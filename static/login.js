@@ -36,6 +36,19 @@ document.addEventListener('DOMContentLoaded', function () {
       if (raw.charAt(0) !== '/') return './';             // must be path-absolute
       if (raw.charAt(1) === '/' || raw.charAt(1) === '\\') return './'; // reject // and \\
       if (/[\x00-\x1f\x7f\s]/.test(raw)) return './';  // reject control chars / whitespace
+      // Subpath mount: server-generated next is prefix-stripped (reverse proxy
+      // removed the mount prefix), so remap it onto the app root. Frontend-
+      // generated next (real pathname, already prefixed) passes through.
+      // No-op for root deployments (appRoot === '/').
+      var _appRoot = new URL('.', window.location.href).pathname;
+      // Normalise a doubled leading slash: the server collapses `//` to `/`
+      // (http.server) while the browser keeps it — a `//` app root would make
+      // the remapped value protocol-relative (open redirect after login).
+      while (_appRoot.length > 1 && _appRoot.slice(0, 2) === '//') _appRoot = _appRoot.slice(1);
+      if (_appRoot !== '/' && raw.indexOf(_appRoot) !== 0) raw = _appRoot + raw.slice(1);
+      // Re-run the protocol-relative/backslash guard on the REMAPPED value:
+      // the input guard above never sees the remap output.
+      if (raw.charAt(0) !== '/' || raw.charAt(1) === '/' || raw.charAt(1) === '\\') return './';
       // #5578: never redirect back to the login page — that self-referential
       // chain is what grows the URL exponentially on repeated expired-auth
       // bounces. Detect the login route even through nested percent-encoding

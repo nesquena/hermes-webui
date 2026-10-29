@@ -469,6 +469,21 @@ def _load_config_for_moa_resolution() -> dict:
     return cfg if isinstance(cfg, dict) else {}
 
 
+def agent_has_moa_virtual_provider() -> bool:
+    """Return True when hermes-agent serves the virtual ``moa`` provider itself.
+
+    Such agents run a ``moa`` session's preset through their MoA facade, so the
+    WebUI must not also thread a per-turn ``moa_config``. ``resolve_moa_preset``
+    shipped in the same hermes-agent change as the virtual provider, so it is a
+    cheap, import-only capability probe.
+    """
+    try:
+        from hermes_cli.moa_config import resolve_moa_preset  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def resolve_moa_config(preset: str | None = None) -> dict:
     try:
         from hermes_cli.moa_config import moa_usage, normalize_moa_config

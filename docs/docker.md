@@ -84,6 +84,8 @@ use `docker-compose.two-container.yml`,
 `docker-compose.three-container.yml`, or run `hermes gateway` separately before
 relying on offline scheduled runs. See [Scheduled jobs and the gateway daemon](#scheduled-jobs-and-the-gateway-daemon) below for the full background and verification steps.
 
+If your mounted `~/.hermes/hermes-agent` is a Hermes-managed git checkout (Agent v0.21.6 or newer, installed by the official installer or `hermes update`), the WebUI runs the container's staged copy of that Agent instead, so the Agent never re-launches the WebUI into your host's Python. As a result, Settings' Agent update reports that the Agent is not a git repository: update the Agent on the host with `hermes update`, then recreate the container (`docker compose up -d --force-recreate`) so it stages the updated Agent. The mounted checkout still runs directly, `.git` and in-app update included, whenever that Agent would not re-launch anyway: with `HERMES_DISABLE_LAZY_INSTALLS=1` (or `true`/`yes`), or when its `install-stamp.json` names an update mechanism other than `self` (#8581).
+
 For troubleshooting, reinstall, or onboarding reproduction trials, do not mount
 your real `~/.hermes` unless you intentionally want to test real state. Use an
 isolated Hermes home and follow
@@ -508,6 +510,43 @@ If you are on an older image, the workaround is to set the IDs explicitly:
 docker run -e WANTED_UID=$(id -u) -e WANTED_GID=$(id -g) ...
 ```
 
+### 10. Fresh WebUI container fails its first start, restart works (#8106)
+
+**Symptom**: In the two- or three-container setup, a newly created WebUI
+container exits during its first start while the agent is running. Restarting
+the same container succeeds. Older images log one of:
+
+```
+usermod: Failed to change ownership of the home directory
+!! ERROR: Failed to set UID of hermeswebui user
+```
+
+```
+chown: cannot access '/home/hermeswebui/.hermes/...': No such file or directory
+!! ERROR: Failed to set owner of /home/hermeswebui
+```
+
+**Cause**: The root init changes the `hermeswebui` UID and then walks
+`/home/hermeswebui` to align ownership. `~/.hermes` is shared with the running
+agent, which replaces files by writing a temp file and renaming it, so an
+entry can disappear between being listed and being changed. A restart does not
+hit this because the UID already matches.
+
+**Fix**: Fixed in the init script. Both ownership walks skip only entries that
+no longer exist; any other `chown` error still stops startup with
+`Failed to set owner of /home/hermeswebui`. On a UID change, files still owned
+by the old UID inside `.git` directories and inside a writable
+`~/.hermes/hermes-agent` checkout move to the new UID, as `usermod -u` did
+before. A read-only agent source mount is left untouched.
+
+To reproduce the race against an image (Linux Docker, local or remote daemon):
+
+```bash
+scripts/docker_first_start_race.sh IMAGE [RACE_ROUNDS]
+```
+
+Exit code 0 means every case passed. CI runs it in `docker-smoke.yml`.
+
 ## Multi-container architecture
 
 The two- and three-container setups use **named Docker volumes** (not bind mounts) by default for a reason: named volumes solve the UID/GID problem by construction. Docker creates the volume's root directory with the correct ownership, all containers reading/writing to it see the same files, no host-side permission setup required.
@@ -533,7 +572,7 @@ The two- and three-container setups use **named Docker volumes** (not bind mount
       └─────────────────────────┘
 ```
 
-The WebUI container doesn't ship with the agent's Python deps — at startup it runs `uv pip install /home/hermeswebui/.hermes/hermes-agent` to install them from the shared volume. The WebUI mount is read-only; the agent container is the only writer.
+The WebUI container doesn't ship with the agent's Python deps. At startup it copies the agent source from the shared volume into a writable stage (`/app/hermes-agent-src`) and installs it with `uv pip install -e "/app/hermes-agent-src[all]"`, passing the agent's own `[tool.uv] override-dependencies` as `--overrides` (since agent v0.22.5 its requirements only resolve with them, #8524). The WebUI mount is read-only; the agent container is the only writer.
 
 ## Upgrading the agent container
 
@@ -629,6 +668,7 @@ volumes:
 - #668 — auto-detect UID/GID from mounted volume
 - #569 — UID/GID detection priority order
 - #7027 — state dir probed before `/workspace` in UID/GID detection (see [#9 above](#9-failed-to-verify-state-directory--restart-loop-on-a-bind-mounted-state-dir-7027))
+- #8106: first-start ownership walks survive files the agent replaces in the shared home (see [#10 above](#10-fresh-webui-container-fails-its-first-start-restart-works-8106))
 
 If you hit a new failure mode not covered here, please [open an issue](https://github.com/nesquena/hermes-webui/issues/new) with:
 

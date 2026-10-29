@@ -75,6 +75,8 @@ def test_no_git_experimental_channel_reports_experimental_release_gap(tmp_path, 
         "manual_update": True,
         "channel": "experimental",
         "no_git": True,
+        # #6859 carries the latest release tag on the no-git/Docker payload too.
+        "latest_tag": "exp-v0.52.416",
     }
 
 

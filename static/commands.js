@@ -211,14 +211,62 @@ function _isWebuiDispatchableAgentCommand(cmd){
   return String(cmd&&cmd.category||'').trim()==='Plugin';
 }
 
+// '-' and '_' are equivalent for slash-slug comparison only — the agent-side
+// resolver documents `_` ≡ `-` for bundle/skill command keys (Telegram
+// rewrites hyphens), so a user typing the underscore spelling must still find
+// and resolve the canonical hyphenated command (#8143).
+// Deliberately NOT the full _skillCommandSlug() here: that helper strips
+// trailing separators ('knowledge_' -> 'knowledge') and folds spaces and
+// punctuation, which would blur prefix boundaries and overmatch neighbouring
+// slugs like 'knowledgebase'.
+function _slashCommandSlugVariants(q){
+  const s=String(q||'');
+  const variants=[s];
+  const underscored=s.replace(/-/g,'_');
+  if(underscored!==s)variants.push(underscored);
+  const hyphenated=s.replace(/_/g,'-');
+  if(hyphenated!==s)variants.push(hyphenated);
+  return variants;
+}
+function _slashCommandMatchesPrefix(name,prefix){
+  const q=String(prefix||'').toLowerCase();
+  if(!q)return true;
+  const n=String(name||'').toLowerCase();
+  return _slashCommandSlugVariants(q).some(v=>n.startsWith(v));
+}
+// Skill rows are substring-matched, not prefix-matched, so the name half of
+// that comparison needs its own alias-aware form.
+function _slashCommandNameIncludes(name,q){
+  const n=String(name||'').toLowerCase();
+  return _slashCommandSlugVariants(q).some(v=>n.includes(v));
+}
+// With the `_` ≡ `-` alias active, a typed prefix can match BOTH spellings of
+// a command registered twice (e.g. plugin-review and plugin_review). Row zero
+// is what an Enter dispatches, so the literal as-typed match must rank ahead
+// of the alias-only match — registry order alone would let /plugin_review
+// dispatch /plugin-review (or vice versa once registration order flips).
+// Stable sort keeps original order within each rank.
+function _rankLiteralPrefixMatchesFirst(matches,q){
+  const needle=String(q||'').toLowerCase();
+  if(!needle||matches.length<2)return matches;
+  // Only a separator spelling (`_` vs `-`) needs literal-first ordering; a plain
+  // prefix keeps master's order (skill rows matched by substring/description).
+  if(_slashCommandSlugVariants(needle).length<2)return matches;
+  return matches.slice().sort((a,b)=>{
+    const an=String(a&&a.name||'').toLowerCase();
+    const bn=String(b&&b.name||'').toLowerCase();
+    return (an.startsWith(needle)?0:1)-(bn.startsWith(needle)?0:1);
+  });
+}
+
 function getMatchingCommands(prefix){
   const q=prefix.toLowerCase();
-  const matches=COMMANDS.filter(c=>c.name.startsWith(q)).map(c=>({...c,source:'builtin'}));
+  const matches=COMMANDS.filter(c=>_slashCommandMatchesPrefix(c.name,q)).map(c=>({...c,source:'builtin'}));
   const seen=new Set(matches.map(c=>c.name));
   const reserved=_getReservedSlashCommandSlugs();
   const bundleSlugs=new Set(_bundleCommandCache.map(bundle=>bundle.name));
   for(const [name, spec] of Object.entries(SLASH_SUBARG_SOURCES)){
-    if(!name.startsWith(q)||seen.has(name))continue;
+    if(!_slashCommandMatchesPrefix(name,q)||seen.has(name))continue;
     matches.push({
       name,
       desc:spec.desc,
@@ -227,7 +275,7 @@ function getMatchingCommands(prefix){
     });
     seen.add(name);
   }
-  if('pet'.startsWith(q)&&!seen.has('pet')){
+  if(_slashCommandMatchesPrefix('pet',q)&&!seen.has('pet')){
     const petMeta=Array.isArray(_agentCommandCache)
       ? _agentCommandCache.find(cmd=>String(cmd&&cmd.name||'').toLowerCase()==='pet')
       : null;
@@ -241,7 +289,7 @@ function getMatchingCommands(prefix){
   // Include agent/plugin commands from /api/commands metadata
   for(const cmd of (_agentCommandCache||[])){
     const name=String(cmd&&cmd.name||'').toLowerCase();
-    if(!name.startsWith(q)||seen.has(name))continue;
+    if(!_slashCommandMatchesPrefix(name,q)||seen.has(name))continue;
     if(cmd.cli_only&&name!=='pet')continue;
     // #6951: only announce commands send() actually dispatches -- anything
     // else would silently fall through to the normal chat path as plain text.
@@ -257,7 +305,7 @@ function getMatchingCommands(prefix){
   }
   if(_agentCommandCacheReady){
     for(const bundle of _bundleCommandCache){
-      if(!bundle.name.startsWith(q)||seen.has(bundle.name)||reserved.has(bundle.name))continue;
+      if(!_slashCommandMatchesPrefix(bundle.name,q)||seen.has(bundle.name)||reserved.has(bundle.name))continue;
       matches.push(bundle);
       seen.add(bundle.name);
     }
@@ -265,15 +313,15 @@ function getMatchingCommands(prefix){
   // A same-slug bundle owns dispatch. Hold plain skills until the independent
   // bundle metadata request settles so a slow bundle response cannot briefly
   // expose a selectable, shadowed skill.
-  if(!_bundleCommandCacheReady)return matches;
+  if(!_bundleCommandCacheReady)return _rankLiteralPrefixMatchesFirst(matches,q);
   for(const skill of _skillCommandCache){
     const name=String(skill&&skill.name||'').toLowerCase();
     const description=String(skill&&skill.desc||'').toLowerCase();
-    if((!name.includes(q)&&!description.includes(q))||seen.has(name)||reserved.has(name)||bundleSlugs.has(name))continue;
+    if((!_slashCommandNameIncludes(name,q)&&!description.includes(q))||seen.has(name)||reserved.has(name)||bundleSlugs.has(name))continue;
     matches.push(skill);
     seen.add(name);
   }
-  return matches;
+  return _rankLiteralPrefixMatchesFirst(matches,q);
 }
 
 let _forcedSkillDirectivePending=null;
@@ -471,9 +519,22 @@ async function getAgentCommandMetadata(name){
   const needle=String(name||'').trim().toLowerCase();
   if(!needle) return null;
   const commands=await loadAgentCommandMetadata();
+  // Exact native-name match ranks first: when BOTH `_` and `-` spellings are
+  // genuinely registered, the literal spelling the user typed must win
+  // regardless of registry order (#8203 round 2 re-gate).
+  const byName=commands.find(cmd=>String(cmd&&cmd.name||'').toLowerCase()===needle);
+  if(byName) return byName;
+  // Then the EXPLICIT aliases array (registry order preserved).
+  const byAlias=commands.find(cmd=>Array.isArray(cmd&&cmd.aliases)&&cmd.aliases.some(a=>String(a||'').toLowerCase()===needle));
+  if(byAlias) return byAlias;
+  // Finally the same `_` ≡ `-` slug variants the autocomplete matcher
+  // advertises: typing the underscore spelling of a hyphenated command (or
+  // vice versa) must resolve the registered native name, so the submit path
+  // dispatches it instead of falling through to chat (#8143, #8203 round 2).
+  const needles=_slashCommandSlugVariants(needle);
   return commands.find(cmd=>{
-    if(String(cmd&&cmd.name||'').toLowerCase()===needle) return true;
-    return Array.isArray(cmd&&cmd.aliases)&&cmd.aliases.some(a=>String(a||'').toLowerCase()===needle);
+    const n=String(cmd&&cmd.name||'').toLowerCase();
+    return needles.some(v=>n===v);
   })||null;
 }
 
@@ -496,12 +557,40 @@ async function executeAgentPluginCommand(text,_meta){
   return _runAgentCommandTransport(text,_meta);
 }
 
+function _canonicalizeSlashCommandToken(text,_meta){
+  const s=String(text||'').trim();
+  const name=String(_meta&&_meta.name||'').trim();
+  if(!name||!s.startsWith('/')) return s;
+  const m=/^\/([^\s/]+)([\s\S]*)$/.exec(s);
+  if(!m) return s;
+  const token=m[1];
+  const tk=token.toLowerCase();
+  const nm=name.toLowerCase();
+  // Already canonical: keep the exact spelling the user typed so a genuinely
+  // registered `_`-named command is dispatched verbatim (#8203 precedence).
+  if(tk===nm) return s;
+  // Rewrite ONLY alias-equivalent spellings: the typed token must be a `_`/`-`
+  // slug variant of the native name (the relation the matcher advertises) or
+  // one of its explicit aliases. A mismatched _meta must never rewrite text.
+  const equivalent=_slashCommandSlugVariants(tk).indexOf(nm)!==-1
+    || _slashCommandSlugVariants(nm).indexOf(tk)!==-1
+    || (Array.isArray(_meta&&_meta.aliases)&&_meta.aliases.some(a=>String(a||'').toLowerCase()===tk));
+  if(!equivalent) return s;
+  // Canonicalize ONLY the command token; the user's arguments stay untouched.
+  return '/'+name+m[2];
+}
+
 async function _runAgentCommandTransport(text,_meta){
   const command=String(text||'').trim();
   if(!command) throw new Error('command is required');
+  // The metadata resolver may have matched an alias/variant spelling the exec
+  // endpoint does not accept as typed (e.g. `/leaf_review` for a registered
+  // `leaf-review`). Canonicalize the command token to the resolved native name
+  // before transport so the advertised spelling makes the request (#8203).
+  const transportCommand=_canonicalizeSlashCommandToken(command,_meta);
   const data=await api('/api/commands/exec',{
     method:'POST',
-    body:JSON.stringify({command})
+    body:JSON.stringify({command:transportCommand})
   });
   return String(data&&data.output||'(no output)');
 }
@@ -1690,8 +1779,19 @@ function _steerIndicatorText(originalMsg, filesSnapshot){
 }
 
 async function _steerPersistDraftForOwner(ownerSid, originalMsg, explicitSteer, filesSnapshot){
-  if(!ownerSid||typeof _saveComposerDraftNow!=='function')return;
-  await _saveComposerDraftNow(ownerSid,_steerRestoreText(originalMsg,explicitSteer),filesSnapshot);
+  if(!ownerSid||typeof _saveComposerDraftNow!=='function') return false;
+  const persistedText = _steerRestoreText(originalMsg,explicitSteer);
+  const persistedFiles = Array.isArray(filesSnapshot) ? [...filesSnapshot] : [];
+  try{
+    const result = _saveComposerDraftNow(ownerSid,persistedText,persistedFiles);
+    if(result&&typeof result.catch==='function'){
+      return result.catch((error)=>_handleComposerDraftPostFailure(error,ownerSid,persistedText,persistedFiles));
+    }
+    return result;
+  }catch(error){
+    _handleComposerDraftPostFailure(error,ownerSid,persistedText,persistedFiles);
+    return false;
+  }
 }
 
 // #5459 gate: cache successful steer uploads by owner session so a failed-steer
@@ -1699,6 +1799,183 @@ async function _steerPersistDraftForOwner(ownerSid, originalMsg, explicitSteer, 
 // Keyed by ownerSid; invalidated when the staged file set changes or on accepted
 // steer (see _steerUploadCacheMatches / clearing below).
 let _steerUploadCache = null; // { sid, sig, paths }
+// Gateway steers whose outcome is unknown, by owner session, so a later
+// pending_steer_leftover carrying this submission can mark them delivered.
+// owned = the exact draft {text, files} this steer restored for its owner.
+// Several may be outstanding per session: each keeps its own record.
+const _steerUncertainBySid = new Map(); // sid -> Set<{ text, delivered, settled, ended, owned, rev }>
+// Steers the Gateway accepted for the owner's current run. A leftover joins
+// pending submissions with "\n", so these claim their lines before an uncertain
+// steer may match (an accepted steer's lines are not proof for another one).
+const _steerAcceptedBySid = new Map(); // sid -> [text]
+// Owned drafts whose compare-and-clear is still in flight; never restore them.
+const _steerRetiringBySid = new Map(); // sid -> { text, files }
+
+function _steerOwnedPayloadMatches(owned, text, files){
+  if(!owned)return false;
+  if(typeof _composerDraftPayloadSignature!=='function')return false;
+  return _composerDraftPayloadSignature(text,files)===_composerDraftPayloadSignature(owned.text,owned.files);
+}
+
+// True only for the exact retiring payload (text AND files): a newer draft with
+// the same text but other attachments is not owned by the retiring steer.
+// A draft saved after retirement began (revision bump) is newer, never retiring.
+function _steerDraftIsRetiring(sid, text, files){
+  const owned=_steerRetiringBySid.get(sid);
+  return !!owned&&owned.rev===_steerDraftRevision(sid)&&_steerOwnedPayloadMatches(owned,text,files);
+}
+
+function _steerUncertainDrop(sid, entry){
+  const set=_steerUncertainBySid.get(sid);
+  if(!set||!set.delete(entry))return false;
+  if(!set.size)_steerUncertainBySid.delete(sid);
+  return true;
+}
+
+function _steerLines(text){
+  return String(text||'').trim().split('\n').map(x=>x.trim());
+}
+
+// The Agent joins its unconsumed steers with "\n", so a leftover is a sequence
+// of whole submitted bodies (each at most once) plus text this tab never sent.
+// Text was delivered only if explaining the leftover with it leaves strictly
+// fewer unexplained lines than every explanation without it. Every other
+// submission takes part (no recency cut-off): an omitted body could be the
+// real explanation. Iterative forward DP over reachable (line, used-bodies)
+// states, so line count never touches the call stack. Past the body/state
+// budget nothing is proven: recovery is kept.
+const _STEER_MATCH_MAX_RELEVANT_BODIES = 24;
+const _STEER_MATCH_MAX_STATES = 200000;
+function _steerFewestUnexplained(lines, bodies){
+  const n=lines.length;
+  const starts=bodies.map(b=>{
+    const at=new Set();
+    for(let pos=0;pos+b.length<=n;pos++){
+      let ok=true;
+      for(let k=0;k<b.length;k++)if(lines[pos+k]!==b[k]){ok=false;break;}
+      if(ok)at.add(pos);
+    }
+    return at;
+  });
+  // dp[pos]: Map(mask -> fewest unexplained lines before pos).
+  const dp=new Array(n+1);
+  dp[0]=new Map([[0,0]]);
+  let states=0;
+  for(let pos=0;pos<n;pos++){
+    const cur=dp[pos];
+    if(!cur)continue;
+    dp[pos]=null;
+    for(const [mask,cost] of cur){
+      if(++states>_STEER_MATCH_MAX_STATES)return null;
+      const put=(p,m,c)=>{const d=dp[p]||(dp[p]=new Map());if(!(d.get(m)<=c))d.set(m,c);};
+      put(pos+1,mask,cost+1);
+      for(let i=0;i<bodies.length;i++){
+        if(mask&(1<<i)||!starts[i].has(pos))continue;
+        put(pos+bodies[i].length,mask|(1<<i),cost);
+      }
+    }
+  }
+  return dp[n]||new Map();
+}
+function _steerLeftoverContains(leftover, text, others){
+  const lines=_steerLines(leftover);
+  const want=_steerLines(text);
+  const has=b=>{
+    for(let pos=0;pos+b.length<=lines.length;pos++){
+      let ok=true;
+      for(let k=0;k<b.length;k++)if(lines[pos+k]!==b[k]){ok=false;break;}
+      if(ok)return true;
+    }
+    return false;
+  };
+  if(!has(want))return false;
+  // A body absent from the leftover cannot explain any of it.
+  const relevant=(Array.isArray(others)?others:[]).map(_steerLines).filter(has);
+  if(relevant.length+1>_STEER_MATCH_MAX_RELEVANT_BODIES)return false;
+  const withWant=_steerFewestUnexplained(lines,[want].concat(relevant));
+  if(!withWant)return false;
+  let bestWith=Infinity,bestWithout=Infinity;
+  for(const [mask,cost] of withWant){
+    if(mask&1)bestWith=Math.min(bestWith,cost);
+    else bestWithout=Math.min(bestWithout,cost);
+  }
+  return bestWith<bestWithout;
+}
+
+function _steerDraftRevision(sid){
+  return typeof _composerDraftRevision==='function'?_composerDraftRevision(sid):0;
+}
+
+// The owner's run ended (done/cancel/apperror): any leftover was emitted before
+// this, so an undelivered settled record can never reconcile. Drop it.
+function _steerSettleTerminal(sid){
+  _steerAcceptedBySid.delete(sid);
+  for(const entry of [...(_steerUncertainBySid.get(sid)||[])]){
+    if(entry.settled)_steerUncertainDrop(sid,entry);
+    else entry.ended=true;
+  }
+}
+
+// Retire only the draft this steer restored: the visible composer when it still
+// shows exactly that payload (text and staged files), and the owner's saved
+// draft via compare-and-clear. Newer text/files and other sessions' composers
+// are left alone.
+function _steerClearVisibleOwned(sid, owned){
+  if(!_steerOwnerIsCurrent(sid))return;
+  const inp=$('msg');
+  const staged=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?S.pendingFiles:[];
+  if(inp&&owned.rev===_steerDraftRevision(sid)&&_steerOwnedPayloadMatches(owned,inp.value,staged)){
+    inp.value='';
+    if(typeof _noteComposerDraftPayload==='function')_noteComposerDraftPayload(sid,'',[]);
+    if(typeof autoResize==='function')autoResize();
+    if(staged.length){
+      S.pendingFiles=[];
+      if(typeof renderTray==='function')renderTray();
+    }
+  }
+  const bar=document.getElementById('msgInner');
+  const rec=bar&&bar.querySelector('.steer-recovery');
+  if(rec)rec.remove();
+}
+
+// owned.rev is the draft revision the recovery restored; a draft saved since
+// then (even an identical retype) is newer and is never cleared or cancelled.
+function _steerRetireOwnedDraft(sid, owned){
+  if(!owned)return Promise.resolve();
+  const retiring={text:owned.text,files:owned.files,rev:owned.rev};
+  if(retiring.rev!==_steerDraftRevision(sid)){
+    _steerClearVisibleOwned(sid,retiring);  // removes only the recovery chip
+    return Promise.resolve();
+  }
+  _steerRetiringBySid.set(sid,retiring);
+  _steerClearVisibleOwned(sid,retiring);
+  const settle=cleared=>{
+    if(_steerRetiringBySid.get(sid)!==retiring)return;
+    _steerRetiringBySid.delete(sid);
+    // Server removed exactly this payload: drop it from view if it was shown
+    // meanwhile; a mismatch means a newer draft won and stays visible.
+    if(cleared===true&&retiring.rev===_steerDraftRevision(sid))_steerClearVisibleOwned(sid,retiring);
+  };
+  const clear=typeof _clearComposerDraftIfUnchanged==='function'?_clearComposerDraftIfUnchanged(sid,owned.text,owned.files,retiring.rev):null;
+  return Promise.resolve(clear).then(settle,()=>settle(false));
+}
+
+// Called by the pending_steer_leftover handler. A leftover matching an in-flight
+// or uncertain steer means it was delivered. Before the response: mark it so the
+// response settles. After the response: retire the restored draft and settle.
+function _steerReconcileLeftover(sid, text){
+  const entries=[...(_steerUncertainBySid.get(sid)||[])];
+  const accepted=_steerAcceptedBySid.get(sid)||[];
+  const proven=entries.filter(entry=>_steerLeftoverContains(text,entry.text,
+    accepted.concat(entries.filter(o=>o!==entry).map(o=>o.text))));
+  for(const entry of proven){
+    entry.delivered=true;
+    if(!entry.settled)continue;
+    _steerUncertainDrop(sid,entry);
+    _steerRetireOwnedDraft(sid,entry.owned);
+  }
+  return proven.length>0;
+}
 function _steerFilesSignature(files){
   try{
     return (Array.isArray(files)?files:[]).map(f=>f&&(f.name+':'+(f.size||0)+':'+(f.lastModified||0))).join('|');
@@ -1777,20 +2054,51 @@ async function _trySteer(msg, explicitSteer){
     showToast(t('cmd_steer_no_msg'));
     return false;
   }
+  const inflight={text:steerText,delivered:false,settled:false,ended:false,owned:null,rev:_steerDraftRevision(ownerSid)};
+  if(!_steerUncertainBySid.has(ownerSid))_steerUncertainBySid.set(ownerSid,new Set());
+  _steerUncertainBySid.get(ownerSid).add(inflight);
   try{
+    // Steering is not idempotent: never resend it automatically.
     result=await api('/api/chat/steer',{
       method:'POST',
+      retries:0,
       body:JSON.stringify({session_id:ownerSid,text:steerText}),
     });
   }catch(e){
-    // Network or server error — keep the active stream running and restore the draft.
-    result={accepted:false, fallback:'network_error'};
+    // Keep the active stream running and restore the draft. With no HTTP reply
+    // (connection dropped, timeout) the server may already have delivered the
+    // steer: keep it as an uncertain record so a later leftover can settle it.
+    result={accepted:false, fallback:'network_error', uncertain:!(e&&e.status)};
+  }
+  const uncertain=!!(result&&(result.fallback==='gateway_steer_uncertain'||result.uncertain===true));
+  if(!uncertain)_steerUncertainDrop(ownerSid,inflight);
+  if(uncertain&&inflight.delivered){
+    // The Gateway already handed this text back as a queued leftover: it was
+    // delivered. Nothing was restored; clear the saved draft only if it is still
+    // the submitted text, so a draft typed during the await survives.
+    _steerUncertainDrop(ownerSid,inflight);
+    _steerUploadCache=null;
+    if(_steerDraftRevision(ownerSid)===inflight.rev){
+      // No draft saved since submit: clear like an accepted steer (also drops a
+      // debounced prefix of the submitted text).
+      if(typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
+    }else{
+      _steerRetireOwnedDraft(ownerSid,{text:_steerRestoreText(originalMsg,explicitSteer),files:pendingFilesSnapshot,rev:_steerDraftRevision(ownerSid)});
+    }
+    return true;
   }
   if(result&&result.accepted){
     // The captured files+text were delivered to ownerSid — clear that session's
     // draft (it may not be the live session anymore if the user switched during
     // the upload/API await, which is fine: we're clearing the OWNER's draft).
     _steerUploadCache=null; // delivered — invalidate the retry cache
+    // A reply that arrives after the run ended (done/cancel/apperror) belongs
+    // to that run: never let it explain a later run's leftover.
+    if(ownerSid&&!inflight.ended){
+      const acc=_steerAcceptedBySid.get(ownerSid)||[];
+      acc.push(steerText);
+      _steerAcceptedBySid.set(ownerSid,acc);
+    }
     if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
     // Show a transient steer indicator in the chat (NOT in S.messages — it must
     // survive the done event's S.messages=d.session.messages replacement).
@@ -1835,15 +2143,29 @@ async function _trySteer(msg, explicitSteer){
   const fallbackCode = result && result.fallback;
   const deadRunFallback = _steerFallbackIsDeadRun(fallbackCode);
   const applyCurrentFailure = !deadRunFallback||_steerOwnerStreamIsCurrent(ownerSid,ownerStreamId);
+  const restoreText=_steerRestoreText(originalMsg,explicitSteer);
+  // A draft saved or typed during the request is newer than the steer: keep it.
+  let restored=_steerDraftRevision(ownerSid)===inflight.rev;
   if(_steerOwnerIsCurrent(ownerSid)&&applyCurrentFailure){
     const inp=$('msg');
-    if(inp){
-      inp.value=_steerRestoreText(originalMsg,explicitSteer);
+    if(inp&&inp.value&&inp.value!==restoreText)restored=false;
+    if(inp&&restored){
+      inp.value=restoreText;
+      if(typeof _noteComposerDraftPayload==='function')_noteComposerDraftPayload(ownerSid,restoreText,pendingFilesSnapshot);
       if(typeof autoResize==='function')autoResize();
     }
     if(typeof renderTray==='function')renderTray();
-  }else{
+  }else if(restored){
     await _steerPersistDraftForOwner(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
+  }
+  if(uncertain){
+    // rev identifies the restored draft itself; later saves are newer drafts.
+    inflight.owned=restored?{text:restoreText,files:pendingFilesSnapshot,rev:_steerDraftRevision(ownerSid)}:null;
+    inflight.settled=true;
+    // A leftover or run end may have arrived during the draft persist above.
+    if((inflight.delivered||inflight.ended)&&_steerUncertainDrop(ownerSid,inflight)){
+      if(inflight.delivered)_steerRetireOwnedDraft(ownerSid,inflight.owned);
+    }
   }
   const clearedDeadRun=deadRunFallback&&_steerClearCurrentOwnerDeadRun(ownerSid,ownerStreamId);
   if(!deadRunFallback||applyCurrentFailure)showToast(t(_steerFailureMessageKey(fallbackCode)), 3500);
@@ -1978,6 +2300,19 @@ function _statusCardFromSession(s){
   const running=!!(s.active_stream_id||S.activeStreamId||S.busy);
   const profile=s.profile||S.activeProfile||'default';
   const workspace=s.workspace||S.currentDir||t('status_unknown');
+  // #visible-vs-total: `visible_message_count` is the human transcript count with
+  // hidden internal rows (quiet-delegation wakeups) removed; `message_count` is the
+  // raw persisted length. Surface BOTH whenever they differ so the user can see the
+  // true size of the conversation instead of only the filtered count. Context
+  // compression does not shrink either value — it rewrites the model-facing
+  // `context_messages` array, not the persisted transcript — so this total is the
+  // pre-compaction size too.
+  const _visibleStatusMessages=(typeof s.visible_message_count==='number'&&s.visible_message_count>=0)
+    ? s.visible_message_count
+    : (s.message_count??(S.messages||[]).filter(m=>m&&m.role&&m.role!=='tool'&&m._source!=='delegation_wakeup').length);
+  const _totalStatusMessages=(typeof s.message_count==='number'&&s.message_count>=0)
+    ? s.message_count
+    : _visibleStatusMessages;
   const rows=[
     {label:t('status_session_id'), value:s.session_id||t('status_unknown')},
     {label:t('status_title'), value:s.title||t('untitled')},
@@ -1989,7 +2324,8 @@ function _statusCardFromSession(s){
     {label:t('status_started'), value:_formatStatusTimestamp(s.created_at)},
     {label:t('status_updated'), value:_formatStatusTimestamp(s.updated_at||s.last_message_at)},
     {label:t('status_tokens'), value:_formatStatusTokens(s)},
-    {label:t('status_messages'), value:String(s.message_count??(S.messages||[]).filter(m=>m&&m.role&&m.role!=='tool').length)},
+    {label:t('status_messages'), value:String(_visibleStatusMessages)},
+    ...(_totalStatusMessages>_visibleStatusMessages?[{label:t('status_messages_total'), value:String(_totalStatusMessages)}]:[]),
     {label:t('status_agent_running'), value:running?t('status_yes'):t('status_no')},
   ];
   return {
@@ -2168,8 +2504,13 @@ async function cmdBranch(args){
 // from the beginning of the full transcript.  We capture the absolute
 // count (_oldestIdx + msgIdx) BEFORE awaiting _ensureAllMessagesLoaded,
 // which resets _oldestIdx to 0 after its wholesale replace.  See #2184.
-async function forkFromMessage(msgIdx){
+async function forkFromMessage(msgIdx, btn){
   if(!S.session)return;
+  // The button bakes its 1-based index at render time; re-read it from the row,
+  // since loading full history (e.g. the outline) re-bases indices without a
+  // re-render (#2184).
+  const forkRow=btn&&btn.closest?btn.closest('[data-msg-idx]'):null;
+  if(forkRow&&typeof _rowCurrentRawIdx==='function') msgIdx=_rowCurrentRawIdx(forkRow,msgIdx-1)+1;
   // During streaming, only block fork if the clicked message is the
   // currently-streaming (live) message itself.  Past messages that are
   // already committed server-side can be forked immediately without
@@ -2311,14 +2652,41 @@ async function getBundleCommandMetadata(name){
   const needle=String(name||'').trim().toLowerCase();
   if(!needle) return null;
   const bundles=await loadBundleCommands();
-  return bundles.find(bundle=>String(bundle&&bundle.name||'').toLowerCase()===needle)||null;
+  // Same `_` ≡ `-` treatment the autocomplete matcher applies: a user typing
+  // the underscore spelling must still resolve the canonical hyphenated
+  // bundle. Without this the literal `===` compare returned null and the send
+  // path posted `/knowledge_loop do X` as plain chat instead of dispatching it
+  // (#8143, #8203 round 2).
+  const needles=_slashCommandSlugVariants(needle);
+  return bundles.find(bundle=>{
+    const n=String(bundle&&bundle.name||'').toLowerCase();
+    return needles.some(v=>n===v);
+  })||null;
+}
+// The composer text the user last closed the list on, by picking a command or pressing
+// Escape. A refresh that was not caused by typing (a slash-command loader landing late,
+// or a lookup still in flight) must not re-open the list for that same text; any edit
+// clears it. Without this, a failing /api/skills (agent-free server) is retried on every
+// keystroke and its late refresh re-opened the list after `/new` was taken, so the next
+// Enter picked again instead of sending (#8050). Closing because nothing matched is not
+// a dismissal: a loader that lands later may still have matches to show.
+let _slashDismissedText=null;
+function markSlashDropdownDismissed(){
+  const ta=$('msg');
+  _slashDismissedText=ta?String(ta.value||''):null;
+}
+function clearSlashDropdownDismissed(){ _slashDismissedText=null; }
+function slashDropdownDismissedFor(text){
+  return _slashDismissedText!==null&&_slashDismissedText===String(text||'');
 }
 function refreshSlashCommandDropdown(){
   const ta=$('msg');if(!ta)return;
   const text=ta.value||'';
   if(text.indexOf('\n')!==-1||_activeSlashCommandOffset(text)<0){hideCmdDropdown();return;}
+  if(slashDropdownDismissedFor(text)) return;
   getSlashAutocompleteMatches(text).then(matches=>{
     if(($('msg').value||'')!==text) return;
+    if(slashDropdownDismissedFor(text)) return;
     if(matches.length)showCmdDropdown(matches);else hideCmdDropdown();
   });
 }
@@ -2401,6 +2769,7 @@ function showCmdDropdown(matches){
         });
       }else{
         hideCmdDropdown();
+        markSlashDropdownDismissed();
       }
     };
     dd.appendChild(el);
@@ -2437,6 +2806,10 @@ function selectCmdDropdownItem(){
     items[_cmdSelectedIdx].onmousedown({preventDefault:()=>{}});
   } else if(items.length===1){
     items[0].onmousedown({preventDefault:()=>{}});
+  } else {
+    hideCmdDropdown();
+    markSlashDropdownDismissed();
+    return;
   }
   hideCmdDropdown();
 }

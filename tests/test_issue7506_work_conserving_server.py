@@ -68,7 +68,10 @@ def test_cold_picker_is_work_conserving(tmp_path, order):
     env.update(HERMES_CONFIG_PATH=str(config_path), HERMES_WEBUI_HOST="127.0.0.1",
                HERMES_WEBUI_PORT=str(port), HERMES_WEBUI_MODELS_REBUILD_BUDGET="4",
                HERMES_WEBUI_TEST_NETWORK_BLOCK="1", HERMES_WEBUI_PASSWORD="",
-               HERMES_WEBUI_SKIP_ONBOARDING="1")
+               HERMES_WEBUI_SKIP_ONBOARDING="1",
+               # A from-scratch env drops the suite's HERMES_DISABLE_LAZY_INSTALLS; without it a
+               # PM-managed Agent installs a full ~1.1 GB environment into this temp HOME per test.
+               HERMES_DISABLE_LAZY_INSTALLS="1")
     log_path = tmp_path / "server.log"
     try:
         with log_path.open("w") as log:

@@ -66,16 +66,26 @@ globalThis.fetch = (url, opts) => {
   return new Promise(() => {});
 };
 let _ttsSpeaking = false;
+let _ttsGeneration = 0;
+let _ttsLastRequestTs = 0;
+let _ttsRequestMinGapMs = 0;
 let _playingEdgeAudio = null;
 let _ttsCurrentUtterance = null;
 let _ttsChunkQueue = [];
 let _ttsChunkIndex = 0;
 let _ttsActiveBtn = null;
+// #7529: the chunked Edge path pins the captured playback profile, so the
+// harness must expose the same global the production code reads.
+const S = { session: { session_id: 'sid-edge' }, activeProfile: 'default' };
+globalThis.S = S;
 __UI_FNS__
 const row = { dataset: { rawText: 'Hello from Edge' } };
 const btn = { dataset: { speaking: '0' }, closest: () => row };
 speakMessage(btn);
-console.log(JSON.stringify(requests));
+// The shared /api/tts scheduler (_acquireTtsRequestSlot) resolves through a
+// Promise chain even when the pacing gap is zero, so fetch fires in a microtask.
+// Flush it before printing, otherwise `requests` is still empty here.
+setTimeout(() => { console.log(JSON.stringify(requests)); }, 0);
 """
 
 
@@ -102,12 +112,32 @@ const S = { session: { session_id: 'sid-edge' } };
 let _voiceModeActive = true;
 let _voiceModeThinkingSid = null;
 let _ttsSpeaking = false;
+let _ttsGeneration = 0;
+let _ttsLastRequestTs = 0;
+let _ttsRequestMinGapMs = 0;
 let _playingEdgeAudio = null;
 function _setState() {}
 function _startListening() {}
+// Helpers this PR introduces in ui.js and that _speakResponse calls. Upstream
+// boot.js/ui.js do not define them, so the harness must provide stubs.
+function _clearBrowserTtsRecovery() {}
+function _armBrowserTtsRecovery() {}
+function _scheduleVoiceMicRearm() {}
+function _clearVoiceMicRearm() {}
+function _beginTtsPlayback() { _ttsSpeaking = true; return ++_ttsGeneration; }
+function _ownsTtsPlayback(gen) { return gen === _ttsGeneration; }
+function _stopActivePlaybackAudio() {}
+// The edge branch routes through the shared scheduler; record the request with a
+// synchronous stand-in here (real pacing/limiting is covered by
+// test_openai_tts_chunk_generation_race).
+function _sendTtsRequest(init) {
+  return fetch(new URL('api/tts', 'http://localhost:8787/').href, init)
+    .then(r => r.arrayBuffer().then(buf => ({ ok: true, buf })));
+}
 __BOOT_FNS__
 _speakResponse();
-console.log(JSON.stringify(requests));
+// Same microtask flush as the UI harness above.
+setTimeout(() => { console.log(JSON.stringify(requests)); }, 0);
 """
 
 
@@ -120,6 +150,16 @@ def test_play_edge_tts_chunked_sends_explicit_engine_when_server_still_elevenlab
             extract_function(UI_JS, "_playEdgeTtsChunked"),
             extract_function(UI_JS, "stopTTS"),
             extract_function(UI_JS, "speakMessage"),
+            # Scheduler / generation-token helpers introduced by this PR. The
+            # driver extracts function definitions only, so these must be listed
+            # explicitly or the harness hits ReferenceError.
+            extract_function(UI_JS, "_beginTtsPlayback"),
+            extract_function(UI_JS, "_ownsTtsPlayback"),
+            extract_function(UI_JS, "_acquireTtsRequestSlot"),
+            extract_function(UI_JS, "_sendTtsRequest"),
+            extract_function(UI_JS, "_noteTtsRequestSent"),
+            extract_function(UI_JS, "_ttsRequestWaitMs"),
+            extract_function(UI_JS, "_stopActivePlaybackAudio"),
         ]
     )
     requests = _run_node(_UI_HARNESS.replace("__UI_FNS__", fns))
@@ -129,6 +169,11 @@ def test_play_edge_tts_chunked_sends_explicit_engine_when_server_still_elevenlab
     assert requests[0]["body"]["engine"] == "edge"
     assert requests[0]["body"]["text"] == "Hello from Edge"
     assert requests[0]["body"]["voice"] == "en-US-AriaNeural"
+    # #7529: the captured playback profile travels with every chunk, so a switch
+    # while the shared scheduler holds or retries one cannot move it to the new
+    # profile. The harness pins activeProfile='default' and the old code omitted
+    # exactly that value, which is what let the leak through.
+    assert requests[0]["body"].get("profile") == "default"
 
 
 def test_voice_mode_edge_branch_sends_explicit_engine_when_server_still_openai():
@@ -141,3 +186,7 @@ def test_voice_mode_edge_branch_sends_explicit_engine_when_server_still_openai()
     assert requests[0]["body"]["engine"] == "edge"
     assert requests[0]["body"]["text"] == "Hello from Edge"
     assert requests[0]["body"]["voice"] == "en-US-AriaNeural"
+    # #7529: the voice-mode Edge branch pins the captured profile too, so a
+    # switch while the shared scheduler holds or retries the request cannot move
+    # it to the new profile.
+    assert requests[0]["body"].get("profile") == "default"

@@ -482,8 +482,10 @@ def test_render_path_reconciles_message_actions_before_session_html_is_cached():
 
     assert "data-extension-message-actions" in render_body
     guarded_sync = "if(typeof _syncExtensionMessageActionSlots==='function') _syncExtensionMessageActionSlots(inner);"
-    assert render_body.index(guarded_sync) < render_body.index(
-        "const _html=inner.innerHTML;"
+    # #7752/#7912: the cache snapshot is taken as `cacheHtml` before the synchronous
+    # highlight pass; the render-tail reconcile (last occurrence) must still precede it.
+    assert render_body.rindex(guarded_sync) < render_body.index(
+        "cacheHtml=inner.innerHTML;"
     )
     cache_restore = render_body.index("inner.innerHTML=cached.html;")
     cache_return = render_body.index("return;", cache_restore)

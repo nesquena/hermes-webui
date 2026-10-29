@@ -33,12 +33,18 @@ def test_browser_notifications_use_service_worker_when_available():
 
 def test_notification_payload_uses_completion_session_when_provided():
     assert "function _notificationOptions" in MESSAGES_JS
-    assert "const sid=(options&&options.sid)||(S&&S.session&&S.session.session_id);" in MESSAGES_JS
     assert "_sessionUrlForSid(sid)" in MESSAGES_JS
     assert "data:{url}" in MESSAGES_JS
-    assert "tag:sid?`hermes-${sid}`" in MESSAGES_JS
+    assert "tag:sessionless?'hermes-webui-sessionless':(sid?`hermes-${sid}`:'hermes-webui')" in MESSAGES_JS
+    # #7652 review: a sessionless marker must not fall back to the current
+    # session, and needs its own tag. See the behavioural coverage in
+    # tests/test_6673_notification_renotify.py and
+    # tests/test_cron_toast_notifications.py.
+    assert "const sessionless=!!(options&&options.sessionless);" in MESSAGES_JS
+    assert "sessionless?null:((options&&options.sid)||(S&&S.session&&S.session.session_id))" in MESSAGES_JS
+    assert "'hermes-webui-sessionless'" in MESSAGES_JS
     assert "function _completionNotificationPreviewText" in MESSAGES_JS
-    assert "_completionNotificationPreviewText(lastAsst," in MESSAGES_JS
+    assert "_completionNotificationPreviewText(lastAsst,{" in MESSAGES_JS
     assert "sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid})" in MESSAGES_JS
     assert "assistantText?assistantText.slice(0,100)" not in MESSAGES_JS
 
@@ -47,6 +53,11 @@ def _extract_fn(src: str, name: str) -> str:
     marker = f"function {name}"
     start = src.find(marker)
     assert start >= 0, f"{name} not found"
+    # Keep the `async` modifier when the declaration has one. The marker matches
+    # inside "async function name", so slicing at `start` would hand the harness
+    # a plain function whose body awaits, which Node rejects at compile time.
+    if src[max(0, start - 6):start] == "async ":
+        start -= 6
     brace = src.find("{", src.find(")", start))
     depth = 0
     for i in range(brace, len(src)):
@@ -448,7 +459,7 @@ def test_completion_notification_fires_when_tab_was_hidden_during_stream():
 def test_desktop_background_notification_signal_stays_out_of_stream_visibility():
     stream_tracker = _source_between(
         "const LIVE_STREAMS={};",
-        "function closeLiveStream(sessionId, streamId, source){",
+        "function closeLiveStream(sessionId, streamId, source",
     )
     deferred_recovery = _source_between(
         "function _reattachOrRestoreAfterDeferredStreamError(source){",

@@ -147,21 +147,39 @@ def test_run_agent_streaming_uses_goal_related():
 # Test 9: STREAM_GOAL_RELATED cleanup on stream exit
 # ---------------------------------------------------------------------------
 
-def test_stream_goal_related_cleaned_up():
-    """STREAM_GOAL_RELATED entries must be cleaned up when streams end."""
-    from pathlib import Path
-    streaming_py = (Path(__file__).resolve().parents[1] / "api" / "streaming.py").read_text()
+def test_stream_goal_related_cleaned_up(tmp_path, monkeypatch):
+    """STREAM_GOAL_RELATED must be released by the canonical teardown path.
 
-    # Must have cleanup of STREAM_GOAL_RELATED
-    assert "STREAM_GOAL_RELATED" in streaming_py
-    # Look for pop or del of STREAM_GOAL_RELATED
-    assert any(
-        pattern in streaming_py
-        for pattern in [
-            "STREAM_GOAL_RELATED.pop",
-            "del STREAM_GOAL_RELATED",
-        ]
-    ), "streaming.py must clean up STREAM_GOAL_RELATED entries when streams end"
+    Behavior-level (#7302 re-gate): assert the REAL worker exit path and the
+    canonical release helper instead of grepping ``api/streaming.py`` for the
+    inline pop. ``_start_chat_stream_for_session`` writes
+    ``STREAM_GOAL_RELATED[stream_id]`` before the worker is admitted, so a
+    cancellation before admission exits through ``q is None`` -- where no
+    teardown ``finally`` ever runs. The registry must still be released, or the
+    goal classification outlives the stream for the process lifetime.
+    """
+    import threading
+
+    from api import config
+    import api.streaming as streaming
+
+    session_id = "sess_1932_goal_cleanup"
+    stream_id = "stream-1932-goal-cleanup"
+    config.register_stream_owner(stream_id, session_id)
+    config.CANCEL_FLAGS[stream_id] = threading.Event()
+    config.STREAM_GOAL_RELATED[stream_id] = True
+    # Cancel before admission: the stream map entry is already gone.
+    config.STREAMS.pop(stream_id, None)
+
+    streaming._run_agent_streaming(session_id, "hello", "test-model", None, stream_id)
+
+    assert stream_id not in config.STREAM_GOAL_RELATED, (
+        "the stream teardown must release STREAM_GOAL_RELATED for the ending "
+        "stream: a released stream must not keep its goal classification"
+    )
+    assert stream_id not in config.STREAM_SESSION_OWNERS, (
+        "the pre-start stream owner must not outlive the stream"
+    )
 
 
 # ---------------------------------------------------------------------------

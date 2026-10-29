@@ -1581,7 +1581,14 @@ def test_busy_predicate_covers_stream_publication_window_before_active_runs(
     active turn. Otherwise a sibling same-origin completion would pass the busy
     pre-check, reserve, claim, and 409 against the already-published stream,
     burning the finite delivery-attempt budget. With the fix, completions that
-    arrive in that window defer WITHOUT claiming (zero claims, zero attempts)."""
+    arrive in that window defer WITHOUT claiming (zero claims, zero attempts).
+
+    The window carries its launch-phase claim: every registration edge publishes
+    the claim in the SAME ``STREAMS_LOCK`` critical section that creates the
+    ``STREAMS`` entry (api/routes.py, #7302 finding 5), so a published stream that
+    is still launching always holds one. Bare ``STREAMS`` membership is not
+    liveness on its own -- a worker that died before admission leaves the entry
+    behind, and that shape must not defer a sibling completion."""
     _reset_wakeup_state()
     registry = _install_fake_process_registry(monkeypatch)
     delivery = _install_fake_durable_delivery_api(monkeypatch)
@@ -1593,6 +1600,14 @@ def test_busy_predicate_covers_stream_publication_window_before_active_runs(
         cfg,
         "STREAM_SESSION_OWNERS",
         {"stream-preactive": "webui-session-1"},
+    )
+    # The publication window carries its launch-phase claim (see the docstring:
+    # the entry and its claim are published on ONE STREAMS_LOCK edge), so this
+    # fixture models the launching stream, not a worker-less orphan.
+    monkeypatch.setattr(
+        cfg,
+        "PRE_ADMISSION_CLAIMS",
+        {"stream-preactive": "publication-window-claim"},
     )
     monkeypatch.setattr(bp, "_emit_bg_task_complete_events_coalesced", lambda *_args: 1)
     monkeypatch.setattr(bp, "ASYNC_DELIVERY_ROUTING_RETRY_SECONDS", 30.0)

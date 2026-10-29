@@ -22,6 +22,7 @@ import re
 import pytest
 from html.parser import HTMLParser
 
+
 REPO = pathlib.Path(__file__).parent.parent
 HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 CSS  = (REPO / "static" / "style.css").read_text(encoding="utf-8")
@@ -278,6 +279,17 @@ def test_settings_system_version_controls_wrap_on_phone_widths():
     assert ".settings-version-badge" in mobile_css and "white-space:nowrap" in mobile_css.replace(" ", ""), (
         "Individual version badges should stay intact while the group wraps."
     )
+    status_rule = _rule_body(mobile_css, "#checkUpdatesStatus")
+    status_decls = _declarations(status_rule)
+    assert status_decls.get("white-space") == "normal", (
+        "Update status text must wrap on phone widths after the latest-tag suffix."
+    )
+    assert status_decls.get("overflow-wrap") == "anywhere", (
+        "Long latest-tag tokens must be allowed to break on phone widths."
+    )
+    assert status_decls.get("min-width") == "0", (
+        "Update status must shrink inside the stacked System header on phones."
+    )
 
 
 def test_rightpanel_mobile_slide_over_css():
@@ -533,7 +545,9 @@ def _run_sidebar_lifecycle(start_width, start_drawer_open, end_width, pref):
     import subprocess
     helpers = _extract_boot_js_functions(
         'closeMobileSidebar', '_isDesktopWidth', '_isCompactWorkspaceViewport',
-        '_sidebarShouldCollapse', '_syncSidebarAria', '_applySidebarState')
+        '_sidebarShouldCollapse', '_syncSidebarAria', '_applySidebarState',
+        '_isPhoneWidthViewport', '_setPanelInert', '_isFocusableControl',
+        '_releaseFocusFromClosedPanel')
     pref_js = 'null' if pref is None else repr(pref)
     script = f"""
 {helpers}
@@ -622,6 +636,8 @@ def _run_sidebar_open_then_resize(width, pref, opener, clicks=1):
     helpers = _extract_boot_js_functions(
         'closeMobileSidebar', '_isDesktopWidth', '_isCompactWorkspaceViewport',
         '_sidebarShouldCollapse', '_syncSidebarAria', '_applySidebarState',
+        '_isPhoneWidthViewport', '_setPanelInert', '_isFocusableControl',
+        '_releaseFocusFromClosedPanel',
         '_isSidebarCollapsed', 'toggleSidebar', 'expandSidebar',
         'toggleMobileSidebar', 'mobileSwitchPanel')
     pref_js = 'null' if pref is None else repr(pref)
@@ -933,13 +949,24 @@ def test_workspace_toggle_close_race_guard_present():
     PR fixes, so lock the guard in.
     """
     fn = _js_function_body(BOOT, "closeMobileWorkspacePanelFromChat")
-    # The guard must short-circuit before closeWorkspacePanel()
+    # The guard must short-circuit before the close call. Anchor on the
+    # argument-bearing call: the explicit-dismiss path passes the invoker
+    # control so focus lands back on the toggle, and a bare "closeWorkspacePanel()"
+    # anchor would not match that form.
     assert "#btnWorkspacePanelToggle" in fn, \
         "pointerdown close must ignore taps on the workspace panel toggle"
     for selector in ("#btnWorkspacePanelEdgeToggle", ".workspace-toggle-btn", ".mobile-files-btn"):
         assert selector in fn, f"toggle guard must also cover {selector}"
-    assert fn.index("if(t) return;") < fn.index("closeWorkspacePanel()"), \
+    assert fn.index("if(t) return;") < fn.index("closeWorkspacePanel("), \
         "the guard must return before closeWorkspacePanel() runs"
+    # The explicit-dismiss path hands focus back to the control that opened the
+    # drawer in the band the code is running in (the edge toggle above 900px, the
+    # composer's workspace toggle at or below it, where the edge toggle is
+    # display:none). A bare close() would strand focus on the now-hidden panel.
+    assert "closeWorkspacePanel(_workspacePanelInvokerForBand())" in fn, \
+        "tapping outside the drawer must pass the invoker through to the close"
+    assert "function _workspacePanelInvokerForBand(" in BOOT, \
+        "the band-aware invoker picker must be shared by both dismiss paths"
 
 
 def test_executed_sidebar_tests_skip_cleanly_without_node():
@@ -964,7 +991,11 @@ def test_mobile_sidebar_drawer_uses_transform_instead_of_left():
         "Mobile .sidebar should keep left:0 in the drawer rules"
     assert sidebar_rule.get("transform") == "translateX(-100%)", \
         "Closed mobile .sidebar should use transform:translateX(-100%)"
-    assert sidebar_rule.get("transition") == "transform .25s ease", \
+    # #7866's follow-up added a delayed `visibility 0s linear .25s` step so the
+    # closed drawer stays invisible-to-Tab without cutting the slide-out short, so
+    # assert the transform animation is present rather than pinning the whole
+    # transition string — a future step must not read as a regression.
+    assert "transform .25s ease" in (sidebar_rule.get("transition") or ""), \
         "Mobile .sidebar should transition transform for drawer animation"
     assert sidebar_rule.get("will-change") == "transform", \
         "Mobile .sidebar should promote the transform layer before drawer animation"
@@ -1229,7 +1260,7 @@ def test_mobile_sidebar_opens_as_full_screen_surface_with_panel_rail():
     assert sidebar_rule.get("transform") == "translateX(-100%)", (
         "Closed mobile sidebar should sit fully offscreen"
     )
-    assert sidebar_rule.get("transition") == "transform .25s ease", (
+    assert "transform .25s ease" in (sidebar_rule.get("transition") or ""), (
         "Mobile sidebar should animate with transform"
     )
     assert sidebar_rule.get("will-change") == "transform", (
@@ -1453,8 +1484,22 @@ def test_mobile_session_page_close_button_is_mobile_scoped():
     assert 'class="panel-head-btn mobile-sidebar-close' in HTML, (
         "Sidebar needs a close button for the full-screen mobile session page"
     )
-    assert 'onclick="closeMobileSidebar()"' in HTML, (
+    assert (
+        'onclick="dismissMobileSidebar()"' in HTML
+        and 'data-tooltip="Close menu"' in HTML
+    ), (
         "Mobile session page close button should close the sidebar"
+    )
+    # The X is an EXPLICIT dismiss, so it routes through dismissMobileSidebar() to hand
+    # focus back to the hamburger (#7713 follow-up). That must still be a real close,
+    # not a new stub: pin that it delegates to closeMobileSidebar with the hamburger.
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    dismiss_start = boot_js.find("function dismissMobileSidebar(")
+    assert dismiss_start != -1, "boot.js must expose dismissMobileSidebar()"
+    dismiss_body = boot_js[dismiss_start : boot_js.find("\n}", dismiss_start) + 2]
+    assert "closeMobileSidebar($('btnHamburger'))" in dismiss_body, (
+        f"dismissMobileSidebar() must close the sidebar and return focus to the "
+        f"hamburger; got {dismiss_body!r}"
     )
     assert "mobile-sidebar-close{display:none" in CSS.replace(" ", ""), (
         "Mobile sidebar close button should be hidden by default"
@@ -1712,8 +1757,8 @@ def test_messages_touch_scrolling_hints_present():
         ".messages must enable -webkit-overflow-scrolling:touch for mobile momentum scroll"
     assert re.search(r'\.messages\{[^}]*touch-action:\s*pan-y', CSS), \
         ".messages must set touch-action:pan-y so vertical swipe gestures scroll the transcript"
-    assert re.search(r'\.messages\{[^}]*overscroll-behavior-y:\s*contain', CSS), \
-        ".messages must contain vertical overscroll so the transcript keeps the gesture"
+    assert re.search(r'\.messages\{[^}]*overscroll-behavior-y:\s*none', CSS), \
+        ".messages must suppress elastic overscroll so bottom follow cannot fight boundary bounce"
 
 
 def test_100dvh_viewport_height():
@@ -1728,7 +1773,24 @@ def test_100dvh_viewport_height():
 
 def test_viewport_disables_page_zoom_for_native_pwa_shell():
     """Installed PWA launches should not rubber-band into browser-style page zoom."""
-    assert 'name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"' in HTML
+    m = re.search(r'<meta\s+name="viewport"\s+content="([^"]+)"', HTML)
+    assert m, "viewport meta tag not found in index.html"
+    content = m.group(1)
+    assert 'width=device-width' in content, "viewport must set width=device-width"
+    assert 'initial-scale=1' in content, "viewport must set initial-scale=1"
+    assert 'maximum-scale=1' in content, "viewport must set maximum-scale=1"
+    assert 'user-scalable=no' in content, "viewport must set user-scalable=no"
+
+
+def test_viewport_requests_keyboard_content_resize():
+    """Edge Android does not resize the layout viewport when the virtual keyboard
+    appears unless interactive-widget=resizes-content is set. Without it, 100dvh
+    stays at full-screen height and the composer floats above a dead gap."""
+    m = re.search(r'<meta\s+name="viewport"\s+content="([^"]+)"', HTML)
+    assert m, "viewport meta tag not found in index.html"
+    content = m.group(1)
+    assert 'interactive-widget=resizes-content' in content, \
+        "viewport must include interactive-widget=resizes-content for Edge Android keyboard resize"
 
 
 def test_pwa_safe_area_top_stays_scoped_to_installed_modes():
@@ -2417,3 +2479,176 @@ def test_mobile_enter_does_not_affect_desktop_logic():
     # The else branch (desktop, sends on Enter without Shift) must still be present
     assert "if(!e.shiftKey){e.preventDefault();send();" in boot_js, \
         "Desktop Enter-to-send logic (else branch) must still be present in boot.js"
+
+
+def test_resize_only_closes_dropdowns_when_phone_boundary_crossed():
+    """Executed listener harness: composer dropdown state must reset ONLY when
+    the phone/desktop (640px) boundary is crossed.
+
+    Drives the real registration + handler code from static/ui.js under node
+    with a fake MediaQueryList: repeated same-mode resizes must produce zero
+    closes, the first boundary change after load must still deliver (no
+    uninitialized-state miss), and both directions must reset the composer
+    menu family exactly once per crossing.
+    """
+    import json
+    import shutil
+    import subprocess
+    if shutil.which("node") is None:
+        pytest.skip("node is not available for executing the JS listener harness")
+
+    ui_js = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    # Extract the registration block: from the _phoneWidthQuery declaration
+    # through the closing brace of the addEventListener/addListener if-chain
+    # (the block ends at the "\n}\n" that closes the outer if after the
+    # addListener fallback line).
+    start = ui_js.index("const _phoneWidthQuery=")
+    tail = ui_js.index("addListener(_onPhoneBoundaryChange);", start)
+    end = ui_js.index("\n}", tail) + 2
+    block = ui_js[start:end]
+
+    script = """
+// ── fake close functions with call counts ──
+const calls = { mobile: 0, model: 0, reasoning: 0, ws: 0 };
+function closeMobileComposerConfig(){ calls.mobile++; }
+function closeModelDropdown(){ calls.model++; }
+function closeReasoningDropdown(){ calls.reasoning++; }
+// closeWsDropdown must be undefined -> exercises the typeof guard, counts via ws
+// ── fake MediaQueryList ──
+let _matches = false; // page loads at 804px -> not phone
+const listeners = [];
+const mql = {
+  get matches(){ return _matches; },
+  addEventListener: (type, fn) => { if (type === 'change') listeners.push(fn); },
+};
+globalThis.window = { matchMedia: (q) => mql };
+// ── the real registration block from static/ui.js ──
+__BLOCK__
+function fireBoundary(){
+  _matches = !_matches;
+  for (const fn of listeners) fn({ matches: _matches });
+}
+// ── scenario ──
+// 1. keyboard-style resizes at constant 804px: no boundary change, zero closes
+  ;(function resizeBurst(){ })();
+// (resize events are not even observable to this listener — nothing to fire)
+const before = JSON.stringify(calls);
+// 2. FIRST boundary change after load (no prior resize): must deliver
+fireBoundary(); // 804 -> 640 (fold)
+const afterFold = JSON.stringify(calls);
+// 3. same-mode events must never fire the listener (guard: listeners only run on change)
+// 4. second crossing (unfold)
+fireBoundary(); // 640 -> 804
+const afterUnfold = JSON.stringify(calls);
+// 5. third crossing (fold again)
+fireBoundary();
+const afterThird = JSON.stringify(calls);
+console.log(JSON.stringify({ before, afterFold, afterUnfold, afterThird, listeners: listeners.length }));
+""".replace("__BLOCK__", block)
+
+    r = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"node failed: {r.stderr}"
+    st = json.loads(r.stdout.strip())
+    # exactly one change listener registered
+    assert st["listeners"] == 1, "exactly one boundary-change listener must be registered"
+    # no closes before any boundary change (keyboard resizes are invisible)
+    assert st["before"] == '{"mobile":0,"model":0,"reasoning":0,"ws":0}'
+    # first crossing after load: every close runs exactly once (no missed first transition)
+    assert st["afterFold"] == '{"mobile":1,"model":1,"reasoning":1,"ws":0}', \
+        "first fold must close mobile config, model, and reasoning dropdowns once each"
+    # ws stays 0: closeWsDropdown is undefined, so the typeof guard must skip it
+    # both directions close
+    assert st["afterUnfold"] == '{"mobile":2,"model":2,"reasoning":2,"ws":0}', \
+        "unfold must also reset the composer menu family (both-directions policy)"
+    assert st["afterThird"] == '{"mobile":3,"model":3,"reasoning":3,"ws":0}'
+
+
+def test_burger_mode_transition_closes_composer_menus():
+    """Executed fit harness: cf-burger transitions (which can happen at a
+    CONSTANT width, e.g. 760px, with no 640px boundary crossing) must close
+    the composer menu family exactly once per real transition, and no-op fit
+    passes (unchanged stage) must produce zero closes.
+
+    Drives the real _fitComposerFooter under node with a fake footer/left
+    pair whose clientWidth/scrollWidth are controlled per scenario — always
+    above the 640px phone boundary, so the MediaQueryList path is never
+    involved and the burger transition is the only trigger.
+    """
+    import json
+    import shutil
+    import subprocess
+    if shutil.which("node") is None:
+        pytest.skip("node is not available for executing the JS fit harness")
+
+    ui_js = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    fit_fn = "function _fitComposerFooter(){" + _js_function_body(ui_js, "_fitComposerFooter") + "}"
+    boundary_fn = "function _onPhoneBoundaryChange(){" + _js_function_body(ui_js, "_onPhoneBoundaryChange") + "}"
+
+    script = """
+// ── fake close functions with call counts ──
+const calls = { mobile: 0, model: 0, reasoning: 0 };
+function closeMobileComposerConfig(){ calls.mobile++; }
+function closeModelDropdown(){ calls.model++; }
+function closeReasoningDropdown(){ calls.reasoning++; }
+
+__FIT_FN__
+__BOUNDARY_FN__
+
+// ── fake DOM: footer + left with controlled geometry ──
+const classes = new Set();
+let clientW = 400, scrollW = 300; // start NON-burger (no overflow)
+const footer = {
+  style: {},
+  classList: {
+    contains: (c) => classes.has(c),
+    remove: (...cs) => cs.forEach(c => classes.delete(c)),
+    add: (...cs) => cs.forEach(c => classes.add(c)),
+    toggle: (c, force) => { if (force) classes.add(c); else classes.delete(c); },
+  },
+  getBoundingClientRect: () => ({ height: 42 }),
+  querySelector: (sel) => (sel === '.composer-left' ? left : null),
+  _classes: classes,
+};
+const left = {
+  get clientWidth(){ return clientW; },
+  get scrollWidth(){ return scrollW; },
+};
+globalThis.document = { querySelector: (sel) => (sel === '.composer-footer' ? footer : null) };
+
+// scenario — everything above the 640px boundary:
+// 1. baseline fit at no-overflow: no transition, zero closes
+_fitComposerFooter();
+const afterBaseline = JSON.stringify(calls);
+// 2. no-op refit (same geometry): zero closes
+_fitComposerFooter();
+const afterNoop = JSON.stringify(calls);
+// 3. content grows -> overflow -> burger transition: one cleanup
+scrollW = 700; // now overflows at cf-icons AND cf-burger stage
+_fitComposerFooter();
+const afterEnterBurger = JSON.stringify(calls) + " burger=" + classes.has('cf-burger');
+// 4. refit while still burger: zero additional closes
+_fitComposerFooter();
+const afterStayBurger = JSON.stringify(calls);
+// 5. content shrinks -> leave burger: one more cleanup
+scrollW = 300;
+_fitComposerFooter();
+const afterLeaveBurger = JSON.stringify(calls) + " burger=" + classes.has('cf-burger');
+console.log(JSON.stringify({ afterBaseline, afterNoop, afterEnterBurger, afterStayBurger, afterLeaveBurger }));
+""".replace("__FIT_FN__", fit_fn).replace("__BOUNDARY_FN__", boundary_fn)
+
+    r = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, f"node failed: {r.stderr}"
+    st = json.loads(r.stdout.strip())
+    # baseline + no-op refit: zero closes (unchanged stage is harmless)
+    assert st["afterBaseline"] == '{"mobile":0,"model":0,"reasoning":0}'
+    assert st["afterNoop"] == '{"mobile":0,"model":0,"reasoning":0}'
+    # entering burger: exactly one cleanup of the composer menu family
+    assert st["afterEnterBurger"] == '{"mobile":1,"model":1,"reasoning":1} burger=true', \
+        "entering burger mode must close the composer menu family exactly once"
+    # staying burger: no additional closes
+    assert st["afterStayBurger"] == '{"mobile":1,"model":1,"reasoning":1}', \
+        "unchanged-geometry refits must not re-fire the cleanup"
+    # leaving burger: exactly one more cleanup (both-directions policy)
+    assert st["afterLeaveBurger"] == '{"mobile":2,"model":2,"reasoning":2} burger=false', \
+        "leaving burger mode must also close the composer menu family exactly once"
+

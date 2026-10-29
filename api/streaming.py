@@ -32,8 +32,9 @@ from api.config import (
     get_config,
     STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES, STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS,
-    STREAM_GOAL_RELATED, PENDING_GOAL_CONTINUATION,
     STREAM_LAST_EVENT_ID,
+    stream_owned_registries,
+    release_stream_owned_registries,
     LOCK, SESSIONS, SESSIONS_MAX, SESSION_DIR,
     _get_session_agent_lock, _alias_session_agent_lock,
     _set_thread_env, _clear_thread_env,
@@ -57,6 +58,7 @@ from api.config import (
     CUSTOM_ROUTE_NO_ENDPOINT,
     custom_provider_route_error,
     raise_for_custom_provider_route,
+    _parse_provider_qualified_model_id,
     model_with_provider_context,
     warm_models_catalog_provenance_if_cold,
     load_settings,
@@ -82,10 +84,14 @@ from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
     StateDBSessionMessagesSnapshot,
+    _cancelled_journal_turn_owner,
     _WEBUI_TRUSTED_AGENT_INPUT_FIELD,
     _is_empty_partial_activity_message,
     _message_exact_timestamp_details,
     _message_private_identity_compatible,
+    _recovered_pending_timestamp,
+    _stable_message_identity_details,
+    _state_db_row_identity_details,
     _validated_webui_pending_user_timestamp_identity,
     _evict_sessions_over_cap,
     clear_process_wakeup_pause,
@@ -413,6 +419,13 @@ _STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.C
     default=None,
 )
 _STREAMING_CRONJOB_WRAPPER_INSTALLED = False
+# Set on the first failed install so the warning is logged once even though the
+# install itself keeps being retried (#8201).
+_STREAMING_CRONJOB_WRAPPER_WARNED = False
+# hermes-agent renamed the model-facing cron tool from ``cronjob`` to
+# ``cronjob_manage``. Older builds still register the old name, so resolve and
+# wrap every name that exists rather than one hardcoded name (#8189).
+_STREAMING_CRONJOB_TOOL_NAMES = ("cronjob_manage", "cronjob")
 
 
 def _stream_writeback_diag_threshold_seconds(environ=None):
@@ -485,40 +498,39 @@ def _install_streaming_cronjob_profile_wrapper() -> None:
 
     The in-chat agent run already binds per-turn contextvars for other
     session-scoped state. Cron jobs are special because ``cron.jobs`` snapshots
-    path constants at import time, so the model-facing ``cronjob`` tool must
-    enter the existing WebUI cron profile context at the tool-call boundary.
-    That context uses the cron-specific lock and restores the module caches as
-    soon as the single cron tool call returns, avoiding long-lived global path
-    mutation for the whole agent turn.
+    path constants at import time, so the model-facing cron tool must enter the
+    existing WebUI cron profile context at the tool-call boundary. That context
+    uses the cron-specific lock and restores the module caches as soon as the
+    single cron tool call returns, avoiding long-lived global path mutation for
+    the whole agent turn.
     """
-    global _STREAMING_CRONJOB_WRAPPER_INSTALLED
+    global _STREAMING_CRONJOB_WRAPPER_INSTALLED, _STREAMING_CRONJOB_WRAPPER_WARNED
     if _STREAMING_CRONJOB_WRAPPER_INSTALLED:
         return
     try:
-        from tools.registry import registry
+        installed = _wrap_streaming_cronjob_tool_entries()
     except Exception:
-        logger.debug("streaming cronjob wrapper: tools registry unavailable", exc_info=True)
+        # A future hermes-agent shape change must not abort a chat stream
+        # (#8186). Warn once to keep the logs quiet, but leave the installed flag
+        # unset: one failed registration must not disable profile pinning for the
+        # life of the process, or every later chat-created job lands in the
+        # default profile's store (#8201).
+        if not _STREAMING_CRONJOB_WRAPPER_WARNED:
+            _STREAMING_CRONJOB_WRAPPER_WARNED = True
+            logger.warning("streaming cronjob wrapper: install failed", exc_info=True)
         return
+    _STREAMING_CRONJOB_WRAPPER_INSTALLED = installed
 
-    entry = registry.get_entry("cronjob")
-    if entry is None:
-        try:
-            import tools.cronjob_tools  # noqa: F401
-        except Exception:
-            logger.debug("streaming cronjob wrapper: cronjob tool import failed", exc_info=True)
-        entry = registry.get_entry("cronjob")
-    if entry is None:
-        logger.debug("streaming cronjob wrapper: cronjob tool not registered")
-        return
-    original_handler = entry.handler
-    if getattr(original_handler, "_webui_streaming_profile_wrapper", False):
-        _STREAMING_CRONJOB_WRAPPER_INSTALLED = True
-        return
 
-    # This relies on the agent tool executor's ``propagate_context_to_thread``
-    # using an unfiltered ``contextvars.copy_context()`` so this WebUI-owned
-    # contextvar reaches the sync cronjob handler even when the tool call runs
-    # on the agent's ThreadPoolExecutor worker.
+def _streaming_cronjob_profile_handler(original_handler):
+    """Return a cron tool handler that enters the streaming cron profile.
+
+    This relies on the agent tool executor's ``propagate_context_to_thread``
+    using an unfiltered ``contextvars.copy_context()`` so this WebUI-owned
+    contextvar reaches the sync cronjob handler even when the tool call runs
+    on the agent's ThreadPoolExecutor worker.
+    """
+
     def _profile_scoped_cronjob_handler(args, **kwargs):
         profile_home = _STREAMING_CRON_PROFILE_HOME.get()
         if not profile_home:
@@ -529,20 +541,90 @@ def _install_streaming_cronjob_profile_wrapper() -> None:
 
     _profile_scoped_cronjob_handler.__dict__["_webui_streaming_profile_wrapper"] = True
     _profile_scoped_cronjob_handler.__dict__["_webui_original_handler"] = original_handler
-    registry.register(
-        name=entry.name,
-        toolset=entry.toolset,
-        schema=entry.schema,
-        handler=_profile_scoped_cronjob_handler,
-        check_fn=entry.check_fn,
-        requires_env=entry.requires_env,
-        is_async=entry.is_async,
-        description=entry.description,
-        emoji=entry.emoji,
-        max_result_size_chars=entry.max_result_size_chars,
-        dynamic_schema_overrides=entry.dynamic_schema_overrides,
-    )
-    _STREAMING_CRONJOB_WRAPPER_INSTALLED = True
+    return _profile_scoped_cronjob_handler
+
+
+def _wrap_streaming_cronjob_tool_entries() -> bool:
+    """Wrap every registered cron tool name; True once at least one is wrapped.
+
+    Only the global registry slot is wrapped, so a profile-scoped tool override
+    stays scoped to its profile (#8201). Returns False when neither name
+    resolves, so a later stream can retry after the agent registers its tools.
+    """
+    try:
+        from tools.registry import registry
+    except Exception:
+        logger.debug("streaming cronjob wrapper: tools registry unavailable", exc_info=True)
+        return False
+
+    # ``get_entry`` resolves the merged view, where the active profile's scoped
+    # override wins over the global slot. Re-registering that entry without a
+    # scope would promote one profile's handler to every profile, so prefer the
+    # global-slot read where the registry offers it and leave scoped overrides
+    # untouched. Older builds only have ``get_entry``.
+    snapshot_registration = getattr(registry, "snapshot_registration", None)
+    if not callable(snapshot_registration):
+        snapshot_registration = None
+
+    def _resolve_entry(name):
+        if snapshot_registration is None:
+            return registry.get_entry(name)
+        return snapshot_registration(name, scope=None)
+
+    def _resolve_entries():
+        entries = []
+        for name in _STREAMING_CRONJOB_TOOL_NAMES:
+            entry = _resolve_entry(name)
+            if entry is not None:
+                entries.append(entry)
+        return entries
+
+    entries = _resolve_entries()
+    if not entries:
+        # Importing the tool module is what registers it. The module path is the
+        # same under both tool names.
+        try:
+            import tools.cronjob_tools  # noqa: F401
+        except Exception:
+            logger.debug("streaming cronjob wrapper: cronjob tool import failed", exc_info=True)
+        entries = _resolve_entries()
+    if not entries:
+        logger.debug("streaming cronjob wrapper: cronjob tool not registered")
+        return False
+
+    installed = False
+    seen = set()
+    for entry in entries:
+        if id(entry) in seen:
+            continue
+        seen.add(id(entry))
+        original_handler = entry.handler
+        if getattr(original_handler, "_webui_streaming_profile_wrapper", False):
+            installed = True
+            continue
+
+        register_kwargs = dict(
+            name=entry.name,
+            toolset=entry.toolset,
+            schema=entry.schema,
+            handler=_streaming_cronjob_profile_handler(original_handler),
+            check_fn=entry.check_fn,
+            requires_env=entry.requires_env,
+            is_async=entry.is_async,
+            description=entry.description,
+            emoji=entry.emoji,
+            max_result_size_chars=entry.max_result_size_chars,
+        )
+        # Older hermes-agent builds predate ``ToolEntry.dynamic_schema_overrides``
+        # (and the matching ``register()`` kwarg). Forward it only when both sides
+        # know it, otherwise every chat stream fails with AttributeError (#8186).
+        if hasattr(entry, "dynamic_schema_overrides") and _supports_kwarg(
+            registry.register, "dynamic_schema_overrides"
+        ):
+            register_kwargs["dynamic_schema_overrides"] = entry.dynamic_schema_overrides
+        registry.register(**register_kwargs)
+        installed = True
+    return installed
 
 
 def _supports_kwarg(func, kwarg_name: str) -> bool:
@@ -1000,6 +1082,87 @@ def _runtime_preferred_base_url(
     return configured_base_url
 
 
+_ROUTING_ENV_REF_RE = re.compile(r"\$\{[^}]+\}")
+
+
+def _drop_unresolved_routing_refs(block):
+    """Drop ``provider_routing`` values that still carry an unexpanded
+    ``${...}`` reference after env expansion.
+
+    Both chat paths expand ``${VAR}`` references before routing reaches the
+    Agent: the sync seam under the fail-closed profile scope
+    (``block_process_env_fallback``) and the streaming path via the expanded
+    config loader. A ``${VAR}`` that the profile does not define (for example
+    a variable only the server process env holds, or one defined nowhere)
+    survives expansion as its literal text. Forwarding that literal would
+    make OpenRouter restrict the request to a provider that does not exist
+    and fail a turn that master (which forwarded no routing) completes. Dropping the affected value restores master's
+    outcome for it, with a warning, without widening what a profile may
+    read from the server environment.
+
+    A list item is dropped individually; a field is dropped when its scalar
+    value is unresolved or its list empties. Non-string values are kept as
+    is. Never mutates ``block``; returns ``(clean_block, dropped)`` where
+    ``dropped`` maps field name to the number of dropped values.
+    """
+    if not isinstance(block, dict):
+        return {}, {}
+    clean = {}
+    dropped = {}
+    for key, value in block.items():
+        if isinstance(value, str):
+            if _ROUTING_ENV_REF_RE.search(value):
+                dropped[key] = 1
+            else:
+                clean[key] = value
+        elif isinstance(value, list):
+            kept = [
+                item for item in value
+                if not (isinstance(item, str)
+                        and _ROUTING_ENV_REF_RE.search(item))
+            ]
+            lost = len(value) - len(kept)
+            if lost:
+                dropped[key] = lost
+            if kept:
+                clean[key] = kept
+        else:
+            clean[key] = value
+    return clean, dropped
+
+
+def _provider_routing_kwargs_for_agent(cfg, agent_params):
+    """Map a profile config's ``provider_routing`` block to AIAgent kwargs.
+
+    Returns only the routing kwargs the installed hermes-agent build accepts
+    (``agent_params``), so older builds degrade gracefully. The WebUI
+    in-process runtime reads the session's own profile config and must forward
+    these, or OpenRouter provider routing (sort/ignore/only/order) is silently
+    dropped for browser chat turns. Mirrors the gateway's TurnRunner.
+    """
+    pr = (cfg or {}).get("provider_routing") or {}
+    if not isinstance(pr, dict):
+        pr = {}
+    pr, dropped = _drop_unresolved_routing_refs(pr)
+    for key, count in dropped.items():
+        logger.warning(
+            "provider_routing.%s references an environment variable this "
+            "profile does not define; dropping %d value(s) for this turn "
+            "instead of forwarding the literal ${...} text",
+            key,
+            count,
+        )
+    mapping = {
+        "providers_allowed": pr.get("only"),
+        "providers_ignored": pr.get("ignore"),
+        "providers_order": pr.get("order"),
+        "provider_sort": pr.get("sort"),
+        "provider_require_parameters": pr.get("require_parameters", False),
+        "provider_data_collection": pr.get("data_collection"),
+    }
+    return {k: v for k, v in mapping.items() if k in agent_params}
+
+
 def _is_fallback_lifecycle_message(kind: str, message: str) -> bool:
     """Return True if an agent lifecycle status should surface as a fallback warning."""
     k = str(kind or '').strip().lower()
@@ -1325,9 +1488,13 @@ def _webui_surface_context_prompt(surface_context: Optional[dict]) -> str:
         "- Write to external notes or durable memory only for explicit captures, durable user preferences, decisions, blockers/open issues, runbook-worthy workflows, or other clearly reusable signals; otherwise leave notes unchanged.",
         "- When you do write or update a durable note, briefly tell the user what note/section changed so the write is reviewable.",
     ]
+    # #8148: no per-session value here. This block sits above the progress and
+    # delivery prompts, and the agent appends the whole ephemeral prompt to the
+    # end of the system text, so a session id on this list made every new chat's
+    # system text differ from that line on and no provider prefix cache could
+    # be reused across chats. See _webui_session_id_prompt().
     fields = (
         ("source", "Source"),
-        ("session_id", "Session ID"),
         ("profile", "Profile"),
         ("workspace", "Workspace"),
     )
@@ -1337,6 +1504,31 @@ def _webui_surface_context_prompt(surface_context: Optional[dict]) -> str:
         if value:
             lines.append(f"- {label}: {value}")
     return "\n".join(lines)
+
+
+def _webui_session_id_prompt(
+    surface_context: Optional[dict], config_data: Optional[dict] = None
+) -> str:
+    """Return the session id line, only when ``webui.pass_session_id`` asks for it.
+
+    Off by default, like hermes-agent's own ``pass_session_id``: the id is
+    different for every chat, so it is the one line that two new chats cannot
+    share (#8148). When it is asked for, the caller emits it last, so everything
+    before it stays a shared prefix.
+    """
+    if not isinstance(surface_context, dict):
+        return ""
+    cfg = config_data if isinstance(config_data, dict) else get_config()
+    webui_cfg = cfg.get("webui") if isinstance(cfg, dict) else None
+    if not isinstance(webui_cfg, dict):
+        return ""
+    if str(webui_cfg.get("pass_session_id") or "").strip().lower() not in {"1", "true", "yes", "on"}:
+        return ""
+    raw = surface_context.get("session_id")
+    value = str(raw).strip() if raw is not None else ""
+    if not value:
+        return ""
+    return f"WebUI session:\n- Session ID: {value}"
 
 
 def _webui_ephemeral_system_prompt(
@@ -1355,6 +1547,10 @@ def _webui_ephemeral_system_prompt(
     delivery_prompt = _webui_delivery_context_prompt(config_data)
     if delivery_prompt:
         parts.append(delivery_prompt)
+    # Last on purpose (#8148): the only per-session text in this prompt.
+    session_id_prompt = _webui_session_id_prompt(surface_context, config_data)
+    if session_id_prompt:
+        parts.append(session_id_prompt)
     return "\n\n".join(part for part in parts if part)
 
 
@@ -1608,7 +1804,7 @@ def _webui_delivery_context_prompt(config_data: Optional[dict] = None) -> str:
     Gemma) reject.
 
     NOTE: This function only covers platform/delivery info.  The session
-    framing (\"Source: WebUI\", \"Session ID\", \"Profile\", \"Workspace\") is
+    framing (\"Source: WebUI\", \"Profile\", \"Workspace\") is
     emitted by ``_webui_surface_context_prompt()``, which is called from
     ``_webui_ephemeral_system_prompt()`` before this helper.  If you
     refactor this area, keep that surface call in place — the two helpers
@@ -2153,6 +2349,16 @@ def _active_turn_authority(session, stream_id, msg_text):
     )
     return {
         'session_id': getattr(session, 'session_id', None),
+        # #7882 re-gate: fork-ownership context for delegation_wakeup turns —
+        # the row stamp keeps the typed _source, but the _fork_child_turn
+        # ownership proof regeneration requires is derived from the session's
+        # fork identity, not the row source.
+        'session_source': getattr(session, 'session_source', None),
+        'fork_session_id': (
+            getattr(session, 'session_id', None)
+            if str(getattr(session, 'session_source', None) or '').strip().lower() == 'fork'
+            else None
+        ),
         'token': token,
         'text': pending_text if pending_text is not None else msg_text,
         'timestamp': getattr(session, 'pending_started_at', None),
@@ -2180,6 +2386,13 @@ def _resolve_active_turn_authority(identity, *, result=None, agent=None):
     resolved = dict(identity)
     resolved.pop('agent_turn_boundary_resolved', None)
     resolved.pop('agent_turn_boundary_source', None)
+    # Preserve the fork-ownership context (#7882 re-gate): a delegation_wakeup
+    # turn inside a fork session derives its _fork_child_turn proof from these
+    # fields at materialization/settlement time.
+    if 'session_source' not in resolved:
+        resolved['session_source'] = None
+    if 'fork_session_id' not in resolved:
+        resolved['fork_session_id'] = None
 
     # Treat the boundary as one coherent pair. In particular, do not retain the
     # failed Agent instance's index/turn when credential self-heal creates a
@@ -2439,8 +2652,22 @@ def _materialize_active_turn_user(identity, msg_text, source):
             identity.get('source') or source or 'webui',
             active_turn_token=identity.get('token'),
         )
-        if str(identity.get('source') or source or '').strip().lower() == 'fork':
+        _settle_source = str(identity.get('source') or source or '').strip().lower()
+        if _settle_source == 'fork':
             child_session_id = identity.get('session_id')
+            if child_session_id:
+                message['_fork_child_turn'] = child_session_id
+        elif (
+            _settle_source == 'delegation_wakeup'
+            and str(identity.get('session_source') or '').strip().lower() == 'fork'
+        ):
+            # A delegation wakeup INSIDE a fork session: the row's _source stays
+            # delegation_wakeup (the hidden-row predicate keys on it), but the
+            # fork-ownership proof regeneration authorization requires rides on
+            # _fork_child_turn (#7882 re-gate must-fix 2 — without it every
+            # regeneration after an async delegation completes in a fork
+            # returns regeneration_read_only).
+            child_session_id = identity.get('session_id') or identity.get('fork_session_id')
             if child_session_id:
                 message['_fork_child_turn'] = child_session_id
     else:
@@ -2449,6 +2676,52 @@ def _materialize_active_turn_user(identity, msg_text, source):
             source,
         )
     return message
+
+
+def _settle_existing_current_turn_user_row(result_messages, previous_context, identity, msg_text):
+    """Return the index of the current turn's user row when already present.
+
+    The settle's exact-prefix suffix proof appends the Agent's returned rows
+    verbatim, and the eager checkpoint is dropped from the owner projection
+    before the Agent runs, so the returned list normally ALREADY contains the
+    current turn's user row. ``_find_active_turn_checkpoint_index`` recognizes
+    it only through a surviving ``_active_turn_token`` or the Agent-resolved
+    ``current_turn_user_idx``; when neither survives (older/stub Agents return
+    no ``turn_id``, or the projection carried no token), the caller must not
+    fall through to materializing a second copy of the same prompt.
+
+    Mirror ``_active_turn_boundary``'s text fallback: the LAST prompt-matching
+    user row at/after a content-matching previous-context prefix is the
+    current turn's row. Returns None when the row is genuinely absent — the
+    caller then materializes it as before.
+    """
+    previous_context = list(previous_context or [])
+    # #7237 round 4 follow-up: only a genuine SUPER-LIST of the previous
+    # context may be probed for an already-present current-turn row. Without
+    # that prefix a compacted / collision-shaped result can carry a same-text
+    # HISTORICAL user row; claiming it as this turn's row inverts the
+    # self-heal ownership proof
+    # (test_compression_snapshot_revision::test_self_heal_repeated_prompt_never_accepts_shifted_historical_row).
+    if not (
+        previous_context
+        and len(result_messages) > len(previous_context)
+        and _messages_have_prefix(result_messages, previous_context)
+    ):
+        return None
+    candidate_start = len(previous_context)
+    expected_text = identity.get('text') if isinstance(identity, dict) else None
+    expected = _normalize_user_text(expected_text if expected_text is not None else msg_text)
+    if not expected:
+        return None
+    for idx in range(len(result_messages) - 1, candidate_start - 1, -1):
+        message = result_messages[idx]
+        if (
+            isinstance(message, dict)
+            and message.get('role') == 'user'
+            and _normalize_user_text(_message_text(message.get('content'))) == expected
+        ):
+            return idx
+    return None
 
 
 def _settle_current_turn_boundary(previous_context, result_messages, identity, msg_text, source):
@@ -2462,6 +2735,30 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
         identity,
         msg_text,
     )
+    if _checkpoint_idx is None:
+        # The current turn's user row can already sit inside
+        # ``result_messages`` even when no token/index authority survives the
+        # projection: the eager checkpoint row is dropped from the owner
+        # projection before the Agent runs (``_drop_checkpointed_current_user_
+        # from_context``), so the user row the Agent returned IS this turn's
+        # own row, not an echo. Materializing a second copy beside it would
+        # persist the same prompt twice — the exact-prefix suffix proof marks
+        # that row protected, so the final context dedupe cannot collapse the
+        # duplicate either (#7237 round 4: cancelled-history real producers,
+        # PRIOR_Q2 duplicated and the state.db Gateway pair dropped). Mirror
+        # ``_active_turn_boundary``'s text fallback: the LAST prompt-matching
+        # user row at/after the previous-context prefix owns the turn.
+        _checkpoint_idx = _settle_existing_current_turn_user_row(
+            result_messages, previous_context, identity, msg_text,
+        )
+        if _checkpoint_idx is not None and identity.get('timestamp') is not None:
+            # The returned row is this turn's own row, but its timestamp may
+            # have been re-stamped with a wall clock by the display merge.
+            # Keep the eager checkpoint's pending-start clock (what the
+            # materialize path stamps) so pre-stop mirror alignment against
+            # the state.db rows stays exact and cancelled-history gap
+            # restoration keeps its anchors (#7237 round 4, real producers).
+            result_messages[_checkpoint_idx]['timestamp'] = identity['timestamp']
     if _checkpoint_idx is not None:
         existing_checkpoint = result_messages[_checkpoint_idx]
         _mark_active_turn_checkpoint(existing_checkpoint, identity)
@@ -2481,8 +2778,19 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
             _settle_source,
             active_turn_token=identity.get('token'),
         )
-        if str(_settle_source).strip().lower() == 'fork':
+        _settle_source_lower = str(_settle_source).strip().lower()
+        if _settle_source_lower == 'fork':
             child_session_id = identity.get('session_id')
+            if child_session_id:
+                existing_checkpoint['_fork_child_turn'] = child_session_id
+        elif (
+            _settle_source_lower == 'delegation_wakeup'
+            and str(identity.get('session_source') or '').strip().lower() == 'fork'
+        ):
+            # Fork-internal delegation wakeup (see _materialize_active_turn_user):
+            # keep _source = delegation_wakeup for hiding, but carry the fork
+            # ownership proof so regeneration stays authorized (#7882 re-gate).
+            child_session_id = identity.get('session_id') or identity.get('fork_session_id')
             if child_session_id:
                 existing_checkpoint['_fork_child_turn'] = child_session_id
         if isinstance(checkpoint, dict):
@@ -2622,6 +2930,8 @@ def _settle_result_messages(
     msg_text,
     source,
     active_turn_identity,
+    projected_history=None,
+    compression_authorized=False,
 ):
     (
         result_messages,
@@ -2634,16 +2944,28 @@ def _settle_result_messages(
         active_turn_identity,
         msg_text,
     )
+    # Call-scoped protection (#7237 review blocker 1, nesquena-hermes
+    # 2026-09-28): the protected-row set returned by _dedupe_replayed_
+    # context_messages never leaves this call frame.
+    _proven_current_turn_rows = None
     if result_messages:
         _assign_stable_message_ids(
             result_messages,
             previous_messages,
             previous_context_messages,
         )
-        next_context_messages = _dedupe_replayed_context_messages(
-            previous_context_messages,
-            next_context_messages,
-            msg_text,
+        # Call-scoped protection (#7237 review blocker 1): _dedupe_replayed_
+        # context_messages RETURNS the rows it proved belong to this turn;
+        # the set never leaves this call frame.
+        next_context_messages, _proven_current_turn_rows = (
+            _dedupe_replayed_context_messages(
+                previous_context_messages,
+                next_context_messages,
+                msg_text,
+                active_turn_identity=active_turn_identity,
+                projected_history=projected_history,
+                compression_authorized=compression_authorized,
+            )
         )
         next_context_messages = _settle_current_turn_boundary(
             previous_context_messages,
@@ -2653,10 +2975,19 @@ def _settle_result_messages(
             source,
         )
     session.context_messages = (
-        _deduplicate_context_messages(next_context_messages)
+        _deduplicate_context_messages(
+            next_context_messages,
+            protected_rows=_proven_current_turn_rows,
+        )
         if result_messages
         else list(next_context_messages or [])
     )
+    # Call-scoped protection handoff (#7237 review blocker 1, nesquena-hermes
+    # 2026-09-28): the protected-row set is computed and consumed INSIDE this
+    # settle call. The old module global (PROVEN_CURRENT_TURN_ROWS) could be
+    # overwritten or cleared by another session's concurrent settle — the
+    # runtime serializes per session, not per process — and the sync route
+    # never consumed it at all. Protection now lives on the call frame only.
     if result_messages:
         session.context_messages = _settle_current_turn_boundary(
             previous_context_messages,
@@ -3178,12 +3509,30 @@ from api.workspace import _resolve_path
 # metadata such as `reasoning`, `thinking`, and `_reasoning` stays omitted here.
 _API_SAFE_MSG_KEYS = {'role', 'content', 'tool_calls', 'tool_call_id', 'name', 'refusal', 'reasoning_content'}
 
+# Discriminators the Agent pass-0 merge needs to see on a row in order to
+# decide whether two adjacent assistant messages are actually mergeable. These
+# are NOT provider-facing — they get stripped in a final projection pass after
+# the merge resolves. Keeping them out of the public `_API_SAFE_MSG_KEYS`
+# preserves the wire contract; preserving them into the merge input matches
+# the Agent's ``_is_codex_interim`` / ``verification_required`` heuristics
+# (#7237 review finding 2).
+_MERGE_VISIBLE_DISCRIMINATORS = frozenset({
+    'codex_reasoning_items',
+    'codex_message_items',
+    'finish_reason',
+})
+# Strict projection drops the merge-visible discriminators + the optional
+# `api_content` sidecar in the final pass. The Agent replay path opts back in
+# to `api_content` via `preserve_api_content=True` (see _sanitize_messages_for_agent).
+_API_PUBLIC_STRIP_KEYS = _MERGE_VISIBLE_DISCRIMINATORS | {'api_content'}
+
 _NATIVE_IMAGE_MAX_BYTES = 20 * 1024 * 1024
 
 _GATEWAY_ROUTING_TOP_LEVEL_KEYS = {
     'used_provider',
     'used_model',
     'requested_provider',
+    'requested_route_provider',
     'requested_model',
 }
 _GATEWAY_ROUTING_CONTAINER_KEYS = (
@@ -3224,7 +3573,7 @@ def _find_gateway_metadata_payload(payload):
     return None
 
 
-def _normalize_gateway_routing_metadata(payload, requested_model=None, requested_provider=None):
+def _normalize_gateway_routing_metadata(payload, requested_model=None, requested_provider=None, requested_route_provider=None):
     """Return safe LLM Gateway routing metadata, or None when absent.
 
     LLM Gateway response metadata can contain provider/model routing details,
@@ -3249,6 +3598,10 @@ def _normalize_gateway_routing_metadata(payload, requested_model=None, requested
         fallback_provider = _clean_gateway_routing_scalar(requested_provider)
         if fallback_provider is not None:
             normalized['requested_provider'] = fallback_provider
+    if 'requested_route_provider' not in normalized:
+        fallback_route_provider = _clean_gateway_routing_scalar(requested_route_provider)
+        if fallback_route_provider is not None:
+            normalized['requested_route_provider'] = fallback_route_provider
 
     routing = []
     raw_routing = src.get('routing')
@@ -3294,7 +3647,7 @@ def _normalize_gateway_routing_metadata(payload, requested_model=None, requested
     return normalized
 
 
-def _extract_gateway_routing_metadata(agent, result, requested_model=None, requested_provider=None):
+def _extract_gateway_routing_metadata(agent, result, requested_model=None, requested_provider=None, requested_route_provider=None):
     candidates = []
     if isinstance(result, dict):
         candidates.extend([
@@ -3321,10 +3674,29 @@ def _extract_gateway_routing_metadata(agent, result, requested_model=None, reque
             candidate,
             requested_model=requested_model,
             requested_provider=requested_provider,
+            requested_route_provider=requested_route_provider,
         )
         if normalized:
             return normalized
     return None
+
+
+def _capture_turn_served_model(s, agent) -> str | None:
+    """Capture the model that actually served this turn onto the session.
+
+    #6068: the served model must be read AFTER agent.run: the agent
+    mutates agent.model when a fallback fires, so the pre-run
+    resolved_model would mis-attribute exactly the turns where
+    attribution matters most.
+    The configured selection is not proof that it served this turn.
+    Sets s.last_used_model from observed agent.model only, and to None
+    when nothing was observed.
+    """
+    _observed_model = getattr(agent, 'model', None)
+    _used_model = _observed_model.strip() if isinstance(_observed_model, str) else None
+    if s is not None:
+        s.last_used_model = (_used_model[:240]) if _used_model else None
+    return _used_model
 
 
 def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str) -> dict:
@@ -4529,6 +4901,9 @@ def _strip_xml_tool_calls(text: str) -> str:
 
 def _sanitize_generated_title(text: str) -> str:
     """Sanitize LLM-generated title text before persisting to session."""
+    # Preserve newline candidate boundaries before markup normalization.
+    if _looks_like_title_option_menu(text):
+        return ''
     s = _strip_thinking_markup(text or '')
     s = re.sub(
         r'^\s*(?:[*_`~]+\s*)?(?:session\s+title|title)\s*:\s*(?:[*_`~]+\s*)?',
@@ -4537,12 +4912,120 @@ def _sanitize_generated_title(text: str) -> str:
         flags=re.IGNORECASE,
     )
     s = re.sub(r'^\s*title\s*:\s*', '', s, flags=re.IGNORECASE)
+    if _looks_like_title_option_menu(s):
+        return ''
     s = s.strip(" \t\r\n\"'`*_~")
     s = re.sub(r'\s+', ' ', s).strip()
     # Guard against chain-of-thought leakage, meta-reasoning, and trivial echo.
     if _is_bad_new_title(s):
         return ''
     return s[:80]
+
+
+_TITLE_OPTION_MENU_RE = re.compile(
+    r'^\s*(?:(?:[-*\u2022\u2023]|\d{1,2}[).:])\s+)?'
+    r'(?:(?:here (?:are|is)|some|good|possible)\s+)*(?:here (?:are|is)\s+some\s+|some\s+of\s+the\s+)?'
+    r'(?:session\s+)?title\s+(?:options?|suggestions?|ideas?|candidates?)\s*:',
+    flags=re.IGNORECASE,
+)
+
+# Evidence that a preamble introduces MULTIPLE candidates rather than one
+# selected title: numbered/bulleted entries or delimited candidates.
+# Unanchored: callers may pass raw stored titles (multiline lists) OR the
+# whitespace-collapsed sanitize form, where list markers are inline.
+_TITLE_MENU_LIST_RE = re.compile(
+    r'(?:[-*\u2022\u2023]|\d{1,2}[).:])\s+\S',
+    flags=re.IGNORECASE,
+)
+_TITLE_MENU_COMMA_JOIN_RE = re.compile(
+    r'\b(?:and|or|vs\.?|versus|then|but|while)\b', flags=re.IGNORECASE,
+)
+_TITLE_MENU_COMMA_SPAN_RE = re.compile(
+    r'^(?:and|or|vs\.?|versus|then|but|while|with|without|from|to|for|of|between|across|after|before)\b'
+    r'|\b(?:with|without|from|to|for|of|between|across|after|before)\s*$',
+    flags=re.IGNORECASE,
+)
+_TITLE_MENU_COMMA_VERB_RE = re.compile(
+    r'^(?:compare|comparing|contrast|contrasting|review|reviewing|explore|exploring|evaluate|evaluating)\b',
+    flags=re.IGNORECASE,
+)
+
+
+def _looks_like_title_option_menu(text: str) -> bool:
+    """Return True for a title-model menu rather than one selected title.
+
+    The preamble alone is not enough: legitimate single titles like
+    ``Title Suggestions: Migration Strategy`` or
+    ``Here Are Some Title Options for Session Naming`` exist and must not be
+    rejected. Classify as a menu only when multiple candidates follow —
+    two or more list entries, or delimiter-separated standalone alternatives.
+    Matching works on both raw stored text and the whitespace-collapsed sanitize
+    form. A grammatical comma inside one title is not a candidate boundary.
+    """
+    s = str(text or '')
+    s_m = _TITLE_OPTION_MENU_RE.match(s)
+    if not s_m:
+        return False
+    rest = s[s_m.end():]
+    if len(_TITLE_MENU_LIST_RE.findall(rest)) >= 2:
+        return True
+    # Only separators outside quoted terms delimit candidates. Two quoted
+    # words in a single comparison title are not a menu.
+    candidates = []
+    separators = []
+    start = 0
+    quote = None
+    for index, char in enumerate(rest):
+        if char in ('"', '\u201c', '\u201d'):
+            if quote is None:
+                quote = '\u201d' if char == '\u201c' else char
+            elif char == quote:
+                quote = None
+        elif quote is None and char in ',;\n':
+            candidates.append(rest[start:index].strip())
+            separators.append(char)
+            start = index + 1
+    candidates.append(rest[start:].strip())
+    if sum(bool(candidate) for candidate in candidates) < 2:
+        return False
+    if any(separator in ';\n' for separator in separators):
+        return True
+    # Two unquoted comma fragments are ambiguous even when both are short:
+    # "OAuth Tokens, Explained" is one title, not two choices. Explicit
+    # quotation or a leading list marker supplies the missing menu structure;
+    # otherwise require at least three alternatives. An explicit "or" between
+    # two fragments also marks a choice after an options preamble.
+    alternative = False
+    if len(candidates) == 2:
+        quoted = all(
+            (item.startswith('"') and item.endswith('"'))
+            or (item.startswith('\u201c') and item.endswith('\u201d'))
+            for item in candidates
+        )
+        marked = bool(re.match(r'^\s*(?:[-*\u2022\u2023]|\d{1,2}[).:])\s+', s))
+        alternative = bool(re.match(r'^or\b', candidates[-1], re.IGNORECASE))
+        if not (quoted or marked or alternative):
+            return False
+    # A comma can also join clauses in ONE title ("Compare REST, GraphQL and
+    # gRPC"). Require short standalone alternatives: a leading action verb,
+    # boundary-spanning preposition, or a connective joining the final segment
+    # to its predecessor makes the split ambiguous, so preserve the title.
+    for index, candidate in enumerate(candidates):
+        if not candidate or len(candidate) > 50 or len(candidate.split()) > 6:
+            return False
+        if (candidate[0] == candidate[-1] == '"'
+                or (candidate[0] == '\u201c' and candidate[-1] == '\u201d')):
+            continue  # A fully quoted alternative may itself contain "and".
+        # An explicit "or" is the option separator, not a grammatical span
+        # within the second candidate; still inspect its remaining words.
+        span_candidate = candidate[3:].strip() if alternative and index == 1 else candidate
+        if (_TITLE_MENU_COMMA_SPAN_RE.search(span_candidate)
+                or (index == 0 and _TITLE_MENU_COMMA_VERB_RE.match(candidate))
+                or (index == len(candidates) - 1
+                    and _TITLE_MENU_COMMA_JOIN_RE.search(candidate)
+                    and not alternative)):
+            return False
+    return True
 
 
 def _looks_invalid_generated_title(text: str) -> bool:
@@ -4563,6 +5046,7 @@ def _looks_invalid_generated_title(text: str) -> bool:
         or re.search(r'^\s*(i|we)\s+(should|need to|will|can)\b', s, flags=re.IGNORECASE)
         or re.search(r'^\s*let me\b', s, flags=re.IGNORECASE)
         or re.search(r"^\s*here(?:'s| is) (?:a |my )?(?:thinking|thought)", s, flags=re.IGNORECASE)
+        or _looks_like_title_option_menu(s)
     )
 
 
@@ -4834,11 +5318,26 @@ def _latest_exchange_snippets(messages):
                 user_text = ''
                 asst_text = ''
                 break
-            if not user_text:
-                user_text = candidate
+            user_text = candidate
+            # Never cross a user boundary to borrow an older assistant reply.
+            break
         if user_text and asst_text:
             break
     return user_text[:500], asst_text[:500]
+
+
+def _title_exchange_for_unresolved_title(messages):
+    """Pick the best completed exchange while an automatic title is unresolved.
+
+    The first exchange is normally the right title source.  If its model output
+    was rejected, however, retrying that same opener on every later turn cannot
+    recover a session that starts with a warm-up message.  Use the latest
+    completed exchange once another user turn exists, while leaving successful
+    titles and configured periodic refreshes untouched.
+    """
+    if _count_exchanges(messages) > 1:
+        return _latest_exchange_snippets(messages)
+    return _first_exchange_snippets(messages)
 
 
 def _count_exchanges(messages):
@@ -4894,8 +5393,13 @@ def _is_provisional_title(current_title: str, messages) -> bool:
     return any(candidate and current == candidate for candidate in candidates)
 
 
-def _background_title_generation_inputs(session):
-    """Return sanitized first-exchange inputs when background title generation is eligible."""
+def _background_title_generation_eligible(session):
+    """True when background title generation should run for *session*.
+
+    Covers the default/provisional placeholders plus structurally invalid
+    generated titles (e.g. a persisted title-option menu), which must re-enter
+    the self-heal path even though ``llm_title_generated`` is set.
+    """
     messages = getattr(session, 'messages', None) or []
     title = getattr(session, 'title', '')
     invalid_existing_title = _looks_invalid_generated_title(title)
@@ -4906,11 +5410,24 @@ def _background_title_generation_inputs(session):
         or _is_provisional_title(title, messages)
         or invalid_existing_title
     )
-    if not eligible_title or (
-        getattr(session, 'llm_title_generated', False) and not invalid_existing_title
-    ):
+    if not eligible_title:
+        return False
+    return not (getattr(session, 'llm_title_generated', False) and not invalid_existing_title)
+
+
+def _background_title_generation_inputs(session):
+    """Return (user_text, assistant_text) title inputs when eligible, else None.
+
+    Exchange selection: normally the first completed exchange names the
+    session; if its model output was rejected, retrying the same warm-up
+    opener forever cannot recover, so a later completed exchange is used
+    instead once one exists.
+    """
+    if not _background_title_generation_eligible(session):
         return None
-    user_text, assistant_text = _first_exchange_snippets(messages)
+    user_text, assistant_text = _title_exchange_for_unresolved_title(
+        getattr(session, 'messages', None) or []
+    )
     return (user_text, assistant_text) if user_text and assistant_text else None
 
 
@@ -6331,34 +6848,99 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
     return 'Conversation topic'
 
 
-def _is_generic_fallback_title(title: str) -> bool:
+def _is_generic_fallback_title(title) -> bool:
     """Return True for low-information fallback labels that should not be persisted."""
     return str(title or '').strip().lower() in {'conversation topic'}
 
 
-def _run_background_title_update(session_id: str, user_text: str, assistant_text: str, placeholder_title: str, put_event, agent=None):
-    """Generate and publish a better title after `done`, then end the stream."""
+# Internal title-generation statuses are diagnostics, not user-facing text.
+# The manual regenerate route renders its 422 body verbatim in the sidebar
+# toast, so any status a user can trigger manually must be translated (#7693:
+# the toast used to show the raw internal code "llm_language_mismatch_aux").
+_TITLE_FAILURE_HUMAN_REASONS = {
+    'llm_language_mismatch': 'the generated title did not match the conversation language',
+    'llm_language_mismatch_aux': 'the generated title did not match the conversation language',
+    'llm_invalid': 'the title model returned an unusable title',
+    'llm_invalid_aux': 'the title model returned an unusable title',
+    'llm_empty': 'the title model returned an empty title',
+    'llm_empty_aux': 'the title model returned an empty title',
+    'llm_error': 'the title model could not be reached',
+    'llm_error_aux': 'the title model could not be reached',
+    'llm_empty_reasoning': 'the title model spent its budget on reasoning and returned no title',
+    'llm_empty_reasoning_aux': 'the title model spent its budget on reasoning and returned no title',
+    'llm_length': 'the title model hit its output limit before returning a title',
+    'llm_length_aux': 'the title model hit its output limit before returning a title',
+    'missing_exchange': 'this conversation has no assistant reply to title yet',
+    'empty_user_message': 'this session has no user message to title yet',
+    'empty_title': 'no title could be produced for this session',
+    'title_generation_disabled': 'title generation is disabled for this profile',
+}
+
+
+def _human_title_failure_reason(status) -> str:
+    """Map an internal title-generation status to readable failure text.
+
+    Known internal codes are translated; anything else passes through unchanged
+    so a new status stays debuggable instead of turning into an empty message.
+    """
+    key = str(status or '').strip()
+    return _TITLE_FAILURE_HUMAN_REASONS.get(key, key)
+
+
+# Recovery cap for a model that keeps answering badly: an invalid model output
+# suppresses the local fallback so the next completed exchange retries the LLM
+# (the local fallback would mark a warm-up opener as successfully titled). A
+# model that ALWAYS returns the wrong language or a list would otherwise retry
+# forever — one title call per turn plus the invalid-output backup chain. After
+# this many exchanges with a still-invalid title, accept the local fallback and
+# stop retrying (maintainer re-gate, #7318).
+_TITLE_RECOVERY_MAX_EXCHANGES = 3
+
+
+def _run_background_title_update(session_id: str, user_text: str, assistant_text: str, placeholder_title: str, put_event, agent=None, stream_owner_id: str = None):
+    """Generate and publish a better title after `done`, then end the stream.
+
+    ``session_id`` is the title target (the canonical/continuation session the
+    title is loaded from and persisted to). ``stream_owner_id`` is the SSE
+    stream owner: when context compression rotated the session ID mid-stream,
+    the client captured the ORIGINAL ``_run_agent_streaming`` session id and
+    its ``stream_end`` fence (static/messages.js) rejects mismatched ids — so
+    ``stream_end`` must be emitted with the original id or the EventSource
+    never closes.
+    """
     try:
+        # Read the canonical in-memory session while deciding whether this
+        # automatic pass may run. A manual rename can race the background LLM
+        # request, so the later write path rebinds under the same lock too.
+        # get_session() itself acquires the global session LOCK in its cache
+        # resolver, so it must run OUTSIDE the explicit critical section
+        # (plain non-reentrant threading.Lock); rebind under LOCK after it.
         try:
             s = get_session(session_id)
+            with LOCK:
+                cached_session = SESSIONS.get(session_id)
+                if cached_session is not None and getattr(cached_session, 'session_id', None) == session_id:
+                    s = cached_session
+                _invalid_existing = _looks_invalid_generated_title(s.title)
+                current = str(s.title or '').strip()
+                already_generated = getattr(s, 'llm_title_generated', False)
+                manual_title = session_has_manual_title(s)
+                still_auto = (
+                    current == placeholder_title
+                    or current in ('Untitled', 'New Chat', '')
+                    or _is_provisional_title(current, s.messages)
+                    or _invalid_existing
+                )
         except KeyError:
             _put_title_status(put_event, session_id, 'skipped', 'missing_session')
             return
         # Allow self-heal when a previously generated title leaked thinking text.
-        _invalid_existing = _looks_invalid_generated_title(s.title)
-        if getattr(s, 'llm_title_generated', False) and not _invalid_existing:
-            _put_title_status(put_event, session_id, 'skipped', 'already_generated', str(s.title or ''))
+        if already_generated and not _invalid_existing:
+            _put_title_status(put_event, session_id, 'skipped', 'already_generated', current)
             return
-        current = str(s.title or '').strip()
-        if session_has_manual_title(s):
+        if manual_title:
             _put_title_status(put_event, session_id, 'skipped', 'manual_title', current)
             return
-        still_auto = (
-            current == placeholder_title
-            or current in ('Untitled', 'New Chat', '')
-            or _is_provisional_title(current, s.messages)
-            or _invalid_existing
-        )
         if not still_auto:
             _put_title_status(put_event, session_id, 'skipped', 'manual_title', current)
             return
@@ -6369,19 +6951,48 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 _put_title_status(put_event, session_id, 'skipped', 'title_generation_disabled', current)
                 return
             aux_title_configured = _aux_title_configured()
+            rejected_model_output = False
             if agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+                rejected_model_output = llm_status in ('llm_invalid', 'llm_language_mismatch')
                 if not next_title and llm_status in ('llm_error', 'llm_invalid'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
+                    rejected_model_output = rejected_model_output or llm_status in ('llm_invalid_aux', 'llm_language_mismatch_aux')
             else:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, conversation_id=session_id)
+                rejected_model_output = llm_status in ('llm_invalid_aux', 'llm_language_mismatch_aux')
                 if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+                    rejected_model_output = rejected_model_output or llm_status in ('llm_invalid', 'llm_language_mismatch')
             source = llm_status
-            if not next_title:
+            # An invalid response is different from an unavailable title model:
+            # choosing a local fallback here would mark a warm-up opener as
+            # successfully titled, blocking the later unresolved-title retry.
+            # Keep the provisional title and retry on the next completed exchange.
+            invalid_model_output = rejected_model_output or llm_status in {
+                'llm_invalid',
+                'llm_invalid_aux',
+                'llm_language_mismatch',
+                'llm_language_mismatch_aux',
+            }
+            # Recovery cap: accept the local fallback once the session has this
+            # many exchanges — a model that keeps answering badly must not mint
+            # one title call per turn forever (#7318 re-gate, SHOULD-FIX). The
+            # count reads the already-materialized session messages snapshot
+            # (no lock held); a concurrently appended message can only make the
+            # cap more permissive by one turn, which is acceptable here.
+            try:
+                exchange_count = _count_exchanges(s.messages)
+            except Exception:
+                exchange_count = 0
+            recovery_capped = invalid_model_output and exchange_count >= _TITLE_RECOVERY_MAX_EXCHANGES
+            if not next_title and (not invalid_model_output or recovery_capped):
                 fallback_title = _fallback_title_from_exchange(user_text, assistant_text)
                 if fallback_title and not _is_generic_fallback_title(fallback_title):
-                    logger.debug("Using local fallback for session title generation")
+                    logger.debug(
+                        "Using local fallback for session title generation%s",
+                        " (recovery cap reached)" if recovery_capped else "",
+                    )
                     next_title = fallback_title
                     source = 'fallback'
                 elif fallback_title:
@@ -6424,7 +7035,22 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 _put_title_status(put_event, session_id, source, fallback_reason, effective_title, raw_preview)
             else:
                 _put_title_status(put_event, session_id, source, llm_status, effective_title, raw_preview)
-            put_event('title', {'session_id': session_id, 'title': effective_title})
+            put_event('title', {
+                # The listener keys its guard on session_id, so this must be the
+                # TITLE TARGET (B) — not the stream owner (A): after an A→B
+                # compression rotation, a reattached listener runs with
+                # activeSid=B and would reject an A-keyed event before ever
+                # checking expectedCurrent, leaving B's malformed title in place.
+                'session_id': session_id,
+                'stream_owner_session_id': stream_owner_id or session_id,
+                'target_session_id': session_id,
+                'title': effective_title,
+                # The title this event REPLACES. The client passes it back as
+                # expectedCurrent so a listener-style update is accepted even
+                # when the outgoing title is a malformed persisted value that
+                # no default/provisional candidate matches (#7318 re-gate).
+                'expectedCurrent': current,
+            })
             # Sync the generated title to state.db so `hermes sessions list` shows it.
             try:
                 from api.state_sync import sync_session_title
@@ -6434,7 +7060,7 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
         else:
             _put_title_status(put_event, session_id, 'skipped', source or 'unchanged', effective_title, raw_preview)
     finally:
-        put_event('stream_end', {'session_id': session_id})
+        put_event('stream_end', {'session_id': stream_owner_id or session_id})
 
 
 def _run_background_title_refresh(session_id: str, user_text: str, assistant_text: str, current_title: str, put_event, agent=None):
@@ -6550,7 +7176,11 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     return None, llm_status or 'empty_title', raw_preview
 
 
-def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
+def _preserve_pre_compression_snapshot(
+    s,
+    old_sid: str,
+    continuation_sid: str | None = None,
+) -> bool:
     """Persist old_sid as a read-only pre-compression snapshot.
 
     Context compression rotates the active WebUI session id from old_sid to the
@@ -6559,28 +7189,36 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
     """
     old_path = SESSION_DIR / f'{old_sid}.json'
     if not old_path.exists():
-        return
+        return False
     try:
         existing_text = old_path.read_text(encoding='utf-8')
         try:
             existing = json.loads(existing_text)
             existing_msgs = len(existing.get('messages') or [])
-            existing_snapshot = bool(existing.get('pre_compression_snapshot'))
         except (json.JSONDecodeError, ValueError):
             # Treat corrupt/malformed old JSON as missing history and rewrite it
             # from the in-memory pre-compression messages below. That is safer
             # than leaving an unreadable recovery snapshot behind.
             existing_msgs = -1
-            existing_snapshot = False
         if len(s.messages) > existing_msgs:
             # In-memory messages are newer than the file; save the full old
             # snapshot from the current session object while preserving its
             # pre-existing parent_session_id lineage.
             saved_sid = s.session_id
             saved_snapshot = bool(getattr(s, 'pre_compression_snapshot', False))
+            saved_continuation_sid = (
+                str(getattr(s, 'pre_compression_continuation_session_id', None) or '')
+                if getattr(s, 'pre_compression_continuation_session_id', None)
+                else None
+            )
             saved_pinned = bool(getattr(s, 'pinned', False))
             s.session_id = old_sid
             s.pre_compression_snapshot = True
+            s.pre_compression_continuation_session_id = (
+                str(continuation_sid).strip()
+                if continuation_sid
+                else None
+            )
             s.pinned = False
             # Stage-359 / PR #2295: clear runtime stream-state fields on the
             # archived snapshot so the sidebar does not reopen the parent as
@@ -6610,13 +7248,14 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             finally:
                 s.session_id = saved_sid
                 s.pre_compression_snapshot = saved_snapshot
+                s.pre_compression_continuation_session_id = saved_continuation_sid
                 s.pinned = saved_pinned
                 s.active_stream_id = saved_active_stream_id
                 s.pending_user_message = saved_pending_user_message
                 s.pending_attachments = saved_pending_attachments
                 s.pending_started_at = saved_pending_started_at
                 s.pending_user_source = saved_pending_user_source
-            return
+            return True
         # Existing file is already at least as complete as memory; stamp only
         # the snapshot marker so index/sidebar projection can hide it without
         # rewriting a shorter messages array over a fuller transcript.
@@ -6624,6 +7263,11 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
         snapshot = Session.load(old_sid)
         if snapshot:
             snapshot.pre_compression_snapshot = True
+            snapshot.pre_compression_continuation_session_id = (
+                str(continuation_sid).strip()
+                if continuation_sid
+                else None
+            )
             snapshot.pinned = False
             # Stage-359 Opus SHOULD-FIX: clear runtime fields on the loaded
             # snapshot too. If the disk snapshot was last persisted while the
@@ -6642,10 +7286,205 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
                 "Marked pre-compression session %s as sidebar-hidden snapshot",
                 old_sid,
             )
+            return True
+        return False
     except OSError:
         logger.debug("Could not read old session file before preservation")
     except Exception:
         logger.debug("Failed to preserve pre-compression session file", exc_info=True)
+    return False
+
+
+def _migrate_compression_session_ownership(
+    s,
+    old_sid: str,
+    new_sid: str,
+    agent_lock,
+) -> bool:
+    """Atomically publish a durable compression continuation."""
+    from api import models as _models
+    from api.paths import _atomic_write_text
+
+    missing = object()
+    previous_state = (
+        s.session_id,
+        bool(getattr(s, 'pre_compression_snapshot', False)),
+        getattr(s, 'pre_compression_continuation_session_id', None),
+        getattr(s, 'parent_session_id', None),
+    )
+    old_path = SESSION_DIR / f'{old_sid}.json'
+    index_path = _models.SESSION_INDEX_FILE
+    index_row_snapshot = None
+    index_file_existed = False
+    try:
+        old_preimage = old_path.read_text(encoding='utf-8')
+        with _models._INDEX_WRITE_LOCK:
+            index_file_existed = index_path.exists()
+            if index_file_existed:
+                try:
+                    index_payload = json.loads(index_path.read_bytes())
+                except (OSError, json.JSONDecodeError):
+                    logger.debug(
+                        "Could not capture compression marker index row",
+                        exc_info=True,
+                    )
+                    return False
+                if not isinstance(index_payload, list):
+                    logger.debug(
+                        "Could not capture compression marker index row: index is not a list",
+                        exc_info=True,
+                    )
+                    return False
+                for row in index_payload:
+                    if (
+                        isinstance(row, dict)
+                        and str(row.get('session_id') or '') == old_sid
+                    ):
+                        index_row_snapshot = copy.deepcopy(row)
+                        break
+    except OSError:
+        logger.debug("Could not capture compression marker preimage", exc_info=True)
+        return False
+
+    def _restore_durable_snapshot() -> None:
+        def _updated_at_key(entry):
+            try:
+                return float((entry or {}).get('updated_at') or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        with _models._INDEX_WRITE_LOCK:
+            _atomic_write_text(old_path, old_preimage, encoding='utf-8')
+            if not index_path.exists():
+                if not index_file_existed:
+                    return
+                current_rows = []
+            else:
+                current_rows = json.loads(index_path.read_bytes())
+                if not isinstance(current_rows, list):
+                    raise ValueError("session index must be a list")
+
+            filtered = [
+                row for row in current_rows
+                if not (isinstance(row, dict) and str(row.get('session_id') or '') == old_sid)
+            ]
+            if index_row_snapshot is not None:
+                filtered.append(index_row_snapshot)
+                filtered.sort(key=_updated_at_key, reverse=True)
+            elif filtered == current_rows:
+                return
+            _payload = json.dumps(
+                filtered,
+                ensure_ascii=False,
+                indent=2,
+            )
+            _atomic_write_text(index_path, _payload, encoding='utf-8')
+
+    with LOCK:
+        if SESSIONS.get(old_sid) is not s or str(getattr(s, 'session_id', '') or '') != old_sid:
+            logger.warning(
+                "compression cache migration blocked by stale owner: old_sid=%s new_sid=%s",
+                old_sid,
+                new_sid,
+            )
+            return False
+        existing_new_session = SESSIONS.get(new_sid, missing)
+        if existing_new_session is not missing and existing_new_session is not s:
+            logger.warning(
+                "compression cache migration blocked by existing continuation owner: old_sid=%s new_sid=%s",
+                old_sid,
+                new_sid,
+            )
+            return False
+        with SESSION_AGENT_LOCKS_LOCK:
+            old_lock = SESSION_AGENT_LOCKS.get(old_sid, missing)
+            new_lock = SESSION_AGENT_LOCKS.get(new_sid, missing)
+            if old_lock is not missing and old_lock is not agent_lock:
+                logger.warning(
+                    "compression lock migration blocked by stale owner: old_sid=%s new_sid=%s",
+                    old_sid,
+                    new_sid,
+                )
+                return False
+            if new_lock is not missing and new_lock is not agent_lock:
+                logger.warning(
+                    "compression lock migration blocked by existing continuation lock: old_sid=%s new_sid=%s",
+                    old_sid,
+                    new_sid,
+                )
+                return False
+            SESSION_AGENT_LOCKS[old_sid] = agent_lock
+            SESSION_AGENT_LOCKS[new_sid] = agent_lock
+
+    if not _preserve_pre_compression_snapshot(s, old_sid, new_sid):
+        with SESSION_AGENT_LOCKS_LOCK:
+            if old_lock is missing and SESSION_AGENT_LOCKS.get(old_sid) is agent_lock:
+                SESSION_AGENT_LOCKS.pop(old_sid, None)
+            if new_lock is missing and SESSION_AGENT_LOCKS.get(new_sid) is agent_lock:
+                SESSION_AGENT_LOCKS.pop(new_sid, None)
+        return False
+
+    try:
+        with LOCK:
+            if SESSIONS.get(old_sid) is not s or str(getattr(s, 'session_id', '') or '') != old_sid:
+                raise RuntimeError("stale owner while publishing")
+            if existing_new_session is missing:
+                if SESSIONS.get(new_sid) is not None and SESSIONS.get(new_sid) is not s:
+                    raise RuntimeError("continuation owner changed during publish")
+            elif SESSIONS.get(new_sid) is not existing_new_session:
+                raise RuntimeError("continuation owner changed during publish")
+            with SESSION_AGENT_LOCKS_LOCK:
+                if SESSION_AGENT_LOCKS.get(old_sid, missing) not in (missing, agent_lock):
+                    raise RuntimeError("stale old-lock while publishing")
+                if SESSION_AGENT_LOCKS.get(new_sid) is not agent_lock:
+                    raise RuntimeError("continuation lock changed during publish")
+
+                s.session_id = new_sid
+                s.pre_compression_snapshot = False
+                s.pre_compression_continuation_session_id = None
+                s.parent_session_id = old_sid
+                SESSIONS[new_sid] = s
+                SESSIONS.move_to_end(new_sid)
+                _evict_sessions_over_cap()
+
+                if SESSIONS.get(old_sid) is s:
+                    SESSIONS.pop(old_sid, None)
+
+    except Exception:
+        try:
+            _restore_durable_snapshot()
+        except Exception:
+            logger.debug(
+                "Failed to restore compression marker durable state",
+                exc_info=True,
+            )
+        with LOCK:
+            if SESSIONS.get(new_sid) is s:
+                SESSIONS.pop(new_sid, None)
+            if existing_new_session is not missing:
+                SESSIONS[new_sid] = existing_new_session
+            if SESSIONS.get(old_sid) is None:
+                SESSIONS[old_sid] = s
+            s.session_id, s.pre_compression_snapshot, s.pre_compression_continuation_session_id, s.parent_session_id = previous_state
+            with SESSION_AGENT_LOCKS_LOCK:
+                if SESSION_AGENT_LOCKS.get(old_sid) is agent_lock:
+                    if old_lock is missing:
+                        SESSION_AGENT_LOCKS.pop(old_sid, None)
+                    else:
+                        SESSION_AGENT_LOCKS[old_sid] = old_lock
+                if SESSION_AGENT_LOCKS.get(new_sid) is agent_lock:
+                    if new_lock is missing:
+                        SESSION_AGENT_LOCKS.pop(new_sid, None)
+                    else:
+                        SESSION_AGENT_LOCKS[new_sid] = new_lock
+        logger.debug(
+            "Compression ownership migration aborted: old_sid=%s new_sid=%s",
+            old_sid,
+            new_sid,
+            exc_info=True,
+        )
+        return False
+    return True
 
 
 def _maybe_schedule_title_refresh(session, put_event, agent):
@@ -7093,6 +7932,7 @@ def _sanitize_messages_for_api(
     effective_provider: str | None = None,
     effective_base_url: str | None = None,
     preserve_api_content: bool = False,
+    preserve_row_clocks: bool = False,
     requested_provider: str = "",
 ):
     """Return a deep copy of messages with only API-safe fields.
@@ -7125,8 +7965,18 @@ def _sanitize_messages_for_api(
         # here because direct provider/compression projections must continue to
         # reject unknown bookkeeping fields.
         allowed_keys = _API_SAFE_MSG_KEYS | {"api_content"}
+    # The Agent pass-0 merge needs the codex_interim/finish_reason
+    # discriminators on the rows it inspects. They are stripped in a final
+    # pass after the merge resolves so the wire contract still matches
+    # `_API_SAFE_MSG_KEYS` (#7237 review finding 2a).
+    allowed_keys = allowed_keys | _MERGE_VISIBLE_DISCRIMINATORS
     # First pass: collect all tool_call_ids declared by assistant messages.
     # Handles both OpenAI ('id') and Anthropic ('call_id') field names.
+    # Late recovery can restore display rows without proving a context owner.
+    # Filter before tool-ID collection and metadata stripping on both paths.
+    messages = [message for message in messages if not (
+        isinstance(message, dict) and message.get('_recovered_display_only') is True
+    )]
     valid_tool_call_ids: set = set()
     for msg in messages:
         if not isinstance(msg, dict):
@@ -7195,7 +8045,82 @@ def _sanitize_messages_for_api(
         if strip_native_images and 'content' in sanitized:
             sanitized['content'] = _strip_native_image_parts_from_content(sanitized.get('content'))
         if sanitized.get('role'):
-            clean.append(sanitized)
+            # The Agent-replay caller (``preserve_row_clocks``) rides each
+            # row's own clock through the projection under a transient
+            # internal marker so the bare-assistant splice guard can detect
+            # out-of-clock-order late-output rows on the PROJECTED list (a raw
+            # index would misattach after a sanitizer merge/replacement,
+            # round-6 blocker 2). ``_sanitize_messages_for_agent`` strips the
+            # marker before the wire payload is returned; it never reaches the
+            # provider.
+            if preserve_row_clocks and 'timestamp' in msg:
+                _clocked = dict(sanitized)
+                _clocked['_replay_ts'] = msg['timestamp']
+                # Ride the cancelled-stop provenance through the projection
+                # too: the ``allowed_keys`` filter above drops ``_partial`` /
+                # ``_error``, so without this marker the splice guard cannot
+                # tell a state.db stopped row (must stay addressable) from an
+                # ordinary float-clock assistant pair (must merge like the
+                # installed Agent) — the two are otherwise identical on the
+                # projected list. Stripped before the wire payload returns.
+                # Only the STOP markers qualify: a bare ``_state_db_row_id``
+                # or float clock is exactly the round-5/6 cancelled-history
+                # pair that the outbound snapshot MUST merge (the installed
+                # Agent merges it, the durable side keeps it addressable).
+                # ``_stopped_db_successor`` is the durable discriminator the
+                # reconcile stamps on assistant rows it admits from state.db
+                # beyond the selected context while a terminal partial/error
+                # carrier exists without proven ownership (#7237 [False]
+                # maintainer-call resolution): those ARE stopped-context
+                # successors and must stay individually addressable, while a
+                # hand-built plain float-clock pair (round-5/6 tests) carries
+                # no stamp and still merges. Stripped before the wire payload
+                # returns.
+                if (
+                    msg.get('_partial') is True
+                    or msg.get('_error') is True
+                    or msg.get('_stopped_db_successor') is True
+                ):
+                    _clocked['_replay_stop'] = True
+                clean.append(_clocked)
+            else:
+                clean.append(sanitized)
+
+    # Merge consecutive assistant rows BEFORE positional orphan pairing, so a
+    # legitimate ``assistant(call), assistant(progress), tool(result)`` shape
+    # is seen as the paired shape the Agent's own pass order produces (#7237
+    # review, blocker 2). Mirrors agent repair pass 0.
+    clean = _merge_consecutive_assistant_rows(clean)
+
+    # Repair adjacent tool-call/result blocks before validating tool results
+    # globally. Otherwise a result belonging to a later, unrelated turn can
+    # make an earlier orphan call look answered and survive this projection.
+    repaired_clean = _strip_orphan_tool_calls(clean)
+    clean = [
+        repaired
+        for original, repaired in zip(clean, repaired_clean, strict=True)
+        if not (
+            original.get('role') == 'assistant'
+            and original.get('tool_calls')
+            and not repaired.get('tool_calls')
+            and not str(repaired.get('content') or '').strip()
+        )
+    ]
+
+    # Recompute ownership from the repaired call rows.  A tool result that was
+    # only linked to a now-removed non-adjacent call must be removed too.
+    surviving_tool_call_ids = {
+        tc.get('id') or tc.get('call_id')
+        for msg in clean
+        if msg.get('role') == 'assistant'
+        for tc in (msg.get('tool_calls') or [])
+        if isinstance(tc, dict) and (tc.get('id') or tc.get('call_id'))
+    }
+    clean = [
+        msg for msg in clean
+        if msg.get('role') != 'tool'
+        or (msg.get('tool_call_id') or '') in surviving_tool_call_ids
+    ]
 
     # Third pass: strip orphaned tool_calls from assistant messages — calls whose id
     # has no matching tool-role response in the clean list.  Strict providers (DeepSeek,
@@ -7251,6 +8176,22 @@ def _sanitize_messages_for_api(
                 continue  # drop — fusing the neighbours is clean, or it's a stale prompt
             # Keep but strip the temporary marker
             msg = {k: v for k, v in msg.items() if k != '_recovered'}
+        # Final projection: drop the merge-visible discriminators so the
+        # DEFAULT public sanitizer output (direct provider projection) matches
+        # the ``_API_SAFE_MSG_KEYS`` wire contract. The internal Agent replay
+        # path (``preserve_api_content=True`` -> ``_sanitize_messages_for_agent``)
+        # keeps them: the Agent's own pass-0 repair consumes those
+        # discriminators, so stripping them here makes the Agent merge
+        # historical assistant rows differently than the projection this
+        # process handed it — the returned prefix drifts and the exact-prefix
+        # projection-authority gate rejects the turn, losing the reply. They
+        # are stripped only at the direct provider boundary (#7237 review
+        # round-N+2 finding 4, nesquena-hermes 2026-10-05). ``api_content``
+        # stays when ``preserve_api_content`` is true (the Agent replay
+        # projection strips it via a dedicated path earlier in the function,
+        # so we don't double-strip here).
+        if not preserve_api_content:
+            msg = {k: v for k, v in msg.items() if k not in _MERGE_VISIBLE_DISCRIMINATORS}
         final.append(msg)
     return final
 
@@ -7263,6 +8204,7 @@ def _sanitize_messages_for_agent(
     effective_provider: str | None = None,
     effective_base_url: str | None = None,
     requested_provider: str = "",
+    normalize_bare_assistant_adjacency: bool = False,
 ):
     """Build the internal Agent replay projection with ``api_content`` intact.
 
@@ -7270,23 +8212,541 @@ def _sanitize_messages_for_agent(
     payload field.  Keep this opt-in at one named boundary so every Agent
     history call uses the same contract while ordinary API/compression callers
     continue to use the default-stripping sanitizer.
+
+    ``normalize_bare_assistant_adjacency`` (``#7237 review round 3 finding 5``)
+    collapses two adjacent BARE assistant rows the way the installed Agent's
+    own ``repair_message_sequence`` does. It defaults to False because the
+    direct-provider projection and the Gateway runs-API history builder must
+    keep those rows as separate turns (#8034 parity). Only the Agent-replay
+    caller turns it on: that is the path whose snapshot the settle compares
+    against the Agent's returned list, so it must model the Agent's merge or
+    every second successive follow-up drops its prompt and reply.
     """
-    return _sanitize_messages_for_api(
+    if normalize_bare_assistant_adjacency:
+        # The user-pair merge mirrors the installed Agent's pass-3
+        # consecutive-user repair. It stays BEFORE the projection (the
+        # reviewer's direction): plain-text user rows carry no provenance, and
+        # merging them early cannot interact with the sanitizer's own pass-0.
+        messages = _merge_agent_replay_bare_user_rows(messages)
+    sanitized = _sanitize_messages_for_api(
         messages,
         cfg=cfg,
         effective_model=effective_model,
         effective_provider=effective_provider,
         effective_base_url=effective_base_url,
         preserve_api_content=True,
+        preserve_row_clocks=normalize_bare_assistant_adjacency,
         requested_provider=requested_provider,
     )
+    if normalize_bare_assistant_adjacency:
+        # #7237 round 5 (re-gate 10/11, both regressions): the bare-assistant
+        # normalization runs AFTER the API sanitizer, not before it.
+        #
+        # Before it, two regressions the reviewer reproduced on this head:
+        #
+        # 1. Verification supersession was defeated. The pre-sanitizer merge
+        #    CONCATENATED a provisional ``verification_required`` row with its
+        #    final replacement, so the sanitizer's own pass-0 merge — which
+        #    REPLACES such a row instead of unioning it — never saw the pair,
+        #    and the provisional text plus its finish reason survived.
+        # 2. The cancelled-history block list read provenance
+        #    (``_state_db_row_id``, ``_partial``, float clocks) to keep durable
+        #    rows addressable, but the merge still ran BEFORE that provenance
+        #    was stripped, so the outbound snapshot could hold separate rows
+        #    for a pair the installed Agent merges — the shape that dropped the
+        #    next exchange in the reviewer's controlled replay.
+        #
+        # With the sanitizer first, its pass-0 owns the assistant-adjacency
+        # contract (union for plain pairs, REPLACE for a superseded
+        # verification candidate) on the projected rows, and this merge only
+        # re-applies the Agent's unconditional collapse to the BARE pairs the
+        # pass-0 deliberately leaves alone. The user merge still runs on the
+        # raw rows, which is where its contract lives.
+        #
+        # #7237 round 6 (review blockers, nesquena-hermes 2026-10-12): the
+        # raw-provenance blocked-pair handoff is REMOVED. It carried a
+        # cancellation exemption into the producer-normalized snapshot that
+        # the installed Agent does not honor (the merged answer of a
+        # float-clock follow-up pair was lost across save/cold-reload), and
+        # its raw index positions misattach once the sanitizer replaces or
+        # merges rows (the verification supersession schedule dropped the
+        # next exchange's follow-up/answer). The outbound merge now mirrors
+        # the installed Agent unconditionally; durable raw-row addressability
+        # is proven separately on the settle/persist side, which keeps the
+        # raw rows verbatim.
+        #
+        # #7237 round 6 CI (boundary matrix, 2026-10-14): one cancelled-history
+        # shape is still preserved as separate rows in the OUTBOUND snapshot —
+        # an out-of-clock-order splice (a late assistant output whose clock is
+        # NEWER than the row following the pair). The reconcile proves those
+        # rows individually addressable and the boundary matrix pins the
+        # row-level prefix, so the sent projection keeps them separate; the
+        # settle proof compares the UNCONDITIONAL merge of the sent rows (what
+        # the installed Agent returns), computed at the settle call sites.
+        sanitized = _merge_agent_replay_bare_assistant_rows(
+            sanitized, preserve_splices=True
+        )
+        # The clock and stop markers are transient projection-internal
+        # discriminators: they must not ride the wire payload (the installed
+        # Agent clones all keys and strict providers reject unknown fields).
+        sanitized = [
+            {k: v for k, v in row.items() if k not in ('_replay_ts', '_replay_stop')}
+            if isinstance(row, dict)
+            else row
+            for row in sanitized
+        ]
+    return sanitized
+
+
+def _replay_user_row_is_compaction_carrier(row):
+    """Return True when a user row is a compaction-summary handoff carrier.
+
+    #7237 round 8 finding 2 (nesquena-hermes 2026-10-15): the user-fold guard
+    must refuse whatever the installed ``_merge_consecutive_users`` refuses,
+    and that predicate is ``split_user_originated_turn(prev)[0] is not None``.
+    The handoff half of that split exists for exactly one class of row —
+    ``is_compaction_summary_message`` — so this helper delegates to the
+    installed recognizer instead of a hand-maintained prefix list. The
+    installed check covers the metadata flag, the legacy
+    ``[CONTEXT SUMMARY]:`` handoff, the merged-delimiter carrier shape
+    (``[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]``) and every
+    historical summary prefix — the webui marker predicate alone matched none
+    of the first three, so the fold welded the carrier into the next user row
+    and the settle's strict-prefix proof then refused the changed prefix.
+
+    When the installed recognizer cannot even be imported (broken agent
+    checkout — e.g. the suite's sys.path isolation guard mid-run), this helper
+    degrades to a content-level mirror of the carrier shapes (the webui marker
+    prefixes, the legacy ``[CONTEXT SUMMARY]:`` handoff and the merged
+    delimiter) so ordinary user rows still fold exactly as before; only the
+    metadata-flag carrier shape is invisible on that last-resort path. Folding
+    must never be blanket-disabled by an unimportable recognizer — that
+    regressed every user-fold consumer in CI-shard order.
+    """
+    try:
+        from agent.context_compressor import is_compaction_summary_message
+    except Exception:
+        return _replay_user_row_looks_like_summary_carrier(row)
+    try:
+        return bool(is_compaction_summary_message(row))
+    except Exception:
+        return _replay_user_row_looks_like_summary_carrier(row)
+
+
+def _replay_user_row_looks_like_summary_carrier(row):
+    """Last-resort content mirror of the compaction-carrier shapes.
+
+    Used only when the installed ``is_compaction_summary_message`` is
+    unreachable; see ``_replay_user_row_is_compaction_carrier``.
+    """
+    if not isinstance(row, dict):
+        return False
+    content = row.get('content')
+    if not isinstance(content, str):
+        return False
+    return bool(
+        _is_context_compression_marker(row)
+        or content.lstrip().startswith('[CONTEXT SUMMARY]:')
+        or '[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]' in content
+    )
+
+
+def _replay_user_row_is_plain_mergeable(row):
+    """Return True when a user row may take part in the Agent's user-pair merge.
+
+    Mirrors the installed ``_merge_consecutive_users`` guard: only plain-text
+    user rows merge. Compression/summary carriers (``split_user_originated``
+    material), /steer control rows (``display_kind == 'steer'``), structured
+    (JSON-prefixed / list) content, and non-replayable rows are left alone.
+
+    The two PREV-side refusals of the installed guard — a compaction-summary
+    carrier and a /steer row — are evaluated in
+    ``_merge_agent_replay_bare_user_rows`` (the installed guard is asymmetric:
+    only the preceding row is checked), alongside this predicate (#7237 round
+    8 finding 2).
+    """
+    if not isinstance(row, dict) or row.get('role') != 'user':
+        return False
+    kind = row.get('display_kind')
+    if kind is not None and kind != 'steer':
+        return False
+    content = row.get('content')
+    if not isinstance(content, str):
+        return False
+    if content.startswith('\x00json:'):
+        return False
+    if (
+        _is_context_compression_marker(row)
+        or _is_compressed_context_tool_result_summary_message(row)
+        or row.get('_recovered_display_only') is True
+        or _is_reasoning_only_assistant_message(row)
+        or _is_non_replayable_history_row(row)
+    ):
+        return False
+    return True
+
+
+def _merge_agent_replay_bare_user_rows(messages):
+    """Mirror the installed Agent's pass-3 merge of consecutive user rows.
+
+    The Agent's ``repair_message_sequence`` folds consecutive plain-text user
+    rows into one row joined with a literal ``\\n\\n`` boundary, so an
+    unanswered user tail followed by a new prompt is returned as a single
+    merged row. The Agent-replay projection is both the input the Agent
+    re-merges and the snapshot the settle diffs against the Agent's output:
+    if the projection leaves the pair unmerged, the Agent merges it, the
+    returned prefix no longer matches the snapshot, and settlement fails
+    closed — the next successive send loses its prompt and reply (#7237
+    review blocker 2, nesquena-hermes 2026-10-09).
+
+    This helper applies the Agent's pass-3 rule only, on a copy, for the
+    Agent-replay caller. It never rewrites the durable raw history — the
+    settle persists the raw rows and appends the proven current-turn suffix
+    on top. A merge that changes the visible content drops the survivor's
+    ``api_content`` sidecar (``drop_stale_api_content`` mirror).
+    """
+    if not isinstance(messages, list):
+        return messages
+    merged: list = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            merged.append(msg)
+            continue
+        prev = merged[-1] if merged and isinstance(merged[-1], dict) else None
+        if (
+            prev is not None
+            and _replay_user_row_is_plain_mergeable(prev)
+            and _replay_user_row_is_plain_mergeable(msg)
+            # #7237 round 8 finding 2 (nesquena-hermes 2026-10-15): mirror the
+            # installed ``_merge_consecutive_users`` PREV-side refusals exactly:
+            # a summary carrier (``split_user_originated_turn(prev)[0] is not
+            # None``) is a deliberate durable shape after retry/rewind and must
+            # never be welded into the next user row, and a /steer row that
+            # ended the previous run is already persisted (merging the next
+            # prompt into it would rewrite it in place). The installed guard is
+            # asymmetric — only ``prev`` is checked — so the mirror is too.
+            and not _replay_user_row_is_compaction_carrier(prev)
+            and prev.get('display_kind') != 'steer'
+        ):
+            survivor = copy.deepcopy(prev)
+            prev_content = survivor.get('content')
+            new_content = msg.get('content')
+            if prev_content and new_content:
+                survivor['content'] = prev_content + '\n\n' + new_content
+            elif new_content:
+                survivor['content'] = new_content
+            elif not prev_content:
+                survivor['content'] = ''
+            content_rewritten = survivor.get('content') != prev_content
+            if content_rewritten:
+                survivor.pop('api_content', None)
+            merged[-1] = survivor
+            continue
+        merged.append(msg)
+    return merged
+
+
+def _installed_repair_runtime_usable():
+    """True when the installed Agent's repair machinery can run unmodified.
+
+    ``repair_message_sequence`` imports the persistence codec
+    (``hermes_state.SessionDB``) at call time and reads its class attributes.
+    Test harnesses that fake ``hermes_state`` (a lambda or ``Mock`` in the
+    ``SessionDB`` slot) make those reads raise or, worse, silently return mock
+    objects that would corrupt row content. Probe the codec's actual contract
+    before trusting it: the sentinel prefix must be a real string and a plain
+    string must round-trip unchanged.
+    """
+    try:
+        from hermes_state import SessionDB
+
+        return (
+            isinstance(getattr(SessionDB, "_CONTENT_JSON_PREFIX", None), str)
+            and SessionDB._decode_content("plain-text-probe") == "plain-text-probe"
+        )
+    except Exception:
+        return False
+
+
+# The settle projection replays the Agent's argument sanitizer on a private copy; its "repaired before request"
+# warnings belong to the Agent's real request, not to this simulation.
+_SETTLE_PROJECTION_QUIET_LOGGER = logging.getLogger("api.streaming.settle_projection")
+_SETTLE_PROJECTION_QUIET_LOGGER.disabled = True
+
+
+def _tool_call_arguments_need_sanitize(rows) -> bool:
+    """True when an assistant tool call's arguments are blank, None or invalid JSON (what the installed Agent's
+    ``sanitize_tool_call_arguments`` rewrites); False for the common case so the projection skips the extra copy."""
+    for row in rows or ():
+        if not isinstance(row, dict) or row.get("role") != "assistant":
+            continue
+        calls = row.get("tool_calls")
+        if not isinstance(calls, list):
+            continue
+        for call in calls:
+            function = call.get("function") if isinstance(call, dict) else None
+            if not isinstance(function, dict):
+                continue
+            arguments = function.get("arguments")
+            if arguments is None or (isinstance(arguments, str) and not arguments.strip()):
+                return True
+            if isinstance(arguments, str):
+                try:
+                    json.loads(arguments)
+                except ValueError:
+                    return True
+    return False
+
+
+def _apply_installed_repair(rows):
+    """Run the installed Agent's ``repair_message_sequence`` on ``rows`` in place.
+
+    Returns True when the installed repair ran. On a missing/stubbed agent
+    runtime it returns False WITHOUT trusting a half-applied mutation (repair
+    can raise mid-sequence and its passes mutate row dicts in place), so the
+    caller must discard ``rows`` and fall back to the webui mirrors on a fresh
+    copy.
+    """
+    if not _installed_repair_runtime_usable():
+        return False
+    try:
+        from agent import agent_runtime_helpers as _agent_helpers
+
+        # The installed Agent normalizes tool-call arguments (blank/None -> "{}", corrupted JSON -> "{}" plus a
+        # stub result) BEFORE its role repair, on every request. Model that step too, or a history holding an
+        # empty-arguments call projects a prefix the Agent never returns and the settle drops the current
+        # exchange from the saved model context. Older Agents without the helper skip it.
+        sanitize = getattr(_agent_helpers, "sanitize_tool_call_arguments", None)
+        if callable(sanitize) and _tool_call_arguments_need_sanitize(rows):
+            # On its own copy: the sanitizer reads run_agent.AIAgent constants and can insert stub results, so a
+            # failure part-way must not leave a half-sanitized projection. On failure keep the repair-only
+            # projection (the behaviour before this step was modeled).
+            sanitized = copy.deepcopy(rows)
+            try:
+                sanitize(sanitized, logger=_SETTLE_PROJECTION_QUIET_LOGGER)
+            except Exception:
+                sanitized = None
+            if sanitized is not None:
+                rows[:] = sanitized
+        _agent_helpers.repair_message_sequence(None, rows)
+    except Exception:
+        return False
+    return True
+
+
+def _agent_replay_settle_projection(sent_history):
+    """Return the history form the installed Agent will RETURN for the rows
+    this process actually handed it.
+
+    The installed Agent's ``repair_message_sequence`` normalizes its whole
+    working set before every call — pass 0 (adjacent assistant merge), pass 1
+    (stray / duplicate tool-result removal), pass 2 (unanswered tool-call
+    pruning plus payload-empty drop) and pass 3 (consecutive-user merge) — and
+    that repaired sequence is the prefix the settle's strict-prefix proof must
+    match. #7237 round 8 finding 1 (nesquena-hermes 2026-10-15): modeling only
+    pass 0 and pass 3 left the projection holding rows the installed repair had
+    dropped (a duplicate tool result for one call; a call row whose only result
+    was orphaned by an interleaved Codex interim), the prefix proof refused
+    the genuine suffix, and settlement failed closed at
+    ``return list(previous_context), None`` — the current exchange survived in
+    display but was lost from the saved model context.
+
+    The projection is therefore the installed whole-sequence repair of the
+    sent rows, on a SEPARATE deep copy (the Agent mutates the list and the
+    tail dicts it receives in place; the snapshot the settle compares against
+    must never be a moving target). Splice pairs stay separate in the SENT
+    projection itself (``preserve_splices``); the repair here is what the
+    installed Agent returns, which merges every adjacent bare assistant pair
+    unconditionally (#7237 boundary matrix, late-output shapes).
+
+    When the installed agent runtime is missing or its persistence codec is a
+    test stub (``_installed_repair_runtime_usable`` is False), the webui
+    mirrors of pass 0 and pass 3 run instead: those environments cannot compute
+    the real contract at all, and their suites pin the mirror behavior. The
+    durable raw history and the strict-prefix ownership contract are
+    unchanged either way.
+    """
+    source = list(sent_history or [])
+    projected = copy.deepcopy(source)
+    if _apply_installed_repair(projected):
+        return projected
+    projected = _merge_agent_replay_bare_assistant_rows(
+        copy.deepcopy(source), preserve_splices=False
+    )
+    return _merge_agent_replay_bare_user_rows(projected)
+
+
+def _replay_pair_is_cancelled_history_splice(messages, idx):
+    """Return True when the adjacent assistant pair ending at ``idx`` is a
+    cancelled-history splice that must stay individually addressable.
+
+    #7237 boundary matrix pins the row-level prefix for the ``late-output``
+    shapes: a late assistant row whose clock is NEWER than the row that
+    FOLLOWS the pair in the projected list must stay individually addressable
+    in the outbound snapshot (the round-5 ``_replay_merge_blocked_by_cancelled_history``
+    clause 3, restored WITHOUT the raw-provenance handoff round 6 removed).
+    The guard runs on the PROJECTED rows, which carry their own clocks
+    (``_replay_ts``) through the sanitizer, so a raw index can never misattach
+    after a sanitizer merge/replacement (round-6 blocker 2).
+
+    Round-6 blocker fix (``bbd805369``) restored only the clock-order clause;
+    the remaining round-5 provenance signals kept being dropped, which
+    regressed the cancelled-stream readers (``test_real_stop_earlier_identical_clocks_cannot_veto_next_worker``):
+    a state.db-origin stopped row carries a REAL round-trip float clock
+    (sqlite ``REAL`` column), and in the identical-clock shape that clock is
+    NEWER than nothing that follows, so the clock-order clause alone does not
+    fire and the row got absorbed into the preceding assistant row. The full
+    round-5 signal set is therefore evaluated here, on the projected rows:
+
+    - a cancel-stop / recovery marker on either row (``_partial``,
+      ``_error``, ``_recovered*``, ``_active_turn_token``), carried through
+      the projection as the transient ``_replay_stop`` marker because the
+      sanitizer's ``allowed_keys`` filter drops the raw markers.
+
+    The round-5 float-clock clause is deliberately NOT restored: the
+    round-6 durable-preservation contract pins that a plain adjacent
+    assistant pair with ordinary sqlite REAL float clocks merges
+    unconditionally, exactly like the installed Agent (restoring it there
+    drops the follow-up answer across cold load). The cancelled-stream
+    reader shape is covered by its stop marker instead.
+
+    Pairs in clock order with no splice provenance — including the
+    float-clock-free and supersession-continuation schedules the round-6
+    durable-preservation tests pin — merge unconditionally, exactly like the
+    installed Agent.
+    """
+    if idx < 1:
+        return False
+    msg = messages[idx]
+    prev = messages[idx - 1]
+    if not isinstance(msg, dict):
+        return False
+    # Provenance signals first: the splice row can be the LAST row of the
+    # projection (``_deduplicate_context_messages`` drops the duplicate user
+    # turn between a checkpoint assistant row and the state.db stopped row,
+    # which leaves the stopped row at the list tail with nothing after it).
+    # The round-6 restore only looked at pairs with a following row, so that
+    # tail shape lost its protection and the reader test regressed.
+    for row in (prev, msg):
+        if not isinstance(row, dict):
+            continue
+        if row.get("_replay_stop") is True:
+            return True
+        if row.get("_partial") is True or row.get("_error") is True:
+            return True
+        if any(str(key).startswith("_recovered") for key in row):
+            return True
+        if row.get("_active_turn_token"):
+            return True
+    if idx + 1 >= len(messages):
+        return False
+    nxt = messages[idx + 1]
+    if not isinstance(nxt, dict):
+        return False
+    later_ts = msg.get("_replay_ts", msg.get("timestamp"))
+    next_ts = nxt.get("_replay_ts", nxt.get("timestamp"))
+    if not isinstance(later_ts, (int, float)) or isinstance(later_ts, bool):
+        return False
+    if not isinstance(next_ts, (int, float)) or isinstance(next_ts, bool):
+        return False
+    return later_ts > next_ts
+
+
+def _merge_agent_replay_bare_assistant_rows(messages, *, preserve_splices: bool = False):
+    """Mirror the installed Agent's merge of adjacent bare assistant rows.
+
+    The Agent's ``repair_message_sequence`` merges consecutive assistant turns
+    unconditionally, including two plain-text rows with no tool call and no
+    merge-visible discriminator. ``_merge_consecutive_assistant_rows``
+    deliberately leaves that pair alone so the #8034 direct-provider/Gateway
+    parity contract holds.
+
+    The Agent-replay projection cannot follow either contract in isolation: it
+    is the input the Agent will re-merge, and it is also the snapshot the settle
+    diffs against the Agent's output. Leaving the pair unmerged there means the
+    Agent merges it, the returned prefix no longer matches the snapshot, and
+    settlement rejects the changed prefix — dropping the next prompt and reply
+    (#7237 review round 3 finding 5).
+
+    This helper applies the Agent's rule only, on a copy, for that one caller.
+    It never widens the provider projection. The exclusions mirror the
+    installed contract:
+
+    - Codex interim rows are exempt, exactly like the Agent's own
+      ``_is_codex_interim`` gate (#7237 review round 4 finding).
+    - Pairs with a tool call on either side are left to the sanitizer's own
+      pass-0 merge (tool-call union semantics); this helper only collapses
+      the BARE pair that merge deliberately keeps.
+    - A merge that changes the visible content drops the survivor's
+      ``api_content`` sidecar (mirror of the Agent's
+      ``drop_stale_api_content``), so the replay never resends pre-merge
+      bytes the rewrite discarded.
+
+    #7237 round 6 (review blockers, nesquena-hermes 2026-10-12): the round-5
+    blocked-pair raw-provenance handoff is REMOVED. The cancellation
+    exemption it carried into the snapshot is not honored by the installed
+    Agent (the merged answer of a float-clock follow-up pair was lost across
+    save/cold-reload), and its raw index positions misattach once the
+    sanitizer replaces or merges rows (the verification supersession schedule
+    dropped the next exchange's follow-up/answer). The outbound merge mirrors
+    the installed Agent unconditionally; durable raw rows stay individually
+    addressable on the settle/persist side, which keeps the raw history
+    verbatim.
+    """
+    if not isinstance(messages, list):
+        return messages
+    merged: list = []
+    for _idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            merged.append(msg)
+            continue
+        prev = merged[-1] if merged and isinstance(merged[-1], dict) else None
+        if (
+            prev is not None
+            and prev.get("role") == "assistant"
+            and msg.get("role") == "assistant"
+            and not _is_codex_interim_row(prev)
+            and not _is_codex_interim_row(msg)
+            and not prev.get("tool_calls")
+            and not msg.get("tool_calls")
+            and not _is_reasoning_only_assistant_message(prev)
+            and not _is_reasoning_only_assistant_message(msg)
+            and not _is_non_replayable_history_row(prev)
+            and not _is_non_replayable_history_row(msg)
+            and not (
+                preserve_splices
+                and _replay_pair_is_cancelled_history_splice(messages, _idx)
+            )
+        ):
+            survivor = copy.deepcopy(prev)
+            prev_content = survivor.get("content")
+            new_content = msg.get("content")
+            content_rewritten = False
+            if isinstance(prev_content, str) and isinstance(new_content, str):
+                joined = "\n".join(
+                    part for part in (prev_content.strip(), new_content.strip()) if part
+                )
+                if joined:
+                    survivor["content"] = joined
+                    content_rewritten = joined != prev_content
+            elif not prev_content and new_content is not None:
+                survivor["content"] = new_content
+                content_rewritten = new_content != prev_content
+            if content_rewritten:
+                survivor.pop("api_content", None)
+            if not survivor.get("reasoning_content") and msg.get("reasoning_content"):
+                survivor["reasoning_content"] = msg.get("reasoning_content")
+            merged[-1] = survivor
+            continue
+        merged.append(msg)
+    return merged
 
 
 def _api_safe_message_positions(messages):
     """Return [(original_index, sanitized_message)] for API-safe messages."""
     valid_tool_call_ids: set = set()
     for msg in messages:
-        if not isinstance(msg, dict):
+        if not isinstance(msg, dict) or msg.get('_recovered_display_only') is True:
             continue
         if msg.get('role') == 'assistant':
             for tc in msg.get('tool_calls') or []:
@@ -7297,7 +8757,7 @@ def _api_safe_message_positions(messages):
 
     out = []
     for idx, msg in enumerate(messages):
-        if not isinstance(msg, dict):
+        if not isinstance(msg, dict) or msg.get('_recovered_display_only') is True:
             continue
         if _is_reasoning_only_assistant_message(msg):
             continue
@@ -7311,7 +8771,14 @@ def _api_safe_message_positions(messages):
             tid = msg.get('tool_call_id') or ''
             if not tid or tid not in valid_tool_call_ids:
                 continue
-        sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
+        # Note: the merge-visible discriminators (codex_*/finish_reason) and
+        # the optional `api_content` sidecar are kept on the row so the
+        # Agent pass-0 merge below sees the same fields the Agent's own
+        # ``_merge_consecutive_assistants`` sees. They are stripped in the
+        # final projection pass to honour the public API contract
+        # (#7237 review finding 2a).
+        merge_visible_keys = _API_SAFE_MSG_KEYS | _MERGE_VISIBLE_DISCRIMINATORS | {'api_content'}
+        sanitized = {k: v for k, v in msg.items() if k in merge_visible_keys}
         sanitized = scrub_internal_replay_fields(
             [sanitized],
             message_records=True,
@@ -7324,6 +8791,112 @@ def _api_safe_message_positions(messages):
             sanitized['content'] = _strip_oob_blocks(sanitized['content'])
         if sanitized.get('role'):
             out.append((idx, sanitized))
+
+    # Merge consecutive assistant rows BEFORE positional orphan pairing —
+    # mirror of _sanitize_messages_for_api (Agent pass-0 order, #7237
+    # blocker 2). This path carries (original_index, msg) pairs and every
+    # stored index MUST address the row it is paired with: downstream
+    # alignment (e.g. _restore_reasoning_metadata_before_boundary) walks
+    # these pairs and dereferences the stored index inside the raw list.
+    # A union merge keeps the FIRST row's index because the first row (and
+    # only the first row) survives as the merged body. A verification
+    # supersession REPLACES the provisional row with a different surviving
+    # row, so it must store that survivor's OWN index — keeping the dead
+    # provisional row's index would align the survivor to a row the
+    # projection no longer emits and lose its stable id, timestamp and
+    # display reasoning (#7237 review ownership defect 2, nesquena-hermes
+    # 2026-09-23). The merge also matches the Agent's own contract: carry
+    # the later row's `reasoning_content` when the survivor lacks it, and
+    # drop the survivor's `api_content` when the joined content actually
+    # changed (replaying the sidecar would resend pre-merge bytes the
+    # rewrite just discarded, #7237 review finding 2b).
+    merged_rows: list = []
+    for idx, msg in out:
+        if not isinstance(msg, dict):
+            merged_rows.append((idx, msg))
+            continue
+        prev_pair = merged_rows[-1] if merged_rows and isinstance(merged_rows[-1][1], dict) else None
+        if (
+            prev_pair is not None
+            and prev_pair[1].get('role') == 'assistant'
+            and msg.get('role') == 'assistant'
+            and not _is_codex_interim_row(msg)
+            and not _is_codex_interim_row(prev_pair[1])
+        ):
+            prev_idx, prev = prev_pair
+            if prev.get('finish_reason') in ('verification_required', 'verify_hook_continue'):
+                # Supersession: ``msg`` REPLACES the provisional row, so the
+                # surviving row is ``msg`` itself. Store ``msg``'s own index
+                # (``idx``), never the discarded row's ``prev_idx`` — the
+                # positional consumer would otherwise align the survivor to a
+                # row that is no longer in this projection (#7237 review
+                # ownership defect 2).
+                merged_rows[-1] = (idx, msg)
+                continue
+            prev_calls = list(prev.get('tool_calls') or [])
+            new_calls = list(msg.get('tool_calls') or [])
+            if new_calls:
+                prev['tool_calls'] = prev_calls + new_calls
+            elif prev_calls:
+                prev['tool_calls'] = prev_calls
+            else:
+                prev.pop('tool_calls', None)
+            prev_content = prev.get('content')
+            new_content = msg.get('content')
+            content_rewritten = False
+            if isinstance(prev_content, str) and isinstance(new_content, str):
+                joined = '\n'.join(p for p in (prev_content.strip(), new_content.strip()) if p)
+                if joined:
+                    prev['content'] = joined
+                    # ``joined`` may equal the stripped prev_content when the
+                    # later row carried empty/whitespace text; only count
+                    # that as a rewrite when the value actually changed.
+                    content_rewritten = joined != prev_content
+            elif not prev_content and new_content is not None:
+                prev['content'] = new_content
+                content_rewritten = new_content != prev_content
+            # Carry reasoning_content from the later row when the survivor
+            # lacks it. Strict thinking-capable providers need one on the
+            # merged tool-call turn; this matches the Agent's own contract.
+            if not prev.get('reasoning_content') and msg.get('reasoning_content'):
+                prev['reasoning_content'] = msg['reasoning_content']
+            # Drop the survivor's api_content when the merge actually changed
+            # the visible content; otherwise the sidecar still describes the
+            # pre-merge bytes and replaying it would silently resend what the
+            # rewrite just discarded (prompt-cache invariant, see Agent
+            # drop_stale_api_content).
+            if content_rewritten:
+                prev.pop('api_content', None)
+            continue
+        merged_rows.append((idx, msg))
+    out = merged_rows
+
+    # Repair adjacent tool-call/result blocks before validating tool results
+    # globally, matching _sanitize_messages_for_api.
+    original_out = out
+    repaired_rows = _strip_orphan_tool_calls([msg for _idx, msg in original_out])
+    out = [
+        (idx, repaired)
+        for (idx, original), repaired in zip(original_out, repaired_rows, strict=True)
+        if not (
+            original.get('role') == 'assistant'
+            and original.get('tool_calls')
+            and not repaired.get('tool_calls')
+            and not str(repaired.get('content') or '').strip()
+        )
+    ]
+    surviving_tool_call_ids = {
+        tc.get('id') or tc.get('call_id')
+        for _idx, msg in out
+        if msg.get('role') == 'assistant'
+        for tc in (msg.get('tool_calls') or [])
+        if isinstance(tc, dict) and (tc.get('id') or tc.get('call_id'))
+    }
+    out = [
+        (idx, msg) for idx, msg in out
+        if msg.get('role') != 'tool'
+        or (msg.get('tool_call_id') or '') in surviving_tool_call_ids
+    ]
 
     # Third pass: strip orphaned tool_calls from assistant messages (mirrors
     # _sanitize_messages_for_api pass 3).
@@ -7365,11 +8938,164 @@ def _api_safe_message_positions(messages):
             if not _recovered_user_row_is_kept(prev_role, next_role):
                 continue
             msg = {k: v for k, v in msg.items() if k != '_recovered'}
+        # Final projection: drop the merge-visible discriminators and the
+        # ``api_content`` sidecar so the position payload matches the
+        # `_API_SAFE_MSG_KEYS` wire contract. The Agent replay path
+        # (``_sanitize_messages_for_agent`` -> ``preserve_api_content=True``)
+        # passes a different allowlist and re-inserts ``api_content`` upstream
+        # before the public boundary; here the position path is the strict
+        # public projection (#7237 review finding 2a).
+        msg = {k: v for k, v in msg.items() if k not in _API_PUBLIC_STRIP_KEYS}
         final_out.append((idx, msg))
     return final_out
 
 
-def _deduplicate_context_messages(messages):
+def _protected_replay_key(msg, protected_rows):
+    """Return True when ``msg`` is a settle-proven current-turn row that must
+    not be collapsed by the context identity dedupe (#7237 round-N residual 2,
+    nesquena-hermes 2026-09-28)."""
+    if not protected_rows:
+        return False
+    if not isinstance(msg, dict):
+        return False
+    key = _message_replay_key(msg)
+    return key is not None and key in protected_rows
+
+
+def _proven_turn_split(proven_suffix, msg_text):
+    """Split ``proven_suffix`` at the current-turn user row.
+
+    Returns ``(head, tail)`` where ``head`` is the replayed history the Agent
+    echoed inside the suffix (duplicate material the identity dedupe must
+    collapse, per the #1217 full-replay-dedup contract) and ``tail`` is the
+    current turn's own exchange, which must be kept verbatim (the turn may
+    legitimately repeat historical content — #7237 round-N residual 2,
+    nesquena-hermes 2026-09-28).
+
+    Returns ``None`` when no current-turn user row is found, in which case the
+    caller keeps the whole suffix.
+    """
+    rows = list(proven_suffix or [])
+    if not msg_text:
+        return None
+    start = None
+    for idx, row in enumerate(rows):
+        if isinstance(row, dict) and row.get('role') == 'user' and (
+            _looks_like_current_user_turn(row, msg_text)
+        ):
+            start = idx
+    if start is None:
+        return None
+    return rows[:start], rows[start:]
+
+
+def _is_active_turn_checkpoint_row(row, active_turn_identity, msg_text):
+    """Return True only when ``row`` is PROVEN to be the checkpoint this
+    invocation's settle is working on (#7237 review blocker 2,
+    nesquena-hermes 2026-09-28).
+
+    Replay-key/text equality alone is not ownership proof: an earlier turn's
+    user row can carry the SAME text as a legitimate re-ask, and dropping
+    the echo then deletes the re-ask outright. Proof requires either:
+
+    * the row carries the active-turn token of the identity being settled;
+      or
+    * the identity carries no token (legacy/tokenless runs) AND the row
+      itself carries an active-turn token — only checkpoint rows persist
+      that marker, so a plain historical row with identical text never
+      qualifies — plus the trusted sentinel-stripped text match against
+      ``msg_text``.
+    """
+    if not isinstance(row, dict) or row.get('role') != 'user':
+        return False
+    token = (
+        active_turn_identity.get('token')
+        if isinstance(active_turn_identity, dict)
+        else None
+    )
+    if token:
+        return row.get('_active_turn_token') == token
+    # No identity token available (legacy/tokenless settle): require
+    # checkpoint SHAPE — the row itself carries an active-turn token, which
+    # only checkpoint rows persist (a plain historical user row never does,
+    # so the reviewer's no-token historical-tail repro stays excluded) —
+    # plus the trusted sentinel-stripped text match against ``msg_text``.
+    if not msg_text:
+        return False
+    return bool(row.get('_active_turn_token')) and _looks_like_current_user_turn(
+        row, msg_text
+    )
+
+
+def _stable_message_ownership_id(message) -> tuple[str | None, bool]:
+    """Canonical stable id restricted to the ownership-granting shape.
+
+    #6310 (nesquena-hermes 2026-08-03): only a valid NON-NEGATIVE INTEGER
+    message id may prove independent ownership in the context dedupe. The
+    broadly shared ``_stable_message_identity_details`` canonicaliser accepts
+    any non-empty int/str/float — ``-7``, ``3.5`` and ``abc`` all canonicalise
+    — which is right for alias reconciliation but too permissive as an
+    ownership signal. A malformed, negative or non-integer id must fail safely
+    to the legacy content-identity collapse instead of splitting a turn.
+    """
+    stable_id, canonical_valid = _stable_message_identity_details(message)
+    if not canonical_valid or stable_id is None:
+        return None, False
+    if not stable_id.isdigit():
+        return None, False
+    return stable_id, True
+
+
+def _independently_owned_user_pair(prior_row, candidate_row) -> bool:
+    """Return True when two same-text user rows are independently owned turns.
+
+    #6310 (nesquena-hermes 2026-08-03): the dedup-local handling prefers a
+    valid non-negative integer message id when one is available. The user
+    exact-index inside ``_deduplicate_context_messages`` keys on
+    content+timestamp+source+attachments and knows nothing about durable ids,
+    so two committed turns that repeat text verbatim inside one timestamp
+    bucket collapse there before the stable-id ownership path can tell them
+    apart. When BOTH rows carry valid DISTINCT durable ids the pair is
+    independently owned and the exact index must defer to that path. Every
+    other shape — an id-less row, a matching id, or an invalid/boolean/
+    negative/non-integer id — keeps the legacy collapse unchanged.
+    """
+    prior_id, prior_valid = _stable_message_ownership_id(prior_row)
+    candidate_id, candidate_valid = _stable_message_ownership_id(candidate_row)
+    return bool(
+        prior_valid
+        and candidate_valid
+        and prior_id is not None
+        and candidate_id is not None
+        and prior_id != candidate_id
+    )
+
+
+def _register_seen_stable_id(key, msg, seen_stable_by_key) -> None:
+    """Append ``msg``'s durable stable id to the per-key kept-id registry.
+
+    #6310 bookkeeping: a row admitted through an active-turn path must
+    register its id, or a later replay of that same record (its timestamp
+    shifted across a load, so the exact index no longer matches) reaches the
+    stable-id ownership path with a registry that never saw the id and
+    survives as a duplicate the model would be sent twice. Append-only on
+    purpose: a superseded id stays in the registry so a replay of the replaced
+    record still collapses against it.
+    """
+    if key is None:
+        return
+    stable_id, stable_valid = _stable_message_ownership_id(msg)
+    if not (stable_valid and stable_id is not None):
+        return
+    kept = seen_stable_by_key.get(key)
+    if not isinstance(kept, list):
+        kept = []
+        seen_stable_by_key[key] = kept
+    if stable_id not in kept:
+        kept.append(stable_id)
+
+
+def _deduplicate_context_messages(messages, protected_rows=None):
     """Remove duplicate messages from context by identity, keeping first occurrence.
 
     Prevents the agent from seeing the same message twice in conversation_history
@@ -7377,12 +9103,21 @@ def _deduplicate_context_messages(messages):
     Compression/reference markers are internal recovery material: keep at most
     one canonical assistant reference so a mis-role ``user`` marker cannot become
     the next active user instruction.
+
+    ``protected_rows`` is a set of replay keys the settle PROVED belong to the
+    current turn (the supplied projection was a strict exact prefix of the
+    returned conversation). Such a row may repeat historical content verbatim
+    and must survive (#7237 round-N residual 2, nesquena-hermes 2026-09-28).
     """
     if not messages:
         return messages
     seen = set()
     deduped = []
     user_exact_index = {}
+    # Registry of the durable stable ids kept per replay key (#7237 round 7
+    # finding 2): lets a content collision distinguish a replayed duplicate
+    # from an independently owned occurrence that repeats content verbatim.
+    seen_stable_by_key = {}
     for msg in messages:
         if _is_context_compression_marker(msg):
             marker_key = (
@@ -7400,11 +9135,28 @@ def _deduplicate_context_messages(messages):
         if _is_compressed_context_tool_result_summary_message(msg) and not msg.get('tool_call_id'):
             deduped.append(msg)
             continue
+        # A row the settle PROVED belongs to the current turn (the sent
+        # projection was a strict exact prefix of the return) may legitimately
+        # repeat historical content verbatim; collapsing it would delete the
+        # current turn (#7237 round-N residual 2, nesquena-hermes 2026-09-28).
+        if _protected_replay_key(msg, protected_rows):
+            deduped.append(msg)
+            continue
         # Context ownership is provider-facing: two rows with identical visible
         # text but different durable ``api_content`` sidecars are distinct turns.
         # Keep the display identity unchanged so ordinary transcript dedup still
         # collapses the same visible row.
         key = _message_replay_key(msg)
+        # #6310 bookkeeping (PR #8519 round 1): the exact-key index may only
+        # ever name a row that was actually RETAINED, and it is published
+        # after retention is decided. The historical code published the
+        # prospective append slot (``len(deduped)``) before the stable-id
+        # branch could drop the row, so a discarded replay left the index
+        # pointing past the list and the next same-key lookup dereferenced a
+        # slot that was never filled. ``retained_exact_key`` carries the key
+        # to the publish site at the bottom of the loop; a dropped row simply
+        # never publishes, and the previously retained owner stays indexed.
+        retained_exact_key = None
         if isinstance(msg, dict) and msg.get('role') == 'user' and key is not None:
             user_exact_key = (
                 key,
@@ -7413,24 +9165,272 @@ def _deduplicate_context_messages(messages):
                 msg.get('_source') or 'webui',
                 json.dumps(msg.get('attachments') or [], sort_keys=True, ensure_ascii=False),
             )
+            retained_exact_key = user_exact_key
             prior_exact_idx = user_exact_index.get(user_exact_key)
             if msg.get('_active_turn_token'):
                 if prior_exact_idx is not None:
                     deduped[prior_exact_idx] = msg
+                    _register_seen_stable_id(key, msg, seen_stable_by_key)
                     continue
                 if key in seen:
                     deduped.append(msg)
+                    _register_seen_stable_id(key, msg, seen_stable_by_key)
                     user_exact_index[user_exact_key] = len(deduped) - 1
                     continue
             elif prior_exact_idx is not None:
-                continue
-            user_exact_index[user_exact_key] = len(deduped)
+                # #6310 (nesquena-hermes 2026-08-03): this exact index keys on
+                # content+timestamp+source+attachments and knows nothing about
+                # durable ids, so two independently settled turns repeating
+                # text verbatim inside one timestamp bucket would collapse here
+                # before the stable-id ownership path below could tell them
+                # apart. When BOTH rows carry valid DISTINCT stable ids the id
+                # is the preferred ownership signal — defer to that path. An
+                # id-less, id-matching or invalid-id row keeps the legacy
+                # collapse exactly as before. Every stored index names a
+                # retained row (see the publish site below), so this lookup is
+                # always in range.
+                if not _independently_owned_user_pair(deduped[prior_exact_idx], msg):
+                    continue
         if key is not None and key in seen:
-            continue
-        if key is not None:
+            # #7237 round 7 finding 2 (nesquena-hermes 2026-10-14): a content
+            # collision is a replay of an already-kept row UNLESS this row and
+            # every kept same-key occurrence carry valid, DISTINCT durable
+            # stable ids. Independently settled occurrences (a re-asked
+            # question answered again) repeat content verbatim; the admitting
+            # settle kept them via the call-scoped ``protected_rows`` and a
+            # later build's content-only collapse deleted the second
+            # occurrence from the outbound history and from the cold
+            # ``context_messages``. Distinct durable ids prove the rows are
+            # different turns; a missing/matching id stays conservative and
+            # collapses exactly like before. #6310 (2026-08-03): the ownership
+            # signal is a valid NON-NEGATIVE INTEGER id — a malformed,
+            # negative or non-integer id fails safely to this legacy collapse.
+            stable_id, stable_valid = _stable_message_ownership_id(msg)
+            kept_ids = seen_stable_by_key.get(key) or [None]
+            if not (
+                stable_valid
+                and stable_id is not None
+                and all(
+                    other is not None and other != stable_id
+                    for other in kept_ids
+                )
+            ):
+                continue
+            kept_ids.append(stable_id)
+        if key is not None and key not in seen:
             seen.add(key)
+            stable_id, stable_valid = _stable_message_ownership_id(msg)
+            seen_stable_by_key[key] = [
+                stable_id if (stable_valid and stable_id is not None) else None
+            ]
         deduped.append(msg)
+        # #6310 bookkeeping: publish the exact-key index only now that the row
+        # is retained, and name the slot it actually occupies. A dropped row
+        # never reaches this site, so no index can outlive its row.
+        if retained_exact_key is not None:
+            user_exact_index[retained_exact_key] = len(deduped) - 1
     return deduped
+
+
+
+
+def _is_codex_interim_row(msg):
+    """Mirror agent.agent_runtime_helpers._is_codex_interim (read-only check)."""
+    return bool(
+        (msg.get('codex_reasoning_items') if isinstance(msg, dict) else None)
+        or (msg.get('codex_message_items') if isinstance(msg, dict) else None)
+        or (isinstance(msg, dict) and msg.get('finish_reason') == 'incomplete')
+    )
+
+
+def _merge_consecutive_assistant_rows(messages):
+    """Context-only merge of consecutive assistant rows (Agent pass-0 mirror).
+
+    The Agent's ``repair_message_sequence`` merges consecutive assistant turns
+    BEFORE orphan detection so the merged tool_call-id union is known; the
+    WebUI's outbound sanitizer must mirror that order or a legitimate
+    ``assistant(call), assistant(progress), tool(result)`` shape is
+    misclassified as an orphan and silently dropped (#7237 review, blocker 2).
+
+    Codex interim rows are exempt (they carry their own continuation state),
+    and a provisional verification candidate is superseded, not unioned —
+    both mirroring ``_merge_consecutive_assistants`` in the installed runtime.
+    The merge also matches the Agent's two extra behaviours, so the WebUI
+    helper cannot drift from the runtime contract (#7237 review finding 2b):
+
+    ① When the survivor lacks ``reasoning_content`` and the later row
+       carries one, copy the later value onto the survivor. Strict thinking
+       providers need a ``reasoning_content`` on the merged tool-call turn.
+    ② When the join actually changes the visible content, drop the
+       survivor's ``api_content`` sidecar. Replaying it would silently
+       resend pre-merge bytes the rewrite just discarded.
+
+    Copy-on-write: input rows are never mutated; only merged rows are new.
+    Returns a new list.
+    """
+    if not isinstance(messages, list):
+        return messages
+    merged: list = []
+    cloned: set = set()  # indexes into `merged` that are safe to mutate
+    for msg in messages:
+        if not isinstance(msg, dict):
+            merged.append(msg)
+            continue
+        prev = merged[-1] if merged and isinstance(merged[-1], dict) else None
+        # #8034 parity contract: two bare plain-text assistant rows must stay
+        # separate turns (the direct-provider projection and the gateway
+        # runs-API history builder do not merge them). The #7237 merge is
+        # load-bearing only when at least one of the pair carries a tool-call,
+        # a codex interim discriminator, or a merge-visible discriminator, so
+        # it is applied strictly in that case (#7237 review round-N+2 finding 4
+        # must not widen the default provider projection).
+        if (
+            prev is not None
+            and prev.get('role') == 'assistant'
+            and msg.get('role') == 'assistant'
+            and not _is_codex_interim_row(msg)
+            and not _is_codex_interim_row(prev)
+            and (
+                prev.get('tool_calls')
+                or msg.get('tool_calls')
+                or any(prev.get(k) is not None for k in _MERGE_VISIBLE_DISCRIMINATORS)
+                or any(msg.get(k) is not None for k in _MERGE_VISIBLE_DISCRIMINATORS)
+            )
+        ):
+            # Copy-on-write: clone the survivor before the first in-place
+            # merge so input rows are never mutated (same contract as
+            # _strip_orphan_tool_calls).
+            if len(merged) - 1 not in cloned:
+                merged[-1] = copy.deepcopy(prev)
+                cloned.add(len(merged) - 1)
+            prev = merged[-1]
+            if prev.get('finish_reason') in ('verification_required', 'verify_hook_continue'):
+                # Superseded candidate: replace rather than union. The input
+                # row is now shared (not cloned); drop any stale clone mark.
+                merged[-1] = msg
+                cloned.discard(len(merged) - 1)
+                continue
+            # Union tool_calls; drop stale empty tool_calls on the survivor.
+            prev_calls = list(prev.get('tool_calls') or [])
+            new_calls = list(msg.get('tool_calls') or [])
+            if new_calls:
+                prev['tool_calls'] = prev_calls + new_calls
+            elif prev_calls:
+                prev['tool_calls'] = prev_calls
+            else:
+                prev.pop('tool_calls', None)
+            prev_content = prev.get('content')
+            new_content = msg.get('content')
+            content_rewritten = False
+            if isinstance(prev_content, str) and isinstance(new_content, str):
+                joined = '\n'.join(p for p in (prev_content.strip(), new_content.strip()) if p)
+                if joined:
+                    prev['content'] = joined
+                    # ``joined`` may equal the stripped prev_content when the
+                    # later row carried empty/whitespace text; only count
+                    # that as a rewrite when the value actually changed.
+                    content_rewritten = joined != prev_content
+            elif not prev_content and new_content is not None:
+                prev['content'] = new_content
+                content_rewritten = new_content != prev_content
+            # ① Carry reasoning_content from the later row when the survivor
+            # lacks it. Mirrors the Agent's own contract.
+            if not prev.get('reasoning_content') and msg.get('reasoning_content'):
+                prev['reasoning_content'] = msg['reasoning_content']
+            # ② Drop the survivor's api_content when the merge actually
+            # changed the visible content; otherwise the sidecar still
+            # describes the pre-merge bytes and replaying it would silently
+            # resend what the rewrite just discarded.
+            if content_rewritten:
+                prev.pop('api_content', None)
+            continue
+        merged.append(msg)
+    return merged
+
+
+def _strip_orphan_tool_calls(messages):
+    """Return a context-only repair without mutating any input message rows.
+
+    Strict providers reject an assistant ``tool_calls`` entry when no matching
+    ``tool`` result follows in the same context. The repair belongs to the
+    model-facing context projection, not the display transcript, so the input
+    list and every input dictionary must remain unchanged. Clone only rows whose
+    ``tool_calls`` field is actually removed or filtered.
+    """
+    if not isinstance(messages, list):
+        return messages
+    repaired = list(messages)
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        calls = msg.get("tool_calls")
+        if isinstance(calls, str):
+            try:
+                calls = json.loads(calls)
+            except (ValueError, TypeError):
+                continue
+        if not isinstance(calls, list) or not calls:
+            continue
+        # The repair is called at completed-turn writeback sinks. A final row
+        # is not automatically in flight; preserving it solely because it is
+        # last lets settled orphan calls survive into the next request.
+        covered = set()
+        probe = idx + 1
+        while probe < len(messages):
+            following = messages[probe]
+            if not isinstance(following, dict):
+                break
+            # A temporary ``_recovered`` user row is materialized by the #1543
+            # stale-stream recovery path between an assistant's ``tool_calls``
+            # and their ``tool`` results. A later pass in
+            # ``_sanitize_messages_for_api`` / ``_api_safe_message_positions``
+            # drops that row from the final projection, so treat it as
+            # transparent here — otherwise a valid, completed tool pair is
+            # misclassified as an orphan and silently lost on exactly the
+            # recovery path this repair is meant to harden.
+            if following.get("role") == "user" and following.get("_recovered"):
+                probe += 1
+                continue
+            # Consecutive assistant rows merge in the Agent's repair, so an
+            # intermediate progress row between a call and its result is
+            # transparent here too (else a valid pair reads as an orphan).
+            if following.get("role") == "assistant":
+                probe += 1
+                continue
+            if following.get("role") != "tool":
+                break
+            covered.add(str(following.get("tool_call_id") or ""))
+            probe += 1
+        kept = []
+        dropped = []
+        for call in calls:
+            call_id = (
+                str(call.get("id") or call.get("call_id") or "")
+                if isinstance(call, dict)
+                else ""
+            )
+            if call_id and call_id in covered:
+                kept.append(call)
+            else:
+                dropped.append(call_id)
+        if not dropped:
+            continue
+        repaired_msg = copy.deepcopy(msg)
+        if kept:
+            repaired_msg["tool_calls"] = copy.deepcopy(kept)
+        else:
+            repaired_msg.pop("tool_calls", None)
+        repaired[idx] = repaired_msg
+        # debug, not warning: this runs on every projection of every turn, so an
+        # abandoned call would otherwise log several warnings per turn forever.
+        logger.debug(
+            "Dropped %d orphan tool_call id(s) at context index %d (no tool_result "
+            "immediately after); would have caused an upstream 400: %s",
+            len(dropped),
+            idx,
+            ", ".join(d for d in dropped if d) or "<missing id>",
+        )
+    return repaired
 
 
 def _assign_stable_message_ids(result_messages, *existing_arrays):
@@ -7588,6 +9588,16 @@ def _hard_prune_post_compression_tool_results(messages, *, compressor=None):
     return pruned, len(replacements)
 
 
+def _should_prune_tool_results_after_compression(agent) -> bool:
+    """True when the active context engine is the native ContextCompressor (or absent)."""
+    _compressor = getattr(agent, 'context_compressor', None)
+    try:
+        from agent.context_compressor import ContextCompressor as _NativeCC
+    except ImportError:
+        return True
+    return (_compressor is None) or isinstance(_compressor, _NativeCC)
+
+
 def _prune_context_tool_results_after_compression(agent, context_messages):
     """Run the active compressor's cheap tool-result pruning on model context.
 
@@ -7721,6 +9731,12 @@ def _restore_reasoning_metadata_before_boundary(
             # with their display counterpart.
             if prev_msg.get('id') is not None and cur_msg.get('id') is None:
                 cur_msg['id'] = prev_msg['id']
+            # SQLite identity is private replay provenance, stripped before
+            # Agent input. Restore it only on this proved historical prefix,
+            # never onto the active turn even when the text is identical.
+            if (prev_msg.get('_state_db_row_id') is not None
+                    and cur_msg.get('_state_db_row_id') is None):
+                cur_msg['_state_db_row_id'] = prev_msg['_state_db_row_id']
             if (
                 prev_msg.get(_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG) is True
                 and cur_msg.get(_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG) is not True
@@ -7842,6 +9858,99 @@ def _message_identity(msg):
     )
 
 
+# Fields that participate in the model-facing row comparison for an EXACT prefix
+# proof. These are the keys the Agent actually sent to the provider; comparing
+# them verbatim (no whitespace normalization, no 500-char truncation) is the
+# only way to prove a projected-history prefix. Restoration-only metadata
+# (id, timestamp, reasoning, attachments, _recovered, _partial, _error, etc.)
+# is display-side bookkeeping and is intentionally excluded.
+_EXACT_PREFIX_MODEL_FIELDS = (
+    'role',
+    'content',
+    'tool_calls',
+    'tool_call_id',
+    'name',
+    'refusal',
+    'reasoning_content',
+    'codex_reasoning_items',
+    'codex_message_items',
+    'finish_reason',
+)
+
+
+def _model_row_exact_equal(actual, expected):
+    """Return True iff ``actual`` matches ``expected`` on every model-facing field.
+
+    Used by the strict projected-prefix proof. Unlike ``_message_replay_key`` /
+    ``_message_identity`` — which normalize whitespace and truncate content at
+    500 characters — this comparison is byte-exact on the wire payload the
+    provider actually receives. Two rows that differ only in whitespace or
+    past character 500 are NOT equal here, so a sanitizer rewrite or a
+    transformer that drifts from the sent projection cannot be accepted as
+    the same prefix (#7237 review ownership finding 3, nesquena-hermes
+    2026-09-26).
+    """
+    if not isinstance(actual, dict) or not isinstance(expected, dict):
+        return False
+    for field in _EXACT_PREFIX_MODEL_FIELDS:
+        if actual.get(field) != expected.get(field):
+            return False
+    # ``api_content`` is the Agent replay sidecar: include it when the
+    # projection carried one. Both sides are absent-or-equal (the projection
+    # path sets it via ``preserve_api_content=True``; the Agent's return
+    # either keeps it or strips it in lockstep).
+    if 'api_content' in expected or 'api_content' in actual:
+        if actual.get('api_content') != expected.get('api_content'):
+            return False
+    return True
+
+
+def _messages_have_prefix_exact(messages, prefix):
+    """Strict exact-prefix check on model-facing row values.
+
+    Unlike ``_messages_have_prefix`` (which delegates to ``_message_replay_key``
+    and therefore normalizes whitespace and truncates at 500 characters), this
+    helper compares complete row values for every row in ``prefix``. A
+    sanitizer-rewritten historical row, a row that drifted in whitespace, or
+    a row whose content diverges after character 500 is rejected as a
+    non-match — the projected-prefix proof is the only authority for current-
+    turn suffix ownership, so it must be strict (#7237 review ownership
+    finding 3, nesquena-hermes 2026-09-26).
+    """
+    messages = list(messages or [])
+    prefix = list(prefix or [])
+    if len(messages) < len(prefix):
+        return False
+    for idx, expected in enumerate(prefix):
+        if not _model_row_exact_equal(messages[idx], expected):
+            return False
+    return True
+
+
+def _durable_tool_row_identity(msg):
+    """Return (tool_call_id, row_id) for a tool row with a valid durable row.
+
+    Agent-side compression rewrites old tool results in model context to a
+    one-line summary while keeping the state.db row, so content-based identity
+    differs from the visible full-output row. A durable row ID proves row
+    identity (run-state contract), so backfill can match on it instead.
+    """
+    if not isinstance(msg, dict) or msg.get('role') != 'tool':
+        return None
+    # Read the row through the canonical provenance helper: messages loaded
+    # from state.db (and IDs preserved from older Agents) carry
+    # ``_state_db_row_id`` rather than ``_row_id``, and both sides of the
+    # backfill must normalize to the same identity. Contradictory aliases are
+    # invalid and fall back to content-based matching.
+    row_id, valid = _state_db_row_identity_details(msg)
+    if not valid or row_id is None or int(row_id) <= 0:
+        return None
+    tool_call_id = msg.get('tool_call_id')
+    if not isinstance(tool_call_id, str) or not tool_call_id:
+        return None
+    return (tool_call_id, row_id)
+
+
 def _messages_have_prefix(messages, prefix, *, key_fn=None):
     key_fn = key_fn or _message_identity
     if len(messages or []) < len(prefix or []):
@@ -7892,47 +10001,48 @@ def _strip_replayed_prefix(existing_messages, candidates):
     existing_messages = list(existing_messages or [])
     candidates = list(candidates or [])
     max_overlap = min(len(existing_messages), len(candidates))
-    for overlap in range(max_overlap, 0, -1):
-        left = [_message_replay_key(m) for m in existing_messages[-overlap:]]
-        right = [_message_replay_key(m) for m in candidates[:overlap]]
-        if left == right:
-            return candidates[overlap:]
-    return candidates
+    if not max_overlap:
+        return candidates
+    # KMP matches the longest candidate prefix at the end of the old transcript.
+    # Each payload is keyed once; shrinking slices re-serialized O(n²) rows while
+    # settlement held the session lock. Keep the existing replay-key semantics.
+    keys = [_message_replay_key(m) for m in candidates[:max_overlap]]
+    fallback = [0] * max_overlap
+    matched = 0
+    for idx in range(1, max_overlap):
+        while matched and keys[idx] != keys[matched]:
+            matched = fallback[matched - 1]
+        if keys[idx] == keys[matched]:
+            matched += 1
+        fallback[idx] = matched
+    matched = 0
+    for message in existing_messages[-max_overlap:]:
+        key = _message_replay_key(message)
+        if matched == max_overlap:
+            matched = fallback[matched - 1]
+        while matched and key != keys[matched]:
+            matched = fallback[matched - 1]
+        if key == keys[matched]:
+            matched += 1
+    return candidates[matched:]
+
+
+def _session_arc_summary_key(message):
+    """Identify long summaries by role, provider payload and normalized prefix."""
+    if not isinstance(message, dict):
+        return None
+    text = ' '.join(_message_text(message.get('content', '')).split())
+    if len(text) < 2000 or not text.startswith('[Session Arc Summary'):
+        return None
+    api_content = message.get('api_content')
+    normalized = ' '.join(api_content.split()) if isinstance(api_content, str) and api_content else None
+    return (message.get('role'), normalized, text[:1500])
 
 
 def _looks_like_replayed_session_arc_summary(previous_msg, candidate_msg):
-    """Return True for repeated LCM/session summaries with refreshed hints.
-
-    LCM summary cards can be re-injected with the same long recovered context
-    and a different tail such as an expand hint. Exact identity misses those,
-    but appending both copies bloats every later model prompt.
-    """
-    if not isinstance(previous_msg, dict) or not isinstance(candidate_msg, dict):
-        return False
-    if previous_msg.get('role') != candidate_msg.get('role'):
-        return False
-    previous_api_content = previous_msg.get("api_content")
-    candidate_api_content = candidate_msg.get("api_content")
-    normalized_previous_api_content = (
-        " ".join(previous_api_content.split())
-        if isinstance(previous_api_content, str) and previous_api_content
-        else None
-    )
-    normalized_candidate_api_content = (
-        " ".join(candidate_api_content.split())
-        if isinstance(candidate_api_content, str) and candidate_api_content
-        else None
-    )
-    if normalized_previous_api_content != normalized_candidate_api_content:
-        return False
-    previous_text = " ".join(_message_text(previous_msg.get('content', '')).split())
-    candidate_text = " ".join(_message_text(candidate_msg.get('content', '')).split())
-    if len(previous_text) < 2000 or len(candidate_text) < 2000:
-        return False
-    marker = '[Session Arc Summary'
-    if not previous_text.startswith(marker) or not candidate_text.startswith(marker):
-        return False
-    return previous_text[:1500] == candidate_text[:1500]
+    """Recognize the same recovered context with a refreshed trailing hint."""
+    previous_key = _session_arc_summary_key(previous_msg)
+    return previous_key is not None and previous_key == _session_arc_summary_key(candidate_msg)
 
 
 def _strip_replayed_context_items(existing_messages, candidates):
@@ -7944,27 +10054,75 @@ def _strip_replayed_context_items(existing_messages, candidates):
 
     existing_keys = [_message_replay_key(m) for m in existing_messages]
     candidate_keys = [_message_replay_key(m) for m in candidates]
-    existing_large = [m for m in existing_messages if isinstance(m, dict)]
+    # Reversing both sequences turns a match starting at candidate idx into a
+    # match ending at the corresponding reversed position. A suffix automaton
+    # computes these longest matches without scanning every old start again.
+    transitions, links, lengths = [{}], [-1], [0]
+    last = 0
+    for key in reversed(existing_keys):
+        current = len(transitions)
+        transitions.append({})
+        lengths.append(lengths[last] + 1)
+        links.append(0)
+        parent = last
+        while parent >= 0 and key not in transitions[parent]:
+            transitions[parent][key] = current
+            parent = links[parent]
+        if parent >= 0:
+            target = transitions[parent][key]
+            if lengths[parent] + 1 == lengths[target]:
+                links[current] = target
+            else:
+                clone = len(transitions)
+                transitions.append(dict(transitions[target]))
+                lengths.append(lengths[parent] + 1)
+                links.append(links[target])
+                while parent >= 0 and transitions[parent].get(key) == target:
+                    transitions[parent][key] = clone
+                    parent = links[parent]
+                links[target] = links[current] = clone
+        last = current
+
+    matches = [0] * len(candidate_keys)
+    state = matched = 0
+    for idx in range(len(candidate_keys) - 1, -1, -1):
+        key = candidate_keys[idx]
+        while state and key not in transitions[state]:
+            state = links[state]
+            matched = min(matched, lengths[state])
+        target = transitions[state].get(key)
+        if target is None:
+            matched = 0
+        else:
+            state = target
+            matched += 1
+        matches[idx] = matched
+
+    summary_keys = set()
+    unusual_summary_keys = []
+    for message in existing_messages:
+        key = _session_arc_summary_key(message)
+        if key is not None:
+            try:
+                summary_keys.add(key)
+            except TypeError:
+                # Preserve the old equality rule for malformed, unhashable roles.
+                unusual_summary_keys.append(key)
     cleaned = []
     idx = 0
     min_block = 3
     while idx < len(candidates):
         msg = candidates[idx]
-        if any(_looks_like_replayed_session_arc_summary(prev, msg) for prev in existing_large):
+        key = _session_arc_summary_key(msg)
+        try:
+            repeated_summary = key is not None and key in summary_keys
+        except TypeError:
+            repeated_summary = key in unusual_summary_keys
+        if repeated_summary:
             idx += 1
             continue
 
-        best = 0
-        for start in range(len(existing_keys)):
-            length = 0
-            while (
-                idx + length < len(candidate_keys)
-                and start + length < len(existing_keys)
-                and candidate_keys[idx + length] == existing_keys[start + length]
-            ):
-                length += 1
-            if length > best:
-                best = length
+        best = matches[idx]
         if best >= min_block:
             idx += best
             continue
@@ -7974,13 +10132,394 @@ def _strip_replayed_context_items(existing_messages, candidates):
     return cleaned
 
 
-def _dedupe_replayed_context_messages(previous_context, result_messages, msg_text=None):
-    """Keep model context append-only without replayed blocks/summaries."""
+def _looks_like_current_user_turn_scan(messages, msg_text):
+    """Return the index of the last row that looks like the current user turn.
+
+    Scan companion to ``_looks_like_current_user_turn`` for the settle path:
+    walks ``messages`` and returns the last user row whose workspace-stripped
+    text matches ``msg_text``. Returns None when nothing matches.
+
+    Mirrors ``_find_current_user_turn``'s last-strong-match policy. First-match
+    would replay historical assistant output whenever the same prompt was used
+    in an earlier turn (the very bug ``_find_current_user_turn`` was hardened
+    against, #7237 review finding 3). This fallback is used when the
+    active-turn identity is unavailable, which is exactly the case where
+    the bug bites hardest.
+
+    There is deliberately NO weak/arbitrary fallback. A text match on the
+    submitted prompt is the only ownership proof this scan can offer; an
+    unmatched user row is merely the last ``role: "user"`` row and can be a
+    synthetic continuation prompt the agent loop appended after the real turn.
+    Anchoring a current-turn slice on such a row drops the assistant/tool
+    output that belongs to the real turn in between (#7237 review ownership
+    defect 1, nesquena-hermes 2026-09-23). The caller
+    (``_dedupe_replayed_context_messages``) fails closed on None and keeps the
+    raw pre-turn context instead of guessing.
+    """
+    last_strong_match = None
+    for idx, msg in enumerate(messages or []):
+        if _looks_like_current_user_turn(msg, msg_text):
+            last_strong_match = idx
+    return last_strong_match
+
+
+def _proven_current_turn_suffix(projected_history, result_messages):
+    """Return the proven current-turn suffix of ``result_messages``, else None.
+
+    ``result_messages`` is the FULL conversation the Agent returned: the exact
+    projected history this process handed it (``agent.run_conversation``
+    copies it into ``messages`` and appends the turn on top) followed by the
+    current turn's rows. When that projection is still the returned list's
+    prefix, every row after it was produced by the current turn and may be
+    appended to the raw ``previous_context``. Sanitizer-rewritten historical
+    rows are then never examined at all, so they cannot be appended beside the
+    authoritative raw history and duplicated into the next model context
+    (#7237 review data-regression finding, nesquena-hermes 2026-09-23).
+
+    The supplied ``projected_history`` distinguishes three states that the
+    previous implementation collapsed into one:
+
+    * ``None`` — caller did not supply a projection. No proof available;
+      return ``None`` so the caller fails closed.
+    * ``[]`` — caller supplied an EXPLICITLY EMPTY projection. The Agent was
+      sent no history, so the FULL returned list is this turn's output (it
+      may be ``[]`` if the turn produced no rows). This is valid and
+      authoritative: when non-empty raw history sanitizes to ``[]``
+      (reasoning-only, error, empty-partial, or orphan rows) the Agent was
+      sent nothing and the entire return is the current-turn suffix
+      (#7237 review ownership finding 2, nesquena-hermes 2026-09-26).
+    * non-empty list — caller supplied a projection. Use the STRICT
+      exact-prefix check (no whitespace normalization, no 500-char
+      truncation — compare complete model-facing row values) so two rows
+      that differ only in whitespace or after character 500 cannot be
+      accepted as the same sent projection (#7237 review ownership finding
+      3, nesquena-hermes 2026-09-26). If the exact projection is a prefix,
+      return exactly the returned suffix; an EQUAL-LENGTH exact match means
+      the returned list is exactly the sent projection, so the proven suffix
+      is EMPTY (``[]``) — the current turn produced no rows, which is
+      distinct from ``None`` ("no proof") and must not fail closed
+      (#7237 review blocker round N, nesquena-hermes 2026-09-27).
+
+    The projection length gates how many rows are compared, so a stale
+    ``previous_context`` can never widen the match: only rows the Agent was
+    actually sent count.
+
+    Returns None when no suffix is proven — the caller must then fail closed
+    and append NOTHING. An empty list return value is reserved for the
+    ``[]`` projection / empty-current-turn case and means "the proven suffix
+    is empty", which the caller appends as zero rows.
+    """
+    if projected_history is None:
+        # Not supplied: no proof available.
+        return None
+    projection = list(projected_history)
+    result_messages = list(result_messages or [])
+    if not projection:
+        # Explicitly empty: the Agent was sent no history. The full returned
+        # list (if any) is the current-turn suffix. An empty result is also
+        # valid — the turn produced no rows.
+        return list(result_messages)
+    if len(result_messages) < len(projection):
+        return None
+    if not _messages_have_prefix_exact(result_messages, projection):
+        return None
+    # Proven: everything past the sent projection is this turn's output.
+    # It is appended verbatim — the current turn's user row can legitimately
+    # repeat a historical prompt, so a replayed-suffix strip here would drop
+    # the turn's own leading row instead of a replay.
+    #
+    # An EQUAL-LENGTH exact match is a proven EMPTY suffix: the returned list
+    # is exactly the sent projection, so the current turn produced no rows.
+    # The empty list return value is the caller's contract for "proven empty"
+    # (#7237 review blocker round N, nesquena-hermes 2026-09-27) — it must
+    # NOT be collapsed into ``None``, which would fail closed and drop the
+    # raw context's own current turn.
+    return result_messages[len(projection):]
+
+
+def _current_turn_compression_rotation(
+    result_messages,
+    projected_history,
+    msg_text=None,
+    compression_authorized=False,
+):
+    """Return True only when the producer says THIS turn rotated the context.
+
+    Wholesale-replacement authority is never derived from marker text or
+    position (#7237 review round-N+1 residual, nesquena-hermes 2026-09-28).
+    ``is_context_compression_marker`` matches ANY non-tool row whose text
+    begins ``[CONTEXT COMPACTION`` — including a user literally typing that
+    text — and ``result_messages`` is the sent projection followed by the
+    current turn. An old marker can be replayed inside the projection,
+    drifted until it no longer matches its own row, or MOVED to a different
+    index; in every one of those shapes it is still historical material, and
+    letting it disable the projection-authority gate would discard the
+    authoritative raw history in favour of the returned list.
+
+    The only trustworthy signal is the producer's: the Agent rotating its own
+    session_id inside this turn. Callers that observed that rotation pass
+    ``compression_authorized=True``. It is deliberately a per-call argument,
+    never module state, so a concurrent session's settle cannot authorize
+    this one (#7237 review blocker 1).
+
+    When authority is absent the helper returns False unconditionally: the
+    caller's projection-authority gate (exact prefix or fail-closed) then
+    owns the settle, and ``projected_history`` itself decides whether a
+    marker is historical — by position AND, when it can be matched, by
+    model-field-exact identity.
+    """
+    if not compression_authorized:
+        # Position and text are not authority. An old marker anywhere in the
+        # return — including one relocated or text-drifted to an index the
+        # positional heuristics used to trust — is historical material and
+        # must fail closed.
+        return False
+    # #7237 review round 3 finding 4 (nesquena-hermes 2026-10-06): the producer
+    # has committed this rotation, so a MISSING marker must not veto it. The
+    # installed ``ContextCompressor.compress()`` assembles its summary as an
+    # assistant ``[PRIOR CONTEXT ...]`` carrier, which is not spelled
+    # ``[CONTEXT COMPACTION``; requiring that spelling refused a compression
+    # that had really run — 7 returned rows became 25 persisted old rows and
+    # the answer was absent, even with ``compression_authorized=True``.
+    #
+    # Authority comes from the producer, never from marker presence. The shapes
+    # the installed compressor emits vary by head protection — an assistant
+    # ``[PRIOR CONTEXT ...]`` carrier, a user-leading card at index 0, a card
+    # after a protected head — so this helper deliberately inspects none of
+    # them. Every accepted shape is a genuine production of the context layer,
+    # and every rejected shape is a caller that observed no rotation.
+    return True
+
+
+def _producer_committed_compression(agent, session_id):
+    """True when the PRODUCER really replaced the context inside this call.
+
+    ``#7237 review round 3 (nesquena-hermes 2026-10-06)``: wholesale-replacement
+    authority must be derived from actual producer commitment, never from marker
+    spelling, marker placement, or a single proxy signal.
+
+    Two independent producer commitments exist, and a settle must honour both:
+
+    1. **Rotated session id.** The context layer hands a rotated conversation a
+       fresh id, so a non-empty continuation id inside this call means a
+       compression really ran here.
+
+    2. **Committed in-place compression.** The installed Agent can compress
+       *in place*: it keeps its session id, rewrites the context, and records
+       ``agent._last_compaction_in_place = True``. This is the default on the
+       installed Agent, so the id-rotation proxy alone never sees it — the settle
+       then refused a compression the producer had already committed, and the
+       sync route kept the 24 old context rows while dropping the answer.
+
+    A marker appearing in the payload is NOT evidence: a replayed, drifted, or
+    relocated marker is historical material and earns no authority.
+    """
+    if agent is None:
+        return False
+    rotated = bool(
+        getattr(agent, "session_id", None)
+        and getattr(agent, "session_id", None) != session_id
+    )
+    in_place = bool(getattr(agent, "_last_compaction_in_place", False))
+    return rotated or in_place
+
+
+def _dedupe_replayed_context_messages(
+    previous_context,
+    result_messages,
+    msg_text=None,
+    active_turn_identity=None,
+    projected_history=None,
+    compression_authorized=False,
+):
+    """Keep model context append-only without replayed blocks/summaries.
+
+    Returns ``(settled_context, protected_rows)``. ``protected_rows`` is a
+    set of replay keys the settle PROVED belong to the current turn — the
+    protection is CALL-SCOPED and must be consumed by the caller in the same
+    settle (e.g. ``_settle_result_messages`` passing it to
+    ``_deduplicate_context_messages``). It must never be handed through
+    module state: another session's concurrent settle could overwrite or
+    clear it (#7237 review blocker 1, nesquena-hermes 2026-09-28).
+
+    When the replayed prefix no longer matches the raw pre-turn context and no
+    compression marker explains the rotation, the raw previous context is
+    authoritative: only the current-turn slice (located via the active-turn
+    checkpoint / current user row) is settled on top of it (#7237 blocker 1).
+
+    ``projected_history`` is the exact conversation-history projection this
+    process sent to the Agent (``_sanitize_messages_for_agent`` output). It is
+    the only ownership signal for rows the sanitizer rewrote: when it is not
+    threaded, or when the returned list does not start with it, no current-turn
+    boundary can be proven and the settle fails closed by keeping the raw
+    ``previous_context`` alone — unproven historical rows are never appended
+    beside it (#7237 review data-regression finding, nesquena-hermes
+    2026-09-23). A supplied but NON-EXACT projection is resolved BEFORE every
+    recovery branch (stale-merge, assistant/tool-only, checkpoint, prompt):
+    none of those signals may guess ownership of sanitizer-rewritten rows
+    (#7237 review blocker round N, nesquena-hermes 2026-09-27). Only a
+    marker that proves a NEW current-turn compression rotation keeps
+    wholesale replacement (#7237 review residual, nesquena-hermes
+    2026-09-27).
+    """
     previous_context = list(previous_context or [])
     result_messages = list(result_messages or [])
     if not previous_context or not result_messages:
-        return result_messages
+        return result_messages, None
     previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
+    # A compression marker is the EXPLICIT exception: the model-context layer
+    # legitimately rotated the whole context, so wholesale replacement stays
+    # allowed. The exception is NARROW (#7237 review residual, nesquena-hermes
+    # 2026-09-27): it takes EXPLICIT producer authority, not marker text or
+    # position (#7237 review round-N+1 residual, nesquena-hermes 2026-09-28).
+    # A marker already inside the supplied projection is historical, a literal
+    # ``[CONTEXT COMPACTION ...`` user prompt is content, and a marker that
+    # does not lead the returned conversation is replayed material. Any other
+    # marker must NOT disable the projection-authority decisions below.
+    _has_compression_rotation = _current_turn_compression_rotation(
+        result_messages, projected_history, msg_text,
+        compression_authorized=bool(compression_authorized),
+    )
+    # #7237 review exact-prefix authority gate (nesquena-hermes 2026-09-26,
+    # blocker round N 2026-09-27): when ``projected_history`` is supplied and
+    # is a STRICT exact prefix of the returned list, that proof is
+    # authoritative and is resolved BEFORE every branch below — including the
+    # prompt/checkpoint scans, which would otherwise mis-pick a historical
+    # user row inside the projection that happens to equal ``msg_text``
+    # (ownership finding 1) or append sanitized historical residuals beside
+    # the raw history. An explicitly-empty projection is equally
+    # authoritative: the Agent was sent no history, so the FULL returned list
+    # is the current turn's suffix (finding 2). An equal-length exact match
+    # is a proven EMPTY suffix (round-N finding 2).
+    #
+    # A NON-EXACT supplied projection is authority too, in the negative
+    # direction: it proves that the returned list was NOT produced by
+    # appending a current turn onto the exact projection this process sent.
+    # No stale-merge, assistant/tool-only, checkpoint, or prompt signal may
+    # then claim ownership of sanitizer-rewritten historical rows — every one
+    # of those branches guesses a boundary from the raw context or the
+    # returned text, and the whole point of the projection is that the
+    # sanitizer can rewrite rows so those guesses are wrong. The settle must
+    # keep ``previous_context`` and append NOTHING unproven (round-N
+    # blocker 1). Only a marker that proves a NEW current-turn compression
+    # rotation (resolved once above) may bypass this authority.
+    if projected_history is not None and not _has_compression_rotation:
+        _proven_suffix = _proven_current_turn_suffix(
+            projected_history, result_messages,
+        )
+        if _proven_suffix is not None:
+            # The strict exact-prefix proof is authoritative: every row after
+            # the sent projection was produced by the CURRENT turn, so the
+            # suffix is appended VERBATIM. A current turn may legitimately
+            # repeat historical content (the same user prompt answered
+            # again) and must not be stripped away — the round-N residual-2
+            # data-loss defect (nesquena-hermes 2026-09-28).
+            #
+            # Before appending, one class must still be collapsed: the Agent
+            # echoing the sent history a SECOND time inside the suffix. That
+            # is duplicate historical material (the #1217 full-replay-dedup
+            # contract), not the turn's own exchange. The discriminator is the
+            # current-turn user row: rows BEFORE it are replayed history (strip
+            # their overlap with ``previous_context``); rows FROM it onward are
+            # the turn's own content (keep verbatim).
+            _suffix = list(_proven_suffix)
+            _split = _proven_turn_split(_suffix, msg_text)
+            if _split is None:
+                _append_rows = list(_suffix)
+            else:
+                _head, _tail = _split
+                # The WebUI sends the Agent a user_message that carries the
+                # ``[Workspace::v1: <path>]`` sentinel, and a real Agent echoes
+                # that exact row back inside the full conversation. The echo is
+                # the SAME turn as the raw checkpoint already in
+                # ``previous_context`` (``_message_identity`` strips the
+                # sentinel for user rows so both keys match), so appending it
+                # would persist this user turn twice — once bare, once
+                # sentinel-prefixed — and the model would see a duplicated
+                # prompt that is not the submitted text. Drop that single echo;
+                # every row AFTER it is this turn's own output and stays.
+                if _tail:
+                    # Only a row that echoes the checkpoint ALREADY sitting at
+                    # the tail of ``previous_context`` is a duplicate: that is
+                    # the row this process persisted for this turn before the
+                    # Agent ran. A row that merely repeats some EARLIER turn's
+                    # content is a legitimate re-ask and must be kept verbatim
+                    # (round-N residual 2), so compare against the LAST row
+                    # only — never the whole history.
+                    #
+                    # Replay-key equality alone is NOT ownership proof
+                    # (#7237 review blocker 2, nesquena-hermes 2026-09-28):
+                    # an earlier turn's row can carry the SAME text (a
+                    # legitimate re-ask), so the drop fires only when the
+                    # previous tail is PROVEN to be this invocation's
+                    # active-turn checkpoint — the active-turn token matches
+                    # the identity of the turn being settled (or the identity
+                    # is unavailable and the tail IS a checkpoint-shaped
+                    # current-turn row matching ``msg_text`` via the trusted
+                    # sentinel-stripped comparison).
+                    if (
+                        previous_context
+                        and _message_replay_key(_tail[0])
+                        == _message_replay_key(previous_context[-1])
+                        and _is_active_turn_checkpoint_row(
+                            previous_context[-1],
+                            active_turn_identity,
+                            msg_text,
+                        )
+                    ):
+                        _tail = _tail[1:]
+                _append_rows = (
+                    _strip_replayed_prefix(previous_context, _head) + _tail
+                )
+            _protected = {
+                _message_replay_key(_row)
+                for _row in _append_rows
+                if isinstance(_row, dict)
+            }
+            logger.info(
+                "Projected history supplied and is a STRICT exact prefix of "
+                "the returned list: keeping raw pre-turn context (%d rows) + "
+                "%d proven current-turn row(s); replayed history inside the "
+                "suffix is stripped, the turn's own rows are kept verbatim "
+                "(#7237 exact-prefix authority gate)",
+                len(previous_context), len(_append_rows),
+            )
+            return list(previous_context) + _append_rows, _protected
+        logger.info(
+            "Projected history supplied but NOT a STRICT exact prefix of the "
+            "returned list: keeping raw pre-turn context (%d rows) verbatim; "
+            "no unproven historical rows appended by stale-merge, "
+            "assistant/tool-only, checkpoint, or prompt fallbacks "
+            "(#7237 review blocker round N, nesquena-hermes 2026-09-27)",
+            len(previous_context),
+        )
+        # #7237 review round-N+2 finding 3 (nesquena-hermes 2026-10-05):
+        # before the non-exact projection fails closed, recognise the VERIFIED
+        # tail-merge case. The installed Agent merges consecutive user rows, so
+        # a genuine follow-up after an unanswered user tail is returned with the
+        # prompted tail folded into the current user row — the projection is not
+        # an exact prefix, but the preceding projection rows match exactly and
+        # the merged boundary validates against the submitted prompt. The old
+        # gate dropped that turn's reply entirely (both Codex and reading
+        # confirmed the loss on the streaming path). Only a merge with proven
+        # provenance settles the normalized current exchange; a fully divergent
+        # list still fails closed below.
+        _tail_merge_current, _tail_merge_protected = _verified_tail_merge_result(
+            projected_history,
+            result_messages,
+            msg_text,
+            previous_user_tail,
+            previous_context,
+        )
+        if _tail_merge_current is not None:
+            logger.info(
+                "Verified tail-merge after unanswered user tail: keeping raw "
+                "pre-turn context (%d rows) + cleaned current exchange "
+                "(%d row(s)) (#7237 review round-N+2 finding 3)",
+                len(previous_context), len(_tail_merge_current),
+            )
+            return list(previous_context) + _tail_merge_current, _tail_merge_protected
+        return list(previous_context), None
     if not _messages_have_prefix(
         result_messages,
         previous_context,
@@ -8028,7 +10567,7 @@ def _dedupe_replayed_context_messages(previous_context, result_messages, msg_tex
                 candidates = _strip_replayed_prefix(previous_context, candidates)
                 if candidates:
                     candidates = _strip_replayed_context_items(previous_context, candidates)
-                return previous_context + candidates
+                return previous_context + candidates, None
         assistant_or_tool_only_result = bool(result_messages) and all(
             _is_context_compression_marker(m)
             or (
@@ -8041,8 +10580,105 @@ def _dedupe_replayed_context_messages(previous_context, result_messages, msg_tex
             candidates = _strip_replayed_prefix(previous_context, result_messages)
             if candidates:
                 candidates = _strip_replayed_context_items(previous_context, candidates)
-            return previous_context + candidates
-        return result_messages
+            return previous_context + candidates, None
+        # Wholesale replacement of the historical prefix is only legitimate
+        # when the model-context layer explicitly rotated the context (a
+        # compression turn). Any other prefix mismatch — including one caused
+        # by this module's own outbound orphan sanitizer rewriting the replayed
+        # prefix — must NOT persist the projected history: the first local turn
+        # after an orphan repair would otherwise permanently remove the
+        # original call/result pair from session.context_messages (silent
+        # data loss, #7237 review blocker 1). Keep the authoritative raw
+        # pre-turn context and settle only the current-turn slice on top.
+        #
+        # ``_has_compression_rotation`` was resolved once at the top of this
+        # function before the projection-authority gate, so it is still in
+        # scope here. When a projection WAS supplied and no marker proves a
+        # NEW current-turn rotation, the gate above already resolved it in BOTH
+        # directions (returning ``previous_context + proven suffix`` for an
+        # exact prefix, or ``previous_context`` alone for a non-exact
+        # projection, round-N blocker 1); reaching this point with
+        # ``projected_history is not None`` and no rotation proof is
+        # impossible. Only the projection-less ownership scan remains.
+        if not _has_compression_rotation:
+            _boundary_idx = _find_active_turn_checkpoint_index(
+                result_messages, previous_context, active_turn_identity, msg_text,
+            )
+            if _boundary_idx is None:
+                # Ownership must be PROVEN, not guessed: only a prompt-derived
+                # match on ``msg_text`` may locate the current turn here. An
+                # unmatched user row can be a synthetic continuation prompt
+                # appended after the real turn, and slicing from it would drop
+                # the assistant/tool output in between (#7237 review ownership
+                # defect 1, nesquena-hermes 2026-09-23). When no boundary is
+                # proven the current-turn slice cannot be isolated, so the raw
+                # ``previous_context`` is preserved verbatim and the projected
+                # result is not persisted wholesale either.
+                _boundary_idx = _looks_like_current_user_turn_scan(
+                    result_messages, msg_text,
+                )
+            if _boundary_idx is not None:
+                # Current-turn slice: everything from the boundary row on.
+                _current_slice = result_messages[_boundary_idx:]
+                _current_slice = _strip_replayed_prefix(previous_context, _current_slice)
+                if _current_slice:
+                    _current_slice = _strip_replayed_context_items(previous_context, _current_slice)
+                logger.info(
+                    "Prefix mismatch without compression: keeping raw pre-turn context "
+                    "(%d rows) + current-turn slice (boundary at %d); wholesale "
+                    "acceptance suppressed (#7237 blocker 1)",
+                    len(previous_context), _boundary_idx,
+                )
+                return list(previous_context) + _current_slice, None
+            # No proven boundary: fail closed. The current-turn slice cannot be
+            # isolated, so do not guess one — slicing from an unproven user row
+            # would drop live assistant/tool rows, and persisting the projected
+            # result on its own would drop the repaired pair the raw context
+            # still carries. Keep the raw pre-turn context and settle the whole
+            # projected delta on top of it (#7237 review ownership defect 1,
+            # nesquena-hermes 2026-09-23).
+            #
+            # Data-regression guard (#7237 review, nesquena-hermes 2026-09-23):
+            # ``result_messages`` is the FULL conversation, not a current-turn
+            # delta — it is the projected history this process sent the Agent
+            # followed by the new turn's rows. Stripping suffix/prefix overlap
+            # from the full list cannot remove sanitizer-REWRITTEN historical
+            # rows, so the residual used to duplicate projected history beside
+            # the authoritative raw history in the next model context. When the
+            # exact projection sent to the Agent is threaded through, only rows
+            # proven to belong to the current turn may be appended; otherwise
+            # nothing is appended at all (fail closed).
+            logger.info(
+                "Prefix mismatch without compression and no proven current-turn "
+                "boundary nor projected-history prefix: keeping raw pre-turn "
+                "context (%d rows) verbatim; no unproven historical rows appended "
+                "(#7237 data-regression finding)",
+                len(previous_context),
+            )
+            return list(previous_context), None
+        # A marker that proves a NEW current-turn compression rotation
+        # explains the rotation: wholesale replacement of the historical
+        # prefix stays legitimate.
+        return result_messages, None
+    # Fast-path strict re-check (#7237 exact-prefix authority gap): the
+    # loose raw-prefix match normalized whitespace and truncated content at
+    # 500 characters, so a drifted historical row can look like a replayed
+    # prefix. The authority gate above already resolves every supplied
+    # projection in both directions when no marker proves a NEW current-turn
+    # rotation (exact prefix → ``previous_context + proven suffix``;
+    # non-exact → ``previous_context`` alone, round-N blocker 1), so this
+    # branch is a redundant safety net kept for defense-in-depth: if a
+    # future edit ever lets a supplied non-exact projection reach the
+    # raw-prefix path, it still fails closed.
+    if projected_history is not None and not _has_compression_rotation:
+        logger.info(
+            "Raw-prefix fast path hit, projected history supplied but not "
+            "an exact prefix: keeping raw pre-turn context (%d rows) "
+            "verbatim; no unproven suffix appended (#7237 exact-prefix "
+            "authority gap)",
+            len(previous_context),
+        )
+        return list(previous_context), None
     candidates = result_messages[len(previous_context):]
     # Strip stale merges only from the new-turn candidate slice so that
     # legitimate historical user rows in the already-committed previous_context
@@ -8057,12 +10693,22 @@ def _dedupe_replayed_context_messages(previous_context, result_messages, msg_tex
     candidates = _strip_replayed_prefix(previous_context, candidates)
     if candidates:
         candidates = _strip_replayed_context_items(previous_context, candidates)
-    return previous_context + candidates
+    return previous_context + candidates, None
 
 
-def _dedupe_replayed_active_context(previous_context, result_messages, msg_text=None):
-    """Keep model context append-only without re-appending a replayed tail."""
-    return _dedupe_replayed_context_messages(previous_context, result_messages, msg_text)
+def _dedupe_replayed_active_context(previous_context, result_messages, msg_text=None, projected_history=None, compression_authorized=False):
+    """Keep model context append-only without re-appending a replayed tail.
+
+    Compatibility shim: returns the settled context alone. Callers that need
+    the call-scoped protected rows must call ``_dedupe_replayed_context_messages``
+    directly and unpack the ``(settled, protected_rows)`` tuple (#7237 review
+    blocker 1, nesquena-hermes 2026-09-28).
+    """
+    settled, _protected = _dedupe_replayed_context_messages(
+        previous_context, result_messages, msg_text, projected_history=projected_history,
+        compression_authorized=bool(compression_authorized),
+    )
+    return settled
 
 
 def _is_context_compression_marker(msg):
@@ -8146,6 +10792,13 @@ def _find_current_user_turn(messages, msg_text):
         return last_strong_match
     if last_weak_match is not None:
         return last_weak_match
+    # No strong/weak match: returning the LAST user row (fallback) is safe
+    # because we only use it when no turn in the conversation matches the
+    # prompt at all — anchoring on the most recent user row is the closest
+    # match we have. Returning None would force the dedupe to skip the
+    # current-turn slice and risk wholesale history loss (#7237 review
+    # blocker 1 / 3 interaction: a None here means the whole current
+    # turn is dropped on the no-identity, no-marker path).
     return fallback
 
 
@@ -8336,6 +10989,143 @@ def _detect_stale_user_merge(message, msg_text, previous_user_tail, previous_con
         and len(stale_segments) == 1
         and _normalize_user_text(previous_user_tail) == stale_segments[0]
     )
+
+
+def _proven_tail_merge_exchange(
+    projected_history,
+    result_messages,
+    msg_text,
+    previous_user_tail,
+    previous_context,
+):
+    """Return the current-turn rows to append for a VERIFIED tail-merge, or None.
+
+    The installed Agent merges consecutive user rows. When the user sends a
+    follow-up after an unanswered user tail, the Agent's pass-0 repair folds
+    that trailing user row together with the submitted prompt, so the returned
+    list is no longer the sent projection with the current turn appended — the
+    last projection row (the answered tail) is replaced by the merged current
+    user row. The projection-authority gate would otherwise fail closed and the
+    reply would be lost (#7237 review round-N+2 finding 3, nesquena-hermes
+    2026-10-05).
+
+    This helper proves the tail-merge WITHOUT trusting the merge:
+      * every projection row BEFORE the boundary matches exactly
+        (``_messages_have_prefix_exact`` on ``projected_history[:-1]``), and
+      * after stripping the first projection row (the replayed tail) the
+        current exchange is validated against the submitted ``msg_text``.
+
+    On success returns ``(cleaned_current_rows, protected_rows)`` whose cleaned
+    rows replace the polluted merged tail and whose remaining rows are the
+    appended current-turn suffix. Returns ``None`` when the shape is not a
+    verified tail-merge and the settle must fail closed.
+    """
+    projection = list(projected_history or [])
+    result = list(result_messages or [])
+    if len(projection) < 1 or len(result) < len(projection):
+        return None
+    # All projected rows before the tail must match exactly — this is what makes
+    # the merge provenance trustworthy (a fully divergent list is not a tail-merge).
+    if not _messages_have_prefix_exact(result, projection[:-1]):
+        return None
+    boundary_idx = len(projection) - 1
+    boundary_row = result[boundary_idx]
+    if not isinstance(boundary_row, dict) or boundary_row.get("role") != "user":
+        return None
+    # The merged current row must be explainable by the prior tail + submitted
+    # prompt. Require the STALE-MERGE shape specifically: the boundary row folds
+    # a replayed prior user emoji/tail together with the submitted prompt, which
+    # ``_detect_stale_user_merge`` validates (suffix normalizes to the ENTIRE
+    # submitted prompt; the prefix is explained by prior user context). A bare
+    # ``_looks_like_current_user_turn`` match is NOT a tail-merge — a replayed
+    # historical row whose text merely normalizes to the prompt (whitespace
+    # drift of the projection's own tail) must still fail closed on the project-
+    # authority gate (#7237 review round-N+2 finding 3).
+    is_stale_merge = bool(
+        previous_user_tail
+        and _detect_stale_user_merge(
+            boundary_row,
+            msg_text,
+            previous_user_tail,
+            previous_context=previous_context,
+        )
+    )
+    if not is_stale_merge:
+        return None
+    # The merged row carries the polluted tail + current prompt; clean it back to
+    # the submitted turn and keep every row after it (the current-turn suffix).
+    #
+    # #7237 review round 3 finding 3 (nesquena-hermes 2026-10-06): the boundary
+    # row's ownership is ESTABLISHED here — it is the row the Agent produced for
+    # THIS call, validated by ``_detect_stale_user_merge`` against the submitted
+    # prompt. Content equality must not erase that.
+    #
+    # The replay stripper keys purely on ``(role, text, tool ids)``
+    # (``_message_replay_key`` -> ``_message_identity``), so a same-text re-ask
+    # makes the cleaned boundary row byte-identical to the unanswered tail at
+    # the end of ``previous_context``. ``_strip_replayed_prefix`` then measures
+    # that as a replay overlap and drops the row — the reply ships with no
+    # prompt in front of it, and the current turn's user row is gone. The token
+    # survives ``copy.deepcopy``, so ownership IS available here; the stripper
+    # simply cannot see it.
+    cleaned_boundary = copy.deepcopy(boundary_row)
+    cleaned_boundary["content"] = msg_text
+    cleaned_boundary.pop("api_content", None)
+    cleaned_rows = [cleaned_boundary] + result[boundary_idx + 1:]
+    _clean = _strip_replayed_prefix(previous_context, cleaned_rows)
+    if _clean:
+        _clean = _strip_replayed_context_items(previous_context, _clean)
+    if not _clean:
+        return cleaned_rows, None
+    # Restore the verified boundary row if the text-keyed strip consumed it.
+    # This is NOT a blanket "keep the current turn" rule: the row was proven to
+    # be the Agent's output for THIS call by ``_detect_stale_user_merge``, so
+    # removing it discards a turn the producer really answered. A row that
+    # fails that proof never reaches this branch (the gate above returns None),
+    # so the re-ask cannot use this path to resurrect historical material.
+    #
+    # It goes back where the Agent put it: immediately before the current-turn
+    # assistant suffix that follows it. Inserting after that suffix would
+    # produce ``assistant, user`` — a user turn answering nothing.
+    if not any(
+        isinstance(row, dict) and row is cleaned_boundary for row in _clean
+    ):
+        _insert_at = len(_clean)
+        for _idx, _row in enumerate(_clean):
+            if isinstance(_row, dict) and _row.get("role") == "assistant":
+                _insert_at = _idx
+                break
+        _clean = _clean[:_insert_at] + [cleaned_boundary] + _clean[_insert_at:]
+    return _clean, None
+
+
+def _verified_tail_merge_result(
+    projected_history,
+    result_messages,
+    msg_text,
+    previous_user_tail,
+    previous_context,
+):
+    """Return ``(current_turn_rows, protected_rows)`` for a verified tail-merge,
+    or ``(None, None)`` when not proven. Thin wrapper of
+    ``_proven_tail_merge_exchange`` returning protected-row keys for the call
+    scope."""
+    resolved = _proven_tail_merge_exchange(
+        projected_history,
+        result_messages,
+        msg_text,
+        previous_user_tail,
+        previous_context,
+    )
+    if resolved is None:
+        return None, None
+    current_turn_rows, _empty = resolved
+    _protected = {
+        _message_replay_key(row)
+        for row in current_turn_rows
+        if isinstance(row, dict)
+    }
+    return current_turn_rows, _protected
 
 
 def _strip_stale_user_merge_from_messages(
@@ -8595,7 +11385,29 @@ def _advance_truncation_watermark_after_commit(session) -> None:
             if isinstance(ts, (int, float)) and ts > 0:
                 session.truncation_watermark = float(ts)
                 return
-    session.truncation_watermark = time.time()
+    # No timestamped user row (e.g. a handoff/background-notification turn
+    # committed without one). The watermark's meaning is "suppress the
+    # REPLACED tail", so it must stay anchored to a real message timestamp --
+    # stamping wall-clock time here made the watermark NEWER than every row in
+    # the sidecar, which permanently starved the sidecar_advanced_past_watermark
+    # guard of the only signal that would let newer state.db rows merge back.
+    # That is a self-locking filter: the rows needed to advance the sidecar past
+    # the watermark are exactly the rows the watermark hides. Clamp to the
+    # newest real message instead, keeping the sidecar able to advance past it.
+    # Never 0.0 (the truncate-to-empty sentinel that must keep blocking replay,
+    # #2914) -- hence the >0 check.
+    newest_real_ts = None
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        ts = msg.get('timestamp') or msg.get('_ts')
+        if isinstance(ts, (int, float)) and ts > 0:
+            newest_real_ts = ts if newest_real_ts is None else max(newest_real_ts, ts)
+    if newest_real_ts is not None:
+        session.truncation_watermark = float(newest_real_ts)
+    # Otherwise: genuinely no timestamped row at all. Keep the existing (stale)
+    # value rather than inventing a wall-clock boundary — a too-old watermark
+    # only over-filters the replaced tail; it cannot self-lock the merge.
 
 
 def _merge_display_messages_after_agent_result(
@@ -8741,27 +11553,48 @@ def _merge_display_messages_after_agent_result(
             )
         )
         _display_id_set = {_message_identity(m) for m in previous_display}
-        _context_id_set = {
-            _message_identity(m)
-            for m in previous_context
-            if not (
+        # A context tool row whose durable row is already displayed is the same
+        # row (e.g. an Agent-pruned summary of the visible full output), never
+        # a context-only turn, regardless of how its content was rewritten.
+        # Map it to its display twin's identity so it is never inserted but
+        # still anchors the backfill cursor at the visible tool result.
+        _display_identity_by_durable_tool_row = {}
+        for m in previous_display:
+            _durable = _durable_tool_row_identity(m)
+            if _durable is not None:
+                _display_identity_by_durable_tool_row.setdefault(_durable, _message_identity(m))
+
+        def _is_displayed_native_image_context_row(m):
+            return (
                 isinstance(m, dict)
                 and m.get('_active_turn_token') in _displayed_native_image_context_tokens
             )
+
+        def _displayed_durable_tool_twin_identity(m):
+            _durable = _durable_tool_row_identity(m)
+            if _durable is None:
+                return None
+            return _display_identity_by_durable_tool_row.get(_durable)
+
+        _context_id_set = {
+            _message_identity(m)
+            for m in previous_context
+            if not _is_displayed_native_image_context_row(m)
+            if _displayed_durable_tool_twin_identity(m) is None
             if not _is_context_compression_marker(m)
             and not _is_compressed_context_tool_result_summary_message(m)
         }
         _has_context_only_turns = bool(_context_id_set - _display_id_set)
         if _has_context_only_turns:
-            context_keys = [
-                None
-                if (
-                    isinstance(m, dict)
-                    and m.get('_active_turn_token') in _displayed_native_image_context_tokens
+            context_keys = []
+            for m in previous_context:
+                if _is_displayed_native_image_context_row(m):
+                    context_keys.append(None)
+                    continue
+                _twin_identity = _displayed_durable_tool_twin_identity(m)
+                context_keys.append(
+                    _twin_identity if _twin_identity is not None else _message_identity(m)
                 )
-                else _message_identity(m)
-                for m in previous_context
-            ]
             # Precompute display keys once; avoids repeated json.dumps calls inside
             # the inner any() loop (was O(D²·C) — see perf fix below).
             _display_keys = [_message_identity(m) for m in previous_display]
@@ -9716,7 +12549,12 @@ def _sse_keepalive(handler) -> None:
 def _sse(handler, event, data):
     """Write one SSE event to the response stream."""
     payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-    _sse_write(handler, payload.encode('utf-8'))
+    try:
+        encoded = payload.encode('utf-8')
+    except UnicodeEncodeError:
+        payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=True)}\n\n"
+        encoded = payload.encode('utf-8')
+    _sse_write(handler, encoded)
 
 
 # ── SSE write deadline (Defect A: per-connection thread exhaustion) ─────────
@@ -9835,6 +12673,14 @@ def _materialize_pending_user_turn_before_error(
         existing = messages[-1]
         if not isinstance(existing, dict) or existing.get('role') != 'user':
             return False
+        if active_turn_token and existing.get('_active_turn_token') and existing.get('_active_turn_token') != active_turn_token:
+            # Text + integer-second timestamp is not ownership (re-gate
+            # 2026-10-06 item 3): a second interrupt of the same prompt
+            # inside one second carries a DIFFERENT stream token, and this
+            # turn's recovery must run instead of collapsing into the other
+            # turn's row. Token-less rows (legacy data) keep the established
+            # timestamp check.
+            return False
         existing_source = existing.get('_source') or 'webui'
         try:
             existing_ts = int(existing.get('timestamp'))
@@ -9847,6 +12693,43 @@ def _materialize_pending_user_turn_before_error(
             and list(existing.get('attachments') or []) == pending_attachments
         )
 
+    def ctx_already_has_turn_mirror(ctx):
+        """True when the model context already carries this turn's mirror.
+
+        The gateway cancel-time reconcile (_reconcile_gateway_cancelled_context)
+        mirrors the interrupted prompt into context_messages BEFORE
+        _persist_cancelled_turn runs (re-gate 2026-10-05 item 2 order), and the
+        mirrored partial may trail it. Scanning the recent tail (not just the
+        last row) recognizes that mirror by content + timestamp + source and
+        prevents a second user row on a replayed settle.
+        """
+        if not isinstance(ctx, list) or not ctx:
+            return False
+        for row in reversed(ctx[-8:]):
+            if not (isinstance(row, dict) and row.get('role') == 'user'):
+                continue
+            if _normalize_user_text(_message_text(row.get('content'))) != _normalize_user_text(pending_text):
+                break
+            if (
+                active_turn_token
+                and row.get('_active_turn_token')
+                and row.get('_active_turn_token') != active_turn_token
+            ):
+                # Not this stream's row (re-gate 2026-10-06 item 3): the
+                # reconcile may not have mirrored this turn yet, or the
+                # matching row belongs to a different interrupt of the same
+                # prompt inside the same second. Token-less rows keep the
+                # established timestamp check.
+                break
+            try:
+                row_ts = int(row.get('timestamp'))
+            except (TypeError, ValueError):
+                break
+            if row_ts == recovered_ts and (row.get('_source') or 'webui') == pending_source:
+                return True
+            break
+        return False
+
     if is_exact_checkpoint(getattr(session, 'messages', None)):
         return False
     recovered = {
@@ -9857,7 +12740,17 @@ def _materialize_pending_user_turn_before_error(
     }
     if str(pending_source or '').strip().lower() == 'fork':
         recovered['_fork_child_turn'] = session.session_id
-    stamp_message_source(recovered, pending_source)
+    elif (
+        str(pending_source or '').strip().lower() == 'delegation_wakeup'
+        and str(getattr(session, 'session_source', None) or '').strip().lower() == 'fork'
+    ):
+        # Fork-internal delegation wakeup: keep the typed _source for hiding but
+        # carry the fork-ownership proof regeneration requires (#7882 re-gate).
+        recovered['_fork_child_turn'] = session.session_id
+    # The recovered row carries this stream's active-turn token so every
+    # downstream dedup can prove ownership by identity instead of by
+    # content + integer-second timestamp (re-gate 2026-10-06 item 3).
+    stamp_message_source(recovered, pending_source, active_turn_token=active_turn_token)
     if pending_attachments:
         recovered['attachments'] = pending_attachments
     session.messages.append(recovered)
@@ -9870,7 +12763,12 @@ def _materialize_pending_user_turn_before_error(
     # Placing the mirror here (rather than in _persist_cancelled_turn) covers
     # all three callers: cancel, provider-error, and exception paths.
     ctx = getattr(session, 'context_messages', None)
-    if isinstance(ctx, list) and ctx and not is_exact_checkpoint(ctx):
+    if (
+        isinstance(ctx, list)
+        and ctx
+        and not is_exact_checkpoint(ctx)
+        and not ctx_already_has_turn_mirror(ctx)
+    ):
         ctx.append(dict(recovered))
     # The new user turn is now committed to messages (#3831): advance a positive
     # truncation watermark left over from a prior retry/undo/edit so that
@@ -10324,6 +13222,118 @@ def _register_pending_user_timestamp_identity(
         save(touch_updated_at=False, skip_index=True)
 
 
+def _preserve_legacy_agent_row_identity(callable_obj, identity):
+    """Keep IDs returned by an older Agent's actual SQLite append calls.
+
+    Some Agents accept user timestamps but still discard returned row IDs.
+    Observe only this flush's calls on its own thread/DB instance, then attach
+    the returned IDs to those exact dicts. This is write provenance, not a
+    content-only guess about an independently read historical transcript.
+    """
+    agent = getattr(callable_obj, '__self__', None)
+    context = getattr(agent, '_webui_legacy_identity_context', None)
+    if not isinstance(identity, dict):
+        if isinstance(context, threading.local):
+            context.owner = None
+        return
+    flush = getattr(agent, '_flush_messages_to_session_db', None)
+    if not callable(flush):
+        return
+    if not isinstance(context, threading.local):
+        context = threading.local()
+        agent._webui_legacy_identity_context = context
+    context.owner = copy.deepcopy(identity)
+    if getattr(agent, '_webui_legacy_identity_adapter', False):
+        return
+
+    def flush_with_identity(messages, conversation_history=None):
+        owner = copy.deepcopy(getattr(context, 'owner', None))
+        if not isinstance(owner, dict):
+            return flush(messages, conversation_history)
+        db = getattr(agent, '_session_db', None)
+        append = getattr(db, 'append_message', None)
+        namespace = getattr(db, '__dict__', None)
+        if not callable(append) or not isinstance(namespace, dict):
+            return flush(messages, conversation_history)
+        lock = namespace.setdefault('_webui_legacy_identity_lock', threading.RLock())
+        with lock:
+            original_override = namespace.get('append_message')
+            had_override = 'append_message' in namespace
+            sid = getattr(agent, 'session_id', None)
+            start = max(len(conversation_history or []), getattr(agent, '_last_flushed_db_idx', 0))
+            rows = list(messages[start:])
+            observed = []
+            owner_thread = threading.get_ident()
+
+            def observed_append(*args, **kwargs):
+                row_id = append(*args, **kwargs)
+                if threading.get_ident() == owner_thread:
+                    observed.append((kwargs, row_id))
+                return row_id
+
+            db.append_message = observed_append
+            try:
+                result = flush(messages, conversation_history)
+            finally:
+                if namespace.get('append_message') is observed_append:
+                    if had_override:
+                        db.append_message = original_override
+                    else:
+                        del db.append_message
+            if (getattr(agent, '_session_db', None) is not db
+                    or getattr(agent, 'session_id', None) != sid
+                    or not rows or len(rows) != len(observed)):
+                return result
+            ids = [row_id for _, row_id in observed]
+            if not all(type(row_id) is int and row_id > 0 for row_id in ids) or len(set(ids)) != len(ids):
+                return result
+            index = getattr(agent, '_persist_user_message_idx', None)
+            for offset, (row, (written, row_id)) in enumerate(zip(rows, observed, strict=True)):
+                known_id, valid = _state_db_row_identity_details(row)
+                # Later legacy flushes apply the clean user override only to
+                # SQLite, leaving the workspace prefix in the live dict.
+                current_user_override = (
+                    type(index) is int and index == start + offset
+                    and owner.get('session_id') == sid and owner.get('token')
+                    and getattr(context, 'owner', None) == owner
+                    and written.get('role') == 'user'
+                    and written.get('content') == getattr(agent, '_persist_user_message_override', None)
+                    and written.get('content') == owner.get('text')
+                    and _active_turn_user_text_matches(row, owner.get('text'))
+                )
+                if (not isinstance(row, dict) or written.get('session_id') != sid
+                        or written.get('role') != row.get('role')
+                        or (written.get('content') != row.get('content') and not current_user_override)
+                        or not valid or known_id not in (None, str(row_id))):
+                    return result
+            # Native producers retain their own provenance and clock contract.
+            # The run signature alone does not establish that capability.
+            if all(_state_db_row_identity_details(row)[0] == str(row_id)
+                   for row, row_id in zip(rows, ids, strict=True)):
+                return result
+            for row, row_id in zip(rows, ids, strict=True):
+                row['_state_db_row_id'] = row_id
+            # The old Agent exports an index but no turn_id. Its own indexed
+            # dict plus this successful append proves the active user; retain
+            # WebUI's run token so shared settlement does not insert it again.
+            if (isinstance(owner, dict) and owner.get('session_id') == sid
+                    and getattr(context, 'owner', None) == owner
+                    and owner.get('token') and type(index) is int
+                    and start <= index < start + len(rows)
+                    and _active_turn_user_text_matches(messages[index], owner.get('text'))):
+                stamp_message_source(messages[index], owner.get('source') or 'webui',
+                                     active_turn_token=owner['token'])
+                row_timestamp, row_clock_valid = _message_exact_timestamp_details(messages[index])
+                owner_timestamp, owner_clock_valid = _message_exact_timestamp_details(
+                    {'timestamp': owner.get('timestamp')})
+                if row_clock_valid and row_timestamp is None and owner_clock_valid and owner_timestamp is not None:
+                    messages[index]['timestamp'] = owner_timestamp
+            return result
+
+    agent._flush_messages_to_session_db = flush_with_identity
+    agent._webui_legacy_identity_adapter = True
+
+
 def _build_run_conversation_kwargs(
     callable_obj,
     *,
@@ -10334,13 +13344,17 @@ def _build_run_conversation_kwargs(
     task_id,
     persist_user_message,
     persist_user_timestamp,
+    legacy_row_identity_owner=None,
 ):
-    """Build one rolling-compatible Agent invocation contract without mutation.
+    """Build one rolling-compatible Agent invocation contract.
 
     ``persist_user_timestamp`` is signature-gated (#6935): an older
     hermes-agent whose ``run_conversation()`` predates the kwarg must not
     receive it, or the call trips a TypeError before the turn starts.
+    The title-only override is gated the same way and uses the submitted
+    prompt, not the workspace/notification-enriched model input.
     """
+    _preserve_legacy_agent_row_identity(callable_obj, legacy_row_identity_owner)
     kwargs = {
         "user_message": user_message,
         "system_message": system_message,
@@ -10359,6 +13373,12 @@ def _build_run_conversation_kwargs(
         kwargs,
         "conversation_history_revision",
         conversation_history_revision,
+    )
+    _add_supported_run_conversation_kwarg(
+        callable_obj,
+        kwargs,
+        "title_user_message",
+        persist_user_message,
     )
     return kwargs
 
@@ -10461,6 +13481,7 @@ def _compute_agent_cache_signature(
     reasoning_config=None,
     main_request_overrides=None,
     _main_request_overrides=None,
+    provider_routing_kwargs=None,
     prefill_context=None,
     profile_home: str | None = None,
     safe_profile_runtime_env: dict | None = None,
@@ -10487,6 +13508,7 @@ def _compute_agent_cache_signature(
         sorted(toolsets) if toolsets else [],
         reasoning_config or {},
         _main_request_overrides or {},
+        provider_routing_kwargs or {},
         _public_prefill_context_status(prefill_context),
         profile_home or '',
         _env.get('TERMINAL_ENV', '') or '',
@@ -10772,18 +13794,20 @@ def _run_agent_streaming(
                     ephemeral=bool(ephemeral),
                     backend=WEBUI_LOCAL_CHAT_BACKEND,
                 )
+                # Worker admission ends the launch phase (#7302 finding 5): retire
+                # the claim published at registration. Ownership lives in
+                # ACTIVE_RUNS from here on.
+                from api.config import retire_pre_admission_claim_if_owned
+
+                retire_pre_admission_claim_if_owned(stream_id, streams_lock_held=True)
     if q is None:
-        # The stream was cancelled before the worker started; the route layer
-        # already registered the stream owner, so release it here to avoid
-        # leaking a STREAM_SESSION_OWNERS entry that the teardown finally never sees.
-        unregister_stream_owner(stream_id)
-        try:
-            clear_session_writeback_owner_if_owned(session_id, stream_id)
-        except Exception:
-            logger.debug(
-                "Failed to clear session writeback owner for stream %s", stream_id,
-                exc_info=True,
-            )
+        # The stream was cancelled (or cleared as an orphan) before this worker
+        # was admitted, so no teardown finally will ever run for it: release
+        # EVERY registry the route layer registered for the stream, not just the
+        # owner and writeback rows. STREAM_GOAL_RELATED is written before worker
+        # admission (api/routes.py `_start_chat_stream_for_session`), so a
+        # pre-start cancellation otherwise strands it for the process lifetime.
+        release_stream_owned_registries(stream_id, session_id=session_id)
         return
     try:
         run_journal = RunJournalWriter(session_id, stream_id)
@@ -11396,6 +14420,7 @@ def _run_agent_streaming(
             else getattr(s, "model_provider", None)
         )
         provider_context = str(provider_context).strip().lower() if provider_context else None
+        _turn_route_provider = provider_context
         _agent_lock = _get_session_agent_lock(session_id)
         # #4251: the route layer already persisted this turn's model under the
         # session lock before dispatch, so a mismatch here means a newer picker
@@ -11415,6 +14440,8 @@ def _run_agent_streaming(
                 _last_persisted_model = model
                 _last_persisted_provider = provider_context
                 _turn_owns_persisted_model = True
+                _turn_route_model = model
+                _turn_route_provider = provider_context
 
         # TD1: set thread-local env context so concurrent sessions don't clobber globals
         # Check for pre-flight cancel (user cancelled before agent even started)
@@ -11478,6 +14505,11 @@ def _run_agent_streaming(
                 s.model_provider = provider_context
                 if _repaired and model != (s.model or ""):
                     s.model = model
+                _last_persisted_model = s.model
+                _last_persisted_provider = s.model_provider
+                # ponytail: finalize route snapshot when profile normalization is accepted
+                _turn_route_model = s.model
+                _turn_route_provider = s.model_provider
 
         # Capture the resolved profile name now, while profile context is
         # reliable. Used in the compression migration block to stamp s.profile
@@ -12328,6 +15360,7 @@ def _run_agent_streaming(
             # detached worker for a NAMED profile paired that profile's endpoint
             # with the DEFAULT profile's API key (finding #3). No-op for the
             # default/root profile.
+            _session_requested_provider = None
             with profiles_api.profile_scope_for_detached_worker(
                 _resolved_profile_name, "model + credential resolution", logger_override=logger
             ):
@@ -12653,6 +15686,15 @@ def _run_agent_streaming(
             # re-instantiated fresh each turn (#855).
             if 'gateway_session_key' in _agent_params:
                 _agent_kwargs['gateway_session_key'] = session_id
+            # OpenRouter provider_routing (sort/ignore/only/order): mirror the
+            # gateway's TurnRunner so browser chat turns respect the profile's
+            # provider_routing block. Per-param guarded for older agent builds.
+            # Captured (not recomputed) so the agent-cache signature below can
+            # include the effective routing: editing sort/only/ignore must mint
+            # a new agent for an already-open session instead of reusing one
+            # built on the old routing.
+            _routing_kwargs = _provider_routing_kwargs_for_agent(_cfg, _agent_params)
+            _agent_kwargs.update(_routing_kwargs)
 
             # ── Agent cache: reuse across messages in the same session ──
             # Mirrors gateway _agent_cache.  Keeps _user_turn_count alive so
@@ -12678,6 +15720,7 @@ def _run_agent_streaming(
                     toolsets=_toolsets,
                     reasoning_config=_reasoning_config,
                     main_request_overrides=_main_request_overrides,
+                    provider_routing_kwargs=_routing_kwargs,
                     prefill_context=_prefill_context,
                     profile_home=_profile_home,
                     safe_profile_runtime_env=_safe_profile_runtime_env,
@@ -12896,6 +15939,8 @@ def _run_agent_streaming(
                 session_id,
                 profile=getattr(s, 'profile', None),
                 with_revision=True,
+                **({'include_row_identity': True}
+                   if _cancelled_journal_turn_owner(s.messages) else {}),
             )
 
             def _context_and_revision_from_state_snapshot(state_snapshot):
@@ -12923,6 +15968,8 @@ def _run_agent_streaming(
                     session_id,
                     profile=getattr(s, 'profile', None),
                     with_revision=True,
+                    **({'include_row_identity': True}
+                       if _cancelled_journal_turn_owner(s.messages) else {}),
                 )
                 return _context_and_revision_from_state_snapshot(fresh_state_snapshot)
 
@@ -13045,11 +16092,22 @@ def _run_agent_streaming(
                     effective_provider=resolved_provider,
                     effective_base_url=resolved_base_url,
                     requested_provider=(_session_requested_provider or ""),
+                    # #7237 review round 3 finding 5 (nesquena-hermes
+                    # 2026-10-06): model the installed Agent's unconditional
+                    # merge of adjacent bare assistant rows on the replay
+                    # projection. Without it the Agent merges the pair, the
+                    # returned prefix stops matching this snapshot, and the
+                    # second successive follow-up loses its prompt and reply.
+                    # Default-off elsewhere so #8034 wire parity is untouched.
+                    normalize_bare_assistant_adjacency=True,
                 ),
                 conversation_history_revision=_conversation_history_revision,
                 task_id=session_id,
                 persist_user_message=msg_text,
                 persist_user_timestamp=_persist_user_timestamp,
+                legacy_row_identity_owner=(
+                    _active_turn_identity if _cancelled_journal_turn_owner(s.messages) else None
+                ),
             )
             # Only pass moa_config when a /moa override is actually active, so a
             # normal send never trips a TypeError on an older hermes-agent whose
@@ -13102,8 +16160,43 @@ def _run_agent_streaming(
                     _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
                 put('cancel', _cancel_event_payload('Cancelled by user'))
                 return
+            # Thread the EXACT conversation-history projection handed to the
+            # Agent through to the settle path. ``result["messages"]`` is the
+            # full conversation (projection + current turn), so without this
+            # signal the replay dedupe cannot tell which rows the current turn
+            # owns and sanitizer-rewritten historical rows could be appended
+            # beside the authoritative raw history (#7237 review
+            # data-regression finding, nesquena-hermes 2026-09-23).
+            #
+            # The settle proof compares the UNCONDITIONAL merge of the sent
+            # rows (the form the installed Agent returns), because the sent
+            # projection itself keeps out-of-clock-order splice pairs separate
+            # (#7237 boundary matrix late-output shapes).
+            _run_conversation_projected_history = _agent_replay_settle_projection(
+                _run_conversation_kwargs.get("conversation_history") or []
+            )
             result = agent.run_conversation(**_run_conversation_kwargs)
             _remember_pending_steer_result(result)
+            # #7237 review round-N+1 residual (nesquena-hermes, 2026-09-28):
+            # wholesale-replacement authority for the settle must come from the
+            # PRODUCER, never from marker text or position. The producer's own
+            # evidence that this turn rotated the context is the Agent
+            # rotating its session_id: the context layer hands a rotated
+            # conversation a fresh id, so a non-empty continuation id inside
+            # this call means a compression really ran HERE. A marker that
+            # merely appears — replayed, drifted, or relocated to index 0 — is
+            # historical material and gets no authority. Computed once, right
+            # after the Agent returns, and threaded per-call into the settle.
+            # ``#7237 review round 3 (nesquena-hermes 2026-10-06)``: the
+            # producer can commit compression in place (keeping its session id
+            # and setting ``_last_compaction_in_place``), which the installed
+            # Agent does by default. The old id-rotation-only proxy therefore
+            # never saw the most common case, and a genuinely compressed turn
+            # was refused by the settle — the answer vanished and the 24 old
+            # rows survived. Honour both producer commitments through the
+            # shared predicate, which both the streaming and sync settles now
+            # call so they cannot drift apart again.
+            _compressed_this_turn = _producer_committed_compression(agent, session_id)
             _active_turn_identity = _resolve_active_turn_authority(
                 _active_turn_identity,
                 result=result,
@@ -13262,6 +16355,8 @@ def _run_agent_streaming(
                         msg_text,
                         _turn_pending_source,
                         _active_turn_identity,
+                        _run_conversation_projected_history,
+                        compression_authorized=_compressed_this_turn,
                     )
                 # Strip XML tool-call blocks from assistant message content.
                 # DeepSeek and some other providers emit <function_calls>...</function_calls>
@@ -13300,7 +16395,7 @@ def _run_agent_streaming(
                     new_sid = _agent_sid
                     _compression_origin_session_id = old_sid
                     _compression_continuation_session_id = new_sid
-                    s.session_id = new_sid
+                    _pre_migration_profile = s.profile
                     # Carry profile identity across the compression boundary.
                     # Without this, s.profile stays None on the continuation
                     # session. On the next request, _run_agent_streaming calls
@@ -13317,59 +16412,11 @@ def _run_agent_streaming(
                             "Stamped profile=%r on continuation session %s after compression",
                             _resolved_profile_name, new_sid,
                         )
-                    # Preserve the original session file so the full pre-compression
-                    # history survives even when summarisation fails. The previous
-                    # implementation renamed old_sid.json → new_sid.json, which
-                    # destroyed the only persistent copy of the uncompressed history
-                    # before the new (possibly summary-only) session had been saved.
-                    # If the LLM summariser also failed, the user was left with zero
-                    # recoverable messages. (#2223)
-                    # ---
-                    # Archive the old session: write its current state to disk so
-                    # the full conversation history survives even when context
-                    # compression removes messages from the model's context. Skip
-                    # the write when the file already contains up-to-date data
-                    # (i.e. it was just saved by a checkpoint).
-                    _preserve_pre_compression_snapshot(s, old_sid)
-                    # The continuation is the live/tip session, not another archived
-                    # snapshot. If the in-memory object was itself loaded from a
-                    # pre-compression snapshot (possible on repeated compression chains
-                    # or stale-cache repair paths), _preserve_pre_compression_snapshot()
-                    # intentionally restores that old flag; clear it before saving the
-                    # new continuation so sidebar/discoverability code does not hide the
-                    # session that owns the completed turn.
-                    s.pre_compression_snapshot = False
-                    # Always link the continuation session to its immediate predecessor
-                    # (the preserved snapshot). This OVERRIDES any prior
-                    # parent_session_id because the new continuation IS the next link
-                    # in the chain: traversal walks new → old → old.parent → ... root.
-                    # Stage-353 Opus SHOULD-FIX: previous `if not s.parent_session_id`
-                    # guard skipped this stamp on fork-of-fork compressions, so a
-                    # subsequent traversal from the new continuation would jump
-                    # over the just-preserved snapshot back to the original fork
-                    # parent, losing access to the recoverable history in old_sid.json.
-                    s.parent_session_id = old_sid
-                    with LOCK:
-                        cached_old_session = SESSIONS.pop(old_sid, None)
-                        if cached_old_session is not None and cached_old_session is not s:
-                            cached_old_sid = str(getattr(cached_old_session, 'session_id', '') or '')
-                            if cached_old_sid == str(old_sid):
-                                SESSIONS[old_sid] = cached_old_session
-                            else:
-                                logger.warning(
-                                    "compression cache migration skipped stale object: old_sid=%s new_sid=%s cached_session_id=%s",
-                                    old_sid,
-                                    new_sid,
-                                    cached_old_sid or None,
-                                )
-                        SESSIONS[new_sid] = s
-                        SESSIONS.move_to_end(new_sid)
-                        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-                    # Migrate the per-session lock by aliasing new_sid to the
-                    # held _agent_lock reference directly. Keep old_sid aliased
-                    # too until the weak registry can reclaim both safely after
-                    # all old-ID holders and waiters release the lock.
-                    _alias_session_agent_lock(old_sid, new_sid, _agent_lock)
+                    if not _migrate_compression_session_ownership(s, old_sid, new_sid, _agent_lock):
+                        s.profile = _pre_migration_profile
+                        raise RuntimeError(
+                            f"Failed to migrate compressed-session ownership: {old_sid}->{new_sid}",
+                        )
                     # Migrate cached agent to the new session ID so the turn
                     # count survives context compression.
                     from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
@@ -13619,6 +16666,7 @@ def _run_agent_streaming(
                                 toolsets=_toolsets,
                                 reasoning_config=_reasoning_config,
                                 main_request_overrides=_main_request_overrides,
+                                provider_routing_kwargs=_routing_kwargs,
                                 prefill_context=_prefill_context,
                                 profile_home=_profile_home,
                                 safe_profile_runtime_env=_safe_profile_runtime_env,
@@ -13656,6 +16704,13 @@ def _run_agent_streaming(
                                         effective_provider=resolved_provider,
                                         effective_base_url=resolved_base_url,
                                         requested_provider=(_session_requested_provider or ""),
+                                        # #7237 round 3 finding 5: the heal retry
+                                        # re-enters the same Agent with the same
+                                        # replay contract, so it must apply the
+                                        # same bare-assistant normalization as
+                                        # the primary send or the retry's snapshot
+                                        # diverges from what the Agent returns.
+                                        normalize_bare_assistant_adjacency=True,
                                     ),
                                     conversation_history_revision=(
                                         _heal_conversation_history_revision
@@ -13663,6 +16718,9 @@ def _run_agent_streaming(
                                     task_id=session_id,
                                     persist_user_message=msg_text,
                                     persist_user_timestamp=_heal_persist_user_timestamp,
+                                    legacy_row_identity_owner=(
+                                        _active_turn_identity if _cancelled_journal_turn_owner(s.messages) else None
+                                    ),
                                 )
                                 if moa_config is not None:
                                     _heal_kwargs["moa_config"] = moa_config
@@ -13674,6 +16732,17 @@ def _run_agent_streaming(
                                     _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
                                     put('cancel', _cancel_event_payload('Cancelled by user'))
                                     return
+                                # The heal retry sent its own projection;
+                                # thread it so the settle's ownership signal
+                                # matches the run that produced this result
+                                # (#7237 review data-regression finding).
+                                # The settle proof uses the UNCONDITIONAL merge
+                                # of the sent rows (the form the installed
+                                # Agent returns; splice pairs stay separate in
+                                # the sent projection itself).
+                                _heal_projected_history = _agent_replay_settle_projection(
+                                    _heal_kwargs.get("conversation_history") or []
+                                )
                                 _heal_result = agent.run_conversation(**_heal_kwargs)
                                 _remember_pending_steer_result(_heal_result)
                                 _active_turn_identity = _resolve_active_turn_authority(
@@ -13726,6 +16795,20 @@ def _run_agent_streaming(
                                     msg_text,
                                     _turn_pending_source,
                                     _active_turn_identity,
+                                    _heal_projected_history,
+                                    # #7237 review blocker 4 (nesquena-hermes
+                                    # 2026-10-09): the first heal retry's
+                                    # result was produced by THIS ``agent``
+                                    # (fresh credentials, same instance), so
+                                    # the compression authority must read the
+                                    # shared producer commitment from it —
+                                    # rotation-only proxies cannot see the
+                                    # default in-place compaction and the
+                                    # settle would refuse a genuine
+                                    # compression, dropping the healed answer.
+                                    compression_authorized=_producer_committed_compression(
+                                        agent, session_id
+                                    ),
                                 )
                                 # normal post-result persistence path by
                                 # leaving _assistant_added truthy (set below).
@@ -13784,7 +16867,7 @@ def _run_agent_streaming(
                             _err_type,
                             _err_hint,
                         )
-                        if _turn_pending_source == 'process_wakeup':
+                        if _turn_pending_source in ('process_wakeup', 'delegation_wakeup'):
                             _recorded_pause = record_process_wakeup_provider_unavailable_pause(
                                 s,
                                 classification=_err_type,
@@ -13890,10 +16973,19 @@ def _run_agent_streaming(
                         _compressed = True
                 # Notify the frontend that compression happened
                 if _compressed:
-                    s.context_messages = _prune_context_tool_results_after_compression(
-                        agent,
-                        s.context_messages,
-                    )
+                    # Only the native engine gets hard tool-result pruning;
+                    # external engines (e.g. lcm-x) own their budget/ref markers.
+                    if _should_prune_tool_results_after_compression(agent):
+                        s.context_messages = _prune_context_tool_results_after_compression(
+                            agent,
+                            s.context_messages,
+                        )
+                    else:
+                        logger.debug(
+                            "post-compression tool-result pruning skipped "
+                            "(active engine: %s)",
+                            type(getattr(agent, 'context_compressor', None)).__name__,
+                        )
                     s.post_compression_context_tokens_estimate = _estimate_post_compression_context_tokens(
                         agent,
                         s.context_messages,
@@ -13972,7 +17064,11 @@ def _run_agent_streaming(
                 # Only auto-generate title when still default; preserves user renames
                 if s.title == 'Untitled' or s.title == 'New Chat' or not s.title:
                     s.title = title_from(s.messages, s.title)
-                _bg_title_inputs = _background_title_generation_inputs(s)
+                _bg_title_inputs = None
+                if _background_title_generation_eligible(s):
+                    _u0, _a0 = _title_exchange_for_unresolved_title(s.messages)
+                    if _u0 and _a0:
+                        _bg_title_inputs = (_u0, _a0)
                 # Read token/cost usage from the agent object (if available).
                 # Per-turn overwrite (#1857): replace cumulative session totals with the
                 # agent's most recent values, which already represent the current turn's
@@ -13988,9 +17084,15 @@ def _run_agent_streaming(
                 cache_read_tokens = getattr(agent, 'session_cache_read_tokens', 0) or 0
                 cache_write_tokens = getattr(agent, 'session_cache_write_tokens', 0) or 0
                 prev_input_tokens = getattr(s, 'input_tokens', 0) or 0
+                prev_output_tokens = getattr(s, 'output_tokens', 0) or 0
                 prev_cache_read_tokens = getattr(s, 'cache_read_tokens', 0) or 0
+                prev_cache_write_tokens = getattr(s, 'cache_write_tokens', 0) or 0
+                prev_estimated_cost = getattr(s, 'estimated_cost', 0.0) or 0.0
                 turn_input_tokens = max(0, input_tokens - prev_input_tokens)
+                turn_output_tokens = max(0, output_tokens - prev_output_tokens)
                 turn_cache_read_tokens = max(0, cache_read_tokens - prev_cache_read_tokens)
+                turn_cache_write_tokens = max(0, cache_write_tokens - prev_cache_write_tokens)
+                turn_estimated_cost = max(0.0, (estimated_cost or 0.0) - prev_estimated_cost)
                 # Per-turn percent is computed server-side from persisted session
                 # counters so the message label uses the same denominator as the
                 # final usage payload even if the browser missed an intermediate event.
@@ -14052,18 +17154,48 @@ def _run_agent_streaming(
                 _gateway_routing = _extract_gateway_routing_metadata(
                     agent,
                     result,
+                    # The resolved (bare) model, as on master: a qualified
+                    # route hint such as @openrouter:gpt-4o served by gpt-4o
+                    # is not a model switch. The route provider rides along
+                    # separately for the settlement guard.
                     requested_model=resolved_model or model,
                     requested_provider=resolved_provider,
+                    requested_route_provider=_turn_route_provider,
                 )
-                # #6068: the served model must be read AFTER agent.run — the agent
+                # #6068: the served model must be read AFTER agent.run: the agent
                 # mutates agent.model when a fallback fires, so the pre-run
                 # resolved_model would mis-attribute exactly the turns where
                 # attribution matters most.
                 # The configured selection is not proof that it served this turn.
-                _observed_model = getattr(agent, 'model', None)
-                _used_model = _observed_model.strip() if isinstance(_observed_model, str) else None
+                # ponytail: normalize empty/whitespace to None for route equality
+                def _norm_str(v):
+                    val = str(v or '').strip().lower()
+                    return val if val else None
+
+                # ponytail: reuse shared parser for @provider:model tags
+                def _bare_route_model(v):
+                    val = str(v or '').strip()
+                    if val.startswith('@') and ':' in val:
+                        parsed = _parse_provider_qualified_model_id(val)
+                        if parsed:
+                            return parsed[0].strip().lower()
+                        return val.split(':', 1)[1].strip().lower()
+                    return val.lower() if val else None
+
+                _route_matches = True
+                if s is not None:
+                    _cur_m = getattr(s, 'model', None)
+                    _cur_p = getattr(s, 'model_provider', None)
+                    _target_m = _turn_route_model or resolved_model or model
+                    if _bare_route_model(_cur_m) != _bare_route_model(_target_m):
+                        _route_matches = False
+                    if _norm_str(_cur_p) != _norm_str(_turn_route_provider):
+                        _route_matches = False
+
+                _used_model = _capture_turn_served_model(s if _route_matches else None, agent)
                 if _gateway_routing:
-                    s.gateway_routing = _gateway_routing
+                    if _route_matches:
+                        s.gateway_routing = _gateway_routing
                     _history = list(getattr(s, 'gateway_routing_history', None) or [])
                     _history.append(_gateway_routing)
                     s.gateway_routing_history = _history[-50:]
@@ -14080,6 +17212,28 @@ def _run_agent_streaming(
                                 _dm['_firstTokenMs'] = _ttft_ms
                             if _used_model:
                                 _dm['_usedModel'] = _used_model
+                            # Persist the per-turn usage snapshot next to the other
+                            # settled-turn fields above so the token/cache footer
+                            # survives a session reload. The client already
+                            # derives the same shape from the SSE ``usage``
+                            # payload (_doneUsageFallback delta in messages.js),
+                            # but that value lives only in the live browser tab:
+                            # GET /api/session never returns ``_turnUsage``, so a
+                            # reload or a second tab loses the badge. Mirror the
+                            # client's delta semantics and write it alongside
+                            # ``_turnDuration``/``_firstTokenMs`` (same guard as
+                            # the #503 client path: only stamp when the turn
+                            # actually consumed tokens).
+                            if (turn_input_tokens or turn_output_tokens
+                                    or turn_cache_read_tokens or turn_cache_write_tokens):
+                                _dm['_turnUsage'] = {
+                                    'input_tokens': turn_input_tokens,
+                                    'output_tokens': turn_output_tokens,
+                                    'estimated_cost': turn_estimated_cost,
+                                    'cache_read_tokens': turn_cache_read_tokens,
+                                    'cache_write_tokens': turn_cache_write_tokens,
+                                    'cache_hit_percent': turn_cache_hit_percent,
+                                }
                             break
                 # Persist context window data on the session so the context-ring
                 # indicator survives a page reload (#1318). Must run BEFORE
@@ -14605,7 +17759,11 @@ def _run_agent_streaming(
             # #1932: only evaluate when the turn was goal-related (set via
             # STREAM_GOAL_RELATED or goal_related parameter).
             try:
-                from api.goals import evaluate_goal_after_turn, has_active_goal
+                from api.goals import (
+                    evaluate_goal_after_turn,
+                    has_active_goal,
+                    register_pending_goal_continuation,
+                )
 
                 if not goal_related or not has_active_goal(session_id, profile_home=_profile_home):
                     _goal_decision = {}
@@ -14651,13 +17809,25 @@ def _run_agent_streaming(
                     })
                 if decision.get('should_continue'):
                     continuation_prompt = str(decision.get('continuation_prompt') or '').strip()
+                    continuation_id = None
                     if continuation_prompt:
                         # #1932: mark this session as pending a goal continuation
                         # so the next /chat/start creates a goal-related stream.
-                        PENDING_GOAL_CONTINUATION.add(session_id)
+                        # #6885 + #7855: register marker + prompt + continuation
+                        # ID as ONE record
+                        # (api/goals.register_pending_goal_continuation) so the
+                        # routes.py consumer can tell a genuine user turn from
+                        # the browser's continuation dispatch. Admission is by
+                        # ID, so the browser may edit or combine the queued
+                        # entry without losing the goal.
+                        continuation_id = register_pending_goal_continuation(session_id, continuation_prompt)
+                        if not continuation_id:
+                            continuation_prompt = ''
+                    if continuation_prompt:
                         put('goal_continue', {
                             'session_id': session_id,
                             'continuation_prompt': continuation_prompt,
+                            'continuation_id': continuation_id,
                             'text': continuation_prompt,
                             'message': _goal_message,
                             'message_key': decision.get('message_key') or 'goal_continuing',
@@ -14695,6 +17865,7 @@ def _run_agent_streaming(
                 threading.Thread(
                     target=_run_background_title_update,
                     args=(s.session_id, *_bg_title_inputs, str(s.title or '').strip(), put, agent),
+                    kwargs={'stream_owner_id': session_id},
                     daemon=True,
                 ).start()
             else:
@@ -14778,7 +17949,7 @@ def _run_agent_streaming(
                 with _lock_ctx:
                     if (
                         not ephemeral
-                        and _turn_pending_source == 'process_wakeup'
+                        and _turn_pending_source in ('process_wakeup', 'delegation_wakeup')
                         and _exc_is_credential_pool_empty
                     ):
                         # Merge the pause into the CURRENT session object under
@@ -14980,6 +18151,7 @@ def _run_agent_streaming(
                         toolsets=_toolsets,
                         reasoning_config=_reasoning_config,
                         main_request_overrides=_main_request_overrides,
+                        provider_routing_kwargs=_routing_kwargs,
                         prefill_context=_prefill_context,
                         profile_home=_profile_home,
                         safe_profile_runtime_env=_safe_profile_runtime_env,
@@ -15016,6 +18188,10 @@ def _run_agent_streaming(
                                 effective_provider=resolved_provider,
                                 effective_base_url=resolved_base_url,
                                 requested_provider=(_session_requested_provider or ""),
+                                # #7237 round 3 finding 5: same Agent-replay
+                                # normalization as the primary send and the
+                                # first heal retry.
+                                normalize_bare_assistant_adjacency=True,
                             ),
                             conversation_history_revision=(
                                 _heal_conversation_history_revision
@@ -15023,6 +18199,9 @@ def _run_agent_streaming(
                             task_id=session_id,
                             persist_user_message=msg_text,
                             persist_user_timestamp=_heal_persist_user_timestamp,
+                            legacy_row_identity_owner=(
+                                _active_turn_identity if _cancelled_journal_turn_owner(s.messages) else None
+                            ),
                         )
                         if moa_config is not None:
                             _heal_kwargs2["moa_config"] = moa_config
@@ -15034,6 +18213,16 @@ def _run_agent_streaming(
                                 _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
                             put('cancel', _cancel_event_payload('Cancelled by user'))
                             return
+                        # Terminal-heal retry: thread the projection this
+                        # retry sent so the settle can prove which rows the
+                        # current turn owns (#7237 review data-regression
+                        # finding). The settle proof uses the UNCONDITIONAL
+                        # merge of the sent rows (the form the installed Agent
+                        # returns; splice pairs stay separate in the sent
+                        # projection itself).
+                        _heal_projected_history2 = _agent_replay_settle_projection(
+                            _heal_kwargs2.get("conversation_history") or []
+                        )
                         _heal_result = _heal_agent.run_conversation(**_heal_kwargs2)
                         _remember_pending_steer_result(_heal_result)
                         _active_turn_identity = _resolve_active_turn_authority(
@@ -15082,6 +18271,22 @@ def _run_agent_streaming(
                                         msg_text,
                                         _turn_pending_source,
                                         _active_turn_identity,
+                                        _heal_projected_history2,
+                                        # #7237 review blocker 4 (nesquena-hermes
+                                        # 2026-10-09): the terminal heal's result
+                                        # was produced by ``_heal_agent`` (a fresh
+                                        # instance minted for the retry), not the
+                                        # original ``agent`` the old rotation-only
+                                        # proxy checked. Deriving the compression
+                                        # authority from the ACTUAL producer keeps
+                                        # the settle consistent with the streaming
+                                        # and sync paths: an in-place compaction by
+                                        # the heal agent must be honoured, or the
+                                        # healed answer is dropped with the old
+                                        # context.
+                                        compression_authorized=_producer_committed_compression(
+                                            _heal_agent, session_id
+                                        ),
                                     )
                                     # Terminal self-heal success must finalize the
                                     # turn exactly once: clear the pending markers
@@ -15181,7 +18386,7 @@ def _run_agent_streaming(
             _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
             with _lock_ctx:
                 if not ephemeral and not _stream_writeback_is_current(s, stream_id):
-                    if _turn_pending_source == 'process_wakeup':
+                    if _turn_pending_source in ('process_wakeup', 'delegation_wakeup'):
                         # #6623 re-gate: merge the pause into the CURRENT
                         # session object under the canonical lock — never save
                         # the worker's detached snapshot. The helper fails
@@ -15201,7 +18406,7 @@ def _run_agent_streaming(
                     )
                     return
 
-                if _turn_pending_source == 'process_wakeup':
+                if _turn_pending_source in ('process_wakeup', 'delegation_wakeup'):
                     _recorded_pause = record_process_wakeup_provider_unavailable_pause(
                         s,
                         classification=_exc_type,
@@ -15369,14 +18574,14 @@ def _run_agent_streaming(
         # restore above.
         _reset_turn_session_identity(_turn_session_identity_tokens)
         with STREAMS_LOCK:
-            STREAMS.pop(stream_id, None)
-            CANCEL_FLAGS.pop(stream_id, None)
-            AGENT_INSTANCES.pop(stream_id, None)  # Clean up agent instance reference
-            STREAM_PARTIAL_TEXT.pop(stream_id, None)  # Clean up partial text buffer (#893)
-            STREAM_REASONING_TEXT.pop(stream_id, None)  # Clean up reasoning trace (#1361 §A)
-            STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)  # Clean up tool calls (#1361 §B)
-            STREAM_GOAL_RELATED.pop(stream_id, None)  # Clean up goal-related flag (#1932)
-            STREAM_LAST_EVENT_ID.pop(stream_id, None)  # Clean up event_id pointer (stage-364)
+            # ONE list for every per-stream registry (#7302 re-gate): this is the
+            # same tuple the chat/start orphan recovery releases, so a registry
+            # added later cannot be popped here and forgotten there (or the
+            # reverse). Per-registry cleanup notes (partial text #893, reasoning
+            # #1361 §A, tool calls #1361 §B, goal flag #1932, event id stage-364)
+            # live with the registries in api/config.py.
+            for _stream_registry in stream_owned_registries():
+                _stream_registry.pop(stream_id, None)
             unregister_active_run(stream_id)
             # Clean up the stream-owner registry so stale stream_id→session_id
             # mappings do not accumulate over thousands of completed streams (#6351).
@@ -15493,6 +18698,37 @@ def _steer_bound_stream(sid: str, stream_id: str, text: str) -> dict | None:
         return {"accepted": accepted, "fallback": None, "stream_id": stream_id}
 
 
+def _deliver_gateway_steer(sid: str, result: dict, text: str) -> dict:
+    """Forward a Gateway-owned steer to its run; keep the queue fallback on refusal.
+
+    Called outside registry locks: the Gateway HTTP write must never hold them.
+    """
+    if not isinstance(result, dict) or result.get("fallback") != "gateway_steer_queued":
+        return result
+    stream_id = result.get("stream_id")
+    try:
+        from api.gateway_chat import (
+            GATEWAY_STEER_ACCEPTED, GATEWAY_STEER_UNCERTAIN, gateway_stream_steer_target, steer_gateway_run,
+        )
+
+        # Run id and its owning endpoint are captured together: reading them
+        # separately let a finishing worker drop the endpoint in between and the
+        # steer fall back to the process Gateway, which does not own the run.
+        target = gateway_stream_steer_target(str(stream_id or ""))
+        outcome = None
+        if target:
+            run_id, base_url, api_key = target
+            outcome = steer_gateway_run(run_id, text, base_url, api_key)
+        if outcome == GATEWAY_STEER_ACCEPTED:
+            return {"accepted": True, "fallback": None, "stream_id": stream_id}
+        if outcome == GATEWAY_STEER_UNCERTAIN:
+            # Sent but unanswered: queueing could deliver it twice; the browser keeps the draft.
+            return {"accepted": False, "fallback": "gateway_steer_uncertain", "stream_id": stream_id}
+    except Exception:
+        logger.debug("Gateway steer forwarding failed for session %s", sid, exc_info=True)
+    return result
+
+
 def _handle_chat_steer(handler, body: dict) -> bool:
     """Inject a /steer payload into the active agent for a session.
 
@@ -15540,7 +18776,7 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     if stream_id:
         result = _steer_bound_stream(sid, stream_id, text)
         if result is not None:
-            return j(handler, result)
+            return j(handler, _deliver_gateway_steer(sid, result, text))
 
     with _cfg.SESSION_AGENT_CACHE_LOCK:
         cached = _cfg.SESSION_AGENT_CACHE.get(sid)
@@ -15560,8 +18796,9 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                     with _cfg.ACTIVE_RUNS_LOCK:
                         active_run = dict((_cfg.ACTIVE_RUNS or {}).get(str(active_stream_id)) or {})
                     if active_run.get("backend") == "gateway":
-                        return j(handler, {"accepted": False, "fallback": "gateway_steer_queued",
-                                           "stream_id": active_stream_id})
+                        return j(handler, _deliver_gateway_steer(sid, {
+                            "accepted": False, "fallback": "gateway_steer_queued",
+                            "stream_id": active_stream_id}, text))
                 except Exception:
                     logger.warning(
                         "Gateway ownership lookup failed before steer fallback for session=%s stream_id=%s",
@@ -15638,7 +18875,7 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                         result = {"accepted": accepted, "fallback": None,
                                   "stream_id": active_stream_id}
 
-    return j(handler, result)
+    return j(handler, _deliver_gateway_steer(sid, result, text))
 
 
 def cancel_stream(stream_id: str) -> bool:
@@ -15750,6 +18987,13 @@ def cancel_stream(stream_id: str) -> bool:
         # _clear_stale_stream_state() can eventually reclaim the session if the
         # worker is stuck in C-level I/O and never reaches its finally (#6623).
         update_active_run(stream_id, phase="cancelling", cancelled_at=time.time())
+
+        # Stop also ends the launch phase when the worker was never admitted: retire
+        # the claim on this same edge, AFTER the cancellation is published and BEFORE
+        # ownership is detached (#7302 finding 5). Retiring earlier would let a second
+        # chat/start slip in over a turn Stop already cancelled; retiring later leaves
+        # the claim behind, which would block a reuse of this stream id.
+        _live_config.retire_pre_admission_claim_if_owned(stream_id, streams_lock_held=True)
 
         # Stop and Steer share STREAMS_LOCK -> ACTIVE_RUNS_LOCK ordering.
         # Publish cancellation and detach ownership before releasing the edge;
@@ -15879,6 +19123,12 @@ def cancel_stream(stream_id: str) -> bool:
                     )
                     _emit_cancel_event = False
                     return True
+                # Decide the saved-partial path before creating a provisional
+                # journal-only owner. Existing partials must remain available
+                # to the next-send history through the established projection.
+                _partial_msg = _build_partial_message(
+                    _cancel_partial_text, _cancel_reasoning, _cancel_tool_calls,
+                )
                 # ── Preserve the user's typed message before clearing pending state (#1298) ──
                 # The agent's internal messages list (where the user message was appended at
                 # the start of run_conversation()) may not have been merged back into
@@ -15896,18 +19146,24 @@ def cancel_stream(stream_id: str) -> bool:
                 # Wrapped in its own try/except so an unexpected _cs.messages shape (e.g.
                 # in unit tests using Mock sessions) cannot escape and skip the rest of
                 # the cleanup.
+                _cancel_turn_start = None
+                _cancel_turn_token = None
                 try:
                     _pending_user = getattr(_cs, 'pending_user_message', None)
                     _pending_source = getattr(_cs, 'pending_user_source', None)
                     _pending_atts_raw = getattr(_cs, 'pending_attachments', None)
                     _pending_atts = list(_pending_atts_raw) if isinstance(_pending_atts_raw, (list, tuple)) else []
                     _pending_started = getattr(_cs, 'pending_started_at', None) or 0
+                    _cancel_turn_token = build_active_turn_token(stream_id, _pending_started)
                     _msgs_for_recovery = _cs.messages if isinstance(_cs.messages, list) else None
                     if _pending_user and _msgs_for_recovery is not None:
                         _last_user = None
-                        for _m in reversed(_msgs_for_recovery):
+                        _last_user_idx = None
+                        for _idx in range(len(_msgs_for_recovery) - 1, -1, -1):
+                            _m = _msgs_for_recovery[_idx]
                             if isinstance(_m, dict) and _m.get('role') == 'user':
                                 _last_user = _m
+                                _last_user_idx = _idx
                                 break
                         _already_persisted = False
                         if _last_user is not None:
@@ -15922,24 +19178,166 @@ def cancel_stream(stream_id: str) -> bool:
                             if isinstance(_last_content, str) and _last_ts >= _pending_started:
                                 # Tolerate the workspace prefix the streaming thread prepends.
                                 if _pending_user == _last_content or _pending_user in _last_content:
-                                    _already_persisted = True
-                        if not _already_persisted:
-                            _recovered_ts = int(time.time())
-                            if isinstance(_pending_started, (int, float)) and _pending_started > 0:
-                                _recovered_ts = int(_pending_started)
+                                    _row_token = _last_user.get('_active_turn_token')
+                                    if (
+                                        _cancel_turn_token
+                                        and _row_token
+                                        and _row_token != _cancel_turn_token
+                                    ):
+                                        # Content + recency is not turn ownership (re-gate
+                                        # 2026-10-06 item 3): a second interrupt of the same
+                                        # prompt inside one second must synthesize its OWN
+                                        # row (with its own token), not bind this turn's
+                                        # cancel identity to the previous interrupt's row.
+                                        # Token-less rows keep the established check.
+                                        _already_persisted = False
+                                    else:
+                                        _already_persisted = True
+                        if _already_persisted:
+                            _cancel_turn_start = _last_user_idx
+                        else:
+                            _recovered_ts = _recovered_pending_timestamp(_pending_started)
                             _user_turn: dict = {
                                 'role': 'user',
                                 'content': _pending_user,
                                 'timestamp': _recovered_ts,
                             }
-                            stamp_message_source(_user_turn, _pending_source)
+                            stamp_message_source(
+                                _user_turn,
+                                _pending_source,
+                                active_turn_token=_cancel_turn_token,
+                            )
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
                             _msgs_for_recovery.append(_user_turn)
+                            _cancel_turn_start = len(_msgs_for_recovery) - 1
+
+                        if isinstance(_cancel_turn_start, int):
+                            # Bind the durable cancel hook to the same exact turn
+                            # identity used by normal settlement. A display ordinal
+                            # cannot be translated into provider context after
+                            # compression because the two lists may have different
+                            # user-row counts.
+                            _cancel_owner = _msgs_for_recovery[_cancel_turn_start]
+                            if _cancel_turn_token:
+                                stamp_message_source(
+                                    _cancel_owner,
+                                    _pending_source,
+                                    active_turn_token=_cancel_turn_token,
+                                )
+
+                            if _partial_msg is None:
+                                # Provisional recovery boundary, not a queued
+                                # request. Only journal-only Stop needs an owner
+                                # awaiting durable model-visible output.
+                                _cancel_owner['_recovered'] = True
+                                # Keep the cancelled user boundary in provider context
+                                # so a later exact-stream recovery can be inserted before
+                                # a successor instead of becoming orphaned display state.
+                                from api.models import (
+                                    _append_recovered_turn_to_context,
+                                    _message_matches_pending_checkpoint,
+                                )
+
+                                _context_messages = getattr(_cs, 'context_messages', None)
+                                if not _cancel_turn_token:
+                                    _append_recovered_turn_to_context(_cs, _cancel_owner)
+                                elif not isinstance(_context_messages, list):
+                                    # Let the existing helper initialize context from
+                                    # the now-token-bearing display history.
+                                    _append_recovered_turn_to_context(_cs, _cancel_owner)
+                                else:
+                                    _token_matches = [
+                                        _row
+                                        for _row in _context_messages
+                                        if (
+                                            isinstance(_row, dict)
+                                            and _row.get('role') == 'user'
+                                            and _row.get('_active_turn_token') == _cancel_turn_token
+                                        )
+                                    ]
+                                    for _context_owner in _token_matches:
+                                        _context_owner['_recovered'] = True
+                                    if not _token_matches:
+                                        _strict_matches = [
+                                            _row
+                                            for _row in _context_messages
+                                            if _message_matches_pending_checkpoint(
+                                                _row,
+                                                _pending_user,
+                                                _pending_started,
+                                                _pending_source,
+                                                _pending_atts,
+                                            )
+                                        ]
+                                        _tail = _context_messages[-1] if _context_messages else None
+                                        if (
+                                            len(_strict_matches) == 1
+                                            and _strict_matches[0] is _tail
+                                            and isinstance(_tail, dict)
+                                            and not _tail.get('_active_turn_token')
+                                        ):
+                                            # Only a unique tokenless checkpoint at
+                                            # the exact context tail may be upgraded.
+                                            # Repeated equal prompts or a row already
+                                            # owned by another token are ambiguous and
+                                            # must remain untouched.
+                                            stamp_message_source(
+                                                _tail,
+                                                _pending_source,
+                                                active_turn_token=_cancel_turn_token,
+                                            )
+                                            _tail['_recovered'] = True
+                                        elif not _strict_matches:
+                                            # The current pending user is absent from
+                                            # provider context. Append the exact
+                                            # token-bearing owner rather than binding
+                                            # an older content-equal row.
+                                            _append_recovered_turn_to_context(
+                                                _cs, _cancel_owner
+                                            )
                 except Exception:
                     logger.debug(
                         "Failed to recover pending user message on cancel for %s",
                         _cancel_session_id,
+                    )
+                # Gateway runs: mirror the interrupted turn (recovered user
+                # row + the streamed partial snapshot taken under streams_lock
+                # above) into the model-facing context BEFORE the stream id is
+                # cleared below. This runs while _stream_writeback_is_current
+                # still passes, so a normal user Stop reconciles the same
+                # snapshot a gateway-side cancel would, and the next turn's
+                # client-built conversation_history includes everything the
+                # gateway persisted at the moment of interruption.
+                try:
+                    _cancel_backend = ""
+                    if isinstance(active_run_entry, dict):
+                        _cancel_backend = str(active_run_entry.get("backend") or "")
+                    if _cancel_backend == "gateway" or (
+                        (getattr(_cs, "gateway_run", None) or {}).get("stream_id") == stream_id
+                    ):
+                        from api.gateway_chat import _reconcile_gateway_cancelled_context
+
+                        # ONE whole-second stamp shared by the model-facing
+                        # partial row and the display partial below: two
+                        # independent int(time.time()) calls can straddle a
+                        # second boundary and the display merge key (whole
+                        # seconds) would then insert a second copy of the
+                        # partial on the next successful turn (re-gate
+                        # 2026-10-05 item 5).
+                        _cancel_partial_ts = int(time.time())
+                        _reconcile_gateway_cancelled_context(
+                            _cs, stream_id, partial_text=_cancel_partial_text,
+                            partial_ts=_cancel_partial_ts,
+                        )
+                    else:
+                        _cancel_partial_ts = int(time.time())
+                except Exception:
+                    _cancel_partial_ts = int(time.time())
+                    logger.debug(
+                        "Failed gateway cancel-context reconcile for %s",
+                        stream_id,
+                        exc_info=True,
                     )
                 _cs.active_stream_id = None
                 _cs.pending_user_message = None
@@ -15966,9 +19364,12 @@ def cancel_stream(stream_id: str) -> bool:
                 # call and strict providers would 400 on the malformed entries.
                 # The underscore-prefixed key is not in the whitelist, so sanitize
                 # strips it. The UI reads it via static/messages.js. (v0.50.251.)
-                _partial_msg = _build_partial_message(
-                    _cancel_partial_text, _cancel_reasoning, _cancel_tool_calls,
-                )
+                if _partial_msg is not None:
+                    # Same stamp the context reconcile used for its mirrored
+                    # partial row — one whole-second key so the display merge
+                    # cannot insert a second copy after a boundary straddle
+                    # (re-gate 2026-10-05 item 5).
+                    _partial_msg["timestamp"] = _cancel_partial_ts
                 _cancel_marker_exists = _session_has_cancel_marker(_cs)
                 _cancel_marker_idx = len(_cs.messages)
                 if _cancel_marker_exists:
@@ -16006,6 +19407,42 @@ def cancel_stream(stream_id: str) -> bool:
                         'provider_details_label': 'Cancellation details',
                         'timestamp': int(time.time()),
                     })
+
+                # A journal-only turn has no in-memory partial to carry into the
+                # cancel save. Persist an exact-stream recovery capability on
+                # its marker before returning success. If this process exits
+                # while the old worker is unwinding, a later ordinary session
+                # read can recover already-emitted journal output without
+                # replaying provider execution. Live-buffer partials keep their
+                # existing path and deliberately do not opt into this slice.
+                if (
+                    _partial_msg is None
+                    and isinstance(_cancel_turn_start, int)
+                    and _cancel_turn_token
+                ):
+                    _cancel_retry_marker = None
+                    for _candidate in reversed(_cs.messages):
+                        if not isinstance(_candidate, dict) or _candidate.get('role') != 'assistant':
+                            continue
+                        _candidate_content = str(_candidate.get('content') or '').strip().lower()
+                        if (
+                            _candidate.get('_error') is True
+                            and any(pattern in _candidate_content for pattern in _CANCEL_MARKER_PATTERNS)
+                        ):
+                            _cancel_retry_marker = _candidate
+                            break
+                    if _cancel_retry_marker is not None:
+                        _cancel_retry_marker['_pending_journal_recovery'] = True
+                        _cancel_retry_marker['_journal_retry_kind'] = 'cancelled'
+                        _cancel_retry_marker['_journal_retry_stream_id'] = str(stream_id)
+                        _cancel_retry_marker['_journal_retry_attempts'] = 0
+                        _cancel_retry_marker['_journal_retry_first_seen_ts'] = int(time.time())
+                        from api.models import _JOURNAL_RECOVERY_PROCESS_TOKEN
+
+                        _cancel_retry_marker['_journal_retry_process_token'] = (
+                            _JOURNAL_RECOVERY_PROCESS_TOKEN
+                        )
+                        _cancel_retry_marker['_journal_retry_owner_token'] = _cancel_turn_token
                 _cs.save()
                 _cancel_session_payload = _redacted_session_payload_with_full_messages(_cs)
             except Exception:

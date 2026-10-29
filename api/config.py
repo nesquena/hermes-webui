@@ -33,6 +33,7 @@ from urllib.parse import parse_qs, urlparse
 
 # ── Basic layout ──────────────────────────────────────────────────────────────
 import api.paths as _paths
+from api import startup as _startup
 from api.plugin_providers import (
     effective_provider_display_name as _effective_provider_display_name,
     is_plugin_model_provider as _is_plugin_model_provider,
@@ -49,6 +50,189 @@ REPO_ROOT = Path(__file__).parent.parent.resolve()
 # ── Network config (env-overridable) ─────────────────────────────────────────
 HOST = os.getenv("HERMES_WEBUI_HOST", "127.0.0.1")
 PORT = int(os.getenv("HERMES_WEBUI_PORT", "8787"))
+
+
+def _natural_model_id_key(_m, _provider_id: str = ""):
+    r"""Locale-independent natural sort key for model ids (#7528 round-4).
+
+    Contract shared with the frontend ``_compareModelPickerEntries`` in
+    ``static/ui.js``: no localeCompare, no browser collation — both sides run
+    the identical token algorithm so ordering is deterministic across Python
+    and JS boundaries:
+
+    1. lowercase the id;
+    2. strip ONE provider-routing ``@<provider>:`` segment when the exact
+       provider id is known — a named custom provider such as
+       ``custom:abc`` must strip the FULL ``@custom:abc:`` prefix so the
+       underlying model id is compared (``@custom:abc:z-model`` →
+       ``z-model``), matching the frontend's provider-aware branch. Without
+       the provider id we fall back to a single leading ``@...:`` strip so
+       bare routing prefixes still collapse to the model id;
+    3. split into ASCII digit runs and text runs (``[0-9]+|[^0-9]+`` — ASCII
+       on purpose so JS ``/\d+/`` and Python agree on what counts as a digit;
+       Arabic-Indic ٢ etc. stay in the text run);
+    4. digit run vs digit run: compare numeric value (strip leading zeros,
+       compare core length then core text), tie-break by raw run text so
+       ``007`` vs ``7`` is deterministic;
+    5. text run vs text run: compare Unicode code points;
+    6. digit run sorts before text run at the same position;
+    7. shorter run list sorts first when prefix-identical.
+
+    ``model-2`` sorts before ``model-10`` while plain lexical sort would emit
+    ``model-10`` first. The returned key is a comparable wrapper, so callers
+    keep using ``sort(key=_natural_model_id_key)`` unchanged.
+
+    The key is ONLY the routing-stripped id. A bare id and its routed twin
+    (``a-model`` vs ``@custom:abc:a-model``) strip to the same value and
+    therefore compare EQUAL here, so Python's stable sort preserves input
+    order. That is deliberate: the picker's provider-aware tie-break sorts
+    routed-first, and matching it here WOULD flip the API order — the two
+    boundaries disagree only for this pair, which the final picker dedups
+    away, so there is no visible row either way. See
+    ``test_provider_aware_tie_is_left_equal_by_design``.
+    """
+    return _NaturalModelKey(
+        _natural_model_routing_stripped(str((_m or {}).get("id") or ""), _provider_id)
+    )
+
+
+def _natural_model_routing_stripped(value, _provider_id: str = "") -> str:
+    """Strip one leading ``@<provider>:`` routing segment.
+
+    When ``_provider_id`` is supplied AND the value carries that exact
+    routing prefix (case-insensitive), the FULL ``@<provider>:`` segment is
+    removed. This mirrors the frontend ``_modelPickerSortableId`` provider-
+    aware branch: a named custom provider id like ``custom:abc`` must strip
+    ``@custom:abc:`` (not just the first colon) so the underlying model id
+    is what gets compared, with the api and the picker agreeing on order
+    for mixed bare / @custom:<name>:routed entries (review blocker 2,
+    2026-09-19). When the prefix doesn't match (e.g. a legacy alias) or no
+    provider is given, drop a single leading ``@...:`` segment so the common
+    routing shapes still collapse cleanly.
+    """
+    _s = str(value or "")
+    if _s.startswith("@"):
+        _pid = str(_provider_id or "").strip()
+        if _pid:
+            _prefix = "@" + _pid + ":"
+            if _s[: len(_prefix)].lower() == _prefix.lower():
+                return _s[len(_prefix):]
+        colon = _s.find(":")
+        if colon >= 0:
+            return _s[colon + 1:]
+    return _s
+
+
+def _natural_model_key_runs(text: str) -> list:
+    # ASCII-only digit definition; see _natural_model_id_key docstring. Using
+    # an explicit [0-9] class guarantees the Python side agrees with the JS
+    # /\d+/ (ASCII) so the two runtime comparators tokenize identically for
+    # every input — including non-ASCII decimal digits such as Arabic-Indic
+    # U+0662, which must fall into the text run on both sides (review
+    # blocker 3, 2026-09-19).
+    return re.findall(r"[0-9]+|[^0-9]+", str(text or "").lower())
+
+
+class _NaturalModelKey:
+    """Hash-free, comparison-only sort key implementing the shared contract."""
+
+    __slots__ = ("_runs",)
+
+    def __init__(self, value):
+        self._runs = _natural_model_key_runs(value)
+
+    @staticmethod
+    def _is_digit_run(run: str) -> bool:
+        """True when the run is ASCII digits ONLY.
+
+        ``str.isdigit()`` is Unicode-aware and returns True for non-ASCII
+        decimal digits (Arabic-Indic U+0662, Devanagari, fullwidth), which is
+        exactly where the shared contract says text. The JS side classifies
+        with ``/^\\d+$/`` (ASCII), so a run of ``٢`` was numeric here but text
+        there — and two distinct ids like ``model-1٢`` / ``model-1a`` came out
+        in OPPOSITE order in the picker and the api (#7528 re-gate).
+
+        The tokenizer already emits ASCII-only digit runs
+        (``_natural_model_key_runs`` uses ``[0-9]+|[^0-9]+``), so this is
+        belt-and-braces: any digit-looking run reaching here is ASCII by
+        construction, and the classification no longer depends on a Unicode
+        predicate that the JS side cannot replicate.
+        """
+        return bool(run) and all("0" <= ch <= "9" for ch in run)
+
+    @staticmethod
+    def _cmp_runs(a: str, b: str) -> int:
+        a_digit = _NaturalModelKey._is_digit_run(a)
+        b_digit = _NaturalModelKey._is_digit_run(b)
+        if a_digit and b_digit:
+            a_core = a.lstrip("0") or "0"
+            b_core = b.lstrip("0") or "0"
+            if len(a_core) != len(b_core):
+                return -1 if len(a_core) < len(b_core) else 1
+            if a_core != b_core:
+                return -1 if a_core < b_core else 1
+            if a != b:
+                return -1 if a < b else 1
+            return 0
+        if not a_digit and not b_digit:
+            for ca, cb in zip(a, b, strict=False):
+                if ord(ca) != ord(cb):
+                    return -1 if ord(ca) < ord(cb) else 1
+            if len(a) != len(b):
+                return -1 if len(a) < len(b) else 1
+            return 0
+        return -1 if a_digit else 1
+
+    def _cmp(self, other) -> int:
+        common = min(len(self._runs), len(other._runs))
+        for i in range(common):
+            c = self._cmp_runs(self._runs[i], other._runs[i])
+            if c:
+                return c
+        if len(self._runs) != len(other._runs):
+            return -1 if len(self._runs) < len(other._runs) else 1
+        return 0
+
+    def __lt__(self, other):
+        return self._cmp(other) < 0
+
+    def __le__(self, other):
+        return self._cmp(other) <= 0
+
+    def __gt__(self, other):
+        return self._cmp(other) > 0
+
+    def __ge__(self, other):
+        return self._cmp(other) >= 0
+
+    def __eq__(self, other):
+        return isinstance(other, _NaturalModelKey) and self._cmp(other) == 0
+
+
+def _sort_picker_group_models(group: dict) -> None:
+    """Apply the natural model sort WHERE it belongs (#7528 owner option B).
+
+    Custom / aggregator groups (``custom``, ``custom:<name>``) arrive in
+    machine insertion order (New-API style gateways with 50+ ids), so their
+    ``models`` are natural-sorted whole. Built-in providers keep their
+    curated catalog order in ``models`` (newest-first lists such as OpenAI's
+    stay newest-first). Every group's ``extra_models`` overflow tail is
+    machine-provided and natural-sorted, so the API order matches the
+    picker's Show-more order. Mirrors the frontend policy in ``static/ui.js``
+    (``_sortModelPickerOptions`` and ``renderModelDropdown``'s
+    ``_orderGroupRows``: custom groups whole, built-in groups only their
+    ``extra`` rows after the curated ones).
+    """
+    provider_id = str(group.get("provider_id") or "")
+    lowered = provider_id.strip().lower()
+    is_custom = lowered == "custom" or lowered.startswith("custom:")
+    for bucket in ("models", "extra_models") if is_custom else ("extra_models",):
+        rows = group.get(bucket)
+        if isinstance(rows, list) and len(rows) > 1:
+            try:
+                rows.sort(key=lambda _m, _pid=provider_id: _natural_model_id_key(_m, _pid))
+            except Exception:
+                pass
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
@@ -165,92 +349,30 @@ def _env_mb_bytes(name: str, default_mb: int) -> int:
 
 
 # ── Hermes agent directory discovery ─────────────────────────────────────────
-def _discover_agent_dir() -> Path:
-    """
-    Locate the hermes-agent checkout using a multi-strategy search.
-
-    Priority:
-      1. HERMES_WEBUI_AGENT_DIR env var  -- explicit override always wins
-      2. HERMES_HOME / hermes-agent      -- e.g. ~/.hermes/hermes-agent
-      3. Sibling of this repo            -- ../hermes-agent
-      4. Parent of this repo             -- ../../hermes-agent (nested layout)
-      5. Common install paths            -- ~/.hermes/hermes-agent (again as fallback)
-      6. HOME / hermes-agent             -- ~/hermes-agent (simple flat layout)
-    """
-    explicit_override = os.getenv("HERMES_WEBUI_AGENT_DIR")
-    if explicit_override:
-        explicit_path = Path(explicit_override).expanduser().resolve()
-        if explicit_path.exists() and _looks_like_agent_source_root(explicit_path):
-            return explicit_path
-
-    candidates = []
-
-    # 2. HERMES_HOME / hermes-agent
-    hermes_home = os.getenv("HERMES_HOME", str(_DEFAULT_HERMES_HOME))
-    candidates.append(Path(hermes_home).expanduser() / "hermes-agent")
-
-    # 3. Sibling: <repo-root>/../hermes-agent
-    candidates.append(REPO_ROOT.parent / "hermes-agent")
-
-    # 4. Parent is the agent repo itself (repo cloned inside hermes-agent/)
-    if _looks_like_agent_source_root(REPO_ROOT.parent):
-        candidates.append(REPO_ROOT.parent)
-
-    # 5. ~/.hermes/hermes-agent (explicit common path)
-    candidates.append(_DEFAULT_HERMES_HOME / "hermes-agent")
-
-    # 6. ~/hermes-agent
-    candidates.append(HOME / "hermes-agent")
-
-    # 7. XDG_DATA_HOME / hermes-agent  (e.g. ~/.local/share/hermes-agent)
-    xdg_data = Path(os.getenv("XDG_DATA_HOME", str(HOME / ".local" / "share")))
-    candidates.append(xdg_data.expanduser() / "hermes-agent")
-
-    # 8. System-wide install paths (e.g. /opt/hermes-agent, /usr/local/hermes-agent)
-    for sys_prefix in ("/opt", "/usr/local", "/usr/local/share"):
-        candidates.append(Path(sys_prefix) / "hermes-agent")
-
-    # Prefer real source checkouts before pip-style roots so lookalikes cannot preempt them.
-    for path in candidates:
-        if path.exists() and (path / "run_agent.py").exists():
-            return path.resolve()
-
-    for path in candidates:
-        if path.exists() and _looks_like_pip_style_agent_source_root(path):
-            return path.resolve()
-
-    return None
-
-
-def _looks_like_agent_source_root(path: Path) -> bool:
-    """Return True when a directory resembles a hermes-agent source root."""
-    if (path / "run_agent.py").exists():
-        return True
-    return _looks_like_pip_style_agent_source_root(path)
-
-
-def _looks_like_pip_style_agent_source_root(path: Path) -> bool:
-    """Return True for pip-style agent roots with a real agent package signal."""
-    if not (path / "cron" / "jobs.py").exists():
-        return False
-    if (path / "hermes").exists():
-        return True
-    hermes_cli_dir = path / "hermes_cli"
-    return (
-        (hermes_cli_dir / "__init__.py").exists()
-        or (hermes_cli_dir / "main.py").exists()
+def _discovery_result():
+    # Same helper managed_agent_startup uses to pick the Agent it activates, so
+    # startup activation and the runtime Agent cannot diverge (#8529).
+    return _startup.discover_runtime_agent_identity(
+        repo_root=REPO_ROOT,
+        default_hermes_home=_DEFAULT_HERMES_HOME,
+        user_home=HOME,
     )
 
 
-def _discover_python(agent_dir: Path) -> str:
+def _discover_agent_dir() -> Path | None:
+    return _discovery_result().agent_dir
+
+
+def _discover_python(agent_dir: Path | None, proven_python: str | None = None) -> str:
     """
     Locate a Python executable that has the Hermes agent dependencies installed.
 
     Priority:
       1. HERMES_WEBUI_PYTHON env var
       2. Agent venv at <agent_dir>/venv/bin/python
-      3. Local .venv inside this repo
-      4. System python3
+      3. Interpreter that proved the Agent root
+      4. Local .venv inside this repo
+      5. System python3
     """
     if os.getenv("HERMES_WEBUI_PYTHON"):
         return os.getenv("HERMES_WEBUI_PYTHON")
@@ -268,10 +390,13 @@ def _discover_python(agent_dir: Path) -> str:
         venv_py_win = agent_dir / "venv" / "Scripts" / "python.exe"
         if venv_py_win.exists():
             return str(venv_py_win)
-        
+
         venv_py_win = agent_dir / ".venv" / "Scripts" / "python.exe"
         if venv_py_win.exists():
             return str(venv_py_win)
+
+    if proven_python:
+        return proven_python
 
     # Local .venv inside this repo
     for subdir, binary in (("bin", "python"), ("Scripts", "python.exe")):
@@ -291,8 +416,9 @@ def _discover_python(agent_dir: Path) -> str:
 
 
 # Run discovery
-_AGENT_DIR = _discover_agent_dir()
-PYTHON_EXE = _discover_python(_AGENT_DIR)
+_DISCOVERY = _discovery_result()
+_AGENT_DIR = _DISCOVERY.agent_dir
+PYTHON_EXE = _discover_python(_AGENT_DIR, _DISCOVERY.python_exe)
 
 # ── Inject agent dir into sys.path so Hermes modules are importable ──────────
 
@@ -1561,6 +1687,7 @@ def _resolve_configured_provider_id(
     *,
     base_url: object = None,
     resolve_alias: bool = True,
+    model_id: str | None = None,
 ) -> str:
     """Normalize a configured provider id.
 
@@ -1583,7 +1710,9 @@ def _resolve_configured_provider_id(
     if not resolve_alias:
         raw = str(provider or "").strip().lower()
         if base_url and raw == "custom":
-            by_base_url = _named_custom_provider_slug_for_base_url(base_url, config_obj)
+            by_base_url = _named_custom_provider_slug_for_base_url(
+                base_url, config_obj, model_id=model_id
+            )
             if by_base_url:
                 return by_base_url
         return str(provider or "")
@@ -1593,7 +1722,9 @@ def _resolve_configured_provider_id(
         base_url
         and str(resolved or "").strip().lower() == "custom"
     ):
-        by_base_url = _named_custom_provider_slug_for_base_url(base_url, config_obj)
+        by_base_url = _named_custom_provider_slug_for_base_url(
+            base_url, config_obj, model_id=model_id
+        )
         if by_base_url:
             return by_base_url
 
@@ -1725,19 +1856,54 @@ def _lookup_custom_api_key_env(provider_id: object) -> str | None:
     return None
 
 
+def _custom_provider_entry_owns_model(entry: dict, model_id: str) -> bool:
+    """True when a ``custom_providers[]`` entry declares ``model_id`` itself.
+
+    Ownership is by declaration, not substring: an exact ``model:`` match or a
+    listed id in a pinned ``models:`` allowlist (all shapes via
+    ``_configured_model_ids``). A live discovered catalog is metadata, not a
+    declaration. Used to disambiguate several entries sharing one ``base_url``
+    (#7176): the declaring owner outranks declaration order, and among several
+    declaring owners the first-declared one wins.
+    """
+    model = str(model_id or "").strip()
+    if not model or not isinstance(entry, dict):
+        return False
+    if str(entry.get("model") or "").strip() == model:
+        return True
+    if _provider_models_are_discovered_catalog(entry):
+        return False
+    return model in _configured_model_ids(entry.get("models"))
+
+
 def _named_custom_provider_slug_for_base_url(
     base_url: object,
     config_obj: dict | None = None,
+    model_id: str | None = None,
 ) -> str:
+    """Slug of the custom_providers[] entry for ``base_url``.
+
+    Several entries may share one ``base_url`` (a gateway fronting several
+    APIs on one host, one entry per ``api_mode`` — #7176). A plain first-match
+    then routes every model through the FIRST-declared entry, producing an
+    opaque 401 for models owned by later entries. When ``model_id`` is given,
+    the entry that declares the model outranks declaration order; otherwise
+    (or when no entry declares it) the historical first-match stands.
+    """
     target = _normalize_base_url_for_match(base_url)
     if not target:
         return ""
+    fallback = ""
     for entry in _custom_provider_entries(config_obj):
         entry_base_url = _normalize_base_url_for_match(entry.get("base_url"))
         if entry_base_url != target:
             continue
-        return _custom_provider_slug_from_name(entry.get("name")) or "custom"
-    return ""
+        slug = _custom_provider_slug_from_name(entry.get("name")) or "custom"
+        if not fallback:
+            fallback = slug
+        if model_id and _custom_provider_entry_owns_model(entry, model_id):
+            return slug
+    return fallback
 
 
 def _provider_is_known_or_configured(
@@ -2897,6 +3063,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             cfg,
             base_url=config_base_url,
             resolve_alias=False,
+            model_id=model_id,
         )
 
     # Heal legacy ``provider: local`` entries (written by WebUI < v0.50.252)
@@ -6771,7 +6938,7 @@ _available_models_cache_ts: float = 0.0
 _available_models_live_rebuild_ts: float = 0.0
 _available_models_cache_source_fingerprint: dict | None = None
 _AVAILABLE_MODELS_CACHE_TTL: float = 86400.0  # 24 hours
-_SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 300.0
+_SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 3600.0
 _available_models_cache_lock = threading.RLock()  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
 _cache_build_in_progress = False  # True while a cold path is actively building
@@ -7323,10 +7490,13 @@ def _minimal_static_models_catalog() -> dict:
         if isinstance(model_cfg, dict):
             active_provider = model_cfg.get("provider")
             cfg_base_url = model_cfg.get("base_url", "") or ""
+        # Resolved before provider detection so the shared-base_url
+        # disambiguation (#7176) can prefer the entry that owns this model.
+        default_model = get_effective_default_model(cfg)
         if active_provider:
             try:
                 active_provider = _resolve_configured_provider_id(
-                    active_provider, cfg, base_url=cfg_base_url
+                    active_provider, cfg, base_url=cfg_base_url, model_id=default_model
                 )
             except Exception:
                 active_provider = str(active_provider or "").strip() or None
@@ -7337,13 +7507,13 @@ def _minimal_static_models_catalog() -> dict:
                     _store = json.loads(_ap.read_text(encoding="utf-8"))
                     active_provider = (
                         _resolve_configured_provider_id(
-                            _store.get("active_provider"), cfg, base_url=cfg_base_url
+                            _store.get("active_provider"), cfg,
+                            base_url=cfg_base_url, model_id=default_model,
                         )
                         or None
                     )
             except Exception:
                 pass
-        default_model = get_effective_default_model(cfg)
         groups: list[dict] = []
         if default_model:
             try:
@@ -7386,12 +7556,16 @@ def _static_models_catalog_without_live_probes() -> dict:
         if isinstance(model_cfg, dict):
             active_provider = model_cfg.get("provider")
             cfg_base_url = model_cfg.get("base_url", "") or ""
+        # Resolved before provider detection so the shared-base_url
+        # disambiguation (#7176) can prefer the entry that owns this model.
+        default_model = get_effective_default_model(cfg)
         if active_provider:
             try:
                 active_provider = _resolve_configured_provider_id(
                     active_provider,
                     cfg,
                     base_url=cfg_base_url,
+                    model_id=default_model,
                 )
             except Exception:
                 active_provider = str(active_provider or "").strip() or None
@@ -7407,13 +7581,13 @@ def _static_models_catalog_without_live_probes() -> dict:
                             auth_store.get("active_provider"),
                             cfg,
                             base_url=cfg_base_url,
+                            model_id=default_model,
                         )
                         or None
                     )
         except Exception:
             logger.debug("Failed to load auth store for static models catalog", exc_info=True)
 
-        default_model = get_effective_default_model(cfg)
         detected_providers: set[str] = set()
         configured_model_ids: dict[str, list[str]] = {}
         named_custom_groups: dict[str, dict[str, object]] = {}
@@ -7541,7 +7715,9 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         if cfg_base_url:
             detected_providers.add(
-                _named_custom_provider_slug_for_base_url(cfg_base_url, cfg)
+                _named_custom_provider_slug_for_base_url(
+                    cfg_base_url, cfg, model_id=default_model
+                )
                 or active_provider
                 or "custom"
             )
@@ -7710,6 +7886,17 @@ def _static_models_catalog_without_live_probes() -> dict:
             return (3, provider_id)
 
         groups.sort(key=_group_sort_key)
+
+        # Natural, case-insensitive model order (#7528) — applied ONLY where
+        # the owner's option B allows it: custom/aggregator groups are sorted
+        # whole (a newapi-style gateway otherwise shows jd-* / sn-* / sub-*
+        # intermixed in insertion order, user request 2026-09-05); built-in
+        # providers keep their curated catalog order. The exact provider_id is
+        # threaded so a named custom provider such as `custom:abc` strips the
+        # FULL `@custom:abc:` prefix when sorting (review blocker 2,
+        # 2026-09-19). See `_sort_picker_group_models`.
+        for _group in groups:
+            _sort_picker_group_models(_group)
 
         model_aliases = _model_aliases_from_config()
 
@@ -8409,6 +8596,178 @@ def _is_loadable_disk_cache(cache: object) -> bool:
     return True
 
 
+# --- Durable-cache read memo (#7723 follow-up) ---------------------------
+# Since #7932 the models-cache freshness clock lives INSIDE the payload
+# (``_built_at``), so reading it costs a full parse of the whole catalog file.
+# A session visit needs that stamp AND the catalog groups, which meant parsing
+# the same file twice per visit — ~10 ms of redundant JSON parsing on a
+# 675 KB / 5000-model catalog, doubling session-open disk I/O.
+#
+# This one-slot memo lets the first reader parse the file once and hand the
+# result to the readers that immediately follow on the same visit. It changes
+# NO public or private signatures and no call sites, so every existing stub of
+# these loaders keeps working.
+#
+# Correctness: the entry is keyed on the IDENTITY OF THE BYTES ACTUALLY PARSED
+# — (path, st_mtime_ns, st_size, st_ino, st_dev) read from the open file
+# descriptor — and re-validated by a fresh stat() before use, so a cache
+# rewritten between the two reads is never served from a stale memo.
+#
+# The descriptor stat matters on its own: the writer replaces the file with a
+# temp file plus os.replace(), which mints a NEW inode but can land inside the
+# same coarse-clock mtime tick at an identical size. A precheck-then-open
+# window measured on Linux showed a same-size rewrite served the old generation
+# in 1,461 of 2,000 trials. Keying on the inode of the bytes we parsed makes
+# that window unobservable, because the key and the payload are taken from the
+# same open file.
+#
+# Slot access is guarded by a lock held across the producer's write and across
+# the consumer's whole read-validate-clear path. Without it two threads that
+# interleave inside that path both pass validation and both receive the SAME
+# payload object, which is exactly the shared-mutable-catalog aliasing the
+# consume step exists to prevent.
+#
+# The entry ALSO carries the catalog generation (``_models_rebuild_seq``) that
+# was current when the payload was parsed. A catalog invalidation advances
+# that generation, so an entry parsed before one describes the PRE-invalidation
+# catalog. The file's stat identity cannot detect that on its own — a rebuild
+# is not guaranteed to change ANY part of that key (same coarse-clock mtime
+# tick, same size, and a filesystem that reissues the freed inode) — so the
+# generation travels with the entry and fences it. The producer refuses to
+# publish an entry whose generation is no longer current, and the consumer
+# rejects one whose generation no longer matches. BOTH are required:
+# ``invalidate_models_cache()`` clears the slot BEFORE it advances the
+# generation, so a producer can publish into that gap and only the consumer's
+# check can catch it.
+#
+# ``None`` in the payload slot means "the file parsed, but not to a dict" — a
+# real answer, distinct from "no memo entry". An unreadable/unparseable file
+# takes a different route: the read raises, the memo slot is CLEARED, and the
+# next reader retries from scratch.
+_MODELS_DISK_PAYLOAD_UNSET = object()
+# (path, st_mtime_ns, st_size, st_ino, st_dev, catalog generation, payload)
+_models_disk_payload_memo: tuple[str, int, int, int, int, int, dict | None] | None = None
+_models_disk_payload_memo_lock = threading.Lock()
+
+
+def _clear_models_disk_payload_memo() -> None:
+    """Drop the one-slot parse memo (a no-op when the slot is already empty).
+
+    Callers that abandon a parse without consuming it MUST go through here, so
+    the memo cannot keep a whole parsed catalog resident past the visit that
+    produced it. The memo lock is a leaf — nothing is acquired while it is
+    held — so this is safe to call while holding the catalog lock.
+    """
+    global _models_disk_payload_memo
+    with _models_disk_payload_memo_lock:
+        _models_disk_payload_memo = None
+
+
+def _read_models_cache_disk_payload(cache_path: Path) -> dict | None:
+    """Read + parse the durable models cache, memoising it for immediate reuse.
+
+    Returns the raw on-disk payload, or None when the file is missing or
+    unreadable/unparseable (which also clears the memo).
+    """
+    global _models_disk_payload_memo
+    # Capture the catalog generation BEFORE the parse. An invalidation that
+    # lands while this read is in flight advances the generation, and the
+    # bytes parsed here then describe the PRE-invalidation catalog.
+    generation = _models_rebuild_seq
+    try:
+        with open(cache_path, encoding="utf-8") as f:
+            # fstat describes the bytes json.load is about to parse, so the
+            # memo key and the payload cannot disagree.
+            st = os.fstat(f.fileno())
+            payload = json.load(f)
+    except Exception:
+        _clear_models_disk_payload_memo()
+        return None
+    if not isinstance(payload, dict):
+        payload = None
+    entry = (
+        str(cache_path),
+        st.st_mtime_ns,
+        st.st_size,
+        st.st_ino,
+        st.st_dev,
+        generation,
+        payload,
+    )
+    with _models_disk_payload_memo_lock:
+        # Publish only while the generation this parse belongs to is still
+        # current. A catalog invalidation that landed during the parse
+        # supersedes these bytes, and a reader must never be handed them.
+        if generation == _models_rebuild_seq:
+            _models_disk_payload_memo = entry
+    return payload
+
+
+def _memoized_models_cache_disk_payload(cache_path: Path):
+    """Consume the memoised payload if it still matches the file on disk.
+
+    Returns ``_MODELS_DISK_PAYLOAD_UNSET`` when there is no usable entry, in
+    which case the caller must read the file itself.
+
+    The entry is CONSUMED on a hit (the memo slot is cleared before the
+    payload is returned). The memo exists to collapse the precheck+loader
+    double-parse inside a single session visit — never to serve one parse to
+    readers spread across time. A pre-#7932-era read always produced a fresh
+    ``json.load``, so each caller owned its catalog exclusively and could
+    mutate it freely; handing the SAME objects to a second reader would let
+    one caller's in-place edits (e.g. ``_annotate_fast_tier_model_groups``
+    writing ``supports_fast_tier`` into the model dicts, or
+    ``warm_models_catalog_provenance_if_cold`` publishing it into the
+    process-wide ``_available_models_cache`` without a deepcopy) corrupt a
+    later read that would then hand the edited catalog back as if it had just
+    been parsed from disk.
+
+    Consuming the slot restores the pre-existing ownership invariant: the memo
+    hands its payload to exactly one reader, and every later read re-parses.
+    That keeps the single-parse win for the one sequence that matters (the
+    freshness precheck immediately followed by the loader in the same visit)
+    while making aliasing impossible.
+
+    The lock is held across the whole read-validate-clear path, not just the
+    clear. Reading the slot and then calling ``stat()`` releases the GIL, so
+    without the lock two threads can both be inside this function at once, both
+    pass validation, and both return the same object. The consume step would
+    then be a no-op in exactly the case it exists for.
+    """
+    global _models_disk_payload_memo
+    with _models_disk_payload_memo_lock:
+        memo = _models_disk_payload_memo
+        if memo is None:
+            return _MODELS_DISK_PAYLOAD_UNSET
+        path_str, mtime_ns, size, ino, dev, generation, payload = memo
+        if path_str != str(cache_path):
+            return _MODELS_DISK_PAYLOAD_UNSET
+        try:
+            st = cache_path.stat()
+        except OSError:
+            return _MODELS_DISK_PAYLOAD_UNSET
+        if (st.st_mtime_ns, st.st_size, st.st_ino, st.st_dev) != (mtime_ns, size, ino, dev):
+            return _MODELS_DISK_PAYLOAD_UNSET
+        # Generation fence, checked AFTER the stat so that an invalidation
+        # landing during the stat() is still caught. The stat identity alone
+        # cannot tell a pre-invalidation catalog from the rebuilt one: a
+        # rebuild is not guaranteed to change any part of that key. The
+        # generation can, because an invalidation always advances it.
+        #
+        # The producer refuses to publish a stale generation, but it cannot
+        # cover this window: ``invalidate_models_cache()`` clears the slot
+        # BEFORE it advances the generation, so a producer can publish into
+        # that gap. This check is what catches it.
+        if generation != _models_rebuild_seq:
+            # The entry belongs to a superseded catalog generation. It can
+            # never be served, so drop it rather than keep a parsed catalog
+            # resident.
+            _models_disk_payload_memo = None
+            return _MODELS_DISK_PAYLOAD_UNSET
+        _models_disk_payload_memo = None
+        return payload
+
+
 def _load_models_cache_from_disk() -> dict | None:
     """Load /api/models cache from disk if it exists and has current metadata.
 
@@ -8423,10 +8782,16 @@ def _load_models_cache_from_disk() -> dict | None:
         import json as _j
 
         cache_path = _get_models_cache_path()
-        if not cache_path.exists():
+        cache = _memoized_models_cache_disk_payload(cache_path)
+        if cache is _MODELS_DISK_PAYLOAD_UNSET:
+            if not cache_path.exists():
+                return None
+            with open(cache_path, encoding="utf-8") as f:
+                cache = _j.load(f)
+        elif cache is None:
+            # The memo recorded that this exact file parsed to a non-dict, so
+            # there is no usable catalog in it.
             return None
-        with open(cache_path, encoding="utf-8") as f:
-            cache = _j.load(f)
         if not _is_loadable_disk_cache(cache):
             return None
         # Strip the disk-only metadata before returning, so the in-memory
@@ -8824,10 +9189,15 @@ def _load_stale_models_cache_from_disk() -> dict | None:
         import json as _j
 
         cache_path = _get_models_cache_path()
-        if not cache_path.exists():
+        cache = _memoized_models_cache_disk_payload(cache_path)
+        if cache is _MODELS_DISK_PAYLOAD_UNSET:
+            if not cache_path.exists():
+                return None
+            with open(cache_path, encoding="utf-8") as f:
+                cache = _j.load(f)
+        elif cache is None:
+            # The memo recorded that this exact file parsed to a non-dict.
             return None
-        with open(cache_path, encoding="utf-8") as f:
-            cache = _j.load(f)
         if not _is_valid_models_cache(cache):
             return None
         if cache.get("_schema_version") != _MODELS_CACHE_SCHEMA_VERSION:
@@ -8896,6 +9266,7 @@ def _save_models_cache_to_disk(
                 if build_fingerprint is not None
                 else _models_cache_source_fingerprint()
             ),
+            "_built_at": time.time(),
             "active_provider": cache["active_provider"],
             "default_model": cache["default_model"],
             "configured_model_badges": cache["configured_model_badges"],
@@ -9087,6 +9458,18 @@ def _invalidate_models_catalog_epoch(*, delete_disk: bool = True, provider_id: s
     global _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint
     global _cache_build_in_progress
+    # Drop the one-slot parse memo BEFORE the disk unlink below. The memo is
+    # keyed on (path, mtime_ns, size, st_ino, st_dev), so a payload parsed
+    # before this call keeps a key that still matches the freshly rebuilt file:
+    # the writer creates a new inode, but the rebuild can land inside the same
+    # coarse-clock mtime tick at an identical size, and on any filesystem that
+    # reuses inodes the st_ino/st_dev pair can match too. A reader that then
+    # consumed the memo would be handed the PRE-invalidation catalog -- and
+    # because the consume step hands out that object without a copy, the
+    # caller's in-place edits would corrupt it for every reader after it.
+    # Invalidating the memory cache while leaving the parse memo populated is
+    # therefore not a no-op: the memo is the one cache that survives here.
+    _clear_models_disk_payload_memo()
     with _models_cache_disk_commit_lock:
         with _cache_build_cv:
             _allocate_models_rebuild_seq()
@@ -9677,6 +10060,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 active_provider,
                 cfg,
                 base_url=cfg_base_url,
+                model_id=default_model,
             )
 
         # 2. Read auth store (active_provider fallback + credential_pool inspection)
@@ -9692,6 +10076,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         auth_store.get("active_provider"),
                         cfg,
                         base_url=cfg_base_url,
+                        model_id=default_model,
                     )
             except Exception:
                 logger.debug("Failed to load auth store from %s", auth_store_path)
@@ -9987,6 +10372,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         model_cfg.get("provider"),
                         cfg,
                         base_url=base_url,
+                        model_id=default_model,
                     )
                     if provider_hint:
                         return str(provider_hint).strip().lower()
@@ -10004,20 +10390,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         if provider_hint:
                             return str(provider_hint).strip().lower()
 
-            custom_providers_cfg = cfg.get("custom_providers", [])
-            if isinstance(custom_providers_cfg, list):
-                for entry in custom_providers_cfg:
-                    if not isinstance(entry, dict):
-                        continue
-                    entry_base_url = _normalize_base_url_for_match(entry.get("base_url"))
-                    if entry_base_url != target:
-                        continue
-                    entry_name = str(entry.get("name") or "").strip()
-                    if entry_name:
-                        return _custom_provider_slug_from_name(entry_name)
-                    return "custom"
-
-            return ""
+            return _named_custom_provider_slug_for_base_url(
+                base_url, cfg, model_id=default_model
+            )
 
         def _models_endpoint_for_base_url(base_url: str) -> str:
             base = str(base_url or "").strip().rstrip("/")
@@ -10275,6 +10650,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # 4. Fetch models from custom endpoint if base_url is configured
         auto_detected_models = []
         auto_detected_models_by_provider: dict[str, list[dict]] = {}
+        _active_probe_owner = None
         if cfg_base_url:
             base_url = cfg_base_url.strip()
             configured_provider = _configured_provider_for_base_url(base_url)
@@ -10353,6 +10729,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 provider_key = provider.lower()
                 auto_detected_models_by_provider.setdefault(provider_key, []).append(auto_model)
                 detected_providers.add(provider_key)
+            _active_probe_owner = (provider.lower(), str(api_key or "").strip())
 
         _custom_providers_cfg = cfg.get("custom_providers", [])
         _named_custom_groups: dict = {}
@@ -10403,6 +10780,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         isinstance(_cp_configured_models, (dict, list))
                         and len(_cp_configured_models) > 0
                     )
+                    if (
+                        _active_probe_owner
+                        and _active_probe_owner[0] == _slug
+                        and str(_cp_api_key or "").strip() != _active_probe_owner[1]
+                    ):
+                        # #7176: a shared-URL entry whose credential (even none)
+                        # differs must not inherit the active probe's catalog.
+                        auto_detected_models_by_provider.pop(_slug, None)
                     _live_models = auto_detected_models_by_provider.get(_slug)
                     _live_error = None
                     if _cp_has_configured_models:
@@ -10482,7 +10867,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 detected_providers.discard("custom")
 
         _named_custom_slugs = _named_custom_provider_slugs(cfg)
-        _base_matched_named_slug = _named_custom_provider_slug_for_base_url(cfg_base_url, cfg)
+        _base_matched_named_slug = _named_custom_provider_slug_for_base_url(
+            cfg_base_url, cfg, model_id=default_model
+        )
         if _base_matched_named_slug and _named_custom_slugs:
             for _pid in list(detected_providers):
                 _pid_norm = str(_pid or "").strip().lower()
@@ -11183,6 +11570,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             return (3, pid)
         groups.sort(key=_group_sort_key)
 
+        # Natural model order (#7528 owner option B): custom/aggregator groups
+        # sorted whole, built-in providers keep their curated catalog order,
+        # and every group's `extra_models` overflow tail is sorted so the API
+        # order matches the picker's Show-more order. Mirrors the static
+        # catalog path (user request 2026-09-05; review blocker 2, 2026-09-19).
+        for _group in groups:
+            _sort_picker_group_models(_group)
+
         # 12. Include model aliases so the WebUI frontend can resolve them.
         model_aliases = _model_aliases_from_config()
 
@@ -11768,11 +12163,44 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         return copy.deepcopy(_static_models_catalog_without_live_probes())
 
 
-def _models_cache_file_age_seconds(cache_path: Path, now: float) -> float | None:
+def _models_disk_cache_built_at(cache_path: Path) -> float | None:
+    """Return the persisted ``_built_at`` (last live rebuild) stamp, if present.
+
+    Returns None for caches written before the stamp existed (their freshness
+    falls back to file mtime), future-stamped caches, and any unreadable/unparseable
+    payload, so the freshness decision never hard-fails on a malformed cache.
+
+    Goes through ``_read_models_cache_disk_payload`` so the parse is memoised:
+    this is the first reader on the session-visit path, and the loaders that
+    follow it in the same call reuse the parse rather than re-reading the file.
+    """
     try:
-        return max(0.0, now - cache_path.stat().st_mtime)
+        payload = _read_models_cache_disk_payload(cache_path)
+        if not isinstance(payload, dict):
+            return None
+        built_at = payload.get("_built_at")
+        if isinstance(built_at, (int, float)) and math.isfinite(built_at) and 0 < built_at <= time.time():
+            return float(built_at)
+        return None
+    except Exception:
+        return None
+
+
+def _models_cache_file_age_seconds(cache_path: Path, now: float) -> float | None:
+    """Age of the disk models cache judged against when it was built.
+
+    The refresh clock is the persisted ``_built_at`` stamp (last live rebuild)
+    written by ``_save_models_cache_to_disk``. A cache written before the stamp
+    existed (or carrying an invalid/future stamp) falls back to mtime age.
+    """
+    try:
+        mtime_age = max(0.0, now - cache_path.stat().st_mtime)
     except OSError:
         return None
+    built_at = _models_disk_cache_built_at(cache_path)
+    if built_at is not None:
+        return max(0.0, now - built_at)
+    return mtime_age
 
 
 def warm_models_catalog_provenance_if_cold() -> None:
@@ -11892,6 +12320,17 @@ def get_available_models_for_session_visit() -> dict:
             cached = _get_fresh_memory_models_cache(now_mono)
             if cached is not None:
                 _mark("memory_cache_hit")
+                # The freshness precheck above parsed the durable cache into
+                # the one-slot parse memo, but this visit is served from
+                # memory and never reaches the loader that would consume it.
+                # Drop the entry so the memo cannot keep a whole parsed
+                # catalog resident (2.2 MB at 5000 models) past the visit
+                # that produced it, and so an unrelated later read cannot
+                # consume a parse this visit abandoned.
+                #
+                # The memo lock is a leaf, so taking it under the catalog lock
+                # cannot invert the commit -> catalog order.
+                _clear_models_disk_payload_memo()
                 _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
                 return cached
         _mark("memory_cache_miss_loading_disk")
@@ -12304,6 +12743,13 @@ def create_stream_channel() -> StreamChannel:
 
 STREAMS: dict = {}
 STREAMS_LOCK = threading.Lock()
+# Launch-phase ownership claims, keyed by stream_id and guarded by STREAMS_LOCK
+# (no extra lock edge). A claim is published in the SAME critical section that
+# creates the STREAMS entry and retired by identity once the worker is admitted
+# or the stream is torn down. While it exists the stream is still launching, so
+# chat/start must keep it whatever the pending age -- a slow session save between
+# registration and worker admission is not evidence of an orphan.
+PRE_ADMISSION_CLAIMS: dict = {}
 
 
 def peek_stream(stream_id):
@@ -12331,6 +12777,248 @@ STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated du
 STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal-related turns (#1932)
 STREAM_LAST_EVENT_ID: dict = {}  # stream_id -> latest journal event_id for `id:` field on live SSE frames (stage-364)
 PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
+# #6885 admission correction (round 2, maintainer review): marker and prompt
+# are ONE record so the two collections cannot drift apart. Value shape:
+#   {"prompt": str, "continuation_id": str}
+# #7855: the routes.py consumer admits the turn by "continuation_id" — the
+# token the server issues here and carries on the goal_continue SSE event,
+# which the browser keeps on the queued entry through inline edits and
+# combines. A genuine user/queued turn carries no ID, so it keeps user
+# priority and the record stays for the real continuation dispatch.
+# Written atomically next to the set add in streaming/gateway goal_continue
+# paths; consumed together with the marker by
+# _consume_pending_goal_continuation.
+# There is deliberately no wall-clock expiry: the browser keeps a queued
+# continuation across refreshes and restores it into the composer for a
+# later send, so a TTL retired perfectly usable records (#7855 blocker 1).
+# A record lives until it is consumed or explicitly retired (goal clear /
+# session retirement, plus an orphan sweep for broken halves). Pause does
+# NOT retire it: a paused goal is resumed with the same pending
+# continuation, so clearing it on pause broke the resume retry
+# (test_7855_regate_behaviour CORE 2).
+PENDING_GOAL_CONTINUATION_PROMPTS: dict = {}
+PENDING_GOAL_CONTINUATION_LOCK = threading.Lock()
+
+# ── THE list of per-stream registries (#7302 re-gate) ───────────────────────
+# Every registry a stream owns. Both the local worker teardown (api/streaming.py)
+# and the chat/start orphan recovery (api/routes.py) iterate THIS list instead of
+# hand-maintained pop lists, so a new per-stream registry cannot be added to one
+# teardown path and silently forgotten in the other.
+def stream_owned_registries() -> tuple:
+    """The per-stream registries, resolved on EVERY call.
+
+    Deliberately a function, not a module-level constant: a frozen tuple holds
+    the dict objects that existed at import time, so rebinding a registry
+    (``config.STREAMS = {...}``) would leave every teardown popping the stale
+    dict and leaking the live one. Module-level attribute lookup keeps the list
+    in step with whichever object is current.
+    """
+    return (
+        STREAMS,
+        AGENT_INSTANCES,
+        CANCEL_FLAGS,
+        STREAM_GOAL_RELATED,
+        STREAM_PARTIAL_TEXT,
+        STREAM_REASONING_TEXT,
+        STREAM_LIVE_TOOL_CALLS,
+        STREAM_LAST_EVENT_ID,
+    )
+
+
+def _release_stream_owned_rows(stream_id: str, session_id: str | None) -> None:
+    """Drop this stream's rows from every registry. Caller holds the locks."""
+    for _registry in stream_owned_registries():
+        _registry.pop(stream_id, None)
+    # The launch-phase claim dies with the stream it was published for. This is
+    # the single teardown entry point every release path goes through, so the
+    # claim can never outlive its stream and block a later chat/start.
+    PRE_ADMISSION_CLAIMS.pop(stream_id, None)
+    # Owner registries. The writeback entry is compare-and-clear: a successor
+    # admitted after cancel must keep its registry claim (#6623 re-gate).
+    unregister_stream_owner(stream_id)
+    if session_id:
+        try:
+            clear_session_writeback_owner_if_owned(session_id, stream_id)
+        except Exception:
+            logger.debug(
+                "Failed to clear session writeback owner for stream %s", stream_id,
+                exc_info=True,
+            )
+
+
+def release_stream_owned_registries(
+    stream_id: str, *, session_id: str | None = None, streams_lock_held: bool = False
+) -> None:
+    """Release EVERY registry a stream can own -- the single teardown entry point.
+
+    ``streams_lock_held=True`` is for callers already inside ``STREAMS_LOCK``
+    (``threading.Lock`` is not reentrant). Lock order stays
+    ``STREAMS_LOCK -> STREAM_SESSION_OWNERS_LOCK``, the order the rest of the
+    lifecycle uses; ``_release_stream_owned_rows`` never takes a lock itself, so
+    the nesting is the caller's.
+
+    The Gateway-owned rows (``_STREAM_RUN_LIFECYCLE`` / ``_STREAM_RUN_IDS`` /
+    ``_STREAM_ENDPOINTS``) are NOT touched here: they live in api/gateway_chat.py
+    and are released through ``release_gateway_stream_state()``, which uses the
+    lifecycle/waiter protocol and must run OUTSIDE ``STREAMS_LOCK``.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return
+    if streams_lock_held:
+        _release_stream_owned_rows(stream_id, session_id)
+        return
+    with STREAMS_LOCK:
+        _release_stream_owned_rows(stream_id, session_id)
+
+
+def publish_pre_admission_claim(stream_id: str, *, streams_lock_held: bool = False) -> str:
+    """Publish the launch-phase ownership claim for a stream being registered.
+
+    MUST run inside the same ``STREAMS_LOCK`` critical section that creates the
+    ``STREAMS`` entry (pass ``streams_lock_held=True``; ``threading.Lock`` is not
+    reentrant): the orphan check in ``_active_stream_blocks_chat_start`` reads this
+    registry under that lock, and a stream registered without its claim is
+    indistinguishable from a crashed turn once the pending window expires.
+
+    Returns the claim token; retire with ``retire_pre_admission_claim_if_owned``.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return ""
+    claim_token = uuid.uuid4().hex
+    if streams_lock_held:
+        PRE_ADMISSION_CLAIMS[stream_id] = claim_token
+        return claim_token
+    with STREAMS_LOCK:
+        PRE_ADMISSION_CLAIMS[stream_id] = claim_token
+    return claim_token
+
+
+def retire_pre_admission_claim_if_owned(
+    stream_id: str, *, claim_token: str | None = None, streams_lock_held: bool = False
+) -> bool:
+    """Retire a launch-phase claim by IDENTITY. Idempotent; returns whether it retired.
+
+    ``claim_token=None`` is the stream's own teardown speaking for the whole
+    stream (Stop, launch failure, worker admission): the claim goes with it. With
+    a token, only that exact claim is retired, so a successor that registered the
+    same stream id keeps its own claim.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return False
+
+    def _retire() -> bool:
+        current = PRE_ADMISSION_CLAIMS.get(stream_id)
+        if current is None:
+            return False
+        if claim_token is not None and current != claim_token:
+            return False
+        PRE_ADMISSION_CLAIMS.pop(stream_id, None)
+        return True
+
+    if streams_lock_held:
+        return _retire()
+    with STREAMS_LOCK:
+        return _retire()
+
+
+def _is_orphaned_stream_locked(
+    stream_id: str, pending_turn_in_window: bool
+) -> bool:
+    """Orphan decision body. The caller holds ``STREAMS_LOCK``.
+
+    Split out so the decision and the release can share ONE lock acquisition
+    (``release_orphaned_stream_if_still_orphaned``); ``is_orphaned_stream`` is the
+    locking wrapper for readers that only need the answer.
+    """
+    if stream_id not in STREAMS:
+        return False
+    if stream_id in PRE_ADMISSION_CLAIMS:
+        return False
+    if pending_turn_in_window:
+        return False
+    try:
+        with ACTIVE_RUNS_LOCK:
+            if stream_id in (ACTIVE_RUNS or {}):
+                return False
+    except Exception:
+        # Fail closed: an unreadable liveness registry must never be taken as
+        # proof of an orphan.
+        return False
+    return True
+
+
+def is_orphaned_stream(
+    stream_id: str,
+    *,
+    pending_turn_in_window: bool = False,
+    streams_lock_held: bool = False,
+) -> bool:
+    """Single definition of an orphaned stream, shared by every reader.
+
+    A stream is an orphan only when ALL of these hold:
+
+      * it is still registered in ``STREAMS``;
+      * no worker owns it (``ACTIVE_RUNS`` has no row);
+      * it is not still launching (``PRE_ADMISSION_CLAIMS`` has no claim);
+      * its pending turn is outside the registration window
+        (``pending_turn_in_window`` -- the caller's call, since only callers with
+        the session at hand can evaluate it).
+
+    ``STREAMS`` membership alone is not liveness: the entry is removed by the
+    worker's own finalization, so a hard-killed or wedged worker leaves it behind.
+    ``ACTIVE_RUNS`` is the authoritative worker-liveness registry, the
+    launch-phase claim covers the window between registration and worker
+    admission, and the pending window covers the shortest gap for callers that
+    hold a session.
+
+    The claim check is mandatory. Without it a stream that is still launching is
+    classified as orphaned and reaped, which makes its first worker exit without
+    running the turn (finding 5). Callers that already hold ``STREAMS_LOCK`` must
+    pass ``streams_lock_held=True``: ``threading.Lock`` is not reentrant.
+
+    Reading this answer and acting on it later is NOT safe on its own -- see
+    ``release_orphaned_stream_if_still_orphaned`` for the decide-and-release
+    contract.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return False
+    if streams_lock_held:
+        return _is_orphaned_stream_locked(stream_id, pending_turn_in_window)
+    with STREAMS_LOCK:
+        return _is_orphaned_stream_locked(stream_id, pending_turn_in_window)
+
+
+def release_orphaned_stream_if_still_orphaned(
+    stream_id: str, *, pending_turn_in_window: bool = False
+) -> bool:
+    """Decide AND release on ONE ``STREAMS_LOCK`` edge. Returns whether it released.
+
+    Callers that decide and release under two separate acquisitions hand the worker
+    a race: it can publish its ``ACTIVE_RUNS`` row (or its launch claim) in the gap,
+    and the release then drops a stream that is live -- taking its ownership state
+    with it while the worker keeps running. Re-validating inside the same critical
+    section that drops the rows makes a stale decision impossible.
+
+    ``_release_stream_owned_rows`` takes no locks ("caller holds the locks"), and
+    ``stream_owner_session_id`` only takes ``STREAM_SESSION_OWNERS_LOCK``, which
+    respects the documented ``STREAMS_LOCK -> STREAM_SESSION_OWNERS_LOCK`` order.
+
+    Gateway-owned rows are deliberately NOT touched here: they live in
+    api/gateway_chat.py and must be released OUTSIDE ``STREAMS_LOCK``, so the caller
+    runs ``release_gateway_stream_state()`` when this returns True.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return False
+    with STREAMS_LOCK:
+        if not _is_orphaned_stream_locked(stream_id, pending_turn_in_window):
+            return False
+        _release_stream_owned_rows(stream_id, stream_owner_session_id(stream_id))
+        return True
 
 
 def register_stream_owner(stream_id: str, session_id: str) -> None:
@@ -12558,6 +13246,13 @@ DEFERRED_PROCESS_WAKEUPS_LOCK = threading.Lock()
 # subscribers-empty grace path (60s) handles ordinary tab-close traffic.
 SESSION_CHANNEL_IDLE_TTL_SECS: int = 14400  # 4 hours
 SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS: int = 60  # subscribers-empty grace
+# Positive dead-subscriber signal. How long a subscriber's queue
+# must reject broadcasts CONTINUOUSLY before the reaper may treat it as dead
+# (a ghost/half-open tab that never drains). A healthy tab drains on every
+# event, so it can never accumulate a run this long; 300s is well above the
+# SSE heartbeat interval and any plausible transient backpressure. Age alone
+# never collects a subscribed channel — only this signal or an explicit close.
+SESSION_CHANNEL_SUBSCRIBER_STALL_SECS: int = 300  # 5 minutes
 
 # Active agent-run registry. This intentionally tracks worker lifecycle rather
 # than SSE lifecycle: cancel/reconnect may remove STREAMS while the worker is
@@ -12650,6 +13345,37 @@ def unregister_active_run(stream_id: str) -> None:
         ACTIVE_RUNS.pop(stream_id, None)
         LAST_RUN_FINISHED_AT = time.time()
     unregister_stream_owner(stream_id)
+
+
+def unregister_active_run_if_owned(stream_id: str, *, claim_token: str | None = None) -> bool:
+    """Retire an active-run row only while it is still the caller's own claim.
+
+    ``Stop`` (``cancel_stream``) deliberately leaves the row behind in
+    ``phase="cancelling"`` so recovery/health polling sees the detached run while
+    the worker unwinds; the worker's normal ``finally`` retires it and stamps
+    ``LAST_RUN_FINISHED_AT``. A worker cancelled BEFORE it admits the stream takes
+    the early-return path, which never reaches that ``finally`` -- so the claim
+    published before the worker was scheduled has to be retired here, BY IDENTITY,
+    so a row that a successor legitimately registered for the same stream id is
+    never deleted. Returns True when this call retired the row.
+
+    ``unregister_stream_owner`` is deliberately NOT called: the owner registry is a
+    stream-owned registry (already released by ``release_stream_owned_registries``)
+    and a successor may own it.
+    """
+    if not stream_id:
+        return False
+    global LAST_RUN_FINISHED_AT
+    with ACTIVE_RUNS_LOCK:
+        entry = ACTIVE_RUNS.get(stream_id)
+        if entry is None:
+            return False
+        if claim_token is not None:
+            if not isinstance(entry, dict) or str(entry.get("claim_token") or "") != str(claim_token):
+                return False
+        ACTIVE_RUNS.pop(stream_id, None)
+        LAST_RUN_FINISHED_AT = time.time()
+    return True
 
 # Agent cache: reuse AIAgent across messages in the same WebUI session so that
 # _user_turn_count survives between turns.  This mirrors the gateway's
@@ -12837,6 +13563,14 @@ _SETTINGS_DEFAULTS = {
     "project_quick_create_buttons": False,  # opt-in: show per-project "+" quick-create buttons on sidebar project chips (#4676)
     "structured_code_default_view": "auto",  # JSON/YAML fenced-block default render: auto | on | off (#484 follow-up). auto => Tree when line count >= structured_code_auto_tree_lines, else Raw.
     "structured_code_auto_tree_lines": 10,  # in 'auto' mode, minimum line count to default a JSON/YAML block to Tree view (preserves the original hardcoded >=10 behavior)
+    # Run-journal retention caps (#7613). 0 disables an individual cap. The sweep
+    # ARCHIVES eligible runs (compresses + moves them to _run_journal_archive/)
+    # rather than deleting, so these caps only decide when a run leaves the live
+    # directory; reads fall back to the archive. Defaults mirror api.run_journal.
+    "run_journal_retention_ttl_days": 14,  # archived once the run file is N days old
+    "run_journal_retention_max_runs_per_session": 40,  # keep at most N newest runs live per session
+    "run_journal_retention_max_bytes_per_session": 256 * 1024 * 1024,  # per-session live byte budget
+    "run_journal_archive_ttl_days": 0,  # delete ARCHIVES older than N days; 0 = never (keep forever)
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
     "chat_activity_display_mode": "compact_worklog",  # compact_worklog | transparent_stream | hide_all_activity
     "transparent_stream_event_timestamps": True,  # show per-event timestamp chips inside Transparent Stream
@@ -13159,10 +13893,14 @@ _SETTINGS_INT_RANGES = {
     "inflight_state_max_json_chars": (100000, 4000000),
     "structured_code_auto_tree_lines": (1, 1000),
     "voice_silence_ms": (200, 60000),
+    "run_journal_retention_max_runs_per_session": (0, 100_000),
+    "run_journal_retention_max_bytes_per_session": (0, 100 * 1024 * 1024 * 1024),
 }
 _SETTINGS_FLOAT_RANGES = {
     "tts_rate": (0.5, 2.0),
     "tts_pitch": (0.0, 2.0),
+    "run_journal_retention_ttl_days": (0.0, 3650.0),
+    "run_journal_archive_ttl_days": (0.0, 3650.0),
 }
 _SETTINGS_BOOL_KEYS = {
     "onboarding_completed",

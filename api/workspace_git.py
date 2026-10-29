@@ -144,7 +144,17 @@ def _classify_git_error(message: str, args: list[str] | None = None) -> str:
         return "not_a_repo"
     if "outside the workspace" in text or "outside the git repository" in text:
         return "path_outside_workspace"
-    if "authentication failed" in text or "permission denied" in text or "could not read username" in text:
+    if (
+        "authentication failed" in text
+        or "permission denied" in text
+        or "could not read username" in text
+        or "unable to get password from user" in text
+        # Git Credential Manager on Windows refuses to prompt when interaction is
+        # disabled (GCM_INTERACTIVE=never / credential.interactive=false): git then
+        # reports "Cannot prompt because user interactivity has been disabled."
+        # That is still an authentication failure, not a generic git failure.
+        or "cannot prompt because user interactivity has been disabled" in text
+    ):
         return "auth_failed"
     if "no upstream" in text or "no configured push destination" in text or "has no upstream branch" in text:
         return "no_upstream"
@@ -182,6 +192,11 @@ def _run_git(
 ) -> subprocess.CompletedProcess[str]:
     cwd = ctx_or_cwd.repo_root if isinstance(ctx_or_cwd, GitContext) else ctx_or_cwd
     run_env = _clean_git_env(env)
+    if args and args[0] == "status":
+        # Status is a read. Without this, Git may take .git/index.lock to
+        # refresh the index, and a status killed at its timeout can leave
+        # that lock behind and block the user's next commit (#8520).
+        run_env["GIT_OPTIONAL_LOCKS"] = "0"
     if repository_git_proxy_blocks(args, cwd, run_env):
         raise GitWorkspaceError(
             "Repository-configured core.gitProxy is not allowed for git:// remotes",
@@ -196,6 +211,11 @@ def _run_git(
     attributes_file = None
     hooks_path = None
     extra_configs: list[tuple[str, str]] = []
+    if args and args[0] == "diff":
+        # `git diff` ignores GIT_OPTIONAL_LOCKS and refreshes a stale index
+        # on its own, which takes .git/index.lock. The panel only reads, so
+        # skip that refresh (#8520). Commands that write keep normal locking.
+        extra_configs.append(("diff.autoRefreshIndex", "false"))
     temporary_attributes: list[str] = []
     temporary_dirs: list[str] = []
     try:

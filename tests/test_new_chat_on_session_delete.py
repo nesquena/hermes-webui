@@ -123,9 +123,9 @@ class TestDeleteFlowSource:
             "both delete paths (single + batch) must route through the shared helper"
         )
         # The batch block must carry the same gate.
-        start = sess_src.find('ids.forEach(_clearHandoffStorageForSession);')
+        start = sess_src.find('async function _deleteSelectedSessionsBatch(')
         assert start != -1
-        end = sess_src.find('exitSessionSelectMode();await renderSessionList();', start)
+        end = sess_src.find('\nfunction _showBatchProjectPicker(', start)
         assert end != -1
         batch = sess_src[start:end]
         assert 'window._newChatOnSessionDelete===true' in batch, (
@@ -220,6 +220,7 @@ const _sessionListQueryString = () => '';
 const _sessionSnapshotById = sid => ({ session_id: sid, worktree_path: null });
 const _captureSessionReflowPositions = () => null;
 const _clearHandoffStorageForSession = () => {};
+const _forgetComposerDraftLocalFallback = () => {};
 const _clearPersistedSessionQueue = () => {};
 const _hydrateTodosFromSession = () => {};
 const _optimisticallyRemoveSessionFromList = () => {};
@@ -336,7 +337,10 @@ if (DRAFT_SCEN[scenario]) {
   eval(extractFunc('_clearRememberedNewChatDraftSession'));
   eval(extractFunc('_restoreRememberedNewChatDraftSession'));
 }
-if (isBatch) eval(extractFunc('_renderBatchActionBar'));
+if (isBatch) {
+  eval(extractFunc('_deleteSelectedSessionsBatch'));
+  eval(extractFunc('_renderBatchActionBar'));
+}
 
 (async () => {
   if (scenario === 'flag_on_delayed_draft_navigate_b' || scenario === 'flag_on_delayed_draft_switch_profile') {

@@ -69,6 +69,24 @@ _FETCH_NETWORK_FAILURE_SIGNATURES = (
     'tls connection was non-properly terminated',
     'ssl certificate problem',
 )
+# `_run_git` reports a command it cancelled at its own timeout as
+# "git <args> timed out after <n>s". That line is our deadline, not a network
+# symptom: the apply fetch runs with a 15 s budget, so classify the marker as
+# a timeout with its bound. libcurl's real "Operation timed out after <n>
+# milliseconds" stalls are not `git `-prefixed and keep network guidance.
+_FETCH_DEADLINE_TIMEOUT_RE = re.compile(
+    r'^git (?P<operation>.+?) timed out after (?P<bound>\d+(?:\.\d+)?)s$',
+    re.MULTILINE,
+)
+# Git < 2.51 names the blocking ref ("'refs/remotes/origin/x' exists; cannot
+# create 'refs/remotes/origin/x/y'"). Git >= 2.51 batches fetch ref updates
+# and reports the same name conflict only through the summary hint, which
+# fetch.c emits solely for REF_TRANSACTION_ERROR_NAME_CONFLICT; stale-lock
+# failures keep their "Unable to create '...lock'" wording and never match.
+_REMOTE_REF_COLLISION_RE = re.compile(
+    r"exists; cannot create ['\"]refs/remotes/origin/"
+    r"|some local refs could not be updated; try running\s+['\"]git remote prune origin['\"]"
+)
 _RELEASE_TAG_RE = re.compile(r'^v[0-9][0-9A-Za-z.+-]*$')
 _EXPERIMENTAL_RELEASE_TAG_RE = re.compile(r'^exp-v[0-9]+(?:\.[0-9]+)*$')
 _GITHUB_RELEASE_TAGS_URL = 'https://api.github.com/repos/nesquena/hermes-webui/tags?per_page=100'
@@ -130,7 +148,20 @@ def _sanitize_git_diagnostic(output: str, *, limit: int = _GIT_DIAGNOSTIC_MAX_CH
 
 
 def _apply_fetch_failure_message(fetch_out: str, network_message: str) -> str:
-    """Return the apply-path fetch failure message for the given stderr."""
+    """Return the apply-path fetch failure message for the given stderr.
+
+    A fetch the updater cancelled at its own deadline is a timeout: say so,
+    naming the cancelled command and its bound. The echoed command is run
+    through the same credential scrub as every other git diagnostic. Only real
+    network signatures keep the connectivity guidance.
+    """
+    cancelled = _FETCH_DEADLINE_TIMEOUT_RE.search(fetch_out or '')
+    if cancelled:
+        return (
+            f'The fetch was cancelled after {cancelled.group("bound")}s — '
+            f'git {_sanitize_git_diagnostic(cancelled.group("operation"))} '
+            f'did not finish before the update deadline.'
+        )
     detail = _sanitize_git_diagnostic(fetch_out)
     if not detail:
         return network_message
@@ -278,13 +309,39 @@ def _run_git(args, cwd, timeout=10):
         # On non-UTF-8 locales (e.g. Chinese Windows GBK), a binary git
         # output that fails to decode used to leave r.stdout = None and crash
         # the whole import with AttributeError. Guard against None defensively.
-        stdout = (r.stdout or '').strip()
+        raw_stdout = r.stdout or ''
+        # ``-z`` output is a byte-for-byte path protocol: leading/trailing
+        # whitespace belongs to filenames and must not be stripped.  Textual
+        # commands retain the historical trimming behaviour.
+        stdout = raw_stdout if '-z' in args else raw_stdout.strip()
         stderr = (r.stderr or '').strip()
         if r.returncode == 0:
             return stdout, True
+        if (args[:2] == ['fetch', 'origin']
+                and all(arg in {'--quiet', '--tags', '--force'} for arg in args[2:])
+                and _REMOTE_REF_COLLISION_RE.search(stderr or stdout)):
+            refspec, refspec_ok = _run_git(['config', '--get-all', 'remote.origin.fetch'], cwd)
+            # Custom destinations may prune local tags or branches; fail closed.
+            if refspec_ok and refspec == '+refs/heads/*:refs/remotes/origin/*':
+                return _run_git([
+                    'fetch', 'origin', '--prune', '--no-prune-tags', '--refmap=',
+                    *args[2:], '+refs/heads/*:refs/remotes/origin/*',
+                ], cwd, timeout=timeout)
         return stderr or stdout or f"git exited with status {r.returncode}", False
     except subprocess.TimeoutExpired as exc:
-        detail = (getattr(exc, 'stderr', None) or getattr(exc, 'stdout', None) or '').strip()
+        # text=True decodes only the *completed* run's pipes; on a timeout
+        # subprocess still hands back the raw partial output as bytes, so a
+        # timed-out command that had already printed (e.g. a slow `git pull`
+        # on a bad link) used to leak bytes into callers' str handling and
+        # crash the update endpoint with TypeError (#8198).
+        raw = getattr(exc, 'stderr', None) or getattr(exc, 'stdout', None) or ''
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode('utf-8', 'replace')
+        # The partial output is user-facing git text: a pull that died on a
+        # credentialed remote can echo the URL (with its token) before timing
+        # out, so run it through the same credential scrub the fetch path uses.
+        # limit=sys.maxsize: never truncate. Redaction can lengthen the text, so len(raw) would cut its tail.
+        detail = _sanitize_git_diagnostic(raw, limit=sys.maxsize)
         return detail or f"git {' '.join(args)} timed out after {timeout}s", False
     except FileNotFoundError:
         return 'git executable not found', False
@@ -1017,6 +1074,11 @@ def _check_webui_published_release_update(channel=DEFAULT_UPDATE_CHANNEL):
         'release_based': True,
         'current_version': current_version,
         'latest_version': latest_version,
+        # Same field as the git paths: on the no-git/Docker payload the
+        # frontend's "Latest tag:" suffix would otherwise fall back to the
+        # Agent's tag (e.g. "Latest tag: v2026.9.24" while trailing a WebUI
+        # release). Maintainer fold, PR #6859 round 3.
+        'latest_tag': latest_version,
         'compare_url': _build_compare_url(repo_url, current_ref, latest_ref),
         'manual_update': True,
         'channel': channel,
@@ -1131,7 +1193,7 @@ def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None)
     return f'origin/{branch}'
 
 
-def _channel_up_to_date_info(path, name, channel, current_tag):
+def _channel_up_to_date_info(path, name, channel, current_tag, latest_tag=None):
     """Return an 'up to date' payload for a channel that must NOT branch-compare.
 
     Used by the stable channel: stable tags are a promoted subset of master, so
@@ -1151,6 +1213,10 @@ def _channel_up_to_date_info(path, name, channel, current_tag):
         'release_based': True,
         'current_version': current_tag,
         'latest_version': current_tag,
+        # Real latest channel tag for the frontend's "Latest tag:" suffix —
+        # latest_version here holds the CURRENT tag (HEAD is on it), so the
+        # frontend must never fall back to it as a "latest" tag. (#6859 S1)
+        'latest_tag': latest_tag or current_tag,
         'channel': channel,
     }
 
@@ -1217,7 +1283,7 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     suppress_stable_fallthrough = (channel == 'stable' and name == 'webui')
     if behind == 0 and _head_is_past_latest_tag(path, current_tag, channel):
         if suppress_stable_fallthrough:
-            return _channel_up_to_date_info(path, name, channel, current_tag)
+            return _channel_up_to_date_info(path, name, channel, current_tag, latest_tag)
         return None
 
     # Users tracking main can already contain the newest fetched release tag
@@ -1227,7 +1293,7 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     # configured upstream instead of advertising a tag that cannot fast-forward.
     if behind > 0 and _head_contains_ref(path, latest_tag):
         if suppress_stable_fallthrough:
-            return _channel_up_to_date_info(path, name, channel, current_tag)
+            return _channel_up_to_date_info(path, name, channel, current_tag, latest_tag)
         return None
 
     # Patch releases can land on a side branch while day-to-day installs track
@@ -1235,7 +1301,7 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     # that `git pull --ff-only <latest-tag>` cannot reach.
     if behind > 0 and not _can_fast_forward_to(path, latest_tag):
         if suppress_stable_fallthrough:
-            return _channel_up_to_date_info(path, name, channel, current_tag)
+            return _channel_up_to_date_info(path, name, channel, current_tag, latest_tag)
         return None
 
     remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
@@ -1258,6 +1324,7 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
         'release_based': True,
         'current_version': current_version_display,
         'latest_version': latest_tag,
+        'latest_tag': latest_tag,
         'channel': channel,
     }
 
@@ -1333,6 +1400,125 @@ def _check_repo_branch(path, name, *, fetch=True):
     }
 
 
+def _update_recovery_hints(path: Path, compare_ref: str | None = None) -> dict:
+    """Report which update-recovery conditions a checkout still shows.
+
+    The Docker manual notice keeps Agent recovery buttons (``Force update`` /
+    ``Clear lock and retry``) alive across update checks. Persisting them
+    without re-validating the repo left a destructive force button armed after
+    the underlying conflict was resolved outside the UI (Greptile P1 on
+    #8040). Every check now answers "does the recovery condition still
+    exist?" from live repo state:
+
+    - ``force``: unresolved merge conflicts, divergent history, or an
+      untracked path that the offered ref would overwrite -- every condition
+      that can arm the destructive recovery button.
+    - ``clear_lock``: a stale ``.git/index.lock`` is present (the only lock
+      the clear-lock flow addresses).
+
+    ``None`` means "could not determine": the UI must never clear a recovery
+    button on a failed probe.
+    """
+    hints = {'force': None, 'clear_lock': None}
+    git_dir = path / '.git'
+    try:
+        git_dir_is_directory = git_dir.is_dir()
+    except OSError:
+        git_dir_is_directory = False
+    if git_dir_is_directory:
+        inv = _inventory_locks(path)
+        hints['clear_lock'] = bool(inv.get('well_known_lock_present'))
+    status_out, status_ok = _run_git(
+        [
+            '--no-optional-locks',
+            'status',
+            '--porcelain=v1',
+            '-z',
+            '--untracked-files=all',
+            '--no-renames',
+        ],
+        path,
+        timeout=5,
+    )
+    if not status_ok:
+        return hints
+
+    entries = [entry for entry in status_out.split('\0') if entry]
+    if any(
+        entry[:2] in {'DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU'}
+        for entry in entries
+    ):
+        hints['force'] = True
+        return hints
+
+    # Without a freshly fetched comparison ref, a clean index is not enough
+    # to clear Force update: the checkout may still be divergent or an
+    # untracked path may still collide with the pending update.
+    if not compare_ref:
+        return hints
+
+    counts_out, counts_ok = _run_git(
+        ['rev-list', '--left-right', '--count', f'HEAD...{compare_ref}'],
+        path,
+        timeout=5,
+    )
+    counts = counts_out.split() if counts_ok else []
+    if len(counts) != 2 or not all(part.isdigit() for part in counts):
+        return hints
+    diverged = int(counts[0]) > 0 and int(counts[1]) > 0
+
+    untracked = [entry[3:] for entry in entries if entry.startswith('?? ')]
+    # Git collapses an untracked nested repository to ``dir/`` even with
+    # --untracked-files=all.  Its contents are therefore unknown: an incoming
+    # path below it may collide, but different contents may also be harmless.
+    # Keep that state inconclusive instead of claiming either safe or unsafe.
+    collapsed_untracked_dirs = [item.rstrip('/') for item in untracked if item.endswith('/')]
+    explicit_untracked = [item for item in untracked if not item.endswith('/')]
+    collision = False
+    collapsed_overlap = False
+    if untracked:
+        added_out, added_ok = _run_git(
+            [
+                'diff-tree',
+                '-r',
+                '--no-renames',
+                '--diff-filter=A',
+                '--name-only',
+                '-z',
+                'HEAD',
+                compare_ref,
+            ],
+            path,
+            timeout=5,
+        )
+        if not added_ok:
+            return hints
+        added = [entry for entry in added_out.split('\0') if entry]
+        collision = any(
+            local == incoming
+            or local.startswith(f'{incoming}/')
+            or incoming.startswith(f'{local}/')
+            for local in explicit_untracked
+            for incoming in added
+        )
+        # Both directions matter: an incoming path at or below the collapsed
+        # directory, and a collapsed directory at or below an incoming blob
+        # (git refuses to replace a directory holding untracked content).
+        collapsed_overlap = any(
+            incoming == local_dir
+            or incoming.startswith(f'{local_dir}/')
+            or local_dir.startswith(f'{incoming}/')
+            for local_dir in collapsed_untracked_dirs
+            for incoming in added
+        )
+
+    if diverged or collision:
+        hints['force'] = True
+    elif not collapsed_overlap:
+        hints['force'] = False
+    return hints
+
+
 def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     """Check if a git repo is behind its latest release. Returns dict or None.
 
@@ -1360,6 +1546,15 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
             'no_git': True,
         }
 
+    # Recovery hints are consumed by the Docker manual notice, which offers
+    # Agent-only recovery buttons; other targets keep their payload unchanged.
+    # This is what lets the frontend clear a stale recovery button once the
+    # repo no longer needs it (Greptile P1 on #8040).
+    def attach_recovery(payload, compare_ref=None):
+        if payload is not None and name == 'agent':
+            payload['recovery'] = _update_recovery_hints(path, compare_ref)
+        return payload
+
     # Fetch tags first so update prompts track published releases, not every
     # development commit that lands on master/main after the latest release.
     #
@@ -1380,27 +1575,44 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
             release_info['error'] = message
             release_info['stale_check'] = True
             release_info['dirty'] = _is_dirty(path)
-            return release_info
-        return {
+            return attach_recovery(release_info)
+        payload = {
             'name': name,
             'behind': None,
             'error': message,
             'stale_check': True,
             'dirty': _is_dirty(path),
         }
+        return attach_recovery(payload)
 
     release_info = _check_repo_release(path, name, channel)
     if release_info is not None:
         release_info = dict(release_info)
         release_info['dirty'] = _is_dirty(path)
-        return release_info
+        return attach_recovery(release_info, release_info.get('branch'))
+
+    # When the release check found no update gap (HEAD already contains the
+    # latest tag), we fall through to the branch check below.  Before doing
+    # that, probe for tag info so the frontend can show "Latest tag: vX.Y.Z"
+    # even when the user is on main ahead of the latest release.  The tag
+    # data is purely informational — the branch check determines whether an
+    # update is actionable.  (_run_git never raises; guard on falsy returns.)
+    _tags = _release_tags(path, channel)
+    _tag_info = None
+    if _tags:
+        _latest = _tags[0]
+        _current = _current_release_tag(path, channel)
+        _tag_info = {'latest_tag': _latest, 'current_tag': _current}
 
     branch_info = _check_repo_branch(path, name, fetch=False)
     if branch_info is not None:
         branch_info = dict(branch_info)
         branch_info['dirty'] = _is_dirty(path)
         branch_info['channel'] = channel
-        return branch_info
+        if _tag_info is not None:
+            branch_info['latest_tag'] = _tag_info['latest_tag']
+            branch_info['current_tag'] = _tag_info['current_tag']
+        return attach_recovery(branch_info, branch_info.get('branch'))
     return None
 
 
@@ -1484,9 +1696,13 @@ def check_for_updates(force=False, *, include_agent=True, channel=None):
             and cache_matches
             and time.time() - _update_cache['checked_at'] < CACHE_TTL
         ):
-            return dict(_update_cache)
+            cached = dict(_update_cache)
+            cached['cached'] = True
+            return cached
         if _check_in_progress and cache_matches:
-            return dict(_update_cache)  # another thread is already checking this channel
+            cached = dict(_update_cache)
+            cached['cached'] = True
+            return cached  # another thread is already checking this channel
         _check_in_progress = True
 
     try:
@@ -2305,6 +2521,10 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
         pull_args.extend(['origin', compare_ref])
     pull_out, pull_ok = _run_git(pull_args, path, timeout=30)
     if not pull_ok:
+        # Every pull-failure message below interpolates git's own output, and
+        # git echoes the remote URL (token included) when a pull dies. Scrub
+        # once here so no branch can leak it (#8198 follow-up).
+        pull_out = _sanitize_git_diagnostic(pull_out, limit=sys.maxsize)  # never truncate (redaction can lengthen)
         if _is_git_lock_error(pull_out):
             # Lock conflict during pull. If a stash was pushed for the local
             # modifications, attempt to restore it before returning so the
