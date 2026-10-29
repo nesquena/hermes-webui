@@ -2468,7 +2468,11 @@ def restart_stale_runtime() -> dict:
       v1 ceiling or a surviving delegate), incomplete, or unreadable is
       refused (an unverifiable marker fails closed with the in-flight
       update); a crashed update's leftover (dead owner, no delegate)
-      stays recoverable so it cannot block the operator forever;
+      stays recoverable so it cannot block the operator forever — but
+      only while the loaded checkout is provably free: an updater's
+      child that still holds the checkout kernel lock keeps the update
+      in flight even after its marker owner died (``held``), and an
+      unverifiable checkout refuses too;
     * active chat work returns the shared restart-blocked response, exactly
       like ``/api/updates/apply``;
     * the stale check is repeated under ``_apply_lock`` so a runtime that

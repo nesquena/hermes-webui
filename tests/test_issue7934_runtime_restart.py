@@ -830,3 +830,191 @@ def test_real_dead_owner_without_delegate_still_allows_restart(
     assert len(env.checkout.workers) == 1
     env.checkout.workers[0]()
     assert len(env.destructive.execv) == 1
+
+
+# ── checkout custody: a dead marker owner is not sufficient ──
+#
+# The installed Agent (marker v2, hermes_cli/update_lock.py) guards the
+# checkout with a second authority besides the marker PID: a KERNEL lock
+# on ``hermes-update.lock`` inside the checkout's git dir (or
+# ``.hermes-update.lock`` at the checkout root for non-git installs). An
+# updater's completion/build/git child inherits the lock FD (pass_fds), so
+# the checkout can stay locked after the marker owner died — with no
+# ``delegate:`` marker line. The recovery route must refuse while the
+# actual loaded checkout is held or unverifiable, even though every marker
+# identity is dead, and still recover when the same checkout is provably
+# free (the control above).
+
+
+def _checkout_lock_path(checkout):
+    """The installed Agent's checkout kernel lock path for this checkout
+    (mirrors hermes_cli/update_lock.py ``checkout_lock_path``: a linked
+    worktree locks in its common git dir; a plain checkout locks
+    ``.hermes-update.lock`` at its root)."""
+    root = checkout.root
+    dot = root / ".git"
+    if dot.is_dir():
+        gitdir = dot
+    elif dot.is_file():
+        text = dot.read_text(encoding="utf-8-sig").strip()
+        if not text.startswith("gitdir:"):
+            return root / ".hermes-update.lock"
+        gitdir = root / text[len("gitdir:"):].strip()
+    else:
+        return root / ".hermes-update.lock"
+    common = gitdir / "commondir"
+    if common.is_file():
+        gitdir = gitdir / common.read_text(encoding="utf-8-sig").strip()
+    return gitdir / "hermes-update.lock"
+
+
+def _hold_checkout_lock(checkout, hold_seconds=60):
+    """Spawn a surviving updater child that holds the REAL checkout kernel
+    lock.  Models the installed Agent's custody lifecycle: the updater's
+    child keeps the flock after the marker owner died.  Terminate the
+    returned process to release custody."""
+    lock_path = _checkout_lock_path(checkout)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.touch()
+    script = (
+        "import fcntl, os, sys, time\n"
+        f"fd = os.open({str(lock_path)!r}, os.O_RDONLY)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+        "sys.stdout.write('locked\\n')\n"
+        "sys.stdout.flush()\n"
+        f"time.sleep({hold_seconds})\n"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    assert child.stdout is not None
+    line = child.stdout.readline()
+    assert line.strip() == "locked", (
+        "the custody child must report its flock before the test proceeds"
+    )
+    return child
+
+
+@pytest.fixture
+def held_checkout_lock():
+    """Spawn updater-custody children; every one is terminated on teardown."""
+    children = []
+
+    def hold(checkout):
+        child = _hold_checkout_lock(checkout)
+        children.append(child)
+        return child
+
+    yield hold
+    for child in children:
+        child.terminate()
+        try:
+            child.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=10)
+
+
+@pytest.mark.parametrize(
+    "publish_marker",
+    [None, _publish_dead_owner_marker],
+    ids=["absent", "dead-owner"],
+)
+def test_real_held_checkout_refuses_admission_despite_idle_marker(
+    real_restart_env, held_checkout_lock, publish_marker,
+):
+    """A dead marker owner is not sufficient: an updater child can still
+    hold the CHECKOUT kernel lock (no ``delegate:`` line exists for it), so
+    recovery admission must refuse with the ``held`` diagnostic while the
+    loaded checkout is locked — for an absent marker and a dead-owner
+    leftover alike."""
+    env = real_restart_env
+    if publish_marker is not None:
+        publish_marker(env.checkout)
+    held_checkout_lock(env.checkout)
+
+    result = env.updates.restart_stale_runtime()
+
+    assert result.get("ok") is not True
+    assert result["type"] == "agent_runtime_stale"
+    assert result["agent_update_state"] == "held"
+    assert result["restart_scheduled"] is False
+    assert env.checkout.workers == [], (
+        "a held checkout must not schedule any recovery worker"
+    )
+    assert env.destructive_total() == 0
+
+
+def test_real_checkout_held_between_admission_and_lock_refuses(
+    real_restart_env, held_checkout_lock,
+):
+    """The under-lock re-check must refuse when custody appears after
+    admission: the marker reads idle-stale at admission, then an updater
+    child takes the checkout lock before the under-lock re-read."""
+    env = real_restart_env
+    checkout = env.checkout
+    _publish_dead_owner_marker(checkout)
+
+    def hold_under_lock():
+        held_checkout_lock(checkout)
+
+    try:
+        env.hook.on_acquire = hold_under_lock
+        result = env.updates.restart_stale_runtime()
+    finally:
+        env.hook.on_acquire = None
+
+    assert result.get("ok") is not True
+    assert result["type"] == "agent_runtime_stale"
+    assert result["agent_update_state"] == "held"
+    assert result["restart_scheduled"] is False
+    assert env.checkout.workers == [], (
+        "a held checkout must not schedule any recovery worker"
+    )
+    assert env.lock.locked() is False
+    assert env.destructive_total() == 0
+
+
+def test_real_worker_aborts_when_checkout_becomes_held_across_the_delay(
+    real_restart_env, held_checkout_lock,
+):
+    """The delayed pre-replacement guard must re-probe checkout custody: a
+    dead marker keeps reading ``stale`` while an updater child locks the
+    checkout after scheduling was accepted — the replacement must abort
+    before any purge/exec/spawn/exit."""
+    env = real_restart_env
+    checkout = env.checkout
+    _publish_dead_owner_marker(checkout)
+
+    result = env.updates.restart_stale_runtime()
+    assert result["ok"] is True
+    assert result["restart_scheduled"] is True
+    assert len(checkout.workers) == 1
+
+    held_checkout_lock(checkout)
+    checkout.workers[0]()
+
+    assert env.destructive_total() == 0, (
+        "a held checkout must abort the replacement before any destructive call"
+    )
+    assert any("aborted" in w for w in env.logs.warnings)
+
+
+def test_real_unverifiable_checkout_lock_refuses(real_restart_env):
+    """A checkout whose lock cannot be probed fails closed: a non-regular
+    file (here: a directory) at the Agent's lock path reads ``unknown`` and
+    refuses recovery even with a dead marker owner."""
+    env = real_restart_env
+    _publish_dead_owner_marker(env.checkout)
+    lock_path = env.checkout.root / ".git" / "hermes-update.lock"
+    lock_path.mkdir(parents=True)
+
+    result = env.updates.restart_stale_runtime()
+
+    assert result.get("ok") is not True
+    assert result["agent_update_state"] == "unknown"
+    assert result["restart_scheduled"] is False
+    assert env.destructive_total() == 0

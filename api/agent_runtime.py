@@ -50,10 +50,12 @@ _AGENT_DELEGATE_LINE = re.compile(
 # a leftover, and only an everywhere-absent marker reads as no update.
 _MARKER_STATE_PRECEDENCE = ("unknown", "active", "stale_live", "stale", "absent")
 # States a restart guard must refuse: an update in flight (a young owner or
-# a long-lived one past the v1 ceiling), an unverifiable marker, or an
-# incomplete environment.  A crashed update's leftover (``stale``) stays
-# recoverable so a dead owner cannot block the operator's restart forever.
-_AGENT_UPDATE_UNSAFE_STATES = ("active", "stale_live", "incomplete", "unknown")
+# a long-lived one past the v1 ceiling), an unverifiable marker, an
+# incomplete environment, or a checkout whose kernel lock is still held by
+# an updater child (``held``).  A crashed update's leftover (``stale``)
+# stays recoverable so a dead owner cannot block the operator's restart
+# forever.
+_AGENT_UPDATE_UNSAFE_STATES = ("active", "stale_live", "incomplete", "unknown", "held")
 # Slow local Git reads must not look like source drift after just two seconds.
 # Share one total budget across all reads; unreadable revisions fail closed.
 _GIT_REVISION_TIMEOUT_SECONDS = 10
@@ -449,6 +451,113 @@ def _base_marker_home() -> Path:
         return _HERMES_HOME
 
 
+# The installed Agent (marker v2, ``hermes_cli/update_lock.py``) guards the
+# checkout with a second authority besides the marker PID: a KERNEL lock on
+# ``hermes-update.lock`` inside the checkout's git dir (or
+# ``.hermes-update.lock`` at the checkout root for non-git installs). An
+# updater's completion/build/git child inherits the lock FD (``pass_fds``),
+# so the checkout can remain locked after the marker owner died — without
+# any ``delegate:`` marker line.  Recovery therefore probes this lock
+# read-only and fails closed while the actual loaded checkout is held.
+_AGENT_CHECKOUT_LOCK_NAME = ".hermes-update.lock"
+_AGENT_GIT_CHECKOUT_LOCK_NAME = "hermes-update.lock"
+
+
+def _agent_checkout_lock_path() -> Path | None:
+    """Return the installed Agent's checkout kernel lock path, or ``None``.
+
+    Mirrors ``hermes_cli/update_lock.py`` ``checkout_lock_path`` for the
+    LOADED Agent checkout: a linked worktree (``.git`` is a ``gitdir:``
+    file) locks inside its common git dir; any other checkout locks
+    ``.hermes-update.lock`` at its root.  Read-only — the path is resolved
+    from disk, never created.
+    """
+    if _AGENT_SOURCE_DIR is None:
+        return None
+    root = _AGENT_SOURCE_DIR
+    try:
+        dot = root / ".git"
+        if dot.is_dir():
+            gitdir = dot
+        elif dot.is_file():
+            text = dot.read_text(encoding="utf-8-sig").strip()
+            if not text.startswith("gitdir:"):
+                return root / _AGENT_CHECKOUT_LOCK_NAME
+            gitdir = root / text[len("gitdir:"):].strip()
+        else:
+            return root / _AGENT_CHECKOUT_LOCK_NAME
+        common = gitdir / "commondir"
+        if common.is_file():
+            gitdir = gitdir / common.read_text(encoding="utf-8-sig").strip()
+        return Path(os.path.normpath(gitdir)) / _AGENT_GIT_CHECKOUT_LOCK_NAME
+    except OSError:
+        # An unreadable checkout is never provably unlocked; probe the
+        # root-side lock path, hardening the admission below.
+        return root / _AGENT_CHECKOUT_LOCK_NAME
+
+
+def _agent_checkout_lock_state() -> str:
+    """Report whether the loaded Agent checkout's kernel lock is held.
+
+    Mirrors the installed Agent's bounded read-only ``checkout_lock_held``
+    probe (``hermes_cli/update_lock.py``): open the lock file and try one
+    non-blocking exclusive lock.  A missing lock file is ``free``; a lock
+    that cannot be taken is ``held``; a lock path that exists but cannot be
+    probed (not a regular file, unreadable, unsupported primitives) is
+    ``unknown`` and fails closed.  Never writes, truncates, or reclaims the
+    lock: this is a diagnostic, not a custody claim.
+    """
+    path = _agent_checkout_lock_path()
+    if path is None:
+        # No loaded checkout — nothing to protect.
+        return "free"
+    flags = getattr(os, "O_BINARY", 0)
+    if sys.platform == "win32":
+        # msvcrt.locking needs a writable-capable handle; O_RDWR never
+        # writes here (only the byte-range probe touches the fd).
+        flags |= os.O_RDWR
+    else:
+        flags |= os.O_RDONLY | _O_NONBLOCK | _O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return "free"
+    except OSError:
+        return "unknown"
+    try:
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            return "unknown"
+        if not stat.S_ISREG(st.st_mode):
+            return "unknown"
+        if sys.platform == "win32":
+            import msvcrt
+
+            try:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            except OSError:
+                return "held"
+            return "free"
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover - POSIX ships fcntl
+            return "unknown"
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return "held"
+        except OSError:
+            return "unknown"
+        return "free"
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def _agent_update_transaction_state() -> str:
     """Report marker diagnostics, never proof of successful completion.
 
@@ -457,7 +566,11 @@ def _agent_update_transaction_state() -> str:
     Candidate homes are folded with ``_MARKER_STATE_PRECEDENCE``: an
     unverifiable marker anywhere outranks an in-flight one, an in-flight one
     outranks a leftover, and only an everywhere-absent marker reads as no
-    update at all.
+    update at all.  A marker that reads idle is then cross-checked against
+    the checkout kernel lock: the loaded checkout can stay held by an
+    updater child after its marker owner died, so a held or unverifiable
+    checkout reads ``held``/``unknown`` (both refused) instead of
+    ``stale``/``unverified``.
     """
     live_states = [
         _read_live_agent_update(home / _AGENT_UPDATE_MARKER)
@@ -471,6 +584,22 @@ def _agent_update_transaction_state() -> str:
         live_state = "unknown"
     if live_state == "unknown":
         return "unknown"
+
+    # The checkout kernel lock is a second authority on the LOADED Agent
+    # checkout: an updater's completion/build/git child can hold it after
+    # the marker owner died — no ``delegate:`` line needed — so a marker
+    # that reads idle or leftover while the checkout is still locked is an
+    # update still in flight.  A held or unverifiable checkout refuses even
+    # when every marker identity is dead; only a provably free checkout
+    # keeps the dead-owner/absent-marker recovery semantics.  Live marker
+    # identities (``active``/``stale_live``) already refuse, so the probe
+    # runs only where its verdict could authorise recovery.
+    if live_state in ("absent", "stale"):
+        checkout_state = _agent_checkout_lock_state()
+        if checkout_state == "held":
+            return "held"
+        if checkout_state == "unknown":
+            return "unknown"
 
     recovery_present = False
     for root in _agent_install_roots():
