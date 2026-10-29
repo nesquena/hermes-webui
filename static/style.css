@@ -9,7 +9,7 @@
     --bg:#FEFCF7;--sidebar:#FAF7F0;--border:#E0D8C8;--border2:rgba(0,0,0,0.15);
     --text:#1A1610;--muted:#5C5344;--accent:#B8860B;--blue:#0288A8;--gold:#8B6508;--code-bg:#F5F0E5;
     --surface:#F3EEE3;--topbar-bg:rgba(250,247,240,.98);--main-bg:rgba(254,252,247,0.5);
-    --focus-ring:rgba(184,134,11,.35);--focus-glow:rgba(184,134,11,.1);
+    --focus-ring:rgba(184,134,11,.35);--focus-glow:rgba(184,134,11,.1);--focus-ring-strong:var(--text);
     --input-bg:rgba(0,0,0,.03);--hover-bg:rgba(0,0,0,.05);
     --strong:#0F0D08;--em:#5C5344;--code-text:#8b4513;--code-inline-bg:rgba(0,0,0,.06);--pre-text:#1A1610;
     --accent-hover:#996F08;--accent-bg:rgba(184,134,11,0.08);--accent-bg-strong:rgba(184,134,11,0.15);--accent-text:#8B6508;
@@ -190,7 +190,7 @@
   :root[data-skin="graphite"] .session-item.active.streaming,
   :root[data-skin="graphite"] .session-item.active.unread,
   :root[data-skin="graphite"] .session-item.active.needs-attention,
-  :root[data-skin="graphite"] .session-item.active:focus-within,
+  :root[data-skin="graphite"] .session-item.active:has(:focus-visible),
   :root[data-skin="graphite"] .session-item.active.menu-open{padding-right:40px;}
   @media (hover:hover){:root[data-skin="graphite"] .session-item.active:hover{padding-right:40px;}}
   :root[data-skin="graphite"] .session-item.active::before{content:"";position:absolute;left:7px;top:12px;bottom:12px;width:2px;border-radius:999px;background:color-mix(in srgb,var(--accent) 70%,var(--border2));opacity:.55;}
@@ -199,7 +199,7 @@
   :root[data-skin="graphite"] .session-item.active .session-meta{margin-top:2px;}
   :root[data-skin="graphite"] .session-item.active .session-time{padding-left:4px;}
   :root[data-skin="graphite"] .session-item.active:hover .session-time:not(.is-hidden),
-  :root[data-skin="graphite"] .session-item.active:focus-within .session-time:not(.is-hidden),
+  :root[data-skin="graphite"] .session-item.active:has(:focus-visible) .session-time:not(.is-hidden),
   :root[data-skin="graphite"] .session-item.active.menu-open .session-time:not(.is-hidden){display:inline-flex;visibility:hidden;}
   :root[data-skin="graphite"] .session-item.active .session-lineage-count{height:17px;padding:0 6px;margin-left:0;background:var(--surface)!important;color:var(--muted)!important;border:1px solid var(--border);}
   :root[data-skin="graphite"] .session-item.active .session-title,
@@ -316,7 +316,7 @@
   :root[data-skin="codex"] .session-item.active.streaming,
   :root[data-skin="codex"] .session-item.active.unread,
   :root[data-skin="codex"] .session-item.active.needs-attention,
-  :root[data-skin="codex"] .session-item.active:focus-within,
+  :root[data-skin="codex"] .session-item.active:has(:focus-visible),
   :root[data-skin="codex"] .session-item.active.menu-open{padding-right:40px;}
   @media (hover:hover){:root[data-skin="codex"] .session-item.active:hover{padding-right:40px;}}
   :root[data-skin="codex"] .session-item.active::before{content:"";position:absolute;left:7px;top:12px;bottom:12px;width:2px;border-radius:999px;background:color-mix(in srgb,var(--accent) 70%,var(--border2));opacity:.55;}
@@ -325,7 +325,7 @@
   :root[data-skin="codex"] .session-item.active .session-meta{margin-top:2px;}
   :root[data-skin="codex"] .session-item.active .session-time{padding-left:4px;}
   :root[data-skin="codex"] .session-item.active:hover .session-time:not(.is-hidden),
-  :root[data-skin="codex"] .session-item.active:focus-within .session-time:not(.is-hidden),
+  :root[data-skin="codex"] .session-item.active:has(:focus-visible) .session-time:not(.is-hidden),
   :root[data-skin="codex"] .session-item.active.menu-open .session-time:not(.is-hidden){display:inline-flex;visibility:hidden;}
   :root[data-skin="codex"] .session-item.active .session-lineage-count{height:17px;padding:0 6px;margin-left:0;background:var(--surface)!important;color:var(--muted)!important;border:1px solid var(--border);}
   :root[data-skin="codex"] .session-item.active .session-title,
@@ -442,7 +442,7 @@
   :root[data-skin="terracotta"] .session-item.active.streaming,
   :root[data-skin="terracotta"] .session-item.active.unread,
   :root[data-skin="terracotta"] .session-item.active.needs-attention,
-  :root[data-skin="terracotta"] .session-item.active:focus-within,
+  :root[data-skin="terracotta"] .session-item.active:has(:focus-visible),
   :root[data-skin="terracotta"] .session-item.active.menu-open{padding-right:40px;}
   @media (hover:hover){:root[data-skin="terracotta"] .session-item.active:hover{padding-right:40px;}}
   :root[data-skin="terracotta"] .session-item.active::before{content:"";position:absolute;left:7px;top:12px;bottom:12px;width:2px;border-radius:999px;background:color-mix(in srgb,var(--accent) 70%,var(--border2));opacity:.55;}
@@ -451,7 +451,7 @@
   :root[data-skin="terracotta"] .session-item.active .session-meta{margin-top:2px;}
   :root[data-skin="terracotta"] .session-item.active .session-time{padding-left:4px;}
   :root[data-skin="terracotta"] .session-item.active:hover .session-time:not(.is-hidden),
-  :root[data-skin="terracotta"] .session-item.active:focus-within .session-time:not(.is-hidden),
+  :root[data-skin="terracotta"] .session-item.active:has(:focus-visible) .session-time:not(.is-hidden),
   :root[data-skin="terracotta"] .session-item.active.menu-open .session-time:not(.is-hidden){display:inline-flex;visibility:hidden;}
   :root[data-skin="terracotta"] .session-item.active .session-lineage-count{height:17px;padding:0 6px;margin-left:0;background:var(--surface)!important;color:var(--muted)!important;border:1px solid var(--border);}
   :root[data-skin="terracotta"] .session-item.active .session-title,
@@ -568,7 +568,7 @@
   :root[data-skin="github"] .session-item.active.streaming,
   :root[data-skin="github"] .session-item.active.unread,
   :root[data-skin="github"] .session-item.active.needs-attention,
-  :root[data-skin="github"] .session-item.active:focus-within,
+  :root[data-skin="github"] .session-item.active:has(:focus-visible),
   :root[data-skin="github"] .session-item.active.menu-open{padding-right:40px;}
   @media (hover:hover){:root[data-skin="github"] .session-item.active:hover{padding-right:40px;}}
   :root[data-skin="github"] .session-item.active::before{content:"";position:absolute;left:7px;top:12px;bottom:12px;width:2px;border-radius:999px;background:color-mix(in srgb,var(--accent) 70%,var(--border2));opacity:.55;}
@@ -577,7 +577,7 @@
   :root[data-skin="github"] .session-item.active .session-meta{margin-top:2px;}
   :root[data-skin="github"] .session-item.active .session-time{padding-left:4px;}
   :root[data-skin="github"] .session-item.active:hover .session-time:not(.is-hidden),
-  :root[data-skin="github"] .session-item.active:focus-within .session-time:not(.is-hidden),
+  :root[data-skin="github"] .session-item.active:has(:focus-visible) .session-time:not(.is-hidden),
   :root[data-skin="github"] .session-item.active.menu-open .session-time:not(.is-hidden){display:inline-flex;visibility:hidden;}
   :root[data-skin="github"] .session-item.active .session-lineage-count{height:17px;padding:0 6px;margin-left:0;background:var(--surface)!important;color:var(--muted)!important;border:1px solid var(--border);}
   :root[data-skin="github"] .session-item.active .session-title,
@@ -865,8 +865,8 @@
   :root.dark[data-skin="nous"] .session-tree-badge{background:rgba(99,179,237,.2);color:#4682B4;}
   :root.dark[data-skin="nous"] .session-tag{background:rgba(99,179,237,.2);color:#4682B4;}
   /* Image lightbox */
-  :root[data-skin="nous"] .img-lightbox-close:hover{background:rgba(70,130,180,.4);}
-  :root.dark[data-skin="nous"] .img-lightbox-close:hover{background:rgba(70,130,180,.4);}
+  :root[data-skin="nous"] .img-lightbox-close:hover,:root[data-skin="nous"] .img-lightbox-fit:hover{background:rgba(70,130,180,.4);}
+  :root.dark[data-skin="nous"] .img-lightbox-close:hover,:root.dark[data-skin="nous"] .img-lightbox-fit:hover{background:rgba(70,130,180,.4);}
   :root[data-skin="nous"] .img-lightbox-nav:hover{background:rgba(70,130,180,.5);}
   :root.dark[data-skin="nous"] .img-lightbox-nav:hover{background:rgba(70,130,180,.5);}
   /* Diff blocks */
@@ -969,6 +969,12 @@
   :root[data-skin="geist-contrast"] .theme-pick-btn.active,
   :root[data-skin="geist-contrast"] .font-size-pick-btn.active{background:var(--surface-subtle)!important;border-color:var(--border2)!important;color:var(--text)!important;box-shadow:inset 0 0 0 1px var(--border)!important;font-weight:500!important;}
   :root[data-skin="geist-contrast"] .session-item.active{position:relative;border:1px solid var(--border2)!important;}
+  /* The Geist Contrast active-row rule sets an `!important` inset 1px shadow that
+     would otherwise override the keyboard focus ring, leaving a focused active
+     conversation with no keyboard-specific indicator. Restore the 2px focus ring
+     at higher specificity + `!important` when the row's open-control is
+     keyboard-focused. */
+  :root[data-skin="geist-contrast"] .session-item.active:has(.session-open-control:focus-visible){box-shadow:inset 0 0 0 2px var(--focus-ring-strong)!important;}
   :root[data-skin="geist-contrast"] .session-item.active::before{content:"";position:absolute;left:6px;top:10px;bottom:10px;width:2px;border-radius:999px;background:var(--accent);}
   :root[data-skin="geist-contrast"] .session-item.active .session-title,
   :root[data-skin="geist-contrast"] .session-item.active .session-meta,
@@ -1150,7 +1156,7 @@
   :root.dark[data-skin="neon"] .mcp-http{color:#c8a0ff;}
   :root.dark[data-skin="neon"] .mcp-status-active{color:#00dd88;}
   /* Image lightbox */
-  :root.dark[data-skin="neon"] .img-lightbox-close:hover{background:rgba(179,71,255,.35);}
+  :root.dark[data-skin="neon"] .img-lightbox-close:hover,:root.dark[data-skin="neon"] .img-lightbox-fit:hover{background:rgba(179,71,255,.35);}
   /* Links: cyan with hover glow */
   :root.dark[data-skin="neon"] a{color:var(--info);transition:text-shadow 0.2s;}
   :root.dark[data-skin="neon"] a:hover{text-shadow:0 0 8px rgba(0,221,255,0.4);}
@@ -1217,7 +1223,7 @@
   :root.dark[data-skin="neon-soft"] .diff-block .diff-plus{color:#b347ff;}
   :root.dark[data-skin="neon-soft"] .mcp-http{color:#c8a0ff;}
   :root.dark[data-skin="neon-soft"] .mcp-status-active{color:#00dd88;}
-  :root.dark[data-skin="neon-soft"] .img-lightbox-close:hover{background:rgba(179,71,255,.35);}
+  :root.dark[data-skin="neon-soft"] .img-lightbox-close:hover,:root.dark[data-skin="neon-soft"] .img-lightbox-fit:hover{background:rgba(179,71,255,.35);}
   :root.dark[data-skin="neon-soft"] a{color:var(--info);transition:text-shadow 0.2s;}
   :root.dark[data-skin="neon-soft"] a:hover{text-shadow:0 0 8px rgba(0,221,255,0.4);}
 
@@ -1283,7 +1289,7 @@
   :root.dark[data-skin="neon-paint"] .diff-block .diff-plus{color:#FF2D95;}
   :root.dark[data-skin="neon-paint"] .mcp-http{color:#FF80BF;}
   :root.dark[data-skin="neon-paint"] .mcp-status-active{color:#00E676;}
-  :root.dark[data-skin="neon-paint"] .img-lightbox-close:hover{background:rgba(255,45,149,.35);}
+  :root.dark[data-skin="neon-paint"] .img-lightbox-close:hover,:root.dark[data-skin="neon-paint"] .img-lightbox-fit:hover{background:rgba(255,45,149,.35);}
   :root.dark[data-skin="neon-paint"] a{color:var(--info);transition:text-shadow 0.2s;}
   :root.dark[data-skin="neon-paint"] a:hover{text-shadow:0 0 10px rgba(0,229,255,0.5);}
 
@@ -1332,7 +1338,7 @@
   :root.dark[data-skin="verdigris"] .mcp-http{color:#E4C28D;}
   :root.dark[data-skin="verdigris"] .mcp-status-active{color:#E4C28D;}
   /* Image lightbox */
-  :root.dark[data-skin="verdigris"] .img-lightbox-close:hover{background:rgba(200,154,90,.35);}
+  :root.dark[data-skin="verdigris"] .img-lightbox-close:hover,:root.dark[data-skin="verdigris"] .img-lightbox-fit:hover{background:rgba(200,154,90,.35);}
   :root.dark[data-skin="verdigris"] .img-lightbox-nav:hover{background:rgba(200,154,90,.40);}
 
   /* #594: app-dialog light mode overrides — base styles use hardcoded dark gradients */
@@ -1596,9 +1602,9 @@
      action button (.session-actions, position:absolute, 26x26 at right:6px)
      and attention indicator (26x26 at right:6px) still need 40px reserved
      when they're visible — covered by the hover / streaming / unread /
-     menu-open / focus-within rule below. */
+     menu-open / keyboard-focus rule below. */
   .session-item{padding:8px 8px;margin-bottom:2px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted);transition:background .15s,color .15s,transform .5s cubic-bezier(.22,.61,.36,1),box-shadow .15s ease;display:flex;align-items:flex-start;gap:8px;min-width:0;position:relative;touch-action:pan-y;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;transform:translate3d(var(--session-swipe-offset,0),var(--session-reflow-offset,0),0);}
-  .session-item.streaming,.session-item.unread,.session-item.needs-attention,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}
+  .session-item.streaming,.session-item.unread,.session-item.needs-attention,.session-item:has(:focus-visible),.session-item.menu-open{padding-right:40px;}
   .session-item.needs-attention{box-shadow:inset 3px 0 0 var(--warning);background:color-mix(in srgb,var(--warning) 8%,transparent);}
   .session-item.attention-approval{box-shadow:inset 3px 0 0 var(--error);background:color-mix(in srgb,var(--error) 9%,transparent);}
   .session-item.attention-clarify{box-shadow:inset 3px 0 0 var(--warning);background:color-mix(in srgb,var(--warning) 8%,transparent);}
@@ -1655,9 +1661,30 @@
   .session-item.streaming .session-title-row{color:var(--text);}
   .session-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow:hidden;}
   .session-title-row{display:flex;align-items:center;gap:6px;min-width:0;}
-  .session-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);user-select:none;}
-  .session-title:focus-visible{outline:none;}
-  .session-item:has(> .session-text > .session-title-row > .session-title:focus-visible){box-shadow:inset 0 0 0 2px var(--accent);}
+  /* Title first, chips after it. The group wraps and shows exactly one line (1lh = the title's
+     inherited line box), so a chip that does not fit beside the title moves, whole, to the hidden
+     second line instead of shrinking the title or being clipped mid-pill. The title itself only
+     ellipsizes when it is wider than the whole group, as it did on master when the chips lived
+     inside it. Tags stay reachable through the row tooltip and the #tag filter. */
+  .session-title-group{display:flex;flex-wrap:wrap;align-items:center;align-content:flex-start;column-gap:6px;row-gap:0;flex:1 1 auto;min-width:6ch;max-width:100%;height:1lh;overflow:hidden;}
+  .session-title-group:has(> .session-title-input){height:auto;overflow:visible;}
+  .session-title{flex:0 1 auto;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);user-select:none;border:0;background:transparent;padding:0;margin:0;text-align:left;font:inherit;line-height:inherit;}
+  .session-open-control{cursor:pointer;}
+  .session-open-control:focus-visible{outline:2px solid transparent;outline-offset:-2px;}
+  /* Session rows need an opaque, 3:1 keyboard indicator. The shared
+     --focus-ring token is deliberately translucent for glow-style controls;
+     --focus-ring-strong follows each skin's already contrast-safe text token. */
+  .session-item:has(.session-open-control:focus-visible){box-shadow:inset 0 0 0 2px var(--focus-ring-strong);}
+  /* Preserve the attention owner while the row also owns keyboard focus.
+     Put the 3px state stripe first so it remains visible above the 2px ring. */
+  .session-item.needs-attention:has(.session-open-control:focus-visible),
+  .session-item.attention-clarify:has(.session-open-control:focus-visible){box-shadow:inset 3px 0 0 var(--warning),inset 0 0 0 2px var(--focus-ring-strong);}
+  .session-item.attention-approval:has(.session-open-control:focus-visible){box-shadow:inset 3px 0 0 var(--error),inset 0 0 0 2px var(--focus-ring-strong);}
+  /* Geist Contrast's active-row shadow is !important, so its combined states
+     need the same cascade strength rather than losing either indicator. */
+  :root[data-skin="geist-contrast"] .session-item.active.needs-attention:has(.session-open-control:focus-visible),
+  :root[data-skin="geist-contrast"] .session-item.active.attention-clarify:has(.session-open-control:focus-visible){box-shadow:inset 3px 0 0 var(--warning),inset 0 0 0 2px var(--focus-ring-strong)!important;}
+  :root[data-skin="geist-contrast"] .session-item.active.attention-approval:has(.session-open-control:focus-visible){box-shadow:inset 3px 0 0 var(--error),inset 0 0 0 2px var(--focus-ring-strong)!important;}
   .session-search-hit{border-radius:4px;background:var(--accent-bg);color:var(--accent-text);box-decoration-break:clone;-webkit-box-decoration-break:clone;padding:0 .08em;}
   .session-search-preview{font-size:11px;line-height:1.35;color:var(--muted);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow-wrap:anywhere;opacity:.9;}
   .session-search-hit-preview{background:var(--accent-bg);color:var(--accent-text);}
@@ -1668,7 +1695,7 @@
   .session-item.active .session-meta{color:var(--accent-text);opacity:.8;}
   .session-state-indicator{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:10px;height:10px;color:var(--accent);visibility:hidden;}
   .session-attention-indicator{position:absolute;right:6px;top:50%;transform:translateY(-50%);width:26px;height:26px;z-index:1;pointer-events:none;transition:opacity .15s ease,visibility .15s ease;}
-  .session-item:hover .session-attention-indicator,.session-item:focus-within .session-attention-indicator,.session-item.menu-open .session-attention-indicator{opacity:0;visibility:hidden;}
+  .session-item:hover .session-attention-indicator,.session-item:has(:focus-visible) .session-attention-indicator,.session-item.menu-open .session-attention-indicator{opacity:0;visibility:hidden;}
   .session-state-indicator.is-streaming,.session-state-indicator.is-unread,.session-state-indicator.is-attention-approval,.session-state-indicator.is-attention-clarify,.session-state-indicator.is-attention-generic{visibility:visible;}
   .session-state-indicator.is-attention-approval{color:var(--error);}
   .session-state-indicator.is-attention-clarify{color:var(--warning);}
@@ -1717,11 +1744,14 @@
     flex-shrink:0;
   }
   .session-time.is-hidden{display:none;}
-  .session-item:hover .session-time,.session-item:focus-within .session-time,.session-item.menu-open .session-time{display:none;}
+  .session-item:has(:focus-visible) .session-time,.session-item.menu-open .session-time{display:none;}
+  @media (hover:hover){
+    .session-item:hover .session-time{display:none;}
+  }
   /* ── Session action trigger + dropdown ── */
   .session-actions{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .15s ease;}
-  .session-item:hover .session-actions,.session-item:focus-within .session-actions,.session-item.menu-open .session-actions{opacity:1;pointer-events:auto;}
-  .session-item.streaming:not(:hover):not(:focus-within):not(.menu-open) .session-actions,.session-item.unread:not(:hover):not(:focus-within):not(.menu-open) .session-actions{opacity:0;pointer-events:none;}
+  .session-item:hover .session-actions,.session-item:has(:focus-visible) .session-actions,.session-item.menu-open .session-actions{opacity:1;pointer-events:auto;}
+  .session-item.streaming:not(:hover):not(:has(:focus-visible)):not(.menu-open) .session-actions,.session-item.unread:not(:hover):not(:has(:focus-visible)):not(.menu-open) .session-actions{opacity:0;pointer-events:none;}
   .session-actions-trigger{width:26px;height:26px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer;padding:0;line-height:1;display:inline-flex;align-items:center;justify-content:center;transition:background .12s,color .12s,border-color .12s;}
   .session-actions-trigger:hover{background:var(--hover-bg);color:var(--text);}
   .session-actions-trigger.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text);}
@@ -1747,8 +1777,13 @@
     .session-item.session-list-flip-enter{animation:none;}
     .session-state-indicator.is-attention-approval:not(.is-streaming):not(.is-unread)::before{animation:none;}
   }
-  /* Hide overlay during inline rename */
+  /* Keep overlays and tag chips from competing with the inline rename input.
+     Scope the tag hide to the RENAMING row's own title-group so a nested
+     child's rename does not also hide the containing parent row's tag chips
+     (the `:has(.session-title-input)` ancestor match otherwise reaches the
+     top-level parent row when a fork/child under it is being renamed). */
   .session-item:has(.session-title-input) .session-actions{display:none;}
+  .session-title-group:has(> .session-title-input) > .session-tag{display:none;}
   @keyframes session-menu-in{from{opacity:0;transform:translate3d(0,-4px,0) scale(.985);}to{opacity:1;transform:translate3d(0,0,0) scale(1);}}
   @keyframes session-long-press{from{filter:brightness(1);}to{filter:brightness(1.08);}}
   @keyframes sessionSwipeReturn{0%{opacity:.62;transform:translate3d(var(--session-swipe-return-offset,32px),var(--session-reflow-offset,0),0) scale(.985);}100%{opacity:1;transform:translate3d(0,var(--session-reflow-offset,0),0) scale(1);}}
@@ -2602,9 +2637,12 @@
   /* MEDIA: inline image rendering (feat #450) */
   .msg-media-img{display:inline-block;width:120px;height:90px;border-radius:6px;margin:3px 4px 3px 0;cursor:zoom-in;object-fit:cover;border:1px solid var(--border);vertical-align:bottom;transition:opacity .15s;}
   .msg-media-img:hover{opacity:.85;}
-  .img-lightbox{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.82);display:flex;align-items:center;justify-content:center;cursor:zoom-out;animation:lb-in .15s ease;}
+  .img-lightbox{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.82);display:flex;align-items:center;justify-content:center;cursor:zoom-out;animation:lb-in .15s ease;outline:none;}
   @keyframes lb-in{from{opacity:0}to{opacity:1}}
-  .img-lightbox img{max-width:90vw;max-height:90vh;object-fit:contain;border-radius:8px;box-shadow:0 8px 48px rgba(0,0,0,.6);cursor:default;}
+  .img-lightbox-viewport{position:relative;width:90vw;height:90vh;overflow:hidden;border-radius:8px;touch-action:none;user-select:none;-webkit-user-select:none;cursor:grab;}
+  .img-lightbox-viewport.is-panning{cursor:grabbing;}
+  .img-lightbox-canvas{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform;}
+  .img-lightbox-canvas img{display:block;width:100%;height:100%;max-width:none;max-height:none;border-radius:8px;box-shadow:0 8px 48px rgba(0,0,0,.6);cursor:inherit;-webkit-user-drag:none;}
   .mermaid-viewer{display:flex;flex-direction:column;gap:6px;max-width:100%;min-width:0;}
   .mermaid-viewer-toolbar{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:4px;align-items:center;flex-shrink:0;}
   .mermaid-viewer-btn{width:28px;height:28px;border:1px solid var(--border2);border-radius:6px;background:var(--input-bg);color:var(--muted);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;transition:background .15s,color .15s,border-color .15s,transform .15s;flex:0 0 auto;padding:0;}
@@ -2620,8 +2658,24 @@
   .mermaid-viewer-canvas{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform;}
   .mermaid-viewer-svg{display:block;width:100%;height:100%;}
   .img-lightbox .mermaid-lightbox-svg{background:var(--code-bg);cursor:default;}
-  .img-lightbox-close{position:absolute;top:16px;right:20px;width:36px;height:36px;border:none;border-radius:50%;background:rgba(255,255,255,.12);color:#fff;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s;}
-  .img-lightbox-close:hover{background:rgba(255,255,255,.22);}
+  .img-lightbox-close{position:absolute;top:max(16px,env(safe-area-inset-top,0px));right:max(20px,env(safe-area-inset-right,0px));width:36px;height:36px;border:1px solid rgba(255,255,255,.28);border-radius:50%;background:rgba(0,0,0,.5);color:#fff;font-size:26px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s,border-color .15s;}
+    /* Hover lightens to a mid-grey disc: visible over the near-black scrim AND over a bright image, where the white
+       glyph keeps its contrast (a darker hover on a dark scrim was invisible; a white one washes out over light
+       images). Shared by the Mermaid lightbox, which reuses this class. */
+    .img-lightbox-close:hover{background:rgba(72,72,78,.88);border-color:rgba(255,255,255,.55);}
+    .img-lightbox-close:focus-visible{outline:2px solid rgba(255,255,255,.85);outline-offset:2px;}
+    .img-lightbox-fit{position:absolute;top:max(16px,env(safe-area-inset-top,0px));right:max(64px,calc(env(safe-area-inset-right,0px) + 64px));width:36px;height:36px;padding:0;border:1px solid rgba(255,255,255,.28);border-radius:50%;background:rgba(0,0,0,.5);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s,border-color .15s;z-index:1;}
+    .img-lightbox-fit:hover{background:rgba(72,72,78,.88);border-color:rgba(255,255,255,.55);}
+    .img-lightbox-fit svg{width:18px;height:18px;display:block;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;}
+    .img-lightbox-fit:focus-visible{outline:2px solid rgba(255,255,255,.85);outline-offset:2px;}
+    /* Touch: 44px targets (WCAG/HIG minimum) with a 12px gap so a near-miss on Fit cannot close a zoomed image. The
+       Mermaid lightbox reuses the close button, so its toolbar keeps clear of the larger target (44px + 12px gap);
+       otherwise a tap on Reset view at 320px lands on close. */
+    @media (pointer:coarse){
+      .img-lightbox-close,.img-lightbox-fit{width:44px;height:44px;}
+      .img-lightbox-fit{right:max(76px,calc(env(safe-area-inset-right,0px) + 76px));}
+      .mermaid-viewer--lightbox .mermaid-viewer-toolbar{padding-right:calc(max(20px,env(safe-area-inset-right,0px)) + 56px);}
+    }
   .img-lightbox-nav{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:44px;border:none;border-radius:50%;background:rgba(255,255,255,.12);color:#fff;font-size:28px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s,opacity .15s;z-index:1;opacity:.6;}
   .img-lightbox-nav:hover{background:rgba(255,255,255,.28);opacity:1;}
   .img-lightbox-nav-prev{left:16px;}
@@ -3437,7 +3491,7 @@
     .session-actions{display:none;}
     .session-item{padding-right:6px;}
     .session-item.streaming,.session-item.unread{padding-right:40px;}
-    .session-item:focus-within,.session-item.menu-open{padding-right:6px;}
+    .session-item:has(:focus-visible),.session-item.menu-open{padding-right:6px;}
   }
 
   @media (max-width: 340px){
@@ -5192,6 +5246,7 @@ main.main > #mainPlugin{display:none;}
 /* Sidebar menu (lives in the left sidebar under the cog panel) */
 .panel-view#panelSettings{gap:0;padding:0;}
 .panel-head{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:41px;padding:8px 12px;border-bottom:1px solid var(--border);font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;flex-shrink:0;}
+.panel-head-title{margin:0;font:inherit;color:inherit;letter-spacing:inherit;text-transform:inherit;}
 .panel-head-actions{display:flex;align-items:center;gap:4px;text-transform:none;letter-spacing:normal;}
 .panel-head-btn{width:24px;height:24px;padding:0;display:inline-flex;align-items:center;justify-content:center;border:none;background:transparent;border-radius:6px;color:var(--muted);cursor:pointer;transition:background .15s,color .15s;flex-shrink:0;}
 .mobile-sidebar-close{display:none;}
@@ -5880,8 +5935,8 @@ main.main > #mainPlugin{display:none;}
 .session-worktree-indicator svg{width:12px;height:12px;}
 .session-item:hover .session-branch-indicator,
 .session-item:hover .session-worktree-indicator,
-.session-item:focus-within .session-branch-indicator,
-.session-item:focus-within .session-worktree-indicator,
+.session-item:has(:focus-visible) .session-branch-indicator,
+.session-item:has(:focus-visible) .session-worktree-indicator,
 .session-item.menu-open .session-branch-indicator{
   opacity:.85;
   color:var(--text);
@@ -5954,7 +6009,7 @@ main.main > #mainPlugin{display:none;}
 .session-tree-badge{display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;font-size:9px;font-weight:700;padding:0 4px;border-radius:8px;background:rgba(99,179,237,.2);color:#63b3ed;margin-left:auto;flex-shrink:0;user-select:none;}
 
 /* ── Session tags ── */
-.session-tag{display:inline-block;font-size:9px;font-weight:600;padding:1px 5px;margin-left:4px;border-radius:3px;background:rgba(99,179,237,.2);color:#63b3ed;cursor:pointer;vertical-align:middle;}
+.session-tag{display:inline-block;flex:0 0 auto;min-width:0;max-width:10ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:9px;font-weight:600;padding:1px 5px;margin-left:0;border-radius:3px;background:rgba(99,179,237,.2);color:#63b3ed;cursor:pointer;vertical-align:middle;}
 .session-tag:hover{background:rgba(99,179,237,.35);}
 
 /* ── File rename input ── */

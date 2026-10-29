@@ -107,8 +107,47 @@ class _SyncThread:
         return None
 
 
+@pytest.fixture(autouse=True)
+def _restore_session_registries():
+    """Put the process-wide session registries back after every test here.
+
+    Several tests clear ``SESSIONS`` (one OrderedDict shared by api.config,
+    api.models and api.routes) and the writeback/stream owner maps, then seed
+    them with stand-ins. Left in place, a stand-in outlives its test: any later
+    ``Session.save()`` that takes ``_write_session_index``'s full-rebuild path
+    (no index file yet) calls ``compact()`` on every ``SESSIONS`` value, and an
+    unrelated test fails with "'SimpleNamespace' object has no attribute
+    'compact'" depending only on test order.
+    """
+    sessions = list(config.SESSIONS.items())
+    writeback = dict(config.SESSION_WRITEBACK_OWNERS)
+    stream_owners = dict(config.STREAM_SESSION_OWNERS)
+    with config.STREAMS_LOCK:
+        streams = dict(config.STREAMS)
+    try:
+        yield
+    finally:
+        config.SESSIONS.clear()
+        config.SESSIONS.update(sessions)
+        config.SESSION_WRITEBACK_OWNERS.clear()
+        config.SESSION_WRITEBACK_OWNERS.update(writeback)
+        config.STREAM_SESSION_OWNERS.clear()
+        config.STREAM_SESSION_OWNERS.update(stream_owners)
+        with config.STREAMS_LOCK:
+            config.STREAMS.clear()
+            config.STREAMS.update(streams)
+
+
 def _make_session(session_id: str) -> SimpleNamespace:
+    # A stand-in placed in SESSIONS must honour the contract every SESSIONS value
+    # has: the session index's full rebuild calls compact() on each of them.
     return SimpleNamespace(
+        compact=lambda *a, **kw: {
+            "session_id": session_id,
+            "title": "Existing",
+            "message_count": 0,
+            "updated_at": 0,
+        },
         session_id=session_id,
         title="Existing",
         active_stream_id=None,
@@ -362,6 +401,133 @@ def test_retry_timer_drains_once_as_attempt_1(monkeypatch, fake_timer):
     )
     assert sid not in routes._DEFERRED_WAKEUP_RETRY_TIMERS, (
         "the fired retry must drop its handle or it can re-enter the drain"
+    )
+
+
+# --------------------------------------------------------------------------
+# #8363 review follow-up: the stalled-unwind ordering.
+#
+# The launch-abort re-arm records the retry entry and schedules ONE timer. The
+# abort's exception normally reaches the dispatcher's handler microseconds
+# later, and that handler's re-defer upgrades the same entry with the
+# dispatch-claim provenance. If the unwind stalls longer than the timer delay,
+# the timer-fired drain runs FIRST. It must already see the provenance: if the
+# entry is untagged, the drain reads the dispatch's own transport claim (the
+# shared registry consumed key) as an agent read, pops the entry, starts
+# nothing, and leaves no timer behind — the automatic continuation is lost.
+# --------------------------------------------------------------------------
+
+
+def test_stalled_unwind_keeps_the_timer_fired_retry(monkeypatch, fake_timer):
+    """A retry timer that fires before the abort reaches the dispatcher's
+    handler must still deliver exactly one retry.
+
+    The only seam is the chat worker thread: its first ``start()`` raises, any
+    later ``start()`` is an accepted launch with no model work. Everything else
+    is the real path: ``_start_server_side_wakeup_turn`` → ``start_session_turn``
+    → ``_start_run`` → ``_start_chat_stream_for_session`` (real launch-abort
+    cleanup + re-arm) → the real one-shot timer → the real drain.
+    """
+    from tests._wakeup_helpers import FakeProcessRegistry, install_fake_registry
+
+    sid = "wakeup-stalled-unwind"
+    process_id = "proc-stalled"
+    _reset_wakeup_state()
+    session, holder = _install_launch_abort(monkeypatch, sid)
+    # Keep the real ``start_session_turn`` resolution offline: a platform temp
+    # path is not a registered WebUI workspace on every dev machine.
+    monkeypatch.setattr(
+        routes, "_resolve_chat_workspace_with_recovery", lambda s, workspace: "/tmp"
+    )
+
+    fake_registry = FakeProcessRegistry()
+    fake_registry.register(process_id, sid)
+    install_fake_registry(monkeypatch, fake_registry)
+    # The idle dispatch claims the shared consumed key before it starts the
+    # turn (the cross-A/B transport dedupe). Model that claim; no process read
+    # and no accepted agent turn has happened for it.
+    fake_registry._completion_consumed.add(process_id)
+
+    worker_starts = []
+
+    class _ProbeThread:
+        """Run the wakeup runner inline; fail the FIRST chat worker launch."""
+
+        def __init__(self, target=None, args=(), kwargs=None, name=None,
+                     daemon=False, **_extra):
+            self.target = target
+            self.args = args or ()
+            self.kwargs = kwargs or {}
+            self.name = str(name or "")
+            self.daemon = bool(daemon)
+
+        def start(self):
+            if self.name.startswith("hermes-webui-process-wakeup-"):
+                self.target(*self.args, **self.kwargs)
+                return
+            worker_starts.append("worker")
+            if len(worker_starts) == 1:
+                raise RuntimeError("thread launch failed (simulated)")
+
+    monkeypatch.setattr(threading, "Thread", _ProbeThread)
+
+    real_start_session_turn = routes.start_session_turn
+    probe = {"timer_fired": False, "entries_at_fire": []}
+
+    def _stalled_start_session_turn(*args, **kwargs):
+        try:
+            return real_start_session_turn(*args, **kwargs)
+        except BaseException:
+            # The worker launch just failed; its real abort cleanup + re-arm
+            # have already run. Hold the exception here — before it reaches
+            # ``_runner``'s handler — and let the retry timer fire inside this
+            # window (the stalled-unwind ordering).
+            with config.DEFERRED_PROCESS_WAKEUPS_LOCK:
+                probe["entries_at_fire"] = [
+                    dict(entry)
+                    for entry in (config.DEFERRED_PROCESS_WAKEUPS.get(sid) or [])
+                ]
+            for timer in list(_FakeTimer.instances):
+                timer.fn(*timer.args)
+            probe["timer_fired"] = True
+            raise
+
+    monkeypatch.setattr(
+        routes, "start_session_turn", _stalled_start_session_turn, raising=True
+    )
+
+    prompt = (
+        "[IMPORTANT: Background process proc-stalled completed (exit_code=0).\n"
+        "Command: true\nOutput:\ndone]"
+    )
+    bp._start_server_side_wakeup_turn(
+        sid,
+        prompt,
+        process_id=process_id,
+        consumed_claimed_by_dispatch=True,
+    )
+
+    assert probe["timer_fired"], "the retry timer never fired inside the stall"
+    entries = probe["entries_at_fire"]
+    assert len(entries) == 1, (
+        f"the launch-abort re-arm must queue exactly one retry, got {entries!r}"
+    )
+    assert entries[0].get("consumed_claimed_by_dispatch") is True, (
+        "the launch-abort re-arm queued an UNTAGGED retry entry. A timer drain "
+        "that runs before the dispatcher's handler re-defer reads the "
+        "dispatch's own transport claim as an agent read and drops the only "
+        "retry (#8363 review)."
+    )
+    # Exactly two worker launches: the failed one and the timer-delivered retry.
+    assert worker_starts == ["worker", "worker"], (
+        "the timer-fired drain must launch exactly one retry; got "
+        f"{len(worker_starts)} worker launch attempt(s)"
+    )
+    # The timer delivered and dropped its own handle: nothing left to re-fire.
+    assert len(_FakeTimer.instances) == 1
+    assert _FakeTimer.instances[0].started
+    assert sid not in routes._DEFERRED_WAKEUP_RETRY_TIMERS, (
+        "the fired retry must drop its registry handle"
     )
 
 

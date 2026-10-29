@@ -52,6 +52,12 @@ class MockEventSource {
 }
 window.EventSource = MockEventSource;
 window.MockEventSource = MockEventSource;
+// The scenarios model a browser that believes it is online: a connection-error
+// is a lost SSE stream, not an offline device. Chromium reports
+// navigator.onLine === false when the host has no network route (for example a
+// sandboxed run in an empty network namespace), and messages.js then correctly
+// defers the terminal event behind the offline banner, so pin it.
+Object.defineProperty(Navigator.prototype, 'onLine', {configurable: true, get: () => true});
 """
 
 

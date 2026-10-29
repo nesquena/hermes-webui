@@ -738,10 +738,15 @@ def test_divergent_profile_without_config_yaml_stays_isolated(monkeypatch, tmp_p
     # monkeypatch teardown + path-change invalidation keep the global cache clean.
 
 
-def test_suggestions_scoped_to_explicit_profile_saved_roots(tmp_path):
+def test_suggestions_scoped_to_explicit_profile_saved_roots(tmp_path, monkeypatch):
     """Sweep regression (#7168 review): list_workspace_suggestions with an
     explicit profile must widen trust only via THAT profile's saved
     workspaces — a workspace saved under a different profile stays out."""
+    # Trust also comes from $HOME; keep tmp_path outside it (a sandboxed run
+    # sets HOME=/tmp, which would trust every fixture dir for any profile).
+    home = tmp_path / "isolated-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
     other_dir = tmp_path / "other-profile-dir"
     other_dir.mkdir(parents=True)
     mine = tmp_path / "mine"
@@ -761,11 +766,14 @@ def test_suggestions_scoped_to_explicit_profile_saved_roots(tmp_path):
     assert mine.exists()  # control: fixture dir is real, absence is scoping
 
 
-def test_recovery_helper_threads_profile_to_trust_and_fallback(tmp_path):
+def test_recovery_helper_threads_profile_to_trust_and_fallback(tmp_path, monkeypatch):
     """Sweep regression (#7168 review): resolve_implicit_workspace_with_recovery
     passes the profile into both trust resolution and the recovery fallback,
     so a deleted session workspace recovers to a fallback trusted for THAT
     profile — never via another profile's saved list."""
+    home = tmp_path / "isolated-home"  # keep fixture dirs outside $HOME trust
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
     external = tmp_path / "external-carol"
     external.mkdir()
     stale = tmp_path / "stale-workspace"
