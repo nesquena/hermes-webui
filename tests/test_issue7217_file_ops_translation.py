@@ -1416,3 +1416,50 @@ class TestListDirCliOwnerProfile:
         routes._handle_list_dir(handler, urlparse("/api/list?session_id=cli-5&path=."))
 
         assert handler.status == 404
+
+
+# ── #8450 maintainer re-gate: JSON export right after a file listing ─────────
+# get_session_for_file_ops caches the translated path on the (cached, shared)
+# Session object as ``_local_workspace`` (a PosixPath). The export handler used
+# to snapshot the whole instance dict, so once ANY listing had attached the
+# view — on every profile, mapped or not — json.dumps raised ``TypeError:
+# Object of type PosixPath is not JSON serializable`` and the route answered
+# 500. RED on the reviewed head; the export must stay 200 with the transcript
+# intact and never leak underscore-cached attributes.
+
+
+class TestJsonExportAfterFileListing:
+    def test_export_json_after_listing_attached_local_workspace(
+        self, mapped_world, monkeypatch
+    ):
+        import api.models as models
+        import api.routes as routes
+
+        webui_ws = mapped_world["webui_ws"]
+        # The cached session object that a listing path resolves and mutates…
+        session = routes.Session(session_id="exp-1", workspace="/workspace", profile="alice")
+        session.messages = [{"role": "user", "content": "hello"}]
+        _patch_file_ops_session_plumbing(monkeypatch, session)
+        listed = models.get_session_for_file_ops("exp-1")  # …attaches the view
+        assert listed is session
+        assert listed.local_workspace == webui_ws.resolve()
+        assert "_local_workspace" in vars(listed)
+
+        # …and the export handler reads the very same cached object.
+        monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: listed)
+        monkeypatch.setattr(routes, "get_active_profile_name", lambda: "alice")
+        monkeypatch.setattr(routes, "_profiles_match", lambda row, active: row == active)
+
+        handler = _FakeHandler()
+        routes._handle_session_export(
+            handler, urlparse("/api/session/export?session_id=exp-1&format=json")
+        )
+
+        assert handler.status == 200
+        payload = handler.json_body()
+        assert payload["session_id"] == "exp-1"
+        # Transcript intact — the export is the readable JSON artifact.
+        assert payload["messages"] == [{"role": "user", "content": "hello"}]
+        # Underscore-backed caches (the PosixPath translation, and any future
+        # cached attribute) never leak into the exported artifact.
+        assert not any(key.startswith("_") for key in payload)

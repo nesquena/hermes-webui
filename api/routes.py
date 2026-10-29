@@ -21811,7 +21811,10 @@ def _handle_session_export(handler, parsed):
     # ``public_session_projection`` supersedes the narrower
     # ``redact_session_data`` path so export context_messages uses the same
     # alias-stripping boundary as the visible transcript.
-    snapshot = dict(s.__dict__)
+    # Underscore attributes are per-request caches (e.g. the file-ops
+    # ``_local_workspace`` PosixPath translation, #7217) and must never
+    # serialise into the export artifact — same contract as ``Session.save()``.
+    snapshot = {k: v for k, v in s.__dict__.items() if not k.startswith("_")}
     if _cancelled_journal_turn_owner(getattr(s, "messages", None) or [], include_live_partial=True):
         state_messages = get_state_db_session_messages(
             sid, profile=getattr(s, "profile", None), include_row_identity=True,
