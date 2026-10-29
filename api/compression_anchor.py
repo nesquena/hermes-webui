@@ -33,6 +33,8 @@ an automatic/compression-aware pipeline, and ``False`` (default) for manual
 compression contexts.
 """
 
+import json
+
 
 def _content_text(content, *, part_types):
     if isinstance(content, list):
@@ -382,6 +384,11 @@ def is_user_originated_turn(message) -> bool:
     every synthetic ``role='user'`` scaffolding shape so the WebUI turn counter
     agrees with the agent's lineage view.
 
+    #7681 re-gate finding 1: raw state.db rows carry list content as the
+    ``\\x00json:`` sentinel STRING (the agent's own read path decodes it first);
+    decode before delegating, so the agent's predicate and the mirror both
+    classify the same structured content the agent persists.
+
     #7681 finding 3: the agent's predicate is
     ``split_user_originated_turn(message)[1] is not None``, which the WebUI must
     mirror EXACTLY — including that a summary carrier with a live payload IS a
@@ -395,6 +402,7 @@ def is_user_originated_turn(message) -> bool:
       3. a blank echo -> not a turn.
       4. anything else -> a real human turn.
     """
+    message = _with_plaintext_content(message)
     agent_verdict = _agent_user_originated_turn(message)
     if agent_verdict is not None:
         return agent_verdict
@@ -665,6 +673,80 @@ _SUMMARY_END_MARKER = (
 )
 _MERGED_SUMMARY_DELIMITER = "[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]"
 _MERGED_PRIOR_CONTEXT_HEADER = "[PRIOR CONTEXT — for reference only; not a new message]"
+
+# The agent persists list (multimodal) content as the sentinel string
+# ``"\x00json:" + json.dumps(...)`` with ASCII escaping (hermes_state
+# SessionDB._encode_content). The em dash inside the merged-summary delimiter
+# is therefore stored as ``\\u2014``, so every plaintext INSTR/TRIM predicate
+# below misses the row — the carrier looks scaffolding while the agent counts
+# its live ask (#7681 re-gate finding 1). Rows read from raw state.db must be
+# decoded before classification, exactly as SessionDB._decode_content does on
+# the agent's own read path.
+_CONTENT_JSON_PREFIX = "\x00json:"
+
+
+def _decode_sentinel_content(value):
+    """Reverse the agent's sentinel encoding; scalars pass through unchanged.
+
+    Fail closed like ``SessionDB._decode_content``: a reserved-prefix string
+    that is not valid JSON stays the raw string, so a crafted import cannot
+    smuggle structure in by using the marker.
+    """
+    if isinstance(value, str) and value.startswith(_CONTENT_JSON_PREFIX):
+        try:
+            return json.loads(value[len(_CONTENT_JSON_PREFIX):])
+        except (TypeError, ValueError):
+            return value
+    return value
+
+
+def _with_plaintext_content(message):
+    """Copy of ``message`` with sentinel-encoded content decoded to parts.
+
+    The webui reads raw state.db rows, so list content arrives as the
+    ``\\x00json:`` string here even though the agent's own read path decodes it
+    before its predicate runs. Decode before EITHER classifier (agent-delegated
+    or self-contained mirror) sees the row, so both judge the same structured
+    content the agent judges.
+    """
+    if not isinstance(message, dict):
+        return message
+    content = message.get("content")
+    decoded = _decode_sentinel_content(content)
+    if decoded is content:
+        return message
+    return {**message, "content": decoded}
+
+
+def _plaintext_content_sql(raw_expr: str) -> str:
+    """SQL expression: the plaintext view of a message's content for the guards.
+
+    Sentinel-encoded list rows (``\\x00json:`` + ``json.dumps(parts)``,
+    ensure_ascii=True) are decoded with the JSON1 functions BEFORE the
+    plaintext marker/display-kind guards and the aggregation: the part texts
+    concatenate in order and non-text blocks (image parts) render as a marker
+    character instead of vanishing, so an image-only live ask stays visible to
+    the delimiter splitter. SQLite text functions stop at the embedded NUL, so
+    the payload is reached through the byte-based BLOB view and cast back to
+    text explicitly for older JSON1 builds. A sentinel row whose payload is not
+    valid JSON stays raw (fail closed, mirroring ``_decode_sentinel_content``).
+    """
+    trimmed = f"LTRIM(COALESCE({raw_expr}, ''))"
+    payload = f"CAST(SUBSTR(CAST({trimmed} AS BLOB), 7) AS TEXT)"
+    decoded = (
+        "COALESCE((SELECT GROUP_CONCAT("
+        "COALESCE(NULLIF(TRIM(JSON_EXTRACT(je.value, '$.text')), ''),"
+        " CASE WHEN JSON_TYPE(je.value) = 'text' THEN NULLIF(TRIM(je.value), '')"
+        " WHEN JSON_TYPE(je.value) = 'object'"
+        " AND COALESCE(JSON_EXTRACT(je.value, '$.type'), 'text')"
+        " NOT IN ('text', 'input_text', 'output_text') THEN '▇' END), '')"
+        f" FROM JSON_EACH({payload}) AS je), '')"
+    )
+    return (
+        "LOWER(LTRIM(CASE WHEN SUBSTR(CAST("
+        f"{trimmed} AS BLOB), 1, 6) = CAST(CHAR(0) || 'json:' AS BLOB)"
+        f" AND JSON_VALID({payload}) THEN {decoded} ELSE {trimmed} END))"
+    )
 
 
 def _flagged_carrier_has_live_payload_sql(content_expr: str) -> str:

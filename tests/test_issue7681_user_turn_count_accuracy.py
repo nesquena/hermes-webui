@@ -1790,12 +1790,20 @@ def test_leading_whitespace_plus_header_only_payload_is_not_a_live_ask():
 #   b. live asks embedded in summary carriers were still excluded.
 # Both are pinned here against the agent's classifier, not against webui itself.
 
-# Both agent checkouts can hold the authoritative literals: the PR clone and the
-# deployed copy under ~/.hermes. The guard below accepts a match in either.
-AGENT_SRC_CANDIDATES = (
-    Path("/home/xiaobao/hermes-agent/agent"),
-    Path("/home/xiaobao/.hermes/hermes-agent/agent"),
-)
+# Resolved portably (#7681 re-gate finding 3): the previous hard-coded
+# /home/xiaobao paths made the drift guard skip everywhere but the
+# contributor's own machine — CI included — so the guard never ran there.
+# HERMES_HOME (an explicit agent/env root) and the standard installed
+# location under ~/.hermes are the authoritative sources; the oracle is the
+# INSTALLED Agent the webui actually runs against.
+def _resolve_agent_src_candidates() -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    hermes_home = os.environ.get("HERMES_HOME")
+    if hermes_home:
+        candidates.append(Path(hermes_home) / "hermes-agent" / "agent")
+        candidates.append(Path(hermes_home) / "agent")
+    candidates.append(Path.home() / ".hermes" / "hermes-agent" / "agent")
+    return tuple(candidates)
 
 _RECOVERY_NUDGES = {
     "length_continuation_network_stub": (
@@ -1891,7 +1899,10 @@ def test_recovery_nudge_literals_still_match_the_agent_source():
     import ast
 
     agent_constants: dict[str, str] = {}
-    for base in AGENT_SRC_CANDIDATES:
+    candidates = _resolve_agent_src_candidates()
+    agent_checkout_present = False
+    for base in candidates:
+        agent_checkout_present = agent_checkout_present or base.is_dir()
         loop_py = base / "conversation_loop.py"
         if not loop_py.exists():
             continue
@@ -1907,6 +1918,19 @@ def test_recovery_nudge_literals_still_match_the_agent_source():
         break
 
     if not agent_constants:
+        # #7681 re-gate finding 3: when a resolved candidate ACTUALLY
+        # contains an agent checkout (a present ``agent/`` dir), the guard
+        # must FAIL rather than skip — a silently skipped drift guard is the
+        # failure mode this test exists to prevent. Skip is reserved for
+        # genuinely agent-less environments: plain CI without an Agent
+        # install, and the webui test sandbox (the harness points
+        # HERMES_HOME at a temp dir that contains no checkout).
+        if agent_checkout_present:
+            raise AssertionError(
+                "resolved agent source(s) contain a checkout but none has "
+                f"conversation_loop.py at {[str(c) for c in candidates]} — "
+                "the Agent is present, so the drift guard must run"
+            )
         import pytest
 
         pytest.skip("agent conversation_loop.py not available in this environment")
@@ -1920,16 +1944,17 @@ def test_recovery_nudge_literals_still_match_the_agent_source():
         "dropped_toolcall_nudge": "_DROPPED_TOOLCALL_NUDGE_CONTENT",
         "empty_tool_response_nudge": "_EMPTY_TOOL_RESPONSE_NUDGE",
     }
-    found = 0
+    missing = [attr for attr in expected_sources.values() if attr not in agent_constants]
+    assert not missing, (
+        "the agent no longer defines the mirrored nudge constant(s) "
+        f"{missing} in the resolved agent source — the literal mirror in "
+        "api/compression_anchor.py may have drifted; update both sides"
+    )
     for name, attr in expected_sources.items():
-        if attr not in agent_constants:
-            continue
         assert _RECOVERY_NUDGES[name] == agent_constants[attr], (
             f"{name}: the literal mirrored in api/compression_anchor.py no longer "
             f"equals the agent's {attr} — the exclusion is stale"
         )
-        found += 1
-    assert found, "none of the agent's nudge constants were found — the guard is inert"
 
 
 def test_live_ask_inside_a_summary_carrier_counts_as_a_user_turn(tmp_path):
@@ -2502,3 +2527,179 @@ def test_inactive_row_flag_survives_the_webhook_projection(monkeypatch, tmp_path
         "the webhook projection drops has_inactive_user_rows, so a compacted "
         "webhook session's inflated count cannot be suppressed"
     )
+
+
+# ── re-gate 2026-10-29 finding 1: list-encoded (multimodal) summary carriers ──
+#
+# The Agent persists list content as the sentinel `\0json:` + `json.dumps(...)`
+# with ASCII escaping, so the merged-summary delimiter's em dash is stored as
+# `\u2014` and the plaintext INSTR predicates can never match that row. The
+# Agent's `_merge_summary_into_tail_row` keeps list content, so production
+# compaction folds into exactly this shape. The maintainer's oracle counts the
+# four shapes below 1/1/0/0; the webui counted 0/0/1/1. Both the state.db SQL
+# aggregate and the sidecar predicate must decode sentinel rows before the
+# carrier / blank guards run.
+_CONTENT_JSON_PREFIX = "\x00json:"
+
+
+def _sentinel_list_content(parts: list) -> str:
+    """The agent's durable spelling of list content (hermes_state SessionDB)."""
+    return _CONTENT_JSON_PREFIX + json.dumps(parts)
+
+
+def _list_summary_carrier(ask_parts: list) -> list:
+    """A merged prior-context carrier whose content is a multimodal part list."""
+    header = {"type": "text", "text": _PRIOR_HEADER + "\n"}
+    suffix = {
+        "type": "text",
+        "text": "\n\n" + _DELIM + "\n\n## Summary\nwe discussed X\n\n" + _END_MARKER,
+    }
+    return [header] + ask_parts + [suffix]
+
+
+def _list_carrier_session_db(tmp_path, rows):
+    """Real-schema state.db with one session; returns {id: row} from the
+    route's own reader plus the reader's row list (presence == in /api/sessions)."""
+    import sys as _sys
+
+    _sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from api.agent_sessions import read_importable_agent_session_rows
+    finally:
+        _sys.path.pop(0)
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT,
+            session_source TEXT,
+            title TEXT,
+            model TEXT,
+            started_at REAL NOT NULL,
+            message_count INTEGER DEFAULT 0,
+            parent_session_id TEXT,
+            ended_at REAL,
+            end_reason TEXT
+        );
+        CREATE TABLE messages (
+            id TEXT PRIMARY KEY,
+            session_id TEXT,
+            role TEXT,
+            content TEXT,
+            timestamp REAL,
+            _compressed_summary INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX idx_messages_session ON messages(session_id, timestamp);
+        """
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, session_source, title, model, started_at,"
+        " message_count, parent_session_id, ended_at, end_reason)"
+        " VALUES ('s1', 'cli', 'cli', 'S', 'm', 10.0, %d, NULL, NULL, NULL)" % len(rows)
+    )
+    for mid, role, content, flag in rows:
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, timestamp,"
+            " _compressed_summary) VALUES (?,?,?,?,?,?)",
+            (mid, "s1", role, content, 11.0, flag),
+        )
+    conn.commit()
+    conn.close()
+    listed = read_importable_agent_session_rows(db)
+    return {r["id"]: r for r in listed}, listed
+
+
+_IMAGE_ASK = [{"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}]
+_TEXT_ASK = [{"type": "text", "text": "please also fix the login bug"}]
+
+
+def test_list_encoded_text_ask_carrier_counts_and_stays_in_sessions(tmp_path):
+    """The maintained shape 1: a merged carrier whose live ask is TEXT, stored
+    as sentinel-encoded list content, counts 1 and its session stays in the
+    /api/sessions reader output (agent oracle: 1)."""
+    rows = [
+        ("m0", "user", "first real question", 0),
+        ("m1", "user", _sentinel_list_content(_list_summary_carrier(_TEXT_ASK)), 1),
+    ]
+    by_id, listed = _list_carrier_session_db(tmp_path, rows)
+    assert "s1" in by_id, f"carrier session missing from the listing: {[r['id'] for r in listed]}"
+    assert by_id["s1"]["actual_user_message_count"] == 2, (
+        "expected 2 (the plain ask + the list-encoded carrier's live text ask); "
+        "got %s — the sentinel row was not decoded before the carrier guards"
+        % by_id["s1"]["actual_user_message_count"]
+    )
+
+
+def test_list_encoded_image_only_ask_carrier_counts_and_stays_in_sessions(tmp_path):
+    """Maintainer shape 2: the same carrier whose live ask is media-only
+    (image_url part) counts 1 and stays listed (agent oracle: 1)."""
+    rows = [
+        ("m0", "user", "first real question", 0),
+        ("m1", "user", _sentinel_list_content(_list_summary_carrier(_IMAGE_ASK)), 1),
+    ]
+    by_id, listed = _list_carrier_session_db(tmp_path, rows)
+    assert "s1" in by_id, f"image-ask carrier session missing: {[r['id'] for r in listed]}"
+    assert by_id["s1"]["actual_user_message_count"] == 2, (
+        "expected 2 (plain ask + the image-only live ask); got %s"
+        % by_id["s1"]["actual_user_message_count"]
+    )
+
+
+def test_sentinel_empty_list_user_row_is_not_a_user_turn(tmp_path):
+    """Maintainer shape 3: an empty-list row counts 0 (agent oracle: 0). The
+    raw sentinel string is never blank, so the old aggregate counted it."""
+    rows = [
+        ("m0", "user", "first real question", 0),
+        ("m1", "user", _sentinel_list_content([]), 0),
+    ]
+    by_id, _ = _list_carrier_session_db(tmp_path, rows)
+    assert by_id["s1"]["actual_user_message_count"] == 1, (
+        "expected 1 (the empty list is not a turn); got %s"
+        % by_id["s1"]["actual_user_message_count"]
+    )
+
+
+def test_sentinel_blank_text_list_user_row_is_not_a_user_turn(tmp_path):
+    """Maintainer shape 4: a list whose only part is blank text counts 0
+    (agent oracle: 0)."""
+    rows = [
+        ("m0", "user", "first real question", 0),
+        ("m1", "user", _sentinel_list_content([{"type": "text", "text": "  \t "}]), 0),
+    ]
+    by_id, _ = _list_carrier_session_db(tmp_path, rows)
+    assert by_id["s1"]["actual_user_message_count"] == 1, (
+        "expected 1 (the blank-text list is not a turn); got %s"
+        % by_id["s1"]["actual_user_message_count"]
+    )
+
+
+def test_sidecar_predicate_decodes_sentinel_list_carriers():
+    """The sidecar classifier must decode sentinel rows before classifying:
+    both carrier shapes are turns (agent oracle: True)."""
+    for label, ask in (("text ask", _TEXT_ASK), ("image-only ask", _IMAGE_ASK)):
+        row = {
+            "role": "user",
+            "content": _sentinel_list_content(_list_summary_carrier(ask)),
+            "_compressed_summary": True,
+        }
+        with _force_mirror_mode() as anchor:
+            assert anchor.is_user_originated_turn(row) is True, (
+                f"sentinel list carrier with {label} is a live user turn — the "
+                "agent counts it, the sidecar must decode first"
+            )
+
+
+def test_sidecar_predicate_decodes_sentinel_empty_and_blank_lists():
+    """Decoding must also restore the negatives: an empty list and a blank-text
+    list are NOT turns (agent oracle: False)."""
+    for label, content in (
+        ("empty list", _sentinel_list_content([])),
+        ("blank-text list", _sentinel_list_content([{"type": "text", "text": "  \t "}])),
+    ):
+        row = {"role": "user", "content": content}
+        with _force_mirror_mode() as anchor:
+            assert anchor.is_user_originated_turn(row) is False, (
+                f"sentinel {label} is not a human turn — the agent counts 0"
+            )

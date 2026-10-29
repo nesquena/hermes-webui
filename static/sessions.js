@@ -19,6 +19,13 @@ const ICONS={
 // responses from in-flight requests when the user switches sessions again
 // before the first request completes (#1060).
 let _loadingSessionId = null;
+// #7681: optimistic pending-turn bump state, shared with messages.js. Declared
+// here (top level) because the classic-<script> bundle shares one global scope
+// — an assignment without a declaration elsewhere throws ReferenceError only
+// when the code path runs, which the scope_undef gate catches statically
+// (#3696 brick class).
+let _optimisticTurnBumpSid = null;
+let _optimisticTurnBumpBase = null;
 // Each loadSession() invocation gets a monotonically increasing generation.
 // `_loadingSessionId` only tracks destination session_id, so same-session
 // concurrent loads can still race and overwrite each other unless we compare

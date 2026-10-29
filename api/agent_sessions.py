@@ -10,6 +10,7 @@ from urllib.parse import quote, quote_from_bytes
 
 from api.compression_anchor import (
     _flagged_carrier_has_live_payload_sql,
+    _plaintext_content_sql,
     is_user_originated_turn,
     user_turn_sql_exclusions,
 )
@@ -1021,7 +1022,11 @@ def read_importable_agent_session_rows(
                 # below is generated from the same content rules the sidecar
                 # producer classifies with (api/compression_anchor), so the two
                 # counters can never drift apart.
-                content_expr = "LOWER(LTRIM(COALESCE(m.content, '')))"
+                # #7681 re-gate finding 1: `m._plaintext_content` is the decoded
+                # view computed once in the join source (see join_clause below);
+                # raw state.db rows carry list content as `\x00json:` +
+                # json.dumps(...) and need decoding before any guard runs.
+                content_expr = "LOWER(LTRIM(m._plaintext_content))"
                 # #7681 finding 3 (second half): a flagged summary carrier is not
                 # automatically scaffolding. The agent unwraps it and keeps the
                 # live ask that sits in front of the merged delimiter, so a
@@ -1088,8 +1093,11 @@ def read_importable_agent_session_rows(
                     # #7681 finding 2: SQLite's TRIM() strips SPACES only, so a
                     # whitespace-only row holding a tab or a newline used to
                     # count as a user turn. Trim the full ASCII whitespace set.
+                    # The guard runs on the decoded view: a sentinel row's raw
+                    # bytes are never blank, but an empty/blank part list
+                    # decodes to '' (#7681 re-gate finding 1).
                     content_guard = (
-                        " AND TRIM(COALESCE(m.content, ''), ' ' || char(9)"
+                        f" AND TRIM({content_expr}, ' ' || char(9)"
                         " || char(10) || char(13)) != ''"
                     )
                     user_message_count_expr = (
@@ -1121,7 +1129,29 @@ def read_importable_agent_session_rows(
                 user_message_count_expr = "NULL"
                 user_message_count_unknown_expr = "1"
             last_activity_expr = "MAX(m.timestamp)" if messages_has_timestamp else "NULL"
-            join_clause = "LEFT JOIN messages m ON m.session_id = s.id"
+            # #7681 re-gate finding 1: decode sentinel-encoded list rows ONCE,
+            # in the join source, so every guard below reads the same decoded
+            # view without inlining the JSON1 expression dozens of times (the
+            # inline form overflowed SQLite's parser stack). The agent persists
+            # list content as `\x00json:` + json.dumps(...) with ASCII escaping,
+            # so the delimiter's em dash arrives as `\u2014` and the INSTR-based
+            # carrier guards never match the raw bytes; the decoded text
+            # (non-text blocks rendered as a marker) restores the plaintext
+            # shape every guard expects.
+            if 'content' in message_cols:
+                # ``LIMIT -1`` (no-op limit) keeps the SQLite flattener from
+                # re-inlining the JSON1 decode into every one of the ~3000
+                # content references below. Inlined, each copy carries the
+                # GROUP_CONCAT aggregate and the statement blows past SQLite's
+                # aggregate-terms cap ("more than 2000 aggregate terms").
+                join_clause = (
+                    "LEFT JOIN (SELECT mq.*, "
+                    + _plaintext_content_sql("mq.content")
+                    + " AS _plaintext_content FROM messages mq LIMIT -1) m"
+                    " ON m.session_id = s.id"
+                )
+            else:
+                join_clause = "LEFT JOIN messages m ON m.session_id = s.id"
             group_by_clause = "GROUP BY s.id"
         else:
             # No usable messages table: use the denormalized per-session counts
