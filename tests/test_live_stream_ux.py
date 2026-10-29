@@ -9,10 +9,8 @@ def test_stale_interrupted_event_marks_recovery_control():
     assert "\"recovery_control\": True" in RUN_JOURNAL_PY
 
 
-def test_done_and_restore_filters_recovery_messages_from_frontend_state():
-    assert "_filterRecoveryControlMessages(S.messages || [])" in MESSAGES_JS
-    assert "if(!m||m.role==='tool') return false;" in MESSAGES_JS
-    assert "if(m.recovery_control===true) return true;" in MESSAGES_JS
+def test_done_and_restore_preserve_recovery_messages_for_coordinate_merges():
+    assert "_filterRecoveryControlMessages(S.messages || [])" not in MESSAGES_JS
     assert "continue exactly where you left off" in MESSAGES_JS
     assert "do not retry the same tool call" in MESSAGES_JS
 

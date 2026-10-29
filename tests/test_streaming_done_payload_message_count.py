@@ -70,25 +70,53 @@ def test_full_message_payload_includes_todo_state_snapshot():
     assert payload["todo_state"]["ts"] == 101
 
 
-def test_done_payload_uses_full_message_count_helper():
+def test_done_payload_uses_bounded_terminal_message_count_helper():
     done_idx = STREAMING_SOURCE.index("put('done', _done_payload)")
-    block_start = STREAMING_SOURCE.rfind("raw_session =", 0, done_idx)
+    block_start = STREAMING_SOURCE.rfind("_done_payload =", 0, done_idx)
     block = STREAMING_SOURCE[block_start:done_idx]
 
-    assert "_session_payload_with_full_messages(s, tool_calls=tool_calls)" in block
+    assert "_best_effort_terminal_session_payload(s)" in block
+    assert "_session_payload_with_full_messages(s" not in block
     assert "s.compact() | {'messages': s.messages" not in block
 
+    heal_end = STREAMING_SOURCE.index(
+        "logger.info('[webui] self-heal (except path): retry succeeded')"
+    )
+    heal_start = STREAMING_SOURCE.rfind("_done_session_payload = None", 0, heal_end)
+    heal_block = STREAMING_SOURCE[heal_start:heal_end]
+    assert "_best_effort_terminal_session_payload(s)" in heal_block
+    assert "_session_payload_with_full_messages(s" not in heal_block
+    assert "s.compact() | {'messages': s.messages" not in heal_block
 
-def test_apperror_payload_uses_full_message_count_helper():
+    optional_session_idx = heal_block.index("if _done_session_payload is not None:")
+    session_assignment_idx = heal_block.index(
+        "_done_payload['session'] = _done_session_payload"
+    )
+    heal_done_idx = heal_block.index("put('done', _done_payload)")
+    heal_end_idx = heal_block.index("put('stream_end', {'session_id': session_id})")
+    assert optional_session_idx < session_assignment_idx < heal_done_idx < heal_end_idx
+
+    lines = heal_block.splitlines()
+    guard_line = next(line for line in lines if "if _done_session_payload is not None:" in line)
+    session_line = next(line for line in lines if "_done_payload['session'] =" in line)
+    done_line = next(line for line in lines if "put('done', _done_payload)" in line)
+    end_line = next(line for line in lines if "put('stream_end', {'session_id': session_id})" in line)
+    assert len(session_line) - len(session_line.lstrip()) > len(guard_line) - len(guard_line.lstrip())
+    assert len(done_line) - len(done_line.lstrip()) == len(guard_line) - len(guard_line.lstrip())
+    assert len(end_line) - len(end_line.lstrip()) == len(guard_line) - len(guard_line.lstrip())
+
+
+def test_apperror_payload_uses_bounded_terminal_message_count_helper():
     error_idx = STREAMING_SOURCE.index("put('apperror', _error_payload)")
-    block_start = STREAMING_SOURCE.rfind("_error_payload['session']", 0, error_idx)
+    block_start = STREAMING_SOURCE.rfind("_terminal_session_payload =", 0, error_idx)
     block = STREAMING_SOURCE[block_start:error_idx]
 
-    assert "_session_payload_with_full_messages(s, tool_calls=s.tool_calls)" in block
+    assert "_best_effort_terminal_session_payload(s)" in block
+    assert "_session_payload_with_full_messages(s" not in block
     assert "s.compact() | {'messages': s.messages" not in block
 
 
-def test_gateway_done_payload_uses_full_message_count_helper():
+def test_gateway_done_payload_uses_bounded_terminal_message_count_helper():
     """The gateway-routed chat `done` SSE shares the settled-payload path and
     must also report a message_count matching the embedded transcript (sibling
     of the two streaming.py sites)."""
@@ -97,5 +125,5 @@ def test_gateway_done_payload_uses_full_message_count_helper():
     block_start = gateway_source.rfind("gateway_session_payload =", 0, done_idx)
     block = gateway_source[block_start:done_idx]
 
-    assert "_session_payload_with_full_messages(s, tool_calls=[])" in block
+    assert "_best_effort_terminal_session_payload(s)" in block
     assert 's.compact() | {"messages": s.messages' not in block

@@ -65,6 +65,11 @@ from api.session_events import (
 )
 from api.gateway_restart import restart_active_profile_gateway
 from api.shares import create_or_refresh_share, load_share, revoke_share
+from api.session_ops import (
+    _exact_message_owner_positions,
+    _messages_for_limited_payload,
+    _rebase_tool_calls_to_owner_positions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -10769,7 +10774,6 @@ def _message_window_for_display(messages, msg_limit=None, msg_before=None, expan
     return window, start_idx
 
 
-_LIMITED_TOOL_CONTENT_MAX_CHARS = 4096
 # Server-side ceiling on the ?msg_limit= tail-window size. A client could
 # otherwise request msg_limit=1000000 and force the server to assemble and
 # serialize an unbounded message payload (the frontend's own pagination grows
@@ -10861,48 +10865,6 @@ def _state_db_backstop_limit_for_display(session, msg_before) -> int | None:
     return None if has_boundary_prefix else _STATE_DB_DISPLAY_ROW_BACKSTOP
 
 
-_LIMITED_TOOL_CONTENT_NOTICE = (
-    "\n\n[Tool output truncated in paginated session response; "
-    "load the full transcript to inspect the complete result.]"
-)
-
-
-def _tool_message_for_limited_payload(message):
-    """Return a bounded copy of large hidden tool-result rows for paginated loads."""
-    if not isinstance(message, dict) or str(message.get("role") or "").lower() != "tool":
-        return message
-    content = message.get("content")
-    if content in (None, ""):
-        return message
-    if isinstance(content, str):
-        text = content
-    else:
-        try:
-            text = json.dumps(content, ensure_ascii=False, default=str)
-        except Exception:
-            text = str(content)
-    if len(text) <= _LIMITED_TOOL_CONTENT_MAX_CHARS:
-        return message
-    clipped = dict(message)
-    preview = text[:_LIMITED_TOOL_CONTENT_MAX_CHARS] + _LIMITED_TOOL_CONTENT_NOTICE
-    if isinstance(content, str):
-        clipped["content"] = preview
-    elif isinstance(content, list):
-        clipped["content"] = [{"type": "text", "text": preview}]
-    elif isinstance(content, dict):
-        clipped["content"] = {"_truncated": True, "preview": preview}
-    else:
-        clipped["content"] = preview
-    clipped["_content_truncated"] = True
-    clipped["_content_original_chars"] = len(text)
-    return clipped
-
-
-def _messages_for_limited_payload(messages) -> list:
-    """Bound hidden tool-result payloads before sending a msg_limit response."""
-    return [_tool_message_for_limited_payload(msg) for msg in list(messages or [])]
-
-
 def _limited_webui_messages_for_display(session, state_db_messages) -> list:
     """Return the display sidecar plus only necessary state.db rows for msg_limit.
 
@@ -10943,38 +10905,25 @@ def _display_merge_session_is_active(session) -> bool:
 
 def _display_exact_owner_positions(session, messages):
     """Map saved row positions before display/cache copies lose object identity."""
-    projected = {id(row): index for index, row in enumerate(messages)}
-    return {
-        index: projected[id(row)]
-        for index, row in enumerate(getattr(session, "messages", None) or [])
-        if id(row) in projected
-    }
+    return _exact_message_owner_positions(
+        getattr(session, "messages", None),
+        messages,
+    )
 
 
 def _display_projected_owner_positions(source_messages, messages, source_owners):
     """Compose saved-to-source positions with an exact-object display projection."""
-    projected = {id(row): index for index, row in enumerate(messages)}
+    projected = _exact_message_owner_positions(source_messages, messages)
     return {
-        owner: projected[id(source_messages[index])]
+        owner: projected[index]
         for owner, index in source_owners.items()
-        if 0 <= index < len(source_messages) and id(source_messages[index]) in projected
+        if index in projected
     }
 
 
 def _display_rebased_tool_calls(tool_calls, owner_positions):
     """Project cards onto proven owners without changing persisted metadata."""
-    projected = []
-    for card in tool_calls or []:
-        if not isinstance(card, dict):
-            projected.append(card)
-            continue
-        owner = card.get("assistant_msg_idx")
-        if type(owner) is int:
-            if owner not in owner_positions:
-                continue
-            card = dict(card, assistant_msg_idx=owner_positions[owner])
-        projected.append(card)
-    return projected
+    return _rebase_tool_calls_to_owner_positions(tool_calls, owner_positions)
 
 
 def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None, owner_positions=None):

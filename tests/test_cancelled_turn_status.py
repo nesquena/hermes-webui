@@ -227,7 +227,7 @@ class TestCancelledTurnPersistenceGuards:
             "to /api/session so captured _partial reasoning/tool rows are visible immediately."
         )
 
-    def test_worker_cancel_events_do_not_embed_session_payload(self):
+    def test_worker_cancel_events_embed_bounded_session_payload(self):
         src = _read("api/streaming.py")
         worker_start = src.find("def _run_agent_streaming(")
         cancel_stream_start = src.find("def cancel_stream(", worker_start)
@@ -236,6 +236,6 @@ class TestCancelledTurnPersistenceGuards:
         cancel_stream_block = src[cancel_stream_start:]
 
         assert "_cancel_event_payload('Cancelled by user', s)" not in worker_block
-        assert "_cancel_event_payload('Cancelled by user', session=" not in worker_block
-        assert "None if ephemeral else s" not in worker_block
+        assert "_cancel_event_payload('Cancelled by user', session=" in worker_block
+        assert "None if ephemeral else s" in worker_block
         assert "_cancel_event_payload('Cancelled by user', session=_cancel_session_payload)" in cancel_stream_block

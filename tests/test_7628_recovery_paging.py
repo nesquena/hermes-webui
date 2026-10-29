@@ -73,8 +73,7 @@ function install(name, src) {
 
 // ---- helpers from messages.js (mirror test_issue5224 set) ----
 const MESSAGE_HELPERS = [
-  "_isMarkerOnlyAssistantMessage", "_streamRecoveryControlMessageText",
-  "_streamRecoveryControlMessage", "_filterRecoveryControlMessages",
+  "_isMarkerOnlyAssistantMessage",
   "_replaceMarkerOnlyAssistantWithStreamError", "_messageIdentityKey",
   "_isHistoricalAnchorActivityScene", "_carryForwardEphemeralTurnFields",
   "_isTerminalStreamErrorMarkerMessage", "_restoreSettledSession",
