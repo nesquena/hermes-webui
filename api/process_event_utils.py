@@ -140,16 +140,21 @@ def attach_wakeup_display_meta(msg: Any, source: Any) -> None:
 
 
 def is_hidden_transcript_row(msg: Any) -> bool:
-    """Return True when a transcript row is internal and must never render.
+    """Return True when a transcript row should be omitted from visible views.
 
-    Single predicate every transcript consumer calls — restore window, retry
-    target, content search, title derivation, HTML export, public shares, and
-    visible counts — so a hidden row hidden in one surface stays hidden in all
-    of them (#quiet-delegation gate review). Keyed on the typed ``_source``
-    stamp only, never on content: content sniffing would misclassify real user
-    rows whose text merely resembles a wakeup envelope.
+    One predicate keeps transcript pages, search, exports, shares, and visible
+    counts consistent. Delegation wakeups use their typed ``_source`` marker;
+    dismissed provider errors use their explicit row marker. Never infer from
+    content, which could misclassify real user text.
     """
-    return isinstance(msg, dict) and msg.get("_source") == "delegation_wakeup"
+    return isinstance(msg, dict) and (
+        msg.get("_source") == "delegation_wakeup"
+        or (
+            msg.get("role") == "assistant"
+            and msg.get("_error") is True
+            and msg.get("_dismissed") is True
+        )
+    )
 
 
 def build_active_turn_token(stream_id: Any, started_at: Any) -> str | None:

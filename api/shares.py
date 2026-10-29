@@ -425,9 +425,8 @@ def _sanitize_message(message: dict, *, redact_paths=(), allowed_roots: tuple[Pa
     role = str(message.get("role") or "").strip().lower()
     if role not in {"user", "assistant"}:
         return None
-    # Public boundary: hidden internal rows (delegation_wakeup handoffs) are
-    # private model plumbing and must never appear in a share
-    # (#quiet-delegation gate review).
+    # Public shares omit hidden transcript rows, including internal delegation
+    # handoffs and provider-error cards the user dismissed.
     from api.process_event_utils import is_hidden_transcript_row
 
     if is_hidden_transcript_row(message):
