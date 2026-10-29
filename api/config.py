@@ -6696,7 +6696,6 @@ def get_reasoning_status(
     """
     config_data = _load_yaml_config_file(_get_config_path())
     display_cfg = config_data.get("display") or {}
-    agent_cfg = config_data.get("agent") or {}
     show_raw = display_cfg.get("show_reasoning") if isinstance(display_cfg, dict) else None
 
     resolve_model = model_id
