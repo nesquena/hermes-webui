@@ -1,5 +1,29 @@
 # Hermes Web UI: Browser Testing Plan
 
+## Tool-stream live HTML snapshot coalescing
+
+Run `./scripts/test.sh tests/test_tool_snapshot_coalescing.py` for executed
+production tool listeners, snapshot scheduling, stale/cancelled timer callbacks,
+stream disposal, and the synchronous session-switch snapshot. Tool events still
+update state and render immediately; only the memory-only `liveTurnHtml` copy
+shares the existing 700 ms trailing throttle with text updates. Structured
+inflight persistence, journal cursors and terminal settlement are unchanged.
+
+Optional Chromium probe (Playwright and `playwright install chromium` required):
+
+```bash
+python tests/browser_tool_snapshot_replay.py --baseline <pre-fix-ref> --output-dir <new-directory>
+```
+
+The loopback fixture freezes the Chromium page with CDP, sends 1,000 real SSE
+tool events, then resumes it. It uses a synthetic 2.5 MB live turn and the real
+HTML serializer; other rendering and persistence helpers are stubbed. Desktop
+and narrow-width runs assert every event arrived, the latest DOM was captured,
+and the candidate serialized at most three times rather than 1,000. Saved JSON
+and screenshots are synthetic probe evidence, not full-app UI or live-provider
+coverage. Timing is observational, not a hardware-independent test threshold.
+This bounds snapshot overhead, not all scene rebuild or session-loading costs.
+
 ## Project-picker deferred repaint handoff regression
 
 Expand a parent with fork-child menus, open a picker, defer a list repaint,

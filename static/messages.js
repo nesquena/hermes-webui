@@ -2330,8 +2330,8 @@ function closeLiveStream(sessionId, streamId, source, reconnecting=false){
   if(typeof live.dispose==='function') live.dispose(reconnecting);
   if(typeof live.cancelIdleRecovery==='function') live.cancelIdleRecovery();
   // Snapshot the current live-turn DOM BEFORE tearing the stream down. The
-  // per-event snapshot (snapshotLiveTurn) only fires on content/tool_complete
-  // SSE events, so switching away during a quiet window (mid tool-exec, silent
+  // periodic snapshot only follows content/tool SSE events, so switching away
+  // during a quiet window (mid tool-exec, silent
   // thinking) would leave a stale-or-absent snapshot — on switch-back
   // restoreLiveTurnHtmlForSession() then fails and loadSession()'s fallback
   // rebuilds with an EMPTY appendThinking(), permanently losing the streamed
@@ -2668,16 +2668,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // Throttled per-frame variant. snapshotLiveTurnHtmlForSession serializes the
   // whole (growing) live turn via turn.outerHTML — O(n)/frame -> O(n^2) over a
   // long answer, and a real GC-pressure source. The snapshot only backs
-  // mid-stream session-switch restore, and the switch path (sessions.js) plus
-  // the stream event boundaries (tool/done) already capture synchronously, so a
-  // coarse trailing snapshot during streaming is sufficient. (#5455 WS2.2)
+  // mid-stream session-switch restore; the switch/close paths already capture
+  // synchronously. Tool replay needs the same bound as token rendering, not
+  // one serialization of the growing turn per event. (#5455 WS2.2)
   let _snapshotLiveTurnTimer=null;
   function _throttledSnapshotLiveTurn(){
-    if(_snapshotLiveTurnTimer) return;
-    _snapshotLiveTurnTimer=setTimeout(()=>{_snapshotLiveTurnTimer=null;snapshotLiveTurn();},700);
+    if(_snapshotLiveTurnTimer!==null||_streamFinalized) return;
+    const timer=setTimeout(()=>{
+      if(_snapshotLiveTurnTimer!==timer) return;
+      _snapshotLiveTurnTimer=null;
+      if(!_streamFinalized) snapshotLiveTurn();
+    },700);
+    _snapshotLiveTurnTimer=timer;
   }
   function _cancelThrottledSnapshotTimer(){
-    if(_snapshotLiveTurnTimer){clearTimeout(_snapshotLiveTurnTimer);_snapshotLiveTurnTimer=null;}
+    if(_snapshotLiveTurnTimer!==null){clearTimeout(_snapshotLiveTurnTimer);_snapshotLiveTurnTimer=null;}
   }
   // Throttled variant for token-by-token updates. persistInflightState()
   // calls saveInflightState() which does JSON.parse + JSON.stringify + write
@@ -6328,6 +6333,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(reconnecting) _flushPendingSegmentRender();
       else _streamFinalized=true;
       _cancelAnimationFramePendingStreamRender();
+      _cancelThrottledSnapshotTimer();
     }};
     _bindSidebarIdleRecovery(LIVE_STREAMS[activeSid]);
 
@@ -6499,7 +6505,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       _flushPendingSegmentRender({force:true});
       appendLiveToolCard(tc,{sessionId:activeSid,streamId});
-      snapshotLiveTurn();
+      _throttledSnapshotLiveTurn();
       _freshSegment=true;
       _smdEndParser();
       _resetAssistantSegment();
@@ -6540,7 +6546,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       } else {
         appendLiveToolCard(tc,{sessionId:activeSid,streamId});
       }
-      snapshotLiveTurn();
+      _throttledSnapshotLiveTurn();
       scrollIfPinned();
     });
 
