@@ -549,6 +549,20 @@ class _Browser:
         self.page.evaluate(_SETTLE)
         return sid
 
+    def reload(self) -> None:
+        """Hard reload: the active session comes back through the boot path."""
+        self.page.reload(wait_until="domcontentloaded")
+        self.page.wait_for_function(
+            "() => typeof S !== 'undefined' && S._bootReady === true", timeout=15000
+        )
+        self.page.wait_for_function(
+            "text => ((document.querySelector('#msgInner') || {}).innerText || '').includes(text)",
+            arg=_FINAL,
+            timeout=15000,
+        )
+        self.dismiss_onboarding()
+        self.page.evaluate(_SETTLE)
+
     def fetched(self, name: str) -> list[str]:
         return [url for url in self.media if name in url]
 
@@ -599,6 +613,9 @@ def test_transparent_stream_preview_fetches_nothing_until_the_row_opens(browser,
             "vision preview transparent", _vision_messages([str(media_dir / "transparent.png")])
         )
         assert browser.fetched("transparent.png") == [], "fetched while the row was deferred"
+
+        browser.reload()
+        assert browser.fetched("transparent.png") == [], "fetched on page load with the row collapsed"
 
         state = page.evaluate(_MATERIALIZE_TRANSPARENT_ROW, _VISION_ROW)
         assert state == {"open": False, "previewInDom": True}, state
