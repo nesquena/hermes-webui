@@ -604,6 +604,14 @@ def test_onboarding_blocks_free_provider_when_agent_lacks_support(monkeypatch, t
         })
 
 
+def test_onboarding_docs_explain_free_key_and_agent_support():
+    src = (ROOT / "docs" / "onboarding.md").read_text(encoding="utf-8")
+    easy_start_row = next(line for line in src.splitlines() if "| Easy start |" in line)
+    assert "OpenCode Free" in easy_start_row
+    assert "six curated models without a key" in easy_start_row
+    assert "OpenCode Free requires a Hermes Agent version that supports it." in src
+
+
 def test_agent_free_provider_support_comes_from_overlay_registry(monkeypatch):
     import api.onboarding as onboarding
 
