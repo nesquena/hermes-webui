@@ -61,6 +61,8 @@
 
 ### Fixed
 
+- **A flaky worker-slot test no longer fails CI at random.** `test_worker_slot_releases_after_request_finishes` sent its next request as soon as the held one's response arrived, but the server gives the slot back only after the socket is shut down, so a loaded runner could see the overflow 503. It now waits for the release, as its sibling test already did; it still fails if a slot is never released. Test-only. (#8599)
+
 - **CI's scope/undefined-reference check now actually runs, and fails closed when it can't.** The gate looked for eslint only on PATH, but CI installs it under `node_modules/.bin`, so every CI run skipped it with a warning. It now falls back to the checkout's eslint when PATH has none (`eslint.cmd` on Windows), and CI passes `--require-eslint` so a missing eslint is a failure instead of a silent skip. Local runs without node still skip as before. (#8588)
 
 - **Opening a running session no longer shows the turn's activity above your own prompt, and forking a saved row while a turn runs keeps the right rows.** When the transcript window starts inside the running turn, the in-flight prompt is placed above that turn's activity (and never claims a previous turn's rows), as a display-only row that a later full reload replaces with the saved prompt. Fork, edit and regenerate indices skip that row, so branching from saved row 0 keeps one row instead of two, and the windowed case keeps its absolute offsets. (#8543, thanks @happy5318)
