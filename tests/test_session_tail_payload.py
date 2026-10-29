@@ -185,7 +185,7 @@ def test_msg_limit_tail_keeps_pre_compression_snapshot_parent_reachable():
     child.pre_compression_snapshot = False
     child.session_source = "webui"
 
-    with patch("api.routes.Session.load", return_value=parent):
+    with patch("api.routes.Session.load_readonly", return_value=parent):
         payload = _invoke(
             child,
             query="session_id=tail_payload_001&messages=1&resolve_model=0&msg_limit=30",

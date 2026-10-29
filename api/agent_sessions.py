@@ -71,7 +71,12 @@ def state_db_readonly_uri(db_path, platform: str | None = None) -> str:
     return state_db_file_uri(db_path, platform=platform) + "?mode=ro"
 
 
-def open_state_db_readonly(db_path: Path, log: logging.Logger | None = None) -> sqlite3.Connection:
+def open_state_db_readonly(
+    db_path: Path,
+    log: logging.Logger | None = None,
+    *,
+    check_same_thread: bool = True,
+) -> sqlite3.Connection:
     """Open the live agent ``state.db`` read-only for a pure-read projection.
 
     Same rationale as the session-listing path (#5455): a write-capable handle
@@ -82,11 +87,16 @@ def open_state_db_readonly(db_path: Path, log: logging.Logger | None = None) -> 
     The caller must ensure ``db_path`` exists — this raises ``FileNotFoundError``
     for a missing path rather than creating a ghost database.
 
+    Set ``check_same_thread=False`` only when the caller serializes connection use.
     Callers own the returned connection (wrap it in ``contextlib.closing``).
     """
     if not db_path.exists():
         raise FileNotFoundError(f"agent state.db not found: {db_path}")
-    return sqlite3.connect(state_db_readonly_uri(db_path.resolve()), uri=True)
+    return sqlite3.connect(
+        state_db_readonly_uri(db_path.resolve()),
+        uri=True,
+        check_same_thread=check_same_thread,
+    )
 
 
 MESSAGING_SOURCES = {
