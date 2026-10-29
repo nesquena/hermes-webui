@@ -225,6 +225,39 @@ def discover_agent_dir(
     ).agent_dir
 
 
+def discover_runtime_agent_identity(
+    *,
+    repo_root: Path,
+    default_hermes_home: Path | None = None,
+    user_home: Path | None = None,
+) -> _AgentDiscovery:
+    """The Agent this WebUI process runs against, from one argument set.
+
+    ``api.config`` (the runtime) and ``managed_agent_startup`` (which activates
+    the Agent's dependency layer before ``api.config`` may be imported) must
+    resolve the same root: activating one Agent's dependencies and then
+    importing another Agent's code breaks chat (#8355 review, #8529). Both call
+    this helper so the HERMES_HOME / platform-default home / interpreter
+    arguments cannot drift apart again.
+
+    Stdlib-only (``api.paths`` included), so it is safe to call before the
+    Agent's dependencies are on ``sys.path``.
+    """
+    from api import paths as _paths
+
+    if default_hermes_home is None:
+        default_hermes_home = _paths._platform_default_hermes_home()
+    if user_home is None:
+        user_home = _paths.HOME
+    return _discover_agent_identity(
+        repo_root=repo_root,
+        hermes_home=Path(os.getenv("HERMES_HOME", str(default_hermes_home))),
+        default_hermes_home=default_hermes_home,
+        user_home=user_home,
+        python_exe=os.getenv("HERMES_WEBUI_PYTHON") or sys.executable,
+    )
+
+
 def fix_credential_permissions() -> None:
     """Ensure sensitive files in HERMES_HOME have safe permissions.
 
@@ -366,6 +399,10 @@ def _agent_install_dir(agent_dir: Path) -> Path:
         # between redirect the install to a directory nothing had validated.
         try:
             staged = Path(raw).expanduser().resolve(strict=True)
+            # Docker may already run the authorized Agent from this stage.
+            # Its manifest names the original mount, not another copy of itself.
+            if staged == agent_dir.resolve():
+                return agent_dir
         except (OSError, RuntimeError, ValueError):
             # Missing, unresolvable or `~unknown-user`: never fatal at startup.
             return agent_dir

@@ -1,6 +1,11 @@
 """Tests for the two-tier mtime cache in _get_profile_skills_stats (#4783).
 
-Proof matrix:
+#7940 changed the cache to stale-while-revalidate: the per-call stat probe
+moved off the request path (a fresh window serves zero-I/O; a stale window
+returns immediately and re-probes on a background worker). The proof matrix
+below now covers the SYNC path (miss / hard-TTL expiry), where the probe and
+recompute still run immediately:
+
   1. Within-TTL returns cached counts with zero I/O (no stat, no read).
   2. After TTL, unchanged files trigger stat-only path (no recompute).
   3. After TTL, changed files trigger full recompute.
@@ -8,6 +13,11 @@ Proof matrix:
   5. .clear() forces immediate recompute.
   6. Return signature is unchanged: tuple[int, int].
   7. Nested skill deletions change the stat probe even when file mtimes do not.
+
+The revalidate-window behavior itself is covered by
+tests/test_issue7940_profile_skills_swr.py.
+
+Cache tuple: (enabled, compat, mtime_ns, hard_expiry, org, validated_at).
 """
 import shutil
 import sys
@@ -84,6 +94,8 @@ def _clear_cache():
         mod = sys.modules.get("api.profiles")
         if mod and hasattr(mod, "_SKILLS_STATS_CACHE"):
             mod._SKILLS_STATS_CACHE.clear()
+        if mod and hasattr(mod, "_SKILLS_STATS_REVALIDATE_INFLIGHT"):
+            mod._SKILLS_STATS_REVALIDATE_INFLIGHT.clear()
     except Exception:
         pass
     yield
@@ -91,6 +103,8 @@ def _clear_cache():
         mod = sys.modules.get("api.profiles")
         if mod and hasattr(mod, "_SKILLS_STATS_CACHE"):
             mod._SKILLS_STATS_CACHE.clear()
+        if mod and hasattr(mod, "_SKILLS_STATS_REVALIDATE_INFLIGHT"):
+            mod._SKILLS_STATS_REVALIDATE_INFLIGHT.clear()
     except Exception:
         pass
     for k in [k for k in sys.modules if k == "api" or k.startswith("api.")]:
@@ -119,32 +133,33 @@ def profiles_mod(tmp_path):
 
 
 class TestWithinTTLZeroIO:
-    """Within TTL + unchanged files: skip the expensive SKILL.md recompute.
+    """Fresh-window hit: skip BOTH the SKILL.md recompute and the stat probe.
 
-    The cheap stat-only mtime probe DOES run on every call (that is the
-    out-of-band change-detection fix for #4783); only _compute_profile_skills_stats
-    (which reads + parses every SKILL.md) is avoided within the TTL.
+    #7940 stale-while-revalidate contract: inside _SKILLS_STATS_REVALIDATE_AFTER
+    a cache hit serves purely from memory — the stat-only probe (a full skill-
+    tree walk) no longer runs on the request path. Out-of-band detection moved
+    to the background revalidate covered in test_issue7940_profile_skills_swr.
     """
 
-    def test_second_call_within_ttl_skips_compute_but_probes_mtime(self, profiles_mod):
+    def test_second_call_within_revalidate_window_is_zero_io(self, profiles_mod):
         mod, profile_dir = profiles_mod
         with (
             patch.object(mod, "_compute_profile_skills_stats", wraps=mod._compute_profile_skills_stats) as mock_compute,
             patch.object(mod, "_skill_tree_max_mtime_ns", wraps=mod._skill_tree_max_mtime_ns) as mock_stat,
+            patch.object(mod, "_start_skills_stats_revalidate_thread") as mock_spawn,
         ):
             mod._get_profile_skills_stats(profile_dir)
             compute_calls_after_first = mock_compute.call_count
             stat_calls_after_first = mock_stat.call_count
 
-            # Second call within TTL with unchanged files
+            # Second call inside the fresh window with unchanged files
             result = mod._get_profile_skills_stats(profile_dir)
 
             assert mock_compute.call_count == compute_calls_after_first, \
-                "_compute_profile_skills_stats (expensive SKILL.md read) must NOT be called within TTL when files are unchanged"
-            # The cheap mtime probe runs on every call so out-of-band changes are
-            # caught promptly — it must have advanced past the first-call count.
-            assert mock_stat.call_count > stat_calls_after_first, \
-                "_skill_tree_max_mtime_ns (cheap stat probe) MUST run on every call to detect out-of-band changes"
+                "_compute_profile_skills_stats (expensive SKILL.md read) must NOT run on a fresh-window hit"
+            assert mock_stat.call_count == stat_calls_after_first, \
+                "_skill_tree_max_mtime_ns must NOT run on a fresh-window hit (#7940 SWR)"
+            mock_spawn.assert_not_called()
             assert isinstance(result, tuple) and len(result) == 2
 
 
@@ -162,7 +177,7 @@ class TestAfterTTLSafetyRecompute:
         fixed_mtime_ns = 1_700_000_000_000_000_000
         past_expiry = time.time() - 1.0
         resolved = Path(profile_dir).resolve()
-        mod._SKILLS_STATS_CACHE[resolved] = (3, 5, fixed_mtime_ns, past_expiry, None)
+        mod._SKILLS_STATS_CACHE[resolved] = (3, 5, fixed_mtime_ns, past_expiry, None, past_expiry)
 
         with (
             patch.object(mod, "_compute_profile_skills_stats", return_value=(4, 6)) as mock_compute,
@@ -191,7 +206,7 @@ class TestAfterTTLChangedFilesFullRecompute:
         new_mtime_ns = 2_000_000_000_000_000_000
         past_expiry = time.time() - 1.0
         resolved = Path(profile_dir).resolve()
-        mod._SKILLS_STATS_CACHE[resolved] = (1, 2, old_mtime_ns, past_expiry, None)
+        mod._SKILLS_STATS_CACHE[resolved] = (1, 2, old_mtime_ns, past_expiry, None, past_expiry)
 
         with (
             patch.object(mod, "_compute_profile_skills_stats", return_value=(7, 9)) as mock_compute,
@@ -204,32 +219,45 @@ class TestAfterTTLChangedFilesFullRecompute:
 
 
 class TestWithinTTLChangedFilesRecompute:
-    """Regression for the gate-found SILENT bug: an out-of-band (CLI/git) change
-    WITHIN the TTL must be detected promptly, not hidden until the TTL expires.
+    """Out-of-band (CLI/git) change WITHIN the TTL still surfaces — bounded to
+    the revalidate window under #7940 SWR, not the full TTL.
 
-    The earlier design returned the cached value on a zero-I/O fast path while
-    still inside the TTL, so the mtime probe never ran and an out-of-band change
-    was invisible for up to the full TTL (worse than master's short window).
+    A stale-window hit returns the old counts immediately and the background
+    worker republishes the recomputed counts, so the NEXT read sees the change.
+    Detection is no longer per-call; it is bounded by
+    _SKILLS_STATS_REVALIDATE_AFTER + one probe/compute (~seconds), which is the
+    explicit #7940 contract change. The worker is driven synchronously here via
+    the _start_skills_stats_revalidate_thread seam.
     """
 
-    def test_changed_mtime_within_ttl_triggers_recompute(self, profiles_mod):
+    def test_changed_mtime_in_stale_window_republishes_in_background(self, profiles_mod):
         mod, profile_dir = profiles_mod
 
         old_mtime_ns = 1_000_000_000_000_000_000
         changed_mtime_ns = 2_000_000_000_000_000_000
         future_expiry = time.time() + 9999.0  # firmly WITHIN the TTL
+        stale_validated = time.time() - mod._SKILLS_STATS_REVALIDATE_AFTER - 1.0
         resolved = Path(profile_dir).resolve()
-        mod._SKILLS_STATS_CACHE[resolved] = (1, 2, old_mtime_ns, future_expiry, None)
+        mod._SKILLS_STATS_CACHE[resolved] = (1, 2, old_mtime_ns, future_expiry, None, stale_validated)
 
         with (
             patch.object(mod, "_compute_profile_skills_stats", return_value=(7, 9)) as mock_compute,
             patch.object(mod, "_skill_tree_max_mtime_ns", return_value=changed_mtime_ns),
+            patch.object(
+                mod, "_start_skills_stats_revalidate_thread",
+                side_effect=lambda pd: mod._revalidate_skills_stats_worker(pd),
+            ),
         ):
             result = mod._get_profile_skills_stats(profile_dir)
 
-        mock_compute.assert_called_once(), \
-            "an out-of-band change within the TTL must trigger a recompute, not be hidden until expiry"
-        assert result == (7, 9)
+        # The stale hit itself returns the old counts — never blocks on I/O —
+        # while the worker republishes the corrected counts for the next read.
+        assert result == (1, 2)
+        mock_compute.assert_called_once()
+        entry = mod._SKILLS_STATS_CACHE[resolved]
+        assert (entry[0], entry[1], entry[2]) == (7, 9, changed_mtime_ns)
+        # Inflight marker cleared for the next stale hit.
+        assert resolved not in mod._SKILLS_STATS_REVALIDATE_INFLIGHT
 
 
 class TestConfigYamlMtimeDetected:
@@ -245,7 +273,7 @@ class TestConfigYamlMtimeDetected:
         old_mtime_ns = config_path.stat().st_mtime_ns
         past_expiry = time.time() - 1.0
         resolved = Path(profile_dir).resolve()
-        mod._SKILLS_STATS_CACHE[resolved] = (2, 4, old_mtime_ns, past_expiry, None)
+        mod._SKILLS_STATS_CACHE[resolved] = (2, 4, old_mtime_ns, past_expiry, None, past_expiry)
 
         # Bump config.yaml mtime
         new_mtime_ns = old_mtime_ns + 1_000_000_000  # +1 second in ns
@@ -268,7 +296,7 @@ class TestClearForcesRecompute:
         # Populate cache with a fresh (non-expired) entry
         resolved = Path(profile_dir).resolve()
         future_expiry = time.time() + 9999.0
-        mod._SKILLS_STATS_CACHE[resolved] = (3, 3, 0, future_expiry, None)
+        mod._SKILLS_STATS_CACHE[resolved] = (3, 3, 0, future_expiry, None, time.time())
 
         mod._SKILLS_STATS_CACHE.clear()
 
@@ -295,8 +323,9 @@ class TestNestedDeletionDetected:
         assert mod._get_profile_skills_stats(profile_dir) == (2, 2)
 
         resolved = Path(profile_dir).resolve()
-        enabled, compat, cached_mtime_ns, _, cached_org = mod._SKILLS_STATS_CACHE[resolved]
-        mod._SKILLS_STATS_CACHE[resolved] = (enabled, compat, cached_mtime_ns, time.time() - 1.0, cached_org)
+        enabled, compat, cached_mtime_ns, _, cached_org, _ = mod._SKILLS_STATS_CACHE[resolved]
+        past = time.time() - 1.0
+        mod._SKILLS_STATS_CACHE[resolved] = (enabled, compat, cached_mtime_ns, past, cached_org, past)
 
         time.sleep(0.02)
         shutil.rmtree(deleted_skill_dir)

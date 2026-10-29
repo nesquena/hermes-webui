@@ -2515,6 +2515,15 @@ async function newSession(flash, options={}){
       _clearEmptyComposerModelOverride();
     }
     S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
+    // #8356: New Chat takes the pane without going through loadSession(), so
+    // an in-flight loadSession() for the previous session still owns the load
+    // (its _loadingSessionId/_loadGeneration match) and its response can write
+    // the old transcript over the new pane. Invalidate the superseded load
+    // here: clearing the id and advancing the generation makes every stale
+    // _isCurrentLoad() continuation bail — the idle error catch, the inflight
+    // restore and the busy-flag cleanup can no longer mutate the new pane.
+    _loadingSessionId = null;
+    _loadSessionGeneration++;
     // #7855: a brand-new session starts with no restored-continuation draft.
     if(typeof _clearRestoredGoalContinuationDraft==='function') _clearRestoredGoalContinuationDraft();
     S._pendingSessionToolsets=null;
@@ -4301,7 +4310,7 @@ async function _ensureMessagesLoaded(sid, opts) {
   // S.messages in a single frame.
   opts = opts || {};
   const _loadGeneration = Number.isFinite(opts.loadGeneration) ? Number(opts.loadGeneration) : null;
-  const _ownsLoad = () => _loadingSessionId === sid && (_loadGeneration === null || _loadSessionGeneration === _loadGeneration);
+  const _ownsLoad = () => _loadingSessionId === sid && (_loadGeneration === null || _loadSessionGeneration === _loadGeneration) && !!S.session && S.session.session_id === sid;
   if (!_ownsLoad()) return;
   // Metadata-only reads omit regeneration authority. Cached rows alone do
   // not prove that the current session payload can authorize regeneration.
