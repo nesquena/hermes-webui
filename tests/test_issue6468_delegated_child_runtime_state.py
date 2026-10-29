@@ -559,6 +559,26 @@ def test_forget_runtime_owner_prunes_live_and_persisted_records(monkeypatch, tmp
     }
 
 
+def test_forget_runtime_owner_matches_renamed_root_profile(monkeypatch, tmp_path):
+    _isolated_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr(profiles, "_root_profile_name_cache", {"default", "root-alias"})
+    monkeypatch.setattr(profiles, "_root_profile_name_cache_loaded", True)
+    runtime.record_subagent_event(
+        "default",
+        "subagent.complete",
+        {"child_session_id": "child-root", "status": "ok"},
+        owner_session_id="parent-root",
+    )
+
+    assert runtime.forget_runtime_owner("parent-root", profile="root-alias")
+    runtime.clear_live_runtime()
+
+    assert runtime.child_runtime("default", "child-root") == {
+        "runtime_state": "unknown",
+        "runtime_reason": "",
+    }
+
+
 def test_events_without_child_or_owner_are_ignored(monkeypatch, tmp_path):
     _isolated_runtime(monkeypatch, tmp_path)
 

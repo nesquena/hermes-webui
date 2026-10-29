@@ -24,7 +24,7 @@ _TERMINAL_TTL_SECONDS = 15 * 60
 _MAX_TERMINAL_RECORDS = 256
 
 
-def _key(profile: Any, child_session_id: Any) -> tuple[str, str] | None:
+def _normalized_profile(profile: Any) -> str:
     profile_value = str(profile or "").strip() or "default"
     from api.profiles import _profiles_match
 
@@ -32,6 +32,11 @@ def _key(profile: Any, child_session_id: Any) -> tuple[str, str] | None:
     # root-profile alias share one runtime record.
     if _profiles_match(profile_value, "default"):
         profile_value = "default"
+    return profile_value
+
+
+def _key(profile: Any, child_session_id: Any) -> tuple[str, str] | None:
+    profile_value = _normalized_profile(profile)
     child_value = str(child_session_id or "").strip()
     return (profile_value, child_value) if child_value else None
 
@@ -258,7 +263,8 @@ def forget_runtime_owner(owner_session_id: Any, *, profile: Any | None = None) -
     owner_value = str(owner_session_id or "").strip()
     if not owner_value:
         return False
-    profile_value = str(profile or "").strip()
+    raw_profile_value = str(profile or "").strip()
+    profile_value = _normalized_profile(raw_profile_value) if raw_profile_value else ""
     with _LOCK:
         _prune_live_records()
         terminal_records = _prune_cached_terminal_records()
