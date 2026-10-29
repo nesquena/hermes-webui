@@ -173,7 +173,10 @@ jobs:
 
       - name: Scope / undefined-reference gate (#3696)
         if: needs.changes.outputs.docs_only != 'true'
-        run: python3 scripts/scope_undef_gate.py
+        # --require-eslint: fail rather than skip if eslint is missing. The step
+        # above installs eslint into node_modules/.bin, not onto PATH, and before
+        # the gate looked there it skipped on every run.
+        run: python3 scripts/scope_undef_gate.py --require-eslint
 
   test:
     needs: changes
