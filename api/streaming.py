@@ -3844,11 +3844,15 @@ def _set_turn_session_identity(session_id: str, workspace: str = "", profile_nam
         persistent-Docker container key from it (``profile:<name>``, with the
         default profile staying literally ``"default"``). WebUI never bound
         it, so a named-profile session collapsed onto the shared default key
-        and the user saw a second, empty default-keyed sandbox. Bound only
-        when *profile_name* is truthy: an explicit ``""`` would mask the
-        process-env fallback for CLI/cron on a reused thread-pool worker.
-        Optional-import guarded — Agents predating the ContextVar simply skip
-        this binding and keep the process-env fallback below.
+        and the user saw a second, empty default-keyed sandbox. A truthy
+        *profile_name* binds that name; a falsy one binds the profile the
+        process-env mirror owns for everyone else (the captured ambient while
+        any publisher is live — empty when the ambient was absent — else the
+        current env value, else ``""``), so a default turn running beside a
+        live named turn resolves ``""`` instead of falling through to the
+        named turn's env value. Optional-import guarded — Agents predating
+        the ContextVar simply skip this binding and keep the process-env
+        fallback below.
       * ``agent.runtime_cwd._SESSION_CWD`` — this turn's workspace, when
         *workspace* is given. The WebUI runs the agent IN-PROCESS, so
         ``os.getcwd()`` is the server's launch directory, not the workspace the
@@ -3888,16 +3892,37 @@ def _set_turn_session_identity(session_id: str, workspace: str = "", profile_nam
         tokens["ui_session_id"] = _UI_SID.set(sid)
     except Exception:
         logger.debug("per-turn _SESSION_UI_SESSION_ID bind failed", exc_info=True)
-    if profile_name:
-        # #8452: the ContextVar the Agent's profile-scoped Docker derivation
-        # reads FIRST (get_session_env prefers it over the process env). Bound
-        # via the ContextVar directly so the reset below can use reset-token
-        # semantics like every sibling above.
-        try:
-            from gateway.session_context import _SESSION_PROFILE as _SP
+    try:
+        from gateway.session_context import _SESSION_PROFILE as _SP
+        if profile_name:
+            # #8452: the ContextVar the Agent's profile-scoped Docker derivation
+            # reads FIRST (get_session_env prefers it over the process env). Bound
+            # via the ContextVar directly so the reset below can use reset-token
+            # semantics like every sibling above.
             tokens["session_profile"] = _SP.set(str(profile_name))
-        except Exception:
-            logger.debug("per-turn _SESSION_PROFILE bind failed", exc_info=True)
+        else:
+            # #8452 re-gate (round 5): a DEFAULT turn must not leave the
+            # ContextVar unset while a concurrent named turn is live — the
+            # mirror has put that turn's profile in the process env, and an
+            # unset ContextVar makes get_session_env fall through to it, so the
+            # default turn and its readers (children it spawns, the kanban
+            # notifier) would resolve the named turn's profile for the whole
+            # overlap window. Bind the mirror's captured ambient instead:
+            # _PROFILE_MIRROR_AMBIENT when any publisher is live — the "absent"
+            # sentinel maps to "" — else the current env value, else "". The
+            # Agent's own API server binds profile="" for default sessions for
+            # exactly this reason. Read under the mirror lock so a concurrent
+            # publish cannot land between the two reads and smuggle a live
+            # turn's profile in through the env branch.
+            with _PROFILE_MIRROR_LOCK:
+                if _PROFILE_MIRROR_PUBLISHERS:
+                    _ambient = _PROFILE_MIRROR_AMBIENT
+                    fallback = "" if _ambient is _PROFILE_MIRROR_UNSET else _ambient
+                else:
+                    fallback = os.environ.get(_PROFILE_MIRROR_KEY, "")
+            tokens["session_profile"] = _SP.set(str(fallback))
+    except Exception:
+        logger.debug("per-turn _SESSION_PROFILE bind failed", exc_info=True)
     if workspace:
         # Bound via the ContextVar directly, not ``set_session_cwd``, so the
         # reset below can use reset-token semantics like every sibling above.

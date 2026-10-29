@@ -249,6 +249,120 @@ def test_interleaved_concurrent_profile_turns_do_not_bleed(monkeypatch):
     assert observed["play-child"] == "play"
 
 
+@pytest.mark.parametrize("ambient", [None, "inherited-ambient"])
+def test_default_turn_beside_a_live_named_turn_reads_empty_profile(monkeypatch, ambient):
+    """Review round 5: a DEFAULT turn must not read a concurrent named turn's
+    profile.
+
+    The reverse exposure of #8452: ``_set_turn_session_identity`` binds
+    ``_SESSION_PROFILE`` only for a truthy name, and the WebUI never calls
+    ``set_session_vars``, so a default turn's ContextVar stays unset and
+    ``get_session_env`` falls back to the process env — where the mirror has
+    put the named turn's LIVE profile. The default turn (and everything it
+    spawns) would resolve the named turn's profile for the whole overlap
+    window. The fix binds the mirror's captured ambient instead: ``''`` when
+    the ambient was absent, the inherited ambient value otherwise.
+    """
+    sc = _session_context(monkeypatch)
+    streaming = _streaming()
+    if ambient is None:
+        monkeypatch.delenv("HERMES_SESSION_PROFILE", raising=False)
+    else:
+        monkeypatch.setenv("HERMES_SESSION_PROFILE", ambient)
+
+    barrier = threading.Barrier(2)
+    observed: dict[str, str] = {}
+    errors: list[BaseException] = []
+
+    def _named_turn() -> None:
+        try:
+            tokens = streaming._set_turn_session_identity(
+                "sid-8452-named", profile_name="work",
+            )
+            mirror_token = streaming._publish_turn_session_profile("work")
+            try:
+                barrier.wait(timeout=10)
+                barrier.wait(timeout=10)
+            finally:
+                streaming._release_turn_session_profile(mirror_token)
+                streaming._reset_turn_session_identity(tokens)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    def _default_turn() -> None:
+        try:
+            tokens = streaming._set_turn_session_identity(
+                "sid-8452-default", profile_name="",
+            )
+            mirror_token = streaming._publish_turn_session_profile(None)
+            try:
+                barrier.wait(timeout=10)
+                # The named turn is live and its profile sits in the process
+                # env: the only thing shielding the default turn is its own
+                # ContextVar binding.
+                observed["ctxvar"] = sc._SESSION_PROFILE.get()
+                observed["get_session_env"] = sc.get_session_env(
+                    "HERMES_SESSION_PROFILE", "*missing*"
+                )
+                observed["os_environ"] = os.environ.get("HERMES_SESSION_PROFILE")
+                child: dict[str, str] = {}
+
+                def _child() -> None:
+                    child["profile"] = sc.get_session_env(
+                        "HERMES_SESSION_PROFILE", "*missing*"
+                    )
+
+                contextvars.copy_context().run(_child)
+                observed["child"] = child["profile"]
+                barrier.wait(timeout=10)
+            finally:
+                streaming._release_turn_session_profile(mirror_token)
+                streaming._reset_turn_session_identity(tokens)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=_named_turn),
+        threading.Thread(target=_default_turn),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=20)
+    assert not errors, f"concurrent turn raised: {errors!r}"
+    # The named turn is genuinely live: the process slot names it. Any
+    # shielding must come from the default turn's OWN binding, never from the
+    # env the named turn still owns.
+    assert observed["os_environ"] == "work", (
+        f"the probe never overlapped: the process env read "
+        f"{observed['os_environ']!r} instead of the live turn's 'work'"
+    )
+    expected = "" if ambient is None else ambient
+    assert observed["get_session_env"] == expected, (
+        f"ambient={ambient!r}: the default turn resolved "
+        f"{observed['get_session_env']!r} — a live named turn's profile bled "
+        "through the process-env fallback of an unbound ContextVar"
+    )
+    assert observed["ctxvar"] == expected, (
+        "the default turn's _SESSION_PROFILE ContextVar must be bound to the "
+        "mirror's ambient ('' when absent), not left unset"
+    )
+    assert observed["child"] == expected, (
+        f"ambient={ambient!r}: a copy_context() child of the default turn read "
+        f"{observed['child']!r} — the live named turn's profile leaked into "
+        "the default turn's descendants"
+    )
+    # After both turns end: clean — the env is the pre-turn ambient, the
+    # main-thread ContextVar is untouched.
+    assert os.environ.get("HERMES_SESSION_PROFILE") == ambient, (
+        f"process env kept {os.environ.get('HERMES_SESSION_PROFILE')!r} after "
+        f"both turns finished; ambient was {ambient!r}"
+    )
+    assert sc._SESSION_PROFILE.get() is sc._UNSET, (
+        "the main thread's ContextVar must stay untouched by both turns"
+    )
+
+
 def test_profile_bind_degrades_when_agent_lacks_the_contextvar(monkeypatch):
     """Optional-import compat: an Agent without _SESSION_PROFILE must not break.
 
@@ -635,11 +749,13 @@ def test_streaming_next_turn_does_not_inherit_the_previous_profile(monkeypatch, 
         monkeypatch, tmp_path, profile=None, active_profile_name=None,
     )
     second.run()
-    assert second.observed["ctx_profile"] == "UNSET", (
-        "the profile-less turn after a named-profile turn must see no bound "
-        f"profile; observed {second.observed.get('ctx_profile')!r}"
+    assert second.observed["ctx_profile"] == "", (
+        "the profile-less turn after a named-profile turn must see an empty "
+        "binding, not the previous turn's profile nor an unset ContextVar "
+        "that would fall through to the env; observed "
+        f"{second.observed.get('ctx_profile')!r}"
     )
-    assert second.observed["resolved_profile"] == "<unset>"
+    assert second.observed["resolved_profile"] == ""
     assert second.observed["env_profile"] is None
     assert second.observed["thread_env_profile"] is None
     _assert_identity_restored(sc, monkeypatch)
