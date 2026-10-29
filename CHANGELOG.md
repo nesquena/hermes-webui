@@ -59,6 +59,8 @@
 
 ### Fixed
 
+- **Opening a running session no longer shows the turn's activity above your own prompt, and forking a saved row while a turn runs keeps the right rows.** When the transcript window starts inside the running turn, the in-flight prompt is placed above that turn's activity (and never claims a previous turn's rows), as a display-only row that a later full reload replaces with the saved prompt. Fork, edit and regenerate indices skip that row, so branching from saved row 0 keeps one row instead of two, and the windowed case keeps its absolute offsets. (#8543, thanks @happy5318)
+
 - **Single-container Docker no longer warns at startup that the staged Agent copy is "not a current copy" of itself.** When the staged Agent directory resolves to the directory already chosen for installation, startup uses it without comparing it against itself; a different stage still goes through the ownership, ancestry, identity and freshness checks. Thanks @GeorgiaPreda. (#8568, fixes #8555)
 
 - **A silent voice clip says "No speech detected" instead of failing, and a Send clicked while recording still sends.** When server speech-to-text answers with an empty transcript, the composer now shows the existing no-speech toast rather than a transcription error, and a queued Send goes through with whatever the composer holds (text, staged files or selected context) instead of being dropped. Real transcription failures, including a provider command that crashes with an error marker, still report an error. Thanks @fedebyes. (#8563)
