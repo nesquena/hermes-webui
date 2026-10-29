@@ -5998,11 +5998,14 @@ main.main > #mainPlugin{display:none;}
 .session-child-count[role="button"] .session-child-count-label{min-width:max-content;text-overflow:clip;}
 .session-child-count[role="button"] .session-child-activity-indicator{width:10px;height:10px;}
 .session-title-row:has(.session-child-count[role="button"]) .session-title{flex-basis:auto;}
-/* Reference wording stays complete at normal sidebar widths; in a narrow
-   content box it yields to the primary title just like a navigable count. */
+/* Reference wording stays complete at normal sidebar widths; give the title
+   group the remaining space rather than shrinking both intrinsic widths.
+   In a narrow content box the group instead competes for primary-title space. */
+.session-title-row:has(.session-child-count:not([role="button"])) .session-title-group{flex-basis:0;}
 .session-text:has(.session-child-count){container-type:inline-size;}
 @container (max-width:220px){
   .session-child-count:not([role="button"]){max-width:50%;}
+  .session-title-row:has(.session-child-count:not([role="button"])) .session-title-group{flex-basis:auto;}
   .session-title-row:has(.session-child-count:not([role="button"])) .session-title{flex-basis:auto;}
 }
 .session-child-count-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}

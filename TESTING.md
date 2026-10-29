@@ -163,9 +163,11 @@ checks reference-only title glyphs and hit-tested status marks at 180/220/240px
 across every locale, both densities, selected/inactive rows, light/dark Graphite,
 Default, Catppuccin and Geist Contrast. The separate normal-width matrix keeps
 the full child-qualified label readable at 300/360px with parent-own notification
-gutters. Narrow reference chips use a 50% cap and intrinsic title basis when the
-session text content box is at most 220px; wider content retains the 60% cap and
-flexible title basis so localized `Archived child` remains readable. A focused
+gutters. Narrow reference chips use a 50% cap and intrinsic title-group basis when
+the session text content box is at most 220px; wider content retains the 60% cap
+and a zero title-group basis so localized `Archived child` remains readable.
+The title group's wrapping and one-line tag clipping remain unchanged, and
+childless rows retain upstream's intrinsic group basis. A focused
 220/240/300px German matrix also checks Arial and DejaVu Sans metrics across
 Default/Catppuccin, both densities, selected/inactive rows, and parent-own states,
 so host font fallback cannot hide intermediate-width title clipping. The full
