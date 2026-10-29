@@ -452,10 +452,23 @@ safe_resolve(root, requested):
     - Calls .relative_to(root) to assert the result is inside root
     - Raises ValueError on path traversal (../../etc/passwd)
 
+list_dir_page(workspace, rel='.', cursor=None):
+    - Resolves the selected directory, then scans it through the anchored dir_fd
+      path when available or the path-based fallback on other platforms.
+    - Applies the existing containment, blocked-path, symlink, and reachability
+      checks to scanned entries. The ordering key is workspace_sort_rank, then
+      case-insensitive name, then the original name.
+    - Retains 201 candidates while scanning and returns up to 200 entries with
+      has_more and a signed cursor. The cursor binds the resolved directory and
+      the last entry's complete ordering key. Continuations scan and validate the
+      directory again; retained candidates and final sorting stay bounded, while
+      traversal and per-entry validation remain proportional to directory size.
+    - Both listing routes serialize nanosecond timestamps as strings for the
+      browser and preserve rank and timestamp fields on every page.
+
 list_dir(workspace, rel='.'):
-    - Calls safe_resolve, then iterdir()
-    - Sorts: directories first, then files, case-insensitive alpha within each group
-    - Returns up to 200 entries with {name, path, type, size}
+    - Returns the entries from the first list_dir_page() result for callers that
+      need a plain list.
 
 read_file_content(workspace, rel):
     - Calls safe_resolve
@@ -1817,7 +1830,8 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
                                Missing authority never creates an automatic refetch
                                loop.
     /api/sessions              List of all session compact() dicts, sorted by updated_at
-    /api/list                  ?session_id=X&path=. -> directory listing for session workspace
+    /api/list                  ?session_id=X&path=. -> up to 200 entries plus has_more and cursor
+    /api/escape/list           ?session_id=X&token=T&path=. -> the same page shape with virtual read-only paths
     /api/file                  ?session_id=X&path=rel -> file content (text, 200KB limit)
     /share/<token>             Public read-only HTML shell for a sanitized shared transcript snapshot
     /api/share/<token>         Public JSON payload for a sanitized shared transcript snapshot

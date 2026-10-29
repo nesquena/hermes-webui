@@ -3107,6 +3107,10 @@
   .file-tree.drag-over-upload{outline:2px dashed var(--blue,#3b82f6);outline-offset:-2px;border-radius:6px;}
   .file-item{display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:8px;cursor:pointer;font-size:12px;color:var(--muted);transition:all .12s;min-width:0;}
   .file-item:hover{background:var(--hover-bg);color:var(--text);}
+  .file-item.ws-load-more-row{justify-content:center;margin-top:6px;border:1px dashed var(--border2);color:var(--accent-text);font-size:11px;}
+  .file-item.ws-load-more-row:hover{background:var(--accent-bg);color:var(--accent-text);}
+  .file-item.ws-load-more-row:focus-visible{outline:2px solid var(--focus-ring);outline-offset:1px;}
+  .file-item.ws-load-more-row[aria-disabled="true"]{opacity:.6;cursor:wait;}
   .file-item.active{background:var(--accent-bg);color:var(--accent-text);}
   .file-item.dragging{opacity:.35;border:1px dashed var(--accent-bg-strong);}
   .file-item.drag-over,.breadcrumb-seg.drag-over{background:var(--accent-bg);color:var(--accent-text);outline:1px solid var(--accent-bg-strong);outline-offset:-1px;}

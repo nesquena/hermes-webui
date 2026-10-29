@@ -365,12 +365,27 @@ class TestSwitchRaceGuards:
         assert bump_idx < wsskel_idx, (
             "the unconditional bump must precede the panel-gated showWorkspaceTreeSkeleton"
         )
-        # loadDir captures + re-checks the generation after BOTH awaited /api/list points
+        # loadDir captures one owner and checks it after the root response and the
+        # restored-directory prefetch settles.
         ld = WORKSPACE[WORKSPACE.index("async function loadDir("):]
         ld = ld[: ld.index("\nfunction refreshWorkspacePanel(")]
         assert "const treeGen=_wsTreeGen" in ld, "loadDir must capture the tree generation at call time"
-        assert ld.count("treeGen!==_wsTreeGen") >= 2, (
-            "loadDir must re-check the tree generation after BOTH awaited /api/list points "
-            "(root render + expanded-dirs prefetch) and discard stale renders"
+        assert "const _loadIsCurrent=()=>_workspaceRequestIsCurrent(" in ld, (
+            "loadDir must use the workspace request owner for stale-result checks"
+        )
+        root_request = ld.index("const data=await api(")
+        root_guard = ld.index("if(!_loadIsCurrent())return;", root_request)
+        recovered_workspace = ld.index("if(data.workspace_recovered&&data.workspace)", root_guard)
+        assert root_request < root_guard < recovered_workspace, (
+            "loadDir must discard a stale root listing before changing the workspace"
+        )
+        prefetch = ld.index("const results=await Promise.all(", root_request)
+        prefetch_guard = ld.index("if(!_loadIsCurrent())return;", prefetch)
+        cache_write = ld.index("for(const {dirPath,entries,error,isCurrent} of results)", prefetch_guard)
+        assert prefetch < prefetch_guard < cache_write, (
+            "loadDir must discard stale restored-directory results before caching them"
+        )
+        assert "_fetchAllPages(_workspaceRouteForPath(dirPath,'list'),isCurrent)" in ld, (
+            "restored-directory page requests must use the per-directory owner check"
         )
 
