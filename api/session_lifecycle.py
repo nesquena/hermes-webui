@@ -127,22 +127,29 @@ def register_agent(session_id: str, agent) -> None:
         _condition.notify_all()
 
 
-def unregister_agent(session_id: str) -> None:
+def unregister_agent(session_id: str, *, agent=None) -> bool:
     """Clear the current future-generation agent handle.
 
     Dirty segment owners are intentionally preserved so failed work remains
     retryable even if the cache drops the current agent reference.
+    When ``agent`` is supplied, only clears if the entry's active agent still matches
+    (prevents an evicted agent teardown from clearing a successor turn's registration).
+    Returns True if cleared, False if skipped due to mismatch or absent session.
     """
     if not session_id:
-        return
+        return False
     with _condition:
         entry = _sessions.get(session_id)
-        if entry is not None:
-            entry["agent"] = None
+        if entry is None:
+            return False
+        if agent is not None and entry.get("agent") is not None and entry.get("agent") is not agent:
+            return False
+        entry["agent"] = None
         _condition.notify_all()
+        return True
 
 
-def discard_session(session_id: str) -> bool:
+def discard_session(session_id: str, *, agent=None) -> bool:
     """Permanently drop a session's lifecycle entry to bound memory growth.
 
     The ``_sessions`` dict is process-global and historically only ever grew:
@@ -156,9 +163,11 @@ def discard_session(session_id: str) -> bool:
     retained agent handle. If the entry is busy or dirty it is left untouched so
     failed batch-extraction memory work stays retryable -- exactly the invariant
     ``unregister_agent`` and ``_evict_session_agent`` already preserve.
+    When ``agent`` is supplied, only discards if the entry does not belong to a
+    different successor agent.
 
     Returns True when the entry was removed (or was already absent), False when
-    it was retained because work is still pending.
+    it was retained because work is still pending or a successor agent is registered.
     """
     if not session_id:
         return False
@@ -166,6 +175,8 @@ def discard_session(session_id: str) -> bool:
         entry = _sessions.get(session_id)
         if entry is None:
             return True
+        if agent is not None and entry.get("agent") is not None and entry.get("agent") is not agent:
+            return False
         if entry["in_flight"]:
             return False
         if entry["generation"] > entry["committed_generation"]:
@@ -194,14 +205,24 @@ def mark_turn_completed(session_id: str, *, agent=None) -> int:
         return generation
 
 
-def has_uncommitted_work(session_id: str) -> bool:
+def has_uncommitted_work(session_id: str, *, agent=None) -> bool:
     if not session_id:
         return False
     with _lock:
         entry = _sessions.get(session_id)
         if entry is None:
             return False
-        return entry["generation"] > entry["committed_generation"]
+        if agent is None:
+            return entry["generation"] > entry["committed_generation"]
+        committed = entry.get("committed_generation", 0)
+        for segment in entry.get("segments", []):
+            if segment.get("end", 0) > committed:
+                seg_agent = segment.get("agent")
+                if seg_agent is None:
+                    seg_agent = entry.get("agent")
+                if seg_agent is agent:
+                    return True
+        return False
 
 
 def _first_uncommitted_segment(entry: dict) -> dict | None:
