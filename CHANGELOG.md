@@ -45,6 +45,8 @@
 
 ### Security
 
+- **Public shares read each embedded local image through one no-follow descriptor.** The share embedder used to resolve, check, stat and then reopen an image by name, so a writer inside an allowed root who swapped a path component while a share was being created could get a file from outside the workspace and attachment roots embedded in the public snapshot. Each image is now mapped lexically to its allowed root, walked component by component without following links, and checked and read from that single descriptor (size capped from `fstat`); anything that can't be read that way gets the existing placeholder. (#8583, refs #6126)
+
 - **Public shares no longer publish inline `data:` images from the conversation.** An image written into a message as a `data:` URI (markdown, a `MEDIA:data:` token or a raw `<img>`) was copied into the public share snapshot unchanged, and the share credential redactor cannot read inside base64, so bytes hidden in such an image were published on the share link. Public share snapshots now show `[Inline attachment omitted from public share]` in its place, including in the share title. Verified local images (#6174) still embed as before, and the private session view, exports and live chat are unchanged. A valid `MEDIA:data:` image is no longer embedded in public shares (#7949). Shares created earlier keep their snapshot until refreshed or revoked. (#8465)
 
 - **The request log no longer records a client-chosen address as `forwarded_for`.** The structured request log, which fail2ban jails read, copied the left-most `X-Forwarded-For` hop from any peer, so any client could write an arbitrary address there and get someone else banned. It now records `forwarded_for` only when the socket peer is a trusted proxy (loopback, or listed in `HERMES_WEBUI_TRUSTED_PROXY_CIDRS`), resolving the chain right to left to a validated address, and it never reads `X-Real-IP` for this field. A request whose forwarded header was not recorded carries `forwarded_for_ignored: true` instead, and the first one from an untrusted peer logs a one-time warning naming the peer and the setting to change. If a fail2ban jail matches `forwarded_for` and your proxy is not on loopback, add the proxy's address to `HERMES_WEBUI_TRUSTED_PROXY_CIDRS`; `docs/remote-access.md` documents both fields. Thanks @happy5318. (#7864, fixes #7863)
@@ -58,6 +60,8 @@
   exactly as before. Thanks @ybai08. (#8138, fixes #8126)
 
 ### Fixed
+
+- **CI's scope/undefined-reference check now actually runs, and fails closed when it can't.** The gate looked for eslint only on PATH, but CI installs it under `node_modules/.bin`, so every CI run skipped it with a warning. It now falls back to the checkout's eslint when PATH has none (`eslint.cmd` on Windows), and CI passes `--require-eslint` so a missing eslint is a failure instead of a silent skip. Local runs without node still skip as before. (#8588)
 
 - **Opening a running session no longer shows the turn's activity above your own prompt, and forking a saved row while a turn runs keeps the right rows.** When the transcript window starts inside the running turn, the in-flight prompt is placed above that turn's activity (and never claims a previous turn's rows), as a display-only row that a later full reload replaces with the saved prompt. Fork, edit and regenerate indices skip that row, so branching from saved row 0 keeps one row instead of two, and the windowed case keeps its absolute offsets. (#8543, thanks @happy5318)
 
