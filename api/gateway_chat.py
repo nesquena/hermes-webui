@@ -420,6 +420,7 @@ def _settle_gateway_run_approval(
 
     run_id = str(approval_data.get("run_id") or "").strip()
     identity_v1 = bool(approval_data.get("_gateway_agent_identity_v1"))
+    execution_generation = approval_data.get("_gateway_execution_generation")
     with gateway_yolo_handoff(session_id):
         if _gateway_session_yolo_enabled(session_id):
             try:
@@ -428,6 +429,11 @@ def _settle_gateway_run_approval(
                     api_key,
                     run_id,
                     approval_data["approval_id"] if identity_v1 else "",
+                    **(
+                        {"execution_generation": execution_generation}
+                        if identity_v1 and execution_generation is not None
+                        else {}
+                    ),
                 )
                 return True, None, 0
             except Exception:
@@ -447,6 +453,8 @@ def _auto_approve_gateway_run(
     api_key: str,
     run_id: str,
     approval_id: str,
+    *,
+    execution_generation: int | None = None,
 ) -> None:
     """Resolve one Runs API prompt using only the shipped approval contract.
 
@@ -455,7 +463,8 @@ def _auto_approve_gateway_run(
     flag is enabled. Native Agent-side YOLO would be preferable because it can
     bypass gates before they pause and also covers Agent-owned computer-use
     policy; https://github.com/NousResearch/hermes-agent/pull/61946 tracks that
-    API capability. Until then, do not send speculative fields to the Agent.
+    API capability. Until then, send only the fields the gateway itself
+    published for this prompt (its id and, when present, its generation).
     """
     from api.runner_client import HttpRunnerClient
 
@@ -463,6 +472,7 @@ def _auto_approve_gateway_run(
         run_id,
         approval_id,
         "once",
+        **({"execution_generation": execution_generation} if execution_generation is not None else {}),
     )
 
 
@@ -594,6 +604,22 @@ def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
     return ("tool_complete" if is_complete else "tool"), event_payload
 
 
+def _gateway_prompt_identity(payload) -> str:
+    """The exact per-prompt id a gateway published, across payload generations.
+
+    ``request_id`` (session bridge) and ``prompt_id`` (pending-controls
+    projection) are the canonical names; ``approval_id`` / ``id`` are the
+    older shapes kept for gateways that still send them.
+    """
+    return str(
+        payload.get("request_id")
+        or payload.get("prompt_id")
+        or payload.get("approval_id")
+        or payload.get("id")
+        or ""
+    ).strip()
+
+
 def _gateway_runs_approval_event(payload: dict) -> dict | None:
     """Map a runs-API approval.request payload to the WebUI approval contract."""
     if not isinstance(payload, dict):
@@ -605,7 +631,15 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
     pattern_key = str(payload.get("pattern_key") or "").strip()
     args = payload.get("args") if isinstance(payload.get("args"), (list, dict)) else []
     run_id = str(payload.get("run_id") or "").strip()
-    raw_approval_id = str(payload.get("approval_id") or payload.get("id") or "").strip()
+    raw_approval_id = _gateway_prompt_identity(payload)
+    # The canonical Runs API approval payload identifies the prompt as
+    # ``request_id`` (session bridge) or ``prompt_id`` (pending-controls
+    # projection) and fences it with an integer ``execution_generation``. Keep
+    # both: without them the client can only guess a local id and has nothing
+    # the generation-fenced respond endpoint will accept.
+    execution_generation = payload.get("execution_generation")
+    if type(execution_generation) is not int:
+        execution_generation = None
     approval_id = raw_approval_id
     if not approval_id:
         approval_id = uuid.uuid4().hex
@@ -627,14 +661,45 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
         "run_id": run_id,
         "approval_id": approval_id,
         "_gateway_raw_approval_id_present": bool(raw_approval_id),
+        "_gateway_execution_generation": execution_generation,
         "choices": choices,
         "allow_permanent": bool(allow_permanent),
     }
 
 
 def _gateway_approval_key(payload) -> str:
-    """Stable id for one gateway approval, shared by the status probe and the event relay."""
-    return str(payload.get("approval_id") or payload.get("id") or payload.get("timestamp") or "")
+    """Stable id for one gateway approval, shared by the status probe and the event relay.
+
+    The execution generation is part of the identity: a run that re-publishes the
+    same prompt id at a newer generation is a different prompt, and answering the
+    old generation is refused by the gateway. Keying on the id alone deduped that
+    replay away and left the mirror pointing at a dead generation.
+    """
+    identity = _gateway_prompt_identity(payload) or str(payload.get("timestamp") or "")
+    generation = payload.get("execution_generation")
+    if identity and type(generation) is int:
+        return f"{identity}#{generation}"
+    return identity
+
+
+def _gateway_status_approval(status: dict) -> dict | None:
+    """The pending approval a durable run status describes, in either projection shape.
+
+    The session bridge answers ``status["approval"]`` with the latest single
+    prompt; the canonical authority projection answers ``pending_controls``,
+    where the run's own queue order puts the prompt that must be answered first
+    at the head.
+    """
+    approval = status.get("approval")
+    if isinstance(approval, dict):
+        return approval
+    controls = status.get("pending_controls")
+    if not isinstance(controls, list):
+        return None
+    for control in controls:
+        if isinstance(control, dict) and control.get("kind") == "approval":
+            return control
+    return None
 
 
 def _relay_gateway_run_approval(session_id, run_id, payload, base_url, api_key, *, put_gateway_event) -> bool:
@@ -649,7 +714,15 @@ def _relay_gateway_run_approval(session_id, run_id, payload, base_url, api_key, 
         return False
     approval_data["run_id"] = run_id
     from api.config import gateway_supports_approval_identity_v1
-    identity_v1 = bool(approval_data.get("_gateway_raw_approval_id_present")) and gateway_supports_approval_identity_v1(base_url, api_key)
+    # Exact-id answering needs a trustworthy per-prompt identity. A gateway
+    # that published an ``execution_generation`` for this prompt proves it can
+    # fence the answer to that exact prompt (canonical Runs API contract), so
+    # the generation itself is the authority; the advertised capability remains
+    # the fallback for gateways that only promise it via /v1/capabilities.
+    identity_v1 = bool(approval_data.get("_gateway_raw_approval_id_present")) and (
+        approval_data.get("_gateway_execution_generation") is not None
+        or gateway_supports_approval_identity_v1(base_url, api_key)
+    )
     approval_data["_gateway_agent_identity_v1"] = identity_v1
     auto_approved, head, total = _settle_gateway_run_approval(
         session_id,
@@ -1254,14 +1327,21 @@ def _run_gateway_runs_api_streaming(
         gateway advertises ``approval_identity_v1``; without both, skip the
         status-card insert entirely so the replay alone orders the queue
         A -> B."""
-        approval = status.get("approval")
+        approval = _gateway_status_approval(status)
         if (
             str(status.get("status") or "").strip().lower() == "waiting_for_approval"
             and isinstance(approval, dict)
         ):
-            raw_approval_id = str(approval.get("approval_id") or approval.get("id") or "").strip()
+            raw_approval_id = _gateway_prompt_identity(approval)
+            exact_generation = approval.get("execution_generation")
             from api.config import gateway_supports_approval_identity_v1
-            if not (raw_approval_id and gateway_supports_approval_identity_v1(base_url, api_key)):
+            if not (
+                raw_approval_id
+                and (
+                    type(exact_generation) is int
+                    or gateway_supports_approval_identity_v1(base_url, api_key)
+                )
+            ):
                 return
             approval_key = _gateway_approval_key(approval)
             if approval_key and approval_key not in surfaced_approval_ids:
@@ -1698,7 +1778,7 @@ def _await_gateway_run_result(
             status = _get_gateway_run_status(base_url, api_key, run_id)
         except (urllib.error.URLError, OSError, ValueError):
             return True  # fail open: a stale card 409s, a missing one stalls the run
-        approval = status.get("approval")
+        approval = _gateway_status_approval(status)
         return (
             str(status.get("status") or "").strip().lower() == "waiting_for_approval"
             and isinstance(approval, dict)
@@ -1706,7 +1786,7 @@ def _await_gateway_run_result(
         )
 
     def surface_parked_approval(status):
-        approval = status.get("approval")
+        approval = _gateway_status_approval(status)
         if str(status.get("status") or "").strip().lower() == "waiting_for_approval" and isinstance(approval, dict):
             approval_key = _gateway_approval_key(approval)
             if approval_key not in surfaced_approval_ids:
@@ -1853,6 +1933,115 @@ def _process_profile_is_root() -> bool:
         return False  # fail closed: treat the mirrored alias as per-profile
 
 
+def _env_value_is_profile_sourced(profiles_mod, key, value) -> bool:
+    """True when os.environ's *value* for *key* came from a profile's .env rather than the launcher (#8432).
+
+    Two sources put a profile's values into the process environment: the profile loader's mirror (recorded in
+    ``_loaded_profile_env_keys``) and a shell launcher that sourced a NAMED launch home's ``.env`` before Python
+    started (ctl.sh does this for ``$HERMES_HOME/.env``), recorded by the startup snapshot. A value equal to what the
+    named launch home's .env set at startup is that profile's, even if the launcher exported it too (fail closed).
+    The root home's .env is shared by definition, so its values are not profile-sourced.
+    """
+    value = str(value or "").strip()
+    if not value:
+        return False  # an empty value configures nothing
+    if key in (getattr(profiles_mod, "_loaded_profile_env_keys", ()) or ()):
+        return True
+    launch_env = getattr(profiles_mod, "_INITIAL_HERMES_HOME_DOTENV", None) or {}
+    if str(launch_env.get(key) or "").strip() != value:
+        return False
+    launch_home = str(getattr(profiles_mod, "_INITIAL_HERMES_HOME", "") or "").strip()
+    try:
+        return not _same_profile_home(launch_home, profiles_mod.get_hermes_home_for_profile(""))
+    except Exception:
+        return True  # fail closed
+
+
+def _config_url_may_belong_to_a_profile(profiles_mod, process_home) -> bool:
+    """True unless the ambient config's Gateway URL comes from an operator config file outside every profile (#8432).
+
+    Without ``HERMES_CONFIG_PATH`` (or with one a profile .env chose) the ambient config is the process profile's own
+    config.yaml. A launcher-provided file outside every profile home is operator configuration, shared, unless its
+    URL is a ``${VAR}`` template filled from a profile's .env.
+    """
+    import re as _re
+
+    from api.config import _load_yaml_config_file_raw
+    from api.workspace import _safe_resolve
+
+    override = str(os.environ.get("HERMES_CONFIG_PATH") or "").strip()
+    if not override or _env_value_is_profile_sourced(profiles_mod, "HERMES_CONFIG_PATH", override):
+        return True
+    cfg_dir = _safe_resolve(Path(override).expanduser()).parent
+    try:
+        own_home = _safe_resolve(Path(process_home).expanduser())
+        if cfg_dir == own_home or own_home in cfg_dir.parents:
+            return True  # inside the process profile's own home (any layout, isolated included)
+    except Exception:
+        return True  # fail closed
+    try:
+        roots = [_safe_resolve(Path(profiles_mod.get_hermes_home_for_profile("")).expanduser() / "profiles")]
+        canonical = getattr(profiles_mod, "_profiles_root", None)
+        if callable(canonical):
+            roots.append(_safe_resolve(Path(canonical())))
+    except Exception:
+        return True  # fail closed
+    if any(root in cfg_dir.parents for root in roots):
+        return True  # strictly below the profiles root: inside a named profile's directory
+    raw = _load_yaml_config_file_raw(Path(override).expanduser(), _copy=False)
+    raw_url = str(raw.get("webui_gateway_base_url") or "") if isinstance(raw, dict) else ""
+    for ref in _re.findall(r"\$\{([^}]+)\}", raw_url):
+        name = ref.split(":-", 1)[0].strip()
+        value = os.environ.get(name)
+        if value is not None and _env_value_is_profile_sourced(profiles_mod, name, value):
+            return True
+    return False
+
+
+def _shared_url_may_belong_to_process_profile(session_home) -> bool:
+    """True unless the shared Gateway URL is provably the launcher's, under a NAMED process profile (#8432).
+
+    With the root profile as the process profile, os.environ and the ambient config are the shared settings: False.
+    The process profile's own sessions are never affected: False. Nothing configured anywhere (the default URL)
+    belongs to no profile: False. Otherwise the URL may be a profile's (True) when it comes from:
+
+    - os.environ, and the value is profile-sourced (mirrored by the loader, or preloaded from a named launch home);
+    - the ambient config, and that file is the process profile's own config.yaml, a file inside a profile home,
+      a file a profile .env chose, or an operator file whose ``${VAR}`` URL is filled from a profile's .env;
+    - anything undeterminable (an exception): fail closed.
+    """
+    from api import profiles as _profiles
+
+    if _process_profile_is_root():
+        return False
+    try:
+        process_home = _profiles.get_process_profile_home()
+        if _same_profile_home(session_home, process_home):
+            return False
+    except Exception:
+        process_home = None
+    raw_env_url = str(os.environ.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+    try:
+        if raw_env_url:
+            return _env_value_is_profile_sourced(_profiles, _WEBUI_GATEWAY_BASE_URL_ENV, raw_env_url)
+        from api.config import get_config
+
+        cfg = get_config()
+        if not (isinstance(cfg, dict) and str(cfg.get("webui_gateway_base_url") or "").strip()):
+            return False
+        if process_home is None:
+            return True
+        return _config_url_may_belong_to_a_profile(_profiles, process_home)
+    except Exception:
+        return True
+
+
+def _same_profile_home(a, b) -> bool:
+    from api.workspace import _safe_resolve
+
+    return _safe_resolve(Path(a).expanduser()) == _safe_resolve(Path(b).expanduser())
+
+
 def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
     """URL and key for a session's profile, never those of the process-active profile.
 
@@ -1864,9 +2053,17 @@ def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
       the cached ambient config); without one it keeps the shared URL.
     - Key, on a URL that is not the shared one: the profile's own HERMES_WEBUI_GATEWAY_API_KEY or API_SERVER_KEY,
       or none; the launcher's and the shared key are never sent to another Gateway.
-    - Key, on the shared URL: the profile's own HERMES_WEBUI_GATEWAY_API_KEY, then the shared alias (the
-      launcher's export, or the root profile's .env), then the profile's API_SERVER_KEY (the key of its own
-      Gateway), then the shared key.
+    - Key, on the shared URL, for another profile: its own HERMES_WEBUI_GATEWAY_API_KEY, then the shared key
+      (what v0.52.492 sends), then its API_SERVER_KEY only when there is no shared key at all. A profile's
+      API_SERVER_KEY is the key of its OWN Gateway route: the Agent's API server picks the profile from the URL
+      and accepts only that profile's key, so on the shared URL it would be a 401.
+    - Key, on the shared URL, for the process profile's own sessions: its own HERMES_WEBUI_GATEWAY_API_KEY, then
+      the shared alias (the launcher's export, or the root profile's .env), then its API_SERVER_KEY (read fresh
+      from its .env), then the shared key.
+    - Exception (#8432): under a NAMED process profile, a profile with a key but no URL gets the process pair
+      (URL and key from one source, as v0.52.492 sends) unless the shared URL is provably the launcher's (an
+      export that no profile .env supplied, or an operator config file outside every profile home), because that
+      URL may be a profile's own Gateway and must never receive another profile's key.
     """
     from api import profiles as _profiles
     from api.config import _expand_env_vars, _load_yaml_config_file_raw, _thread_ctx, get_config
@@ -1916,7 +2113,31 @@ def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
             )
     if url != shared_url:
         return url, own_key  # the profile's own Gateway: its own key or none, never the shared one
-    return url, (own_alias or shared_alias or own_key or shared_key)
+    if not own_url_env and not own_url_cfg and own_key and _shared_url_may_belong_to_process_profile(home):
+        # #8432: this profile set a key but no URL, and the "shared" URL may be the NAMED process profile's own
+        # (mirrored from its .env or read from its config). Never send this profile's key there; use the process
+        # pair, URL and key from one source, exactly what v0.52.492 sends for every fresh turn.
+        return shared_url, shared_key
+    if _session_is_process_profile(home):
+        # The process profile's own sessions: the shared key IS this profile's key, read fresh from its .env.
+        return url, (own_alias or shared_alias or own_key or shared_key)
+    # Another profile on the shared URL. Its API_SERVER_KEY is the key of its OWN Gateway route (the Agent's API
+    # server picks the profile from the URL, its default listener or /p/<profile> under gateway.multiplex_profiles,
+    # and accepts only that profile's key), so it never replaces the shared key here: that was a 401 where
+    # v0.52.492 sends the shared key. Only an explicit WebUI alias set for this profile
+    # (HERMES_WEBUI_GATEWAY_API_KEY in its .env) outranks the shared key; its API_SERVER_KEY is used only when the
+    # WebUI was given no shared key at all. A profile that wants its own route sets its own URL.
+    return url, (own_alias or shared_key or own_key)
+
+
+def _session_is_process_profile(session_home) -> bool:
+    """True when the session's profile home is the profile the WebUI process runs on (fail: False)."""
+    from api import profiles as _profiles
+
+    try:
+        return _same_profile_home(session_home, _profiles.get_process_profile_home())
+    except Exception:
+        return False
 
 
 def _gateway_config_for_profile(profile_name) -> dict | None:

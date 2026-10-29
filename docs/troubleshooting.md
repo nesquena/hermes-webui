@@ -312,6 +312,7 @@ silently re-enable the operation you were trying to change.
 **Notes.**
 
 - Runs without a complete terminal row (including a journal truncated mid-write) are **never** archived — a crashed run stays in place, readable, exactly as before.
+- A run the session still needs to recover an interrupted answer (its active stream, or the run an interrupted-turn marker names) stays live, so rolling back to a release that predates the archive format (such as v0.52.492) can still recover it.
 - An archived run's compressed copy is verified byte-exact before the live file is dropped; a failure at any step leaves the live file untouched (a missed archive is always safe).
 - Deleting a session deletes its archives too.
 - Set `HERMES_WEBUI_RUN_JOURNAL_SWEEP=0` to turn the sweep off entirely.
