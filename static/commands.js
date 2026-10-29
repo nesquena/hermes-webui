@@ -1788,9 +1788,11 @@ function _showSteerIndicator(text, files){
   el.innerHTML=(typeof _steerRowInnerHtml==='function')
     ? _steerRowInnerHtml(body,uploaded,'',sid)
     : `<div class="msg-body">${esc(body)}</div>`;
-  const turn=document.getElementById('liveAssistantTurn');
-  const blocks=turn&&typeof _assistantTurnBlocks==='function'?_assistantTurnBlocks(turn):null;
-  (blocks||inner).appendChild(el);
+  // #8559 review item 2: append to msgInner itself, AFTER the live assistant
+  // turn. Inside .assistant-turn-blocks the scene reconciliation owns row
+  // order and moves its managed rows past the live Steer row, pushing the
+  // earlier prose/activity BELOW it; master keeps them above.
+  inner.appendChild(el);
   if(typeof scrollToBottom==='function') scrollToBottom();
 }
 

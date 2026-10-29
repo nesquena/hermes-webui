@@ -418,6 +418,12 @@ def _render_messages_harness() -> str:
     # evaluated with it. The shim's createElement() returns no template `content`, so the
     # helper takes its insertAdjacentHTML fallback here, exactly as before.
     insert_block_source = _function_source(ui, "_insertSegmentBlock")
+    # The mid-stream rebuild section drives renderMessages()'s #3877 preserve
+    # branch (INFLIGHT + activeStreamId set), which calls these helpers.
+    preserve_helpers_source = "\n".join(
+        _function_source(ui, name)
+        for name in ("_normalizeTransferredLiveProse", "_liveAssistantSegmentTextLength")
+    )
     steer_source = ui[ui.index("const _STEER_OOB_OPEN_RE"):ui.index("\nfunction setStatus", ui.index("const _STEER_OOB_OPEN_RE"))]
     commands = (ROOT / "static" / "commands.js").read_text(encoding="utf-8")
     live_steer_source = _function_source(commands, "_showSteerIndicator")
@@ -723,6 +729,7 @@ def _render_messages_harness() -> str:
         eval({json.dumps(transparent_source)});
         eval({json.dumps(legacy_metadata_source)});
         eval({json.dumps(insert_block_source)});
+        eval({json.dumps(preserve_helpers_source)});
         eval({json.dumps(steer_source)});
         eval({json.dumps(live_steer_source)});
         {evals}
@@ -886,7 +893,28 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         elements.liveAssistantTurn = liveTurns[liveTurns.length-1];
         _showSteerIndicator('use B',[]);
         const liveSteerRows=elements.msgInner.querySelectorAll('.steer-row-live').length;
-        const liveBeforeFinal=!!(elements.liveAssistantTurn&&elements.liveAssistantTurn.querySelector('.steer-row-live'));
+        const childIdx=(el)=>Array.prototype.indexOf.call(elements.msgInner.children,el);
+        const liveRowEl=elements.msgInner.querySelector('.steer-row-live');
+        const liveRowAfterTurn=!!(liveRowEl&&elements.liveAssistantTurn
+          &&childIdx(liveRowEl)>childIdx(elements.liveAssistantTurn));
+        // Mid-stream rebuild (#8559 review item 3): a renderMessages() during
+        // the stream must not drop the live Steer row, and the row must sit
+        // AFTER the live assistant turn (a direct msgInner child, not inside
+        // the turn's blocks).
+        S.activeStreamId='steer-stream-1';
+        INFLIGHT['steer-order']={{}};
+        renderMessages();
+        const steerRowsAfterRebuild=elements.msgInner.querySelectorAll('.steer-row-live').length;
+        const rowAfterRebuild=elements.msgInner.querySelector('.steer-row-live');
+        // Position anchor: the turn the row was appended after. (The shim's
+        // appendChild does not move nodes, so a preserved-turn re-append can
+        // leave a duplicate turn reference at the end; the original turn's
+        // index is the stable comparison point, here and in the real DOM.)
+        const steerAfterTurnAfterRebuild=steerRowsAfterRebuild===1
+          &&!!rowAfterRebuild&&!!elements.liveAssistantTurn
+          &&childIdx(rowAfterRebuild)>childIdx(elements.liveAssistantTurn);
+        S.activeStreamId=null;
+        delete INFLIGHT['steer-order'];
         const settledMessages=[...S.messages,
           {{role:'user',display_kind:'steer',content:'use B'}},
           {{role:'assistant',content:'final after steer'}}];
@@ -909,7 +937,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           historicalSummary,
           rawHistoricalSummary,
           duplicateReferenceSummary,
-          steerOrder:{{liveSteerRows,liveBeforeFinal,settledOrder,settledSteerRows,reloadOrder,reloadSteerRows}},
+          steerOrder:{{liveSteerRows,liveRowAfterTurn,steerRowsAfterRebuild,steerAfterTurnAfterRebuild,settledOrder,settledSteerRows,reloadOrder,reloadSteerRows}},
         }}));
         """
     )
@@ -959,7 +987,9 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
 
     order = result["steerOrder"]
     assert order["liveSteerRows"] == 1
-    assert order["liveBeforeFinal"] is True
+    assert order["liveRowAfterTurn"] is True
+    assert order["steerRowsAfterRebuild"] == 1
+    assert order["steerAfterTurnAfterRebuild"] is True
     assert order["settledOrder"] == ["user", "assistant", "steer", "assistant"]
     assert order["settledSteerRows"] == 1
     assert order["reloadOrder"] == order["settledOrder"]
