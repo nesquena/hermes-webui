@@ -11059,7 +11059,11 @@ def _limited_webui_messages_for_display_with_sidecar(
             owner_positions.clear()
             owner_positions.update(sidecar_owners)
         if merge_parent_lineage:
-            return _merged_webui_lineage_messages_for_display(session, sidecar_messages)
+            return _merge_display_lineage_with_owners(
+                session,
+                sidecar_messages,
+                owner_positions=owner_positions,
+            )
         return sidecar_messages
     state_db_messages = _suppress_native_image_display_mirrors(
         session,
@@ -11077,7 +11081,11 @@ def _limited_webui_messages_for_display_with_sidecar(
             owner_positions.clear()
             owner_positions.update(sidecar_owners)
         if merge_parent_lineage:
-            return _merged_webui_lineage_messages_for_display(session, sidecar_messages)
+            return _merge_display_lineage_with_owners(
+                session,
+                sidecar_messages,
+                owner_positions=owner_positions,
+            )
         return sidecar_messages
 
     # NOTE: do not short-circuit to the sidecar when state.db has no strictly
@@ -11138,7 +11146,11 @@ def _limited_webui_messages_for_display_with_sidecar(
                 _display_merge_cache.move_to_end(sid, last=True)
                 cached_messages = [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
                 if merge_parent_lineage:
-                    return _merged_webui_lineage_messages_for_display(session, cached_messages)
+                    return _merge_display_lineage_with_owners(
+                        session,
+                        cached_messages,
+                        owner_positions=owner_positions,
+                    )
                 return cached_messages
     merged = merge_session_messages_append_only(
         sidecar_messages,
@@ -11189,10 +11201,18 @@ def _limited_webui_messages_for_display_with_sidecar(
         # Same shallow-copy contract as the cache-hit path (and as the lineage
         # cache): callers may attach display metadata to the returned rows.
         if merge_parent_lineage:
-            return _merged_webui_lineage_messages_for_display(session, merged)
+            return _merge_display_lineage_with_owners(
+                session,
+                merged,
+                owner_positions=owner_positions,
+            )
         return [dict(m) if isinstance(m, dict) else m for m in merged]
     if merge_parent_lineage:
-        return _merged_webui_lineage_messages_for_display(session, merged)
+        return _merge_display_lineage_with_owners(
+            session,
+            merged,
+            owner_positions=owner_positions,
+        )
     return merged
 
 
@@ -11940,6 +11960,21 @@ def _merged_webui_lineage_messages_for_display(
     return merged_messages
 
 
+def _merge_display_lineage_with_owners(session, messages, owner_positions=None):
+    """Merge a parent transcript and carry saved owner indexes by row identity."""
+    source_messages = list(messages or [])
+    source_owners = dict(owner_positions or {})
+    merged = _merged_webui_lineage_messages_for_display(session, source_messages)
+    if owner_positions is not None:
+        owner_positions.clear()
+        owner_positions.update(_display_projected_owner_positions(
+            source_messages,
+            merged,
+            source_owners,
+        ))
+    return merged
+
+
 def _display_coordinate_messages(
     session,
     state_db_messages,
@@ -11976,8 +12011,6 @@ def _display_coordinate_messages(
         truncation_boundary=getattr(session, "truncation_boundary", None),
         incoming_provenance="state_db",
         cancelled_journal_owner_messages=getattr(session, "messages", None) or [],
-        incoming_provenance="state_db",
-        cancelled_journal_owner_messages=getattr(session, "messages", None) or [],
     )
     merged = _merged_webui_lineage_messages_for_display(
         session,
@@ -12010,12 +12043,16 @@ def _message_summary(messages) -> dict:
     return {"message_count": len(messages), "last_message_at": last_message_at}
 
 
-def _foreign_display_coordinate_summary(sid: str, profile=None):
+def _foreign_display_coordinate_summary(sid: str, profile=None, *, is_messaging_session=False):
     """Return a cached display summary, checking lineage stats before parsing."""
     try:
         state_summary = get_state_db_session_summary(sid, profile=profile)
         db_revision = _state_db_session_signature(sid, profile)
-        cache_ttl = None if db_revision is not None else _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_TTL
+        cache_ttl = (
+            _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_TTL
+            if _state_db_exists_without_revision(profile, db_revision)
+            else None
+        )
         cache_key = (
             _foreign_display_coordinate_cache_scope(profile),
             _foreign_display_coordinate_state_db_identity(profile),
@@ -12023,6 +12060,7 @@ def _foreign_display_coordinate_summary(sid: str, profile=None):
             sid,
             _numeric_count(state_summary.get("message_count")),
             float(state_summary.get("last_message_at") or 0.0),
+            bool(is_messaging_session),
         )
         now = time.monotonic()
         with _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_LOCK:
@@ -12040,8 +12078,11 @@ def _foreign_display_coordinate_summary(sid: str, profile=None):
         if not session:
             return None
         sidecars = _foreign_display_coordinate_sidecar_identity(session)
-        backstop = _state_db_backstop_limit_for_display(session, None)
-        is_messaging_session = _is_messaging_session_record(session)
+        backstop = (
+            None
+            if is_messaging_session
+            else _state_db_backstop_limit_for_display(session, None)
+        )
         reader_kwargs = {"profile": profile}
         if is_messaging_session:
             reader_kwargs["stitch_continuations"] = True
@@ -12081,6 +12122,24 @@ def _foreign_display_coordinate_summary(sid: str, profile=None):
     except Exception:
         logger.debug("Foreign display-coordinate summary failed for %s", sid, exc_info=True)
         return None
+
+
+def _state_db_exists_without_revision(profile, revision) -> bool:
+    if revision is not None:
+        return False
+    try:
+        if isinstance(profile, str) and profile.strip():
+            from api.models import _get_profile_home
+
+            db_path = _get_profile_home(profile) / "state.db"
+        else:
+            db_path = _active_state_db_path()
+        db_path.stat()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
 
 
 def _foreign_display_coordinate_sidecar_stat(path: Path):
@@ -16008,6 +16067,7 @@ def _handle_session_get(handler, parsed) -> bool:
                 metadata_summary = _foreign_display_coordinate_summary(
                     sid,
                     profile=_session_profile,
+                    is_messaging_session=is_messaging_session,
                 )
             if metadata_summary is None:
                 # Keep sidebar polling on the summary path so it cannot repair
@@ -16040,7 +16100,11 @@ def _handle_session_get(handler, parsed) -> bool:
             elif msg_limit is not None:
                 if _display_cache_hit is not None:
                     _all_msgs = (
-                        _merged_webui_lineage_messages_for_display(s, _display_cache_hit)
+                        _merge_display_lineage_with_owners(
+                            s,
+                            _display_cache_hit,
+                            owner_positions=_display_owner_positions,
+                        )
                         if merge_parent_lineage
                         else _display_cache_hit
                     )

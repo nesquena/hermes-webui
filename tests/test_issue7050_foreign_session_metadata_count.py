@@ -564,6 +564,204 @@ def test_messaging_metadata_keeps_parent_assistant_turns_from_stitched_state_db(
     assert metadata["last_message_at"] == full["last_message_at"] == 1001.0
 
 
+def test_metadata_cache_uses_route_resolved_messaging_classification(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "messaging_classification_cache_7050"
+    child_turn = [
+        {"role": "user", "content": "child question", "timestamp": 1000.0},
+        {"role": "assistant", "content": "child answer", "timestamp": 1001.0},
+    ]
+    stitched_turn = [
+        {"role": "user", "content": "parent question", "timestamp": 900.0},
+        {"role": "assistant", "content": "parent answer", "timestamp": 901.0},
+        *child_turn,
+    ]
+    session = _install_test_session(monkeypatch, tmp_path, sid, child_turn)
+    session.is_cli_session = True
+    session.read_only = True
+    session.save(touch_updated_at=False)
+    lookup = [{"source_tag": "tui", "session_source": "tui", "is_cli_session": True}]
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: lookup[0])
+    loader_calls = []
+
+    def load_rows(_sid, _profile, reader_kwargs):
+        loader_calls.append(dict(reader_kwargs))
+        rows = stitched_turn if reader_kwargs.get("stitch_continuations") else child_turn
+        return rows, None
+
+    monkeypatch.setattr(routes, "_load_state_db_messages_with_stable_signature", load_rows)
+    first = _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+    lookup[0] = {"source_tag": "slack", "session_source": "messaging", "is_cli_session": True}
+    second = _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+
+    assert first["message_count"] == 2
+    assert second["message_count"] == 4
+    assert loader_calls == [
+        {"profile": None, "limit": 50_000},
+        {"profile": None, "stitch_continuations": True},
+    ]
+
+
+def test_messaging_summary_does_not_cap_the_transcript_reader(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "messaging_uncapped_summary_7050"
+    session = _install_test_session(monkeypatch, tmp_path, sid, [])
+    session.is_cli_session = True
+    session.read_only = True
+    session.session_source = "messaging"
+    session.source_tag = "slack"
+    session.save(touch_updated_at=False)
+    monkeypatch.setattr(
+        routes,
+        "_lookup_cli_session_metadata",
+        lambda _sid: {"source_tag": "slack", "session_source": "messaging", "is_cli_session": True},
+    )
+    rows = [
+        {"role": "user", "content": f"row {index}", "timestamp": float(index)}
+        for index in range(50_002)
+    ]
+    reader_kwargs = []
+
+    def load_rows(_sid, _profile, kwargs):
+        reader_kwargs.append(dict(kwargs))
+        return rows, None
+
+    monkeypatch.setattr(routes, "_load_state_db_messages_with_stable_signature", load_rows)
+    metadata = _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+
+    assert metadata["message_count"] == 50_002
+    assert "limit" not in reader_kwargs[0]
+    assert reader_kwargs[0]["stitch_continuations"] is True
+
+
+@pytest.mark.parametrize("with_state_db", [False, True])
+def test_paged_foreign_parent_merge_rebases_cancelled_tool_owner(
+    monkeypatch, tmp_path, with_state_db,
+):
+    import api.routes as routes
+
+    routes._clear_foreign_display_coordinate_summary_cache()
+    parent_id = "tool_owner_parent_7050"
+    sid = "tool_owner_child_7050"
+    parent_messages = [
+        {"role": "user", "content": "parent question", "timestamp": 900.0},
+        {"role": "assistant", "content": "parent answer", "timestamp": 901.0},
+    ]
+    child_messages = [
+        {"role": "user", "content": "cancel this turn", "timestamp": 1000.0},
+        {"role": "assistant", "content": "partial answer", "timestamp": 1001.0, "_partial": True},
+        {"role": "assistant", "content": "Task cancelled: stopped", "timestamp": 1002.0,
+         "_error": True, "type": "cancelled"},
+    ]
+    _install_test_session(monkeypatch, tmp_path, parent_id, parent_messages)
+    session = _install_test_session(monkeypatch, tmp_path, sid, child_messages)
+    session.parent_session_id = parent_id
+    session.is_cli_session = True
+    session.source_tag = "tui"
+    session.raw_source = "tui"
+    session.session_source = "tui"
+    session.tool_calls = [{"id": "cancelled-tool", "name": "read", "done": True,
+                           "result": "tool result", "assistant_msg_idx": 1}]
+    session.save(touch_updated_at=False)
+    monkeypatch.setattr(
+        routes,
+        "_lookup_cli_session_metadata",
+        lambda _sid: {"source_tag": "tui", "raw_source": "tui", "session_source": "tui",
+                      "is_cli_session": True},
+    )
+    if with_state_db:
+        _make_state_db(tmp_path / "state.db", sid, child_messages)
+
+    for _ in range(2):
+        payload = _session_payload(
+            routes,
+            f"/api/session?session_id={sid}&messages=1&resolve_model=0&msg_limit=30",
+        )
+        assert payload["messages"][:2] == parent_messages
+        card = next(card for card in payload["tool_calls"] if card.get("id") == "cancelled-tool")
+        owner = card["assistant_msg_idx"]
+        assert payload["messages"][owner]["content"] == "partial answer"
+        assert owner == 3
+
+
+def test_cached_paged_parent_merge_rebases_cancelled_tool_owner(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    parent_messages = [
+        {"role": "user", "content": "parent question", "timestamp": 900.0},
+        {"role": "assistant", "content": "parent answer", "timestamp": 901.0},
+    ]
+    child_messages = [
+        {"role": "user", "content": "cancel this turn", "timestamp": 1000.0},
+        {"role": "assistant", "content": "partial answer", "timestamp": 1001.0, "_partial": True},
+        {"role": "assistant", "content": "Task cancelled: stopped", "timestamp": 1002.0,
+         "_error": True, "type": "cancelled"},
+    ]
+    parent = _install_test_session(monkeypatch, tmp_path, "tool_owner_cache_parent_7050", parent_messages)
+    session = _install_test_session(monkeypatch, tmp_path, "tool_owner_cache_child_7050", child_messages)
+    session.parent_session_id = parent.session_id
+    session.tool_calls = [{"id": "cancelled-tool", "name": "read", "done": True,
+                           "assistant_msg_idx": 1}]
+    session.save(touch_updated_at=False)
+    monkeypatch.setattr(routes, "_state_db_session_signature", lambda *_args, **_kwargs: ("revision",))
+    sidecar_owners = {}
+    sidecar_messages = routes._webui_sidecar_lineage_messages_for_display(
+        session,
+        owner_positions=sidecar_owners,
+    )
+
+    for _ in range(2):
+        owners = dict(sidecar_owners)
+        messages = routes._limited_webui_messages_for_display_with_sidecar(
+            session,
+            sidecar_messages,
+            child_messages,
+            state_db_signature=("revision",),
+            owner_positions=owners,
+            merge_parent_lineage=True,
+        )
+        card = routes._display_rebased_tool_calls(session.tool_calls, owners)[0]
+        assert messages[:2] == parent_messages
+        assert card["assistant_msg_idx"] == 3
+        assert messages[card["assistant_msg_idx"]]["content"] == "partial answer"
+
+
+def test_sidecar_only_foreign_summary_reuses_spaced_polls(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    routes._clear_foreign_display_coordinate_summary_cache()
+    sid = "sidecar_only_summary_7050"
+    session = _install_test_session(
+        monkeypatch,
+        tmp_path,
+        sid,
+        [{"role": "user", "content": "saved prompt", "timestamp": 1000.0}],
+    )
+    session.is_cli_session = True
+    session.source_tag = "tui"
+    session.raw_source = "tui"
+    session.session_source = "tui"
+    session.save(touch_updated_at=False)
+    now = [100.0]
+    monkeypatch.setattr(routes.time, "monotonic", lambda: now[0])
+    reader_calls = []
+    real_loader = routes._load_state_db_messages_with_stable_signature
+
+    def load_rows(*args, **kwargs):
+        reader_calls.append(args[0])
+        return real_loader(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "_load_state_db_messages_with_stable_signature", load_rows)
+    first = routes._foreign_display_coordinate_summary(sid)
+    for _ in range(2):
+        now[0] += 30.0
+        assert routes._foreign_display_coordinate_summary(sid) == first
+
+    assert reader_calls == [sid]
+
+
 def test_foreign_summary_cache_hit_avoids_lineage_parsing(monkeypatch, tmp_path):
     import api.models as models
     import api.routes as routes
