@@ -43,14 +43,30 @@ index is not yet known (live stream-born rows).
 
 ## Implementation status
 
-* **Finding 1 — implemented this round.** Response summaries keep the
+* **Finding 1 — implemented.** Response summaries keep the
   server-rebased indices; the prepend path merges the retained verdict map
   with owners shifted by the page length.
-* **Finding 4 — implemented this round.** Explicit-id metadata reservation
-  before the name fallback; verdict transfer unchanged (occurrence-exact
-  only).
-* **Findings 2 and 3 — designed, deferred to the next round.** They require
-  threading the occurrence ordinal through the server event path and the
-  browser render/dedup keys (a larger change than the point fixes above); the
-  design above is the plan, and the round-11 occurrence-id work on the rearm
-  events is its first half.
+* **Finding 2 — implemented.** No flat verdicts: every entry (singletons
+  included) is scoped to a verified owning `assistant_msg_idx` (fail closed
+  when the owner cannot be proven), the map is rebuilt from
+  `session.tool_calls` in the done/recovery paths before the
+  `_mergeSettledToolCallsWithLiveMetadata` reconciliation, prepend merges
+  the union of shifted retained owners, and the render consumers honour the
+  row's own index (round 14, re-verified round 15).
+* **Finding 3 — implemented.** The occurrence ordinal is carried through the
+  paired SSE events (round 11), the live mirror rows, the saved summary and
+  journal replay (`api/routes.py`), the server hydration rows and the
+  owner-scoped `_anchor_scene_row_key` (`tool:<tid>@<owner>`, round 14), and
+  every browser render/dedup key (round 15): `_anchorSceneToolRowLogicalKey`
+  and `_toolIdentity`/`_toolDisclosureIdentity` in `static/ui.js` scope by
+  `(tid, assistant_msg_idx)` with the occurrence-ordinal fallback, the
+  settle path (`static/messages.js` `_anchorSceneExistingRowKey` +
+  `_anchorSceneToolRowTwinIndex`) bridges the two spellings of the same
+  occurrence (projected occurrence row ↔ settled owner row) by rank, and a
+  verdict is only transferred between rows of the same occurrence.
+* **Finding 4 — implemented.** Explicit-id metadata reservation before the
+  name fallback in both consumers; verdict transfer unchanged
+  (occurrence-exact only).
+* **Finding 5 — implemented.** `_tool_result_owners_by_tid()` aligns the
+  settlement pairing only against occurrences that have a resolved result, so
+  a declared-but-unfinished trailing call cannot shift completed verdicts.

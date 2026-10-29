@@ -3431,6 +3431,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const isError=!!(tool&&(tool.is_error||tool.error));
     row.row_id=tid?`settled:${activeSid||'session'}:${streamId||'stream'}:tool:${tid}`:row.row_id;
     row.tool_call_id=tid||null;
+    // #7653 re-gate round 15 (10-27 re-review, item 3): a settled row rebuilt
+    // from a live mirror entry keeps the occurrence ordinal, so its
+    // ``_anchorSceneExistingRowKey`` matches the projected twin (live scene
+    // rows carry the occurrence on the payload) and the settle path merges
+    // the same occurrence's two spellings instead of keeping two cards.
+    const occurrence=tool&&tool.occurrence!==undefined&&tool.occurrence!==null&&tool.occurrence!==''
+      ?tool.occurrence
+      :(tool&&tool.payload&&tool.payload.occurrence!==undefined&&tool.payload.occurrence!==null&&tool.payload.occurrence!==''
+        ?tool.payload.occurrence
+        :null);
     row.tool={
       id:tid||null,
       name,
@@ -3444,8 +3454,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       is_error:isError,
       duration:tool&&tool.duration!==undefined?tool.duration:null,
       started_at:tool&&tool.started_at!==undefined?tool.started_at:null,
+      ...(occurrence!==null&&occurrence!==''?{occurrence}:{}),
       signature:[name,tid||'',JSON.stringify(args||{})].join('|'),
     };
+    if(occurrence!==null&&occurrence!=='') row.occurrence=occurrence;
     row.payload={
       ...row.payload,
       tid:tid||undefined,
@@ -3458,6 +3470,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       is_error:isError,
       duration:tool&&tool.duration!==undefined?tool.duration:undefined,
       started_at:tool&&tool.started_at!==undefined?tool.started_at:undefined,
+      ...(occurrence!==null&&occurrence!==''?{occurrence}:{}),
     };
     return row;
   }
@@ -3950,11 +3963,33 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // ``s.tool_calls``, so the key includes it whenever either side names
       // one. A row with no occurrence keeps the historical tid key, which is
       // the pre-#7653 behaviour for a provider that never reuses an id.
+      //
+      // #7653 re-gate round 15 (10-27 re-review, item 3): scope by the OWNER
+      // first, matching the server's ``_anchor_scene_row_key``
+      // (``tool:<tid>@<owner>``) and the ui.js ``_anchorSceneToolRowLogicalKey``.
+      // Settled/hydrated rows carry their owning assistant message index on
+      // ``group``/``payload`` (``_anchorSceneRowBase``) but no occurrence
+      // ordinal, so two occurrences of one tid at different owners collapsed
+      // here even though the live path already separated them. Read the
+      // occurrence from ``payload`` too (the persisted scene rows carry it
+      // there — ``_anchor_scene_tool_row`` in api/routes.py).
+      const group=row.group&&typeof row.group==='object'?row.group:{};
+      const payload=row.payload&&typeof row.payload==='object'?row.payload:{};
+      const owner=row.assistant_msg_idx!==undefined&&row.assistant_msg_idx!==null&&row.assistant_msg_idx!==''
+        ?row.assistant_msg_idx
+        :(group.assistant_msg_idx!==undefined&&group.assistant_msg_idx!==null&&group.assistant_msg_idx!==''
+          ?group.assistant_msg_idx
+          :(payload.assistant_msg_idx!==undefined&&payload.assistant_msg_idx!==null&&payload.assistant_msg_idx!==''
+            ?payload.assistant_msg_idx
+            :null));
+      if(owner!=null&&owner!=='') return `tool:${tid}@${owner}`;
       const occ=row.occurrence!==undefined&&row.occurrence!==null&&row.occurrence!==''
         ?row.occurrence
         :(tool.occurrence!==undefined&&tool.occurrence!==null&&tool.occurrence!==''
           ?tool.occurrence
-          :null);
+          :(payload.occurrence!==undefined&&payload.occurrence!==null&&payload.occurrence!==''
+            ?payload.occurrence
+            :null));
       return occ===null?`tool:${tid}`:`tool:${tid}#${occ}`;
     }
     if(row.role==='prose'||row.role==='thinking'){
@@ -4173,6 +4208,57 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       return false;
     };
+    // #7653 re-gate round 15 (10-27 re-review, item 3): bridge the two
+    // spellings of the SAME occurrence in the settle path. A projected live
+    // row knows its occurrence ordinal (``tool:<tid>#<occ>``) but no owner,
+    // while the settled transcript row knows its owner
+    // (``tool:<tid>@<owner>``) but no ordinal. The ordinal and the owner are
+    // both ORDERED per tid (the k-th occurrence owns the k-th assistant
+    // message that emits the tid), so a row of one spelling pairs with the
+    // same-rank row of the other spelling — and two DIFFERENT occurrences
+    // never pair (each consumes its own rank, round-11 trailing alignment
+    // semantics).
+    const _twinConsumed=new Set(); // row indices already consumed as a twin
+    const _anchorSceneToolRowTwinIndex=(row,key)=>{
+      if(!key||key.indexOf('tool:')!==0) return -1;
+      const rest=key.slice('tool:'.length);
+      const at=rest.indexOf('@');
+      const hash=rest.indexOf('#');
+      const tid=at>0?rest.slice(0,at):(hash>0?rest.slice(0,hash):rest);
+      if(!tid) return -1;
+      const incomingOwner=at>0?rest.slice(at+1):null;
+      const incomingOcc=hash>0?rest.slice(hash+1):null;
+      const ownerRows=[]; // {index, owner} in push order
+      const occRows=[];   // {index, occ} in push order — includes BARE rows
+      for(let i=0;i<rows.length;i+=1){
+        if(_twinConsumed.has(i)) continue;
+        const k=_anchorSceneExistingRowKey(rows[i]);
+        if(!k||k.indexOf('tool:')!==0) continue;
+        const r=k.slice('tool:'.length);
+        const a=r.indexOf('@');
+        const h=r.indexOf('#');
+        const t=a>0?r.slice(0,a):(h>0?r.slice(0,h):r);
+        if(t!==tid) continue;
+        if(a>0) ownerRows.push({index:i,owner:r.slice(a+1)});
+        else occRows.push({index:i,occ:h>0?r.slice(h+1):null});
+      }
+      if(incomingOwner!=null){
+        if(!occRows.length) return -1;
+        // Next-unused pairing: owners and occurrences both arrive in
+        // per-tid order, so the k-th owner row pairs with the k-th
+        // occurrence row (round-11 trailing alignment semantics). Two
+        // DIFFERENT occurrences never pair — each consumes its own rank.
+        // A bare ownerless row (legacy, no ordinal) is the single-spelling
+        // case: at most one can exist per tid (two bare rows collapse via
+        // the exact-key path above), so it pairs only with the first owner.
+        return occRows[0].index;
+      }
+      if(incomingOcc!=null){
+        if(!ownerRows.length) return -1;
+        return ownerRows[0].index;
+      }
+      return -1;
+    };
     const pushRow=(row,origin)=>{
       if(!row||typeof row!=='object') return;
       const finalSegmentEligible=finalSegmentLiveProseRows.has(row);
@@ -4190,6 +4276,25 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           rows[existingIdx]={...rows[existingIdx],...row,display_hint:_anchorSceneRowDisplayHintForMode(row,sceneMode)};
         }
         return;
+      }
+      // #7653 re-gate round 15 (10-27 re-review, item 3): bridge the two
+      // spellings of the SAME occurrence — a projected live row that knows
+      // only its occurrence ordinal (``tool:<tid>#<occ>``) and the settled
+      // transcript row that knows only its owner (``tool:<tid>@<owner>``).
+      // The live path (round 11) and the hydration path (round 14) keep two
+      // DIFFERENT occurrences apart, so without the bridge the settle path
+      // here kept BOTH spellings of ONE occurrence and the turn grew a
+      // duplicate card after settlement.
+      if(key&&key.startsWith('tool:')&&!seen.has(key)){
+        const twinIdx=_anchorSceneToolRowTwinIndex(row,key);
+        if(twinIdx>=0){
+          // Same occurrence already projected: keep the earlier row (the live
+          // registry row carries the freshest body); its twin's settled body
+          // was already merged upstream (_enrichSettledToolRowBodyFromLive).
+          _twinConsumed.add(twinIdx);
+          seen.add(key);
+          return;
+        }
       }
       if(key) seen.add(key);
       // ── provenance-aware mirror consumption (settled rows) ───

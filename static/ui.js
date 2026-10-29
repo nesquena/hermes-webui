@@ -16779,7 +16779,16 @@ function _appendWorklogReason(list, anchor){
 function _toolIdentity(tc){
   if(!tc) return '';
   const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
-  if(tid) return `id:${tid}`;
+  if(tid){
+    // #7653 re-gate round 15 (10-27 re-review, item 3): a reused id owns
+    // several worklog cards, so the step dedup must be occurrence-scoped —
+    // a tid-only key dropped the second ``call_0`` card of the same step.
+    const owner=_toolCardOwnerIndex(tc);
+    if(owner!=null) return `id:${tid}@${owner}`;
+    const occ=_toolCardOccurrence(tc);
+    if(occ!=null&&occ!=='') return `id:${tid}#${occ}`;
+    return `id:${tid}`;
+  }
   const args=tc.args&&typeof tc.args==='object'?tc.args:{};
   return [
     tc.assistant_msg_idx!==undefined?`a:${tc.assistant_msg_idx}`:'',
@@ -16788,10 +16797,50 @@ function _toolIdentity(tc){
     String(tc.snippet||tc.preview||'').slice(0,160),
   ].join('|');
 }
+function _toolCardOwnerIndex(tc){
+  if(!tc) return null;
+  const group=(tc.group&&typeof tc.group==='object')?tc.group:{};
+  const payload=(tc.payload&&typeof tc.payload==='object')?tc.payload:{};
+  const tool=(tc.tool&&typeof tc.tool==='object')?tc.tool:{};
+  const raw=tc.assistant_msg_idx!==undefined&&tc.assistant_msg_idx!==null&&tc.assistant_msg_idx!==''
+    ?tc.assistant_msg_idx
+    :(group.assistant_msg_idx!==undefined&&group.assistant_msg_idx!==null&&group.assistant_msg_idx!==''
+      ?group.assistant_msg_idx
+      :(payload.assistant_msg_idx!==undefined&&payload.assistant_msg_idx!==null&&payload.assistant_msg_idx!==''
+        ?payload.assistant_msg_idx
+        :(tool.assistant_msg_idx!==undefined&&tool.assistant_msg_idx!==null&&tool.assistant_msg_idx!==''
+          ?tool.assistant_msg_idx
+          :null)));
+  return (raw!=null&&raw!==''&&Number.isFinite(Number(raw)))?Number(raw):null;
+}
+function _toolCardOccurrence(tc){
+  if(!tc) return null;
+  const group=(tc.group&&typeof tc.group==='object')?tc.group:{};
+  const payload=(tc.payload&&typeof tc.payload==='object')?tc.payload:{};
+  const tool=(tc.tool&&typeof tc.tool==='object')?tc.tool:{};
+  const raw=tc.occurrence!==undefined&&tc.occurrence!==null&&tc.occurrence!==''
+    ?tc.occurrence
+    :(group.occurrence!==undefined&&group.occurrence!==null&&group.occurrence!==''
+      ?group.occurrence
+      :(payload.occurrence!==undefined&&payload.occurrence!==null&&payload.occurrence!==''
+        ?payload.occurrence
+        :(tool.occurrence!==undefined&&tool.occurrence!==null&&tool.occurrence!==''
+          ?tool.occurrence
+          :null)));
+  return (raw!=null&&raw!=='')?raw:null;
+}
 function _toolDisclosureIdentity(tc){
   if(!tc) return '';
   const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
-  if(tid) return `id:${tid}`;
+  if(tid){
+    // Same occurrence scoping as _toolIdentity: two occurrences of a reused
+    // id must not share one disclosure key (toggling one would open both).
+    const owner=_toolCardOwnerIndex(tc);
+    if(owner!=null) return `id:${tid}@${owner}`;
+    const occ=_toolCardOccurrence(tc);
+    if(occ!=null&&occ!=='') return `id:${tid}#${occ}`;
+    return `id:${tid}`;
+  }
   const stable=[
     tc.assistant_msg_idx!==undefined?`a:${tc.assistant_msg_idx}`:'',
     tc.name||'tool',
@@ -16812,9 +16861,37 @@ function _anchorSceneToolRowLogicalKey(row){
   if(!row||row.role!=='tool') return '';
   const tool=(row.tool&&typeof row.tool==='object')?row.tool:{};
   const payload=(row.payload&&typeof row.payload==='object')?row.payload:{};
+  const group=(row.group&&typeof row.group==='object')?row.group:{};
   const id=row.tool_call_id||tool.id||tool.tid||tool.tool_call_id||tool.tool_use_id||tool.call_id||
     payload.tid||payload.id||payload.tool_call_id||payload.tool_use_id||payload.call_id||'';
-  return id?`call:${id}`:'';
+  if(!id) return '';
+  // #7653 re-gate round 15 (10-27 re-review, item 3): scope the render key by
+  // the OCCURRENCE, never the tid alone. The server hydration keeps one
+  // owner-scoped row per occurrence (``echo FIRST`` then ``exit 3`` on one
+  // reused ``call_0``), but a tid-only key here pushed both rows through the
+  // byKey merge in ``_anchorSceneRowsForRendering`` and collapsed them back
+  // into one card. The durable identity is the owning assistant message
+  // (``group``/``payload`` ``assistant_msg_idx`` on every hydrated row); live
+  // stream-born rows carry the occurrence ordinal instead, so it is the
+  // fallback. A row naming neither keeps the historical bare-tid key, which
+  // is the pre-#7653 behaviour for a provider that never reuses an id.
+  const owner=row.assistant_msg_idx!==undefined&&row.assistant_msg_idx!==null&&row.assistant_msg_idx!==''
+    ?row.assistant_msg_idx
+    :(group.assistant_msg_idx!==undefined&&group.assistant_msg_idx!==null&&group.assistant_msg_idx!==''
+      ?group.assistant_msg_idx
+      :(payload.assistant_msg_idx!==undefined&&payload.assistant_msg_idx!==null&&payload.assistant_msg_idx!==''
+        ?payload.assistant_msg_idx
+        :null));
+  if(owner!=null&&owner!=='') return `call:${id}@${owner}`;
+  const occ=row.occurrence!==undefined&&row.occurrence!==null&&row.occurrence!==''
+    ?row.occurrence
+    :(tool.occurrence!==undefined&&tool.occurrence!==null&&tool.occurrence!==''
+      ?tool.occurrence
+      :(payload.occurrence!==undefined&&payload.occurrence!==null&&payload.occurrence!==''
+        ?payload.occurrence
+        :null));
+  if(occ!=null&&occ!=='') return `call:${id}#${occ}`;
+  return `call:${id}`;
 }
 function _anchorSceneMergeToolRows(prev, row){
   if(!prev) return row;
