@@ -10039,8 +10039,8 @@ function _attachProjectQuickCreateButton(chip, project){
   btn.type='button';
   btn.className='project-chip-quick-create';
   btn.textContent='+';
-  btn.title='New conversation in this project';
-  btn.setAttribute('aria-label','New conversation in this project');
+  btn.title=t('project_chip_new_in_project');
+  btn.setAttribute('aria-label',t('project_chip_new_in_project'));
   const stop=function(e){
     if(!e) return;
     if(typeof e.preventDefault==='function') e.preventDefault();

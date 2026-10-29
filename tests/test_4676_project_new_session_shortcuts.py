@@ -387,6 +387,7 @@ globalThis._newSessionInFlight = params.newSessionInFlightReject
   : (params.newSessionInFlight
       ? Promise.resolve(params.newSessionInFlight)
       : null);
+globalThis.t = (key) => key;
 
 // The + button forwards the project's pinned bindings (workspace/model)
 // alongside project_id. A bare {project_id} project yields no bindings,
@@ -494,7 +495,11 @@ def test_project_chip_quick_create_keeps_active_filter_and_uses_project_override
     assert out["buttonClass"] == "project-chip-quick-create"
     assert out["buttonTag"] == "BUTTON"
     assert out["buttonText"] == "+"
-    assert out["buttonAriaLabel"] == "New conversation in this project"
+    # The + button routes its aria-label through t(); the Node harness stubs
+    # t() as the identity function, so the observable value is the i18n key
+    # (the en bundle value 'New conversation in this project' is asserted by
+    # tests/test_issue8090_i18n_bundle_parity.py).
+    assert out["buttonAriaLabel"] == "project_chip_new_in_project"
     assert out["filterProjectId"] == "project-123"
     assert out["newSession"] == {"flash": False, "options": {"project_id": "project-123"}}
     assert {"type": "set-filter", "projectId": "project-123"} in out["calls"]
