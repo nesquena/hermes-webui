@@ -99,6 +99,26 @@ def _arm_and_consume(store, sid, attempt_id, token=TOKEN):
     )
 
 
+def _age_handoffs(store, sid):
+    """Age all of *sid*'s durable handoffs past the owner-liveness window.
+
+    #7862 re-gate round 15 (CORE finding 2): adoption is gated on PROOF that
+    the owning process is gone — a freshly minted handoff is left alone on a
+    cold restore (its process may be mid-admission), so these crash scenarios
+    first age the durable liveness clock the way a crashed owner that stopped
+    reclaiming would.
+    """
+    from api.config import PENDING_GOAL_CONTINUATION_RECORDS
+
+    with store._LOCK:
+        for key in [k for k in store._CONTINUATION_HANDOFF_TOKENS if k[0] == sid]:
+            store._CONTINUATION_HANDOFF_TOKENS[key]["_handoff_minted_at"] = (
+                store.time.time() - store._ROLLBACK_RECEIPT_TTL_SECONDS - 60
+            )
+    with store._LOCK:
+        store._write_registry_unlocked(PENDING_GOAL_CONTINUATION_RECORDS, context="aging")
+
+
 def _break_replace(monkeypatch, store):
     def _boom(src, dst, *args, **kwargs):
         raise OSError("simulated failed registry replacement")
@@ -172,6 +192,9 @@ class TestTheAdmissionLearnsItsStreamIdentity:
                 sid, "stream-ghi", "start", {"meta": "test"}, session_dir=SESSION_DIR
             )
 
+            # The owning process is proven gone (its liveness clock aged past
+            # the reclaim window) before the restart reconciles the stream.
+            _age_handoffs(store, sid)
             restored = _cold_restore(store)
             from api.config import PENDING_GOAL_CONTINUATION_RECORDS
 
@@ -200,6 +223,9 @@ class TestTheAdmissionLearnsItsStreamIdentity:
         sid, attempt = "sess-stream-4", "att-stream-4"
         _arm_and_consume(store, sid, attempt)
         # No stream recorded: the process died between consume and launch.
+        # Its liveness clock goes stale (the owner is gone) before the
+        # restart reconciles the admission.
+        _age_handoffs(store, sid)
         restored = _cold_restore(store)
         from api.config import PENDING_GOAL_CONTINUATION_RECORDS
 

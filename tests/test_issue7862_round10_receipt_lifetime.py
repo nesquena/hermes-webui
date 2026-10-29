@@ -307,8 +307,22 @@ def test_the_handoff_clock_survives_a_restart(clean_registry):
         == store.CONSUME_COMMITTED
     )
 
+    # #7862 re-gate round 15 (CORE finding 2): adoption is now gated on
+    # PROOF that the owner is gone — a freshly minted handoff belongs to a
+    # process that may still be admitting it. The crashed owner of THIS
+    # handoff stops reclaiming, so age its liveness clock past the reclaim
+    # window and persist the aged clock; the restart then adopts it.
+    with store._LOCK:
+        store._CONTINUATION_HANDOFF_TOKENS[(sid, "att-1")]["_handoff_minted_at"] = (
+            store.time.time() - store._ROLLBACK_RECEIPT_TTL_SECONDS - 60
+        )
+    from api.config import PENDING_GOAL_CONTINUATION_RECORDS
+
+    with store._LOCK:
+        store._write_registry_unlocked(PENDING_GOAL_CONTINUATION_RECORDS, context="aging")
+
     # Cold restart: wipe the live state and restore from disk.
-    from api.config import PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_RECORDS
+    from api.config import PENDING_GOAL_CONTINUATION
 
     with store._LOCK:
         PENDING_GOAL_CONTINUATION.clear()
@@ -321,10 +335,26 @@ def test_the_handoff_clock_survives_a_restart(clean_registry):
     restored = store.restore_goal_continuations()
     assert restored == 1, "the handoff was not adopted after a restart"
 
-    # The adopted handoff must still count as a live attempt.
-    assert store._receipt_attempt_is_live(sid) is True, (
-        "a freshly restored handoff reads as abandoned, so its receipt would be "
-        "swept on the first sweep after a restart"
+    # #7862 re-gate round 15 inverts the round-10 liveness reading: a
+    # handoff that WAS adopted is by definition one whose owner is proven
+    # gone (the liveness clock is stale) — that is what makes the adoption
+    # safe. What round 10 guarded against and MUST still hold is the clock
+    # itself surviving the reload: the durable payload carries
+    # ``_handoff_minted_at`` (``_load_file_raw`` whitelists it), so the
+    # adopted in-memory token keeps the persisted stamp instead of reading
+    # as a brand-new handoff. The reclaim path refreshes that clock for a
+    # live attempt.
+    with store._LOCK:
+        _adopted_clock = (
+            store._CONTINUATION_HANDOFF_TOKENS[(sid, "att-1")].get(
+                "_handoff_minted_at"
+            )
+            or 0
+        )
+    assert _adopted_clock > 0, (
+        "the persisted liveness clock did not survive the reload: a "
+        "restored handoff would read as freshly minted well beyond the "
+        "reclaim window"
     )
 
 

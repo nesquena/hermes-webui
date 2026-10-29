@@ -278,8 +278,34 @@ class TestRegistryToSessionHandoffIsCrashReconcilable:
 
         # The handoff must survive a cold restart on its own, so a process
         # loss between the consume and the pending-start is recoverable.
+        # #7862 re-gate round 15 (CORE finding 2): the adoption is now
+        # gated on PROOF that the owner is gone — a freshly minted handoff
+        # is left alone (its process may be mid-admission, and adopting it
+        # launched two goal workers). A crashed owner stops reclaiming, so
+        # age the DURABLE copy's liveness clock past the reclaim window
+        # first; the restart then adopts exactly as before.
         with store._LOCK:
-            store._CONTINUATION_HANDOFF_TOKENS.clear()
+            _records, _tombstones, _handoffs = store._load_file_raw()
+            _aged = dict(_handoffs[(sid, "att-handoff")])
+            _aged["_handoff_minted_at"] = (
+                store.time.time() - store._ROLLBACK_RECEIPT_TTL_SECONDS - 60
+            )
+            _handoffs[(sid, "att-handoff")] = _aged
+            store._PENDING_GOAL_FILE.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "generation": store._GENERATION,
+                        "records": _records,
+                        "tombstones": _tombstones,
+                        "continuation_handoffs": {
+                            f"{k[0]}\u0000{k[1]}": v for k, v in _handoffs.items()
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+        with store._LOCK:
             store._ROLLBACK_RECEIPTS.clear()
             store._GENERATION = 0
         restored = store.restore_goal_continuations()

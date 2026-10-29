@@ -365,9 +365,12 @@ def test_server_delete_prunes_session_index(cleanup_test_sessions):
             text.find('if parsed.path == "/api/session/delete":'),
         )
         if delete_idx >= 0:
-            # Wide window: the handler must stay within one block for this scan
-            # even after the state.db-first reordering (#8300).
-            delete_block = text[delete_idx:delete_idx+8000]
+            # #7862 re-gate round 15 (no-goal deletes): the handler grew a
+            # registry-state gate, so the fixed 8000-char window no longer
+            # covers the prune call. Bound by the next route branch instead
+            # (_delete_handler_block), as the state.db-first reordering
+            # already required (#8300).
+            delete_block = _delete_handler_block(text, delete_idx)
             assert "prune_session_from_index(sid)" in delete_block, \
                 f"{label} session/delete must prune SESSION_INDEX_FILE"
             return
@@ -382,8 +385,9 @@ def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
         routes_src.find('if parsed.path == "/api/session/delete":'),
     )
     assert delete_idx >= 0, "session/delete handler not found in api/routes.py"
-    # Wide window: see test_server_delete_prunes_session_index (#8300).
-    delete_block = routes_src[delete_idx:delete_idx+8000]
+    # #7862 re-gate round 15 (no-goal deletes): bound by the next route
+    # branch, not a fixed character window (see _delete_handler_block).
+    delete_block = _delete_handler_block(routes_src, delete_idx)
     assert "with_suffix('.json.bak').unlink" in delete_block or 'with_suffix(".json.bak").unlink' in delete_block, \
         "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
 

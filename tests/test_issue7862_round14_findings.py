@@ -360,6 +360,21 @@ class TestFailedStartIsNotExecution:
             },
         )
 
+        # The owner's clock is aged past the reclaim window first (round 15,
+        # CORE finding 2): a freshly minted handoff is left for its live
+        # owner, and this owner crashed — the route compensation proves no
+        # worker ran.
+        with store._LOCK:
+            store._CONTINUATION_HANDOFF_TOKENS[(sid, "att-comp")][
+                "_handoff_minted_at"
+            ] = store.time.time() - store._ROLLBACK_RECEIPT_TTL_SECONDS - 60
+        with store._LOCK:
+            from api.config import PENDING_GOAL_CONTINUATION_RECORDS
+
+            store._write_registry_unlocked(
+                PENDING_GOAL_CONTINUATION_RECORDS, context="aging crash owner"
+            )
+
         _cold_reset(store)
         assert store.restore_goal_continuations() == 1, (
             "cold restore dropped a continuation whose worker never ran: the "
@@ -588,6 +603,18 @@ class TestRestoreRebuildsThePromptMirror:
             store.consume_pending_goal_continuation(sid, PROMPT, cont_id, "att-mir")
             == store.CONSUME_COMMITTED
         )
+        # The crashed owner's liveness clock goes stale first (round 15,
+        # CORE finding 2) so the cold restore adopts the handoff.
+        with store._LOCK:
+            store._CONTINUATION_HANDOFF_TOKENS[(sid, "att-mir")][
+                "_handoff_minted_at"
+            ] = store.time.time() - store._ROLLBACK_RECEIPT_TTL_SECONDS - 60
+        with store._LOCK:
+            from api.config import PENDING_GOAL_CONTINUATION_RECORDS
+
+            store._write_registry_unlocked(
+                PENDING_GOAL_CONTINUATION_RECORDS, context="aging crash owner"
+            )
         _cold_reset(store)
         assert store.restore_goal_continuations() == 1
 

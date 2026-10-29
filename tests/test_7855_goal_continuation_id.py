@@ -347,7 +347,8 @@ class TestWriterWiring:
             "consume_pending_goal_continuation(s.session_id, msg, "
             "goal_continuation_id, goal_continuation_attempt_id, ...)"
         )
-        tail = src[m.start():m.start() + 6000]
+        _next_def = src.find("\ndef ", m.start() + 1)
+        tail = src[m.start():(_next_def if _next_def > m.start() else m.start() + 6000)]
         assert "goal_related = True" in tail, (
             "a COMMITTED consume must classify the turn goal-related"
         )

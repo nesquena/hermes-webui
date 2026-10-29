@@ -111,8 +111,7 @@ def test_routes_consumer_discards_atomically_on_read():
     # consume_continuation_markers() — never up front — so a rejected start
     # rolls back the whole admission (see the receipt guards below).
     m = re.search(
-        r"if not goal_related and goal_continuation_id and "
-        r"s\.session_id in PENDING_GOAL_CONTINUATION:.*?"
+        r"if not goal_related and goal_continuation_id:.*?"
         r"consume_pending_goal_continuation\(\s*"
         r"s\.session_id,\s*msg,\s*goal_continuation_id\s*"
         r",\s*goal_continuation_attempt_id\s*,?"
@@ -127,6 +126,15 @@ def test_routes_consumer_discards_atomically_on_read():
         "routes.py must consume PENDING_GOAL_CONTINUATION atomically via "
         "consume_pending_goal_continuation (check + set goal_related + "
         "discard in the same block)"
+    )
+    # #7862 re-gate round 15 (CORE finding 2): the token gate now REFUSES a
+    # token-bearing request whose session has no pending marker — the intent
+    # was consumed elsewhere, and launching it as an ordinary turn produced
+    # the second goal_related=False worker. The refusal must be wired into
+    # the same token gate.
+    assert "_GoalContinuationTokenUnmatched" in src, (
+        "routes.py must refuse a token-bearing dispatch with no pending "
+        "marker (round 15, CORE finding 2)"
     )
     # The check→consume seam must stay free of other marker mutations. The
     # round-11 continue admission reads the session's goal state between the

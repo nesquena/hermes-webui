@@ -109,6 +109,26 @@ def _arm_and_consume(store, sid, attempt_id, token=TOKEN, prompt=PROMPT):
     )
 
 
+def _age_handoffs(store, sid):
+    """Age all of *sid*'s durable handoffs past the owner-liveness window.
+
+    #7862 re-gate round 15 (CORE finding 2): adoption is gated on PROOF that
+    the owning process is gone — a freshly minted handoff is left alone on a
+    cold restore (its process may be mid-admission). These crash scenarios
+    first age the durable liveness clock the way a crashed owner that stopped
+    reclaiming would, so the restart's adoption/reconciliation still runs.
+    """
+    from api.config import PENDING_GOAL_CONTINUATION_RECORDS
+
+    with store._LOCK:
+        for key in [k for k in store._CONTINUATION_HANDOFF_TOKENS if k[0] == sid]:
+            store._CONTINUATION_HANDOFF_TOKENS[key]["_handoff_minted_at"] = (
+                store.time.time() - store._ROLLBACK_RECEIPT_TTL_SECONDS - 60
+            )
+    with store._LOCK:
+        store._write_registry_unlocked(PENDING_GOAL_CONTINUATION_RECORDS, context="aging")
+
+
 def _routes_scope(start=0, length=70000):
     import api.routes as routes
 
@@ -136,6 +156,9 @@ class TestRetriedContinuationDurability:
         sid = "sess-r12-retry-handoff"
 
         _arm_and_consume(store, sid, "att-1")
+        # The crashed owner's liveness clock goes stale (round 15, CORE
+        # finding 2) before restart 1 adopts the handoff.
+        _age_handoffs(store, sid)
         assert _cold_restore(store) == 1, "restart 1 must adopt the handoff"
 
         # The retry consumes the restored record under a NEW attempt.
@@ -151,7 +174,9 @@ class TestRetriedContinuationDurability:
             "the session-wide adoption marker (finding 3: retried continuation "
             "is lost)"
         )
-        # ...and a second cold restore still recovers it.
+        # ...and a second cold restore still recovers it (the retry's OWN
+        # crash owner is also proven gone first).
+        _age_handoffs(store, sid)
         assert _cold_restore(store) == 1
         from api.config import PENDING_GOAL_CONTINUATION_RECORDS
 
@@ -164,6 +189,9 @@ class TestRetriedContinuationDurability:
         sid = "sess-r12-phantom"
 
         _arm_and_consume(store, sid, "att-1")
+        # The crashed owner's liveness clock goes stale (round 15, CORE
+        # finding 2) before restart 1 adopts the handoff.
+        _age_handoffs(store, sid)
         assert _cold_restore(store) == 1, "restart 1 must adopt the handoff"
 
         # The retry consumes and its launch discharge lands. The discharge
@@ -524,8 +552,10 @@ class TestColdRestoreReconcilesTheRecordedStream:
         try:
             _arm_and_consume(store, sid, "att-1")
             # The route recorded the stream identity, then the process died
-            # BEFORE thr.start(). No worker-side journal exists.
+            # BEFORE thr.start(). No worker-side journal exists. Its liveness
+            # clock goes stale first (round 15, CORE finding 2).
             assert store.record_goal_continuation_stream(sid, "att-1", "stream-abc")
+            _age_handoffs(store, sid)
 
             assert _cold_restore(store) == 1, (
                 "the handoff was dropped because the stream id was treated as "
@@ -550,6 +580,9 @@ class TestColdRestoreReconcilesTheRecordedStream:
             assert store.record_goal_continuation_stream(sid, "att-1", "stream-ghi")
             # The worker DID run (its run journal has a row).
             _write_run_journal_row(sid, "stream-ghi")
+            # The owning process is proven gone (the liveness clock is aged)
+            # before the restart reconciles the executed admission.
+            _age_handoffs(store, sid)
 
             assert _cold_restore(store) == 0, (
                 "an admission whose turn actually ran must still be dropped "
@@ -558,5 +591,11 @@ class TestColdRestoreReconcilesTheRecordedStream:
             from api.config import PENDING_GOAL_CONTINUATION_RECORDS
 
             assert sid not in PENDING_GOAL_CONTINUATION_RECORDS
+            # The executed handoff must not linger as future claimable intent.
+            _records, _tombstones, handoffs = store._load_file_raw()
+            assert not any(k[0] == sid for k in handoffs), (
+                "an executed admission's handoff was left on disk after the "
+                "reconciliation dropped it"
+            )
         finally:
             _clean_journals(sid)

@@ -69,6 +69,27 @@ def _cold_reload(store) -> int:
     return store.restore_goal_continuations()
 
 
+def _age_handoffs(store, sid) -> None:
+    """Age this session's durable handoffs past the owner-liveness window.
+
+    #7862 re-gate round 15 (CORE finding 2): adoption is gated on PROOF that
+    the owning process is gone — a freshly minted handoff is left alone on a
+    cold restore (its process may be mid-admission, which is exactly how two
+    goal workers launched). These scenarios simulate a crash, and a crashed
+    owner stops reclaiming, so the durable liveness clock is aged past the
+    reclaim window; the restart then adopts the handoff as before.
+    """
+    from api.config import PENDING_GOAL_CONTINUATION_RECORDS
+
+    with store._LOCK:
+        for key in [k for k in store._CONTINUATION_HANDOFF_TOKENS if k[0] == sid]:
+            store._CONTINUATION_HANDOFF_TOKENS[key]["_handoff_minted_at"] = (
+                store.time.time() - store._ROLLBACK_RECEIPT_TTL_SECONDS - 60
+            )
+    with store._LOCK:
+        store._write_registry_unlocked(PENDING_GOAL_CONTINUATION_RECORDS, context="aging")
+
+
 @pytest.fixture
 def clean_registry():
     store = _store()
@@ -117,6 +138,9 @@ def test_adoption_converts_the_handoff_instead_of_copying_it(clean_registry):
     assert _handoffs_on_disk(store), (
         "the handoff is not durable, so the crash scenario cannot be exercised"
     )
+    # The crashed owner stops reclaiming: prove it is gone before the
+    # restart adopts the handoff (round 15, CORE finding 2).
+    _age_handoffs(store, sid)
 
     # Step 2: restart — the handoff is adopted into a live record.
     restored = _cold_reload(store)
@@ -195,6 +219,9 @@ def test_a_successful_retry_before_the_second_restart_is_not_resurrected(clean_r
     store.arm_pending_goal_continuation(sid, goal)
     assert store.consume_pending_goal_continuation(sid, goal) == store.CONSUME_COMMITTED
 
+    # The crashed owner's liveness clock goes stale before the restart
+    # adopts the handoff (round 15, CORE finding 2).
+    _age_handoffs(store, sid)
     assert _cold_reload(store) == 1, "adoption stopped working"
     assert sid in PENDING_GOAL_CONTINUATION_RECORDS
     assert not any(k.startswith(sid + "\x00") for k in _handoffs_on_disk(store)), (
@@ -221,6 +248,11 @@ def test_a_failed_snapshot_write_puts_the_handoff_token_back(clean_registry, mon
 
     store.arm_pending_goal_continuation(sid, goal)
     assert store.consume_pending_goal_continuation(sid, goal) == store.CONSUME_COMMITTED
+
+    # The crashed owner's liveness clock goes stale before the restart
+    # attempts the adoption (round 15, CORE finding 2); only then is the
+    # write failure exercised.
+    _age_handoffs(store, sid)
 
     # A real write failure, not a stub: make the tmp write land somewhere
     # unwritable so the production error path records _LAST_WRITE_ERROR exactly as

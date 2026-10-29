@@ -46,7 +46,7 @@ import tempfile
 import threading
 import time
 from collections import deque
-from typing import Deque, Optional
+from typing import Deque, NoReturn, Optional
 
 from api.config import STATE_DIR
 
@@ -105,6 +105,34 @@ _ROLLBACK_RECEIPT_TTL_SECONDS = 15 * 60
 # section, so two writer threads can never interleave different generations.
 _LOCK = threading.RLock()
 
+# #7862 re-gate round 15 (BRICK): ``_LAST_LOCK_ERROR`` makes a refusal to
+# take the cross-process registry lock observable (like the load/write error
+# diagnostics) instead of a silent fallback.
+_LAST_LOCK_ERROR: Optional[str] = None
+
+# #7862 re-gate round 15 (CORE 4): the persisted global generation of the
+# last successful ``_load_file_raw``. A cold process counts generations from
+# 0, so every transaction baselines ``_GENERATION`` above this value AND
+# every record/handoff/tombstone generation on disk before allocating the
+# next mutation's generation — otherwise process B's ``/goal clear`` at its
+# own generation 1 is incomparable with process A's receipt generation 3,
+# and A's rejected-start rollback resurrects a goal the user cleared.
+_LAST_FILE_GENERATION: int = 0
+
+
+class _RegistryLockUnavailable(Exception):
+    """The cross-process registry lock could not be acquired.
+
+    #7862 re-gate round 15 (CORE finding 1, BRICK): the registry transaction
+    must never fall back to an unlocked write — without the file lock a peer
+    process's mutation cannot be serialised, which is the exact race round 12
+    added the lock for. Public mutators translate this into their \"refused\"
+    return value, so an ordinary chat start (which never reaches the lock —
+    see ``record_goal_continuation_stream``/``discard_goal_continuation_handoff``)
+    and the delete path stay healthy while a continuation mutation honestly
+    refuses.
+    """
+
 
 @contextlib.contextmanager
 def _registry_file_lock():
@@ -119,9 +147,19 @@ def _registry_file_lock():
 
     The lock file is separate from the registry payload: it must survive the
     payload's ``os.replace`` (the inode is swapped, the lock is not), and a
-    missing state directory is created on demand. When ``fcntl`` is
-    unavailable (native Windows) the lock degrades to the in-process lock
-    only — the same coverage the registry had before this round.
+    missing state directory is created on demand.
+
+    #7862 re-gate round 15 (CORE finding 1, BRICK): a filesystem without a
+    working ``flock`` (ENOSYS/ENOLCK on some NFS mounts and container
+    overlays) used to propagate out of BOTH the ``os.open`` fallback (which
+    only covered the open) and the lock call itself, 500ing every chat start.
+    Now a lock-acquisition failure raises ``_RegistryLockUnavailable``: the
+    public mutators refuse the continuation mutation — never an unlocked
+    write — and the chat-start path only reaches the lock when a real
+    admission exists (``record_*``/``discard_*`` return early otherwise).
+    When ``fcntl`` itself is unavailable (native Windows) the lock degrades
+    to the in-process lock only — the same coverage the registry had before
+    this round.
     """
     if fcntl is None:  # pragma: no cover - Windows
         yield
@@ -129,18 +167,13 @@ def _registry_file_lock():
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(_REGISTRY_LOCK_FILE), os.O_CREAT | os.O_RDWR, 0o600)
-    except OSError:
-        # A lock we cannot take must not break the chat path: degrade to the
-        # in-process lock rather than raising into the route.
-        logger.warning(
-            "Goal continuation registry: could not open the cross-process "
-            "lock file; falling back to the in-process lock",
-            exc_info=True,
-        )
-        yield
-        return
+    except OSError as exc:
+        _refuse_registry_lock("open", exc)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError as exc:
+            _refuse_registry_lock("flock", exc)
         try:
             yield
         finally:
@@ -153,6 +186,20 @@ def _registry_file_lock():
             os.close(fd)
         except OSError:
             pass
+
+
+def _refuse_registry_lock(phase: str, exc: Exception) -> "NoReturn":
+    """Record and raise the lock-unavailable refusal; never returns."""
+    global _LAST_LOCK_ERROR
+    _LAST_LOCK_ERROR = f"{phase}: {type(exc).__name__}: {exc}"
+    logger.error(
+        "Goal continuation registry: the cross-process lock could not be "
+        "acquired (%s); refusing the registry mutation instead of writing "
+        "unlocked",
+        _LAST_LOCK_ERROR,
+        exc_info=True,
+    )
+    raise _RegistryLockUnavailable(_LAST_LOCK_ERROR) from exc
 
 
 @contextlib.contextmanager
@@ -182,14 +229,62 @@ def _merge_disk_state_unlocked() -> None:
       copy by token AND generation; a mismatch means the memory is stale
       and disk is authoritative.
 
-    Handoffs and receipts are deliberately NOT merged: their in-memory
-    copies are popped without a write on the rollback path, so a blind merge
-    could undo that pop. The handoff republish window is named as a known
-    boundary in the re-gate comment instead.
+    #7862 re-gate round 15 (CORE findings 1-4) extends the merge:
+
+    * an unreadable/corrupt registry (``_LAST_LOAD_ERROR``) is NOT treated
+      as an empty disk — that wiped live memory and persisted the wipe.
+      The merge stops before any drop/adopt, and the next successful write
+      repairs the file from memory;
+    * a peer's HANDOFF is merged into ``_CONTINUATION_HANDOFF_TOKENS`` the
+      same way: disk handoffs were loaded but ignored, so an unrelated
+      writer's snapshot silently erased a peer's in-flight admission and a
+      cold restore lost the continuation. With the merge, every snapshot
+      serialises the complete durable handoff table. An in-memory token
+      stays authoritative (a pop followed by a same-transaction restore
+      write is what retires it durably);
+    * ``_GENERATION`` is baselined above the persisted global generation
+      and every record/handoff/tombstone generation on disk, so a cold
+      process's next mutation can never mint a generation that compares
+      older than another process's receipt;
+    * a merge-adopted peer record publishes master's prompt/token mirror
+      (``_publish_continuation_mirror_unlocked``) together with the marker,
+      or the /goal orphan sweep strips the marker;
+    * a session whose rollback-restore write failed (warm-path ENOSPC) is
+      exempt from the \"absent on disk => gone\" drop until its record
+      lands.
     """
     from api.config import PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_RECORDS
 
-    disk, disk_tombstones, _disk_handoffs = _load_file_raw()
+    disk, disk_tombstones, disk_handoffs = _load_file_raw()
+    if _LAST_LOAD_ERROR:
+        # Corrupt/unreadable registry: the disk is NOT evidence that records
+        # are gone. Refuse to drop or adopt anything; live memory stays
+        # authoritative and the next successful snapshot repairs the file.
+        logger.warning(
+            "Goal continuation registry: the durable state could not be "
+            "read (%s); keeping live memory untouched instead of treating "
+            "the unreadable file as an empty registry",
+            _LAST_LOAD_ERROR,
+        )
+        return
+    # #7862 re-gate round 15 (CORE finding 4): baseline the generation
+    # counter ABOVE every generation on disk — the file's own global
+    # generation, records, tombstones and handoffs alike. A cold process
+    # counts from 0, so a retirement minted at "its own generation 1" would
+    # otherwise stay incomparable with another process's receipt generation
+    # 3, and a late rejected-start rollback would resurrect a goal the user
+    # cleared. Every transaction re-baselines, so each mutation's generation
+    # is strictly newer than anything any process has persisted.
+    highest = max(
+        [int(_LAST_FILE_GENERATION or 0)]
+        + [int(rec.get("generation") or 0) for rec in disk.values()]
+        + [int(gen or 0) for gen in disk_tombstones.values()]
+        + [int(r.get("generation") or 0) for r in disk_handoffs.values()]
+        + [0]
+    )
+    global _GENERATION
+    if highest > _GENERATION:
+        _GENERATION = highest
     for sid, gen in disk_tombstones.items():
         try:
             gen_i = int(gen or 0)
@@ -198,17 +293,31 @@ def _merge_disk_state_unlocked() -> None:
         if gen_i > int(_TOMBSTONES.get(sid) or 0):
             _TOMBSTONES[sid] = gen_i
     for sid in [s for s in PENDING_GOAL_CONTINUATION_RECORDS if s not in disk]:
+        # #7862 re-gate round 15 (should-fix, warm-path ENOSPC): a rollback
+        # whose restore snapshot could not commit left a live record with no
+        # disk copy. Dropping it here ("absent on disk => gone") made the
+        # warm retry run as an ordinary turn; the session stays exempt until
+        # its record lands on disk again.
+        if sid in _RESTORE_WRITE_FAILED_SESSIONS:
+            continue
         # A peer consumed or retired this intent: the durable state is the
         # truth, and this stale copy must not be re-spent or republished.
         PENDING_GOAL_CONTINUATION_RECORDS.pop(sid, None)
         PENDING_GOAL_CONTINUATION.discard(sid)
         _RETIRED_GENERATIONS.pop(sid, None)
     for sid, record in disk.items():
+        if sid in _RESTORE_WRITE_FAILED_SESSIONS:
+            # The warm-ENOSPC exemption is satisfied: the record IS on disk.
+            _RESTORE_WRITE_FAILED_SESSIONS.discard(sid)
         live = PENDING_GOAL_CONTINUATION_RECORDS.get(sid)
         if live is None:
             # A peer armed an intent this process never saw: adopt it so
-            # this writer's snapshot cannot drop it.
-            PENDING_GOAL_CONTINUATION.add(sid)
+            # this writer's snapshot cannot drop it — and publish master's
+            # prompt/token mirror with the marker, exactly like every other
+            # adoption, or the /goal orphan sweep strips the marker and the
+            # resume continue loses its identity admission (round 15
+            # should-fix).
+            _publish_continuation_mirror_unlocked(sid, record)
             PENDING_GOAL_CONTINUATION_RECORDS[sid] = dict(record)
             continue
         if (
@@ -218,8 +327,18 @@ def _merge_disk_state_unlocked() -> None:
             != int(record.get("generation") or 0)
         ):
             # Token or generation drifted: the durable copy is authoritative.
-            PENDING_GOAL_CONTINUATION.add(sid)
+            _publish_continuation_mirror_unlocked(sid, record)
             PENDING_GOAL_CONTINUATION_RECORDS[sid] = dict(record)
+    # #7862 re-gate round 15 (CORE finding 3): merge the COMPLETE durable
+    # handoff table. Before, disk handoffs were loaded but ignored and
+    # snapshots serialised only local tokens, so process B's unrelated write
+    # erased process A's in-flight handoff and a cold restore lost A's
+    # continuation. In-memory tokens stay authoritative (a same-transaction
+    # pop + write is what retires one durably); keys absent from memory are
+    # adopted so every snapshot carries them.
+    for key, record in disk_handoffs.items():
+        if key not in _CONTINUATION_HANDOFF_TOKENS:
+            _CONTINUATION_HANDOFF_TOKENS[key] = dict(record)
 _GENERATION = 0  # bumped under _LOCK on every accepted mutation (arm/retire)
 _LAST_LOAD_ERROR: Optional[str] = None
 _LAST_WRITE_ERROR: Optional[str] = None
@@ -280,6 +399,12 @@ _CONTINUATION_HANDOFF_TOKENS: "dict[tuple[str, str], dict]" = {}
 # continuation the retry already spent.
 _ADOPTED_HANDOFF_SESSIONS: "set[str]" = set()
 _MAX_CONTINUATION_HANDOFFS = 64
+# #7862 re-gate round 15 (should-fix): sessions whose rollback-restore
+# snapshot write FAILED (warm-path ENOSPC). The record is live in memory but
+# absent on disk, so the next unrelated transaction's merge must not drop it
+# ("absent on disk => gone") — that is what turned the warm retry into an
+# ordinary turn. Exempt until the record lands on disk again.
+_RESTORE_WRITE_FAILED_SESSIONS: "set[str]" = set()
 
 
 def _next_generation_unlocked() -> int:
@@ -489,36 +614,57 @@ def record_goal_continuation_stream(
     if not sid or not stream:
         return False
     attempt = str(attempt_id or "").strip()
-    with _registry_transaction():
-        # #7862 re-gate (2026-10-27, CORE finding 1): reload the durable
-        # state under the cross-process lock before mutating.
-        _merge_disk_state_unlocked()
-        key = (sid, attempt) if attempt else None
-        if key is None:
+    # #7862 re-gate round 15 (CORE finding 1, BRICK): an ordinary start with
+    # NO admission must never touch the cross-process lock — ``flock`` can
+    # raise ENOSYS/ENOLCK on NFS mounts and container overlays, and a 500 on
+    # every ordinary start is the exact brick the reviewers replayed. The
+    # in-memory handoff is the ONLY reason this function exists: when this
+    # attempt has none, there is nothing to bind and the early return is the
+    # honest answer (the same True the transactional path used to produce).
+    with _LOCK:
+        if attempt:
+            key = (sid, attempt)
+        else:
             session_keys = [k for k in _CONTINUATION_HANDOFF_TOKENS if k[0] == sid]
             key = session_keys[0] if session_keys else None
         if key is None or key not in _CONTINUATION_HANDOFF_TOKENS:
             # No admission to bind: nothing consumed for this attempt (an
             # ordinary turn, or the intent was never armed). Not an error.
             return True
-        _CONTINUATION_HANDOFF_TOKENS[key]["_handoff_stream_id"] = stream
-        if _write_registry_unlocked(
-            PENDING_GOAL_CONTINUATION_RECORDS,
-            context=f"handoff-stream sid={sid} attempt={key[1]}",
-        ):
-            return True
-        # The identity did not land, so the admission stays unsettled. Drop
-        # the in-memory copy too: leaving it would let this process believe
-        # the reconciliation is possible while disk says otherwise, and the
-        # next snapshot would publish a stream id the failed write never
-        # committed.
-        _CONTINUATION_HANDOFF_TOKENS[key].pop("_handoff_stream_id", None)
-        logger.warning(
-            "Goal continuation admission for session %s (attempt %s) could not "
-            "record its stream identity; the settlement stays unreconciled",
-            sid,
-            key[1],
-        )
+    try:
+        with _registry_transaction():
+            # #7862 re-gate (2026-10-27, CORE finding 1): reload the durable
+            # state under the cross-process lock before mutating.
+            _merge_disk_state_unlocked()
+            if key not in _CONTINUATION_HANDOFF_TOKENS:
+                # A retire/rollback between the check and the transaction
+                # discharged the admission; nothing left to bind. Not an
+                # error — the launch it describes is gone with the intent.
+                return True
+            _CONTINUATION_HANDOFF_TOKENS[key]["_handoff_stream_id"] = stream
+            if _write_registry_unlocked(
+                PENDING_GOAL_CONTINUATION_RECORDS,
+                context=f"handoff-stream sid={sid} attempt={key[1]}",
+            ):
+                return True
+            # The identity did not land, so the admission stays unsettled. Drop
+            # the in-memory copy too: leaving it would let this process believe
+            # the reconciliation is possible while disk says otherwise, and the
+            # next snapshot would publish a stream id the failed write never
+            # committed.
+            _CONTINUATION_HANDOFF_TOKENS[key].pop("_handoff_stream_id", None)
+            logger.warning(
+                "Goal continuation admission for session %s (attempt %s) could not "
+                "record its stream identity; the settlement stays unreconciled",
+                sid,
+                key[1],
+            )
+            return False
+    except _RegistryLockUnavailable:
+        # A lock we cannot take must not fall back to an unlocked write. The
+        # admission stays unsettled; the caller refuses the launch, which
+        # for a TRUE continuation is the honest outcome (the same refusal
+        # shape as a failed snapshot).
         return False
 
 
@@ -623,44 +769,69 @@ def discard_goal_continuation_handoff(session_id: str, attempt_id: str = "") -> 
     if not sid:
         return False
     attempt = str(attempt_id or "").strip()
-    with _registry_transaction():
-        # #7862 re-gate (2026-10-27, CORE finding 1): reload the durable
-        # state under the cross-process lock before mutating.
-        _merge_disk_state_unlocked()
-        had = bool(attempt and (sid, attempt) in _CONTINUATION_HANDOFF_TOKENS)
-        _discharged_record = (
-            dict(_CONTINUATION_HANDOFF_TOKENS[(sid, attempt)]) if had else None
-        )
+    # #7862 re-gate round 15 (CORE finding 1, BRICK): the discharge runs on
+    # EVERY chat start. When this start consumed no continuation there is no
+    # handoff to discharge, so return before touching the cross-process
+    # lock — a broken ``flock`` (ENOSYS/ENOLCK) must never fail an ordinary
+    # start.
+    with _LOCK:
         if attempt:
-            _CONTINUATION_HANDOFF_TOKENS.pop((sid, attempt), None)
+            _had_admission = (sid, attempt) in _CONTINUATION_HANDOFF_TOKENS
         else:
-            for key in [k for k in _CONTINUATION_HANDOFF_TOKENS if k[0] == sid]:
-                del _CONTINUATION_HANDOFF_TOKENS[key]
-        if had:
-            if _write_registry_unlocked(
-                PENDING_GOAL_CONTINUATION_RECORDS,
-                context=f"handoff-discharge sid={sid}",
-            ):
-                # The converted handoff is gone from memory for good, so the
-                # "withhold from disk" marker has nothing left to describe.
-                _ADOPTED_HANDOFF_SESSIONS.discard(sid)
-                return True
-            # The snapshot write failed, so the durable state still describes an
-            # interrupted start. Put the in-memory token back so this process
-            # agrees with disk -- dropping it here would make the failure
-            # invisible to everything but the log, and the next discharge
-            # attempt (or a startup reconciliation) needs the token to act on.
-            # Report the failure: an admitted attempt whose handoff survives is
-            # claimable intent again, so the caller must be able to see it.
-            if attempt and _discharged_record is not None:
-                _CONTINUATION_HANDOFF_TOKENS[(sid, attempt)] = _discharged_record
-            logger.warning(
-                "Goal continuation handoff for session %s could not be durably "
-                "discharged; the attempt stays claimable until reconciled",
-                sid,
+            _had_admission = any(
+                k[0] == sid for k in _CONTINUATION_HANDOFF_TOKENS
             )
-            return False
-    return True
+        if not _had_admission:
+            return True
+    try:
+        with _registry_transaction():
+            # #7862 re-gate (2026-10-27, CORE finding 1): reload the durable
+            # state under the cross-process lock before mutating.
+            _merge_disk_state_unlocked()
+            had = bool(attempt and (sid, attempt) in _CONTINUATION_HANDOFF_TOKENS)
+            _discharged_record = (
+                dict(_CONTINUATION_HANDOFF_TOKENS[(sid, attempt)]) if had else None
+            )
+            if attempt:
+                _CONTINUATION_HANDOFF_TOKENS.pop((sid, attempt), None)
+            else:
+                for key in [k for k in _CONTINUATION_HANDOFF_TOKENS if k[0] == sid]:
+                    del _CONTINUATION_HANDOFF_TOKENS[key]
+            if had:
+                if _write_registry_unlocked(
+                    PENDING_GOAL_CONTINUATION_RECORDS,
+                    context=f"handoff-discharge sid={sid}",
+                ):
+                    # The converted handoff is gone from memory for good, so the
+                    # "withhold from disk" marker has nothing left to describe.
+                    _ADOPTED_HANDOFF_SESSIONS.discard(sid)
+                    return True
+                # The snapshot write failed, so the durable state still describes an
+                # interrupted start. Put the in-memory token back so this process
+                # agrees with disk -- dropping it here would make the failure
+                # invisible to everything but the log, and the next discharge
+                # attempt (or a startup reconciliation) needs the token to act on.
+                # Report the failure: an admitted attempt whose handoff survives is
+                # claimable intent again, so the caller must be able to see it.
+                if attempt and _discharged_record is not None:
+                    _CONTINUATION_HANDOFF_TOKENS[(sid, attempt)] = _discharged_record
+                logger.warning(
+                    "Goal continuation handoff for session %s could not be durably "
+                    "discharged; the attempt stays claimable until reconciled",
+                    sid,
+                )
+                return False
+        return True
+    except _RegistryLockUnavailable:
+        # A lock we cannot take must not fall back to an unlocked write: the
+        # settlement stays unreconciled and recovery reconciles at the next
+        # startup, exactly like a failed snapshot discharge.
+        logger.error(
+            "Goal continuation handoff for session %s could not be durably "
+            "discharged: the cross-process registry lock is unavailable",
+            sid,
+        )
+        return False
 
 
 def _drop_continuation_handoffs_unlocked(sid: str) -> int:
@@ -840,19 +1011,22 @@ def _load_file_raw() -> "tuple[dict[str, dict], dict[str, int], dict[tuple[str, 
     intent instead of restoring nothing. A v3 file has no such section; nothing
     can be re-adopted for it, which is the pre-round-7 behaviour.
     """
-    global _LAST_LOAD_ERROR
+    global _LAST_LOAD_ERROR, _LAST_FILE_GENERATION
     _LAST_LOAD_ERROR = None
     try:
         raw = _PENDING_GOAL_FILE.read_text(encoding="utf-8")
         data = json.loads(raw)
     except FileNotFoundError:
+        _LAST_FILE_GENERATION = 0
         return {}, {}, {}
     except (OSError, ValueError) as exc:
         _LAST_LOAD_ERROR = f"{type(exc).__name__}: {exc}"
         logger.warning("Goal continuation registry unreadable: %s", _LAST_LOAD_ERROR)
+        _LAST_FILE_GENERATION = 0
         return {}, {}, {}
     if isinstance(data, dict):
         file_generation = int(data.get("generation") or 0)
+        _LAST_FILE_GENERATION = file_generation
         raw_records = data.get("records")
         if not isinstance(raw_records, dict):
             _LAST_LOAD_ERROR = (
@@ -913,6 +1087,7 @@ def _load_file_raw() -> "tuple[dict[str, dict], dict[str, int], dict[tuple[str, 
         # v1 format: a bare list of session ids. Upgrade in memory: blank
         # prompt (the old format never carried text); generation is assigned
         # when the record is restored/merged.
+        _LAST_FILE_GENERATION = 0
         return {
             str(sid): {
                 "prompt": "",
@@ -940,6 +1115,30 @@ def load_goal_continuation_tombstones() -> dict:
     with _LOCK:
         _records, tombstones, _handoffs = _load_file_raw()
         return dict(tombstones)
+
+
+def session_has_registry_state(session_id: str) -> bool:
+    """True when any durable registry state exists for *session_id*.
+
+    #7862 re-gate round 15 (should-fix): a session delete used to write an
+    fsynced registry snapshot with a tombstone for EVERY session, goal or
+    not. The delete path calls this first and returns early when there is no
+    record, handoff or receipt — a no-goal delete must not touch the
+    registry at all. Never raises.
+    """
+    from api.config import PENDING_GOAL_CONTINUATION_RECORDS
+
+    sid = str(session_id or "").strip()
+    if not sid:
+        return False
+    with _LOCK:
+        if sid in PENDING_GOAL_CONTINUATION_RECORDS:
+            return True
+        if any(k[0] == sid for k in _CONTINUATION_HANDOFF_TOKENS):
+            return True
+        if any(k[0] == sid for k in _ROLLBACK_RECEIPTS):
+            return True
+    return False
 
 
 def arm_pending_goal_continuation(
@@ -971,36 +1170,42 @@ def arm_pending_goal_continuation(
     if not sid:
         return False
     prompt = "" if continuation_prompt is None else str(continuation_prompt)
-    with _registry_transaction():
-        # #7862 re-gate (2026-10-27, CORE finding 1): reload the durable
-        # state under the cross-process lock before mutating.
-        _merge_disk_state_unlocked()
-        generation = _next_generation_unlocked()
-        # A fresh intent supersedes any older one: drop a stale rollback
-        # receipt for this session so a late rejected-start rollback can never
-        # resurrect the generation the new intent replaced. The session's
-        # retirement stamp is cleared too: this arm IS the new intent, so a
-        # rejected start for it is exactly what a rollback is for.
-        _drop_rollback_receipt_unlocked(sid)
-        # A fresh arm supersedes an older clear: the tombstone is dropped so a
-        # rejected start for THIS intent can roll back normally. Clearing it
-        # (rather than leaving it) is what keeps the tombstone's meaning narrow
-        # -- "the intent as of generation N was cancelled" -- instead of "this
-        # session is cancelled forever".
-        _RETIRED_GENERATIONS.pop(sid, None)
-        _TOMBSTONES.pop(sid, None)
-        PENDING_GOAL_CONTINUATION.add(sid)
-        PENDING_GOAL_CONTINUATION_RECORDS[sid] = {
-            "prompt": prompt,
-            "generation": generation,
-            "created_at": time.time(),
-            "reason": reason,
-            "continuation_id": str(continuation_id or ""),
-        }
-        return _write_registry_unlocked(
-            PENDING_GOAL_CONTINUATION_RECORDS,
-            context=f"arm sid={sid} reason={reason}",
-        )
+    try:
+        with _registry_transaction():
+            # #7862 re-gate (2026-10-27, CORE finding 1): reload the durable
+            # state under the cross-process lock before mutating.
+            _merge_disk_state_unlocked()
+            generation = _next_generation_unlocked()
+            # A fresh intent supersedes any older one: drop a stale rollback
+            # receipt for this session so a late rejected-start rollback can never
+            # resurrect the generation the new intent replaced. The session's
+            # retirement stamp is cleared too: this arm IS the new intent, so a
+            # rejected start for it is exactly what a rollback is for.
+            _drop_rollback_receipt_unlocked(sid)
+            # A fresh arm supersedes an older clear: the tombstone is dropped so a
+            # rejected start for THIS intent can roll back normally. Clearing it
+            # (rather than leaving it) is what keeps the tombstone's meaning narrow
+            # -- "the intent as of generation N was cancelled" -- instead of "this
+            # session is cancelled forever".
+            _RETIRED_GENERATIONS.pop(sid, None)
+            _TOMBSTONES.pop(sid, None)
+            PENDING_GOAL_CONTINUATION.add(sid)
+            PENDING_GOAL_CONTINUATION_RECORDS[sid] = {
+                "prompt": prompt,
+                "generation": generation,
+                "created_at": time.time(),
+                "reason": reason,
+                "continuation_id": str(continuation_id or ""),
+            }
+            return _write_registry_unlocked(
+                PENDING_GOAL_CONTINUATION_RECORDS,
+                context=f"arm sid={sid} reason={reason}",
+            )
+    except _RegistryLockUnavailable:
+        # A lock we cannot take must not fall back to an unlocked write: the
+        # arm is refused and the producer must not emit a goal_continue event
+        # for an intent the route could never admit.
+        return False
 
 
 def retire_pending_goal_continuation(
@@ -1023,49 +1228,55 @@ def retire_pending_goal_continuation(
     sid = str(session_id or "").strip()
     if not sid:
         return False
-    with _registry_transaction():
-        # #7862 re-gate (2026-10-27, CORE finding 1): reload the durable
-        # state under the cross-process lock before mutating.
-        _merge_disk_state_unlocked()
-        generation = _next_generation_unlocked()
-        PENDING_GOAL_CONTINUATION.discard(sid)
-        PENDING_GOAL_CONTINUATION_RECORDS.pop(sid, None)
-        # Record the retirement generation so a rollback receipt minted BEFORE
-        # this retirement can never restore the intent afterwards (#7862 round
-        # 5: ``/goal clear`` was silently undone by a late rejected-start
-        # rollback). Also drop the session's receipts -- they describe an
-        # intent that no longer exists, and keeping them only invites a claim
-        # that the generation guard below would then have to refuse.
-        _drop_rollback_receipt_unlocked(sid)
-        # #7862 round 9 (CORE, finding "a cleared goal comes back after the
-        # next restart"): retire must also discharge the session's durable
-        # HANDOFFS, in this same snapshot. A handoff is evidence that a start
-        # attempt consumed an intent; ``/goal clear`` ends that intent, so
-        # leaving the handoff behind let a later cold restore adopt it and
-        # resurrect the continuation the user just stopped. Adoption only
-        # compared tombstones against the RECORD's generation, and a
-        # handoff-restored record re-derives that generation at adoption
-        # time -- so the tombstone never matched.
-        _drop_continuation_handoffs_unlocked(sid)
-        # Durable tombstone: the clear must outlive this process AND any number
-        # of unrelated retirements, so it is written to the same snapshot as
-        # the state it cleared. The in-memory stamp below stays as the
-        # same-process fast path.
-        _RETIRED_GENERATIONS.pop(sid, None)
-        _RETIRED_GENERATIONS[sid] = generation
-        _TOMBSTONES[sid] = max(generation, int(_TOMBSTONES.get(sid) or 0))
-        while len(_TOMBSTONES) > _MAX_TOMBSTONES:
-            _TOMBSTONES.pop(next(iter(_TOMBSTONES)))
-        # A fresh arm is NOT a retirement, so the session's generation stamp is
-        # left alone: an older receipt must stay blocked.
-        committed = _write_registry_unlocked(
-            PENDING_GOAL_CONTINUATION_RECORDS,
-            context=f"retire sid={sid} reason={reason}",
-        )
-        _RETIRED_LOG.append(
-            {"session_id": sid, "reason": reason, "at": time.time()}
-        )
-        return committed
+    try:
+        with _registry_transaction():
+            # #7862 re-gate (2026-10-27, CORE finding 1): reload the durable
+            # state under the cross-process lock before mutating.
+            _merge_disk_state_unlocked()
+            generation = _next_generation_unlocked()
+            PENDING_GOAL_CONTINUATION.discard(sid)
+            PENDING_GOAL_CONTINUATION_RECORDS.pop(sid, None)
+            # Record the retirement generation so a rollback receipt minted BEFORE
+            # this retirement can never restore the intent afterwards (#7862 round
+            # 5: ``/goal clear`` was silently undone by a late rejected-start
+            # rollback). Also drop the session's receipts -- they describe an
+            # intent that no longer exists, and keeping them only invites a claim
+            # that the generation guard below would then have to refuse.
+            _drop_rollback_receipt_unlocked(sid)
+            # #7862 round 9 (CORE, finding "a cleared goal comes back after the
+            # next restart"): retire must also discharge the session's durable
+            # HANDOFFS, in this same snapshot. A handoff is evidence that a start
+            # attempt consumed an intent; ``/goal clear`` ends that intent, so
+            # leaving the handoff behind let a later cold restore adopt it and
+            # resurrect the continuation the user just stopped. Adoption only
+            # compared tombstones against the RECORD's generation, and a
+            # handoff-restored record re-derives that generation at adoption
+            # time -- so the tombstone never matched.
+            _drop_continuation_handoffs_unlocked(sid)
+            # Durable tombstone: the clear must outlive this process AND any number
+            # of unrelated retirements, so it is written to the same snapshot as
+            # the state it cleared. The in-memory stamp below stays as the
+            # same-process fast path.
+            _RETIRED_GENERATIONS.pop(sid, None)
+            _RETIRED_GENERATIONS[sid] = generation
+            _TOMBSTONES[sid] = max(generation, int(_TOMBSTONES.get(sid) or 0))
+            while len(_TOMBSTONES) > _MAX_TOMBSTONES:
+                _TOMBSTONES.pop(next(iter(_TOMBSTONES)))
+            # A fresh arm is NOT a retirement, so the session's generation stamp is
+            # left alone: an older receipt must stay blocked.
+            committed = _write_registry_unlocked(
+                PENDING_GOAL_CONTINUATION_RECORDS,
+                context=f"retire sid={sid} reason={reason}",
+            )
+            _RETIRED_LOG.append(
+                {"session_id": sid, "reason": reason, "at": time.time()}
+            )
+            return committed
+    except _RegistryLockUnavailable:
+        # A lock we cannot take must not fall back to an unlocked write. The
+        # retirement is REFUSED: the caller (session delete, /goal clear) must
+        # surface the failure instead of claiming a durable clear.
+        return False
 
 
 def normalize_continuation_text(value: str) -> str:
@@ -1201,111 +1412,118 @@ def consume_pending_goal_continuation(
     sid = str(session_id or "").strip()
     if not sid:
         return CONSUME_NOT_MATCHING
-    with _registry_transaction():
-        # #7862 re-gate (2026-10-27, CORE finding 1): the consume is the
-        # transaction that must never trust stale memory. Reload the durable
-        # state under the cross-process lock first: if another process
-        # already spent this intent the record is gone from disk, the merge
-        # drops the stale in-memory copy, and the lookup below answers
-        # ``CONSUME_NOT_MATCHING`` instead of admitting a second run.
-        _merge_disk_state_unlocked()
-        record = PENDING_GOAL_CONTINUATION_RECORDS.get(sid)
-        if record is None:
-            # No durable record: a bare in-memory marker (legacy path or a
-            # v1 file upgraded without prompt text) cannot be matched safely.
-            # Leave it alone rather than retire an intent we cannot verify --
-            # expiry bounds it, and swallowing an unrelated turn is the exact
-            # data-loss bug this function exists to prevent.
-            return CONSUME_NOT_MATCHING
-        recorded_id = str(record.get("continuation_id") or "")
-        request_id = str(continuation_id or "")
-        if recorded_id and request_id and recorded_id != request_id:
-            # A token was carried, but not THIS continuation's token: another
-            # (already consumed or restarted) generation. Treat it like any
-            # other non-matching turn.
-            return CONSUME_NOT_MATCHING
-        # #7862 round 11 (re-gate CORE): an explicit ``continue`` for a
-        # resumed goal is admitted on identity, not on text. The resume
-        # message tells the user to "type continue", and that literal
-        # control is a new human turn the recorded prompt never matches, so
-        # the admission ran with ``goal_related=false`` and the goal loop
-        # stopped after the resume. The guard is deliberately narrow: the
-        # caller must certify an active goal, the text must normalise to
-        # exactly ``continue``, and the request must still carry this
-        # continuation's token (checked above, and a tokenless request falls
-        # through to the text comparison below rather than being admitted).
-        continue_admitted = bool(
-            explicit_continue
-            and goal_active
-            and request_id
-            and normalize_continuation_text(incoming_text) == _CONTINUE_CONTROL
-        )
-        # #7862 re-gate round 3 (finding 4): a request carrying THIS
-        # continuation's token is admitted on identity even when its text was
-        # edited (or the queued entries were combined) while it sat in the
-        # queue. The UI can legitimately produce that: the queue's Combine
-        # action merges the queued texts into one entry, and editing a queued
-        # continuation rewrites the text. Both keep the continuation's token
-        # on the entry, so the turn is still the goal continuation the store
-        # armed — but the recorded prompt no longer matches, the consume
-        # returned NOT_MATCHING, the turn ran as an ordinary turn and the
-        # goal loop stopped.
-        #
-        # The guard is deliberately narrow and does NOT widen the tokenless
-        # contract: the token must be present, must equal the recorded one
-        # (checked above, so a foreign generation is rejected before this
-        # point), and the record must carry a non-empty token of its own.
-        # A tokenless request falls through to the text comparison below.
-        token_admitted = bool(
-            request_id
-            and recorded_id
-            and request_id == recorded_id
-        )
-        if (
-            not continue_admitted
-            and not token_admitted
-            and not _continuation_text_matches(
-                record.get("prompt") or "", incoming_text
+    try:
+        with _registry_transaction():
+            # #7862 re-gate (2026-10-27, CORE finding 1): the consume is the
+            # transaction that must never trust stale memory. Reload the durable
+            # state under the cross-process lock first: if another process
+            # already spent this intent the record is gone from disk, the merge
+            # drops the stale in-memory copy, and the lookup below answers
+            # ``CONSUME_NOT_MATCHING`` instead of admitting a second run.
+            _merge_disk_state_unlocked()
+            record = PENDING_GOAL_CONTINUATION_RECORDS.get(sid)
+            if record is None:
+                # No durable record: a bare in-memory marker (legacy path or a
+                # v1 file upgraded without prompt text) cannot be matched safely.
+                # Leave it alone rather than retire an intent we cannot verify --
+                # expiry bounds it, and swallowing an unrelated turn is the exact
+                # data-loss bug this function exists to prevent.
+                return CONSUME_NOT_MATCHING
+            recorded_id = str(record.get("continuation_id") or "")
+            request_id = str(continuation_id or "")
+            if recorded_id and request_id and recorded_id != request_id:
+                # A token was carried, but not THIS continuation's token: another
+                # (already consumed or restarted) generation. Treat it like any
+                # other non-matching turn.
+                return CONSUME_NOT_MATCHING
+            # #7862 round 11 (re-gate CORE): an explicit ``continue`` for a
+            # resumed goal is admitted on identity, not on text. The resume
+            # message tells the user to "type continue", and that literal
+            # control is a new human turn the recorded prompt never matches, so
+            # the admission ran with ``goal_related=false`` and the goal loop
+            # stopped after the resume. The guard is deliberately narrow: the
+            # caller must certify an active goal, the text must normalise to
+            # exactly ``continue``, and the request must still carry this
+            # continuation's token (checked above, and a tokenless request falls
+            # through to the text comparison below rather than being admitted).
+            continue_admitted = bool(
+                explicit_continue
+                and goal_active
+                and request_id
+                and normalize_continuation_text(incoming_text) == _CONTINUE_CONTROL
             )
-        ):
-            return CONSUME_NOT_MATCHING
-        _next_generation_unlocked()
-        PENDING_GOAL_CONTINUATION.discard(sid)
-        popped = PENDING_GOAL_CONTINUATION_RECORDS.pop(sid)
-        # #7862 round 8 (CORE, finding 2): the record removal and the handoff that
-        # replaces it must land in ONE os.replace. Round 7 wrote them in two
-        # passes (record gone at the first replace, handoff added at the second),
-        # so a process loss between them left records=[] handoffs=[] and the retry
-        # ran as an ordinary turn; and when the second write failed the handoff was
-        # dropped while the consume still returned True. Both halves are staged in
-        # memory first and committed together, so the durable snapshot shows either
-        # "record present, no handoff" or "record absent, handoff present" — never
-        # the empty middle.
-        _record_rollback_receipt_unlocked(sid, record, attempt_id)
-        _record_continuation_handoff_unlocked(sid, record, attempt_id)
-        if not _write_registry_unlocked(
-            PENDING_GOAL_CONTINUATION_RECORDS,
-            context=f"consume+handoff sid={sid}",
-        ):
-            # Nothing became durable: undo BOTH halves so this process still
-            # describes the pre-consume state, and refuse the admission.
-            # The handoff key must be normalised the same way the writer
-            # normalises it, or an empty attempt_id leaves the token behind
-            # under a key this pop cannot reach.
-            _CONTINUATION_HANDOFF_TOKENS.pop(
-                (sid, str(attempt_id or "") or "attempt"), None
+            # #7862 re-gate round 3 (finding 4): a request carrying THIS
+            # continuation's token is admitted on identity even when its text was
+            # edited (or the queued entries were combined) while it sat in the
+            # queue. The UI can legitimately produce that: the queue's Combine
+            # action merges the queued texts into one entry, and editing a queued
+            # continuation rewrites the text. Both keep the continuation's token
+            # on the entry, so the turn is still the goal continuation the store
+            # armed — but the recorded prompt no longer matches, the consume
+            # returned NOT_MATCHING, the turn ran as an ordinary turn and the
+            # goal loop stopped.
+            #
+            # The guard is deliberately narrow and does NOT widen the tokenless
+            # contract: the token must be present, must equal the recorded one
+            # (checked above, so a foreign generation is rejected before this
+            # point), and the record must carry a non-empty token of its own.
+            # A tokenless request falls through to the text comparison below.
+            token_admitted = bool(
+                request_id
+                and recorded_id
+                and request_id == recorded_id
             )
-            _drop_rollback_receipt_unlocked(sid)
-            PENDING_GOAL_CONTINUATION.add(sid)
-            PENDING_GOAL_CONTINUATION_RECORDS[sid] = popped
-            logger.warning(
-                "Refused to consume goal continuation for session %s: the "
-                "durable record could not be removed atomically with its handoff",
-                sid,
-            )
-            return CONSUME_COMMIT_FAILED
-        _RETIRED_LOG.append({"session_id": sid, "reason": "consumed", "at": time.time()})
-        return CONSUME_COMMITTED
+            if (
+                not continue_admitted
+                and not token_admitted
+                and not _continuation_text_matches(
+                    record.get("prompt") or "", incoming_text
+                )
+            ):
+                return CONSUME_NOT_MATCHING
+            _next_generation_unlocked()
+            PENDING_GOAL_CONTINUATION.discard(sid)
+            popped = PENDING_GOAL_CONTINUATION_RECORDS.pop(sid)
+            # #7862 round 8 (CORE, finding 2): the record removal and the handoff that
+            # replaces it must land in ONE os.replace. Round 7 wrote them in two
+            # passes (record gone at the first replace, handoff added at the second),
+            # so a process loss between them left records=[] handoffs=[] and the retry
+            # ran as an ordinary turn; and when the second write failed the handoff was
+            # dropped while the consume still returned True. Both halves are staged in
+            # memory first and committed together, so the durable snapshot shows either
+            # "record present, no handoff" or "record absent, handoff present" — never
+            # the empty middle.
+            _record_rollback_receipt_unlocked(sid, record, attempt_id)
+            _record_continuation_handoff_unlocked(sid, record, attempt_id)
+            if not _write_registry_unlocked(
+                PENDING_GOAL_CONTINUATION_RECORDS,
+                context=f"consume+handoff sid={sid}",
+            ):
+                # Nothing became durable: undo BOTH halves so this process still
+                # describes the pre-consume state, and refuse the admission.
+                # The handoff key must be normalised the same way the writer
+                # normalises it, or an empty attempt_id leaves the token behind
+                # under a key this pop cannot reach.
+                _CONTINUATION_HANDOFF_TOKENS.pop(
+                    (sid, str(attempt_id or "") or "attempt"), None
+                )
+                _drop_rollback_receipt_unlocked(sid)
+                PENDING_GOAL_CONTINUATION.add(sid)
+                PENDING_GOAL_CONTINUATION_RECORDS[sid] = popped
+                logger.warning(
+                    "Refused to consume goal continuation for session %s: the "
+                    "durable record could not be removed atomically with its handoff",
+                    sid,
+                )
+                return CONSUME_COMMIT_FAILED
+            _RETIRED_LOG.append({"session_id": sid, "reason": "consumed", "at": time.time()})
+            return CONSUME_COMMITTED
+    except _RegistryLockUnavailable:
+        # A lock we cannot take must not fall back to an unlocked write.
+        # The continuation IS matched but the registry cannot be transacted:
+        # refuse the admission (CONSUME_COMMIT_FAILED) instead of letting
+        # the route launch it as an ordinary turn.
+        return CONSUME_COMMIT_FAILED
 
 
 def pop_goal_continuation_rollback_receipt(
@@ -1388,67 +1606,90 @@ def restore_pending_goal_continuation(session_id: str, record: dict) -> bool:
     sid = str(session_id or "").strip()
     if not sid or not isinstance(record, dict):
         return False
-    with _registry_transaction():
-        # #7862 re-gate (2026-10-27, CORE finding 1): reload the durable
-        # state under the cross-process lock before mutating — a peer may
-        # have armed a newer intent for this session since the receipt was
-        # taken, and the guard below must compare against the durable truth.
-        _merge_disk_state_unlocked()
-        current = PENDING_GOAL_CONTINUATION_RECORDS.get(sid)
-        if current is not None:
-            # A newer intent for this same session is already live: if it is
-            # a DIFFERENT generation than the receipt describes, the receipt
-            # is stale and must not clobber it. (A byte-identical re-arm of
-            # the very same continuation_id cannot happen mid-flight, since
-            # arming drops the session's receipts, so any live record here
-            # is by construction newer.)
-            return False
-        # Durable tombstone check: has this session's intent been explicitly
-        # retired since this receipt was minted? ``_TOMBSTONES`` is loaded from
-        # disk and survives both a restart and unlimited unrelated
-        # retirements, unlike the in-memory stamp that the 64-entry window
-        # dropped (#7862 round 6).
-        tombstone = _TOMBSTONES.get(sid)
-        legacy_stamp = _RETIRED_GENERATIONS.get(sid)
-        retired_at = max(
-            int(tombstone or 0),
-            int(legacy_stamp or 0),
-        )
-        if retired_at and int(record.get("generation") or 0) <= retired_at:
-            # The intent this receipt describes was explicitly retired
-            # (``/goal clear``, session delete, expiry) AFTER it was consumed
-            # but BEFORE this rollback landed. Restoring it now would silently
-            # undo the user's clear and queue another automatic goal
-            # continuation on a goal they stopped (#7862 round 5). The receipt
-            # is spent either way: it describes an intent that no longer exists.
-            _RETIRED_LOG.append(
-                {
-                    "session_id": sid,
-                    "reason": "rollback_refused_retired",
-                    "at": time.time(),
-                }
+    try:
+        with _registry_transaction():
+            # #7862 re-gate (2026-10-27, CORE finding 1): reload the durable
+            # state under the cross-process lock before mutating — a peer may
+            # have armed a newer intent for this session since the receipt was
+            # taken, and the guard below must compare against the durable truth.
+            _merge_disk_state_unlocked()
+            current = PENDING_GOAL_CONTINUATION_RECORDS.get(sid)
+            if current is not None:
+                # A newer intent for this same session is already live: if it is
+                # a DIFFERENT generation than the receipt describes, the receipt
+                # is stale and must not clobber it. (A byte-identical re-arm of
+                # the very same continuation_id cannot happen mid-flight, since
+                # arming drops the session's receipts, so any live record here
+                # is by construction newer.)
+                return False
+            # Durable tombstone check: has this session's intent been explicitly
+            # retired since this receipt was minted? ``_TOMBSTONES`` is loaded from
+            # disk and survives both a restart and unlimited unrelated
+            # retirements, unlike the in-memory stamp that the 64-entry window
+            # dropped (#7862 round 6).
+            tombstone = _TOMBSTONES.get(sid)
+            legacy_stamp = _RETIRED_GENERATIONS.get(sid)
+            retired_at = max(
+                int(tombstone or 0),
+                int(legacy_stamp or 0),
             )
-            return False
-        _next_generation_unlocked()
-        restored = dict(record)
-        PENDING_GOAL_CONTINUATION.add(sid)
-        PENDING_GOAL_CONTINUATION_RECORDS[sid] = restored
-        # #7862 round 9 (CORE, finding "successful retries leave claimable
-        # handoffs"): the intent is live again as a RECORD, so the handoff for
-        # the attempt that consumed it is spent. Keeping it let a successful
-        # retry followed by a restart restore the continuation a SECOND time:
-        # adoption re-armed the record from the stale handoff even though the
-        # retry had already consumed it. Cleared in the same snapshot as the
-        # restore, so the durable state never shows both.
-        _drop_continuation_handoffs_unlocked(sid)
-        _write_registry_unlocked(
-            PENDING_GOAL_CONTINUATION_RECORDS,
-            context=f"rollback-restore sid={sid}",
-        )
-        _RETIRED_LOG.append(
-            {"session_id": sid, "reason": "restored_rejected_start", "at": time.time()}
-        )
-        return True
+            if retired_at and int(record.get("generation") or 0) <= retired_at:
+                # The intent this receipt describes was explicitly retired
+                # (``/goal clear``, session delete, expiry) AFTER it was consumed
+                # but BEFORE this rollback landed. Restoring it now would silently
+                # undo the user's clear and queue another automatic goal
+                # continuation on a goal they stopped (#7862 round 5). The receipt
+                # is spent either way: it describes an intent that no longer exists.
+                _RETIRED_LOG.append(
+                    {
+                        "session_id": sid,
+                        "reason": "rollback_refused_retired",
+                        "at": time.time(),
+                    }
+                )
+                return False
+            _next_generation_unlocked()
+            restored = dict(record)
+            PENDING_GOAL_CONTINUATION.add(sid)
+            PENDING_GOAL_CONTINUATION_RECORDS[sid] = restored
+            # #7862 round 9 (CORE, finding "successful retries leave claimable
+            # handoffs"): the intent is live again as a RECORD, so the handoff for
+            # the attempt that consumed it is spent. Keeping it let a successful
+            # retry followed by a restart restore the continuation a SECOND time:
+            # adoption re-armed the record from the stale handoff even though the
+            # retry had already consumed it. Cleared in the same snapshot as the
+            # restore, so the durable state never shows both.
+
+            _drop_continuation_handoffs_unlocked(sid)
+            _restore_committed = _write_registry_unlocked(
+                PENDING_GOAL_CONTINUATION_RECORDS,
+                context=f"rollback-restore sid={sid}",
+            )
+            # #7862 re-gate round 15 (should-fix, warm-path ENOSPC): when the
+            # snapshot write fails, the record is live in memory but absent on
+            # disk. The next unrelated transaction's merge would otherwise drop
+            # it ("absent on disk => gone") and the warm retry would run as an
+            # ordinary turn; the session stays exempt from that drop until its
+            # record lands on disk again.
+            if _restore_committed:
+                _RESTORE_WRITE_FAILED_SESSIONS.discard(sid)
+            else:
+                _RESTORE_WRITE_FAILED_SESSIONS.add(sid)
+                logger.warning(
+                    "Goal continuation registry: rollback restored session %s in "
+                    "memory but its snapshot write failed; the record is exempt "
+                    "from the merge drop until it lands on disk",
+                    sid,
+                )
+            _RETIRED_LOG.append(
+                {"session_id": sid, "reason": "restored_rejected_start", "at": time.time()}
+            )
+            return True
+    except _RegistryLockUnavailable:
+        # A lock we cannot take must not fall back to an unlocked write:
+        # the rollback restore is refused and the retry stays unmatched
+        # until the registry can be transacted again.
+        return False
 
 
 # A turn-journal ``interrupted`` row written by the ROUTE itself when a start
@@ -1600,334 +1841,377 @@ def restore_goal_continuations() -> int:
     # process's restore (or any concurrent writer) cannot interleave with
     # its adopt/drop decisions. It does its own disk read below, so the
     # generic merge is deliberately NOT run here.
-    with _registry_transaction():
-        disk, disk_tombstones, disk_handoffs = _load_file_raw()
-        # SILENT finding 3: a session deleted while this process was down
-        # must not have its intent restored. The delete's retirement write
-        # can fail (ENOSPC) after the WebUI tombstone landed, and a cold
-        # restore would then recover the deleted intent — record and handoff
-        # alike. The tombstone is the durable delete marker
-        # (``SESSION_DIR/_deleted_webui_sessions.json``).
-        try:
-            from api.models import _load_webui_deleted_session_tombstone
+    try:
+        with _registry_transaction():
+            disk, disk_tombstones, disk_handoffs = _load_file_raw()
+            # SILENT finding 3: a session deleted while this process was down
+            # must not have its intent restored. The delete's retirement write
+            # can fail (ENOSPC) after the WebUI tombstone landed, and a cold
+            # restore would then recover the deleted intent — record and handoff
+            # alike. The tombstone is the durable delete marker
+            # (``SESSION_DIR/_deleted_webui_sessions.json``).
+            try:
+                from api.models import _load_webui_deleted_session_tombstone
 
-            _deleted_sessions = _load_webui_deleted_session_tombstone()
-        except Exception:
-            _deleted_sessions = frozenset()
-        # Baseline the generation counter ABOVE every generation on disk
-        # (records and tombstones alike). A cold process counts from 0, so a
-        # restored record carrying generation 41 would otherwise compare as
-        # OLDER than the fresh clear at generation 3 -- and the clear would be
-        # forgotten, resurrecting a goal the user had cancelled (#7862 round 6,
-        # scenario 4). Starting above the persisted maximum makes every later
-        # generation strictly newer than anything a previous process wrote.
-        highest = max(
-            [int(rec.get("generation") or 0) for rec in disk.values()]
-            + [int(gen or 0) for gen in disk_tombstones.values()]
-            + [int(gen or 0) for gen in (r.get("generation") or 0 for r in disk_handoffs.values())]
-            + [0]
-        )
-        global _GENERATION
-        if highest > _GENERATION:
-            _GENERATION = highest
-            logger.info(
-                "Goal continuation registry: generation baseline raised to %d from disk",
-                highest,
+                _deleted_sessions = _load_webui_deleted_session_tombstone()
+            except Exception:
+                _deleted_sessions = frozenset()
+            # Baseline the generation counter ABOVE every generation on disk
+            # (records and tombstones alike). A cold process counts from 0, so a
+            # restored record carrying generation 41 would otherwise compare as
+            # OLDER than the fresh clear at generation 3 -- and the clear would be
+            # forgotten, resurrecting a goal the user had cancelled (#7862 round 6,
+            # scenario 4). Starting above the persisted maximum makes every later
+            # generation strictly newer than anything a previous process wrote.
+            highest = max(
+                # #7862 re-gate round 15 (CORE finding 4): the FILE's own global
+                # generation joins the records/tombstones/handoffs. A cold
+                # process that never saw a peer's writes must still retire above
+                # the persisted counter.
+                [int(_LAST_FILE_GENERATION or 0)]
+                + [int(rec.get("generation") or 0) for rec in disk.values()]
+                + [int(gen or 0) for gen in disk_tombstones.values()]
+                + [int(gen or 0) for gen in (r.get("generation") or 0 for r in disk_handoffs.values())]
+                + [0]
             )
-        _TOMBSTONES.clear()
-        _TOMBSTONES.update(disk_tombstones)
-        _RETIRED_GENERATIONS.clear()
-        _RETIRED_GENERATIONS.update(disk_tombstones)
-        # #7862 re-gate CORE: records and handoffs the restore deliberately
-        # does NOT restore (already launched, retired while the process was
-        # down, or belonging to a deleted session). Counted so the closing
-        # snapshot knows the drop must be committed, not just applied in
-        # memory.
-        dropped = 0
-        restored = 0
-        for sid, record in disk.items():
-            if sid in _deleted_sessions:
-                # The session was deleted while this process was down: its
-                # intent must not come back. The record never enters memory,
-                # so the closing snapshot below drops it from disk as well.
+            global _GENERATION
+            if highest > _GENERATION:
+                _GENERATION = highest
                 logger.info(
-                    "Goal continuation registry: refusing to restore the "
-                    "record for deleted session %s",
-                    sid,
+                    "Goal continuation registry: generation baseline raised to %d from disk",
+                    highest,
                 )
-                dropped += 1
-                _RETIRED_LOG.append(
-                    {
-                        "session_id": sid,
-                        "reason": "record_restore_refused_deleted",
-                        "at": time.time(),
-                    }
-                )
-                continue
-            if sid in PENDING_GOAL_CONTINUATION or sid in PENDING_GOAL_CONTINUATION_RECORDS:
-                continue
-            generation = _next_generation_unlocked()
-            record = dict(record)
-            if not record.get("generation"):
-                # v1 upgrade: assign the current generation at restore time.
-                record["generation"] = generation
-            # CORE finding 4: the marker AND master's prompt/token mirror
-            # publish together under their shared lock, so the orphan sweep
-            # and the legacy resolver both see a complete pair.
-            PENDING_GOAL_CONTINUATION_RECORDS[sid] = record
-            _publish_continuation_mirror_unlocked(sid, record)
-            restored += 1
-        # #7862 round 7 (finding 2): adopt the durable handoffs. Each one is an
-        # in-flight chat start whose consume already spent the durable record;
-        # if the process died before the pending-start write, this is the ONLY
-        # evidence that the continuation was admitted. Re-arm it so the retry
-        # can still consume it instead of running as an ordinary turn.
-        adopted = 0
-        # #7862 re-gate CORE: the tokens converted into records during adoption,
-        # kept so a failed snapshot write can put them back. Empty when nothing
-        # was adopted, which is why it is initialised outside the loop.
-        adopted_tokens: dict[tuple[str, str], dict] = {}
-        for (sid, attempt), record in disk_handoffs.items():
-            if sid in _deleted_sessions:
-                # SILENT finding 3: the session was deleted while this
-                # process was down; its handoff is evidence for an intent
-                # that must not exist any more.
-                logger.info(
-                    "Goal continuation registry: refusing to adopt the "
-                    "handoff for deleted session %s (attempt %s)",
-                    sid,
-                    attempt,
-                )
-                _drop_continuation_handoffs_unlocked(sid)
-                dropped += 1
-                _RETIRED_LOG.append(
-                    {
-                        "session_id": sid,
-                        "reason": "handoff_adoption_refused_deleted",
-                        "at": time.time(),
-                    }
-                )
-                continue
-            if sid in PENDING_GOAL_CONTINUATION_RECORDS:
-                # The intent is already live as a record (a rollback restored
-                # it, or an earlier adoption did). Its handoff is spent; drop
-                # it rather than leaving a second claimable copy behind
-                # (#7862 round 9).
-                _drop_continuation_handoffs_unlocked(sid)
-                dropped += 1
-                continue
-            # #7862 re-gate round 3 (finding 5): a handoff carrying a STREAM
-            # id is only evidence that an admission RECORDED an identity — the
-            # route binds the stream id before ``thr.start()``. The reviewer's
-            # new crash window sits exactly between the two: a forced exit at
-            # that boundary restored 0 continuations although no worker ever
-            # ran, because recovery treated the allocated id as proof of
-            # execution. So the recorded stream is now RECONCILED against the
-            # durable run/turn state the WORKER writes, and only a stream that
-            # actually executed is treated as a spent admission:
-            #
-            # * the turn journal carries the route's ``submitted`` event plus
-            #   the worker's own lifecycle rows (``worker_started`` /
-            #   ``completed`` / ``interrupted``) for the stream;
-            # * the run journal carries the SSE rows the worker emits.
-            #
-            # Either one proves the worker reached execution. Neither present
-            # means the process died before ``thr.start()`` — the admission is
-            # unrecoverable-by-any-other-means, so the handoff stays
-            # reconcilable and is adopted below.
-            if record.get("_handoff_stream_id"):
-                _recorded_stream = str(record.get("_handoff_stream_id") or "")
-                if _stream_executed_durably(sid, _recorded_stream):
+            _TOMBSTONES.clear()
+            _TOMBSTONES.update(disk_tombstones)
+            _RETIRED_GENERATIONS.clear()
+            _RETIRED_GENERATIONS.update(disk_tombstones)
+            # #7862 re-gate CORE: records and handoffs the restore deliberately
+            # does NOT restore (already launched, retired while the process was
+            # down, or belonging to a deleted session). Counted so the closing
+            # snapshot knows the drop must be committed, not just applied in
+            # memory.
+            dropped = 0
+            restored = 0
+            for sid, record in disk.items():
+                if sid in _deleted_sessions:
+                    # The session was deleted while this process was down: its
+                    # intent must not come back. The record never enters memory,
+                    # so the closing snapshot below drops it from disk as well.
                     logger.info(
-                        "Goal continuation registry: dropping the handoff for "
-                        "session %s (attempt %s) — its turn executed under "
-                        "stream %s",
+                        "Goal continuation registry: refusing to restore the "
+                        "record for deleted session %s",
+                        sid,
+                    )
+                    dropped += 1
+                    _RETIRED_LOG.append(
+                        {
+                            "session_id": sid,
+                            "reason": "record_restore_refused_deleted",
+                            "at": time.time(),
+                        }
+                    )
+                    continue
+                if sid in PENDING_GOAL_CONTINUATION or sid in PENDING_GOAL_CONTINUATION_RECORDS:
+                    continue
+                generation = _next_generation_unlocked()
+                record = dict(record)
+                if not record.get("generation"):
+                    # v1 upgrade: assign the current generation at restore time.
+                    record["generation"] = generation
+                # CORE finding 4: the marker AND master's prompt/token mirror
+                # publish together under their shared lock, so the orphan sweep
+                # and the legacy resolver both see a complete pair.
+                PENDING_GOAL_CONTINUATION_RECORDS[sid] = record
+                _publish_continuation_mirror_unlocked(sid, record)
+                restored += 1
+            # #7862 round 7 (finding 2): adopt the durable handoffs. Each one is an
+            # in-flight chat start whose consume already spent the durable record;
+            # if the process died before the pending-start write, this is the ONLY
+            # evidence that the continuation was admitted. Re-arm it so the retry
+            # can still consume it instead of running as an ordinary turn.
+            adopted = 0
+            # #7862 re-gate CORE: the tokens converted into records during adoption,
+            # kept so a failed snapshot write can put them back. Empty when nothing
+            # was adopted, which is why it is initialised outside the loop.
+            adopted_tokens: dict[tuple[str, str], dict] = {}
+            for (sid, attempt), record in disk_handoffs.items():
+                if sid in _deleted_sessions:
+                    # SILENT finding 3: the session was deleted while this
+                    # process was down; its handoff is evidence for an intent
+                    # that must not exist any more.
+                    logger.info(
+                        "Goal continuation registry: refusing to adopt the "
+                        "handoff for deleted session %s (attempt %s)",
                         sid,
                         attempt,
-                        _recorded_stream,
                     )
                     _drop_continuation_handoffs_unlocked(sid)
                     dropped += 1
                     _RETIRED_LOG.append(
                         {
                             "session_id": sid,
-                            "reason": "handoff_admission_already_launched",
+                            "reason": "handoff_adoption_refused_deleted",
                             "at": time.time(),
                         }
                     )
                     continue
-                logger.warning(
-                    "Goal continuation registry: the handoff for session %s "
-                    "(attempt %s) recorded stream %s, but no durable run/turn "
-                    "evidence exists for it — the worker never launched, so the "
-                    "admission stays recoverable (#7862 re-gate round 3, "
-                    "finding 5)",
-                    sid,
-                    attempt,
-                    _recorded_stream,
+                if sid in PENDING_GOAL_CONTINUATION_RECORDS:
+                    # The intent is already live as a record (a rollback restored
+                    # it, or an earlier adoption did). Its handoff is spent; drop
+                    # it rather than leaving a second claimable copy behind
+                    # (#7862 round 9).
+                    _drop_continuation_handoffs_unlocked(sid)
+                    dropped += 1
+                    continue
+                # #7862 re-gate round 15 (CORE finding 2): a handoff whose
+                # liveness clock is FRESH belongs to a process that is still in
+                # its admission — the receipt reclaim refreshes the clock exactly
+                # while the attempt reports in. Adopting it here would let THIS
+                # process launch the same continuation the owner is launching:
+                # two goal workers for one intent. Exclusive ownership runs
+                # through the owner's launch (discharge) or rollback (restore);
+                # a cold process adopts a handoff only after proving the owner is
+                # gone — the clock older than the reclaim window, or no clock at
+                # all (the round-10 abandonment convention keeps the registry
+                # bounded). A skipped handoff is left on disk untouched.
+                _handoff_minted_at = 0.0
+                try:
+                    _handoff_minted_at = float(record.get("_handoff_minted_at") or 0.0)
+                except (TypeError, ValueError):
+                    _handoff_minted_at = 0.0
+                if _handoff_minted_at and (
+                    time.time() - _handoff_minted_at
+                ) <= _ROLLBACK_RECEIPT_TTL_SECONDS:
+                    logger.info(
+                        "Goal continuation registry: leaving the handoff for "
+                        "session %s (attempt %s) alone — its owning process is "
+                        "live (liveness clock %ds old)",
+                        sid,
+                        attempt,
+                        int(time.time() - _handoff_minted_at),
+                    )
+                    continue
+                # #7862 re-gate round 3 (finding 5): a handoff carrying a STREAM
+                # id is only evidence that an admission RECORDED an identity — the
+                # route binds the stream id before ``thr.start()``. The reviewer's
+                # new crash window sits exactly between the two: a forced exit at
+                # that boundary restored 0 continuations although no worker ever
+                # ran, because recovery treated the allocated id as proof of
+                # execution. So the recorded stream is now RECONCILED against the
+                # durable run/turn state the WORKER writes, and only a stream that
+                # actually executed is treated as a spent admission:
+                #
+                # * the turn journal carries the route's ``submitted`` event plus
+                #   the worker's own lifecycle rows (``worker_started`` /
+                #   ``completed`` / ``interrupted``) for the stream;
+                # * the run journal carries the SSE rows the worker emits.
+                #
+                # Either one proves the worker reached execution. Neither present
+                # means the process died before ``thr.start()`` — the admission is
+                # unrecoverable-by-any-other-means, so the handoff stays
+                # reconcilable and is adopted below.
+                if record.get("_handoff_stream_id"):
+                    _recorded_stream = str(record.get("_handoff_stream_id") or "")
+                    if _stream_executed_durably(sid, _recorded_stream):
+                        logger.info(
+                            "Goal continuation registry: dropping the handoff for "
+                            "session %s (attempt %s) — its turn executed under "
+                            "stream %s",
+                            sid,
+                            attempt,
+                            _recorded_stream,
+                        )
+                        _drop_continuation_handoffs_unlocked(sid)
+                        dropped += 1
+                        _RETIRED_LOG.append(
+                            {
+                                "session_id": sid,
+                                "reason": "handoff_admission_already_launched",
+                                "at": time.time(),
+                            }
+                        )
+                        continue
+                    logger.warning(
+                        "Goal continuation registry: the handoff for session %s "
+                        "(attempt %s) recorded stream %s, but no durable run/turn "
+                        "evidence exists for it — the worker never launched, so the "
+                        "admission stays recoverable (#7862 re-gate round 3, "
+                        "finding 5)",
+                        sid,
+                        attempt,
+                        _recorded_stream,
+                    )
+                if (sid, attempt) in _CONTINUATION_HANDOFF_TOKENS:
+                    # This process already owns the admission (a rollback restored
+                    # the record and re-armed the handoff, or an earlier pass did).
+                    # The in-memory token is authoritative and nothing is dropped
+                    # here, so this does NOT count towards the closing snapshot.
+                    continue
+                # #7862 round 9 (CORE, finding "a cleared goal comes back after
+                # the next restart"): a handoff is only evidence of an interrupted
+                # start while the intent it describes still exists. If the session
+                # was retired (``/goal clear``, session delete, expiry) after this
+                # handoff was written, adopting it resurrects a goal the user
+                # explicitly stopped -- the record's own generation cannot catch
+                # this, because a handoff-restored record derives its generation
+                # at adoption time. Compare against the handoff's ORIGINAL
+                # generation, which the consume stamped when it spent the intent.
+                handoff_generation = int(record.get("generation") or 0)
+                tombstone = int(
+                    max(
+                        int(_TOMBSTONES.get(sid) or 0),
+                        int(_RETIRED_GENERATIONS.get(sid) or 0),
+                    )
                 )
-            if (sid, attempt) in _CONTINUATION_HANDOFF_TOKENS:
-                # This process already owns the admission (a rollback restored
-                # the record and re-armed the handoff, or an earlier pass did).
-                # The in-memory token is authoritative and nothing is dropped
-                # here, so this does NOT count towards the closing snapshot.
-                continue
-            # #7862 round 9 (CORE, finding "a cleared goal comes back after
-            # the next restart"): a handoff is only evidence of an interrupted
-            # start while the intent it describes still exists. If the session
-            # was retired (``/goal clear``, session delete, expiry) after this
-            # handoff was written, adopting it resurrects a goal the user
-            # explicitly stopped -- the record's own generation cannot catch
-            # this, because a handoff-restored record derives its generation
-            # at adoption time. Compare against the handoff's ORIGINAL
-            # generation, which the consume stamped when it spent the intent.
-            handoff_generation = int(record.get("generation") or 0)
-            tombstone = int(
-                max(
-                    int(_TOMBSTONES.get(sid) or 0),
-                    int(_RETIRED_GENERATIONS.get(sid) or 0),
-                )
-            )
-            if tombstone and handoff_generation and handoff_generation <= tombstone:
+                if tombstone and handoff_generation and handoff_generation <= tombstone:
+                    logger.info(
+                        "Goal continuation registry: refusing to adopt handoff for "
+                        "session %s (generation %d <= retired generation %d)",
+                        sid,
+                        handoff_generation,
+                        tombstone,
+                    )
+                    _drop_continuation_handoffs_unlocked(sid)
+                    dropped += 1
+                    _RETIRED_LOG.append(
+                        {
+                            "session_id": sid,
+                            "reason": "handoff_adoption_refused_retired",
+                            "at": time.time(),
+                        }
+                    )
+                    continue
+                # The intent itself is gone from disk by construction (the consume
+                # removed it), so restore the record for the matching retry: this
+                # is what makes the handoff reconcilable rather than merely
+                # informative.
+                #
+                # #7862 re-gate CORE: this adoption is a CONVERSION, not a copy. The
+                # handoff is the durable evidence that this attempt spent the intent;
+                # the restored record is the durable state that the intent is claimable
+                # again. Leaving the handoff behind made both true at once, and since
+                # a successful retry discharges only ITS OWN attempt's handoff, the
+                # next cold restore re-adopted the original one and resurrected a
+                # continuation that had already been spent.
+                #
+                # Popping the tokens BEFORE `_write_registry_unlocked` is what makes the
+                # swap atomic: that single `os.replace` writes the restored record and
+                # the emptied handoff table together, so a crash in between leaves the
+                # pre-adoption state (handoff still there, no record) — which is
+                # re-adoptable — rather than the double-spendable state. If the write
+                # fails we put the tokens back and do not report an adoption.
+                #
+                # Every token for this sid is collected, not just the current
+                # (sid, attempt): a retry may have minted its own handoff for a
+                # different attempt of the same session, and it is spent by exactly
+                # the same reasoning. (An earlier revision popped only the current key
+                # here and then collected the rest below — which silently dropped the
+                # token this iteration was adopting and left the write-failure path
+                # with nothing to restore.)
+                #
+                # A token recovered from DISK has no in-memory entry to collect, so the
+                # rebuilt dict must carry the liveness clock the disk record provides:
+                # dropping ``_handoff_minted_at`` would make the restored handoff read
+                # as abandoned and get its receipt swept on the next pass.
+                adopted_keys = [k for k in _CONTINUATION_HANDOFF_TOKENS if k[0] == sid]
+                adopted_tokens = {
+                    k: dict(_CONTINUATION_HANDOFF_TOKENS[k]) for k in adopted_keys
+                }
+                adopted_tokens[(sid, attempt)] = dict(record)
+                for k in adopted_keys:
+                    _CONTINUATION_HANDOFF_TOKENS.pop(k, None)
+                # #7862 re-gate CORE: the DURABLE handoff is consumed by this adoption,
+                # but the IN-MEMORY token must survive. Two different consumers need it:
+                #
+                # * ``_receipt_attempt_is_live`` anchors a rollback receipt to its
+                #   handoff's clock. Dropping the token makes a just-adopted attempt read
+                #   as abandoned, so the next sweep drops the receipt and the retry runs
+                #   as an ordinary turn — ``test_the_handoff_clock_survives_a_restart``
+                #   pins that, and it is the round-10 fix this branch already carries.
+                # * the record restored below is what the retry consumes.
+                #
+                # What must NOT survive is the durable copy: a handoff still on disk is
+                # re-adopted by the next cold restore, which resurrects a continuation
+                # the retry already spent. So the tokens are restored in memory and
+                # marked as converted, and ``_write_registry_unlocked`` omits marked
+                # sessions from the payload — one ``os.replace`` publishes the record
+                # and the emptied handoff table together, so a crash in between leaves
+                # the pre-adoption state (handoff, no record — re-adoptable) rather than
+                # the double-spendable state (both).
+                for key, value in adopted_tokens.items():
+                    value["_handoff_adopted_into_record"] = True
+                    _CONTINUATION_HANDOFF_TOKENS[key] = value
+                _ADOPTED_HANDOFF_SESSIONS.add(sid)
+                # CORE finding 4: the adopted record publishes master's
+                # prompt/token mirror together with the marker, exactly like a
+                # plain restored record — otherwise the resume continue loses
+                # its identity admission after the orphan sweep.
+                # #7862 re-gate round 3 (finding 5): a handoff that carried a
+                # stream id but never executed (the crash window before
+                # ``thr.start()``) still carries that id here. The restored
+                # record must NOT: the id describes an attempt that did not run,
+                # so leaving it on the record would let the next snapshot treat
+                # the adoption as a spent admission and drop the continuation
+                # again.
+                _restored_record = dict(record)
+                _restored_record.pop("_handoff_stream_id", None)
+                _publish_continuation_mirror_unlocked(sid, _restored_record)
+                PENDING_GOAL_CONTINUATION_RECORDS[sid] = _restored_record
+                adopted += 1
+                restored += 1
+            if adopted:
                 logger.info(
-                    "Goal continuation registry: refusing to adopt handoff for "
-                    "session %s (generation %d <= retired generation %d)",
-                    sid,
-                    handoff_generation,
-                    tombstone,
+                    "Goal continuation registry: adopted %d durable continuation handoff(s) "
+                    "from an interrupted start",
+                    adopted,
                 )
-                _drop_continuation_handoffs_unlocked(sid)
-                dropped += 1
-                _RETIRED_LOG.append(
-                    {
-                        "session_id": sid,
-                        "reason": "handoff_adoption_refused_retired",
-                        "at": time.time(),
-                    }
+            # #7862 re-gate CORE (Oct 10): a REFUSED or already-launched handoff is
+            # dropped in memory during the loop above, but the drop only becomes
+            # real when the snapshot commits. Without this write the spent handoff
+            # stays on disk, and every later cold restore re-reads it — which for
+            # the already-launched case is exactly the reviewer's resurrection
+            # (cold restore recovers 1 already-admitted continuation).
+            if dropped:
+                logger.info(
+                    "Goal continuation registry: dropped %d non-adoptable durable "
+                    "continuation handoff(s) (already launched or retired)",
+                    dropped,
                 )
-                continue
-            # The intent itself is gone from disk by construction (the consume
-            # removed it), so restore the record for the matching retry: this
-            # is what makes the handoff reconcilable rather than merely
-            # informative.
-            #
-            # #7862 re-gate CORE: this adoption is a CONVERSION, not a copy. The
-            # handoff is the durable evidence that this attempt spent the intent;
-            # the restored record is the durable state that the intent is claimable
-            # again. Leaving the handoff behind made both true at once, and since
-            # a successful retry discharges only ITS OWN attempt's handoff, the
-            # next cold restore re-adopted the original one and resurrected a
-            # continuation that had already been spent.
-            #
-            # Popping the tokens BEFORE `_write_registry_unlocked` is what makes the
-            # swap atomic: that single `os.replace` writes the restored record and
-            # the emptied handoff table together, so a crash in between leaves the
-            # pre-adoption state (handoff still there, no record) — which is
-            # re-adoptable — rather than the double-spendable state. If the write
-            # fails we put the tokens back and do not report an adoption.
-            #
-            # Every token for this sid is collected, not just the current
-            # (sid, attempt): a retry may have minted its own handoff for a
-            # different attempt of the same session, and it is spent by exactly
-            # the same reasoning. (An earlier revision popped only the current key
-            # here and then collected the rest below — which silently dropped the
-            # token this iteration was adopting and left the write-failure path
-            # with nothing to restore.)
-            #
-            # A token recovered from DISK has no in-memory entry to collect, so the
-            # rebuilt dict must carry the liveness clock the disk record provides:
-            # dropping ``_handoff_minted_at`` would make the restored handoff read
-            # as abandoned and get its receipt swept on the next pass.
-            adopted_keys = [k for k in _CONTINUATION_HANDOFF_TOKENS if k[0] == sid]
-            adopted_tokens = {
-                k: dict(_CONTINUATION_HANDOFF_TOKENS[k]) for k in adopted_keys
-            }
-            adopted_tokens[(sid, attempt)] = dict(record)
-            for k in adopted_keys:
-                _CONTINUATION_HANDOFF_TOKENS.pop(k, None)
-            # #7862 re-gate CORE: the DURABLE handoff is consumed by this adoption,
-            # but the IN-MEMORY token must survive. Two different consumers need it:
-            #
-            # * ``_receipt_attempt_is_live`` anchors a rollback receipt to its
-            #   handoff's clock. Dropping the token makes a just-adopted attempt read
-            #   as abandoned, so the next sweep drops the receipt and the retry runs
-            #   as an ordinary turn — ``test_the_handoff_clock_survives_a_restart``
-            #   pins that, and it is the round-10 fix this branch already carries.
-            # * the record restored below is what the retry consumes.
-            #
-            # What must NOT survive is the durable copy: a handoff still on disk is
-            # re-adopted by the next cold restore, which resurrects a continuation
-            # the retry already spent. So the tokens are restored in memory and
-            # marked as converted, and ``_write_registry_unlocked`` omits marked
-            # sessions from the payload — one ``os.replace`` publishes the record
-            # and the emptied handoff table together, so a crash in between leaves
-            # the pre-adoption state (handoff, no record — re-adoptable) rather than
-            # the double-spendable state (both).
-            for key, value in adopted_tokens.items():
-                value["_handoff_adopted_into_record"] = True
-                _CONTINUATION_HANDOFF_TOKENS[key] = value
-            _ADOPTED_HANDOFF_SESSIONS.add(sid)
-            # CORE finding 4: the adopted record publishes master's
-            # prompt/token mirror together with the marker, exactly like a
-            # plain restored record — otherwise the resume continue loses
-            # its identity admission after the orphan sweep.
-            # #7862 re-gate round 3 (finding 5): a handoff that carried a
-            # stream id but never executed (the crash window before
-            # ``thr.start()``) still carries that id here. The restored
-            # record must NOT: the id describes an attempt that did not run,
-            # so leaving it on the record would let the next snapshot treat
-            # the adoption as a spent admission and drop the continuation
-            # again.
-            _restored_record = dict(record)
-            _restored_record.pop("_handoff_stream_id", None)
-            _publish_continuation_mirror_unlocked(sid, _restored_record)
-            PENDING_GOAL_CONTINUATION_RECORDS[sid] = _restored_record
-            adopted += 1
-            restored += 1
-        if adopted:
-            logger.info(
-                "Goal continuation registry: adopted %d durable continuation handoff(s) "
-                "from an interrupted start",
-                adopted,
-            )
-        # #7862 re-gate CORE (Oct 10): a REFUSED or already-launched handoff is
-        # dropped in memory during the loop above, but the drop only becomes
-        # real when the snapshot commits. Without this write the spent handoff
-        # stays on disk, and every later cold restore re-reads it — which for
-        # the already-launched case is exactly the reviewer's resurrection
-        # (cold restore recovers 1 already-admitted continuation).
-        if dropped:
-            logger.info(
-                "Goal continuation registry: dropped %d non-adoptable durable "
-                "continuation handoff(s) (already launched or retired)",
-                dropped,
-            )
-        if restored or dropped:
-            if _write_registry_unlocked(
-                PENDING_GOAL_CONTINUATION_RECORDS,
-                context=f"restore count={restored} dropped={dropped}",
-            ):
-                return restored
-            # The snapshot write failed, so the durable state still describes an
-            # interrupted start with NO live record. Undo the conversion in memory
-            # too: the tokens must go back to being ordinary handoffs (no marker,
-            # no session in the converted set), otherwise this process would
-            # withhold the crash-recovery evidence from every later snapshot and
-            # the adoption would be lost for good. The records stay in memory —
-            # dropping them would strand a continuation the UI still shows as
-            # active.
-            for key, value in adopted_tokens.items():
-                value.pop("_handoff_adopted_into_record", None)
-                _CONTINUATION_HANDOFF_TOKENS[key] = value
-            for converted_sid in {k[0] for k in adopted_tokens}:
-                _ADOPTED_HANDOFF_SESSIONS.discard(converted_sid)
-            logger.warning(
-                "Goal continuation registry: %d adoption(s) could not be made "
-                "durable; the handoff tokens stay claimable until reconciled",
-                adopted,
-            )
-            return 0
+            if restored or dropped:
+                if _write_registry_unlocked(
+                    PENDING_GOAL_CONTINUATION_RECORDS,
+                    context=f"restore count={restored} dropped={dropped}",
+                ):
+                    return restored
+                # The snapshot write failed, so the durable state still describes an
+                # interrupted start with NO live record. Undo the conversion in memory
+                # too: the tokens must go back to being ordinary handoffs (no marker,
+                # no session in the converted set), otherwise this process would
+                # withhold the crash-recovery evidence from every later snapshot and
+                # the adoption would be lost for good. The records stay in memory —
+                # dropping them would strand a continuation the UI still shows as
+                # active.
+                for key, value in adopted_tokens.items():
+                    value.pop("_handoff_adopted_into_record", None)
+                    _CONTINUATION_HANDOFF_TOKENS[key] = value
+                for converted_sid in {k[0] for k in adopted_tokens}:
+                    _ADOPTED_HANDOFF_SESSIONS.discard(converted_sid)
+                logger.warning(
+                    "Goal continuation registry: %d adoption(s) could not be made "
+                    "durable; the handoff tokens stay claimable until reconciled",
+                    adopted,
+                )
+                return 0
         return restored
+    except _RegistryLockUnavailable:
+        # A lock we cannot take must not fall back to an unlocked write;
+        # the startup restore is skipped and the durable state stays
+        # untouched for the next attempt.
+        logger.error(
+            "Goal continuation registry: the startup restore was skipped "
+            "because the cross-process lock is unavailable"
+        )
+        return 0
 
 
 def sweep_expired_goal_continuations(
@@ -1961,6 +2245,10 @@ def durability_diagnostics() -> dict:
             "generation": _GENERATION,
             "last_load_error": _LAST_LOAD_ERROR,
             "last_write_error": _LAST_WRITE_ERROR,
+            # #7862 re-gate round 15 (BRICK): a non-None value means the
+            # cross-process lock refused a continuation mutation (no unlocked
+            # fallback was taken).
+            "last_lock_error": _LAST_LOCK_ERROR,
             "registry_exists": _PENDING_GOAL_FILE.exists(),
             "live_records": len(PENDING_GOAL_CONTINUATION_RECORDS),
             "pending_rollback_receipts": len(_ROLLBACK_RECEIPTS),

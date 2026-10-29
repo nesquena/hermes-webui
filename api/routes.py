@@ -3427,6 +3427,7 @@ from api import config as api_config
 from api.goal_continuation_store import (
     CONSUME_COMMITTED,
     CONSUME_COMMIT_FAILED,
+    CONSUME_NOT_MATCHING,
     _CONTINUE_CONTROL,
     consume_pending_goal_continuation,
     discard_goal_continuation_handoff,
@@ -3438,6 +3439,7 @@ from api.goal_continuation_store import (
     record_goal_continuation_stream,
     restore_pending_goal_continuation,
     retire_pending_goal_continuation,
+    session_has_registry_state,
 )
 
 from api.helpers import (
@@ -3480,6 +3482,20 @@ class _GoalContinuationCommitFailed(Exception):
     def __init__(self, session_id: str = ""):
         super().__init__(f"goal continuation commit failed for {session_id!r}")
         self.session_id = session_id
+
+
+class _GoalContinuationTokenUnmatched(_GoalContinuationCommitFailed):
+    """A request carried a continuation token that matches NO live intent.
+
+    #7862 re-gate round 15 (CORE finding 2): when a browser dispatch still
+    carries a ``goal_continue`` token but the intent is gone — consumed by
+    another process's admission, or already spent — launching it as an
+    ordinary turn is how a second ``goal_related=False`` worker appeared for
+    a continuation another process was already running. Refuse the start so
+    the caller can see the continuation is no longer pending; the same
+    rollback/compensation machinery as ``_GoalContinuationCommitFailed``
+    applies (nothing was consumed here, so the restore is a no-op).
+    """
 
 
 # ── Non-streaming custom-provider connection authority ───────────────────────
@@ -19234,10 +19250,17 @@ def handle_post(handler, parsed) -> bool:
             # e.g. ENOSPC) leaves the continuation prompt claimable on disk and
             # a cold restore recovers the deleted intent, so the failure is
             # surfaced like every other non-durable delete step.
+            # #7862 re-gate round 15 (should-fix): a session with NO record,
+            # handoff or receipt must not write an fsynced registry snapshot
+            # with a tombstone — the no-goal delete returns early and never
+            # touches the registry.
             try:
-                continuation_retired = retire_pending_goal_continuation(
-                    sid, reason="deleted"
-                )
+                if session_has_registry_state(sid):
+                    continuation_retired = retire_pending_goal_continuation(
+                        sid, reason="deleted"
+                    )
+                else:
+                    continuation_retired = True
             except Exception:
                 continuation_retired = False
                 logger.debug("Failed to retire pending goal continuation for deleted session %s", sid)
@@ -27984,7 +28007,23 @@ def _start_chat_stream_for_session(
         # session's pending id), so its request still carries a token here.
         # A server-initiated turn (``start_session_turn``) never carries one
         # and therefore never swallows a browser continuation by text.
-        if not goal_related and goal_continuation_id and s.session_id in PENDING_GOAL_CONTINUATION:
+        # #7862 re-gate round 15 (CORE finding 2): the marker is the ONLY
+        # proof this token's intent is still claimable. When a request
+        # carries a non-empty continuation token but the session has NO
+        # pending marker, the intent was already consumed — by this very
+        # process's earlier dispatch, or by another process's admission
+        # (the two-worker replay). Launching it as an ordinary turn is the
+        # exact misclassification that produced the second
+        # ``goal_related=False`` worker, so REFUSE instead.
+        if not goal_related and goal_continuation_id:
+            if s.session_id not in PENDING_GOAL_CONTINUATION:
+                logger.warning(
+                    "Refusing chat start for session %s: the request carried "
+                    "a continuation token but no pending intent exists "
+                    "(consumed elsewhere or already spent)",
+                    s.session_id,
+                )
+                raise _GoalContinuationTokenUnmatched(session_id=s.session_id)
             _explicit_continue = False
             _goal_is_active = False
             if normalize_continuation_text(msg) == _CONTINUE_CONTROL:
@@ -28059,6 +28098,22 @@ def _start_chat_stream_for_session(
                         _current_goal_continuation_attempt_id(),
                     )
                     raise _GoalContinuationCommitFailed(session_id=s.session_id)
+                elif _consume_outcome == CONSUME_NOT_MATCHING:
+                    # #7862 re-gate round 15 (CORE finding 2): the session
+                    # HAS a pending marker, but THIS token does not match its
+                    # live intent — the record was consumed by another
+                    # process's admission (or a newer generation replaced
+                    # it). The token claims continuation identity, so this is
+                    # not an ordinary turn: refusing prevents the duplicate
+                    # ``goal_related=False`` worker the reviewers replayed.
+                    logger.warning(
+                        "Refusing chat start for session %s: the request "
+                        "carried a continuation token that matches no live "
+                        "intent (attempt %s)",
+                        s.session_id,
+                        _current_goal_continuation_attempt_id(),
+                    )
+                    raise _GoalContinuationTokenUnmatched(session_id=s.session_id)
             except _GoalContinuationCommitFailed:
                 raise
             except Exception:
