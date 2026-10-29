@@ -2405,12 +2405,17 @@ function _openImgLightbox(imgEl) {
   let allImages = [];
   let startIndex = 0;
   if(!imgEl.closest('.attach-tray')){
-    let container = imgEl.closest('.msg-row, .assistant-turn-blocks, .assistant-turn, .user-turn');
+    // A tool-card image preview (vision_analyze) opens on its own and never
+    // joins the message's carousel: it shows what a tool read, not an image
+    // of the reply, and a failed preview is hidden but still in the DOM.
+    const toolPreview = imgEl.closest('.tool-card-image-preview');
+    let container = toolPreview || imgEl.closest('.msg-row, .assistant-turn-blocks, .assistant-turn, .user-turn');
     if(!container) container = imgEl.parentElement;
     if(container){
-      const siblings = container.querySelectorAll('.msg-media-img');
+      const siblings = Array.from(container.querySelectorAll('.msg-media-img'))
+        .filter(image => image.closest('.tool-card-image-preview') === toolPreview);
       if(siblings.length>1){
-        allImages = Array.from(siblings);
+        allImages = siblings;
         startIndex = allImages.indexOf(imgEl);
         if(startIndex===-1) startIndex=0;
       }
@@ -23544,9 +23549,14 @@ function _toolCardPreviewText(tc, displaySnippet){
   return 'Completed';
 }
 // vision_analyze names the analyzed picture in args.image_url; its card previews
-// that image in the expanded detail. Only Hermes' own tool qualifies: the bare
-// name and the mcp__hermes__ alias the Claude SDK bridge exposes. A same-named
-// tool from another MCP server is not trusted to carry an image reference.
+// that image in the expanded detail. Two names qualify: the bare tool, and the
+// mcp__hermes__ form a provider uses when it serves Hermes' tools from an MCP
+// server named "hermes" (the claude-subscription-directsdk provider plugin
+// does). That second name is a naming match, not proof of origin: the Agent
+// names any configured MCP server's tools mcp__<server>__<tool>. What makes
+// accepting it safe is that every ref, whatever the name, goes through the same
+// gating below (/api/media roots, CSP img-src, data: image check). Other
+// servers' vision_analyze tools do not get a preview.
 function _isVisionAnalyzeTool(tc){
   const name=String(tc&&tc.name||'');
   return name==='vision_analyze'||name==='mcp__hermes__vision_analyze';

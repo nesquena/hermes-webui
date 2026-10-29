@@ -9,9 +9,10 @@ The card now shows the image inside the expanded detail (DESIGN.md: arguments
 and result snippets stay behind expansion), rendered by the same
 `_inlineMediaHtmlForRef` helper the MEDIA: pipeline uses, so local files go
 through `/api/media` with the session id and remote URLs keep the CSP
-img-src placeholder policy. Only Hermes' own tool names qualify: the bare
-`vision_analyze` and the `mcp__hermes__vision_analyze` alias the Claude SDK
-bridge exposes; a same-named tool from another MCP server does not.
+img-src placeholder policy. Two names qualify: the bare `vision_analyze` and
+`mcp__hermes__vision_analyze`, the name a provider gives it when it serves
+Hermes' tools from an MCP server called `hermes`; a same-named tool from any
+other MCP server does not.
 
 The image reference must also survive persistence: `image_url` was capped to
 the 120-char incidental limit by `_truncate_tool_args` / `_tool_args_snapshot`
@@ -19,7 +20,10 @@ the 120-char incidental limit by `_truncate_tool_args` / `_tool_args_snapshot`
 paths and broke the preview after a reload. A capped ref (trailing `...`) is
 never rendered.
 
-These tests drive the real functions extracted from static/ui.js in node.
+The render tests drive the real functions extracted from static/ui.js in node.
+The browser tests load the real page from the isolated test server. They check
+that a collapsed card fetches nothing, and that tool previews stay out of the
+image carousel of the message.
 """
 from __future__ import annotations
 
@@ -334,3 +338,322 @@ def test_frontend_snapshot_keeps_long_image_url(tmp_path):
     )
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout)["image_url"] == LONG_PNG
+
+
+# ---------- browser: fetch timing and lightbox isolation ----------
+#
+# The collapsed detail is `max-height:0; overflow:hidden`, not display:none, so
+# `loading="lazy"` alone did not defer the preview: a collapsed card still
+# fetched the full image, and a reloaded session fetched every screenshot it
+# ever analyzed. Separately, a failed (hidden) preview kept its .msg-media-img,
+# which _openImgLightbox collected with the message's own images, so the
+# carousel counted it and Previous landed on a broken image. These drive the
+# real page against the isolated test server.
+
+_BROWSER_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
+_FINAL = "Vision preview browser proof final answer."
+_VISION_ROW = '.tool-card-row[data-tool-name="vision_analyze"]'
+
+
+def _png(width: int, height: int, rgb: tuple[int, int, int]) -> bytes:
+    """A solid-colour RGB PNG, built without Pillow."""
+    import struct
+    import zlib
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+
+    raw = (b"\x00" + bytes(rgb) * width) * height
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+
+
+@pytest.fixture(scope="module")
+def media_dir():
+    from tests._pytest_port import TEST_STATE_DIR
+
+    # The test server runs with HERMES_HOME=TEST_STATE_DIR, an /api/media root.
+    root = Path(TEST_STATE_DIR) / "vision-preview-media"
+    root.mkdir(parents=True, exist_ok=True)
+    colours = {
+        "compact.png": (200, 40, 40),
+        "transparent.png": (40, 160, 60),
+        "ok.png": (40, 60, 200),
+        "report-a.png": (230, 180, 30),
+        "report-b.png": (120, 40, 160),
+    }
+    for name, rgb in colours.items():
+        (root / name).write_bytes(_png(160, 90, rgb))
+    yield root
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def _vision_messages(image_urls: list[str], final: str = _FINAL) -> list[dict]:
+    calls, results = [], []
+    for i, url in enumerate(image_urls):
+        call_id = f"vision-preview-call-{i}"
+        calls.append({
+            "id": call_id,
+            "type": "function",
+            "function": {
+                "name": "vision_analyze",
+                "arguments": json.dumps({"image_url": url, "question": "What does it show?"}),
+            },
+        })
+        results.append({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": json.dumps({"success": True, "analysis": "A settings dialog."}),
+        })
+    return [
+        {"role": "user", "content": "Check the screenshots."},
+        {"role": "assistant", "content": None, "tool_calls": calls},
+        *results,
+        {"role": "assistant", "content": final},
+    ]
+
+
+_IMPORT_AND_LOAD = r"""
+async ({title, messages, finalText}) => {
+  const r = await fetch('/api/session/import', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({title, messages}),
+  });
+  const d = await r.json();
+  if (!r.ok || !d.session || !d.session.session_id) {
+    throw new Error('session import failed: ' + JSON.stringify(d));
+  }
+  await loadSession(d.session.session_id);
+  const deadline = Date.now() + 10000;
+  while (!((document.querySelector('#msgInner') || {}).innerText || '').includes(finalText)) {
+    if (Date.now() > deadline) throw new Error('session never rendered its final text');
+    await new Promise(res => setTimeout(res, 50));
+  }
+  return d.session.session_id;
+}
+"""
+
+# Give lazy-loading, deferred materialization and idle work a chance to run,
+# so "nothing was fetched" means nothing, not "not yet".
+_SETTLE = r"""
+async () => {
+  await new Promise(res => requestAnimationFrame(() => requestAnimationFrame(res)));
+  if (typeof requestIdleCallback === 'function') {
+    await new Promise(res => requestIdleCallback(res, {timeout: 1000}));
+  }
+  await new Promise(res => setTimeout(res, 600));
+}
+"""
+
+_SET_ACTIVITY_MODE = r"""
+async (mode) => {
+  const r = await fetch('/api/settings', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({chat_activity_display_mode: mode}),
+  });
+  if (!r.ok) throw new Error('settings update failed: ' + r.status);
+}
+"""
+
+_GET_ACTIVITY_MODE = (
+    "async () => (await (await fetch('/api/settings')).json()).chat_activity_display_mode"
+)
+
+# Opens the settled worklog, then any nested tool group ("Read 2 files").
+_EXPAND_WORKLOGS = r"""
+async () => {
+  const heads = '.tool-worklog-summary,.tool-call-group-summary,.tool-worklog-tool-group-head';
+  for (let pass = 0; pass < 3; pass++) {
+    const closed = Array.from(document.querySelectorAll(heads))
+      .filter(b => b.getAttribute('aria-expanded') === 'false');
+    if (!closed.length) return;
+    closed.forEach(b => b.click());
+    await new Promise(res => requestAnimationFrame(() => requestAnimationFrame(res)));
+  }
+}
+"""
+
+# Live Transparent Stream rows (and any path that does not defer) carry a
+# built detail while collapsed; materialize a settled row the way the app does
+# to reproduce that state without opening it.
+_MATERIALIZE_TRANSPARENT_ROW = r"""
+(selector) => {
+  const row = document.querySelector(selector);
+  const transparentRow = row && row.closest('.transparent-event-row');
+  if (!transparentRow) throw new Error('no transparent vision row');
+  if (transparentRow.getAttribute('data-transparent-detail-deferred') === '1') {
+    _materializeTransparentToolDetail(transparentRow);
+  }
+  const card = transparentRow.querySelector('.tool-card');
+  return {
+    open: Boolean(card && card.classList.contains('open')),
+    previewInDom: Boolean(transparentRow.querySelector('.tool-card-image-preview img')),
+  };
+}
+"""
+
+_PREVIEW_LOADED = r"""
+(name) => {
+  const img = Array.from(document.querySelectorAll('.tool-card-image-preview img'))
+    .find(i => (i.getAttribute('src') || '').includes(name));
+  return Boolean(img && img.complete && img.naturalWidth > 0);
+}
+"""
+
+
+class _Browser:
+    """One headless Chromium page on the test server, with /api/media logging."""
+
+    def __init__(self, pw_module):
+        from tests._pytest_port import BASE
+
+        self._cm = pw_module.sync_playwright()
+        playwright = self._cm.__enter__()
+        self.browser = playwright.chromium.launch(headless=True, args=_BROWSER_ARGS)
+        context = self.browser.new_context(base_url=BASE, viewport={"width": 1280, "height": 900})
+        self.page = context.new_page()
+        self.errors: list[str] = []
+        self.media: list[str] = []
+        self.page.on("pageerror", lambda exc: self.errors.append(str(exc)))
+        self.page.on(
+            "request",
+            lambda req: self.media.append(req.url) if "/api/media" in req.url else None,
+        )
+        self.boot()
+
+    def boot(self) -> None:
+        self.page.goto("/", wait_until="domcontentloaded")
+        self.page.wait_for_function(
+            "() => typeof S !== 'undefined' && S._bootReady === true", timeout=15000
+        )
+        self.page.wait_for_function("() => typeof loadSession === 'function'", timeout=15000)
+        self.dismiss_onboarding()
+
+    def dismiss_onboarding(self) -> None:
+        # The shared test server can present first-run onboarding; skip it
+        # through the real UI so it cannot intercept the clicks below.
+        overlay = self.page.locator("#onboardingOverlay")
+        if overlay.is_visible():
+            self.page.locator("#onboardingSkipBtn").click()
+            overlay.wait_for(state="hidden", timeout=15000)
+
+    def load(self, title: str, messages: list[dict]) -> str:
+        sid = self.page.evaluate(
+            _IMPORT_AND_LOAD, {"title": title, "messages": messages, "finalText": _FINAL}
+        )
+        self.page.evaluate(_SETTLE)
+        return sid
+
+    def fetched(self, name: str) -> list[str]:
+        return [url for url in self.media if name in url]
+
+    def open_vision_card(self, index: int = 0) -> None:
+        self.dismiss_onboarding()
+        self.page.locator(f"{_VISION_ROW} .tool-card-header").nth(index).click()
+
+    def close(self) -> None:
+        self.browser.close()
+        self._cm.__exit__(None, None, None)
+
+
+@pytest.fixture
+def browser():
+    pw = pytest.importorskip("playwright.sync_api")
+    session = _Browser(pw)
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+def test_compact_worklog_preview_fetches_nothing_until_the_card_opens(browser, media_dir):
+    page = browser.page
+    assert page.evaluate(_GET_ACTIVITY_MODE) == "compact_worklog"
+    browser.load("vision preview compact", _vision_messages([str(media_dir / "compact.png")]))
+    assert browser.fetched("compact.png") == [], "fetched while the worklog group was collapsed"
+
+    page.evaluate(_EXPAND_WORKLOGS)
+    page.wait_for_selector(_VISION_ROW, state="visible", timeout=5000)
+    page.evaluate(_SETTLE)
+    assert browser.fetched("compact.png") == [], "fetched while the card was collapsed"
+
+    browser.open_vision_card()
+    page.wait_for_function(_PREVIEW_LOADED, arg="compact.png", timeout=10000)
+    assert len(browser.fetched("compact.png")) == 1, browser.media
+    assert browser.errors == []
+
+
+def test_transparent_stream_preview_fetches_nothing_until_the_row_opens(browser, media_dir):
+    page = browser.page
+    previous = page.evaluate(_GET_ACTIVITY_MODE)
+    page.evaluate(_SET_ACTIVITY_MODE, "transparent_stream")
+    try:
+        browser.boot()
+        assert page.evaluate("() => chatActivityMode()") == "transparent_stream"
+        browser.load(
+            "vision preview transparent", _vision_messages([str(media_dir / "transparent.png")])
+        )
+        assert browser.fetched("transparent.png") == [], "fetched while the row was deferred"
+
+        state = page.evaluate(_MATERIALIZE_TRANSPARENT_ROW, _VISION_ROW)
+        assert state == {"open": False, "previewInDom": True}, state
+        page.evaluate(_SETTLE)
+        assert browser.fetched("transparent.png") == [], "fetched while the built row was collapsed"
+
+        browser.open_vision_card()
+        page.wait_for_function(_PREVIEW_LOADED, arg="transparent.png", timeout=10000)
+        assert len(browser.fetched("transparent.png")) == 1, browser.media
+        assert browser.errors == []
+    finally:
+        page.evaluate(_SET_ACTIVITY_MODE, previous or "compact_worklog")
+
+
+def test_tool_previews_stay_out_of_the_message_image_carousel(browser, media_dir):
+    """A failed preview (missing file, hidden) and a working one must not join
+    the carousel of the message's own images, and vice versa."""
+    page = browser.page
+    report_a, report_b = media_dir / "report-a.png", media_dir / "report-b.png"
+    final = f"{_FINAL}\n\nMEDIA:{report_a}\n\nMEDIA:{report_b}"
+    messages = _vision_messages(
+        [str(media_dir / "missing.png"), str(media_dir / "ok.png")], final=final
+    )
+    browser.load("vision preview carousel", messages)
+    page.evaluate(_EXPAND_WORKLOGS)
+    page.wait_for_selector(_VISION_ROW, state="visible", timeout=5000)
+    browser.open_vision_card(0)
+    browser.open_vision_card(1)
+    page.wait_for_function(_PREVIEW_LOADED, arg="ok.png", timeout=10000)
+    page.wait_for_function(
+        "() => document.querySelectorAll('.tool-card-image-preview[hidden]').length === 1",
+        timeout=10000,
+    )
+
+    message_images = page.locator(".msg-media-img:not(.tool-card-image-preview *)")
+    assert message_images.count() == 2
+    message_images.first.click()
+    page.wait_for_selector(".img-lightbox", state="visible", timeout=5000)
+    counter = page.locator(".img-lightbox-counter")
+    lightbox_img = page.locator(".img-lightbox-canvas img")
+    assert counter.inner_text() == "1 / 2"
+    # Navigation does not wrap: Previous on the first image must stay put
+    # instead of landing on a (broken) tool preview.
+    page.locator(".img-lightbox-nav-prev").click()
+    assert counter.inner_text() == "1 / 2"
+    assert "report-a.png" in (lightbox_img.get_attribute("src") or "")
+    page.locator(".img-lightbox-nav-next").click()
+    assert counter.inner_text() == "2 / 2"
+    assert "report-b.png" in (lightbox_img.get_attribute("src") or "")
+    page.keyboard.press("Escape")
+    page.wait_for_selector(".img-lightbox", state="detached", timeout=5000)
+
+    page.locator(".tool-card-image-preview:not([hidden]) img").click()
+    page.wait_for_selector(".img-lightbox", state="visible", timeout=5000)
+    assert page.locator(".img-lightbox-counter").count() == 0, "a tool preview opened a carousel"
+    assert "ok.png" in (page.locator(".img-lightbox-canvas img").get_attribute("src") or "")
+    page.keyboard.press("Escape")
+    assert browser.errors == []

@@ -4361,6 +4361,10 @@ body.resizing .sidebar{transition:none!important;}
 .tool-card-image-preview{padding:6px 0 0;margin-bottom:6px;box-sizing:border-box;max-width:100%;}
 .tool-card-image-preview .msg-artifact-image{margin:0;max-width:min(320px,100%);}
 .tool-card-image-preview .msg-media-img{display:block;width:auto;height:auto;max-width:min(320px,100%);max-height:180px;margin:0;object-fit:contain;}
+/* A collapsed detail is max-height:0, not display:none, so loading="lazy" would
+   still fetch the image. Keep the preview out of layout until the card opens,
+   in every activity mode. */
+.tool-card:not(.open) .tool-card-image-preview{display:none;}
 .tool-card-args{margin-bottom:6px;}
 .tool-card-args div{font-size:var(--message-code-font-size);line-height:1.6;}
 .tool-arg-key{color:var(--blue);font-family:var(--font-mono);font-size:var(--message-code-font-size);display:block;margin-bottom:2px;}
