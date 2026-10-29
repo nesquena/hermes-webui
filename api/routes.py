@@ -29172,6 +29172,21 @@ def _handle_chat_start(handler, body, diag=None):
             # BEFORE any session lookup, pending-state write, or
             # worker thread start — a lost-response retry does not
             # even touch disk.
+            # #7782 re-gate review (docs and replay visibility): the replay
+            # must NOT bypass the session-visibility boundary the keyless
+            # path enforces. The recorded acceptance carries the stored
+            # session's identity, and an idempotency key is not an
+            # authorization credential — a leaked key must not read another
+            # profile's session identity. Apply the same profile-visibility
+            # helper the generic POST guard uses for request-supplied
+            # session_ids: a foreign-profile session answers 409
+            # session_profile_mismatch, unreadable ownership metadata
+            # answers 404 Session not found — identical to the same request
+            # without a key.
+            if not _session_id_visible_to_request_profile(
+                handler, idem_claim_record.session_id
+            ):
+                return
             if idem_claim_record.status == "pending":
                 # A turn was admitted earlier but its completion never
                 # became durable; its identity was reconciled onto the

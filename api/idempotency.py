@@ -20,11 +20,20 @@ twice. Contract (issue #7435):
   semantics are equivalent across both backends.
 
 Persistence: the store keeps an in-memory map of the active set and writes
-through to ``<state_dir>/idempotency/store.json`` after every mutation. The
-file is rewritten atomically (write-temp + ``os.replace`` + ``fsync`` on the
-parent directory) so a crash mid-write cannot corrupt the durable map.
-On startup the file is loaded once; corrupt entries are skipped, not
-raised, so a malformed line cannot block WebUI from serving requests.
+every mutation to an append-only write-ahead log,
+``<state_dir>/idempotency/store.json.wal`` (JSON lines, each op carrying a
+monotonic ``seq``), fsync'd before the mutation is acknowledged. The full
+snapshot ``<state_dir>/idempotency/store.json`` is rewritten atomically
+(write-temp + ``os.replace`` + directory ``fsync``) only when the WAL
+crosses its compaction threshold, so a 10k-record store no longer pays a
+~0.7-1.7 s whole-file rewrite per claim/completion (#7782 re-gate review).
+On startup the snapshot is loaded once and the WAL is replayed on top
+(ops with ``seq`` <= the snapshot watermark are no-ops), so a crash
+mid-write cannot corrupt the durable map and a crash between WAL append and
+compaction loses nothing. Corrupt snapshot entries raise, not skip, so a
+malformed line cannot silently forget durable claims; a torn WAL tail (an
+append that was never fsync-acknowledged) is truncated at the last valid
+line.
 
 Expiry and tombstones (contract call 5): a record that completed past its
 TTL is dropped from the record map, but its key is remembered in a separate
@@ -64,7 +73,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -108,6 +117,42 @@ TOMBSTONE_MAX_RECORDS = 10_000
 # Validation bounds for the caller-supplied key. Mirrors the contract
 # language ("non-empty, bounded length, printable ASCII").
 MAX_KEY_LENGTH = 200
+
+# ── Tombstone origin statuses ────────────────────────────────────────────────
+# A tombstone (an expired key that must not be re-admitted) remembers WHY it
+# was created: the evicted record may have COMPLETED (a turn ran) or been
+# PENDING (the #7782 crash window — the turn may never have run). The origin
+# is persisted with the tombstone so the 410 refusal can state the truth:
+# "previously completed" is a lie for a never-admitted pending claim.
+# ``unknown`` is the legacy v2 spelling (bare keys, no origin recorded).
+_TOMBSTONE_ORIGIN_COMPLETE = STATUS_COMPLETE  # "complete"
+_TOMBSTONE_ORIGIN_PENDING = STATUS_PENDING  # "pending"
+_TOMBSTONE_ORIGIN_UNKNOWN = "unknown"
+_VALID_TOMBSTONE_ORIGINS = frozenset(
+    {_TOMBSTONE_ORIGIN_COMPLETE, _TOMBSTONE_ORIGIN_PENDING, _TOMBSTONE_ORIGIN_UNKNOWN}
+)
+
+# ── Write-ahead log ──────────────────────────────────────────────────────────
+# Every mutation is appended to ``store.json.wal`` as one JSON line per op
+# (``{"seq": N, "op": "put"|"del"|"expire", ...}``) and fsync'd before the
+# mutation is acknowledged; the full snapshot is only rewritten when the WAL
+# crosses its compaction threshold (#7782 re-gate: whole-file rewrite per
+# mutation cost 0.7-1.7 s on a 10k-record store). The load path applies the
+# snapshot first, then replays WAL ops with ``seq`` above the snapshot
+# watermark, so a crash between WAL append and compaction loses nothing.
+_WAL_EXT = ".wal"
+_WAL_OP_PUT = "put"
+_WAL_OP_DEL = "del"
+_WAL_OP_EXPIRE = "expire"
+_WAL_OP_TYPES = frozenset({_WAL_OP_PUT, _WAL_OP_DEL, _WAL_OP_EXPIRE})
+# Compaction threshold floor, and the adaptive part: compact when the WAL
+# holds at least 2x the live state (records + tombstones) captured at the
+# last compaction (``store._wal_compaction_baseline``), so the WAL stays
+# bounded and the amortized compaction cost is O(1) per mutation — one
+# ~0.7 s snapshot rewrite per ~2N mutations on an N-record store, then the
+# WAL restarts from empty. ``max(2048, 2 * baseline)`` floors a small
+# store's WAL at ~2048 ops.
+_WAL_COMPACT_MIN_OPS = 2048
 
 # Sentinel exception types — the route maps these onto HTTP status codes.
 class IdempotencyConflict(Exception):
@@ -523,11 +568,28 @@ class IdempotencyStore:
         # "active" keys float to the end of the LRU.
         self._records: "OrderedDict[str, IdempotencyRecord]" = OrderedDict()
         # Keys whose record completed and then expired/evicted (#7782
-        # contract call 5). An OrderedSet (dict used as an ordered set) so
-        # the bound can evict oldest-first; kept OUTSIDE the record cap so
-        # a full store cannot silently re-admit an already-run turn.
-        self._expired_keys: "OrderedDict[str, bool]" = OrderedDict()
+        # contract call 5). An OrderedSet-with-payload (dict used as an
+        # ordered map key → tombstone origin status, see
+        # ``_TOMBSTONE_ORIGIN_*``) so the bound can evict oldest-first and
+        # the 410 refusal can state whether the turn ever completed; kept
+        # OUTSIDE the record cap so a full store cannot silently re-admit
+        # an already-run turn.
+        self._expired_keys: "OrderedDict[str, str]" = OrderedDict()
+        # Write-ahead log state: the next op sequence number, the number
+        # of un-compacted ops currently in the WAL (drives compaction), and
+        # the live-state size (records + tombstones) captured at the last
+        # compaction — the compaction threshold is 2x that baseline, so the
+        # WAL stays bounded and the amortized compaction cost is O(1) per
+        # mutation. A growing-store comparison against the CURRENT live
+        # size never re-triggers (the WAL can never catch a moving target).
+        self._seq = 0
+        self._wal_lines = 0
+        self._wal_compaction_baseline = 0
         self._loaded = False
+
+    @property
+    def _wal_path(self) -> Path:
+        return self._path.with_name(self._path.name + _WAL_EXT)
 
     # -- persistence ---------------------------------------------------------
 
@@ -548,86 +610,233 @@ class IdempotencyStore:
         still loads empty.
         """
         self._records.clear()
+        self._expired_keys.clear()
+        # The in-memory sequence must reset too: a reload/build must not
+        # skip WAL ops because the previous in-memory generation had already
+        # consumed their seq values.
+        self._seq = 0
         path = self._path
-        if not path.exists():
-            self._loaded = True
-            return
+        snapshot_seq = 0
+        if path.exists():
+            try:
+                raw = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                self._loaded = False
+                raise IdempotencyStoreUnavailable(
+                    f"could not read idempotency store {path}: {exc}"
+                ) from exc
+            try:
+                data = json.loads(raw)
+            except (json.JSONDecodeError, ValueError) as exc:
+                self._loaded = False
+                raise IdempotencyStoreUnavailable(
+                    f"idempotency store {path} is corrupt: {exc}"
+                ) from exc
+            entries = data.get("records") if isinstance(data, dict) else None
+            if not isinstance(entries, list):
+                self._loaded = False
+                raise IdempotencyStoreUnavailable(
+                    f"idempotency store {path} has an unexpected shape"
+                )
+            for index, entry in enumerate(entries):
+                if not isinstance(entry, dict):
+                    self._loaded = False
+                    raise IdempotencyStoreUnavailable(
+                        f"idempotency store {path} entry #{index} is not an object"
+                    )
+                try:
+                    rec = IdempotencyRecord.from_json(entry)
+                except Exception as exc:
+                    self._loaded = False
+                    raise IdempotencyStoreUnavailable(
+                        f"idempotency store {path} entry #{index} is malformed: {exc}"
+                    ) from exc
+                self._validate_loaded_record_locked(rec, f"{path} entry #{index}")
+                self._records[rec.key] = rec
+                if rec.status == STATUS_PENDING and not rec.stream_id:
+                    # #7782 finding 1: a pending record loaded from disk with no
+                    # proven admitted stream — the crash window between the claim
+                    # and the turn being admitted, regardless of whether a
+                    # provisional identity was minted at claim time. The durable
+                    # store cannot say whether the turn ran, so the record must
+                    # fail closed as outcome-unknown: NOT replay the provisional
+                    # id (no turn ever accepted it), NOT answer in-flight +
+                    # retry_after=1 for the rest of the TTL. Marking at LOAD
+                    # makes it independent of pid and provisional data; newly
+                    # claimed records are never marked.
+                    rec.outcome_unknown = True
+            snapshot_seq = int(data.get("seq") or 0) if isinstance(data, dict) else 0
+            # #7782 call 5: restore tombstones. A v1 file has none; that is
+            # fine, those keys simply have no memory of completion. v2 files
+            # store bare keys (origin unknown); v3 stores ``[key, origin]``
+            # pairs so the 410 can state whether the turn ever completed.
+            tombstones = data.get("expired_keys") if isinstance(data, dict) else None
+            if tombstones is not None:
+                if isinstance(tombstones, list):
+                    for entry in tombstones:
+                        if isinstance(entry, str) and entry:
+                            self._expired_keys[entry] = _TOMBSTONE_ORIGIN_UNKNOWN
+                        elif (
+                            isinstance(entry, list)
+                            and len(entry) == 2
+                            and isinstance(entry[0], str)
+                            and entry[0]
+                            and entry[1] in _VALID_TOMBSTONE_ORIGINS
+                        ):
+                            self._expired_keys[entry[0]] = entry[1]
+                        else:
+                            self._loaded = False
+                            raise IdempotencyStoreUnavailable(
+                                f"idempotency store {path} has a malformed "
+                                "tombstone entry"
+                            )
+                else:
+                    self._loaded = False
+                    raise IdempotencyStoreUnavailable(
+                        f"idempotency store {path} has an unexpected "
+                        "expired_keys shape"
+                    )
+        self._seq = max(self._seq, snapshot_seq)
+        # The WAL is the tail of the durable state: ops with seq above the
+        # snapshot watermark are replayed on top of it.
+        wal = self._wal_path
+        if wal.exists():
+            self._replay_wal_locked(wal)
+        self._wal_compaction_baseline = len(self._records) + len(self._expired_keys)
+        self._loaded = True
+
+    def _validate_loaded_record_locked(
+        self, rec: IdempotencyRecord, where: str
+    ) -> None:
+        """Validate a record read from the durable state (snapshot or WAL).
+
+        The durable key is the namespaced form; a stripped key, missing
+        profile, or unknown status means we cannot prove which claim the
+        entry belongs to. Raises ``IdempotencyStoreUnavailable``.
+        """
+        if _NAMESPACE_SEP not in rec.key:
+            raise IdempotencyStoreUnavailable(
+                f"idempotency store {where} is missing its profile namespace"
+            )
+        profile, _, raw_key = rec.key.partition(_NAMESPACE_SEP)
+        if not raw_key or not rec.request_fingerprint:
+            raise IdempotencyStoreUnavailable(
+                f"idempotency store {where} is missing key or fingerprint"
+            )
+        if rec.status not in (STATUS_PENDING, STATUS_COMPLETE):
+            raise IdempotencyStoreUnavailable(
+                f"idempotency store {where} has unknown status {rec.status!r}"
+            )
+        if not rec.profile or rec.profile != profile:
+            raise IdempotencyStoreUnavailable(
+                f"idempotency store {where} has a profile that disagrees "
+                "with its namespaced key"
+            )
+
+    def _replay_wal_locked(self, path: Path) -> None:
+        """Replay the write-ahead log on top of the loaded snapshot.
+
+        Ops whose ``seq`` is at or below the snapshot watermark are no-ops
+        (they are already in the snapshot — e.g. after a compaction whose
+        WAL truncate failed). A malformed line with only a torn tail after
+        it (an append that was never fsync-acknowledged) is truncated at the
+        last valid line; a malformed line FOLLOWED by valid lines is
+        mid-file corruption and fails closed.
+        """
         try:
             raw = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             self._loaded = False
             raise IdempotencyStoreUnavailable(
-                f"could not read idempotency store {path}: {exc}"
+                f"could not read idempotency WAL {path}: {exc}"
             ) from exc
-        try:
-            data = json.loads(raw)
-        except (json.JSONDecodeError, ValueError) as exc:
-            self._loaded = False
-            raise IdempotencyStoreUnavailable(
-                f"idempotency store {path} is corrupt: {exc}"
-            ) from exc
-        entries = data.get("records") if isinstance(data, dict) else None
-        if not isinstance(entries, list):
-            self._loaded = False
-            raise IdempotencyStoreUnavailable(
-                f"idempotency store {path} has an unexpected shape"
-            )
-        for index, entry in enumerate(entries):
-            if not isinstance(entry, dict):
-                raise IdempotencyStoreUnavailable(
-                    f"idempotency store {path} entry #{index} is not an object"
-                )
+        if not raw.strip():
+            return
+        lines = raw.split("\n")
+        entries: list[dict] = []
+        invalid_index: int | None = None
+        for idx, line in enumerate(lines):
+            if not line.strip():
+                continue
             try:
-                rec = IdempotencyRecord.from_json(entry)
-            except Exception as exc:
+                op = json.loads(line)
+                if not isinstance(op, dict):
+                    raise ValueError("not an object")
+                if op.get("op") not in _WAL_OP_TYPES or not isinstance(
+                    op.get("seq"), int
+                ):
+                    raise ValueError("bad op header")
+                if op["op"] == _WAL_OP_PUT and not isinstance(
+                    op.get("record"), dict
+                ):
+                    raise ValueError("put op without a record")
+                entries.append(op)
+            except (json.JSONDecodeError, ValueError):
+                invalid_index = idx
+                break
+        if invalid_index is not None:
+            if any(l.strip() for l in lines[invalid_index + 1 :]):
+                self._loaded = False
                 raise IdempotencyStoreUnavailable(
-                    f"idempotency store {path} entry #{index} is malformed: {exc}"
-                ) from exc
-            # The durable key is the namespaced form; a stripped key,
-            # missing profile, or unknown status means we cannot prove
-            # which claim the entry belongs to.
-            if _NAMESPACE_SEP not in rec.key:
-                raise IdempotencyStoreUnavailable(
-                    f"idempotency store {path} entry #{index} is missing its "
-                    "profile namespace"
+                    f"idempotency WAL {path} is corrupt at line "
+                    f"{invalid_index + 1}"
                 )
-            profile, _, raw_key = rec.key.partition(_NAMESPACE_SEP)
-            if not raw_key or not rec.request_fingerprint:
-                raise IdempotencyStoreUnavailable(
-                    f"idempotency store {path} entry #{index} is missing key "
-                    "or fingerprint"
+            good = [l for l in lines[:invalid_index] if l.strip()]
+            try:
+                path.write_text(
+                    "\n".join(good) + ("\n" if good else ""), encoding="utf-8"
                 )
-            if rec.status not in (STATUS_PENDING, STATUS_COMPLETE):
-                raise IdempotencyStoreUnavailable(
-                    f"idempotency store {path} entry #{index} has unknown "
-                    f"status {rec.status!r}"
+                logger.warning(
+                    "idempotency: truncated torn WAL tail at %s (line %d)",
+                    path,
+                    invalid_index + 1,
                 )
-            if not rec.profile or rec.profile != profile:
-                raise IdempotencyStoreUnavailable(
-                    f"idempotency store {path} entry #{index} has a profile "
-                    "that disagrees with its namespaced key"
+            except OSError:
+                logger.warning(
+                    "idempotency: could not truncate torn WAL tail at %s",
+                    path,
+                    exc_info=True,
                 )
-            self._records[rec.key] = rec
-            if rec.status == STATUS_PENDING and not rec.stream_id:
-                # #7782 finding 1: a pending record loaded from disk with no
-                # proven admitted stream — the crash window between the claim
-                # and the turn being admitted, regardless of whether a
-                # provisional identity was minted at claim time. The durable
-                # store cannot say whether the turn ran, so the record must
-                # fail closed as outcome-unknown: NOT replay the provisional
-                # id (no turn ever accepted it), NOT answer in-flight +
-                # retry_after=1 for the rest of the TTL. Marking at LOAD
-                # makes it independent of pid and provisional data; newly
-                # claimed records are never marked.
-                rec.outcome_unknown = True
-        # #7782 call 5: restore tombstones. A v1 file has none; that is fine,
-        # those keys simply have no memory of completion.
-        tombstones = data.get("expired_keys") if isinstance(data, dict) else None
-        if isinstance(tombstones, list):
-            for stored_key in tombstones:
-                if isinstance(stored_key, str) and stored_key:
-                    self._expired_keys[stored_key] = True
-        self._loaded = True
+        for op in entries:
+            seq = int(op["seq"])
+            if seq <= self._seq:
+                # Already reflected in the snapshot watermark.
+                continue
+            key = str(op.get("key") or "")
+            if _NAMESPACE_SEP not in key:
+                self._loaded = False
+                raise IdempotencyStoreUnavailable(
+                    f"idempotency WAL {path} op seq {seq} has an "
+                    "unnamespaced key"
+                )
+            op_type = op["op"]
+            if op_type == _WAL_OP_PUT:
+                try:
+                    rec = IdempotencyRecord.from_json(op.get("record") or {})
+                except Exception as exc:
+                    self._loaded = False
+                    raise IdempotencyStoreUnavailable(
+                        f"idempotency WAL {path} op seq {seq} is malformed: {exc}"
+                    ) from exc
+                self._validate_loaded_record_locked(rec, f"{path} op seq {seq}")
+                self._records[rec.key] = rec
+                if rec.status == STATUS_PENDING and not rec.stream_id:
+                    # Same load-time crash-window marking as the snapshot.
+                    rec.outcome_unknown = True
+            elif op_type == _WAL_OP_DEL:
+                self._records.pop(key, None)
+            else:  # _WAL_OP_EXPIRE
+                self._records.pop(key, None)
+                origin = str(op.get("origin") or _TOMBSTONE_ORIGIN_UNKNOWN)
+                if origin not in _VALID_TOMBSTONE_ORIGINS:
+                    self._loaded = False
+                    raise IdempotencyStoreUnavailable(
+                        f"idempotency WAL {path} op seq {seq} has an unknown "
+                        f"tombstone origin {origin!r}"
+                    )
+                self._expired_keys[key] = origin
+            self._seq = max(self._seq, seq)
+        self._wal_lines = len(entries)
 
     def _ensure_loaded(self) -> None:
         if self._loaded:
@@ -637,10 +846,17 @@ class IdempotencyStore:
                 return
             self._load_locked()
 
-    def _evict_expired_locked(self) -> None:
-        """Drop records past their TTL; must be called with the lock held."""
+    def _evict_expired_locked(self) -> list[tuple[str, IdempotencyRecord]]:
+        """Drop records past their TTL; must be called with the lock held.
+
+        Returns the ``(stored_key, record)`` pairs evicted so the caller can
+        persist the tombstones this sweep minted BEFORE honouring them, and
+        roll the sweep back if that persist fails (#7782 re-gate review: a
+        tombstone that never reached disk must not be honoured, or a
+        restart forgets the refusal and re-admits an already-run turn).
+        """
         if self._ttl_seconds <= 0:
-            return
+            return []
         cutoff = time.time() - self._ttl_seconds
         # Sweep the OrderedDict once. Collect keys first to avoid mutating
         # during iteration.
@@ -652,19 +868,31 @@ class IdempotencyStore:
             # strand an identity-less record until the cap sweep.
             if r.claimed_at < cutoff
         ]
+        evicted: list[tuple[str, IdempotencyRecord]] = []
         for k in expired:
-            self._records.pop(k, None)
+            rec = self._records.pop(k, None)
+            if rec is None:
+                continue
+            evicted.append((k, rec))
             # The turn may have run (COMPLETE), or the claim was left
             # un-admitted when the process died (PENDING, #7782 finding 1's
             # crash window). Either way the KEY was used, so a later re-claim
             # must fail explicitly rather than silently admit a turn. Remember
             # it either way — pending records are exactly the case where a
             # blind re-admission is most dangerous, because a turn may have
-            # been in flight when the claim was written.
-            self._remember_expired_key_locked(k)
+            # been in flight when the claim was written. The origin status is
+            # persisted with the tombstone so the 410 says the truth.
+            self._remember_expired_key_locked(k, rec.status)
+        return evicted
 
-    def _remember_expired_key_locked(self, stored_key: str) -> None:
-        """Record that ``stored_key`` completed and expired (#7782 call 5).
+    def _remember_expired_key_locked(
+        self, stored_key: str, origin: str = _TOMBSTONE_ORIGIN_UNKNOWN
+    ) -> None:
+        """Record that ``stored_key`` expired, and why (#7782 call 5).
+
+        ``origin`` is the status the evicted record had (``complete`` /
+        ``pending`` / legacy ``unknown``) — persisted so the 410 refusal can
+        distinguish \"the turn ran\" from \"the turn may never have run\".
 
         Bounded by ``_TOMBSTONE_MAX`` with oldest-first eviction, so a
         pathological caller cannot grow the set without limit. When the
@@ -675,15 +903,16 @@ class IdempotencyStore:
         """
         if stored_key in self._expired_keys:
             # Refresh recency so a repeatedly-retried key is not the first
-            # tombstone evicted.
+            # tombstone evicted. The origin stays the FIRST record's status
+            # (the record is gone; nothing can change it).
             del self._expired_keys[stored_key]
-            self._expired_keys[stored_key] = True
+            self._expired_keys[stored_key] = origin
             return
-        self._expired_keys[stored_key] = True
+        self._expired_keys[stored_key] = origin
         while len(self._expired_keys) > self._tombstone_max_records:
             self._expired_keys.popitem(last=False)
 
-    def _evict_to_cap_locked(self) -> None:
+    def _evict_to_cap_locked(self) -> list[tuple[str, IdempotencyRecord]]:
         """Bound the in-memory map by the configured cap.
 
         Only drops records whose ``claimed_at`` is past TTL; an
@@ -694,12 +923,18 @@ class IdempotencyStore:
         every expired record has been dropped, the store is full
         and the call must fail closed (the route will surface a
         503 and the caller can retry with a different key or
-        after the next expiry sweep).
+        after the next expiry sweep) — and nothing is popped when
+        the raise fires, so the caller has no partial eviction to
+        roll back.
+
+        Returns the ``(stored_key, record)`` pairs dropped so the caller
+        can persist any freshly-minted tombstones atomically with its own
+        mutation and roll them back on a durable-write failure.
         """
         if self._max_records <= 0:
-            return
+            return []
         if len(self._records) <= self._max_records:
-            return
+            return []
         cutoff = time.time() - self._ttl_seconds if self._ttl_seconds > 0 else None
         # First sweep: drop only expired records. Collect the
         # candidate keys first so we don't mutate the dict during
@@ -713,18 +948,23 @@ class IdempotencyStore:
             if cutoff is not None and r.claimed_at and r.claimed_at >= cutoff:
                 continue
             evictable.append(k)
-        for k in evictable:
-            rec = self._records.pop(k, None)
-            if rec is not None and rec.status == STATUS_COMPLETE:
-                # A capacity-swept COMPLETE record still ran its turn; keep
-                # the tombstone so a later claim of the same key fails
-                # explicitly (#7782 contract call 5).
-                self._remember_expired_key_locked(k)
-        if len(self._records) > self._max_records:
+        if len(self._records) - len(evictable) > self._max_records:
             raise IdempotencyStoreUnavailable(
                 f"idempotency store at cap ({self._max_records}); "
                 f"refusing to evict unexpired records"
             )
+        evicted: list[tuple[str, IdempotencyRecord]] = []
+        for k in evictable:
+            rec = self._records.pop(k, None)
+            if rec is None:
+                continue
+            evicted.append((k, rec))
+            if rec.status == STATUS_COMPLETE:
+                # A capacity-swept COMPLETE record still ran its turn; keep
+                # the tombstone so a later claim of the same key fails
+                # explicitly (#7782 contract call 5).
+                self._remember_expired_key_locked(k, _TOMBSTONE_ORIGIN_COMPLETE)
+        return evicted
 
     def _persist_locked(self) -> None:
         """Atomically rewrite the durable file. Must hold the lock.
@@ -737,6 +977,13 @@ class IdempotencyStore:
         contract: a record that the durable store never
         acknowledged must not be returned to the caller as if it
         had been.
+
+        Since the #7782 re-gate this is the COMPACTION writer (see
+        ``_append_wal_locked`` for the per-mutation durability path): it
+        rewrites the whole snapshot and truncates the WAL, and is only run
+        when the WAL crosses its compaction threshold (or explicitly via
+        ``compact()`` / tests), so a large store no longer pays a full
+        rewrite per claim/completion.
         """
         path = self._path
         try:
@@ -746,12 +993,17 @@ class IdempotencyStore:
                 f"could not create store dir {path.parent}: {exc}"
             ) from exc
         payload = {
-            "version": 2,
+            "version": 3,
             "saved_at": time.time(),
+            # WAL watermark: ops with seq <= this are already in the
+            # snapshot and replayed as no-ops after a restart.
+            "seq": self._seq,
             "records": [r.to_json() for r in self._records.values()],
             # #7782 call 5: keys whose record completed and then expired.
-            # Persisted so the protection survives a restart.
-            "expired_keys": list(self._expired_keys),
+            # Persisted as [key, origin] pairs so the 410 can state whether
+            # the turn ever completed; persisted so the protection survives
+            # a restart.
+            "expired_keys": [[k, origin] for k, origin in self._expired_keys.items()],
         }
         tmp_path = path.with_name(path.name + ".tmp")
         try:
@@ -796,6 +1048,142 @@ class IdempotencyStore:
             raise IdempotencyStoreUnavailable(
                 f"could not fsync store directory {path.parent}: {exc}"
             ) from exc
+        # The snapshot is durable and carries every op up to ``self._seq``:
+        # truncate the WAL so a restart replays nothing stale. A failure
+        # here is NOT fatal — the seq watermark turns the leftover WAL into
+        # a sequence of no-ops on load — so compaction never fails an
+        # already-durable operation on account of bookkeeping.
+        try:
+            with open(self._wal_path, "w", encoding="utf-8") as fh:
+                fh.flush()
+                try:
+                    os.fsync(fh.fileno())
+                except OSError as exc:
+                    if exc.errno not in {errno.EINVAL, errno.ENOTSUP}:
+                        raise
+        except OSError as exc:
+            logger.warning(
+                "idempotency: could not truncate WAL after compaction: %s", exc
+            )
+        self._wal_lines = 0
+        self._wal_compaction_baseline = len(self._records) + len(self._expired_keys)
+
+    def _append_wal_locked(self, ops: list[dict]) -> None:
+        """Append ``ops`` to the write-ahead log and make them durable.
+
+        Must be called with the lock held. This is the per-mutation
+        durability boundary for claim / complete / reconcile / release /
+        sweep: each op becomes one JSON line carrying a monotonic ``seq``,
+        the batch is fsync'd before returning, and a failure raises
+        ``IdempotencyStoreUnavailable`` AFTER the file has been rolled back
+        to its pre-append length — so a failed append leaves no phantom
+        line that a clean restart would replay as a committed claim (the
+        in-memory rollback stays the caller's job). Tolerates EINVAL /
+        ENOTSUP on the file fsync (tmpfs/overlayfs) and fsyncs the parent
+        directory on first creation so the WAL's directory entry survives a
+        power loss before its first acknowledged op can be trusted.
+        """
+        if not ops:
+            return
+        path = self._wal_path
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise IdempotencyStoreUnavailable(
+                f"could not create store dir {path.parent}: {exc}"
+            ) from exc
+        created = not path.exists()
+        start_size = 0
+        try:
+            start_size = path.stat().st_size if path.exists() else 0
+        except OSError:
+            pass
+        fh = None
+        try:
+            fh = open(path, "a", encoding="utf-8")
+            for op in ops:
+                self._seq += 1
+                op["seq"] = self._seq
+                fh.write(json.dumps(op, ensure_ascii=False, separators=(",", ":")) + "\n")
+            fh.flush()
+            try:
+                os.fsync(fh.fileno())
+            except OSError as exc:
+                # Same tolerance as the snapshot path: only the two "this
+                # filesystem cannot fsync" errors are tolerable. A REAL
+                # I/O error (EIO and friends) means the bytes may never
+                # reach the platter — the mutation must fail closed (#7782
+                # finding 3).
+                if exc.errno not in {errno.EINVAL, errno.ENOTSUP}:
+                    raise
+            fh.close()
+            fh = None
+        except OSError as exc:
+            if fh is not None:
+                try:
+                    fh.close()
+                except OSError:
+                    pass
+            # Roll the file back to its pre-append length so a failed
+            # append leaves no phantom line for a clean restart to replay
+            # (the data may already be in the page cache even though the
+            # fsync never acknowledged it — truncate regardless of whether
+            # the file was empty before).
+            try:
+                if created:
+                    path.unlink()
+                else:
+                    os.truncate(path, start_size)
+            except OSError:
+                pass
+            raise IdempotencyStoreUnavailable(
+                f"failed to append to idempotency store {path}: {exc}"
+            ) from exc
+        self._wal_lines += len(ops)
+        if created:
+            # First appearance of the WAL file: its directory entry must be
+            # durable before any acknowledged op can survive a power loss.
+            try:
+                _fsync_directory(path.parent)
+            except OSError as exc:
+                # Best-effort rollback of the file itself, then fail closed
+                # (a real I/O error — EINVAL/ENOTSUP never escapes
+                # _fsync_directory).
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                self._wal_lines = max(0, self._wal_lines - len(ops))
+                raise IdempotencyStoreUnavailable(
+                    f"could not fsync store directory {path.parent}: {exc}"
+                ) from exc
+
+    def _maybe_compact_locked(self) -> None:
+        """Compact the WAL into a fresh snapshot once it crosses the
+        threshold. Must be called with the lock held, after a successful
+        append.
+
+        The threshold is 2x the live-state size captured at the LAST
+        compaction (``_wal_compaction_baseline``), so the WAL stays bounded
+        and the amortized compaction cost is O(1) per mutation: each
+        compaction rewrites N records after 2N WAL ops have accumulated. A
+        compaction failure is logged, not raised: the WAL append already
+        made the mutation durable, and the next mutation retries the
+        compaction.
+        """
+        threshold = max(
+            _WAL_COMPACT_MIN_OPS, 2 * self._wal_compaction_baseline
+        )
+        if self._wal_lines < threshold:
+            return
+        try:
+            self._persist_locked()
+        except IdempotencyStoreUnavailable:
+            logger.warning(
+                "idempotency: could not compact the store; the WAL remains "
+                "the durable state and the next mutation retries",
+                exc_info=True,
+            )
 
     # -- public api ----------------------------------------------------------
 
@@ -847,17 +1235,35 @@ class IdempotencyStore:
             # Any tombstone this sweep just minted must reach disk BEFORE we
             # can honour it as a refusal, otherwise a restart between the
             # sweep and the next successful write forgets the key and
-            # re-admits the turn.
-            _tombstones_before = len(self._expired_keys)
-            self._evict_expired_locked()
-            if len(self._expired_keys) != _tombstones_before:
+            # re-admits the turn. When the tombstone write FAILS the sweep
+            # is rolled back and the claim fails closed (503) — honouring an
+            # in-memory-only tombstone with a 410 the disk cannot back up is
+            # the same restart gap (#7782 re-gate review).
+            _tombstones_before = set(self._expired_keys)
+            evicted = self._evict_expired_locked()
+            minted = [
+                (k, self._expired_keys[k])
+                for k, _ in evicted
+                if k not in _tombstones_before
+            ]
+            if minted:
                 try:
-                    self._persist_locked()
-                except IdempotencyStoreUnavailable:
-                    logger.warning(
-                        "idempotency: could not persist tombstone during claim",
-                        exc_info=True,
+                    self._append_wal_locked(
+                        [
+                            {"op": _WAL_OP_EXPIRE, "key": k, "origin": origin}
+                            for k, origin in minted
+                        ]
                     )
+                except IdempotencyStoreUnavailable:
+                    # Roll the sweep back so memory == disk: the refusal is
+                    # not durable, so neither the eviction nor the tombstone
+                    # may survive in memory.
+                    for k, rec in evicted:
+                        self._records[k] = rec
+                    for k, _ in minted:
+                        self._expired_keys.pop(k, None)
+                    raise
+                _tombstones_before.update(k for k, _ in minted)
             existing = self._records.get(stored_key)
             # #7782 contract call 5: a key whose record completed and then
             # EXPIRED leaves the map but stays remembered in
@@ -866,8 +1272,9 @@ class IdempotencyStore:
             # claim would otherwise silently re-admit a duplicate turn.
             if stored_key in self._expired_keys:
                 raise IdempotencyKeyExpired(
-                    f"idempotency key {key!r} previously completed and has "
-                    "expired; it will not be re-admitted"
+                    self._tombstone_refusal_message(
+                        key, self._expired_keys[stored_key]
+                    )
                 )
             if existing is None:
                 rec = IdempotencyRecord(
@@ -889,9 +1296,23 @@ class IdempotencyStore:
                 self._records[stored_key] = rec
                 # Move to the end of the LRU ordering.
                 self._records.move_to_end(stored_key)
+                # The claim and any cap-eviction tombstones are persisted in
+                # ONE WAL batch, so a restart cannot see one without the
+                # other.
+                ops: list[dict] = [
+                    {"op": _WAL_OP_PUT, "key": stored_key, "record": rec.to_json()}
+                ]
                 try:
-                    self._evict_to_cap_locked()
-                    self._persist_locked()
+                    cap_evicted = self._evict_to_cap_locked()
+                except IdempotencyStoreUnavailable:
+                    self._records.pop(stored_key, None)
+                    raise
+                for ck, crec in cap_evicted:
+                    ops.append(
+                        {"op": _WAL_OP_EXPIRE, "key": ck, "origin": crec.status}
+                    )
+                try:
+                    self._append_wal_locked(ops)
                 except IdempotencyStoreUnavailable:
                     # Roll back the in-memory mutation: the durable
                     # store never saw the record, so neither should
@@ -901,7 +1322,13 @@ class IdempotencyStore:
                     # from disk (or fail to, depending on whether
                     # the file write raced with the rename).
                     self._records.pop(stored_key, None)
+                    for ck, crec in cap_evicted:
+                        self._records[ck] = crec
+                    for ck, _ in cap_evicted:
+                        if ck not in _tombstones_before:
+                            self._expired_keys.pop(ck, None)
                     raise
+                self._maybe_compact_locked()
                 return rec
             # Existing record: check whether it has aged out BEFORE
             # any other comparison. The contract is "fail explicitly
@@ -1047,6 +1474,7 @@ class IdempotencyStore:
         self._ensure_loaded()
         swept = 0
         with self._lock:
+            ops: list[dict] = []
             for record in self._records.values():
                 if record.status != STATUS_PENDING:
                     continue
@@ -1061,10 +1489,14 @@ class IdempotencyStore:
                 if record.outcome_unknown:
                     continue
                 record.outcome_unknown = True
+                ops.append(
+                    {"op": _WAL_OP_PUT, "key": record.key, "record": record.to_json()}
+                )
                 swept += 1
-            if swept:
+            if ops:
                 try:
-                    self._persist_locked()
+                    self._append_wal_locked(ops)
+                    self._maybe_compact_locked()
                 except IdempotencyStoreUnavailable:
                     # The sweep is observability hardening, not a correctness
                     # gate: the in-memory marks still apply for this process,
@@ -1140,20 +1572,16 @@ class IdempotencyStore:
                     "claim exists to bind this completion to"
                 )
             # Snapshot the prior state so a persist failure can be
-            # rolled back to byte-for-byte the same record.
-            prior: IdempotencyRecord | None = None
-            prior = IdempotencyRecord(
-                key=existing.key,
-                request_fingerprint=existing.request_fingerprint,
-                status=existing.status,
-                profile=existing.profile,
-                session_id=existing.session_id,
-                stream_id=existing.stream_id,
-                turn_id=existing.turn_id,
-                response_status=existing.response_status,
+            # rolled back to byte-for-byte the same record. ``replace()``
+            # copies EVERY field — including the provisional identity
+            # (``pending_stream_id`` / ``pending_turn_id``), ``owner_pid``
+            # and the load-time ``outcome_unknown`` mark — so the rollback
+            # restores exactly what the durable claim holds (#7782 re-gate
+            # review: a hand-built snapshot used to drop those fields,
+            # silently wiping them from memory on a failed completion).
+            prior = replace(
+                existing,
                 response_payload=dict(existing.response_payload or {}),
-                claimed_at=existing.claimed_at,
-                completed_at=existing.completed_at,
             )
             existing.status = STATUS_COMPLETE
             existing.session_id = session_id
@@ -1164,15 +1592,35 @@ class IdempotencyStore:
             existing.completed_at = now
             rec = existing
             self._records.move_to_end(stored_key)
+            _tombstones_before = set(self._expired_keys)
             try:
-                self._evict_to_cap_locked()
-                self._persist_locked()
+                cap_evicted = self._evict_to_cap_locked()
+            except IdempotencyStoreUnavailable:
+                self._records[stored_key] = prior
+                raise
+            # The completion and any cap-eviction tombstones land in ONE
+            # WAL batch so a restart cannot see one without the other.
+            ops: list[dict] = [
+                {"op": _WAL_OP_PUT, "key": stored_key, "record": rec.to_json()}
+            ]
+            for ck, crec in cap_evicted:
+                ops.append(
+                    {"op": _WAL_OP_EXPIRE, "key": ck, "origin": crec.status}
+                )
+            try:
+                self._append_wal_locked(ops)
             except IdempotencyStoreUnavailable:
                 # Roll back the in-memory mutation to the prior record
                 # byte-for-byte, so a retry sees exactly the claim state
                 # that the durable store can prove.
                 self._records[stored_key] = prior
+                for ck, crec in cap_evicted:
+                    self._records[ck] = crec
+                for ck, _ in cap_evicted:
+                    if ck not in _tombstones_before:
+                        self._expired_keys.pop(ck, None)
                 raise
+            self._maybe_compact_locked()
             return rec
 
     def reconcile(
@@ -1225,7 +1673,15 @@ class IdempotencyStore:
             existing.turn_id = turn_id
             self._records.move_to_end(stored_key)
             try:
-                self._persist_locked()
+                self._append_wal_locked(
+                    [
+                        {
+                            "op": _WAL_OP_PUT,
+                            "key": stored_key,
+                            "record": existing.to_json(),
+                        }
+                    ]
+                )
             except IdempotencyStoreUnavailable:
                 # The identity could not be made durable. Roll it back so
                 # memory and disk still agree; the pending guard remains.
@@ -1233,6 +1689,7 @@ class IdempotencyStore:
                     prior_session, prior_stream, prior_turn,
                 )
                 raise
+            self._maybe_compact_locked()
             return existing
 
     def release(self, key: str, *, profile: str | None = None) -> None:
@@ -1266,13 +1723,16 @@ class IdempotencyStore:
             if existing.status == STATUS_PENDING:
                 self._records.pop(stored_key, None)
                 try:
-                    self._persist_locked()
+                    self._append_wal_locked(
+                        [{"op": _WAL_OP_DEL, "key": stored_key}]
+                    )
                 except IdempotencyStoreUnavailable:
                     # The drop is not durable. Restore the pending claim
                     # so memory and disk still agree, and refuse rather
                     # than losing the in-flight guard.
                     self._records[stored_key] = existing
                     raise
+                self._maybe_compact_locked()
 
     def lookup(self, key: str, *, profile: str | None = None) -> IdempotencyRecord | None:
         """Return the stored record for ``key`` or ``None`` if absent / expired.
@@ -1280,14 +1740,20 @@ class IdempotencyStore:
         ``key`` is the validated raw key; the same profile namespace
         is applied as for claim/complete. Does not raise; useful for
         diagnostics and tests.
+
+        A diagnostic READ never mutates durable state: an expired record
+        is reported absent without minting the in-memory tombstone that
+        claim()'s sweep would (and persists) — the #7782 re-gate review
+        found lookup() creating tombstones that never reached disk and
+        disagreed with the file after a restart.
         """
         self._ensure_loaded()
         stored_key = build_storage_key(key, profile=profile)
         with self._lock:
-            self._evict_expired_locked()
             rec = self._records.get(stored_key)
-            if rec is not None:
-                self._records.move_to_end(stored_key)
+            if rec is None or self._expired_locked(rec):
+                return None
+            self._records.move_to_end(stored_key)
             return rec
 
     def lookup_stored(self, stored_key: str) -> IdempotencyRecord | None:
@@ -1298,10 +1764,10 @@ class IdempotencyStore:
         """
         self._ensure_loaded()
         with self._lock:
-            self._evict_expired_locked()
             rec = self._records.get(stored_key)
-            if rec is not None:
-                self._records.move_to_end(stored_key)
+            if rec is None or self._expired_locked(rec):
+                return None
+            self._records.move_to_end(stored_key)
             return rec
 
     def keys(self) -> Iterable[str]:
@@ -1313,18 +1779,64 @@ class IdempotencyStore:
         """Drop all in-memory and on-disk state. Tests only."""
         with self._lock:
             self._records.clear()
+            self._expired_keys.clear()
+            self._seq = 0
+            self._wal_lines = 0
+            self._wal_compaction_baseline = 0
             self._loaded = True
             try:
                 if self._path.exists():
                     self._path.unlink()
             except OSError:
                 pass
+            try:
+                if self._wal_path.exists():
+                    self._wal_path.unlink()
+            except OSError:
+                pass
 
     def reload_from_disk(self) -> None:
-        """Force a re-read of the durable file. Used by tests to simulate a restart."""
+        """Force a re-read of the durable state. Used by tests to simulate a restart."""
         with self._lock:
             self._loaded = False
             self._load_locked()
+
+    def compact(self) -> None:
+        """Force a durable snapshot + WAL truncation.
+
+        Called automatically when the WAL crosses its compaction
+        threshold; public so operators and tests can trigger it
+        explicitly. Raises ``IdempotencyStoreUnavailable`` if the
+        snapshot cannot be written (the WAL stays the durable state).
+        """
+        self._ensure_loaded()
+        with self._lock:
+            self._persist_locked()
+
+    def _expired_locked(self, rec: IdempotencyRecord) -> bool:
+        """Pure TTL check — never mutates state (lookup path)."""
+        return self._ttl_seconds > 0 and rec.claimed_at < time.time() - self._ttl_seconds
+
+    @staticmethod
+    def _tombstone_refusal_message(key: str, origin: str) -> str:
+        """The 410 wording for a tombstoned key, honest about WHAT the turn
+        might have done: a COMPLETE-origin tombstone says \"previously
+        completed\"; a PENDING-origin tombstone (the #7782 crash window, the
+        turn may never have run) says the outcome was never recorded; a
+        legacy v2 tombstone whose origin is unknown stays neutral.
+        """
+        if origin == _TOMBSTONE_ORIGIN_PENDING:
+            return (
+                f"idempotency key {key!r} has an expired pending claim whose "
+                "outcome was never recorded; it will not be re-admitted — "
+                "check the session before retrying, or use a new key"
+            )
+        if origin == _TOMBSTONE_ORIGIN_COMPLETE:
+            return (
+                f"idempotency key {key!r} previously completed and has "
+                "expired; it will not be re-admitted"
+            )
+        return f"idempotency key {key!r} has expired and will not be re-admitted"
 
     @property
     def path(self) -> Path:

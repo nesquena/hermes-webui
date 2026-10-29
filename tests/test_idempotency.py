@@ -441,10 +441,12 @@ def test_replay_works_after_process_restart(idem_env):
     expected_stream = p1["stream_id"]
     expected_turn = p1["turn_id"]
 
-    # Sanity: the durable file actually contains the record. The
-    # on-disk key is profile-namespaced (the route is the single
-    # source of truth for the namespace; tests resolve the same
-    # value via ``build_storage_key``).
+    # Sanity: the durable state actually contains the record. Since the
+    # #7782 re-gate the per-mutation writes land in the WAL; compact first
+    # so the snapshot is the complete durable state. The on-disk key is
+    # profile-namespaced (the route is the single source of truth for the
+    # namespace; tests resolve the same value via ``build_storage_key``).
+    idem_env.store.compact()
     assert idem_env.store.path.exists()
     on_disk = json.loads(idem_env.store.path.read_text(encoding="utf-8"))
     on_disk_keys = [r["key"] for r in on_disk.get("records", [])]
@@ -745,7 +747,8 @@ def test_invalid_key_returns_400(idem_env):
 def test_persist_failure_during_claim_rolls_back_and_returns_503(
     idem_env, monkeypatch
 ):
-    """Finding 1: when ``_persist_locked()`` raises during ``claim()``,
+    """Finding 1: when the durable write behind ``claim()`` fails (the WAL
+    append — the per-mutation persistence boundary since the #7782 re-gate),
     the in-memory mutation must be rolled back and the route must
     return 503. The agent-start recorder must show NO admitted turn.
 
@@ -756,15 +759,15 @@ def test_persist_failure_during_claim_rolls_back_and_returns_503(
     """
     from api import idempotency as idem_mod
 
-    # Simulate a disk failure: every persist call raises. The
+    # Simulate a disk failure: every durable append raises. The
     # closure captures the store instance because instance
     # attributes set via ``monkeypatch.setattr`` don't auto-bind
     # ``self`` the way class methods do.
     store_ref = idem_env.store
 
-    def boom_persist():
+    def boom_append(_ops):
         raise idem_mod.IdempotencyStoreUnavailable("simulated disk full")
-    monkeypatch.setattr(store_ref, "_persist_locked", boom_persist)
+    monkeypatch.setattr(store_ref, "_append_wal_locked", boom_append)
 
     body = {"session_id": "idem-session", "message": "hello"}
     key = "persist-fail-claim-key"
@@ -817,19 +820,18 @@ def test_persist_failure_during_complete_rolls_back_and_returns_503(
     assert p["stream_id"] == "stream-1"
     assert len(idem_env.recorder.calls) == 1
 
-    # Simulate a disk failure starting on the SECOND persist
-    # call (which is the complete's persist — the first is the
-    # claim's persist, which must succeed for the agent to
-    # actually start).
+    # Simulate a disk failure starting on the SECOND durable append
+    # (which is the complete's append — the first is the claim's
+    # append, which must succeed for the agent to actually start).
     state = {"call_count": 0, "fail_from": 2}
-    original_persist = idem_env.store._persist_locked
+    original_append = idem_env.store._append_wal_locked
 
-    def flaky_persist():
+    def flaky_append(ops):
         state["call_count"] += 1
         if state["call_count"] >= state["fail_from"]:
             raise idem_mod.IdempotencyStoreUnavailable("simulated disk full")
-        return original_persist()
-    monkeypatch.setattr(idem_env.store, "_persist_locked", flaky_persist)
+        return original_append(ops)
+    monkeypatch.setattr(idem_env.store, "_append_wal_locked", flaky_append)
 
     # Second call: fresh key to force a new claim+complete cycle.
     key2 = "persist-fail-complete-key-2"
@@ -1015,7 +1017,10 @@ def test_two_profiles_same_raw_key_are_isolated(idem_env, monkeypatch):
     assert idem_env.store.lookup_stored(beta_stored_key) is not None
     assert idem_env.store.lookup_stored(beta_stored_key).key == beta_stored_key
 
-    # Two distinct records, neither was a replay.
+    # Two distinct records, neither was a replay. Compact so the snapshot
+    # is the complete durable state (per-mutation writes live in the WAL
+    # since the #7782 re-gate).
+    idem_env.store.compact()
     on_disk = json.loads(idem_env.store.path.read_text(encoding="utf-8"))
     keys = {r["key"] for r in on_disk.get("records", [])}
     assert alpha_stored_key in keys
@@ -1154,11 +1159,14 @@ def test_unreadable_store_file_fails_closed(idem_env):
     body = {"session_id": "idem-session", "message": "hello"}
     key = "unreadable-key"
 
-    # First admit and complete a turn so the durable file has a record.
+    # First admit and complete a turn so the durable state has a record.
     s1, p1 = idem_env.run_handler(body, key_header=key)
     assert s1 == 200
     assert len(idem_env.recorder.calls) == 1
-    assert idem_env.store.path.exists()
+    assert (
+        idem_env.store.path.exists()
+        or idem_env.store.path.with_name(idem_env.store.path.name + ".wal").exists()
+    ), "the durable store (snapshot or WAL) must exist after a completed turn"
 
     # Simulate an I/O error on the store file (permissions, EIO, a
     # truncated/renamed file) by making read_text fail. Force the failure
@@ -1259,10 +1267,10 @@ def test_release_persist_failure_retains_inflight_guard(idem_env, monkeypatch):
     idem_env.store.claim(key, idem_mod.compute_request_fingerprint(body))
     assert idem_env.store.lookup(key).status == "pending"
 
-    # Fail the release's own durable write.
-    def boom_persist():
+    # Fail the release's own durable write (the WAL append).
+    def boom_append(_ops):
         raise idem_mod.IdempotencyStoreUnavailable("simulated: disk gone")
-    monkeypatch.setattr(idem_env.store, "_persist_locked", boom_persist)
+    monkeypatch.setattr(idem_env.store, "_append_wal_locked", boom_append)
 
     with pytest.raises(idem_mod.IdempotencyStoreUnavailable):
         idem_env.store.release(key)
@@ -1406,20 +1414,20 @@ def test_completion_write_failure_retains_and_replays_same_turn(idem_env, monkey
     body = {"session_id": "idem-session", "message": "hello"}
     key = "complete-write-fail-key"
 
-    # Fail ONLY the second persist (the completion's durable write); let
-    # the claim persist (call 1) and the reconciliation persist (call 3,
+    # Fail ONLY the second durable append (the completion's write); let
+    # the claim append (call 1) and the reconciliation append (call 3,
     # the "next persistence call") succeed.
     state = {"call_count": 0}
-    original_persist = idem_env.store._persist_locked
+    original_append = idem_env.store._append_wal_locked
 
-    def one_completion_failure():
+    def one_completion_failure(ops):
         state["call_count"] += 1
         if state["call_count"] == 2:
             raise idem_mod.IdempotencyStoreUnavailable(
                 "simulated: single completion write failure"
             )
-        return original_persist()
-    monkeypatch.setattr(idem_env.store, "_persist_locked", one_completion_failure)
+        return original_append(ops)
+    monkeypatch.setattr(idem_env.store, "_append_wal_locked", one_completion_failure)
 
     # First attempt: turn admitted, completion write fails once, reconcile
     # succeeds, route signals 503 (durability gap) but keeps the guard.
@@ -1875,6 +1883,10 @@ def test_recovered_pending_claim_is_outcome_unknown_across_restart(idem_env, mon
         monkeypatch.setattr(env.routes, "_run_agent_streaming", _counting_worker)
 
         def _copy_snapshot(name: str) -> Path:
+            # Since the #7782 re-gate the durable state is WAL-based; the
+            # snapshot is only (re)written by compaction. Compact first so
+            # the copied file IS the complete durable state at this point.
+            env.store.compact()
             dest = store_path.parent / f"{name}.json"
             shutil.copy2(store_path, dest)
             return dest
@@ -2460,3 +2472,562 @@ def test_namespace_drift_persists_across_restart(idem_env):
         )
     finally:
         profiles_mod._is_root_profile = real_is_root
+
+
+# ─── 2026-10-19 re-gate: four minor findings ─────────────────────────────────
+# complete() rollback snapshot · tombstone durability / wording · replay
+# visibility parity + docs · whole-file rewrite → incremental WAL. Each test
+# drives the REAL store / REAL route; fault injection patches the same
+# durability boundary (os.fsync) the maintainer's repro used.
+
+
+def test_complete_rollback_snapshot_preserves_pending_identity(idem_env, monkeypatch):
+    """#7782 re-gate minor (complete() rollback snapshot): the prior-state
+    snapshot taken before a completion write must copy EVERY field of the
+    pending claim — including ``pending_stream_id`` / ``pending_turn_id`` /
+    ``owner_pid`` and the load-time ``outcome_unknown`` mark. After a failed
+    completion persist, memory must match the durable claim byte-for-byte, or
+    a retry sees a pending record whose provisional identity and owner were
+    silently wiped (and whose outcome-unknown mark is lost, downgrading the
+    shutdown safety to a 1-second retry loop). Reproduces the maintainer's
+    fsync fault injection: EIO on every fsync → complete() fails closed and
+    the rollback must restore the claim exactly as disk has it.
+    """
+    import errno
+
+    from api.idempotency import (
+        IdempotencyStoreUnavailable,
+        build_storage_key,
+        compute_request_fingerprint,
+    )
+
+    env = idem_env
+    body = {"session_id": "idem-session", "message": "hello"}
+    fingerprint = compute_request_fingerprint(body, "default")
+    key = "rollback-snapshot-key"
+    storage_key = build_storage_key(key, "default")
+
+    rec = env.store.claim_with_identity(
+        key,
+        fingerprint,
+        profile="default",
+        session_id="idem-session",
+        stream_id="stream-provisional",
+        turn_id="turn-provisional",
+    )
+    assert rec.status == "pending"
+    # Stamp the load-time outcome-unknown mark exactly as _load_locked does
+    # for a recovered identity-less pending claim, then make it durable.
+    with env.store._lock:
+        env.store._records[storage_key].outcome_unknown = True
+    env.store._persist_locked()
+
+    monkeypatch.setattr(
+        "api.idempotency.os.fsync",
+        lambda _fd: (_ for _ in ()).throw(OSError(errno.EIO, "disk on fire")),
+    )
+    with pytest.raises(IdempotencyStoreUnavailable):
+        env.store.complete(
+            key,
+            profile="default",
+            session_id="idem-session",
+            stream_id="stream-real",
+            turn_id="turn-real",
+            response_status=200,
+            response_payload={"ok": True},
+        )
+
+    # Rollback must restore the FULL prior claim, not a field-stripped
+    # default: provisional identity, owner pid and outcome-unknown all stay.
+    rolled_back = env.store.lookup_stored(storage_key)
+    assert rolled_back.status == "pending"
+    assert rolled_back.pending_stream_id == "stream-provisional", (
+        f"rollback wiped pending_stream_id: {rolled_back.pending_stream_id!r}"
+    )
+    assert rolled_back.pending_turn_id == "turn-provisional"
+    assert rolled_back.owner_pid == os.getpid(), (
+        f"rollback wiped owner_pid: {rolled_back.owner_pid!r}"
+    )
+    assert rolled_back.outcome_unknown is True, (
+        "rollback dropped the outcome_unknown mark"
+    )
+    assert rolled_back.completed_at == 0.0
+    assert rolled_back.response_payload == {}
+
+    # The durable file never saw the completion: reloading reproduces the
+    # same pending claim with its provisional identity intact.
+    env.store.reload_from_disk()
+    on_disk = env.store.lookup_stored(storage_key)
+    assert on_disk is not None and on_disk.status == "pending"
+    assert on_disk.pending_stream_id == "stream-provisional"
+    assert on_disk.pending_turn_id == "turn-provisional"
+    assert on_disk.owner_pid == os.getpid()
+
+
+def test_tombstone_write_failure_fails_closed_instead_of_memory_only_410(
+    idem_env, monkeypatch
+):
+    """#7782 re-gate minor (tombstones): a tombstone minted by the claim-time
+    expiry sweep must reach disk BEFORE it is honoured as a refusal. When the
+    durable write fails, claim() must fail closed (503) and roll the sweep
+    back — NOT swallow the failure and raise 410 from an in-memory-only
+    tombstone, because a restart would then forget the refusal and re-admit
+    an already-run turn. Once the store is writable again the same sweep
+    persists the tombstone and the expired key refuses with a 410 that
+    survives a restart.
+    """
+    import errno
+
+    from api.idempotency import (
+        IdempotencyKeyExpired,
+        IdempotencyStoreUnavailable,
+        build_storage_key,
+        compute_request_fingerprint,
+    )
+
+    env = idem_env
+    body = {"session_id": "idem-session", "message": "hello"}
+    fingerprint = compute_request_fingerprint(body, "default")
+    storage_key = build_storage_key("gone", "default")
+    short = type(env.store)(
+        path=env.store._path, ttl_seconds=0.01, tombstone_max_records=100
+    )
+    short.claim("gone", fingerprint, profile="default")
+    with short._lock:
+        short._records[storage_key].owner_pid = 999999
+    short.complete(
+        "gone",
+        profile="default",
+        session_id="s",
+        stream_id="st",
+        turn_id="t",
+        response_status=200,
+        response_payload={},
+    )
+    time.sleep(0.05)
+
+    real_fsync = os.fsync
+    monkeypatch.setattr(
+        "api.idempotency.os.fsync",
+        lambda _fd: (_ for _ in ()).throw(OSError(errno.EIO, "disk on fire")),
+    )
+    # The claim that drives the expiry sweep must fail closed: the sweep
+    # minted a tombstone it cannot make durable, so neither honouring it
+    # (410) nor pretending the key is fresh (re-admission) is acceptable.
+    with pytest.raises(IdempotencyStoreUnavailable):
+        short.claim("probe", fingerprint, profile="default")
+    # The failed sweep was rolled back: no in-memory-only tombstone lingers
+    # and the expired record is still in the map.
+    with short._lock:
+        assert storage_key not in short._expired_keys, (
+            "claim honoured an in-memory-only tombstone after a failed persist"
+        )
+        assert storage_key in short._records, (
+            "claim did not roll back the expiry sweep"
+        )
+
+    # Store writable again: the same sweep now persists the tombstone, the
+    # expired key refuses with 410, and the refusal survives a restart
+    # (disk agrees — the maintainer's ``expired_keys: []`` on disk gap).
+    monkeypatch.setattr("api.idempotency.os.fsync", real_fsync)
+    short.claim("probe", fingerprint, profile="default")
+    with pytest.raises(IdempotencyKeyExpired):
+        short.claim("gone", fingerprint, profile="default")
+    restarted = type(short)(path=short._path)
+    with pytest.raises(IdempotencyKeyExpired):
+        restarted.claim("gone", fingerprint, profile="default")
+
+
+def test_lookup_does_not_mint_in_memory_tombstones(idem_env):
+    """#7782 re-gate minor (tombstones): lookup() is a diagnostic read. It
+    must report an expired record as absent WITHOUT minting an in-memory
+    tombstone that never reaches disk — a read must not mutate durable state,
+    and a phantom in-memory refusal would disagree with the file after a
+    restart. The sanctioned way to create a tombstone stays the claim-time
+    sweep, which persists it before honouring it.
+    """
+    from api.idempotency import (
+        IdempotencyKeyExpired,
+        build_storage_key,
+        compute_request_fingerprint,
+    )
+
+    env = idem_env
+    body = {"session_id": "idem-session", "message": "hello"}
+    fingerprint = compute_request_fingerprint(body, "default")
+    storage_key = build_storage_key("gone", "default")
+    short = type(env.store)(
+        path=env.store._path, ttl_seconds=0.01, tombstone_max_records=100
+    )
+    short.claim("gone", fingerprint, profile="default")
+    with short._lock:
+        short._records[storage_key].owner_pid = 999999
+    short.complete(
+        "gone",
+        profile="default",
+        session_id="s",
+        stream_id="st",
+        turn_id="t",
+        response_status=200,
+        response_payload={},
+    )
+    time.sleep(0.05)
+
+    assert short.lookup("gone") is None, "expired record must read as absent"
+    with short._lock:
+        assert storage_key not in short._expired_keys, (
+            "lookup() minted an in-memory tombstone that was never written"
+        )
+    # Disk agrees: a reload cannot resurrect a phantom tombstone.
+    short.reload_from_disk()
+    with short._lock:
+        assert storage_key not in short._expired_keys
+    # The sanctioned path still works: a claim drives the sweep, persists
+    # the tombstone, and a restart honours it.
+    short.claim("probe", fingerprint, profile="default")
+    with pytest.raises(IdempotencyKeyExpired):
+        short.claim("gone", fingerprint, profile="default")
+    restarted = type(short)(path=short._path)
+    with pytest.raises(IdempotencyKeyExpired):
+        restarted.claim("gone", fingerprint, profile="default")
+
+
+def test_pending_claim_tombstone_410_does_not_claim_completed(idem_env):
+    """#7782 re-gate minor (tombstone wording): a tombstone minted from a
+    PENDING record — the #7782 crash window where the turn may never have
+    run — must not tell the caller the key \"previously completed\". The 410
+    has to state that the outcome was never recorded. A COMPLETE-origin
+    tombstone keeps the completion wording as the control.
+    """
+    from api.idempotency import (
+        IdempotencyKeyExpired,
+        build_storage_key,
+        compute_request_fingerprint,
+    )
+
+    env = idem_env
+    body = {"session_id": "idem-session", "message": "hello"}
+    fingerprint = compute_request_fingerprint(body, "default")
+    short = type(env.store)(
+        path=env.store._path, ttl_seconds=0.01, tombstone_max_records=100
+    )
+
+    # A claim that NEVER completed (the crash window).
+    short.claim("never-ran", fingerprint, profile="default")
+    with short._lock:
+        short._records[build_storage_key("never-ran", "default")].owner_pid = 999999
+    time.sleep(0.05)
+    short.claim("probe", fingerprint, profile="default")  # drives the sweep
+
+    with pytest.raises(IdempotencyKeyExpired) as excinfo:
+        short.claim("never-ran", fingerprint, profile="default")
+    assert "previously completed" not in str(excinfo.value), (
+        f"410 lies that a never-admitted pending claim completed: "
+        f"{excinfo.value}"
+    )
+    assert "outcome" in str(excinfo.value).lower(), (
+        f"410 must state the outcome was never recorded: {excinfo.value}"
+    )
+
+    # The pending origin survives a restart.
+    restarted = type(short)(path=short._path)
+    with pytest.raises(IdempotencyKeyExpired) as excinfo2:
+        restarted.claim("never-ran", fingerprint, profile="default")
+    assert "previously completed" not in str(excinfo2.value)
+
+    # Control: a tombstone from a COMPLETED record keeps the completion
+    # wording (the honest statement there).
+    short.claim("done-ran", fingerprint, profile="default")
+    with short._lock:
+        short._records[build_storage_key("done-ran", "default")].owner_pid = 999999
+    short.complete(
+        "done-ran",
+        profile="default",
+        session_id="s",
+        stream_id="st",
+        turn_id="t",
+        response_status=200,
+        response_payload={},
+    )
+    time.sleep(0.05)
+    short.claim("probe-2", fingerprint, profile="default")
+    with pytest.raises(IdempotencyKeyExpired) as excinfo3:
+        short.claim("done-ran", fingerprint, profile="default")
+    assert "previously completed" in str(excinfo3.value)
+
+
+def test_keyed_replay_respects_session_profile_visibility(idem_env, monkeypatch, tmp_path):
+    """#7782 re-gate minor (docs and replay visibility): the keyed replay
+    short-circuits BEFORE the keyless path's session checks — with a stubbed
+    visibility check returning false for the session, a keyed retry used to
+    replay 200 while the same request without a key was refused. The replayed
+    acceptance carries the stored session's identity, so it must pass the
+    SAME session-profile visibility boundary (the helper the generic POST
+    guard uses for request-supplied session_ids). A foreign-profile session
+    answers 409 session_profile_mismatch on both paths, and no turn starts.
+    """
+    import api.models as models_mod
+    from api import profiles as profiles_mod
+
+    env = idem_env
+    body = {"session_id": "idem-session", "message": "hello"}
+    key = "vis-key"
+
+    # First call: session visible, turn admitted and completed.
+    s1, p1 = env.run_handler(body, key_header=key)
+    assert s1 == 200, p1
+    assert p1.get("stream_id") == "stream-1"
+    assert len(env.recorder.calls) == 1
+
+    # The session now belongs to another profile: a REAL sidecar under a
+    # disposable SESSION_DIR says so, and the route's real profile-matching
+    # logic is reinstated (the fixture had stubbed it to always-True).
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(models_mod, "SESSION_DIR", session_dir)
+    (session_dir / "idem-session.json").write_text(
+        json.dumps({"session_id": "idem-session", "profile": "other-profile"}),
+        encoding="utf-8",
+    )
+    env.session.profile = "other-profile"
+    with models_mod.LOCK:
+        models_mod.SESSIONS.pop("idem-session", None)
+
+    def _real_visible(session_profile, handler=None):
+        if handler is None:
+            return True
+        return profiles_mod._profiles_match(
+            session_profile, env.routes._get_active_profile_name()
+        )
+
+    monkeypatch.setattr(
+        env.routes, "_session_visible_to_active_profile", _real_visible
+    )
+
+    # Keyed retry: must NOT replay the recorded acceptance across the
+    # profile boundary. Same refusal as the keyless path, zero new turns.
+    s2, p2 = env.run_handler(body, key_header=key)
+    assert s2 == 409, (
+        f"keyed replay leaked a foreign-profile session identity: {s2} {p2}"
+    )
+    assert p2.get("code") == "session_profile_mismatch", p2
+    assert p2.get("replayed_from_idempotency_key") is not True
+    assert len(env.recorder.calls) == 1
+
+    # Parity: the keyless request for the same session answers the same way.
+    s3, p3 = env.run_handler(body)
+    assert s3 == 409, f"keyless parity failed: {s3} {p3}"
+    assert p3.get("code") == "session_profile_mismatch"
+    assert len(env.recorder.calls) == 1
+
+
+def test_keyed_replay_404_when_session_ownership_unreadable(
+    idem_env, monkeypatch, tmp_path
+):
+    """#7782 re-gate minor (replay visibility), the 404 flavor the review
+    described: when the stored session's ownership metadata cannot be read
+    (corrupt / mismatched sidecar), the keyed retry must refuse with 404
+    Session not found instead of replaying the recorded identity — the same
+    answer the session-visibility helper emits everywhere else in the API.
+    """
+    import api.models as models_mod
+    from api import profiles as profiles_mod
+
+    env = idem_env
+    body = {"session_id": "idem-session", "message": "hello"}
+    key = "vis-404-key"
+
+    s1, p1 = env.run_handler(body, key_header=key)
+    assert s1 == 200, p1
+    assert len(env.recorder.calls) == 1
+
+    # A sidecar whose recorded session_id disagrees with its filename is
+    # unreadable ownership metadata (ValueError in get_session_profile_readonly).
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(models_mod, "SESSION_DIR", session_dir)
+    (session_dir / "idem-session.json").write_text(
+        json.dumps({"session_id": "a-different-sid", "profile": "other-profile"}),
+        encoding="utf-8",
+    )
+    env.session.profile = "other-profile"
+    with models_mod.LOCK:
+        models_mod.SESSIONS.pop("idem-session", None)
+
+    def _real_visible(session_profile, handler=None):
+        if handler is None:
+            return True
+        return profiles_mod._profiles_match(
+            session_profile, env.routes._get_active_profile_name()
+        )
+
+    monkeypatch.setattr(
+        env.routes, "_session_visible_to_active_profile", _real_visible
+    )
+
+    s2, p2 = env.run_handler(body, key_header=key)
+    assert s2 == 404, f"keyed replay leaked identity past unreadable ownership: {s2} {p2}"
+    assert p2.get("error") == "Session not found"
+    assert len(env.recorder.calls) == 1
+
+
+def test_mutation_writes_are_incremental_not_full_rewrites(idem_env, monkeypatch):
+    """#7782 re-gate minor (whole-file rewrite): claim + complete must not
+    rewrite the whole store per mutation. The maintainer measured 0.7-1.7 s
+    for one claim+completion on a ~10k-record (3.5 MB) store, both rewrites
+    holding the global lock. Drive the REAL store through N claims +
+    completions and count how many times the full-snapshot writer runs: on a
+    store that has never crossed the compaction threshold it must be ZERO,
+    and the durable state must still be complete across a restart.
+    """
+    from api.idempotency import build_storage_key, compute_request_fingerprint
+
+    env = idem_env
+    store = env.store
+    fingerprint = compute_request_fingerprint(
+        {"session_id": "idem-session", "message": "hello"}, "default"
+    )
+    real_persist = store._persist_locked
+    calls = {"n": 0}
+
+    def counting_persist():
+        calls["n"] += 1
+        return real_persist()
+
+    monkeypatch.setattr(store, "_persist_locked", counting_persist)
+
+    n = 300
+    for i in range(n):
+        key = f"bulk-{i}"
+        store.claim(key, fingerprint, profile="default")
+        with store._lock:
+            store._records[build_storage_key(key, "default")].owner_pid = 999999
+        store.complete(
+            key,
+            profile="default",
+            session_id="s",
+            stream_id=f"st{i}",
+            turn_id=f"t{i}",
+            response_status=200,
+            response_payload={},
+        )
+
+    assert calls["n"] == 0, (
+        f"{calls['n']} full-store rewrites during {2 * n} mutations — one "
+        "per-mutation rewrite is the #7782 whole-file-rewrite finding"
+    )
+    # The durable state is complete even though no full snapshot was ever
+    # written: a restart sees every record.
+    restarted = type(store)(path=store._path)
+    restarted._ensure_loaded()
+    assert len(restarted._records) == n
+    assert restarted.lookup(f"bulk-{n - 1}").stream_id == f"st{n - 1}"
+
+
+def test_compaction_writes_snapshot_and_preserves_state(idem_env):
+    """The incremental WAL is bounded by compaction: compact() must produce a
+    durable snapshot carrying the same state (records + tombstones) and drop
+    the WAL, and mutations after compaction append to the WAL again without
+    rewriting the snapshot. A restart must load exactly the same state either
+    way.
+    """
+    import api.idempotency as idem_mod
+
+    env = idem_env
+    store = env.store
+    fingerprint = idem_mod.compute_request_fingerprint(
+        {"session_id": "idem-session", "message": "hello"}, "default"
+    )
+    wal_path = store.path.with_name(store.path.name + ".wal")
+
+    for i in range(10):
+        key = f"comp-{i}"
+        store.claim(key, fingerprint, profile="default")
+        with store._lock:
+            store._records[idem_mod.build_storage_key(key, "default")].owner_pid = 999999
+        store.complete(
+            key,
+            profile="default",
+            session_id="s",
+            stream_id=f"st{i}",
+            turn_id=f"t{i}",
+            response_status=200,
+            response_payload={},
+        )
+    assert not store.path.exists(), (
+        "no full snapshot may exist before compaction (WAL-only writes)"
+    )
+    assert wal_path.exists() and wal_path.read_text(encoding="utf-8").strip()
+
+    store.compact()
+    assert store.path.exists(), "compact() must write the snapshot"
+    data = json.loads(store.path.read_text(encoding="utf-8"))
+    assert data.get("version") == 3
+    assert len(data.get("records", [])) == 10
+    assert wal_path.read_text(encoding="utf-8").strip() == "", (
+        "compact() must truncate the WAL"
+    )
+
+    restarted = type(store)(path=store._path)
+    restarted._ensure_loaded()
+    assert len(restarted._records) == 10
+    for i in range(10):
+        assert restarted.lookup(f"comp-{i}").stream_id == f"st{i}"
+
+    # Mutations after compaction append to the WAL again; the snapshot's
+    # mtime must not move.
+    snapshot_mtime = store.path.stat().st_mtime_ns
+    store.claim("after-compact", fingerprint, profile="default")
+    with store._lock:
+        store._records[idem_mod.build_storage_key("after-compact", "default")].owner_pid = 999999
+    store.complete(
+        "after-compact",
+        profile="default",
+        session_id="s",
+        stream_id="st-ac",
+        turn_id="t-ac",
+        response_status=200,
+        response_payload={},
+    )
+    assert store.path.stat().st_mtime_ns == snapshot_mtime, (
+        "post-compaction mutations must append to the WAL, not rewrite the snapshot"
+    )
+    assert wal_path.read_text(encoding="utf-8").strip()
+    restarted2 = type(store)(path=store._path)
+    restarted2._ensure_loaded()
+    assert restarted2.lookup("after-compact").status == "complete"
+    assert restarted2.lookup("after-compact").stream_id == "st-ac"
+
+
+def test_legacy_v2_store_without_tombstone_status_loads(idem_env, tmp_path):
+    """v2 store files persisted ``expired_keys`` as bare strings (no origin
+    status). They must still load; such tombstones have unknown origin, so
+    their 410 must use the neutral wording rather than claiming the turn
+    completed.
+    """
+    from api.idempotency import (
+        IdempotencyKeyExpired,
+        IdempotencyStore,
+        build_storage_key,
+    )
+
+    store_path = tmp_path / "legacy-store" / "store.json"
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    storage_key = build_storage_key("old-key", "default")
+    store_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "saved_at": 0.0,
+                "records": [],
+                "expired_keys": [storage_key],
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = IdempotencyStore(path=store_path)
+    store._ensure_loaded()
+    assert store._expired_keys.get(storage_key) == "unknown"
+    with pytest.raises(IdempotencyKeyExpired) as excinfo:
+        store.claim("old-key", "fp", profile="default")
+    assert "previously completed" not in str(excinfo.value)
