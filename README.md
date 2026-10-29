@@ -206,6 +206,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Detached child results are delivered to the parent as internal wakeups. Their raw prompts and completion toasts do not appear as messages from the user; the parent can summarize the results in its own reply. Ordinary background-process wakeups remain visible. A completed parent reply does not, by itself, cancel or suppress outstanding children; a later result may still start a follow-up turn.
 - Mermaid diagram rendering inline (flowcharts, sequence diagrams, gantt charts)
 - Thinking/reasoning display -- collapsible gold-themed cards for Claude extended thinking and o3 reasoning blocks
+- Reasoning-effort controls expose only levels supported by the active model/provider. GPT-5.6 routes can offer Max and Ultra; model switches and fallback transitions re-clamp the saved level to the destination ceiling (for example, GPT-5.5 uses XHigh) before the next request.
 - Approval card for dangerous shell commands (allow once / session / always / deny)
 - SSE auto-reconnect on network blips (SSH tunnel resilience)
 - File attachments persist across page reloads and are stored outside the active workspace by default (`~/.hermes/webui/attachments/<session_id>/`, or `HERMES_WEBUI_ATTACHMENT_DIR/<session_id>/` when configured)
