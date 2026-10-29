@@ -917,7 +917,9 @@
     //    the 2026-10-08 visual review: it renders the shared fit glyph and its
     //    accessible name (title + aria-label) stays translated.
     await run("locale_zh_renders", bucket, async function () {
-      window.setLocale("zh");
+      var activated = await window.activateLocale("zh");
+      assert_(activated.status === "applied" && window.getActiveLocale() === "zh",
+        "zh locale must be active before checking the Fit title");
       var box = await openBox(IMG_W, IMG_H);
       assert_(box.fitBtn.querySelector("svg"), "Fit button must render the shared fit icon");
       var zh = "\u91cd\u7f6e\u7f29\u653e\u4ee5\u9002\u5e94 (F)";
@@ -925,16 +927,19 @@
       var aria = box.fitBtn.getAttribute("aria-label");
       assert_(title === zh, "zh Fit title expected " + zh + " got " + title);
       assert_(aria === title, "aria-label must mirror the localized title");
+      await window.activateLocale("en");
     });
 
     await run("locale_ja_renders", bucket, async function () {
-      window.setLocale("ja");
+      var activated = await window.activateLocale("ja");
+      assert_(activated.status === "applied" && window.getActiveLocale() === "ja",
+        "ja locale must be active before checking the Fit title");
       var box = await openBox(IMG_W, IMG_H);
       assert_(box.fitBtn.querySelector("svg"), "Fit button must render the shared fit icon");
       var ja = "\u30ba\u30fc\u30e0\u3092\u30d5\u30a3\u30c3\u30c8\u306b\u30ea\u30bb\u30c3\u30c8 (F)";
       assert_(box.fitBtn.getAttribute("title") === ja,
         "ja Fit title expected " + ja + " got " + box.fitBtn.getAttribute("title"));
-      window.setLocale("en");
+      await window.activateLocale("en");
     });
 
     // 7. Measured geometry + dark recipe at the desktop width. Fit must be the
