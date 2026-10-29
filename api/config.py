@@ -667,10 +667,22 @@ def get_config() -> dict:
     return _cfg_cache
 
 
-def get_config_snapshot() -> dict:
-    """Return a request-owned config snapshot captured under the cache lock."""
+def get_config_snapshot(*, config_path: "Path | str | None" = None) -> dict:
+    """Return a request-owned config snapshot captured under the cache lock.
+
+    ``config_path`` lets a caller that already owns an explicit profile home
+    pin the read to that profile's file. Environment expansion still uses the
+    caller's thread-local profile scope, preserving credential isolation.
+    """
     with _cfg_lock:
-        config_path = _get_config_path()
+        explicit_path = config_path
+        if explicit_path is None:
+            explicit_path = getattr(_thread_ctx, "config_snapshot_path", None)
+        config_path = (
+            Path(explicit_path).expanduser()
+            if explicit_path is not None
+            else _get_config_path()
+        )
         # Refresh the process cache for this path FIRST, exactly as the
         # unscoped read does: module-level ``cfg`` readers reached from the
         # same scope (resolve_model_alias_runtime -> _configured_model_alias_entries,

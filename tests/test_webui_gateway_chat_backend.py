@@ -2064,6 +2064,7 @@ def test_gateway_endpoint_honours_an_external_directory_hermes_config_path_for_t
     envs = {"alpha": {"API_SERVER_KEY": "alpha-key"}}
     homes = _profile_homes(tmp_path, monkeypatch, envs, config_url="http://gw.local/WRONG")
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: homes["alpha"])
+    monkeypatch.setattr(profiles, "get_process_profile_home", lambda: homes["alpha"])
     monkeypatch.setenv("HERMES_CONFIG_PATH", str(_authoritative_config(tmp_path / "elsewhere" / "custom.yaml")))
 
     assert gateway_chat._gateway_endpoint_for_profile("alpha") == ("http://gw.local/authoritative", "alpha-key")
@@ -2086,6 +2087,7 @@ def test_gateway_endpoint_does_not_let_a_divergent_profile_inherit_the_active_cu
     envs = {"alpha": {"API_SERVER_KEY": "alpha-key"}, "beta": {"API_SERVER_KEY": "beta-key"}}
     homes = _profile_homes(tmp_path, monkeypatch, envs, config_url="http://gw.local/own")
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: homes["alpha"])
+    monkeypatch.setattr(profiles, "get_process_profile_home", lambda: homes["alpha"])
     monkeypatch.setenv("HERMES_CONFIG_PATH", str(_authoritative_config(tmp_path / "elsewhere" / "custom.yaml")))
 
     assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local/own", "beta-key")

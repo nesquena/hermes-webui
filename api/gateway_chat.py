@@ -502,6 +502,17 @@ def _gateway_request_environ(
         deployment, owner_config
     )
     session_config = config_data if isinstance(config_data, dict) else {}
+    # The deployment URL is an inherited fallback for another profile, not an
+    # environment override owned by that profile. If its own YAML selects a
+    # receiver and its .env does not select one, let the YAML win exactly as it
+    # does for an ordinary profile-scoped read. Keeping the inherited launcher
+    # URL in ``merged`` here redirected every named profile to the launcher's
+    # receiver because ``_gateway_base_url`` correctly gives env precedence.
+    if (
+        str(session_config.get("webui_gateway_base_url") or "").strip()
+        and not str(profile_environ.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+    ):
+        merged.pop(_WEBUI_GATEWAY_BASE_URL_ENV, None)
     # Config-only deployment values. The owner's ``config.yaml`` is the
     # deployment authority whenever the launcher environment and the profile
     # both omit the setting. Insert it into the request environment before the
@@ -544,7 +555,7 @@ def _gateway_request_environ(
         # header at all.
         resolved_key = profile_canonical or profile_alias
     else:
-        resolved_key = profile_canonical or launcher_canonical or profile_alias or shared_alias
+        resolved_key = profile_canonical or launcher_canonical or shared_alias or profile_alias
     if resolved_key:
         merged[_WEBUI_GATEWAY_API_KEY_ENV] = resolved_key
         merged["API_SERVER_KEY"] = resolved_key
@@ -788,11 +799,28 @@ def _gateway_request_settings_for_session(
         # deepcopy here could capture the other profile's settings (endpoint,
         # runs-API flag, effort) or die mid-iteration ("dictionary changed
         # size during iteration").
-        cfg = get_config_snapshot()
+        from api.config import _thread_ctx
+
+        previous_config_path = getattr(_thread_ctx, "config_snapshot_path", None)
+        _thread_ctx.config_snapshot_path = _profile_config_path(profile_home)
+        try:
+            # Keep the established zero-argument call shape: strict test and
+            # integration stand-ins implement that public shape, while the
+            # thread-local path pins the real reader without cross-thread state.
+            cfg = get_config_snapshot()
+        finally:
+            if previous_config_path is None:
+                try:
+                    del _thread_ctx.config_snapshot_path
+                except AttributeError:
+                    pass
+            else:
+                _thread_ctx.config_snapshot_path = previous_config_path
         environ, resolved_base_url, resolved_api_key = _gateway_profile_endpoint(
             environ,
             config_data=cfg,
             profile_home=profile_home,
+            profile_name=getattr(session, "profile", ""),
         )
         reasoning_effort = _gateway_reasoning_effort_for_request(
             cfg,
@@ -2370,44 +2398,71 @@ def _sidecars_with_active_stream(session_dir) -> list[str]:
 
 
 def _profile_config_path(home):
-    """config.yaml of a profile home. For the ACTIVE profile that is the authoritative ambient config file
-    (HERMES_CONFIG_PATH may point outside the profile home), the same rule get_config_for_profile_home() uses;
-    any other profile reads its own home, so a divergent profile never inherits the active custom config."""
+    """Return the config file owned by ``home``.
+
+    A launcher ``HERMES_CONFIG_PATH`` belongs to the stable process owner (or
+    to a profile whose home contains the override), not whichever browser
+    profile is request-active.
+    """
     from api import profiles as _profiles
     from api.config import _get_config_path
     from api.workspace import _safe_resolve
 
     target = _safe_resolve(Path(home).expanduser())
     try:
-        if _safe_resolve(Path(_profiles.get_active_hermes_home()).expanduser()) == target:
+        if _safe_resolve(Path(_profiles.get_process_profile_home()).expanduser()) == target:
             return _get_config_path()
     except Exception:
         pass
     try:
         ambient = _get_config_path()
-        if _safe_resolve(ambient.parent) == target:
+        resolved_ambient = _safe_resolve(ambient)
+        if resolved_ambient.parent == target or target in resolved_ambient.parents:
             return ambient
     except Exception:
         pass
     return Path(home) / "config.yaml"
 
 
-def _gateway_profile_endpoint(profile_environ, *, config_data=None, profile_home=None):
+def _gateway_profile_endpoint(
+    profile_environ,
+    *,
+    config_data=None,
+    profile_home=None,
+    profile_name=None,
+):
     """Resolve one profile's effective request environment, URL and key.
 
     New turns and restart recovery must cross the same endpoint-identity and
     credential boundary.  Keeping the overlay here prevents recovery from
     falling back to the former raw URL-string comparison.
     """
-    config_data = config_data if isinstance(config_data, dict) else {}
+    from api import profiles as _profiles
+    from api.config import _expand_env_vars_from_mapping
+
+    config_data = dict(config_data) if isinstance(config_data, dict) else {}
+    raw_url = config_data.get("webui_gateway_base_url")
+    if isinstance(raw_url, str) and "${" in raw_url:
+        expansion_env = dict(_profiles._INITIAL_PROCESS_ENV)
+        expansion_env.update(profile_environ or {})
+        config_data["webui_gateway_base_url"] = _expand_env_vars_from_mapping(
+            raw_url, expansion_env
+        )
     environ = _gateway_request_environ(
         profile_environ,
         config_data=config_data,
         profile_home=profile_home,
     )
+    resolved_url = _gateway_base_url(config_data, environ=environ)
+    if "${" in resolved_url:
+        display_name = str(profile_name or "default").strip() or "default"
+        raise RuntimeError(
+            f"gateway URL for profile {display_name!r} still contains an unresolved variable "
+            f"({resolved_url}); set it in that profile's .env"
+        )
     return (
         environ,
-        _gateway_base_url(config_data, environ=environ),
+        resolved_url,
         _gateway_api_key(environ=environ),
     )
 

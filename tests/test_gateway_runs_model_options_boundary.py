@@ -2065,6 +2065,124 @@ def test_owner_gateway_identity_honors_external_config_path(monkeypatch, tmp_pat
     assert "Authorization" not in captured["headers"]
 
 
+def test_named_session_uses_its_own_config_not_the_launchers_external_config(
+    monkeypatch, tmp_path
+):
+    """A launcher config override belongs to the process owner, not every profile."""
+    from api import config, gateway_chat
+    import api.profiles as profiles
+
+    beta_home = tmp_path / "profiles" / "beta"
+    beta_home.mkdir(parents=True)
+    (beta_home / ".env").write_text("API_SERVER_KEY=beta-key\n", encoding="utf-8")
+    _write_gateway_config(beta_home, "http://beta-gw.test")
+    launcher_config = tmp_path / "launcher.yaml"
+    launcher_config.write_text(
+        "webui_gateway_base_url: http://launcher-gw.test\n", encoding="utf-8"
+    )
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(profiles, "_PROCESS_OWNER_DOTENV", {})
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda name: beta_home if name == "beta" else tmp_path,
+    )
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(launcher_config))
+    monkeypatch.setitem(
+        profiles._INITIAL_PROCESS_ENV, "HERMES_CONFIG_PATH", str(launcher_config)
+    )
+    monkeypatch.setattr(
+        gateway_chat,
+        "_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://launcher-gw.test",
+            "API_SERVER_KEY": "deployment-key",
+        },
+    )
+    cache = {}
+    monkeypatch.setattr(config, "_cfg_cache", cache)
+    monkeypatch.setattr(config, "cfg", cache)
+    monkeypatch.setattr(config, "_cfg_path", None)
+    monkeypatch.setattr(config, "_cfg_mtime", 0.0)
+    monkeypatch.setattr(config, "_cfg_fingerprint", None)
+
+    settings = gateway_chat._gateway_request_settings_for_session(
+        SimpleNamespace(profile="beta")
+    )
+
+    assert settings[2:4] == ("http://beta-gw.test", "beta-key")
+
+
+def test_shared_gateway_deployment_alias_outranks_another_profiles_alias(
+    monkeypatch,
+):
+    """Another profile cannot replace a shared receiver's deployment alias."""
+    from api import gateway_chat
+
+    monkeypatch.setattr(
+        gateway_chat,
+        "_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://shared-gw.test",
+            "API_SERVER_KEY": "deployment-key",
+        },
+    )
+
+    merged = gateway_chat._gateway_request_environ(
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://shared-gw.test",
+            "API_SERVER_KEY": "beta-key",
+        },
+        config_data={},
+    )
+
+    assert gateway_chat._gateway_api_key(environ=merged) == "deployment-key"
+
+
+def test_profile_gateway_url_placeholder_uses_launcher_then_profile_env(
+    monkeypatch,
+):
+    """Launcher variables remain stable inputs to a named profile's URL template."""
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    monkeypatch.setitem(
+        profiles._INITIAL_PROCESS_ENV,
+        "OWNER_GATEWAY_URL",
+        "http://launcher-placeholder-gw.test",
+    )
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+
+    _, url, _ = gateway_chat._gateway_profile_endpoint(
+        {},
+        config_data={"webui_gateway_base_url": "${OWNER_GATEWAY_URL}"},
+    )
+
+    assert url == "http://launcher-placeholder-gw.test"
+
+
+def test_profile_gateway_url_reports_an_unresolved_placeholder(monkeypatch):
+    """A broken profile URL names the profile dotenv remediation."""
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    monkeypatch.delitem(profiles._INITIAL_PROCESS_ENV, "MISSING_GATEWAY_URL", raising=False)
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"gateway URL for profile 'beta'.*set it in that profile's \.env",
+    ):
+        gateway_chat._gateway_profile_endpoint(
+            {},
+            config_data={"webui_gateway_base_url": "${MISSING_GATEWAY_URL}"},
+            profile_name="beta",
+        )
+
+
 def test_unparseable_gateway_url_does_not_break_request_settings(monkeypatch):
     """A spelling ``urlsplit`` rejects must not raise out of the overlay.
 
