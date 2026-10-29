@@ -100,10 +100,28 @@ def _reattach_helper_src() -> str:
     return SESSIONS_JS[start:end]
 
 
-def _pending_resolver_src() -> str:
+def _ui_epsilon_decl() -> str:
+    """The ui.js precision epsilon, hoisted above the sessions.js slice.
+
+    sessions.js (since #8543) declares
+    ``_RECOVERED_PROMPT_TS_EPSILON`` from ``_PENDING_ACTIVE_TURN_TS_EPSILON``
+    with a ``typeof`` probe. ``typeof`` on a *lexically declared but not yet
+    initialised* binding throws ReferenceError (TDZ), so this const must be
+    declared BEFORE the sessions.js helper slice is evaluated.
+    """
+    start = UI_JS.find("const _PENDING_ACTIVE_TURN_TS_EPSILON")
+    assert start != -1, "the epsilon constant is gone from static/ui.js"
+    return UI_JS[start:UI_JS.find("\n", start)]
+
+
+def _pending_resolver_src(include_epsilon: bool = True) -> str:
     """The REAL pending resolver and everything it closes over, from ui.js."""
     start = UI_JS.find("const _PENDING_ACTIVE_TURN_TS_EPSILON")
     assert start != -1, "the epsilon constant is gone from static/ui.js"
+    if not include_epsilon:
+        # Already hoisted by _ui_epsilon_decl(); a second `const` would be a
+        # redeclaration SyntaxError.
+        start = UI_JS.find("\n", start) + 1
     end = UI_JS.find("async function checkInflightOnBoot", start)
     assert end != -1
     block = UI_JS[start:end]
@@ -154,9 +172,10 @@ def _run(script: str) -> None:
 def _harness(session_js: str, body: str) -> str:
     return f"""
 const assert = require('assert');
+{_ui_epsilon_decl()}
 {_reattach_helper_src()}
 {_FALLBACK_HELPERS}
-{_pending_resolver_src()}
+{_pending_resolver_src(include_epsilon=False)}
 {_function_decl(SESSIONS_JS, '_hasInflightTailUserDuplicate')}
 {_function_decl(SESSIONS_JS, '_prepareRunningLiveTail')}
 {session_js}
