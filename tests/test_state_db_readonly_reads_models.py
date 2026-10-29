@@ -227,6 +227,57 @@ def test_get_state_db_session_summary_opens_read_only(tmp_path, monkeypatch):
     _assert_read_only(calls)
 
 
+def test_summary_keeps_the_raw_row_domain_for_the_growth_guard(tmp_path, monkeypatch):
+    """The summary aggregate stays RAW; the reader's active filter is display-only.
+
+    Both consumers of this aggregate compare it with a count that spans every
+    persisted row (the sidecar's message count) and require ``state > sidecar``
+    before exposing a newer transcript, so filtering ``active = 0`` here kills
+    the growth signal after a compaction (#8368 re-gate). The sidebar overlay's
+    active-domain need is served by the batch aggregate's
+    ``active_message_count``, not by this per-session summary.
+    """
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, session_source TEXT, "
+        "title TEXT, message_count INTEGER, started_at REAL, ended_at REAL)"
+    )
+    conn.execute(
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, "
+        "content TEXT, timestamp REAL, active INTEGER)"
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, session_source, title, message_count, started_at) "
+        "VALUES ('sess-arch', 'cli', 'cli', 'Archived', 6, 1000.0)"
+    )
+    conn.executemany(
+        "INSERT INTO messages (session_id, role, content, timestamp, active) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [
+            ("sess-arch", "user", "q1", 1000.0, 1),
+            ("sess-arch", "assistant", "a1", 1001.0, 1),
+            ("sess-arch", "user", "old1", 900.0, 0),
+            ("sess-arch", "assistant", "old2", 901.0, 0),
+            ("sess-arch", "user", "old3", 902.0, 0),
+            ("sess-arch", "assistant", "old4", 903.0, 0),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    _point_models_at(monkeypatch, db)
+
+    summary = models.get_state_db_session_summary("sess-arch")
+    detailed = models.get_state_db_session_messages("sess-arch")
+
+    assert summary["message_count"] == 6, (
+        "the growth signal must span every persisted row; the active-only "
+        "domain hid a post-compaction append from the metadata poll"
+    )
+    assert summary["last_message_at"] == 1001.0
+    assert len(detailed) == 2, "the display reader keeps excluding archive rows"
+
+
 def test_count_conversation_rounds_opens_read_only(tmp_path, monkeypatch):
     db = tmp_path / "state.db"
     _make_state_db(db)
