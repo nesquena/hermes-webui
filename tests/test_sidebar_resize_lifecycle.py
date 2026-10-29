@@ -176,9 +176,11 @@ def _build_harness_html() -> str:
     collapse = _extract_collapse_state_block()
     focus_start = SESSIONS_JS.index('  const focusedChildOwner=')
     focus_end = SESSIONS_JS.index("  list.innerHTML='';", focus_start)
+    focus_helpers = "\n".join(_extract_braced(SESSIONS_JS, f'function {name}(') for name in [
+        '_isSessionSidebarVisible', '_captureSessionOpenControlFocus', '_restoreSessionOpenControlFocus'])
     return (
         HARNESS_HTML.replace("__INIT_RESIZE__", _extract_init_resize())
-        .replace("__FOCUS_CAPTURE__", SESSIONS_JS[focus_start:focus_end])
+        .replace("__FOCUS_CAPTURE__", focus_helpers + "\n" + SESSIONS_JS[focus_start:focus_end])
         .replace("__COLLAPSE_STATE__", collapse)
         .replace("__GROUP_LOOP__", _extract_group_loop())
     )

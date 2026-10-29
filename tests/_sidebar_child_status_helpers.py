@@ -26,7 +26,9 @@ def component_script(source=None):
                  "_profileMatchesActiveProfile"]:
         if "function " + name + "(" in source:
             names.append(name)
-    for name in ["_releaseFocusLikeRowPress", "_repaintSidebarForBackgroundChurn", "_retireProjectPickerForExplicitRepaint"]:
+    for name in ["_releaseFocusLikeRowPress", "_repaintSidebarForBackgroundChurn", "_retireProjectPickerForExplicitRepaint",
+                 "_installSessionOpenControl", "_isSessionSidebarVisible",
+                 "_captureSessionOpenControlFocus", "_restoreSessionOpenControlFocus"]:
         if "function " + name + "(" in source:
             names.append(name)
     # New helper is optional so the same harness exercises the exact prior head.

@@ -101,6 +101,19 @@ not certify browser rendering or real CDN availability.
 
 ## Sidebar child-state presentation
 
+`./scripts/test.sh tests/test_child_title_group_browser.py` runs the title-group
+minimum-width regression; the direct driver is
+`python tests/browser_child_title_group.py --output <artifact-directory>`.
+It renders an approval parent with single approval, single running, or concurrent
+child status through production row rendering and CSS at 180/210/300px, desktop
+and 390px touch contexts, Compact/Detailed density, selected/inactive rows,
+with and without fork/worktree/project badges, in light/dark Default, Graphite,
+Codex, Terracotta, GitHub and Geist Contrast. The 1,728 scenes assert complete
+child numerals, the existing title floor, and unclipped hit-tested status marks
+before any actionability scrolling. `--before-ref <integration-sha>` retains
+red-before reports and paired screenshots. This is an isolated component gate,
+not a live approval-producer or physical-device test.
+
 Run `./scripts/test.sh tests/test_child_session_status.py tests/test_child_session_ux.py tests/test_parent_notification_scope.py tests/test_sidebar_tooltips.py tests/test_465_session_branching.py tests/test_session_lineage_collapse.py tests/test_session_touch_actions.py tests/test_issue3242_3214_i18n_tooltips.py`.
 The production attach/render component covers independent parent and child
 notifications, archived reference-only inclusion, state precedence, navigation,

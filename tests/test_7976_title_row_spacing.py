@@ -14,7 +14,8 @@ CSS = (Path(__file__).resolve().parent.parent / "static" / "style.css").read_tex
 
 
 def test_title_floor_is_scoped_to_rows_with_a_child_chip():
-    assert ".session-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);user-select:none;}" in CSS
+    assert ".session-title-group{display:flex;flex-wrap:wrap;" in CSS
+    assert ".session-title-row:has(.session-child-count) .session-title-group{min-width:24px;}" in CSS
     assert ".session-title-row:has(.session-child-count) .session-title{min-width:24px;}" in CSS
     assert ".session-title{flex:1;min-width:24px;" not in CSS
 
