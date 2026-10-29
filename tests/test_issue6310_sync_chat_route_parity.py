@@ -30,6 +30,7 @@ inference is substituted: the fake Agent echoes the sent history verbatim
 
 from __future__ import annotations
 
+import copy
 import http.client
 import json
 import sys
@@ -306,3 +307,47 @@ def test_clean_history_still_settles_unchanged(tmp_path, monkeypatch):
     assert _contents(reloaded.context_messages) == ["Q1", "A1", "Q2", "A2"], (
         f"a clean history must settle unchanged; got {_contents(reloaded.context_messages)}"
     )
+
+
+@pytest.mark.parametrize("polluted", [False, True])
+def test_current_image_row_owns_turn_after_dedup(tmp_path, monkeypatch, polluted):
+    """#8574 review (nesquena-hermes 2026-10-28): a multimodal current user
+    row must survive the shrinking identity dedup with durable ownership.
+
+    The sync image path mints a turn token but the retained image row carries
+    it only after ``_settle_current_turn_boundary`` runs. When the identity
+    dedup shortens the historical prefix (same-id replay pair removed), the
+    authority's ``current_turn_user_idx`` no longer addresses the current row
+    on the reduced list; the settle then materializes a SECOND plain-text copy
+    of the prompt at the front while the original image row stays un-stamped.
+    """
+    sid = "image-boundary-" + str(polluted)
+    original_setitem = monkeypatch.setitem
+
+    def setitem(mapping, key, value):
+        if mapping is sys.modules and key == "run_agent":
+            parent = _agent_class(sid, "A2")
+
+            class ImageAgent(parent):
+                def run_conversation(self, **kwargs):
+                    result = super().run_conversation(**kwargs)
+                    result["messages"][-2]["content"] = [
+                        {"type": "text", "text": kwargs["persist_user_message"]},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                    ]
+                    return result
+
+            value = SimpleNamespace(AIAgent=ImageAgent)
+        return original_setitem(mapping, key, value)
+
+    monkeypatch.setattr(monkeypatch, "setitem", setitem)
+    history = _DUPLICATE_HISTORIES["same-id"] if polluted else _CLEAN_HISTORY
+    session = _sync_http_send(tmp_path, monkeypatch, sid, copy.deepcopy(history), "Q2", "A2")
+    rows = session.context_messages
+    image_rows = [r for r in rows if r.get("role") == "user" and isinstance(r.get("content"), list)]
+    assert len(image_rows) == 1
+    assert not [r for r in rows if r.get("role") == "user" and r.get("content") == "Q2"]
+    assert image_rows[0].get("_active_turn_token")
+    assert type(image_rows[0].get("id")) is int
+    assert rows[0]["content"] == "Q1"
+    assert rows[-1]["content"] == "A2"

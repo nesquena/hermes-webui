@@ -30109,6 +30109,7 @@ def _handle_chat_sync(handler, body):
                 _dedupe_replayed_context_messages,
                 _deduplicate_context_messages,
                 _find_active_turn_checkpoint_index,
+                _mark_active_turn_checkpoint,
                 _merge_display_messages_after_agent_result,
                 _resolve_active_turn_authority,
                 _restore_display_reasoning_metadata,
@@ -30286,6 +30287,26 @@ def _handle_chat_sync(handler, body):
                 _active_turn_identity["token"] = build_active_turn_token(
                     f"sync:{s.session_id}:{_active_turn_identity['turn_id']}",
                     time.time(),
+                )
+                # #8574 review (nesquena-hermes 2026-10-28): stamp the token
+                # onto the RETAINED result row NOW, while
+                # ``_active_image_index`` still addresses the original Agent
+                # result. ``_deduplicate_context_messages`` below shrinks the
+                # list (it removes replayed same-id history rows), so the
+                # authority's ``current_turn_user_idx`` is stale on the
+                # reduced array and the final ``_settle_current_turn_boundary``
+                # would miss the row — materializing a second plain-text copy
+                # of the prompt at the front while the retained image row
+                # stays un-stamped (ownership then differs between display and
+                # model context). Rows carrying ``_active_turn_token`` are
+                # protected by the identity dedup, and the settle locates the
+                # current row by token first, so the durable stamp survives
+                # the shrinking dedup and the settlement keeps the single
+                # original image row (the streaming path's pre/post-dedup
+                # settlement in ``_settle_result_messages`` establishes the
+                # same durable ownership before the dedup).
+                _mark_active_turn_checkpoint(
+                    _result_messages[_active_image_index], _active_turn_identity
                 )
         _turn_boundary = _active_turn_boundary(
             _result_messages, _previous_context_messages, _active_turn_identity, msg,
