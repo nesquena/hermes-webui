@@ -2098,7 +2098,6 @@ def test_named_session_uses_its_own_config_not_the_launchers_external_config(
         gateway_chat,
         "_GATEWAY_DEPLOYMENT_ENV",
         {
-            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://launcher-gw.test",
             "API_SERVER_KEY": "deployment-key",
         },
     )
@@ -2114,6 +2113,98 @@ def test_named_session_uses_its_own_config_not_the_launchers_external_config(
     )
 
     assert settings[2:4] == ("http://beta-gw.test", "beta-key")
+
+
+def test_profile_config_path_ignores_a_parked_workers_live_override(
+    monkeypatch, tmp_path
+):
+    """A temporary worker mirror cannot redirect the process owner's config."""
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    owner_config = tmp_path / "owner.yaml"
+    owner_config.write_text("webui_gateway_base_url: http://owner-gw.test\n", encoding="utf-8")
+    worker_config = tmp_path / "profiles" / "worker" / "config.yaml"
+    worker_config.parent.mkdir(parents=True)
+    worker_config.write_text("webui_gateway_base_url: http://worker-gw.test\n", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles, "_INITIAL_PROCESS_ENV", {"HERMES_CONFIG_PATH": str(owner_config)}
+    )
+    monkeypatch.setattr(profiles, "_PROCESS_OWNER_DOTENV", {})
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(worker_config))
+
+    assert gateway_chat._profile_config_path(tmp_path) == owner_config
+
+
+def test_launcher_gateway_url_outranks_a_named_profiles_yaml(monkeypatch, tmp_path):
+    """The exported deployment URL stays authoritative over profile YAML."""
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    beta_home = tmp_path / "profiles" / "beta"
+    beta_home.mkdir(parents=True)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://launcher-gw.test",
+            "HERMES_WEBUI_GATEWAY_API_KEY": "launcher-key",
+        },
+    )
+    monkeypatch.setattr(
+        gateway_chat,
+        "_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://launcher-gw.test",
+            "HERMES_WEBUI_GATEWAY_API_KEY": "launcher-key",
+        },
+    )
+
+    merged = gateway_chat._gateway_request_environ(
+        {"API_SERVER_KEY": "beta-key"},
+        config_data={"webui_gateway_base_url": "http://beta-gw.test"},
+        profile_home=beta_home,
+    )
+
+    assert gateway_chat._gateway_base_url({}, environ=merged) == "http://launcher-gw.test"
+    assert gateway_chat._gateway_api_key(environ=merged) == "launcher-key"
+
+
+@pytest.mark.parametrize(
+    ("initial_deployment", "expected_key"),
+    [
+        ({"API_SERVER_KEY": "old-key"}, "new-key"),
+        ({"HERMES_WEBUI_GATEWAY_API_KEY": "launcher-key"}, "launcher-key"),
+    ],
+)
+def test_process_owner_key_rotation_preserves_only_an_explicit_launcher_canonical_key(
+    monkeypatch, tmp_path, initial_deployment, expected_key
+):
+    """Fresh owner dotenv aliases beat cached aliases, not launcher canonicals."""
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(profiles, "_INITIAL_GATEWAY_DEPLOYMENT_ENV", initial_deployment)
+    monkeypatch.setattr(
+        gateway_chat,
+        "_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_API_KEY": (
+                initial_deployment.get("HERMES_WEBUI_GATEWAY_API_KEY") or "old-key"
+            ),
+            "API_SERVER_KEY": "old-key",
+        },
+    )
+
+    merged = gateway_chat._gateway_request_environ(
+        {"API_SERVER_KEY": "new-key"}, config_data={}, profile_home=tmp_path
+    )
+
+    assert gateway_chat._gateway_api_key(environ=merged) == expected_key
 
 
 def test_shared_gateway_deployment_alias_outranks_another_profiles_alias(

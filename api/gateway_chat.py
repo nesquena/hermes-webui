@@ -465,6 +465,8 @@ def _gateway_request_environ(
     profile_home=None,
 ):
     """Return deployment Gateway settings overlaid by one named profile."""
+    from api import profiles as _profiles
+
     if profile_environ is None:
         return None
     deployment = _GATEWAY_DEPLOYMENT_ENV
@@ -502,17 +504,6 @@ def _gateway_request_environ(
         deployment, owner_config
     )
     session_config = config_data if isinstance(config_data, dict) else {}
-    # The deployment URL is an inherited fallback for another profile, not an
-    # environment override owned by that profile. If its own YAML selects a
-    # receiver and its .env does not select one, let the YAML win exactly as it
-    # does for an ordinary profile-scoped read. Keeping the inherited launcher
-    # URL in ``merged`` here redirected every named profile to the launcher's
-    # receiver because ``_gateway_base_url`` correctly gives env precedence.
-    if (
-        str(session_config.get("webui_gateway_base_url") or "").strip()
-        and not str(profile_environ.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
-    ):
-        merged.pop(_WEBUI_GATEWAY_BASE_URL_ENV, None)
     # Config-only deployment values. The owner's ``config.yaml`` is the
     # deployment authority whenever the launcher environment and the profile
     # both omit the setting. Insert it into the request environment before the
@@ -554,6 +545,25 @@ def _gateway_request_environ(
         # receiver's secret. It gets a profile-owned key or no Authorization
         # header at all.
         resolved_key = profile_canonical or profile_alias
+    elif profile_home is not None and _session_is_process_profile(profile_home):
+        # A permanent owner dotenv reload refreshes ``profile_alias`` on every
+        # request.  Startup normalization may also have copied the old alias
+        # into the cached canonical slot; that derived value must not freeze
+        # later key rotations.  Only a canonical key that the launcher really
+        # exported keeps precedence over the fresh owner profile values.
+        launcher_exported_canonical = str(
+            _profiles._INITIAL_GATEWAY_DEPLOYMENT_ENV.get(
+                _WEBUI_GATEWAY_API_KEY_ENV
+            )
+            or ""
+        ).strip()
+        resolved_key = (
+            launcher_exported_canonical
+            or profile_canonical
+            or profile_alias
+            or launcher_canonical
+            or shared_alias
+        )
     else:
         resolved_key = profile_canonical or launcher_canonical or shared_alias or profile_alias
     if resolved_key:
@@ -2405,23 +2415,28 @@ def _profile_config_path(home):
     profile is request-active.
     """
     from api import profiles as _profiles
-    from api.config import _get_config_path
     from api.workspace import _safe_resolve
 
     target = _safe_resolve(Path(home).expanduser())
+    owner_environ = _profiles.get_process_owner_environ()
+    owner_override = str(owner_environ.get("HERMES_CONFIG_PATH") or "").strip()
+    owner_config = (
+        _safe_resolve(Path(owner_override).expanduser())
+        if owner_override
+        else None
+    )
     try:
         if _safe_resolve(Path(_profiles.get_process_profile_home()).expanduser()) == target:
-            return _get_config_path()
+            return owner_config or target / "config.yaml"
     except Exception:
         pass
-    try:
-        ambient = _get_config_path()
-        resolved_ambient = _safe_resolve(ambient)
-        if resolved_ambient.parent == target or target in resolved_ambient.parents:
-            return ambient
-    except Exception:
-        pass
-    return Path(home) / "config.yaml"
+    if owner_config is not None:
+        try:
+            if owner_config.parent == target or target in owner_config.parents:
+                return owner_config
+        except Exception:
+            pass
+    return target / "config.yaml"
 
 
 def _gateway_profile_endpoint(
