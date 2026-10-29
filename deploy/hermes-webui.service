@@ -1,0 +1,18 @@
+[Unit]
+Description=Hermes WebUI (loopback backend for reverse proxy)
+After=network.target
+
+[Service]
+Type=simple
+User=hermeswebui
+Group=hermeswebui
+WorkingDirectory=/opt/hermes-webui
+Environment=HERMES_WEBUI_HOST=127.0.0.1
+Environment=HERMES_WEBUI_PORT=8788
+ExecStart=/opt/hermes-webui/start.sh
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

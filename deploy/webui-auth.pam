@@ -1,0 +1,11 @@
+# PAM service configuration for Hermes WebUI nginx reverse proxy.
+#
+# Install as /etc/pam.d/webui-auth
+# Used by nginx's ngx_http_auth_pam_module (auth_pam_service_name webui-auth).
+#
+# Authenticates system user accounts via pam_unix.so against /etc/shadow.
+# Create users with: sudo useradd -m -s /bin/bash deployer
+
+#%PAM-1.0
+auth     required   pam_unix.so
+account  required   pam_unix.so
