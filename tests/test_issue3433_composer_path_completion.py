@@ -48,8 +48,13 @@ def _run_commands_js(script_body: str) -> dict:
         }});
         """
     )
+    # Pipe the script through stdin rather than argv: this harness inlines the
+    # whole of static/commands.js into the source, and argv is capped at
+    # MAX_ARG_STRLEN (128 KiB) — the file alone is ~126 KiB, so any growth in
+    # commands.js trips E2BIG ("Argument list too long") with no code defect.
     proc = subprocess.run(
-        [NODE, "-e", script],
+        [NODE, "-"],
+        input=script,
         check=True,
         capture_output=True,
         text=True,

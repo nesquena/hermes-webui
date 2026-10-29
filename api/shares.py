@@ -9,7 +9,6 @@ links do not leak local workspace paths, profile details, or raw tool payloads.
 from __future__ import annotations
 
 import base64
-import binascii
 import html
 import io
 import json
@@ -121,28 +120,75 @@ def _redact_share_paths(text: str, extra_paths) -> str:
 # Excludes MEDIA: followed by http/https URLs so external images pass
 # through unchanged.  file:// references are NOT matched here — they are
 # always rejected at the public-share boundary (absolute, un-scoped).
-# `data:` URIs DO match: _replace_ref() routes them to _embed_share_data_uri(),
-# which applies the same public-share policy as a local file (raster MIME
-# allow-list, byte cap, magic-byte check) and never touches the filesystem.
-# Feeding a multi-KB base64 blob to Path(...).resolve()/stat() raised OSError
-# ENAMETOOLONG (errno 36) and 500'd share creation (#7949); passing every data:
-# URI through unchanged would instead republish arbitrary bytes (text/plain,
-# octet-stream, SVG) that credential redaction cannot see.
+# `data:` URIs DO match, and _replace_ref() always replaces them with
+# _INLINE_DATA_PLACEHOLDER without touching the filesystem: feeding a multi-KB
+# base64 blob to Path(...).resolve()/stat() raised OSError ENAMETOOLONG (errno
+# 36) and 500'd share creation (#7949). _sanitize_message() already removes
+# them in _placeholder_inline_data_uris(); the branch keeps direct callers safe.
 _SHARE_MEDIA_RE = re.compile(
     r"MEDIA:(?!https?://)([^\s\)\]>]+)"
 )
 
-# Strict shape for an inline data URI: data:<type/subtype>[;param...];base64,<payload>.
-# Parameters (e.g. charset, name) are tolerated before the mandatory ;base64.
-_DATA_URI_RE = re.compile(
-    r"^data:(?P<mime>[a-z0-9.+-]+/[a-z0-9.+-]+)(?P<params>(?:;[^;,]*)*?);base64,(?P<payload>[A-Za-z0-9+/]*={0,2})$",
+# Content-supplied inline data: URIs are never published in a public share.
+# Their bytes are opaque to the credential redactor (base64 or %-encoding), and
+# an image that renders hides whatever follows a valid header, so a public
+# share replaces every one of them with this placeholder. Only the server-side
+# embed of verified local files (_embed_share_media) may add data: URIs, and
+# it runs after the placeholder pass.
+_INLINE_DATA_PLACEHOLDER = "[*Inline attachment omitted from public share*]"
+# Catch-all: a "data:" that starts a URI (followed by a type/subtype, ";" or
+# ",") is removed through the end of its token, the first whitespace, angle
+# bracket, paren, square bracket or backtick. Parameters are not parsed, so
+# colon-bearing and quoted parameter forms are covered too, and each match
+# consumes its whole token, which keeps the scan linear. Prose such as
+# "data: 5 rows", "metadata:" or "data:key,value" is left alone.
+_CONTENT_DATA_URI_RE = re.compile(
+    r"\bdata:(?=[a-z0-9!#$&^_.+-]+/|[;,])[^\s<>()\[\]`]*",
     re.IGNORECASE,
 )
-# Normalise common aliases to the canonical names used by _SHARE_ALLOWED_MIME_TYPES.
-_DATA_URI_MIME_ALIASES = {"image/jpg": "image/jpeg", "image/pjpeg": "image/jpeg"}
-# Upper bound on the ENCODED payload, checked before decoding so an oversized
-# blob is refused without allocating its decoded bytes.
-_SHARE_EMBED_MAX_B64_CHARS = ((512 * 1024 + 2) // 3) * 4
+# A whole markdown image whose destination is a data: URI, including the
+# <angle-bracket> form and an optional title. The alt text stops at the next
+# "![" and the destination at an unbalanced paren or newline, which keeps the
+# scan linear; anything this misses is still caught by the passes below.
+# "(?:<\s*)?" rather than "<?\s*": two adjacent optional whitespace runs
+# backtrack quadratically on a long whitespace run.
+_CONTENT_MD_DATA_IMAGE_RE = re.compile(
+    r"!\[(?:[^\]!]|!(?!\[))*\]\(\s*(?:<\s*)?data:(?:[^()\n]|\([^()\n]*\))*\)",
+    re.IGNORECASE,
+)
+# The share renderer's own image rule (renderMd matches ![alt](data:image/...)
+# up to the first ")" across newlines, and shows a 64-character stub when the
+# URI fails its strict check). Applied only to the text up to the last ")" so
+# every opener finds a closer, which keeps it linear.
+_CONTENT_MD_DATA_IMAGE_LOOSE_RE = re.compile(
+    r"!\[(?:[^\]!]|!(?!\[))*\]\(data:image/[^)]*\)",
+    re.IGNORECASE,
+)
+# A raw or entity-escaped <img ...> tag (renderMd decodes &lt;/&gt; first).
+# The body stops only at ">" / "&gt;", exactly like renderMd's own tag
+# recognizers (<img\b[^>]*> and <\/?[a-z][^>]*>), so a "<" or "&lt;" inside an
+# attribute value cannot hide a tag from this pass that the renderer will
+# still consume (and drop, together with any payload left in its attributes).
+_CONTENT_IMG_TAG_RE = re.compile(
+    r"(?:<|&lt;)\s*img\b(?:[^>&]|&(?!gt;))*(?:>|&gt;)",
+    re.IGNORECASE,
+)
+# Quoted values of attributes that only ever hold text. An <img> is replaced
+# when it contains a URI-shaped data: anywhere, or any "data:" outside these
+# values, so an https image whose alt text says "metadata:" or "data: 5 rows"
+# keeps rendering while every other data: still fails closed.
+_IMG_TEXT_ATTR_RE = re.compile(
+    r"(?<![\w:-])(?:alt|title|aria-label|aria-description)\s*=\s*(?:\"[^\"]*\"|'[^']*')",
+    re.IGNORECASE,
+)
+_DATA_SCHEME_RE = re.compile(r"data:", re.IGNORECASE)
+# A "data:" that starts a URI even inside a text attribute. Whitespace after
+# the scheme is allowed because the browser's data: URL processor strips it.
+# Used to replace the whole tag, so a newline-split URI cannot leave its
+# payload behind in an alt or title value.
+_DATA_URI_START_RE = re.compile(
+    r"\bdata:\s*(?=[a-z0-9!#$&^_.+-]+/|[;,])", re.IGNORECASE
+)
 
 # Max size (in bytes) for files we'll embed as base64 in a share snapshot.
 _SHARE_EMBED_MAX_BYTES = 512 * 1024  # 512 KiB
@@ -256,42 +302,51 @@ def _sanitize_svg_bytes(data: bytes) -> bytes:
     return buf.getvalue()
 
 
-def _embed_share_data_uri(raw: str) -> str:
-    """Validate an inline ``data:`` media reference for a public share.
+def _placeholder_inline_data_uris(text: str) -> str:
+    """Replace every content-supplied inline ``data:`` URI with a placeholder.
 
-    Applies the same policy as an embedded local file: only the raster types in
-    ``_SHARE_ALLOWED_MIME_TYPES``, strictly valid base64, at most
-    ``_SHARE_EMBED_MAX_BYTES`` decoded, and magic bytes that match the declared
-    type. A valid image is re-emitted as a canonical ``<img>`` built from the
-    decoded bytes; anything else (non-image, SVG, malformed, oversized,
-    mismatched magic, non-base64) becomes ``_PLACEHOLDER`` so none of its bytes
-    reach the public snapshot. Never touches the filesystem (#7949).
+    Covers markdown images (inline, ``<angle>``, titled), raw and
+    entity-escaped ``<img>`` tags, ``MEDIA:data:`` tokens, and, as a final
+    catch-all, a ``data:`` URI anywhere else (reference definitions, links,
+    code, prose), whatever its declared type or letter case. Whole constructs
+    are replaced first so the placeholder reads cleanly; the catch-all
+    guarantees no data: URI survives. Never decodes or re-encodes a payload.
+
+    Must run BEFORE :func:`_embed_share_media`, whose verified local-file
+    ``<img src="data:...">`` output is the only data: URI a share may contain.
     """
-    if len(raw) > _SHARE_EMBED_MAX_B64_CHARS + 256:
-        return _PLACEHOLDER
-    m = _DATA_URI_RE.match(raw)
-    if not m:
-        return _PLACEHOLDER
-    mime_type = m.group("mime").lower()
-    mime_type = _DATA_URI_MIME_ALIASES.get(mime_type, mime_type)
-    if mime_type not in _SHARE_ALLOWED_MIME_TYPES:
-        return _PLACEHOLDER
-    payload = m.group("payload")
-    if not payload or len(payload) > _SHARE_EMBED_MAX_B64_CHARS:
-        return _PLACEHOLDER
-    try:
-        data = base64.b64decode(payload, validate=True)
-    except (binascii.Error, ValueError):
-        return _PLACEHOLDER
-    if not data or len(data) > _SHARE_EMBED_MAX_BYTES:
-        return _PLACEHOLDER
-    if not _check_image_magic(data, mime_type):
-        return _PLACEHOLDER
-    b64 = base64.b64encode(data).decode("ascii")
-    return (
-        f'<img src="data:{mime_type};base64,{b64}"'
-        f' class="msg-media-img" alt="image" loading="lazy">'
-    )
+    if not isinstance(text, str) or not text or not _DATA_SCHEME_RE.search(text):
+        return text
+
+    def _img_tag(m: re.Match) -> str:
+        tag = m.group(0)
+        if _DATA_URI_START_RE.search(tag):
+            return _INLINE_DATA_PLACEHOLDER
+        rest = _IMG_TEXT_ATTR_RE.sub("", tag)
+        return _INLINE_DATA_PLACEHOLDER if _DATA_SCHEME_RE.search(rest) else tag
+
+    def _media_ref(m: re.Match) -> str:
+        parts = split_media_token_ref(m.string, m)
+        if not parts or parts[0].strip()[:5].lower() != "data:":
+            return m.group(0)
+        return _INLINE_DATA_PLACEHOLDER + parts[1]
+
+    # Applied only up to the last ">" or "&gt;" so every opener finds a
+    # closer, which keeps the scan linear on unclosed "<img" runs. "&gt;"
+    # contains no ">" character, so both are needed.
+    entity_end = text.rfind("&gt;")
+    cut = max(text.rfind(">") + 1, entity_end + 4 if entity_end >= 0 else 0)
+    if cut:
+        text = _CONTENT_IMG_TAG_RE.sub(_img_tag, text[:cut]) + text[cut:]
+    text = _CONTENT_MD_DATA_IMAGE_RE.sub(_INLINE_DATA_PLACEHOLDER, text)
+    cut = text.rfind(")") + 1
+    if cut:
+        text = (
+            _CONTENT_MD_DATA_IMAGE_LOOSE_RE.sub(_INLINE_DATA_PLACEHOLDER, text[:cut])
+            + text[cut:]
+        )
+    text = _SHARE_MEDIA_RE.sub(_media_ref, text)
+    return _CONTENT_DATA_URI_RE.sub(_INLINE_DATA_PLACEHOLDER, text)
 
 
 def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> str:
@@ -367,9 +422,9 @@ def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> st
         if not raw:
             return m.group(0)
 
-        # --- Inline data: URI — validate in memory, never resolve as a path ---
+        # --- Inline data: URI — never embedded, never resolved as a path ------
         if raw[:5].lower() == "data:":
-            return _embed_share_data_uri(raw) + suffix
+            return _INLINE_DATA_PLACEHOLDER + suffix
 
         # --- Resolve and validate against allowed roots -----------------------
         p = _resolve_against_roots(raw)
@@ -436,9 +491,13 @@ def _sanitize_message(message: dict, *, redact_paths=(), allowed_roots: tuple[Pa
     if not text:
         return None
     # ALWAYS-ON hardening for the public boundary, independent of any setting:
-    # (1) force credential redaction, (2) embed allowed local media,
-    # (3) strip known local paths.
+    # (1) force credential redaction, (2) placeholder content-supplied inline
+    # data: URIs, (3) embed allowed local media, (4) strip known local paths.
     text = _force_redact_credentials(text)
+    # The placeholder pass runs on exactly the text the embed receives, so no
+    # content-supplied data: URI reaches the snapshot or can pose as embed
+    # output, and the embed's own <img src="data:..."> is never rewritten.
+    text = _placeholder_inline_data_uris(text)
     # Embed local media BEFORE path redaction so the concrete path is still
     # available for file reads.  MEDIA: references become self-contained data
     # URIs — or a static placeholder if the path is outside the allowed roots.
@@ -524,6 +583,7 @@ def build_share_snapshot(session) -> dict:
     _raw_title = safe_session.get("title")
     _raw_title = _raw_title if isinstance(_raw_title, str) else "Untitled"
     title = _force_redact_credentials(_raw_title or "Untitled")
+    title = _placeholder_inline_data_uris(title)
     title = _redact_share_paths(title, redact_paths) or "Untitled"
     return {
         "title": title,

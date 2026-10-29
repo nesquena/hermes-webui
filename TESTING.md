@@ -274,12 +274,12 @@ write the open picker at 390x844, 820x1180, 844x390 and 1440x900.
 Last, it runs `tests/browser_session_row_activation.py`, which imports three
 conversations and opens them from the sidebar without a pointer press. Tab
 from the conversation filter must reach a conversation title, every row title
-must be a focusable link, with `aria-current="page"` on the open
+must be a native button, with `aria-current="page"` on the open
 conversation's title. Mouse events without pointer events (how Firefox performs
 a screen reader's activate command, e.g. NVDA in browse mode), a bare
 `element.click()`, and Enter on the focused title must each open the
-conversation, and a sidebar repaint must never move focus to a title (a screen
-reader would pull its reading cursor back to the list). After Enter opens a
+conversation. A sidebar repaint restores the same previously focused title;
+it must not steal focus from the composer or another control. After Enter opens a
 conversation, focus must be on that row's rebuilt title, so the next Tab reaches
 its ⋮ trigger; Enter on one title and then another before the first has loaded
 must leave focus on the second (open) conversation's title, never the first; on
@@ -362,6 +362,43 @@ non-blocking while the public matrix expands. The Chromium
 merge checks remain a maintainer-controlled repository setting.
 The maintainer's private QA harness remains broader; later public slices will
 add cancellation, compression, and recovery coverage.
+
+### Approval first-click gate
+
+`tests/browser_approval_first_click.py` covers the approval card's transport-id
+identity (#7091). It drives the real `showApprovalForSession`, `respondApproval`,
+and `dismissApprovalCard` in Chromium against a real WebUI server on isolated
+state, and seeds approvals through the loopback-only
+`/api/approval/inject_test` hook:
+
+- S1: a stale transport id on the rendered card still resolves on the first click.
+- S2: a queued successor A to B never inherits A's click; B needs a fresh click.
+- S3: dismiss with a stale id re-renders the head first and does not resurrect it.
+- S4: a successor that never rendered must produce no `/api/approval/respond`
+  request at all.
+- S5: two queued approvals with identical content (same command, description and
+  patterns, different `request_id`) are still distinct identities: clicking A
+  posts nothing, B stays pending, and only a fresh click resolves B. Identical
+  content alone must never let a click answer the approval the user never saw.
+
+```bash
+pip install -r requirements.txt playwright
+python -m playwright install chromium
+python tests/browser_approval_first_click.py
+```
+
+Set `APPROVAL_ARTIFACT_DIR` to keep the screenshots and server log. The
+`approval-first-click` row in the conversation lifecycle workflow is blocking,
+so a regression in the response-id reconciliation fails CI instead of being
+swallowed.
+
+The same identity rules are pinned headlessly in
+`tests/test_gateway_yolo_webui_compat.py`: an entry with no `request_id` and no
+producer token fails closed when the head's transport id differs (no respond
+POST), still answers when the transport id matches (the server-minted id is its
+own proof, so the card cannot re-render forever), and the id-equality
+short-circuit still respects the post-await session fence for both respond and
+dismiss.
 
 ### Active-session reconnect redraw gate
 
@@ -2138,6 +2175,13 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 - Double-click a file in workspace panel to rename. Enter saves, Escape cancels.
 - Create a folder via folder icon in workspace header.
 - Add `#tag` to session title. Verify tag chip appears in sidebar. Click to filter.
+  - At 390px with touch input, the first tap filters without opening the conversation
+    or moving the chip as the timestamp changes. Verify long-press still opens actions.
+  - With a conversation's project picker open, click a tag on another conversation.
+    The picker closes and the tag filter repaints immediately without opening that conversation.
+  - Open the project context menu or composer model menu, then click a conversation
+    title: the menu closes and the conversation opens once. Also check Enter/Space,
+    J/K navigation, input-field protection, desktop hover, and keyboard focus.
 - Archive a session. Verify it disappears. Toggle "Show archived" to see it.
 
 ### Sprint 15: Session Projects

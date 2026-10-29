@@ -228,6 +228,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Delegated subagent sessions nest under their parent row. When that parent is filtered out of the current view (project, source tab, hidden), the subagent is hidden with it rather than shown as a stray top-level "Subagent Session"; a subagent without the cross-surface flag (for example in the all-profiles view) stays a top-level row when its parent is in the other (CLI/TUI) tab, was never imported, or is itself shown as a top-level subagent row, and a subagent that matches an active sidebar search is always listed
 - Project bindings -- right-click a project chip and pick **Project settings…** to pin a default workspace (or several workspaces, with one marked default) and a model. The chip's **+** (and New Chat while the project filter is active) then opens a session already in that workspace/model. The reasoning-effort binding stays in the API (`POST /api/projects/bind`) but is dormant: the dialog no longer offers the row, and nothing applies a stored value to a new session any more — the only mechanism would be the **profile-wide** reasoning-effort preference (the same `agent.reasoning_effort` setting the `/reasoning` command writes), so a row inside a per-project dialog read as per-project while silently moving the whole profile's effort; it comes back with per-session effort (#7881)
 - Session tags -- add #tag to titles for colored chips and click-to-filter
+  Clicking a session tag chip filters the list without opening the conversation.
 - Grouped by Today / Yesterday / Earlier in the sidebar (collapsible date groups)
 - Download as Markdown transcript, full JSON export, or import from JSON
 - Create a public read-only share link for the active conversation from the Control Center; shared pages show a sanitized transcript snapshot without workspace, profile, or live controls
@@ -261,6 +262,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Auto-stops after ~2s of silence
 - Appends to existing textarea content (doesn't replace)
 - Hidden when browser doesn't support Web Speech API (Chrome, Edge, Safari)
+- A saved fallback from browser speech recognition to server-side recording expires after 24 hours. Preferences stored by older versions get a 24-hour window on first use after upgrading. On reload after expiry, the mic returns to normal capture selection: server transcription takes priority when available; otherwise it uses browser speech recognition.
 
 ### Profiles
 - Profile chip in the **composer footer** -- dropdown showing all profiles with gateway status and model info
@@ -558,14 +560,14 @@ the community ARM64-Android field report: [`docs/remote-access.md`](docs/remote-
 
 ### Manual launch (without start.sh)
 
-If you prefer to launch the server directly:
+If you prefer to launch the server directly (for example from your own systemd unit):
 
 ```bash
-cd /path/to/hermes-agent          # or wherever sys.path can find Hermes modules
-HERMES_WEBUI_PORT=8787 venv/bin/python /path/to/hermes-webui/server.py
+export HERMES_WEBUI_AGENT_DIR=/path/to/hermes-agent   # optional, see below
+HERMES_WEBUI_PORT=8787 python3 /path/to/hermes-webui/server.py
 ```
 
-Note: use the agent venv Python (or any Python environment that has the Hermes agent dependencies installed). System Python will be missing `openai`, `httpx`, and other required packages.
+Before importing anything else, `server.py` activates the Hermes Agent's dependency environment. It uses `HERMES_WEBUI_AGENT_DIR` when set, otherwise the same discovery `start.sh` uses (`$HERMES_HOME/hermes-agent`, `~/.hermes/hermes-agent`, the `hermes` launcher, …), so the export is only needed for an Agent installed somewhere else. A Hermes-managed Agent (v0.21.6 or newer, installed by the official installer or `hermes update`) then restarts the server in its own Python with its own dependencies, so the interpreter you launch with does not need the Agent's packages. An older Agent that keeps its dependencies in `venv/` or `.venv/` is not restarted: run `server.py` with that venv's Python instead (`/path/to/hermes-agent/venv/bin/python`). System Python on its own lacks `openai`, `httpx` and other required packages.
 
 Health check:
 

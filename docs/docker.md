@@ -84,6 +84,10 @@ use `docker-compose.two-container.yml`,
 `docker-compose.three-container.yml`, or run `hermes gateway` separately before
 relying on offline scheduled runs. See [Scheduled jobs and the gateway daemon](#scheduled-jobs-and-the-gateway-daemon) below for the full background and verification steps.
 
+If your mounted `~/.hermes/hermes-agent` is a Hermes-managed git checkout (Agent v0.21.6 or newer, installed by the official installer or `hermes update`), the WebUI runs the container's staged copy of that Agent instead, so the Agent never re-launches the WebUI into your host's Python. As a result, Settings' Agent update reports that the Agent is not a git repository: update the Agent on the host with `hermes update`, then recreate the container (`docker compose up -d --force-recreate`) so it stages the updated Agent. The mounted checkout still runs directly, `.git` and in-app update included, whenever that Agent would not re-launch anyway: with `HERMES_DISABLE_LAZY_INSTALLS=1` (or `true`/`yes`), or when its `install-stamp.json` names an update mechanism other than `self` (#8581).
+
+When opt-in auto-install is enabled (`HERMES_WEBUI_AUTO_INSTALL=1`), an already-selected staged Agent is used directly without a stage-copy warning. A different staged directory still has to pass the ownership, ancestry, source-identity, and freshness checks.
+
 For troubleshooting, reinstall, or onboarding reproduction trials, do not mount
 your real `~/.hermes` unless you intentionally want to test real state. Use an
 isolated Hermes home and follow
@@ -570,7 +574,7 @@ The two- and three-container setups use **named Docker volumes** (not bind mount
       └─────────────────────────┘
 ```
 
-The WebUI container doesn't ship with the agent's Python deps — at startup it runs `uv pip install /home/hermeswebui/.hermes/hermes-agent` to install them from the shared volume. The WebUI mount is read-only; the agent container is the only writer.
+The WebUI container doesn't ship with the agent's Python deps. At startup it copies the agent source from the shared volume into a writable stage (`/app/hermes-agent-src`) and installs it with `uv pip install -e "/app/hermes-agent-src[all]"`, passing the agent's own `[tool.uv] override-dependencies` as `--overrides` (since agent v0.22.5 its requirements only resolve with them, #8524). The WebUI mount is read-only; the agent container is the only writer.
 
 ## Upgrading the agent container
 

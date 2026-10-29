@@ -9027,6 +9027,74 @@ def _is_active_turn_checkpoint_row(row, active_turn_identity, msg_text):
     )
 
 
+def _stable_message_ownership_id(message) -> tuple[str | None, bool]:
+    """Canonical stable id restricted to the ownership-granting shape.
+
+    #6310 (nesquena-hermes 2026-08-03): only a valid NON-NEGATIVE INTEGER
+    message id may prove independent ownership in the context dedupe. The
+    broadly shared ``_stable_message_identity_details`` canonicaliser accepts
+    any non-empty int/str/float — ``-7``, ``3.5`` and ``abc`` all canonicalise
+    — which is right for alias reconciliation but too permissive as an
+    ownership signal. A malformed, negative or non-integer id must fail safely
+    to the legacy content-identity collapse instead of splitting a turn.
+    """
+    stable_id, canonical_valid = _stable_message_identity_details(message)
+    if not canonical_valid or stable_id is None:
+        return None, False
+    if not stable_id.isdigit():
+        return None, False
+    return stable_id, True
+
+
+def _independently_owned_user_pair(prior_row, candidate_row) -> bool:
+    """Return True when two same-text user rows are independently owned turns.
+
+    #6310 (nesquena-hermes 2026-08-03): the dedup-local handling prefers a
+    valid non-negative integer message id when one is available. The user
+    exact-index inside ``_deduplicate_context_messages`` keys on
+    content+timestamp+source+attachments and knows nothing about durable ids,
+    so two committed turns that repeat text verbatim inside one timestamp
+    bucket collapse there before the stable-id ownership path can tell them
+    apart. When BOTH rows carry valid DISTINCT durable ids the pair is
+    independently owned and the exact index must defer to that path. Every
+    other shape — an id-less row, a matching id, or an invalid/boolean/
+    negative/non-integer id — keeps the legacy collapse unchanged.
+    """
+    prior_id, prior_valid = _stable_message_ownership_id(prior_row)
+    candidate_id, candidate_valid = _stable_message_ownership_id(candidate_row)
+    return bool(
+        prior_valid
+        and candidate_valid
+        and prior_id is not None
+        and candidate_id is not None
+        and prior_id != candidate_id
+    )
+
+
+def _register_seen_stable_id(key, msg, seen_stable_by_key) -> None:
+    """Append ``msg``'s durable stable id to the per-key kept-id registry.
+
+    #6310 bookkeeping: a row admitted through an active-turn path must
+    register its id, or a later replay of that same record (its timestamp
+    shifted across a load, so the exact index no longer matches) reaches the
+    stable-id ownership path with a registry that never saw the id and
+    survives as a duplicate the model would be sent twice. Append-only on
+    purpose: a superseded id stays in the registry so a replay of the replaced
+    record still collapses against it.
+    """
+    if key is None:
+        return
+    stable_id, stable_valid = _stable_message_ownership_id(msg)
+    if not (stable_valid and stable_id is not None):
+        return
+    kept = seen_stable_by_key.get(key)
+    if not isinstance(kept, list):
+        kept = []
+        seen_stable_by_key[key] = kept
+    if stable_id not in kept:
+        kept.append(stable_id)
+
+
 def _deduplicate_context_messages(messages, protected_rows=None):
     """Remove duplicate messages from context by identity, keeping first occurrence.
 
@@ -9079,6 +9147,16 @@ def _deduplicate_context_messages(messages, protected_rows=None):
         # Keep the display identity unchanged so ordinary transcript dedup still
         # collapses the same visible row.
         key = _message_replay_key(msg)
+        # #6310 bookkeeping (PR #8519 round 1): the exact-key index may only
+        # ever name a row that was actually RETAINED, and it is published
+        # after retention is decided. The historical code published the
+        # prospective append slot (``len(deduped)``) before the stable-id
+        # branch could drop the row, so a discarded replay left the index
+        # pointing past the list and the next same-key lookup dereferenced a
+        # slot that was never filled. ``retained_exact_key`` carries the key
+        # to the publish site at the bottom of the loop; a dropped row simply
+        # never publishes, and the previously retained owner stays indexed.
+        retained_exact_key = None
         if isinstance(msg, dict) and msg.get('role') == 'user' and key is not None:
             user_exact_key = (
                 key,
@@ -9087,18 +9165,32 @@ def _deduplicate_context_messages(messages, protected_rows=None):
                 msg.get('_source') or 'webui',
                 json.dumps(msg.get('attachments') or [], sort_keys=True, ensure_ascii=False),
             )
+            retained_exact_key = user_exact_key
             prior_exact_idx = user_exact_index.get(user_exact_key)
             if msg.get('_active_turn_token'):
                 if prior_exact_idx is not None:
                     deduped[prior_exact_idx] = msg
+                    _register_seen_stable_id(key, msg, seen_stable_by_key)
                     continue
                 if key in seen:
                     deduped.append(msg)
+                    _register_seen_stable_id(key, msg, seen_stable_by_key)
                     user_exact_index[user_exact_key] = len(deduped) - 1
                     continue
             elif prior_exact_idx is not None:
-                continue
-            user_exact_index[user_exact_key] = len(deduped)
+                # #6310 (nesquena-hermes 2026-08-03): this exact index keys on
+                # content+timestamp+source+attachments and knows nothing about
+                # durable ids, so two independently settled turns repeating
+                # text verbatim inside one timestamp bucket would collapse here
+                # before the stable-id ownership path below could tell them
+                # apart. When BOTH rows carry valid DISTINCT stable ids the id
+                # is the preferred ownership signal — defer to that path. An
+                # id-less, id-matching or invalid-id row keeps the legacy
+                # collapse exactly as before. Every stored index names a
+                # retained row (see the publish site below), so this lookup is
+                # always in range.
+                if not _independently_owned_user_pair(deduped[prior_exact_idx], msg):
+                    continue
         if key is not None and key in seen:
             # #7237 round 7 finding 2 (nesquena-hermes 2026-10-14): a content
             # collision is a replay of an already-kept row UNLESS this row and
@@ -9110,8 +9202,10 @@ def _deduplicate_context_messages(messages, protected_rows=None):
             # occurrence from the outbound history and from the cold
             # ``context_messages``. Distinct durable ids prove the rows are
             # different turns; a missing/matching id stays conservative and
-            # collapses exactly like before.
-            stable_id, stable_valid = _stable_message_identity_details(msg)
+            # collapses exactly like before. #6310 (2026-08-03): the ownership
+            # signal is a valid NON-NEGATIVE INTEGER id — a malformed,
+            # negative or non-integer id fails safely to this legacy collapse.
+            stable_id, stable_valid = _stable_message_ownership_id(msg)
             kept_ids = seen_stable_by_key.get(key) or [None]
             if not (
                 stable_valid
@@ -9125,11 +9219,16 @@ def _deduplicate_context_messages(messages, protected_rows=None):
             kept_ids.append(stable_id)
         if key is not None and key not in seen:
             seen.add(key)
-            stable_id, stable_valid = _stable_message_identity_details(msg)
+            stable_id, stable_valid = _stable_message_ownership_id(msg)
             seen_stable_by_key[key] = [
                 stable_id if (stable_valid and stable_id is not None) else None
             ]
         deduped.append(msg)
+        # #6310 bookkeeping: publish the exact-key index only now that the row
+        # is retained, and name the slot it actually occupies. A dropped row
+        # never reaches this site, so no index can outlive its row.
+        if retained_exact_key is not None:
+            user_exact_index[retained_exact_key] = len(deduped) - 1
     return deduped
 
 
@@ -9487,6 +9586,16 @@ def _hard_prune_post_compression_tool_results(messages, *, compressor=None):
         )
         msg[_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG] = True
     return pruned, len(replacements)
+
+
+def _should_prune_tool_results_after_compression(agent) -> bool:
+    """True when the active context engine is the native ContextCompressor (or absent)."""
+    _compressor = getattr(agent, 'context_compressor', None)
+    try:
+        from agent.context_compressor import ContextCompressor as _NativeCC
+    except ImportError:
+        return True
+    return (_compressor is None) or isinstance(_compressor, _NativeCC)
 
 
 def _prune_context_tool_results_after_compression(agent, context_messages):
@@ -16864,10 +16973,19 @@ def _run_agent_streaming(
                         _compressed = True
                 # Notify the frontend that compression happened
                 if _compressed:
-                    s.context_messages = _prune_context_tool_results_after_compression(
-                        agent,
-                        s.context_messages,
-                    )
+                    # Only the native engine gets hard tool-result pruning;
+                    # external engines (e.g. lcm-x) own their budget/ref markers.
+                    if _should_prune_tool_results_after_compression(agent):
+                        s.context_messages = _prune_context_tool_results_after_compression(
+                            agent,
+                            s.context_messages,
+                        )
+                    else:
+                        logger.debug(
+                            "post-compression tool-result pruning skipped "
+                            "(active engine: %s)",
+                            type(getattr(agent, 'context_compressor', None)).__name__,
+                        )
                     s.post_compression_context_tokens_estimate = _estimate_post_compression_context_tokens(
                         agent,
                         s.context_messages,

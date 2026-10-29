@@ -1197,25 +1197,109 @@ function _messageSessionIndexBase(){
   const n=Number(typeof _oldestIdx!=='undefined'?_oldestIdx:0);
   return Number.isFinite(n)?Math.max(0,n):0;
 }
+// A prompt recovered from the live tail / pending cache while the loaded
+// transcript is a TAIL window sits OUTSIDE the canonical window (or is not
+// persisted yet): it is a DISPLAY-ONLY row. It renders like any other row, but
+// it must not shift the absolute index of the real window rows — fork, edit,
+// regenerate and the older-page cursor all derive `_oldestIdx + raw` from them.
+// Counting display-only rows out of the raw->absolute mapping keeps a window
+// that starts at absolute 31 on 31 instead of looking like 32 (fork sends 33).
+function _displayOnlyIndexState(){
+  const root=(typeof globalThis!=='undefined')?globalThis:(typeof window!=='undefined'?window:null);
+  if(!root) return null;
+  if(!root.__hermesDisplayOnlyIndexState){
+    root.__hermesDisplayOnlyIndexState={seen:false,cache:null,src:null,len:-1};
+  }
+  return root.__hermesDisplayOnlyIndexState;
+}
+function _markDisplayOnlyRow(row){
+  if(!row||typeof row!=='object') return row;
+  row._displayOnlyRow=true;
+  const state=_displayOnlyIndexState();
+  if(state){
+    state.seen=true;
+    state.cache=null;
+    state.src=null;
+    state.len=-1;
+  }
+  return row;
+}
+function _displayOnlyRawIndices(){
+  const state=_displayOnlyIndexState();
+  if(!state||!state.seen) return [];
+  const arr=(typeof S!=='undefined'&&S&&Array.isArray(S.messages))?S.messages:[];
+  if(state.cache&&state.src===arr&&state.len===arr.length) return state.cache;
+  const idxs=[];
+  for(let i=0;i<arr.length;i++){
+    if(arr[i]&&arr[i]._displayOnlyRow) idxs.push(i);
+  }
+  state.cache=idxs;
+  state.src=arr;
+  state.len=arr.length;
+  state.seen=idxs.length>0;
+  return idxs;
+}
+function _displayOnlyCountBefore(rawIdx){
+  const idxs=_displayOnlyRawIndices();
+  if(!idxs.length) return 0;
+  let count=0;
+  for(let i=0;i<idxs.length;i++){
+    if(idxs[i]<rawIdx) count++;
+    else break;
+  }
+  return count;
+}
+function _displayOnlyRowAt(rawIdx){
+  const idxs=_displayOnlyRawIndices();
+  if(!idxs.length) return false;
+  return idxs.indexOf(Number(rawIdx))!==-1;
+}
 function _messageSessionIndexForRawIdx(rawIdx){
   const n=Number(rawIdx);
-  if(!Number.isFinite(n)) return null;
-  return _messageSessionIndexBase()+n;
+  if(!Number.isFinite(n)||n<0) return null;
+  // Display-only rows have no canonical position: any value here would be a
+  // fabricated index that fork/edit/regenerate could act on.
+  const hasDisplayOnlyHelpers=typeof _displayOnlyRowAt==='function'&&typeof _displayOnlyCountBefore==='function';
+  if(!hasDisplayOnlyHelpers) return _messageSessionIndexBase()+n;
+  if(_displayOnlyRowAt(n)) return null;
+  const shiftedBy=_displayOnlyCountBefore(n);
+  if(!shiftedBy) return _messageSessionIndexBase()+n;
+  return _messageSessionIndexBase()+n-shiftedBy;
 }
 function _messageRawIdxForSessionIndex(sessionIdx){
   const n=Number(sessionIdx);
   if(!Number.isFinite(n)) return null;
+  let raw=n-_messageSessionIndexBase();
+  const idxs=typeof _displayOnlyRawIndices==='function'?_displayOnlyRawIndices():[];
+  if(raw<0||!idxs.length) return raw;
+  // Invert the counting: every display-only row at/before the candidate pushes
+  // the array position one slot further right.
+  for(let i=0;i<idxs.length;i++){
+    if(idxs[i]<=raw) raw++;
+    else break;
+  }
+  return raw;
+}
+// Window-relative index for keep_count math: `_oldestIdx + raw` must stay the
+// CANONICAL absolute index, so display-only rows are never counted here.
+function _canonicalRawIdxForSessionIndex(sessionIdx){
+  const n=Number(sessionIdx);
+  if(!Number.isFinite(n)) return null;
   return n-_messageSessionIndexBase();
 }
-// Current S.messages index of the message a rendered row shows. data-msg-idx is
-// relative to the _oldestIdx at render time and goes stale when full history
-// loads without a re-render (opening the outline does that); the row's
-// data-session-msg-idx is absolute and does not. Edit, regenerate and fork turn
-// this into an absolute keep_count (#2184), so a stale value truncated or forked
-// at the wrong turn.
+// Current canonical (window-relative) index of the message a rendered row
+// shows. data-msg-idx is relative to the _oldestIdx at render time and goes
+// stale when full history loads without a re-render (opening the outline does
+// that); the row's data-session-msg-idx is absolute and does not. Edit,
+// regenerate and fork turn this into an absolute keep_count (#2184), so a stale
+// value truncated or forked at the wrong turn.
 function _rowCurrentRawIdx(row, fallback){
   const abs=row&&row.dataset?Number(row.dataset.sessionMsgIdx):NaN;
-  const raw=Number.isSafeInteger(abs)&&abs>=0?_messageRawIdxForSessionIndex(abs):null;
+  const raw=Number.isSafeInteger(abs)&&abs>=0
+    ?(typeof _canonicalRawIdxForSessionIndex==='function'
+      ?_canonicalRawIdxForSessionIndex(abs)
+      :abs-_messageSessionIndexBase())
+    :null;
   return Number.isSafeInteger(raw)&&raw>=0?raw:fallback;
 }
 function _messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container){
@@ -4663,6 +4747,10 @@ function _providerFromModelValue(modelId){
 function _modelPickerOptionIdentity(modelId, providerId){
   let value=String(modelId||'');
   const provider=String(providerId||'').trim();
+  if(provider.toLowerCase()==='openrouter'){
+    const prefix='@openrouter:';
+    return (value.toLowerCase().startsWith(prefix)?value.substring(prefix.length):value).toLowerCase();
+  }
   if(value.startsWith('@')&&value.includes(':')){
     const exactPrefix=provider ? `@${provider}:` : '';
     if(exactPrefix && value.toLowerCase().startsWith(exactPrefix.toLowerCase())){
@@ -4694,7 +4782,9 @@ function _deduplicateModelPickerOptions(sel,selectedValue){
     const options=Array.from(group.children||[]).filter(opt=>opt&&opt.tagName==='OPTION');
     const byIdentity=new Map();
     for(const opt of options){
-      const identity=_modelPickerOptionIdentity(opt.value,_getOptionProviderId(opt));
+      const provider=String(_getOptionProviderId(opt)||'').toLowerCase();
+      const value=String(opt.value||'');
+      const identity=_modelPickerOptionIdentity(value,provider);
       if(!identity) continue;
       if(!byIdentity.has(identity)) byIdentity.set(identity,[]);
       byIdentity.get(identity).push(opt);
@@ -5167,20 +5257,32 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
     explicitProvider=rawModel.slice(1,rawModel.lastIndexOf(':'));
   }
   const preferred=String(preferredProviderId||explicitProvider||'').toLowerCase();
+  const isOpenRouterRoute=preferred==='openrouter'&&(rawModel.includes('/')||rawModel.startsWith('@'));
   if(preferred){
-    if(preferred==='custom'||preferred.startsWith('custom:')){
-      // A slash is part of a custom endpoint's upstream model ID, not a
-      // provider namespace. Match the exact routed ID (allowing only the
-      // WebUI's @provider: wrapper and dash/dot spelling compatibility).
+    if(isOpenRouterRoute||preferred==='custom'||preferred.startsWith('custom:')){
+      // Match the full routed ID. OpenRouter's slash IDs are exact; custom
+      // providers retain their legacy dash/dot spelling compatibility.
       const routeNorm=value=>{
         let routed=String(value||'');
         const prefix=`@${preferred}:`;
         if(routed.toLowerCase().startsWith(prefix)) routed=routed.slice(prefix.length);
-        return routed.toLowerCase().replace(/-/g,'.');
+        const normalized=routed.toLowerCase();
+        return isOpenRouterRoute?normalized:normalized.replace(/-/g,'.');
       };
       const providerOptions=options.filter(o=>_getOptionProviderId(o).toLowerCase()===preferred);
+      if(isOpenRouterRoute){
+        const exactRoute=value=>{
+          let routed=String(value||'');
+          const prefix=`@${preferred}:`;
+          if(routed.toLowerCase().startsWith(prefix.toLowerCase())) routed=routed.slice(prefix.length);
+          return routed.toLowerCase();
+        };
+        const exactProviderMatch=providerOptions.find(o=>exactRoute(o.value)===exactRoute(rawModel));
+        if(exactProviderMatch) return exactProviderMatch.value;
+      }
       const providerMatch=providerOptions.find(o=>routeNorm(o.value)===routeNorm(rawModel));
       if(providerMatch) return providerMatch.value;
+      if(isOpenRouterRoute) return null;
       // Legacy sessions may store only the bare suffix of a routed custom
       // option. Preserve #6195's provider-hinted repair, but only for an
       // explicit @provider: row; an unwrapped slash ID belongs to the active
@@ -5316,6 +5418,40 @@ function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
       ?_modelStateForSelect(sel,applied)
       :{model:applied,model_provider:null};
     if(!requestedProvider||String(appliedState&&appliedState.model_provider||'').toLowerCase()===requestedProvider.toLowerCase()) return applied;
+  }
+  if(requestedProvider.toLowerCase()==='openrouter'&&typeof _readModelOverflowData==='function'&&sel.querySelectorAll){
+    const prefix=`@${requestedProvider}:`;
+    const routeKey=value=>{
+      let id=String(value||'');
+      if(id.toLowerCase().startsWith(prefix.toLowerCase())) id=id.slice(prefix.length);
+      return id.toLowerCase();
+    };
+    const target=routeKey(modelId);
+    for(const group of Array.from(sel.querySelectorAll('optgroup'))){
+      if(String(group.dataset&&group.dataset.provider||'').toLowerCase()!==requestedProvider.toLowerCase()) continue;
+      const extra=_readModelOverflowData(group);
+      const matches=extra.map((item,index)=>({item,index})).filter(entry=>routeKey(entry.item.id)===target);
+      const match=matches.find(entry=>String(entry.item.id)===String(modelId))||(matches.length===1?matches[0]:null);
+      if(!match) continue;
+      const opt=document.createElement('option');
+      opt.value=match.item.id;
+      opt.textContent=match.item.label||(typeof getModelLabel==='function'?getModelLabel(opt.value):opt.value);
+      if(String(opt.value).toLowerCase().startsWith(prefix.toLowerCase())){
+        opt.dataset.model=String(opt.value).slice(prefix.length);
+        opt.dataset.provider=requestedProvider;
+      }
+      // A restored overflow row is still an overflow ("extra") row: #7528 sorts a built-in group's curated rows
+      // first and natural-sorts extras after them, so an untagged restore would jump ahead of its siblings.
+      opt.dataset.extra='1';
+      group.appendChild(opt);
+      group.dataset.extraModels=JSON.stringify(extra.filter((_,index)=>index!==match.index));
+      const restored=_applyModelToDropdown(modelId,sel,requestedProvider);
+      if(restored){
+        const state=_modelStateForSelect(sel,restored);
+        if(String(state&&state.model_provider||'').toLowerCase()===requestedProvider.toLowerCase()) return restored;
+      }
+      break;
+    }
   }
   const explicitPrefix=requestedProvider?`@${requestedProvider}:`:'';
   const rawModel=String(modelId||'');
@@ -5605,25 +5741,7 @@ function _addLiveModelsToSelect(provider, models, sel){
   const _isNamedCustomActiveProvider=_ap.startsWith('custom:');
   const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && _ap!=='openai-codex' && (_providerLower===_ap||_isNamedCustomActiveProvider&&_providerLower===_ap);
   // Keep existingNorm.has( within the #907 source slice.
-  const optionIdentity=typeof _modelPickerOptionIdentity==='function'
-    ? (modelId,providerId)=>_modelPickerOptionIdentity(modelId,providerId)
-    : (modelId,providerId)=>{
-        let value=String(modelId||'');
-        const provider=String(providerId||'').trim();
-      if(value.startsWith('@')&&value.includes(':')){
-        const exactPrefix=provider ? `@${provider}:` : '';
-        if(exactPrefix && value.toLowerCase().startsWith(exactPrefix.toLowerCase())){
-          value=value.substring(exactPrefix.length);
-        }else if(value.startsWith('@custom:')){
-          const namedProvider=value.substring('@custom:'.length);
-          const splitAt=namedProvider.indexOf(':');
-          value=splitAt>=0 ? namedProvider.substring(splitAt+1) : namedProvider;
-        }else{
-          value=value.substring(value.indexOf(':')+1);
-        }
-      }
-        return value.split('/').pop().replace(/-/g,'.').toLowerCase();
-      };
+  const optionIdentity=_modelPickerOptionIdentity;
   const existingNorm=new Set([...sel.options].map(o=>optionIdentity(o.value,_getOptionProviderId(o))));
   let added=0;
   for(const m of models){
@@ -6797,7 +6915,18 @@ function renderModelDropdown(){
         // so hoisted-configured models aren't double-counted. (#3691)
         const count=hiddenCount?0:groupRows.length;
         const _plainLabel=String(meta.label||'').replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,'');
-        heading.textContent=count>1?`${_plainLabel} (${count})`:meta.label;
+        // The backend's "(a of b)" is fixed at load time. Restoring an overflow model
+        // moves it from the hidden tail into the group, so recompute "a" from what is
+        // still hidden; otherwise the collapsed heading undercounts the rows below it.
+        let collapsedLabel=meta.label;
+        const _ofMatch=hiddenCount?String(meta.label||'').match(/\((\d+)\s+of\s+(\d+)\)\s*$/):null;
+        if(_ofMatch){
+          const total=Number(_ofMatch[2]);
+          const stillHidden=_modelData.filter(m=>m.groupKey===groupKey&&m.hiddenByDefault).length;
+          const shown=Math.max(0,Math.min(total,total-stillHidden));
+          if(shown!==Number(_ofMatch[1])) collapsedLabel=`${_plainLabel} (${shown} of ${total})`;
+        }
+        heading.textContent=count>1?`${_plainLabel} (${count})`:collapsedLabel;
         dd.appendChild(heading);
         const wrapper=document.createElement('div');
         wrapper.className='model-group-body';
@@ -21731,8 +21860,12 @@ function renderMessages(options){
     const recoveryHtml=recoveryPayload ? _compressionRecoveryHtml(recoveryPayload, (S.session&&S.session.session_id)||'') : '';
     if(recoveryHtml) bodyHtml += recoveryHtml;
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
+    const isDisplayOnlyRow=!!(m&&m._displayOnlyRow);
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
-    const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
+    // Display-only rows have no canonical index, so a keep_count derived from
+    // them would truncate/fork the wrong point: keep the row's actions off
+    // until the transcript row it mirrors actually lands.
+    const editBtn  = isEditableUser ? (isDisplayOnlyRow ? '' : `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>`) : '';
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
@@ -21742,7 +21875,11 @@ function renderMessages(options){
     const branchableReadOnlySession=typeof _isBranchableReadOnlySession==='function'
       ? _isBranchableReadOnlySession(S.session)
       : false;
-    const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1},this)">${li('git-branch',13)}</button>`;
+    // Display-only rows carry no canonical index, so fork/edit cannot compute a
+    // safe keep_count for them: hide the actions until the transcript row lands.
+    // Keep the read-only suppressor as the leading condition (test_465 pins that
+    // expression); display-only rows are suppressed in the same ternary's result.
+    const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : (isDisplayOnlyRow ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1},this)">${li('git-branch',13)}</button>`);
     const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';
     const tsVal=m._ts||m.timestamp;
     // _formatInServerTz handles fractional-hour offsets (India +0530 etc.)
@@ -21838,13 +21975,15 @@ function renderMessages(options){
       if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
       const newRawText=String(displayContent).trim();
       const nextRowHtml=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
+      const userSessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
       if(row){
         row.className='msg-row';
         row.id=_userMessageDomId(rawIdx);
         row.dataset.msgIdx=rawIdx;
-        row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+        row.dataset.sessionMsgIdx=userSessionMsgIdx===null?'':userSessionMsgIdx;
         row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
         row.dataset.role='user';
+        if(isDisplayOnlyRow) row.dataset.displayOnly='1'; else delete row.dataset.displayOnly;
         delete row.dataset.editing;
         if(row.dataset.rawText!==newRawText||row.innerHTML!==nextRowHtml){
           row.dataset.rawText=newRawText;
@@ -21855,9 +21994,10 @@ function renderMessages(options){
         row.className='msg-row';
         row.id=_userMessageDomId(rawIdx);
         row.dataset.msgIdx=rawIdx;
-        row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+        row.dataset.sessionMsgIdx=userSessionMsgIdx===null?'':userSessionMsgIdx;
         row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
         row.dataset.role='user';
+        if(isDisplayOnlyRow) row.dataset.displayOnly='1'; else delete row.dataset.displayOnly;
         row.dataset.rawText=newRawText;
         row.innerHTML=nextRowHtml;
       }
