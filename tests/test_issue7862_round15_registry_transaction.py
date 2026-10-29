@@ -131,11 +131,13 @@ def _snapshot_memory(store):
     """Deep-copy this process's registry memory (a 'second process' view)."""
     from api.config import (
         PENDING_GOAL_CONTINUATION,
+        PENDING_GOAL_CONTINUATION_PROMPTS,
         PENDING_GOAL_CONTINUATION_RECORDS,
     )
 
     snap = {
         "PENDING_GOAL_CONTINUATION": set(PENDING_GOAL_CONTINUATION),
+        "PENDING_GOAL_CONTINUATION_PROMPTS": copy.deepcopy(PENDING_GOAL_CONTINUATION_PROMPTS),
         "PENDING_GOAL_CONTINUATION_RECORDS": copy.deepcopy(PENDING_GOAL_CONTINUATION_RECORDS),
         "_GENERATION": store._GENERATION,
     }
@@ -148,12 +150,17 @@ def _restore_memory(store, snap):
     """Put a previously snapshotted process view back (stale by construction)."""
     from api.config import (
         PENDING_GOAL_CONTINUATION,
+        PENDING_GOAL_CONTINUATION_PROMPTS,
         PENDING_GOAL_CONTINUATION_RECORDS,
     )
 
     with store._LOCK:
         PENDING_GOAL_CONTINUATION.clear()
         PENDING_GOAL_CONTINUATION.update(snap["PENDING_GOAL_CONTINUATION"])
+        PENDING_GOAL_CONTINUATION_PROMPTS.clear()
+        PENDING_GOAL_CONTINUATION_PROMPTS.update(
+            copy.deepcopy(snap["PENDING_GOAL_CONTINUATION_PROMPTS"])
+        )
         PENDING_GOAL_CONTINUATION_RECORDS.clear()
         PENDING_GOAL_CONTINUATION_RECORDS.update(
             copy.deepcopy(snap["PENDING_GOAL_CONTINUATION_RECORDS"])
