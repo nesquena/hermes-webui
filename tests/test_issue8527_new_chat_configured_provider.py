@@ -374,3 +374,328 @@ def test_configured_default_without_provider_stays_null():
     assert body.get("model_provider") in (None, ""), (
         f"no configured provider must stay unresolved; got {body.get('model_provider')!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Maintainer re-gate (2026-10-29): the configured globals are not always a
+# profile-owned pair.
+#
+# Both profile-switch writers (_switchProfileForSessionLoad in sessions.js,
+# switchToProfile in panels.js) used to replace only window._defaultModel when
+# the destination returned ``default_model_provider:null``, retaining the
+# PREVIOUS profile's window._activeProvider. newSession() then sent the
+# destination's default model with the old profile's provider — a
+# wrong-provider client payload (the canonical switch auto-creates the new
+# session BEFORE its normal catalog refresh; the later refresh clears the
+# stale global but cannot retract the request already sent).
+#
+# The writers now adopt the model AND (re)bind the provider from the SAME
+# destination response — replace or clear, never keep the previous profile's
+# provider when the destination has none. These tests compose the REAL
+# switchToProfile → REAL newSession chain (plus the _switchProfileForSessionLoad
+# writer) under node, with the ordinary post-switch refresh ordering recorded,
+# and cover both the null-provider and explicit-provider destination arms.
+# ---------------------------------------------------------------------------
+
+PANELS_JS = ROOT / "static" / "panels.js"
+
+_SWITCH_DRIVER_BODY = r"""
+const fs = require('fs');
+const srcSessions = fs.readFileSync(process.argv[1], 'utf8');
+const srcPanels = fs.readFileSync(process.argv[2], 'utf8');
+const scenario = JSON.parse(process.argv[3]);
+
+const calls = [];
+const bodies = {};
+const noop = () => {};
+const promiseNoop = () => Promise.resolve();
+
+const S = Object.assign({
+  activeProfile: 'default',
+  activeProfileIsDefault: true,
+  session: scenario.session || null,
+  messages: scenario.messages || [],
+  toolCalls: [],
+  _profileSwitchWorkspace: null,
+  _profileDefaultWorkspace: null,
+  _pendingSessionToolsets: null,
+}, scenario.S || {});
+
+let _modelSelect = null;
+
+const ctx = {
+  S: S,
+  $: (id) => (id === 'modelSelect' ? _modelSelect : null),
+  api: (url, opts) => {
+    calls.push(url);
+    if (url === '/api/profile/switch') {
+      return Promise.resolve(scenario.switchData);
+    }
+    if (url === '/api/session/new') {
+      let body = null;
+      try { body = JSON.parse((opts && opts.body) || 'null'); } catch (_) { body = null; }
+      bodies['/api/session/new'] = body;
+      return Promise.resolve({
+        session: {session_id: 'new-sid', messages: [], model: (body && body.model) || null, model_provider: (body && body.model_provider) || null},
+      });
+    }
+    return Promise.resolve({});
+  },
+  window: {
+    _defaultModel: scenario.defaultModel,
+    _activeProvider: scenario.activeProvider,
+    _clearPendingSelections: noop,
+    invalidateSlashSkillCaches: undefined,
+  },
+  document: { title: '', createElement: () => ({dataset: {}, textContent: '', value: '', appendChild() {}, querySelectorAll: () => []}) },
+  localStorage: { removeItem() {}, setItem() {} },
+  showToast: noop,
+  t: (v) => v,
+  updateQueueBadge: noop,
+  clearLiveToolCards: noop,
+  syncTopbar: noop,
+  renderMessages: noop,
+  loadDir: promiseNoop,
+  refreshSessionList: noop,
+  _allProjects: [],
+  _activeProject: scenario.activeProject || null,
+  NO_PROJECT_FILTER: '__no_project__',
+  _newSessionInFlight: null,
+  _newSessionPendingText: () => '',
+  _setNewSessionPending: noop,
+  _messagesTruncated: false,
+  _oldestIdx: 0,
+  _projectBindingsForNewSession: () => ({}),
+  _profileMatchesActiveProfile: () => true,
+  _readEmptyComposerModelOverride: () => null,
+  _modelStateForSelect: (sel, value) => {
+    const opt = (sel && sel.options || []).find((o) => o.value === value);
+    return {model: value, model_provider: (opt ? opt['data-provider'] : null) || null};
+  },
+  _readPersistedModelState: () => null,
+  _clearExplicitPickerPick: noop,
+  _clearEmptyComposerModelOverride: noop,
+  _adoptRegenerationRevision: noop,
+  _rememberNewChatDraftSession: noop,
+  _setActiveSessionUrl: noop,
+  _setLiveAssistantTps: noop,
+  _setSessionViewedCount: noop,
+  _syncCtxIndicator: noop,
+  _applyModelToDropdown: () => null,
+  _applyReasoningChip: noop,
+  _ensureModelOptionInDropdown: noop,
+  _hydrateTodosFromSession: noop,
+  _announceNewSessionWorkspace: noop,
+  _deferWorkspaceRefreshForSession: noop,
+  _retireProjectPickerForExplicitRepaint: noop,
+  _loadSessionGeneration: 0,
+  _sessionSourceFilter: null,
+  _clearRestoredGoalContinuationDraft: noop,
+  updateSendBtn: noop,
+  setStatus: noop,
+  setComposerStatus: noop,
+  startSessionStream: noop,
+  // switchToProfile module vars + stubs (typeof-guarded in source).
+  _profileSwitchGeneration: 0,
+  _profileSwitchInFlight: 0,
+  _profileSwitchOpeningExistingSession: false,
+  _workspacePanelMode: 'closed',
+  _skillsData: null,
+  _workspaceList: null,
+  _tabVisReconcilePending: 0,
+  _renamingSid: null,
+  _sessionListSkeletonActive: false,
+  _invalidateSessionListRenders: noop,
+  _setProfileSwitchListEmbargo: noop,
+  showSessionListSkeleton: noop,
+  bumpWorkspaceTreeGen: noop,
+  showWorkspaceTreeSkeleton: noop,
+  clearWorkspaceTreeSkeleton: noop,
+  _resetCronUnreadForProfileSwitch: noop,
+  _clearPersistedModelState: noop,
+  startGatewaySSE: noop,
+  applyBotName: noop,
+  refreshProfileTransitionReasoningChip: noop,
+  animateNextSessionListRefresh: noop,
+  renderSessionList: promiseNoop,
+  _openProfileSwitchSessionBrowser: noop,
+  _profileSwitchPanelLoad: promiseNoop,
+  closeSessionActionMenu: noop,
+  Object, JSON, Promise, Array, String, Number, Boolean, Math, RegExp, Date,
+  Error, TypeError, console, setTimeout, isNaN, parseInt, parseFloat,
+};
+ctx.refreshRan = null;
+// The ordinary post-switch catalog refresh (populateModelDropdown path) clears
+// the stale globals in the real flow; it runs AFTER the auto-created session's
+// POST and records its position so the test can prove the payload was already
+// correct before it ran — the refresh can never retract a sent request.
+ctx._refreshProfileSwitchBackground = () => {
+  ctx.refreshRan = calls.length;
+  ctx.window._activeProvider = null;
+};
+
+const proxy = new Proxy(ctx, {
+  get(target, prop) { if (prop in target) return target[prop]; return noop; },
+  has() { return true; },
+});
+const vm = require('vm');
+const context = vm.createContext(proxy);
+vm.runInContext(extractAsyncFunction(srcPanels, 'switchToProfile'), context);
+vm.runInContext(extractAsyncFunction(srcSessions, 'newSession'), context);
+vm.runInContext(extractAsyncFunction(srcSessions, '_switchProfileForSessionLoad'), context);
+
+const run = scenario.flow === 'loadSwitch'
+  ? context._switchProfileForSessionLoad(scenario.switchName)
+  : context.switchToProfile(scenario.switchName);
+run.then(() => {
+  process.stdout.write(JSON.stringify({
+    ok: true,
+    calls: calls,
+    bodies: bodies,
+    activeProvider: ctx.window._activeProvider,
+    defaultModel: ctx.window._defaultModel,
+    refreshRan: ctx.refreshRan,
+  }));
+}).catch((err) => {
+  process.stdout.write(JSON.stringify({ok: false, error: String(err && err.stack || err)}));
+});
+"""
+
+
+def _run_switch_driver(scenario: dict) -> dict:
+    """Extract the real switchToProfile + real newSession (or the real
+    _switchProfileForSessionLoad writer) and drive one scenario."""
+    driver = _EXTRACTOR + _SWITCH_DRIVER_BODY
+    proc = subprocess.run(
+        [NODE_BIN, "-e", driver, str(SESSIONS_JS), str(PANELS_JS), json.dumps(scenario)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    out = (proc.stdout or "").strip()
+    if not out:
+        raise AssertionError(f"switch driver produced no output; stderr={proc.stderr[:2000]}")
+    return json.loads(out.splitlines()[-1])
+
+
+_OLD_SESSION = {
+    "session_id": "old-sid",
+    "model": "old-model",
+    "model_provider": "old-route",
+    "profile": "old-profile",
+}
+_OLD_MESSAGES = [{"role": "user", "content": "existing conversation"}]
+_DEST_DEFAULT = "google/gemini-2.5-pro"
+_SWITCH_NAME = "new-profile"
+
+
+def _switch_scenario(switch_data: dict) -> dict:
+    """An existing conversation on the OLD profile; the switch is about to
+    auto-create a new session for the destination profile."""
+    return {
+        "flow": "switch",
+        "switchName": _SWITCH_NAME,
+        "switchData": switch_data,
+        # Stale globals from the previous profile, hydrated before the switch.
+        "defaultModel": _DEST_DEFAULT,
+        "activeProvider": "old-route",
+        "session": _OLD_SESSION,
+        "messages": _OLD_MESSAGES,
+    }
+
+
+def test_profile_switch_new_session_drops_previous_provider_when_destination_has_none():
+    """A destination returning ``default_model_provider:null`` must NOT carry
+    the previous profile's provider onto the auto-created session's payload.
+
+    The canonical switch (real switchToProfile) adopts the destination's
+    default model and then auto-creates the new session (real newSession)
+    BEFORE its normal catalog refresh — which is exactly why the payload must
+    already be correct at POST time: the refresh clears the stale global but
+    cannot retract the request already sent.
+    """
+    result = _run_switch_driver(_switch_scenario({
+        "active": _SWITCH_NAME,
+        "is_default": False,
+        "default_model": _DEST_DEFAULT,
+        "default_model_provider": None,
+    }))
+    assert result["ok"], result.get("error")
+    body = result["bodies"].get("/api/session/new") or {}
+    assert body.get("model") == _DEST_DEFAULT, (
+        f"the destination default model must be sent; got {body.get('model')!r}"
+    )
+    assert body.get("model_provider") in (None, ""), (
+        "a destination with no configured provider must send model_provider=null on the "
+        f"auto-created session — retaining the previous profile's provider "
+        f"({body.get('model_provider')!r}) would bill the new profile's turn to the "
+        "old route (#8527 profile-switch re-gate)"
+    )
+    # Ordinary refresh ordering: the catalog refresh runs AFTER the POST (its
+    # position is recorded), so it can never be the mechanism that fixed the
+    # payload — the writers must have bound the pair from the switch response.
+    assert result["refreshRan"] is not None, "the post-switch refresh must have run"
+    assert result["calls"].index("/api/session/new") < result["refreshRan"], (
+        "the auto-created session's POST must precede the ordinary catalog refresh"
+    )
+
+
+def test_profile_switch_new_session_keeps_destination_provider():
+    """Control arm: a destination WITH a configured provider sends it verbatim."""
+    result = _run_switch_driver(_switch_scenario({
+        "active": _SWITCH_NAME,
+        "is_default": False,
+        "default_model": _DEST_DEFAULT,
+        "default_model_provider": "new-route",
+    }))
+    assert result["ok"], result.get("error")
+    body = result["bodies"].get("/api/session/new") or {}
+    assert body.get("model") == _DEST_DEFAULT
+    assert body.get("model_provider") == "new-route", (
+        f"the destination's own provider must travel with its model; got {body.get('model_provider')!r}"
+    )
+
+
+def _load_switch_scenario(switch_data: dict) -> dict:
+    return {
+        "flow": "loadSwitch",
+        "switchName": _SWITCH_NAME,
+        "switchData": switch_data,
+        "defaultModel": _DEST_DEFAULT,
+        "activeProvider": "old-route",
+        "session": None,
+        "messages": [],
+    }
+
+
+def test_session_load_switch_clears_stale_provider_when_destination_has_none():
+    """The sessions.js profile-switch writer (_switchProfileForSessionLoad)
+    must clear the previous profile's provider when the destination has none."""
+    result = _run_switch_driver(_load_switch_scenario({
+        "active": _SWITCH_NAME,
+        "is_default": False,
+        "default_model": _DEST_DEFAULT,
+        "default_model_provider": None,
+    }))
+    assert result["ok"], result.get("error")
+    assert result["defaultModel"] == _DEST_DEFAULT
+    assert result["activeProvider"] in (None, ""), (
+        "window._activeProvider must be cleared from the same destination response "
+        f"when default_model_provider is null; retained {result['activeProvider']!r} "
+        "from the previous profile (#8527 profile-switch re-gate)"
+    )
+
+
+def test_session_load_switch_adopts_destination_provider():
+    """Control arm: the sessions.js writer adopts a configured destination provider."""
+    result = _run_switch_driver(_load_switch_scenario({
+        "active": _SWITCH_NAME,
+        "is_default": False,
+        "default_model": _DEST_DEFAULT,
+        "default_model_provider": "new-route",
+    }))
+    assert result["ok"], result.get("error")
+    assert result["defaultModel"] == _DEST_DEFAULT
+    assert result["activeProvider"] == "new-route", (
+        f"the destination's configured provider must be adopted; got {result['activeProvider']!r}"
+    )

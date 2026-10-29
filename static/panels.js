@@ -7624,8 +7624,14 @@ async function switchToProfile(name) {
     else localStorage.removeItem('hermes-webui-model');
     _skillsData = null;
     _workspaceList = null;
-    if (data.default_model) window._defaultModel = data.default_model;
-    if (data.default_model_provider) window._activeProvider = data.default_model_provider;
+    // The destination profile's defaults are a PAIR: adopting its default model
+    // also (re)binds the provider from the SAME switch response — replace or
+    // clear, never keep the previous profile's provider when the destination
+    // has none configured (#8527 profile-switch review).
+    if (data.default_model) {
+      window._defaultModel = data.default_model;
+      window._activeProvider = data.default_model_provider || null;
+    }
 
     // ── Apply model ────────────────────────────────────────────────────────
     if (data.default_model) {
