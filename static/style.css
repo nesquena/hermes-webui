@@ -3710,13 +3710,14 @@
 .ws-suggest-item.active .ws-suggest-parent{color:var(--text);}
 /* ── Message action buttons (copy, edit, retry) ── */
 .msg-actions{display:flex;align-items:center;gap:2px;opacity:0;transition:opacity .15s;margin-left:auto;}
-.msg-row:hover .msg-actions{opacity:1;}
+.msg-row:hover .msg-actions,.msg-row:focus-within .msg-actions{opacity:1;}
 /* Keep !important so this beats equal-specificity .msg-foot-with-usage fades during measurement rerenders. */
 .vscroll-measuring .msg-foot,
 .vscroll-measuring .msg-actions,
 .vscroll-measuring .msg-time{transition:none !important;}
 .msg-action-btn{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:2px 5px;border-radius:5px;transition:color .12s,background .12s;line-height:1;}
 .msg-action-btn:hover{color:var(--accent-text);background:var(--accent-bg);}
+.msg-action-btn:focus-visible{color:var(--accent-text);background:var(--accent-bg);outline:2px solid var(--focus-ring);outline-offset:1px;}
 .selected-text-action-group{position:fixed;z-index:1200;display:inline-flex;align-items:center;gap:2px;padding:3px;border:1px solid var(--border2);border-radius:999px;background:var(--bg);box-shadow:0 8px 24px rgba(0,0,0,.26),0 0 0 1px var(--surface);visibility:hidden;opacity:0;pointer-events:none;transform:translateY(4px);transition:visibility 0s linear .12s,opacity .12s ease,transform .12s ease;user-select:none;}
 .selected-text-action-group.visible{visibility:visible;opacity:1;pointer-events:auto;transform:translateY(0);transition-delay:0s;}
 .selected-text-action-group button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:32px;padding:7px 11px;border:1px solid transparent;border-radius:999px;background:transparent;color:var(--text);font-family:inherit;font-size:12px;font-weight:700;line-height:1;cursor:pointer;white-space:nowrap;}
@@ -6361,8 +6362,10 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
 
 /* Persistent action toolbar: subtle at rest, full on hover */
 .msg-actions { opacity: .25; }
-.msg-row:hover .msg-actions { opacity: 1; }
-.assistant-turn:hover .msg-actions { opacity: 1; }
+.msg-row:hover .msg-actions,
+.msg-row:focus-within .msg-actions { opacity: 1; }
+.assistant-turn:hover .msg-actions,
+.assistant-turn:focus-within .msg-actions { opacity: 1; }
 .extension-message-actions{display:contents;}
 .extension-msg-action[aria-pressed="true"]{color:var(--accent);}
 .extension-msg-action[aria-pressed="true"] svg{fill:currentColor;}
@@ -6537,6 +6540,7 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
   transition: opacity .15s;
 }
 .msg-row[data-role="assistant"]:hover .msg-foot,
+.msg-row[data-role="assistant"]:focus-within .msg-foot,
 .assistant-turn:hover .msg-foot,
 .assistant-turn:focus-within .msg-foot { opacity: 1; }
 /* Desktop/tablet keeps the per-turn jump affordance discoverable without
@@ -6580,7 +6584,9 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
 .assistant-turn:focus-within .msg-foot-with-usage .msg-time,
 .assistant-turn:focus-within .msg-foot-with-usage .msg-actions,
 .msg-row[data-role="assistant"]:hover .msg-foot-with-usage .msg-time,
-.msg-row[data-role="assistant"]:hover .msg-foot-with-usage .msg-actions {
+.msg-row[data-role="assistant"]:hover .msg-foot-with-usage .msg-actions,
+.msg-row[data-role="assistant"]:focus-within .msg-foot-with-usage .msg-time,
+.msg-row[data-role="assistant"]:focus-within .msg-foot-with-usage .msg-actions {
   opacity: 1;
 }
 

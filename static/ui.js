@@ -11120,6 +11120,7 @@ function setBusy(v){
   S.busy=v;
   updateSendBtn();
   if(!v){
+    if(typeof a11ySetStreamBusy==='function') a11ySetStreamBusy(false);
     if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
     setStatus('');
     setComposerStatus('');
@@ -11470,7 +11471,8 @@ function dismissToast(btnOrEl){
 function copyToastText(btn){
   const el=btn&&btn.closest?btn.closest('#toast'):null;
   const text=el?(el.dataset.toastMessage||el.textContent||''):'';
-  const done=()=>{const old=btn.textContent;btn.textContent='Copied';setTimeout(()=>{btn.textContent=old;},1200);};
+  const copiedText=(typeof t==='function'&&t('copied'))||'Copied!';
+  const done=()=>{const old=btn.textContent;btn.textContent='Copied';_announceA11yPolite(copiedText);setTimeout(()=>{btn.textContent=old;},1200);};
   _copyText(text).then(done).catch(()=>{});
 }
 function showToast(msg,ms,type){
@@ -11485,6 +11487,11 @@ function showToast(msg,ms,type){
   // 0 (the old "use default" sentinel) and other non-positive or non-numeric values mean the default, not "hide now".
   const duration=(ms==null||!(Number(ms)>0))?(t==='error'?TOAST_ERROR_DEFAULT_MS:TOAST_DEFAULT_MS):ms;
   el.className='toast show '+t;
+  if(typeof el.setAttribute==='function'){
+    el.setAttribute('role',t==='error'?'alert':'status');
+    el.setAttribute('aria-live',t==='error'?'assertive':'polite');
+    el.setAttribute('aria-atomic','true');
+  }
   el.dataset.toastMessage=s;
   if(t==='error') el.innerHTML=`<span class="toast-message">${esc(s)}</span><button class="toast-copy" type="button" data-toast-copy="1" onclick="copyToastText(this);event.stopPropagation()">Copy</button><button class="toast-dismiss" type="button" aria-label="Dismiss error toast" data-toast-dismiss="1" onclick="dismissToast(this);event.stopPropagation()">Dismiss</button>`;
   else el.textContent=s;
@@ -11684,34 +11691,111 @@ function _copyText(text){
   }
   return _fallbackCopy(text);
 }
+let _a11yPoliteClearTimer=null;
+function _announceA11yPolite(message, durationMs=2500){
+  if(typeof announceA11yPolite==='function'){
+    announceA11yPolite(message, durationMs);
+    return;
+  }
+  const text=String(message==null?'':message).trim();
+  if(!text||typeof $!=='function') return;
+  const announcer=$('a11yAnnouncer');
+  if(!announcer) return;
+  if(_a11yPoliteClearTimer&&typeof clearTimeout==='function'){
+    clearTimeout(_a11yPoliteClearTimer);
+    _a11yPoliteClearTimer=null;
+  }
+  const apply=()=>{
+    announcer.textContent=text;
+    if(typeof setTimeout==='function'&&durationMs>0){
+      _a11yPoliteClearTimer=setTimeout(()=>{
+        if(announcer.textContent===text) announcer.textContent='';
+        _a11yPoliteClearTimer=null;
+      }, durationMs);
+    }
+  };
+  announcer.textContent='';
+  if(typeof requestAnimationFrame==='function') requestAnimationFrame(apply);
+  else apply();
+}
 function _fallbackCopy(text){
   return new Promise((resolve,reject)=>{
+    const prevFocus=(typeof document!=='undefined')?document.activeElement:null;
     const ta=document.createElement('textarea');
     ta.value=text;ta.style.cssText='position:fixed;left:0;top:0;width:2em;height:2em;padding:0;border:none;outline:none;box-shadow:none;background:transparent;z-index:-1';
     document.body.appendChild(ta);
     ta.focus();ta.select();
     try{document.execCommand('copy');resolve();}
     catch(e){reject(e);}
-    finally{document.body.removeChild(ta);}
+    finally{
+      document.body.removeChild(ta);
+      if(typeof a11yRestoreFocus==='function'){
+        a11yRestoreFocus(prevFocus);
+      }else if(prevFocus&&prevFocus!==document.body&&typeof prevFocus.focus==='function'){
+        try{prevFocus.focus({preventScroll:true});}catch(_){try{prevFocus.focus();}catch(__){}}
+      }
+    }
   });
+}
+function _applyButtonCopiedFeedback(btn, applyFn, restoreFn){
+  if(!btn) return;
+  let state=btn._copyFeedbackState;
+  const copiedText=(typeof t==='function'&&t('copied'))||'Copied!';
+  if(!state){
+    const origHtml=btn.innerHTML;
+    const rawLabel=typeof btn.getAttribute==='function'?btn.getAttribute('aria-label'):null;
+    const origLabel=(rawLabel&&rawLabel!==copiedText)
+      ? rawLabel
+      : ((typeof t==='function'&&t('copy'))||'Copy');
+    state={
+      timer:null,
+      generation:0,
+      origHtml,
+      origLabel,
+    };
+    btn._copyFeedbackState=state;
+  }else if(state.timer){
+    clearTimeout(state.timer);
+    state.timer=null;
+  }
+  state.generation+=1;
+  const generation=state.generation;
+  if(typeof btn.setAttribute==='function') btn.setAttribute('aria-label',copiedText);
+  if(typeof applyFn==='function') applyFn(copiedText, state);
+  _announceA11yPolite(copiedText);
+  state.timer=setTimeout(()=>{
+    if(btn._copyFeedbackState!==state||state.generation!==generation) return;
+    state.timer=null;
+    delete btn._copyFeedbackState;
+    if(btn.isConnected===false) return;
+    if(typeof restoreFn==='function') restoreFn(state);
+    if(state.origHtml!==undefined) btn.innerHTML=state.origHtml;
+    if(typeof btn.setAttribute==='function') btn.setAttribute('aria-label',state.origLabel);
+  },1500);
 }
 function copyStatusSessionId(btn){
   const text=btn&&btn.getAttribute('data-copy-status-session');
   if(!text)return;
   _copyText(text).then(()=>{
-    const orig=btn.innerHTML;
-    btn.innerHTML=(typeof li==='function')?li('check',13):t('copied');
-    btn.classList.add('copied');
-    setTimeout(()=>{btn.innerHTML=orig;btn.classList.remove('copied');},1500);
+    _applyButtonCopiedFeedback(btn, (copiedText)=>{
+      btn.innerHTML=(typeof li==='function')?li('check',13):copiedText;
+      btn.classList.add('copied');
+    }, ()=>{
+      btn.classList.remove('copied');
+    });
   }).catch(()=>showToast(t('copy_failed')));
 }
 function copyMsg(btn){
-  const row=btn.closest('[data-raw-text]');
+  const row=btn&&btn.closest?btn.closest('[data-raw-text]'):null;
   const text=row?row.dataset.rawText:'';
   if(!text)return;
   _copyText(text).then(()=>{
-    const orig=btn.innerHTML;btn.innerHTML=li('check',13);btn.style.color='var(--blue)';
-    setTimeout(()=>{btn.innerHTML=orig;btn.style.color='';},1500);
+    _applyButtonCopiedFeedback(btn, ()=>{
+      btn.innerHTML=(typeof li==='function')?li('check',13):'Copied!';
+      btn.style.color='var(--blue)';
+    }, ()=>{
+      btn.style.color='';
+    });
   }).catch(()=>showToast(t('copy_failed')));
 }
 function _copyThinkingText(btn){
@@ -11721,10 +11805,12 @@ function _copyThinkingText(btn){
   const text=pre?pre.textContent:'';
   if(!text)return;
   _copyText(text).then(()=>{
-    const orig=btn.innerHTML;
-    btn.innerHTML=li('check',12);
-    btn.style.color='var(--accent)';
-    setTimeout(()=>{btn.innerHTML=orig;btn.style.color='';},1500);
+    _applyButtonCopiedFeedback(btn, ()=>{
+      btn.innerHTML=li('check',12);
+      btn.style.color='var(--accent)';
+    }, ()=>{
+      btn.style.color='';
+    });
   }).catch(()=>showToast(t('copy_failed')));
 }
 
@@ -11904,14 +11990,14 @@ function _buildBrowserUtterance(text, btn, gen){
     } else {
       _ttsSpeaking=false; _ttsCurrentUtterance=null;
       _ttsChunkQueue=[]; _ttsChunkIndex=0; _ttsActiveBtn=null;
-      if(btn) btn.dataset.speaking='0';
+      if(btn){ btn.dataset.speaking='0'; if(typeof btn.setAttribute==='function') btn.setAttribute('aria-pressed','false'); }
     }
   };
   utter.onerror=()=>{
     if(!_ownsTtsPlayback(gen)) return;
     _ttsSpeaking=false; _ttsCurrentUtterance=null;
     _ttsChunkQueue=[]; _ttsChunkIndex=0; _ttsActiveBtn=null;
-    if(btn) btn.dataset.speaking='0';
+    if(btn){ btn.dataset.speaking='0'; if(typeof btn.setAttribute==='function') btn.setAttribute('aria-pressed','false'); }
   };
   return utter;
 }
@@ -11933,7 +12019,7 @@ function _stopActivePlaybackAudio(){
 }
 
 function _playEdgeTtsChunked(text, btn){
-  if(btn) btn.dataset.speaking='1';
+  if(btn){ btn.dataset.speaking='1'; if(typeof btn.setAttribute==='function') btn.setAttribute('aria-pressed','true'); }
   // Claim the generation before releasing the previous playback's audio, so
   // the old generation is already invalid when its stop-fallout callbacks run.
   const gen=_beginTtsPlayback();
@@ -11948,7 +12034,7 @@ function _playEdgeTtsChunked(text, btn){
     if(!_owns()) return;
     _ttsSpeaking=false;
     _stopActivePlaybackAudio();
-    if(btn) btn.dataset.speaking='0';
+    if(btn){ btn.dataset.speaking='0'; if(typeof btn.setAttribute==='function') btn.setAttribute('aria-pressed','false'); }
     if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
   };
   const _playOne=function(idx){
@@ -11957,7 +12043,7 @@ function _playEdgeTtsChunked(text, btn){
     if(!_owns()){ return; }
     if(idx>=chunks.length){
       _ttsSpeaking=false;
-      if(btn) btn.dataset.speaking='0';
+      if(btn){ btn.dataset.speaking='0'; if(typeof btn.setAttribute==='function') btn.setAttribute('aria-pressed','false'); }
       return;
     }
     const chunk=chunks[idx];
@@ -11994,7 +12080,7 @@ function _playEdgeTtsChunked(text, btn){
         if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
         if(!_owns()) return;
         _ttsSpeaking=false;
-        if(btn) btn.dataset.speaking='0';
+        if(btn){ btn.dataset.speaking='0'; if(typeof btn.setAttribute==='function') btn.setAttribute('aria-pressed','false'); }
       };
       audio.play().catch(function(e){
         URL.revokeObjectURL(url);
@@ -12042,12 +12128,12 @@ function speakMessage(btn){
   // after a stop/replacement must not start audio or clear newer state.
   if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
     const gen=_beginTtsPlayback();
-    if(btn) btn.dataset.speaking='1';
+    if(btn){ btn.dataset.speaking='1'; if(typeof btn.setAttribute==='function') btn.setAttribute('aria-pressed','true'); }
     const _failReg=function(msg){
       if(!_ownsTtsPlayback(gen)) return;
       _ttsSpeaking=false;
       _stopActivePlaybackAudio();
-      if(btn)btn.dataset.speaking='0';
+      if(btn){ btn.dataset.speaking='0'; if(typeof btn.setAttribute==='function') btn.setAttribute('aria-pressed','false'); }
       if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
     };
     const _opts={
@@ -12073,7 +12159,7 @@ function speakMessage(btn){
   _ttsChunkIndex=0;
   _ttsActiveBtn=btn;
   const gen=_beginTtsPlayback();
-  if(btn) btn.dataset.speaking='1';
+  if(btn){ btn.dataset.speaking='1'; if(typeof btn.setAttribute==='function') btn.setAttribute('aria-pressed','true'); }
 
   const utter=_buildBrowserUtterance(_ttsChunkQueue[0], btn, gen);
   _ttsCurrentUtterance=utter;
@@ -12081,7 +12167,7 @@ function speakMessage(btn){
 }
 
 function _playElevenLabsTts(text, btn){
-  if(btn) btn.dataset.speaking='1';
+  if(btn){ btn.dataset.speaking='1'; if(typeof btn.setAttribute==='function') btn.setAttribute('aria-pressed','true'); }
   // Claim before releasing the previous playback (same ownership contract as
   // _playOpenaiTts), then route the request through the shared scheduler.
   const gen=_beginTtsPlayback();
@@ -12093,7 +12179,7 @@ function _playElevenLabsTts(text, btn){
     if(!_owns()) return;
     _ttsSpeaking=false;
     _stopActivePlaybackAudio();
-    if(btn)btn.dataset.speaking='0';
+    if(btn){ btn.dataset.speaking='0'; if(typeof btn.setAttribute==='function') btn.setAttribute('aria-pressed','false'); }
     if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
   };
   _sendTtsRequest({
@@ -12110,7 +12196,7 @@ function _playElevenLabsTts(text, btn){
 }
 
 function _playOpenaiTts(text, btn){
-  if(btn) btn.dataset.speaking='1';
+  if(btn){ btn.dataset.speaking='1'; if(typeof btn.setAttribute==='function') btn.setAttribute('aria-pressed','true'); }
   // Generation token: every new playback invalidates all in-flight callbacks
   // of prior plays (`_ttsSpeaking` alone cannot distinguish playback A from
   // B). Claim it before releasing the previous playback's audio, so the old
@@ -12133,7 +12219,7 @@ function _playOpenaiTts(text, btn){
     _ttsGeneration++;
     _ttsSpeaking=false;
     _stopActivePlaybackAudio();
-    if(btn)btn.dataset.speaking='0';
+    if(btn){ btn.dataset.speaking='0'; if(typeof btn.setAttribute==='function') btn.setAttribute('aria-pressed','false'); }
     if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
   };
   const chunks=_splitForTTS(text,150);
@@ -12172,7 +12258,7 @@ function _playOpenaiTts(text, btn){
     if(!_ttsSpeaking||!_ownsTtsPlayback(gen)){ return; }
     if(i>=chunks.length){
       _ttsSpeaking=false;_playingEdgeAudio=null;
-      if(btn)btn.dataset.speaking='0';
+      if(btn){ btn.dataset.speaking='0'; if(typeof btn.setAttribute==='function') btn.setAttribute('aria-pressed','false'); }
       return;
     }
     var bufPromise=_nextBufPromise||_fetchChunk(i);
@@ -12276,7 +12362,7 @@ function _playAudioBuf(arrayBuffer, btn, label, gen){
   const ctx=_getTtsAudioCtx();
   if(!ctx){
     if(_owns()){
-      if(btn)btn.dataset.speaking='0';
+      if(btn){ btn.dataset.speaking='0'; if(typeof btn.setAttribute==='function') btn.setAttribute('aria-pressed','false'); }
       _ttsSpeaking=false;
       showToast(label+': Web Audio API not available');
     }
@@ -12295,7 +12381,7 @@ function _playAudioBuf(arrayBuffer, btn, label, gen){
       }
       if(_owns()){
         _ttsSpeaking=false;
-        if(btn)btn.dataset.speaking='0';
+        if(btn){ btn.dataset.speaking='0'; if(typeof btn.setAttribute==='function') btn.setAttribute('aria-pressed','false'); }
         if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
       }
       resolve();
@@ -12319,7 +12405,7 @@ function _playAudioBuf(arrayBuffer, btn, label, gen){
             if(_owns()){
               _ttsSpeaking=false;
               if(_playingEdgeAudio===src) _playingEdgeAudio=null;
-              if(btn)btn.dataset.speaking='0';
+              if(btn){ btn.dataset.speaking='0'; if(typeof btn.setAttribute==='function') btn.setAttribute('aria-pressed','false'); }
             }
             resolve();
           };
@@ -12343,7 +12429,7 @@ function _playAudioBuf(arrayBuffer, btn, label, gen){
       ctx.decodeAudioData(arrayBuffer.slice(0), _onDecoded, function(e){
         if(_owns()){
           _ttsSpeaking=false;
-          if(btn)btn.dataset.speaking='0';
+          if(btn){ btn.dataset.speaking='0'; if(typeof btn.setAttribute==='function') btn.setAttribute('aria-pressed','false'); }
           showToast(label+' error: '+(e&&e.message||e));
         }
         resolve(); // prevent permanently pending Promise on decode failure
@@ -12370,7 +12456,7 @@ function stopTTS(){
   _ttsChunkIndex=0;
   _ttsActiveBtn=null;
   // Reset all speaking buttons
-  document.querySelectorAll('[data-speaking="1"]').forEach(btn=>{ btn.dataset.speaking='0'; });
+  document.querySelectorAll('[data-speaking="1"]').forEach(btn=>{ btn.dataset.speaking='0'; if(typeof btn.setAttribute==='function') btn.setAttribute('aria-pressed','false'); });
   // Voice-mode closure: the generation above just invalidated every playback,
   // so any rearm a terminal callback scheduled earlier is now stale (it will
   // defer, not reopen the mic). Notify voice mode — while it is still
@@ -14936,7 +15022,7 @@ function isTpsDisplayEnabled(){
 function _assistantRoleHtml(tsTitle='', tpsText=''){
   const _bn=assistantDisplayName();
   const tps=(isTpsDisplayEnabled()&&tpsText)?`<span class="msg-tps-inline" title="Tokens per second">${esc(tpsText)}</span>`:'';
-  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span class="msg-role-name">${esc(_bn)}</span>${tps}</div>`;
+  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant" aria-hidden="true">${esc(_bn.charAt(0).toUpperCase())}</div><span class="msg-role-name" role="heading" aria-level="3">${esc(_bn)}</span>${tps}</div>`;
 }
 function _setAssistantTurnTps(turn, tpsText=''){
   if(!turn) return;
@@ -18943,7 +19029,7 @@ function _renderLiveRunStatusContent(el,startedAt){
   const elapsed=startedAt?Math.max(0,now-startedAt):0;
   const timeStr=_formatRunElapsed(elapsed);
   const tokens=_liveRunStatusTokens;
-  el.innerHTML=`<span class="live-run-status-dot tool-card-running-dot"></span><span class="live-run-status-text lf-time">${timeStr}</span>${tokens?`<span class="lf-sep">·</span><span class="lf-tokens">${_fmtTokens(tokens)} tokens</span>`:''}<span class="lf-sep">·</span><span class="lf-status">Running</span>`;
+  el.innerHTML=`<span class="live-run-status-dot tool-card-running-dot" aria-hidden="true"></span><span class="live-run-status-text lf-time" aria-hidden="true">${timeStr}</span>${tokens?`<span class="lf-sep" aria-hidden="true">·</span><span class="lf-tokens">${_fmtTokens(tokens)} tokens</span>`:''}<span class="lf-sep" aria-hidden="true">·</span><span class="lf-status">Running</span>`;
 }
 function updateLiveRunStatus(opts){
   if(opts&&opts.sessionId&&_liveRunStatusSessionId&&opts.sessionId!==_liveRunStatusSessionId) return;
@@ -19484,7 +19570,7 @@ function _compressionReferenceCardHtml(text, open=false){
           <span class="tool-card-name">${esc(copy.label)}</span>
           <span class="tool-card-preview">${esc(copy.preview)} · ${esc(preview)}</span>
           <span class="tool-card-toggle">${li('chevron-right',12)}</span>
-          <button class="msg-copy-btn msg-action-btn tool-card-copy compression-reference-copy" title="${t('copy')}" onclick="copyMsg(this);event.stopPropagation()">${li('copy',13)}</button>
+          <button type="button" class="msg-copy-btn msg-action-btn tool-card-copy compression-reference-copy" title="${t('copy')}" aria-label="${t('copy')}" onclick="copyMsg(this);event.stopPropagation()">${li('copy',13)}</button>
         </div>
         <div class="tool-card-detail">
           <div class="tool-card-result">
@@ -21777,18 +21863,18 @@ function renderMessages(options){
     if(recoveryHtml) bodyHtml += recoveryHtml;
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
-    const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
-    const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
-    const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
-    const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
+    const editBtn  = isEditableUser ? `<button type="button" class="msg-action-btn" title="${t('edit_message')}" aria-label="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
+    const undoBtn  = isLastAssistant ? `<button type="button" class="msg-action-btn" title="${t('undo_exchange')}" aria-label="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
+    const retryBtn = isLastAssistant ? `<button type="button" class="msg-action-btn" title="${t('regenerate')}" aria-label="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
+    const copyBtn  = `<button type="button" class="msg-copy-btn msg-action-btn" title="${t('copy')}" aria-label="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const readOnlySession=typeof _isReadOnlySession==='function'
       ? _isReadOnlySession(S.session)
       : !!(S.session&&(S.session.read_only||S.session.is_read_only));
     const branchableReadOnlySession=typeof _isBranchableReadOnlySession==='function'
       ? _isBranchableReadOnlySession(S.session)
       : false;
-    const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1},this)">${li('git-branch',13)}</button>`;
-    const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';
+    const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : `<button type="button" class="msg-action-btn" title="${t('fork_from_here')}" aria-label="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1},this)">${li('git-branch',13)}</button>`;
+    const ttsBtn   = !isUser ? `<button type="button" class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" aria-label="${t('tts_listen')||'Listen'}" aria-pressed="false" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';
     const tsVal=m._ts||m.timestamp;
     // _formatInServerTz handles fractional-hour offsets (India +0530 etc.)
     // correctly via offset arithmetic; bare toLocaleString is the browser-tz fallback.
@@ -21831,7 +21917,7 @@ function renderMessages(options){
         noticeInnerHtml=_processWakeupCardHtml(wakeupInfo, processText, {timeHtml, filesHtml, footHtml:`<div class="msg-foot"><span class="msg-actions">${copyBtn}</span></div>`});
       }else{
         const processTextHtml=processText?`<pre class="process-wakeup-text">${esc(processText)}</pre>`:'';
-        noticeInnerHtml=`<div class="process-wakeup-label">${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span></div>${filesHtml}<div class="msg-body process-wakeup-body">${processTextHtml}</div>${processFootHtml}`;
+        noticeInnerHtml=`<div class="process-wakeup-label">${li('terminal',13)}<span role="heading" aria-level="3">${esc(t('process_wakeup_label'))}</span></div>${filesHtml}<div class="msg-body process-wakeup-body">${processTextHtml}</div>${processFootHtml}`;
       }
       const nextRowHtml=`<div class="${noticeClass}">${noticeInnerHtml}</div>`;
       if(row){
@@ -21882,7 +21968,8 @@ function renderMessages(options){
       let row=_msgNodeRecycleEnabled?_recycleStash.get(rawIdx):null;
       if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
       const newRawText=String(displayContent).trim();
-      const nextRowHtml=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
+      const userRoleHtml=`<div class="sr-only msg-role-user" role="heading" aria-level="3">${esc((typeof t==='function'&&t('you'))||'You')}</div>`;
+      const nextRowHtml=`${userRoleHtml}${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
       if(row){
         row.className='msg-row';
         row.id=_userMessageDomId(rawIdx);
@@ -24106,6 +24193,7 @@ function editMessage(btn) {
   // Replace msg-body with an editable textarea
   const ta = document.createElement('textarea');
   ta.className = 'msg-edit-area';
+  if(typeof ta.setAttribute==='function') ta.setAttribute('aria-label', (typeof t==='function'&&t('edit_message'))||'Edit message');
   ta.value = originalText;
   body.replaceWith(ta);
   // Resize after DOM insertion so scrollHeight is correct
@@ -24115,7 +24203,7 @@ function editMessage(btn) {
   // Action bar below the textarea
   const bar = document.createElement('div');
   bar.className = 'msg-edit-bar';
-  bar.innerHTML = `<button class="msg-edit-send">Send edit</button><button class="msg-edit-cancel">Cancel</button>`;
+  bar.innerHTML = `<button type="button" class="msg-edit-send">Send edit</button><button type="button" class="msg-edit-cancel">Cancel</button>`;
   ta.after(bar);
 
   bar.querySelector('.msg-edit-send').onclick = async () => {
@@ -24483,14 +24571,23 @@ function addCopyButtons(container){
       return;
     }
     const btn=document.createElement('button');
+    btn.type='button';
     btn.className='code-copy-btn';
     btn.textContent=t('copy');
+    btn.setAttribute('aria-label',t('copy'));
     btn.onclick=(e)=>{
       e.stopPropagation();
       _copyText(codeEl.textContent).then(()=>{
         btn.textContent=t('copied');
-        setTimeout(()=>{btn.textContent=t('copy');},1500);
-      }).catch(()=>{btn.textContent=t('copy_failed');setTimeout(()=>{btn.textContent=t('copy');},1500);});
+        btn.setAttribute('aria-label',t('copied'));
+        if(typeof _announceA11yPolite==='function') _announceA11yPolite(t('copied'));
+        setTimeout(()=>{btn.textContent=t('copy');btn.setAttribute('aria-label',t('copy'));},1500);
+      }).catch(()=>{
+        btn.textContent=t('copy_failed');
+        btn.setAttribute('aria-label',t('copy_failed'));
+        if(typeof _announceA11yPolite==='function') _announceA11yPolite(t('copy_failed'));
+        setTimeout(()=>{btn.textContent=t('copy');btn.setAttribute('aria-label',t('copy'));},1500);
+      });
     };
     if(header&&header.classList.contains('pre-header')){
       header.style.display='flex';

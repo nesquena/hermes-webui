@@ -3184,6 +3184,8 @@ async function loadSession(sid){
       delete INFLIGHT[sid];
       if(typeof clearInflightState==='function') clearInflightState(sid);
     }
+    if(typeof a11yResetStreamState==='function') a11yResetStreamState();
+    else if(typeof a11ySetStreamBusy==='function') a11ySetStreamBusy(false);
   }
 
   // and syncs the polling snapshot so a deferred /api/sessions poll landing
