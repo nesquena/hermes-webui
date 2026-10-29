@@ -84,7 +84,7 @@ use `docker-compose.two-container.yml`,
 `docker-compose.three-container.yml`, or run `hermes gateway` separately before
 relying on offline scheduled runs. See [Scheduled jobs and the gateway daemon](#scheduled-jobs-and-the-gateway-daemon) below for the full background and verification steps.
 
-If your mounted `~/.hermes/hermes-agent` is a Hermes-managed git checkout (Agent v0.21.6 or newer, installed by the official installer or `hermes update`), the WebUI runs the container's staged copy of that Agent instead, so the Agent never re-launches the WebUI into your host's Python. As a result, Settings' Agent update reports that the Agent is not a git repository: update the Agent on the host with `hermes update`, then recreate the container (`docker compose up -d --force-recreate`) so it stages the updated Agent.
+If your mounted `~/.hermes/hermes-agent` is a Hermes-managed git checkout (Agent v0.21.6 or newer, installed by the official installer or `hermes update`), the WebUI runs the container's staged copy of that Agent instead, so the Agent never re-launches the WebUI into your host's Python. As a result, Settings' Agent update reports that the Agent is not a git repository: update the Agent on the host with `hermes update`, then recreate the container (`docker compose up -d --force-recreate`) so it stages the updated Agent. The mounted checkout still runs directly, `.git` and in-app update included, whenever that Agent would not re-launch anyway: with `HERMES_DISABLE_LAZY_INSTALLS=1` (or `true`/`yes`), or when its `install-stamp.json` names an update mechanism other than `self` (#8581).
 
 For troubleshooting, reinstall, or onboarding reproduction trials, do not mount
 your real `~/.hermes` unless you intentionally want to test real state. Use an

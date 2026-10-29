@@ -57,6 +57,8 @@
 
 ### Fixed
 
+- **Docker single-container setups with a mounted Agent git checkout run that checkout again when the Agent would never relaunch.** Since v0.52.560 they ran the `.git`-less staged copy even with `HERMES_DISABLE_LAZY_INSTALLS=1` or an install stamp whose `updateMechanism` is not `self`, which broke the in-app Agent update (`no_git`) and stopped mount edits taking effect on restart. `select_staged_agent_for_git_checkout` now mirrors the Agent's own `prepare_launch()` and keeps the mount in exactly those cases. (#8582, fixes #8581)
+
 - **The workspace git panel no longer rewrites `.git/index` when it reads a diff.** On a stale index (files touched, line endings changed, or edited outside WebUI), the panel's `git diff --numstat` / `--name-only` and the file diff view refreshed the index as a side effect, taking `.git/index.lock` while you might be committing in a terminal. Diff reads now pass `diff.autoRefreshIndex=false` per call, so they never write; the numbers shown are unchanged. Completes #8520 after #8532. Thanks @balabommablock-cpu. (#8570)
 
 - **The approval card answers on the first click.** The card now checks the server's pending approval before it responds, so a stale id no longer swallows the first click (or the X), and a click is never moved onto a different queued approval, even one with identical text: that approval is shown for a fresh click instead. (#7144 by @BBaFSE, fixes #7091)
