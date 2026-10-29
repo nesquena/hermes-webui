@@ -18,10 +18,13 @@ import tempfile
 
 import pytest
 
+from tests.i18n_locale_loader import locale_codes, locale_key_names, locale_string_value
+
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 COMMANDS_JS = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_CORE = REPO_ROOT / "static" / "i18n-core.js"
+I18N_LOCALE_DIR = REPO_ROOT / "static" / "locales"
 NODE = shutil.which("node")
 
 
@@ -144,8 +147,8 @@ def test_status_card_without_count_fields_falls_back_to_transcript():
 
 def test_status_messages_total_label_is_translated():
     # The key must exist in the English locale map so t() has a fallback for
-    # every other locale (t() falls back to LOCALES.en).
-    assert "status_messages_total: 'Total messages'" in I18N_JS
+    # every other locale (t() falls back to the English bundle).
+    assert locale_string_value("en", "status_messages_total") == "Total messages"
 
 
 def _locales_defining(key: str) -> set:
@@ -154,43 +157,11 @@ def _locales_defining(key: str) -> set:
     The render probe below only visits locales that already define the key, so
     it cannot notice a locale that silently falls back to English.
     """
-    probe = """
-const fs = require('fs');
-const vm = require('vm');
-const src = fs.readFileSync(process.argv[2], 'utf8');
-const sandbox = {window:{}, document:{documentElement:{lang:''}, addEventListener(){},
-    querySelectorAll(){return []}},
-  navigator:{language:'en'}, localStorage:{getItem(){return null},setItem(){}}, console};
-sandbox.window.localStorage = sandbox.localStorage;
-vm.createContext(sandbox);
-vm.runInContext(src + ";globalThis.__i18nProbe = {LOCALES};", sandbox);
-const {LOCALES} = sandbox.__i18nProbe;
-const out = [];
-for (const code of Object.keys(LOCALES)) {
-  const map = LOCALES[code];
-  if (map && Object.prototype.hasOwnProperty.call(map, process.argv[3])) out.push(code);
-}
-console.log(JSON.stringify(out));
-"""
-    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
-        handle.write(probe)
-        script_path = pathlib.Path(handle.name)
-    if NODE is None:
-        pytest.skip("node not on PATH")
-    try:
-        result = subprocess.run(
-            [NODE, str(script_path), str(REPO_ROOT / "static" / "i18n.js"), key],
-            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=30,
-        )
-    finally:
-        script_path.unlink(missing_ok=True)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr)
-    return set(json.loads(result.stdout.strip()))
+    return {code for code in locale_codes() if key in locale_key_names(code)}
 
 
 def _render_labels_in_all_locales(key: str) -> dict:
-    """Render `key` through the REAL i18n.js in every locale that defines it.
+    """Render `key` through the real split locale runtime for each locale.
 
     A presence check (`grep -c`, or the substring assert above) only proves the
     key exists somewhere. This loads the classic script into a vm sandbox,
@@ -201,23 +172,26 @@ def _render_labels_in_all_locales(key: str) -> dict:
     probe = """
 const fs = require('fs');
 const vm = require('vm');
-const src = fs.readFileSync(process.argv[2], 'utf8');
-const sandbox = {window:{}, document:{documentElement:{lang:''}, addEventListener(){},
-    querySelectorAll(){return []}},
-  navigator:{language:'en'}, localStorage:{getItem(){return null},setItem(){}}, console};
+const core = fs.readFileSync(process.argv[2], 'utf8');
+const localeDir = process.argv[3];
+const key = process.argv[4];
+const sandbox = {URL, window:{}, document:{documentElement:{lang:''}, currentScript:null,
+    addEventListener(){}, querySelectorAll(){return []}},
+  navigator:{language:'en',languages:['en']}, localStorage:{getItem(){return null},setItem(){}}, console};
 sandbox.window.localStorage = sandbox.localStorage;
 vm.createContext(sandbox);
-// `const LOCALES` in a classic script lands in the script's lexical scope, not on
-// the sandbox object. Append an explicit export so the harness can read the maps
-// and call the real t() — no re-implementation of the lookup.
-vm.runInContext(src + ";globalThis.__i18nProbe = {LOCALES, t, setLocale};", sandbox);
+vm.runInContext(core, sandbox);
+for (const file of fs.readdirSync(localeDir).filter(name => name.endsWith('.js'))) {
+  vm.runInContext(fs.readFileSync(localeDir + '/' + file, 'utf8'), sandbox);
+}
+vm.runInContext("globalThis.__i18nProbe = {LOCALES, t, setLocale};", sandbox);
 const {LOCALES, t, setLocale} = sandbox.__i18nProbe;
 const out = {};
 for (const code of Object.keys(LOCALES)) {
   const map = LOCALES[code];
-  if (!Object.prototype.hasOwnProperty.call(map, process.argv[3])) continue;
+  if (!Object.prototype.hasOwnProperty.call(map, key)) continue;
   setLocale(code);
-  out[code] = t(process.argv[3]);
+  out[code] = t(key);
 }
 console.log(JSON.stringify(out));
 """
@@ -232,7 +206,7 @@ console.log(JSON.stringify(out));
     node_bin = str(NODE)
     try:
         result = subprocess.run(
-            [node_bin, str(script_path), str(REPO_ROOT / "static" / "i18n.js"), key],
+            [node_bin, str(script_path), str(I18N_CORE), str(I18N_LOCALE_DIR), key],
             cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=30,
         )
     finally:
@@ -263,7 +237,7 @@ def test_status_messages_total_renders_in_every_locale_that_defines_it():
     assert "zh-Hant" in locales, sorted(locales)
     # Simplified Chinese does not translate `status_messages`, so the render
     # probe cannot reach it; its entry is pinned directly above.
-    assert "status_messages_total: '消息总数'" in I18N_JS
+    assert locale_string_value("zh", "status_messages_total") == "消息总数"
     missing = sorted(locales - set(rendered))
     assert "zh" not in missing, "zh defines status_messages_total but rendered no label"
     assert not missing, f"locales translating status_messages but not status_messages_total: {missing}"
@@ -273,7 +247,7 @@ def test_status_message_keys_present_in_es_and_de():
     # t() falls back to English when a locale lacks the key, so a missing
     # translation is a silent language mix rather than a crash. Pin the two
     # locales that shipped without it.
-    assert "status_messages: 'Mensajes'" in I18N_JS
-    assert "status_messages_total: 'Mensajes totales'" in I18N_JS
-    assert "status_messages: 'Nachrichten'" in I18N_JS
-    assert "status_messages_total: 'Nachrichten gesamt'" in I18N_JS
+    assert locale_string_value("es", "status_messages") == "Mensajes"
+    assert locale_string_value("es", "status_messages_total") == "Mensajes totales"
+    assert locale_string_value("de", "status_messages") == "Nachrichten"
+    assert locale_string_value("de", "status_messages_total") == "Nachrichten gesamt"

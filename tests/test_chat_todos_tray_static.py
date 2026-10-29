@@ -17,6 +17,14 @@ from pathlib import Path
 
 import pytest
 
+from tests.i18n_locale_loader import (
+    locale_block,
+    locale_codes,
+    locale_key_names,
+    locale_source_text,
+    locale_string_value,
+)
+
 REPO_ROOT = Path(__file__).parent.parent
 
 
@@ -81,9 +89,10 @@ def test_chat_todos_checkbox_handler_does_not_autosave_the_appearance_payload():
 
 
 def test_i18n_keys_registered_in_english_locale():
-    i18n = _read_static("static/i18n.js")
-    assert "settings_label_chat_todos_in_chat: 'Show task list in chat'" in i18n
-    assert "settings_desc_chat_todos_in_chat: 'Show a collapsible task list" in i18n
+    assert locale_string_value("en", "settings_label_chat_todos_in_chat") == "Show task list in chat"
+    assert locale_string_value("en", "settings_desc_chat_todos_in_chat").startswith(
+        "Show a collapsible task list"
+    )
 
 
 def test_scheduler_fans_out_to_chat_todos_renderer():
@@ -265,7 +274,7 @@ def test_chat_todos_tray_strings_are_localized():
     assert 'id="chatTodosSummary" data-i18n' not in idx
     assert 'id="chatTodosCounter"' not in idx
     assert "todos_tray_open_count" not in ui
-    assert "todos_tray_open_count" not in _read_static("static/i18n.js")
+    assert all("todos_tray_open_count" not in locale_key_names(locale) for locale in locale_codes())
 
 
 def test_chat_todos_closed_chevron_points_down():
@@ -312,8 +321,6 @@ def test_chat_todos_hidden_tab_collision():
 
 
 def test_chat_todos_i18n_keys_in_all_locales():
-    src = _read_static("static/i18n.js")
-    # Extract en block keys that are chat-todos specific
     expected = {
         "settings_label_chat_todos_in_chat",
         "settings_desc_chat_todos_in_chat",
@@ -324,24 +331,11 @@ def test_chat_todos_i18n_keys_in_all_locales():
         "todos_tray_summary_active",
         "todos_tray_summary_done",
     }
-    # LOCALES segmentation: each locale starts at "  <code>: {" and ends before
-    # the next locale header. Using header boundaries avoids a fragile
-    # balanced-brace scan that trips on `${...}` template literals inside i18n
-    # (many _label helpers contain them). The same contract is verified by the
-    # per-locale parity tests (test_chinese_locale.py etc.) which use a full
-    # quote-aware extractor — here we assert presence of the 6 chat-todos keys.
-    header_re = re.compile(r"^\s+'?([a-zA-Z-]+)'?\s*:\s*\{", re.MULTILINE)
-    locale_headers = [
-        (m.start(), m.group(1))
-        for m in header_re.finditer(src)
-        if "_lang" in src[m.end() : m.end() + 800]
-    ]
-    assert len(locale_headers) >= 14, f"expected >=14 locales, got {locale_headers}"
-    for i, (start, locale_key) in enumerate(locale_headers):
-        end = locale_headers[i + 1][0] if i + 1 < len(locale_headers) else len(src)
-        block = src[start:end]
-        missing = sorted(k for k in expected if k not in block)
-        assert not missing, f"{locale_key} missing chat-todos keys: {missing}"
+    locales = locale_codes()
+    assert len(locales) == 15
+    for locale in locales:
+        missing = sorted(expected - locale_key_names(locale))
+        assert not missing, f"{locale} missing chat-todos keys: {missing}"
 
 
 def test_chat_todos_desktop_tray_is_an_in_flow_strip():
@@ -585,7 +579,6 @@ def test_sync_chat_todos_expanded_keeps_aria_in_sync(tmp_path):
 def test_chat_todos_locales_keep_diacritics():
     # [SHOULD-FIX] "Eight locales ship diacritic-stripped text (it, es, pt, fr,
     # cs, tr, pl, vi). Vietnamese is unreadable as shipped."
-    src = _read_static("static/i18n.js")
     required = {
         "attività": "it",
         "attivo": "it",
@@ -608,12 +601,10 @@ def test_chat_todos_locales_keep_diacritics():
         "trùng lặp": "vi",
     }
     for needle, locale in required.items():
-        assert needle in src, f"{locale} lost its diacritics: {needle!r}"
+        assert needle in locale_block(locale), f"{locale} lost its diacritics: {needle!r}"
     # Robustness floor: the share of non-ASCII characters in the vi block must
     # not collapse back to pure ASCII.
-    start = src.find("\n  vi: {")
-    assert start != -1
-    vi_block = src[start : src.find("\n  },", start)]
+    vi_block = locale_block("vi")
     non_ascii = sum(1 for ch in vi_block if ord(ch) > 127)
     assert non_ascii > 200, f"vi locale looks diacritic-stripped ({non_ascii} non-ASCII chars)"
 
@@ -661,9 +652,9 @@ def test_apply_locale_repaints_the_chat_todos_summary():
     # [SILENT] static/index.html:446 — "Opening Settings erases the task summary:
     # applyLocaleToDOM() overwrites the dynamic summary through
     # data-i18n=\"tab_todos\"." The live value must be repainted after restamping.
-    src = _read_static("static/i18n.js")
+    src = locale_source_text()
     start = src.find("function applyLocaleToDOM() {")
-    end = src.find("// Apply saved locale immediately", start)
+    end = src.find("let _locale = LOCALES.en;", start)
     assert start != -1 and end != -1, "missing applyLocaleToDOM"
     body = src[start:end]
     aria_at = body.find("[data-i18n-aria-label]")
@@ -769,9 +760,9 @@ console.log('ok');
 
 
 def test_apply_locale_repaint_probe(tmp_path):
-    src = _read_static("static/i18n.js")
+    src = locale_source_text()
     helper = _extract(
-        src, "function applyLocaleToDOM() {", "// Apply saved locale immediately"
+        src, "function applyLocaleToDOM() {", "let _locale = LOCALES.en;"
     )
     script = _LOCALE_SUMMARY_PROBE.replace("__HELPER__", helper)
     assert _run_node(tmp_path, "locale_summary_probe.js", script).strip() == "ok"
@@ -1483,17 +1474,20 @@ def test_workspace_todos_desc_drops_the_contradictory_sidebar_sentence():
     the sidebar Todos panel "remains available regardless", directly under a card
     that says it is hidden. The sentence is gone in EVERY locale, not just
     English."""
-    i18n = _read_static("static/i18n.js")
     idx = _read_static("static/index.html")
-    for tail in _REMOVED_TODOS_DESC_TAILS:
-        assert tail not in i18n, f"locale tail still present: {tail!r}"
+    for locale in locale_codes():
+        value = locale_string_value(locale, "settings_desc_workspace_todos_tab")
+        for tail in _REMOVED_TODOS_DESC_TAILS:
+            assert tail not in value, f"{locale} still has locale tail: {tail!r}"
     # The HTML fallback text (pre-i18n first paint) drops it too.
     assert "remains available regardless" not in idx
     # ...while the key itself survives in all 15 locales that carried it.
-    assert i18n.count("settings_desc_workspace_todos_tab") == 15
-    assert (
-        "settings_desc_workspace_todos_tab: 'When enabled, a Todos tab appears in the workspace panel.',"
-        in i18n
+    assert all(
+        "settings_desc_workspace_todos_tab" in locale_key_names(locale)
+        for locale in locale_codes()
+    )
+    assert locale_string_value("en", "settings_desc_workspace_todos_tab") == (
+        "When enabled, a Todos tab appears in the workspace panel."
     )
 
 

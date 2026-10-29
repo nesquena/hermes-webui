@@ -12,11 +12,12 @@ as SUSPICIOUS.
 from pathlib import Path
 import re
 
+from tests.i18n_locale_loader import locale_string_value
+
 ROOT = Path(__file__).resolve().parent.parent
 UI = ROOT / "static" / "ui.js"
 STYLE = ROOT / "static" / "style.css"
 BOOT = ROOT / "static" / "boot.js"
-I18N = ROOT / "static" / "i18n.js"
 
 
 def _fit_rule() -> str:
@@ -142,7 +143,7 @@ class TestKeyboardAndButton:
     def test_fit_button_tolerates_a_page_without_i18n(self):
         """Maintainer re-gate 2026-10-09T00:47:03Z, static/ui.js:3153 (BRICK).
 
-        ``static/share.html`` loads ``ui.js`` WITHOUT ``i18n.js``, so a bare
+        ``static/share.html`` loads ``ui.js`` without the locale core, so a bare
         ``t('img_lightbox_fit_title')`` threw ``ReferenceError: t is not
         defined`` while building the lightbox, and every public-share image
         preview failed to open. The lookup must be guarded and the result reused
@@ -155,7 +156,7 @@ class TestKeyboardAndButton:
         )
         assert marker in src, (
             "the fit control's label must fall back to the English string when "
-            "i18n.js is absent (the public share page)"
+            "the locale core is absent (the public share page)"
         )
         assert src.count("t('img_lightbox_fit_title')") == 1, (
             "the only lookup may be the guarded one"
@@ -164,19 +165,16 @@ class TestKeyboardAndButton:
         assert "fitBtn.setAttribute('title', fitTitle);" in src
 
     def test_fit_button_fallback_matches_the_english_locale(self):
-        i18n = I18N.read_text(encoding="utf-8")
         src = UI.read_text(encoding="utf-8")
         fallback = re.search(r":\s*'(Reset zoom to fit \(F\))'", src)
         assert fallback, "the fallback string is missing from ui.js"
-        assert f"img_lightbox_fit_title: '{fallback.group(1)}'" in i18n, (
+        assert locale_string_value("en", "img_lightbox_fit_title") == fallback.group(1), (
             "the ui.js fallback must be exactly the English i18n entry"
         )
 
     def test_non_english_label_exists(self):
-        i18n = I18N.read_text(encoding="utf-8")
-        assert "img_lightbox_fit_title" in i18n
-        assert "img_lightbox_fit_title: '\u91cd\u7f6e\u7f29\u653e\u4ee5\u9002\u5e94 (F)'" in i18n
-        assert "Reset zoom to fit (F)" in i18n
+        assert locale_string_value("zh", "img_lightbox_fit_title") == "重置缩放以适应 (F)"
+        assert locale_string_value("en", "img_lightbox_fit_title") == "Reset zoom to fit (F)"
 
     def test_fit_button_geometry_and_focus_scoped_to_rule(self):
         rule = _fit_rule()

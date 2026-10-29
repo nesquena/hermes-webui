@@ -1,4 +1,9 @@
-from tests.i18n_locale_loader import locale_block, locale_codes, locale_source_text
+from tests.i18n_locale_loader import (
+    locale_block,
+    locale_codes,
+    locale_source_text,
+    locale_string_value,
+)
 from pathlib import Path
 import re
 
@@ -1418,13 +1423,12 @@ vm.runInContext(src, context);
 
 
 def _en_i18n_values(*keys):
-    """Read the ``en`` bundle's literal values for ``keys`` from i18n.js."""
-    en_block = dict(_locale_blocks_with_body(I18N))["en"]
+    """Read the ``en`` bundle's literal values for ``keys``."""
     values = {}
     for key in keys:
-        match = re.search(rf"\b{re.escape(key)}\s*:\s*'([^']*)'", en_block)
-        assert match, f"key '{key}' missing from the en locale bundle"
-        values[key] = match.group(1)
+        value = locale_string_value("en", key)
+        assert value is not None, f"key '{key}' missing from the en locale bundle"
+        values[key] = value
     return values
 
 

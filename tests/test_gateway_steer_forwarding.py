@@ -11,6 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.i18n_locale_loader import locale_codes, locale_key_names, locale_string_value
+
 from api import config, gateway_chat, streaming
 from tests.test_real_steer import _captured_response, _make_handler
 
@@ -174,7 +176,7 @@ def test_uncertain_steer_keeps_the_draft_in_the_browser():
     fn = js[js.index("async function _trySteer("):js.index("async function cmdTitle(")]
     queue_guard = fn[:fn.index("queueSessionMessage(ownerSid")].rsplit("if(", 1)[1]
     assert "gateway_steer_queued" in queue_guard and "uncertain" not in queue_guard  # never auto-queued
-    assert "steer_fail_gateway_steer_uncertain:" in (root / "static" / "i18n.js").read_text(encoding="utf-8")
+    assert "steer_fail_gateway_steer_uncertain" in locale_key_names("en")
 
 
 @pytest.mark.parametrize("event", ["run.completed", "run.failed", "run.cancelled"])
@@ -211,22 +213,15 @@ def test_reattach_status_replays_unconsumed_gateway_steer(monkeypatch, state):
 
 
 def test_uncertain_steer_warning_is_translated_in_every_non_english_locale():
-    import re
-    from pathlib import Path
-    src = (Path(__file__).parents[1] / "static" / "i18n.js").read_text(encoding="utf-8")
     english = "Steer may have reached the agent (no reply from Gateway); your text is kept in the composer"
-    locales = {}
-    current = None
-    for line in src.splitlines():
-        m = re.match(r"^  '?([A-Za-z-]+)'?: \{", line)
-        if m:
-            current = m.group(1)
-        m = re.match(r"^\s+steer_fail_gateway_steer_uncertain: '(.*)',$", line)
-        if m:
-            locales[current] = m.group(1)
-    assert locales.pop("en") == english
+    assert locale_string_value("en", "steer_fail_gateway_steer_uncertain") == english
+    locales = {
+        code: locale_string_value(code, "steer_fail_gateway_steer_uncertain")
+        for code in locale_codes()
+        if code != "en"
+    }
     assert len(locales) >= 14
-    assert {k: v for k, v in locales.items() if v == english} == {}
+    assert all(value and value != english for value in locales.values())
 
 
 @pytest.mark.parametrize("state", ["completed", "failed", "cancelled"])

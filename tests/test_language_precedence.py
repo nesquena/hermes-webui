@@ -962,6 +962,7 @@ def test_accepted_settings_effects_finish_after_locale_changes():
         "let _settingsPanelPostQueue=Promise.resolve();"
         "let _settingsLocalePostInFlight=null;"
         "let _newSessionInFlight=null;"
+        "let _loadSessionGeneration=0;"
         "let _messagesTruncated=false;"
         "let _oldestIdx=0;\n"
         + "\n".join(sources)

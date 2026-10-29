@@ -2151,8 +2151,8 @@ def test_insights_range_keys_are_localized_at_runtime():
     every non-English locale at runtime.
 
     Source-presence assertions false-greened because all 15 bundles contained
-    the keys - with English literals in the 14 non-English ones.  This evaluates
-    the real i18n bundle in node and reads `t()` per locale after setLocale().
+    the keys - with English literals in the 14 non-English ones. This evaluates
+    the real core and locale bundles in node and reads `t()` for every locale.
     """
     import shutil as _shutil
     import subprocess
@@ -2164,15 +2164,22 @@ def test_insights_range_keys_are_localized_at_runtime():
     harness = """
         const fs = require('fs');
         const vm = require('vm');
-        const src = fs.readFileSync(process.env.I18N_JS, 'utf8');
+        const core = fs.readFileSync(process.env.I18N_CORE, 'utf8');
+        const localeDir = process.env.I18N_LOCALE_DIR;
         const sandbox = {
+          URL,
           localStorage: { getItem() { return null; }, setItem() {} },
           navigator: { language: 'en', languages: ['en'] },
-          document: { documentElement: {}, querySelectorAll() { return []; } },
+          document: { documentElement: {}, querySelectorAll() { return []; }, currentScript: null },
           console,
         };
         sandbox.window = sandbox;
-        const probe = src + "\\n;globalThis.__probe = (() => {"
+        vm.createContext(sandbox);
+        vm.runInContext(core, sandbox);
+        for (const file of fs.readdirSync(localeDir).filter(name => name.endsWith('.js'))) {
+          vm.runInContext(fs.readFileSync(localeDir + '/' + file, 'utf8'), sandbox);
+        }
+        vm.runInContext("globalThis.__probe = (() => {"
           + "const out = {};"
           + "for (const loc of Object.keys(LOCALES)) {"
           + "  setLocale(loc);"
@@ -2180,14 +2187,14 @@ def test_insights_range_keys_are_localized_at_runtime():
           + "    vals: ['insights_custom_range','insights_start_date','insights_end_date'].map(k => t(k))};"
           + "}"
           + "return JSON.stringify(out);"
-          + "})();";
-        vm.runInNewContext(probe, sandbox);
+          + "})();", sandbox);
         console.log(sandbox.__probe);
     """
 
     import os
     env = dict(os.environ)
-    env["I18N_JS"] = str(pathlib.Path(__file__).parent.parent / "static" / "i18n.js")
+    env["I18N_CORE"] = str(pathlib.Path(__file__).parent.parent / "static" / "i18n-core.js")
+    env["I18N_LOCALE_DIR"] = str(pathlib.Path(__file__).parent.parent / "static" / "locales")
     proc = subprocess.run([node, "-e", harness], capture_output=True, text=True,
                           encoding="utf-8", timeout=60, check=False, env=env)
     assert proc.returncode == 0, f"node harness failed:\n{proc.stdout}\n{proc.stderr}"
@@ -2799,29 +2806,36 @@ def test_insights_range_fallback_note_is_localized_at_runtime():
     harness = """
         const fs = require('fs');
         const vm = require('vm');
-        const src = fs.readFileSync(process.env.I18N_JS, 'utf8');
+        const core = fs.readFileSync(process.env.I18N_CORE, 'utf8');
+        const localeDir = process.env.I18N_LOCALE_DIR;
         const sandbox = {
+          URL,
           localStorage: { getItem() { return null; }, setItem() {} },
           navigator: { language: 'en', languages: ['en'] },
-          document: { documentElement: {}, querySelectorAll() { return []; } },
+          document: { documentElement: {}, querySelectorAll() { return []; }, currentScript: null },
           console,
         };
         sandbox.window = sandbox;
-        const probe = src + ";globalThis.__probe = (() => {"
+        vm.createContext(sandbox);
+        vm.runInContext(core, sandbox);
+        for (const file of fs.readdirSync(localeDir).filter(name => name.endsWith('.js'))) {
+          vm.runInContext(fs.readFileSync(localeDir + '/' + file, 'utf8'), sandbox);
+        }
+        vm.runInContext("globalThis.__probe = (() => {"
           + "const out = {};"
           + "for (const loc of Object.keys(LOCALES)) {"
           + "  setLocale(loc);"
           + "  out[loc] = {lang: document.documentElement.lang, val: t('insights_range_fallback')};"
           + "}"
           + "return JSON.stringify(out);"
-          + "})();";
-        vm.runInNewContext(probe, sandbox);
+          + "})();", sandbox);
         console.log(sandbox.__probe);
     """
 
     import os
     env = dict(os.environ)
-    env["I18N_JS"] = str(pathlib.Path(__file__).parent.parent / "static" / "i18n.js")
+    env["I18N_CORE"] = str(pathlib.Path(__file__).parent.parent / "static" / "i18n-core.js")
+    env["I18N_LOCALE_DIR"] = str(pathlib.Path(__file__).parent.parent / "static" / "locales")
     proc = subprocess.run([node, "-e", harness], capture_output=True, text=True,
                           encoding="utf-8", timeout=60, check=False, env=env)
     assert proc.returncode == 0, f"node harness failed:\n{proc.stdout}\n{proc.stderr}"

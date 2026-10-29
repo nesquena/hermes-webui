@@ -26,6 +26,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.i18n_locale_loader import (
+    locale_codes,
+    locale_key_names,
+    locale_string_value,
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -108,25 +114,14 @@ PB_I18N_KEYS_RETIRED = (
     "pb_effort_max",
 )
 
-# LOCALES block order in static/i18n.js (15 blocks).
-I18N_LOCALES = (
-    "en", "it", "ja", "ru", "es", "de", "zh", "zh-Hant",
-    "pt", "ko", "fr", "cs", "tr", "pl", "vi",
-)
+# Locale codes come from the eager registry; translations live in split bundles.
+I18N_LOCALES = tuple(locale_codes())
 
 
-def _i18n_locale_chunk(src: str, loc: str) -> str:
-    """Slice of i18n.js from ``loc``'s opening line up to the next locale block."""
-    head = ("\n  '%s': {\n" % loc) if "-" in loc else ("\n  %s: {\n" % loc)
-    i = src.index(head) + len(head)
-    idx = I18N_LOCALES.index(loc)
-    if idx + 1 < len(I18N_LOCALES):
-        nxt = I18N_LOCALES[idx + 1]
-        nhead = ("\n  '%s': {\n" % nxt) if "-" in nxt else ("\n  %s: {\n" % nxt)
-        j = src.index(nhead, i)
-    else:
-        j = src.index("const _I18N_TOOL_ACTION_TEXT_EN", i)
-    return src[i:j]
+def _locale_value(locale: str, key: str) -> str:
+    value = locale_string_value(locale, key)
+    assert value is not None, "missing i18n key %s in %s" % (key, locale)
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -247,12 +242,11 @@ def test_project_bindings_ui_strings_are_localized():
 
 
 def test_project_bindings_i18n_keys_present_in_all_locales():
-    """Every locale block defines the full pb_* key set (i18n.js parity)."""
-    src = _read_static("i18n.js")
+    """Every locale bundle defines the full pb_* key set."""
     assert len(I18N_LOCALES) == 15
     for loc in I18N_LOCALES:
-        chunk = _i18n_locale_chunk(src, loc)
-        missing = [k for k in PB_I18N_KEYS if ("%s: '" % k) not in chunk]
+        keys = locale_key_names(loc)
+        missing = [k for k in PB_I18N_KEYS if k not in keys]
         assert not missing, f"locale {loc!r} is missing pb_* keys: {missing}"
 
 
@@ -637,9 +631,8 @@ def test_chip_menu_holds_a_single_project_settings_row():
     assert "_showProjectBindingsDialog(proj);" in seg
     # ...and the dialog title/menu label say "Project settings", not "Bindings"
     # (the maintainer's wording: "Bindings" is implementer vocabulary).
-    i18n = _read_static("i18n.js")
-    assert "pb_bindings_title: 'Project settings — {0}'" in i18n
-    assert "pb_bindings_menu: 'Project settings…'" in i18n
+    assert _locale_value("en", "pb_bindings_title") == "Project settings — {0}"
+    assert _locale_value("en", "pb_bindings_menu") == "Project settings…"
 
 
 def test_chip_menu_clamps_to_the_viewport():
@@ -699,10 +692,9 @@ def test_bindings_dialog_hides_the_reasoning_effort_row():
 
 def test_retired_bindings_i18n_keys_are_gone_from_every_locale():
     """The keys the menu/effort cleanup retired must not linger anywhere."""
-    src = _read_static("i18n.js")
     for loc in I18N_LOCALES:
-        chunk = _i18n_locale_chunk(src, loc)
-        leftover = [k for k in PB_I18N_KEYS_RETIRED if ("%s: '" % k) in chunk]
+        keys = locale_key_names(loc)
+        leftover = [k for k in PB_I18N_KEYS_RETIRED if k in keys]
         assert not leftover, f"locale {loc!r} still defines retired keys: {leftover}"
 
 

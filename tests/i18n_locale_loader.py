@@ -15,7 +15,7 @@ LOCALE_DIR = REPO / "static" / "locales"
 
 @lru_cache(maxsize=1)
 def locale_manifest() -> dict[str, dict[str, str]]:
-    source = CORE_PATH.read_text(encoding="utf-8")
+    source = locale_sources()["en"]
     match = re.search(
         r"const\s+LOCALE_REGISTRY\s*=\s*Object\.freeze\((\{.*?\})\);",
         source,

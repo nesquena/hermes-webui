@@ -4,11 +4,19 @@ import json
 import re
 import shutil
 import subprocess
+from collections import Counter
 from pathlib import Path
 
 import pytest
 
-from tests.i18n_locale_loader import locale_sources
+from tests.i18n_locale_loader import (
+    CORE_PATH,
+    LOCALE_DIR,
+    locale_block,
+    locale_manifest,
+    locale_source_text,
+    locale_sources,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -179,5 +187,32 @@ process.stdout.write(JSON.stringify({{before,after,subarg}}));
     }
 
 
-def test_locale_sources_are_cached():
-    assert locale_sources() is locale_sources()
+def test_locale_catalog_files_are_read_once_for_shared_reconstruction(monkeypatch):
+    cached_helpers = (
+        locale_manifest,
+        locale_sources,
+        locale_source_text,
+        locale_block,
+    )
+    for helper in cached_helpers:
+        helper.cache_clear()
+
+    paths = {CORE_PATH, *LOCALE_DIR.glob("*.js")}
+    reads = Counter()
+    original_read_text = Path.read_text
+
+    def counted_read_text(path, *args, **kwargs):
+        if path in paths:
+            reads[path] += 1
+        return original_read_text(path, *args, **kwargs)
+
+    try:
+        monkeypatch.setattr(Path, "read_text", counted_read_text)
+        locale_source_text()
+        locale_block("de")
+        locale_source_text()
+    finally:
+        for helper in cached_helpers:
+            helper.cache_clear()
+
+    assert reads == Counter({path: 1 for path in paths})

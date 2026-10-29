@@ -75,7 +75,7 @@ function _onboardingProbeMessage(probe){
   // status === 'error'
   const errKey='onboarding_probe_error_'+probe.error;
   const localized=t(errKey);
-  // i18n.js's `t()` returns the key itself when missing — fall back to a generic message.
+  // The locale core's `t()` returns the key itself when missing — use a generic message.
   const heading=(localized&&localized!==errKey)?localized:(t('onboarding_probe_error_generic')||'Could not reach the configured base URL.');
   const detail=probe.detail?` (${probe.detail})`:'';
   return heading+detail;
