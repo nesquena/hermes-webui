@@ -107,6 +107,33 @@ class _FakePluginManager:
         )
 
 
+class _ColdRegistryPluginManager(_FakePluginManager):
+    """Plugin manager whose skill registry is EMPTY until discovery runs.
+
+    Mirrors a fresh WebUI process that has not yet listed /api/skills (or
+    opened Settings → Plugins): the agent contract only populates the
+    in-memory ``_plugin_skills`` map during ``discover_and_load``. The cold
+    find paths move into the readable map inside discovery, so any lookup
+    that skips discovery sees no skills at all — the 404 regression behind
+    re-gate findings 2/3 (routes.py content fallback and standalone toggle).
+    """
+
+    def __init__(self, find_paths=None):
+        super().__init__(find_paths={})
+        self._cold_find_paths = dict(find_paths or {})
+        self._discovered = False
+
+    def discover_and_load(self, force: bool = False) -> None:
+        super().discover_and_load(force)
+        if not self._discovered:
+            self._find_paths.update(self._cold_find_paths)
+            self._discovered = True
+
+    @property
+    def discovered(self) -> bool:
+        return self._discovered
+
+
 def _write_local_skill(skills_dir: Path, *, name, description="local desc") -> Path:
     skill_dir = skills_dir / name
     skill_dir.mkdir(parents=True, exist_ok=True)
@@ -325,6 +352,30 @@ class TestPluginSkillContentLookup:
         assert captured.get("status") == 200, captured
         assert captured["payload"]["content"] == "linked file content"
         assert captured["payload"]["path"] == "extra.md"
+
+    def test_plugin_skill_file_lookup_discovers_before_find_on_cold_registry(self, skills_dir, tmp_path):
+        """PR #7781 re-gate finding 2 (CORE): the plugin fallback used to call
+        find_plugin_skill() before discovery, so a FRESH first
+        /api/skills/content?name=reviewdemo:skill&file=extra.md returned 404 —
+        the same request after an /api/skills listing (which discovers)
+        returned the correct file. The fallback must run discovery
+        (best-effort, force=False) inside the request-home scope before the
+        lookup, and must still 404 for unknown names."""
+        skill_md = _write_plugin_skill(tmp_path, qualified_name="reviewdemo:skill")
+        (skill_md.parent / "extra.md").write_text("linked file content", encoding="utf-8")
+        manager = _ColdRegistryPluginManager(find_paths={"reviewdemo:skill": skill_md})
+        handled, captured = self._capture_content(
+            manager=manager,
+            path="/api/skills/content?name=reviewdemo:skill&file=extra.md",
+            skills_dir=skills_dir,
+        )
+        assert handled is True
+        assert captured.get("status") == 200, captured
+        assert captured["payload"]["content"] == "linked file content"
+        assert captured["payload"]["path"] == "extra.md"
+        # Discovery ran exactly once, before the lookup, with force=False.
+        assert manager.discover_calls == [False], manager.discover_calls
+        assert manager.discovered is True
 
     def test_plugin_skill_file_lookup_404s_when_plugin_skill_unknown(self, skills_dir):
         manager = _FakePluginManager(find_paths={})
@@ -758,7 +809,9 @@ class TestPluginManagerProfileHomeBinding:
         assert handled is True
         assert captured.get("status") == 200, captured
         assert captured["payload"]["content"] == "linked"
-        assert manager.seen_homes == [profile_b_home], manager.seen_homes
+        # Both manager calls (the re-gate's pre-lookup discover AND the
+        # find) must see profile B's home, not the ambient profile A home.
+        assert manager.seen_homes == [profile_b_home, profile_b_home], manager.seen_homes
         assert Path(get_hermes_home()) == ambient_before
 
     def test_bare_content_lookup_binds_request_active_home(self, tmp_path):

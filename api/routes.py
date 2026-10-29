@@ -17733,9 +17733,20 @@ def handle_get(handler, parsed) -> bool:
                 # manager before giving up (#7770). The lookup runs inside
                 # the request's active-Hermes-home context so the manager
                 # resolved is this profile's (PR #7781 review, finding 1).
+                # Discovery runs FIRST inside the same scope: a fresh WebUI
+                # process that has not listed /api/skills yet sits on an
+                # empty in-memory registry, and find_plugin_skill() only
+                # reads that registry — a cold first request used to 404
+                # where a list-first request succeeded (PR #7781 re-gate,
+                # finding 2). Best-effort: a discovery failure must not
+                # 500 the request, it just leaves the registry as-is.
                 try:
                     with _plugin_manager_home_context():
                         pm = _get_plugin_manager_for_visibility()
+                        try:
+                            pm.discover_and_load(force=False)
+                        except Exception:
+                            pass
                         plugin_path = pm.find_plugin_skill(name)
                 except Exception:
                     plugin_path = None
@@ -34258,10 +34269,20 @@ def _handle_skill_toggle(handler, body):
         # profile's disabled set, which the agent's own listing honors, so
         # the panel row and the agent stay in sync. The lookup runs inside
         # the request's active-Hermes-home context so the manager resolved
-        # belongs to this profile.
+        # belongs to this profile. Discovery runs FIRST inside the same
+        # scope: find_plugin_skill() only reads the in-memory registry,
+        # which a fresh process populates during discovery — a cold
+        # standalone toggle used to 404 on a registered enabled native
+        # plugin where a list-first (warmed) toggle worked (PR #7781
+        # re-gate, finding 3). Best-effort: a discovery failure must not
+        # 500 the request, it just leaves the registry as-is.
         try:
             with _plugin_manager_home_context():
                 pm = _get_plugin_manager_for_visibility()
+                try:
+                    pm.discover_and_load(force=False)
+                except Exception:
+                    pass
                 plugin_path = pm.find_plugin_skill(name)
         except Exception:
             plugin_path = None
