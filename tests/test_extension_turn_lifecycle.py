@@ -81,6 +81,8 @@ loadDir = () => {};
 playNotificationSound = () => {};
 sendBrowserNotification = () => {};
 api = async () => ({});
+_oldestIdx = 0;
+_messagesTruncated = false;
 """
 
 
@@ -119,6 +121,9 @@ async ({kind}) => {
       stream_id: streamId,
       session: {
         session_id: activeSid,
+        _messages_offset: 0,
+        _messages_truncated: false,
+        message_count: 1,
         messages: [{role: 'assistant', content: 'settled-done'}],
         tool_calls: [],
       },
@@ -131,6 +136,9 @@ async ({kind}) => {
       session_id: activeSid,
       session: {
         session_id: activeSid,
+        _messages_offset: 0,
+        _messages_truncated: false,
+        message_count: 1,
         messages: [{role: 'assistant', content: 'settled-error'}],
       },
     });
@@ -142,6 +150,9 @@ async ({kind}) => {
       session_id: activeSid,
       session: {
         session_id: activeSid,
+        _messages_offset: 0,
+        _messages_truncated: false,
+        message_count: 1,
         messages: [{role: 'assistant', content: 'settled-interrupted'}],
       },
     });
@@ -152,6 +163,9 @@ async ({kind}) => {
       session_id: activeSid,
       session: {
         session_id: activeSid,
+        _messages_offset: 0,
+        _messages_truncated: false,
+        message_count: 1,
         messages: [{role: 'assistant', content: 'settled-cancel'}],
       },
     });
