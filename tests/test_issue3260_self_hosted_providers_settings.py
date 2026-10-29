@@ -13,6 +13,8 @@ import api.onboarding as onboarding
 import api.profiles as profiles
 import pytest
 
+from tests.i18n_locale_loader import locale_block, locale_codes, locale_string_value
+
 from tests.js_source_extract import extract_function
 from tests.test_provider_management import _install_fake_hermes_cli, _post
 
@@ -530,18 +532,14 @@ def test_saved_provider_payload_has_no_singular_model_authority(monkeypatch, tmp
 
 
 def test_configured_status_key_is_present_once_in_all_locale_blocks():
-    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
-    locale_blocks = re.findall(
-        r"(?ms)^  (?P<locale>'[^']+'|[A-Za-z-]+): \{(?P<body>.*?)(?=^  (?:'[^']+'|[A-Za-z-]+): \{|\Z)",
-        i18n,
-    )
-    blocks = [body for _, body in locale_blocks]
+    locales = locale_codes()
+    blocks = {locale: locale_block(locale) for locale in locales}
     assert len(blocks) == 15
-    assert all(block.count("providers_status_configured_label:") == 1 for block in blocks)
-    assert all(block.count("providers_status_configured:") == 1 for block in blocks)
+    assert all(block.count("providers_status_configured_label:") == 1 for block in blocks.values())
+    assert all(block.count("providers_status_configured:") == 1 for block in blocks.values())
     labels = {
-        locale.strip("'"): re.search(r"providers_status_configured_label: '([^']+)'", block).group(1)
-        for locale, block in locale_blocks
+        locale: locale_string_value(locale, "providers_status_configured_label")
+        for locale in locales
     }
     assert labels == {
         "en": "Configured",
@@ -688,11 +686,6 @@ def test_provider_card_status_keys_are_translated_alongside_the_new_label():
     """Fable UX gate r3 (2026-10-06): es/de/ko translated only the new configured label, so
     a card mixed one native word with English siblings. The four sibling status keys the
     card header uses are translated in those blocks too."""
-    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
-    blocks = dict(re.findall(
-        r"(?ms)^  (?P<locale>'[^']+'|[A-Za-z-]+): \{(?P<body>.*?)(?=^  (?:'[^']+'|[A-Za-z-]+): \{|\Z)",
-        i18n,
-    ))
     english = {
         "providers_status_configured": "API key configured",
         "providers_status_not_configured": "No API key",
@@ -700,9 +693,8 @@ def test_provider_card_status_keys_are_translated_alongside_the_new_label():
         "providers_status_api_key": "API key",
     }
     for locale in ("es", "de", "ko"):
-        body = blocks[locale]
         for key, en in english.items():
-            value = re.search(rf"{key}: '([^']+)'", body).group(1)
+            value = locale_string_value(locale, key)
             assert value != en, (locale, key, value)
 
 

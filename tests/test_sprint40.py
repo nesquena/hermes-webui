@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """
 Sprint 40 Tests: OAuth provider onboarding path (PR B of issue #329).
 
@@ -6,7 +7,7 @@ Covers:
 - _build_setup_catalog sets current_is_oauth=False for API-key providers
 - _build_setup_catalog sets current_is_oauth=False when no provider configured
 - apply_onboarding_setup with unsupported provider marks onboarding complete directly
-- i18n.js contains all required OAuth onboarding keys in both English and Spanish
+- split locale bundles contains all required OAuth onboarding keys in both English and Spanish
 """
 import pathlib
 import re
@@ -16,7 +17,7 @@ from unittest.mock import patch
 import api.onboarding as mod
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
-I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 ONBOARDING_JS = (REPO_ROOT / "static" / "onboarding.js").read_text(encoding="utf-8")
 
 
@@ -112,14 +113,14 @@ class TestOAuthI18nKeys(unittest.TestCase):
 
     def test_english_locale_has_all_oauth_keys(self):
         """All OAuth onboarding i18n keys must be present in the English locale."""
-        missing = [k for k in _REQUIRED_OAUTH_KEYS if k not in I18N_JS]
+        missing = [k for k in _REQUIRED_OAUTH_KEYS if k not in I18N_SOURCE]
         self.assertFalse(missing,
                          f"English locale missing OAuth keys: {missing}")
 
     def test_spanish_locale_has_all_oauth_keys(self):
         """All OAuth onboarding i18n keys must be present in the Spanish locale."""
         # Spanish locale is the second occurrence of each key
-        counts = {k: I18N_JS.count(k) for k in _REQUIRED_OAUTH_KEYS}
+        counts = {k: I18N_SOURCE.count(k) for k in _REQUIRED_OAUTH_KEYS}
         under = [k for k, c in counts.items() if c < 2]
         self.assertFalse(under,
                          f"Spanish locale missing OAuth keys (need 2 occurrences each): {under}")
@@ -128,7 +129,7 @@ class TestOAuthI18nKeys(unittest.TestCase):
         """Body strings must contain {provider} so JS can substitute the provider name."""
         for key in ["onboarding_oauth_provider_ready_body",
                     "onboarding_oauth_provider_not_ready_body"]:
-            self.assertIn("{provider}", I18N_JS,
+            self.assertIn("{provider}", I18N_SOURCE,
                           f"{key} must contain {{provider}} placeholder")
 
 

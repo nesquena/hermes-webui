@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Tests for #1710 — file-tree tooltip says "Double-click to rename" on folders too,
 but folders don't rename on double-click; they navigate via loadDir(). The tooltip
 is therefore misleading on directory rows.
@@ -73,9 +74,9 @@ class TestFolderTooltipGated:
         )
 
     def test_i18n_key_still_defined_in_all_locales(self):
-        """The i18n key must remain defined in every locale block in static/i18n.js."""
-        i18n = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
-        # i18n.js has 9 locale blocks with the same key. Lock that the key still exists
+        """The i18n key must remain defined in every locale block in static/split locale bundles."""
+        i18n = locale_source_text()
+        # split locale bundles has 9 locale blocks with the same key. Lock that the key still exists
         # at least 5 times (en, plus a quorum of locales) — exact count is i18n maintenance.
         count = i18n.count("double_click_rename:")
         assert count >= 5, (

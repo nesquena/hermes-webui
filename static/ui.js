@@ -3739,11 +3739,11 @@ function _openImgLightboxWithNav(src, alt, images, index) {
   // recovers the image after it has been zoomed/panned out of view.
   const fitBtn = document.createElement('button');
   fitBtn.className = 'img-lightbox-fit';
-  // static/share.html loads ui.js WITHOUT i18n.js, so `t` may be undefined on
+  // static/share.html loads ui.js without the locale core, so `t` may be undefined on
   // the public share page: calling it threw ReferenceError before the lightbox
   // mounted and broke every shared image preview (maintainer re-gate
   // 2026-10-09T00:47:03Z, static/ui.js:3153). Fall back to the English string
-  // (the locale i18n.js ships for img_lightbox_fit_title) and reuse the result
+  // (the locale bundle ships for img_lightbox_fit_title) and reuse the result
   // for both attributes.
   const fitTitle = (typeof t === 'function') ? t('img_lightbox_fit_title') : 'Reset zoom to fit (F)';
   fitBtn.setAttribute('aria-label', fitTitle);
@@ -18266,7 +18266,7 @@ function _buildTransparentEarlierStepsAffordance(hiddenCount){
   el.setAttribute('tabindex','0');
   el.setAttribute('data-earlier-count',String(hiddenCount));
   // i18n with English fallback, matching the sibling "Expand all"/"Collapse all"
-  // controls' t() pattern. Keys live in the en locale (i18n.js); t() falls back to
+  // controls' t() pattern. Keys live in the en locale bundle; t() falls back to
   // en for other locales and to the key name if absent — so guard with a literal.
   const label=hiddenCount===1
     ? _tOrDefault('show_earlier_step_one','Show 1 earlier step')

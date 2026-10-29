@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression coverage for transcript virtualization preference (#4325 + #4343).
 
 The stream-end freeze/jump fix (#4328, semantic viewport anchoring) is covered by
@@ -21,7 +22,7 @@ INDEX = REPO_ROOT / "static" / "index.html"
 PANELS = REPO_ROOT / "static" / "panels.js"
 BOOT = REPO_ROOT / "static" / "boot.js"
 UI = REPO_ROOT / "static" / "ui.js"
-I18N = REPO_ROOT / "static" / "i18n.js"
+I18N = locale_source_text()
 CONFIG = REPO_ROOT / "api" / "config.py"
 
 
@@ -75,7 +76,7 @@ def test_panels_round_trip_and_hot_apply_virtualize_toggle():
 
 
 def test_virtualize_toggle_i18n_all_locales():
-    js = I18N.read_text(encoding="utf-8")
+    js = I18N
     assert js.count("settings_label_virtualize_transcript:") == 15
     assert js.count("settings_desc_virtualize_transcript:") == 15
 

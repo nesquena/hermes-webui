@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression coverage for issue #539: Settings plugin/hook visibility."""
 
 import json
@@ -571,7 +572,7 @@ class TestPluginCollisionDetection:
         assert "plugin.enabled===false" in segment
 
     def test_plugins_panel_i18n_strings_present(self):
-        i18n = read("static/i18n.js")
+        i18n = locale_source_text()
 
         assert "plugins_active_provider:" in i18n
         assert "plugins_provider_no_hooks:" in i18n

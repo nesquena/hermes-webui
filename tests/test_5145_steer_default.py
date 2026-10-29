@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Focused regression coverage for #5145 busy-input defaults."""
 
 import re
@@ -8,7 +9,7 @@ CONFIG_PY = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 LOCALE_KEYS = (
     "en",
     "it",
@@ -31,7 +32,7 @@ def _locale_block(locale_key):
     escaped_keys = [re.escape(key) for key in LOCALE_KEYS]
     next_keys = "|".join(key for key in escaped_keys if key != re.escape(locale_key))
     pattern = rf"^  {re.escape(locale_key)}: \{{(?P<body>.*?)(?=^  (?:{next_keys}): \{{|\n\}};)"
-    match = re.search(pattern, I18N_JS, re.MULTILINE | re.DOTALL)
+    match = re.search(pattern, I18N_SOURCE, re.MULTILINE | re.DOTALL)
     assert match, f"missing {locale_key} locale block"
     return match.group("body")
 
@@ -86,7 +87,7 @@ def test_busy_input_label_changes_without_key_or_id_drift():
     assert 'id="settingsDefaultMessageMode"' in INDEX_HTML
     assert 'data-i18n="settings_label_default_message_mode">Default message mode' in INDEX_HTML
     assert _default_message_mode_label("en") == "Default message mode"
-    assert I18N_JS.count("settings_label_default_message_mode: 'Default message mode'") == 1
+    assert I18N_SOURCE.count("settings_label_default_message_mode: 'Default message mode'") == 1
 
 
 def test_busy_input_labels_stay_in_their_locale_blocks():

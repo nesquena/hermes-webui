@@ -13,12 +13,12 @@ import urllib.request
 from pathlib import Path
 
 from tests._pytest_port import BASE
+from tests.i18n_locale_loader import locale_codes, locale_key_names
 
 
 BOOT_JS = (Path(__file__).parent.parent / "static" / "boot.js").read_text(encoding="utf-8")
 PANELS_JS = (Path(__file__).parent.parent / "static" / "panels.js").read_text(encoding="utf-8")
 INDEX_HTML = (Path(__file__).parent.parent / "static" / "index.html").read_text(encoding="utf-8")
-I18N_JS = (Path(__file__).parent.parent / "static" / "i18n.js").read_text(encoding="utf-8")
 
 
 def _function_block(src: str, name: str) -> str:
@@ -95,10 +95,10 @@ def test_appearance_autosave_status_line_and_i18n_keys_exist():
         "settings_autosave_failed",
         "settings_autosave_retry",
     ]
-    for key in required_keys:
-        assert I18N_JS.count(f"{key}:") >= 8, (
-            f"{key} must be defined in all LOCALES blocks (found {I18N_JS.count(f'{key}:')})"
-        )
+    for locale in locale_codes():
+        keys = locale_key_names(locale)
+        missing = [key for key in required_keys if key not in keys]
+        assert not missing, f"{locale} is missing appearance autosave keys: {missing}"
 
 
 def test_full_save_settings_still_includes_font_size():

@@ -18,8 +18,12 @@ def _open_modal(page, modal_id, locale):
         timeout=10000,
     )
     page.evaluate(
-        """([lang, id]) => {
-            setLocale(lang);
+        """async ([lang, id]) => {
+            const result = await activateLocale(lang);
+            const active = getActiveLocale();
+            if (result.status !== 'applied' || active !== lang) {
+                throw new Error(`locale ${lang} was not ready: ${result.status}/${active}`);
+            }
             if (id === 'kanbanTaskModal') openKanbanCreate();
             else openKanbanCreateBoard();
             applyLocaleToDOM();

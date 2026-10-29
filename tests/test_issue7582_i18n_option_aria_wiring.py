@@ -3,8 +3,8 @@
 not wired through ``data-i18n`` / ``data-i18n-aria-label``, so they
 always render in English even when the user has switched the locale.
 
-The fix adds a handful of new keys in the ``en`` block of
-``static/i18n.js`` (other locales fall back to ``en`` via ``t()``),
+The fix adds a handful of new keys in the English locale bundle. Other
+locales fall back to English through ``t()``.
 threads ``data-i18n`` / ``data-i18n-aria-label`` onto the affected
 elements in ``static/index.html``, and routes the rebuilt default
 option of the TTS voice selector through the same key so locale
@@ -13,11 +13,12 @@ switching keeps both the static and runtime call sites in sync.
 from __future__ import annotations
 
 from pathlib import Path
+from tests.i18n_locale_loader import locale_block
 
 REPO = Path(__file__).resolve().parents[1]
 INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
-I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+EN_BLOCK = locale_block("en")
 
 
 # --- New keys land in the en locale block -----------------------------------
@@ -40,7 +41,7 @@ def test_en_locale_has_new_keys():
     }
     for key, value in expected.items():
         # Match `key: 'value'` (allow optional leading whitespace).
-        assert f"{key}: '{value}'" in I18N_JS, (
+        assert f"{key}: '{value}'" in EN_BLOCK, (
             f"en locale must define {key!r} = {value!r}"
         )
 

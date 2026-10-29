@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Tests for sprint 48 UX bug fixes — v0.50.92.
 
 Covers:
@@ -154,24 +155,24 @@ class TestXmlToolCallStrip:
 class TestWorkspaceEmptyState:
 
     def test_i18n_no_path_string_present(self):
-        src = read('static/i18n.js')
+        src = locale_source_text()
         assert 'workspace_empty_no_path' in src, (
-            "i18n key workspace_empty_no_path must be defined in i18n.js"
+            "i18n key workspace_empty_no_path must be defined in split locale bundles"
         )
 
     def test_i18n_no_path_mentions_settings(self):
-        src = read('static/i18n.js')
+        src = locale_source_text()
         # Extract the value of the key
         m = re.search(r"workspace_empty_no_path:\s*'([^']+)'", src)
-        assert m, "workspace_empty_no_path value not found in i18n.js"
+        assert m, "workspace_empty_no_path value not found in split locale bundles"
         assert 'Settings' in m.group(1), (
             "workspace_empty_no_path should mention Settings"
         )
 
     def test_i18n_empty_dir_string_present(self):
-        src = read('static/i18n.js')
+        src = locale_source_text()
         assert 'workspace_empty_dir' in src, (
-            "i18n key workspace_empty_dir must be defined in i18n.js"
+            "i18n key workspace_empty_dir must be defined in split locale bundles"
         )
 
     def test_empty_state_element_in_html(self):
@@ -198,7 +199,7 @@ class TestWorkspaceEmptyState:
 class TestNotificationDescriptionText:
 
     def test_english_uses_app_not_tab(self):
-        src = read('static/i18n.js')
+        src = locale_source_text()
         # Find the English locale block (appears before other locales)
         # The English block starts at line 1 (it's the first locale object).
         # We look for the settings_desc_notifications in the English section.
@@ -218,14 +219,14 @@ class TestNotificationDescriptionText:
         )
 
     def test_new_wording_exact(self):
-        src = read('static/i18n.js')
+        src = locale_source_text()
         expected = 'while the app is in the background'
         assert expected in src, (
-            f"Exact phrase {expected!r} must appear in i18n.js"
+            f"Exact phrase {expected!r} must appear in split locale bundles"
         )
 
     def test_old_wording_removed_from_english(self):
-        src = read('static/i18n.js')
+        src = locale_source_text()
         old_phrase = 'while the tab is in the background'
         # The old phrase must not appear in the English locale section
         es_marker = "settings_desc_notifications: 'Muestra"

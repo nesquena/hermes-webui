@@ -9,39 +9,39 @@ const _WEBUI_DISPATCHABLE_AGENT_COMMANDS = new Set([
 const COMMANDS=[
   // noEcho:true = action-only commands that don't produce a chat response.
   // Commands without noEcho get a user message echoed to the chat (#840).
-  {name:'help',      desc:t('cmd_help'),             fn:cmdHelp},
-  {name:'clear',     desc:t('cmd_clear'),         fn:cmdClear,     noEcho:true},
-  {name:'compress',  desc:t('cmd_compress'),       fn:cmdCompress, arg:'[focus topic]', noEcho:true},
-  {name:'compact',   desc:t('cmd_compact_alias'),       fn:cmdCompact, noEcho:true},
-  {name:'model',     desc:t('cmd_model'),  fn:cmdModel,     arg:'model_name', subArgs:'models', noEcho:true},
-  {name:'workspace', desc:t('cmd_workspace'),            fn:cmdWorkspace, arg:'name',           noEcho:true},
-  {name:'terminal',  desc:t('cmd_terminal'),             fn:cmdTerminal,                        noEcho:true},
-  {name:'new',       desc:t('cmd_new'),            fn:cmdNew,       noEcho:true},
-  {name:'usage',     desc:t('cmd_usage'),   fn:cmdUsage,     noEcho:true},
-  {name:'theme',     desc:t('cmd_theme'), fn:cmdTheme, arg:'name',  noEcho:true},
-  {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'name', subArgs:'personalities'},
-  {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query'},
-  {name:'use',       desc:t('cmd_use'),      fn:cmdUse,      arg:'skill-name', subArgs:'skills', noEcho:true},
-  {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop,      noEcho:true},
-  {name:'goal',      desc:t('cmd_goal'),     fn:cmdGoal,      arg:'[status|pause|resume|clear|text]', subArgs:['status','pause','resume','clear']},
-  {name:'queue',     desc:t('cmd_queue'),    fn:cmdQueue,     arg:'message', noEcho:true},
-  {name:'interrupt', desc:t('cmd_interrupt'), fn:cmdInterrupt, arg:'message', noEcho:true},
-  {name:'steer',     desc:t('cmd_steer'),    fn:cmdSteer,     arg:'message', noEcho:true},
-  {name:'title',     desc:t('cmd_title'),    fn:cmdTitle,    arg:'[title]'},
-  {name:'retry',     desc:t('cmd_retry'),    fn:cmdRetry,     noEcho:true},
-  {name:'undo',      desc:t('cmd_undo'),     fn:cmdUndo,      noEcho:true},
-  {name:'btw',       desc:t('cmd_btw'),      fn:cmdBtw,       arg:'question', noEcho:true},
-  {name:'background',desc:t('cmd_background'),fn:cmdBackground,arg:'prompt',  noEcho:true},
-  {name:'status',    desc:t('cmd_status'),   fn:cmdStatus},
-  {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice,     noEcho:true},
-  {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh|max', subArgs:['show','hide','none','minimal','low','medium','high','xhigh','max'], noEcho:true},
-  {name:'yolo', desc:t('cmd_yolo'), fn:cmdYolo, noEcho:true},
-  {name:'branch', desc:t('cmd_branch'), fn:cmdBranch, arg:'[name]', noEcho:true},
+  {name:'help',      get desc(){return t('cmd_help');},             fn:cmdHelp},
+  {name:'clear',     get desc(){return t('cmd_clear');},         fn:cmdClear,     noEcho:true},
+  {name:'compress',  get desc(){return t('cmd_compress');},       fn:cmdCompress, arg:'[focus topic]', noEcho:true},
+  {name:'compact',   get desc(){return t('cmd_compact_alias');},       fn:cmdCompact, noEcho:true},
+  {name:'model',     get desc(){return t('cmd_model');},  fn:cmdModel,     arg:'model_name', subArgs:'models', noEcho:true},
+  {name:'workspace', get desc(){return t('cmd_workspace');},            fn:cmdWorkspace, arg:'name',           noEcho:true},
+  {name:'terminal',  get desc(){return t('cmd_terminal');},             fn:cmdTerminal,                        noEcho:true},
+  {name:'new',       get desc(){return t('cmd_new');},            fn:cmdNew,       noEcho:true},
+  {name:'usage',     get desc(){return t('cmd_usage');},   fn:cmdUsage,     noEcho:true},
+  {name:'theme',     get desc(){return t('cmd_theme');}, fn:cmdTheme, arg:'name',  noEcho:true},
+  {name:'personality', get desc(){return t('cmd_personality');}, fn:cmdPersonality, arg:'name', subArgs:'personalities'},
+  {name:'skills',    get desc(){return t('cmd_skills');},   fn:cmdSkills,   arg:'query'},
+  {name:'use',       get desc(){return t('cmd_use');},      fn:cmdUse,      arg:'skill-name', subArgs:'skills', noEcho:true},
+  {name:'stop',      get desc(){return t('cmd_stop');},     fn:cmdStop,      noEcho:true},
+  {name:'goal',      get desc(){return t('cmd_goal');},     fn:cmdGoal,      arg:'[status|pause|resume|clear|text]', subArgs:['status','pause','resume','clear']},
+  {name:'queue',     get desc(){return t('cmd_queue');},    fn:cmdQueue,     arg:'message', noEcho:true},
+  {name:'interrupt', get desc(){return t('cmd_interrupt');}, fn:cmdInterrupt, arg:'message', noEcho:true},
+  {name:'steer',     get desc(){return t('cmd_steer');},    fn:cmdSteer,     arg:'message', noEcho:true},
+  {name:'title',     get desc(){return t('cmd_title');},    fn:cmdTitle,    arg:'[title]'},
+  {name:'retry',     get desc(){return t('cmd_retry');},    fn:cmdRetry,     noEcho:true},
+  {name:'undo',      get desc(){return t('cmd_undo');},     fn:cmdUndo,      noEcho:true},
+  {name:'btw',       get desc(){return t('cmd_btw');},      fn:cmdBtw,       arg:'question', noEcho:true},
+  {name:'background',get desc(){return t('cmd_background');},fn:cmdBackground,arg:'prompt',  noEcho:true},
+  {name:'status',    get desc(){return t('cmd_status');},   fn:cmdStatus},
+  {name:'voice',     get desc(){return t('cmd_voice');},    fn:cmdVoice,     noEcho:true},
+  {name:'reasoning', get desc(){return t('cmd_reasoning');}, fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh|max', subArgs:['show','hide','none','minimal','low','medium','high','xhigh','max'], noEcho:true},
+  {name:'yolo', get desc(){return t('cmd_yolo');}, fn:cmdYolo, noEcho:true},
+  {name:'branch', get desc(){return t('cmd_branch');}, fn:cmdBranch, arg:'[name]', noEcho:true},
 ];
 
 const SLASH_SUBARG_SOURCES={
-  model:{desc:t('cmd_model'), subArgs:'models'},
-  personality:{desc:t('cmd_personality'), subArgs:'personalities'},
+  model:{get desc(){return t('cmd_model');}, subArgs:'models'},
+  personality:{get desc(){return t('cmd_personality');}, subArgs:'personalities'},
 };
 
 function parseCommand(text){
@@ -1634,7 +1634,7 @@ async function cmdSteer(args){
 function _steerFailureMessageKey(fallback) {
   if(fallback==='gateway_steer_queued')return 'steer_fail_no_cached_agent';
   const key = 'steer_fail_' + (fallback || 'unknown');
-  return (typeof LOCALES !== 'undefined' && LOCALES.en && LOCALES.en[key])
+  return (typeof getLocaleBundle === 'function' && getLocaleBundle('en') && getLocaleBundle('en')[key])
     ? key : 'steer_fail_unknown';
 }
 

@@ -1,7 +1,7 @@
 """Follow-up to #7622: the server-rendered /login page must honour Accept-Language.
 
 #7622 was fixed client-side by #7730 — `settings.language` is now `None` until
-the user explicitly picks a locale, and `static/i18n.js` resolves the UI locale
+the user explicitly picks a locale, and the locale core resolves the UI locale
 from `navigator.languages`. But `/login` is rendered by the server *before* any
 of that JavaScript runs, and it still did:
 
