@@ -11737,10 +11737,16 @@ async function _startNewChatAfterDeletingCurrentSession(deletedWorkspace, owner=
   }
   if(deletedWorkspace) S._profileSwitchWorkspace=deletedWorkspace;
   try{
-    const result=await newSession(false,{
+    const newSessionOptions={
       stillOwnsPane,
       preserveRememberedDraftPointer:!!rememberedDraftSid,
-    });
+    };
+    // A project filter may bind a different default workspace. This delete
+    // continuation owns the deleted conversation's known workspace, so pass it
+    // explicitly instead of letting project binding replace the one-shot flag.
+    // Unknown stays implicit; the confirmed-missing retry below stays null.
+    if(deletedWorkspace) newSessionOptions.workspace=deletedWorkspace;
+    const result=await newSession(false,newSessionOptions);
     return result&&result.superseded?{superseded:true}:{created:true};
   }catch(error){
     // The deleted conversation's workspace may have disappeared from disk.

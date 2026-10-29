@@ -45,9 +45,12 @@ globalThis.window = globalThis;
 window.location = {origin: 'http://example.test', pathname: '/session/deleted-A', search: '', hash: ''};
 globalThis.document = {baseURI: 'http://example.test/', createElement() { return {dataset:{}, appendChild(){}}; }};
 globalThis.$ = () => null;
+globalThis.t = key => key;
 
 globalThis.S = {
-  session: null,
+  session: scenario.startsWith('project-default-b-')
+    ? {session_id:'deleted-A', workspace:'/ws/A', profile:'default'}
+    : null,
   messages: [],
   entries: [],
   toolCalls: [],
@@ -63,7 +66,11 @@ globalThis._profileSwitchGeneration = 0;
 globalThis._newSessionInFlight = null;
 globalThis._messagesTruncated = false;
 globalThis._oldestIdx = 0;
-globalThis._activeProject = '';
+globalThis._activeProject = scenario.includes('project') ? 'project-1' : '';
+globalThis._allProjects = scenario.includes('project') ? [{
+  project_id:'project-1', profile:'default', workspaces:['/ws/A','/ws/B'],
+  default_workspace:'/ws/B',
+}] : [];
 globalThis.NO_PROJECT_FILTER = '__NO_PROJECT_FILTER__';
 globalThis._sessionSourceFilter = 'webui';
 globalThis._defaultModel = 'test-model';
@@ -85,11 +92,34 @@ globalThis._setSessionViewedCount = () => {};
 window._clearPendingSelections = () => {};
 globalThis._appRootPath = () => '/';
 globalThis._newSessionPendingText = () => 'Creating new conversation…';
+globalThis._pendingSessionReflowPositions = null;
+globalThis._optimisticallyRemovedSessionIds = new Set();
+globalThis._allSessions = [];
+globalThis._selectedSessions = new Set();
+globalThis._sessionSnapshotById = sid => ({session_id:sid, workspace:'/ws/A', profile:'default'});
+globalThis.showConfirmDialog = async () => true;
+globalThis._readComposerModelPick = () => null;
+globalThis._captureSessionReflowPositions = () => null;
+globalThis._clearHandoffStorageForSession = () => {};
+globalThis._forgetComposerDraftLocalFallback = () => {};
+globalThis._clearPersistedSessionQueue = () => {};
+globalThis._optimisticallyRemoveSessionFromList = () => {};
+globalThis._syncProviderQuotaForActiveContext = () => {};
+globalThis._hydrateTodosFromSession = () => {};
+globalThis._sessionResponseRetainsWorktree = () => false;
+globalThis._worktreeSessionCount = () => 0;
+globalThis._worktreeResponseCount = () => 0;
+globalThis._sessionListQueryString = () => '';
+globalThis._settleEmptyComposerModelAfterFinalSessionDelete = () => {};
+globalThis.renderSessionList = async () => {};
+globalThis.exitSessionSelectMode = () => { _selectedSessions.clear(); };
+globalThis._updateBatchActionBar = () => {};
 
 let releaseCreate = null;
 let releaseDraft = null;
 const createWorkspaces = [];
 globalThis.api = async (url, options = {}) => {
+  if (url === '/api/session/delete') return {};
   if (url.startsWith('/api/session?')) {
     if (scenario === 'draft-load-failure') return {session:{
       session_id:'remembered', message_count:0, title:'New Chat', profile:'default',
@@ -144,12 +174,16 @@ eval(extract('_isRestorableNewChatDraftSession'));
 eval(extract('_rememberNewChatDraftSession'));
 eval(extract('_clearRememberedNewChatDraftSession'));
 eval(extract('_restoreRememberedNewChatDraftSession'));
+eval(extract('_projectBindingsForNewSession'));
 eval(extract('_deleteNewChatProfileGeneration'));
 eval(extract('_deleteNewChatOwnerSnapshot'));
 eval(extract('_deleteNewChatOwnerIsCurrent'));
 eval(extract('_showEmptyConversationAfterDelete'));
 eval(extract('newSession'));
 eval(extract('_startNewChatAfterDeletingCurrentSession'));
+eval(extract('_sessionDeleteErrorMessage'));
+eval(extract('deleteSession'));
+eval(extract('_deleteSelectedSessionsBatch'));
 
 (async () => {
   if (scenario.startsWith('new-chat-during-draft-')) {
@@ -164,9 +198,26 @@ eval(extract('_startNewChatAfterDeletingCurrentSession'));
     ordinary = newSession(false);
     while (!releaseCreate) await new Promise(resolve => setTimeout(resolve, 0));
   }
-  const owner = _deleteNewChatOwnerSnapshot();
-  const pending = _startNewChatAfterDeletingCurrentSession('/ws/A', owner);
-  if (scenario === 'superseded' || scenario === 'superseded-profile') {
+  let pending;
+  if (scenario === 'ordinary-project-new-chat') {
+    pending = newSession(false);
+  } else if (scenario === 'project-default-b-single') {
+    window._newChatOnSessionDelete = true;
+    pending = deleteSession('deleted-A');
+  } else if (scenario === 'project-default-b-batch') {
+    window._newChatOnSessionDelete = true;
+    _selectedSessions.add('deleted-A');
+    pending = _deleteSelectedSessionsBatch();
+  } else {
+    const owner = _deleteNewChatOwnerSnapshot();
+    pending = _startNewChatAfterDeletingCurrentSession('/ws/A', owner);
+  }
+  if (scenario === 'ordinary-project-new-chat'
+      || scenario === 'project-default-b-single'
+      || scenario === 'project-default-b-batch') {
+    while (!releaseCreate) await new Promise(resolve => setTimeout(resolve, 0));
+    releaseCreate();
+  } else if (scenario === 'superseded' || scenario === 'superseded-profile') {
     while (!releaseCreate) await new Promise(resolve => setTimeout(resolve, 0));
     if (scenario === 'superseded') {
       _loadSessionGeneration += 1;
@@ -297,6 +348,25 @@ def test_missing_cached_profile_default_is_explicitly_omitted_on_retry(driver):
     assert result["profileWorkspace"] is None
     assert result["superseded"] is False
     assert result["failed"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize(
+    "scenario",
+    ["project-default-b-single", "project-default-b-batch"],
+)
+def test_delete_replacement_keeps_deleted_workspace_over_active_project_default(driver, scenario):
+    result = _run(driver, scenario)
+    assert result["activeSid"] == "created-A"
+    assert result["createWorkspaces"] == ["/ws/A"]
+    assert result["profileWorkspace"] is None
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_ordinary_project_new_chat_still_uses_project_default(driver):
+    result = _run(driver, "ordinary-project-new-chat")
+    assert result["activeSid"] == "created-B"
+    assert result["createWorkspaces"] == ["/ws/B"]
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
