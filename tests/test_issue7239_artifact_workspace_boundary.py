@@ -203,6 +203,9 @@ def test_unc_paths_match_server_share_and_workspace_before_opening():
             r"\\server\share\other\report.md",
             r"\\server\other\proj\report.md",
             r"\\foreign\share\proj\report.md",
+            r"\\server\other\..\share\proj\report.md",
+            r"\\server\share\..\proj\report.md",
+            r"\\server\share\proj\sub\..\report.md",
             "reports/output.md",
             "README",
         ],
@@ -210,17 +213,23 @@ def test_unc_paths_match_server_share_and_workspace_before_opening():
     )
     assert [row["kind"] for row in rows] == [
         "workspace-contained", "outside", "outside", "outside",
+        "outside", "outside", "workspace-contained",
         "workspace-relative", "workspace-relative",
     ]
     assert rows[0]["openPath"] == "report.md"
-    assert rows[4]["openPath"] == "reports/output.md"
-    assert rows[5]["openPath"] == "README"
+    assert rows[4]["openPath"] is None
+    assert rows[5]["openPath"] is None
+    assert rows[6]["openPath"] == "report.md"
+    assert rows[7]["openPath"] == "reports/output.md"
+    assert rows[8]["openPath"] == "README"
 
 
 def test_unc_open_checks_contained_path_and_blocks_foreign_share():
     workspace = json.dumps(r"\\server\share\proj")
     contained = json.dumps(r"\\server\share\proj\report.md")
     foreign = json.dumps(r"\\other\share\proj\report.md")
+    foreign_traversal = json.dumps(r"\\server\other\..\share\proj\report.md")
+    above_share = json.dumps(r"\\server\share\..\proj\report.md")
     script = _common_js(
         "_classifyArtifactPath", "_workspacePathExists", "openArtifactPath"
     ) + f'''
@@ -233,13 +242,17 @@ const setStatus=status=>calls.push(status); const openFile=async path=>{{calls.p
   const relative=await openArtifactPath('reports/output.md');
   const readme=await openArtifactPath('README');
   const foreignOpened=await openArtifactPath({foreign});
-  process.stdout.write(JSON.stringify({{opened,relative,readme,foreignOpened,calls}}));
+  const foreignTraversalOpened=await openArtifactPath({foreign_traversal});
+  const aboveShareOpened=await openArtifactPath({above_share});
+  process.stdout.write(JSON.stringify({{opened,relative,readme,foreignOpened,foreignTraversalOpened,aboveShareOpened,calls}}));
 }})();'''
     assert _node_json(script) == {
         "opened": True,
         "relative": True,
         "readme": True,
         "foreignOpened": False,
+        "foreignTraversalOpened": False,
+        "aboveShareOpened": False,
         "calls": [
             "tab",
             "/api/list?session_id=s&path=.",
@@ -250,6 +263,8 @@ const setStatus=status=>calls.push(status); const openFile=async path=>{{calls.p
             "tab",
             "/api/list?session_id=s&path=.",
             "README",
+            "workspace_artifact_outside_workspace",
+            "workspace_artifact_outside_workspace",
             "workspace_artifact_outside_workspace",
         ],
     }

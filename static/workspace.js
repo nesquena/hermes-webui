@@ -510,6 +510,7 @@ function _classifyArtifactPath(path, workspace){
   if(pathIsWindows !== workspaceIsWindows) return blocked('outside');
   if(!(workspaceIsWindows || ws.startsWith('/'))) return blocked('outside');
   const split = value => {
+    if(value.startsWith('//')) return {drive:'', rawSegments:value.slice(2).split('/'), segments:null};
     const match = value.match(/^([A-Za-z]:)?\/(.*)$/);
     const rawSegments = (match ? match[2] : value).split('/');
     return {
@@ -520,9 +521,24 @@ function _classifyArtifactPath(path, workspace){
   };
   const pathParts = split(normalized);
   const workspaceParts = split(ws);
-  if(!pathParts.segments || !workspaceParts.segments) return blocked('outside');
-  if(pathIsUNC && (pathParts.segments.length < 2 || workspaceParts.segments.length < 2)) return blocked('unsupported');
   const fold = value => pathIsWindows ? value.toLowerCase() : value;
+  if(pathIsUNC){
+    const uncParts = parts => {
+      const segments = parts.rawSegments.filter(Boolean);
+      return {anchor:segments.slice(0,2), suffix:segments.slice(2)};
+    };
+    const pathUNC = uncParts(pathParts);
+    const workspaceUNC = uncParts(workspaceParts);
+    const invalidAnchor = anchor => anchor.length !== 2 || anchor.some(segment=>segment === '.' || segment === '..');
+    if(invalidAnchor(pathUNC.anchor) || invalidAnchor(workspaceUNC.anchor)) return blocked('unsupported');
+    if(pathUNC.anchor.some((segment,index)=>fold(segment) !== fold(workspaceUNC.anchor[index]))) return blocked('outside');
+    const pathSuffix = normalizeSegments(pathUNC.suffix);
+    const workspaceSuffix = normalizeSegments(workspaceUNC.suffix);
+    if(!pathSuffix || !workspaceSuffix) return blocked('outside');
+    pathParts.segments = pathUNC.anchor.concat(pathSuffix);
+    workspaceParts.segments = workspaceUNC.anchor.concat(workspaceSuffix);
+  }
+  if(!pathParts.segments || !workspaceParts.segments) return blocked('outside');
   if(fold(pathParts.drive) !== fold(workspaceParts.drive) || pathParts.segments.length < workspaceParts.segments.length) return blocked('outside');
   for(let i=0;i<workspaceParts.segments.length;i++){
     if(fold(pathParts.segments[i]) !== fold(workspaceParts.segments[i])) return blocked('outside');
