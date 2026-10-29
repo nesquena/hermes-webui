@@ -4365,6 +4365,7 @@ else _initMediaPlaybackObserver();
 setTimeout(_initMediaPlaybackObserver,0);
 
 // ── Ambient provider quota indicator (#1766) ────────────────────────────────
+let _providerQuotaLastStatus=null;
 // A provider switch can complete before an older account-quota request returns.
 // Only the newest request may update the composer; otherwise an old Codex result
 // can reappear while the active conversation uses another provider.
@@ -4377,26 +4378,91 @@ function _providerQuotaProfileKey(){
   return (typeof S!=='undefined'&&S&&S.activeProfile)?String(S.activeProfile):'';
 }
 
+// Number(null), Number('') and Number(false) are 0: a missing or rejected
+// measurement must hide, not render as $0.00 / 0%.
+function _isQuotaMeasurement(value){
+  return (typeof value==='number'||(typeof value==='string'&&value.trim()!==''))&&Number.isFinite(Number(value));
+}
 function _formatQuotaMoneyShort(value){
+  if(!_isQuotaMeasurement(value)) return '';
   const n=Number(value);
-  if(!Number.isFinite(n)) return '';
   if(Math.abs(n)>=100) return '$'+n.toFixed(0);
   if(Math.abs(n)>=10) return '$'+n.toFixed(1);
   return '$'+n.toFixed(2);
 }
 function _formatQuotaPercentShort(value){
+  if(!_isQuotaMeasurement(value)) return '';
   const n=Number(value);
-  if(!Number.isFinite(n)) return '';
   return Math.max(0,Math.min(100,n)).toFixed(0)+'%';
+}
+// Which account window the chip shows (Settings: quota_chip_window). The fixed modes pick by
+// the window's limit_window_seconds, never by list position: providers do not order windows.
+function _normalizeQuotaChipWindow(value){
+  return value==='shortest'||value==='longest'?value:'most_constrained';
+}
+function _quotaWindowSeconds(x){
+  return x&&_isQuotaMeasurement(x.limit_window_seconds)&&Number(x.limit_window_seconds)>0?Number(x.limit_window_seconds):null;
+}
+function _selectQuotaChipWindow(windows){
+  const valid=windows.filter(x=>x&&_isQuotaMeasurement(x.remaining_percent));
+  if(!valid.length) return null;
+  const mode=_normalizeQuotaChipWindow(typeof window!=='undefined'?window._quotaChipWindow:undefined);
+  if(mode==='shortest'||mode==='longest'){
+    const timed=valid.filter(x=>_quotaWindowSeconds(x)!==null);
+    if(timed.length) return timed.reduce((best,x)=>{
+      const a=_quotaWindowSeconds(x),b=_quotaWindowSeconds(best);
+      return (mode==='shortest'?a<b:a>b)?x:best;
+    });
+    // No eligible window reports a valid positive duration: fall back to the most constrained one.
+  }
+  return valid.reduce((min,x)=>Number(x.remaining_percent)<Number(min.remaining_percent)?x:min);
+}
+// Time left until a window resets, e.g. "2h 14m" / "3d 5h"; '' when unknown or past.
+function _formatQuotaResetIn(value,now){
+  if(!value) return '';
+  const ms=new Date(value).getTime();
+  if(!Number.isFinite(ms)) return '';
+  const s=Math.round((ms-(typeof now==='number'?now:Date.now()))/1000);
+  if(s<=0) return '';
+  const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+  if(d>0) return d+'d'+(h?' '+h+'h':'');
+  if(h>0) return h+'h'+(m?' '+m+'m':'');
+  return Math.max(1,m)+'m';
+}
+// Hover text: one line per account window (all periods), each with its remaining
+// share and time to reset when the provider reports one, then any detail lines.
+function _providerQuotaWindowLines(accountLimits,now){
+  const windows=accountLimits&&Array.isArray(accountLimits.windows)?accountLimits.windows:[];
+  const lines=[];
+  for(const w of windows){
+    if(!w||!_isQuotaMeasurement(w.remaining_percent)) continue;
+    const name=typeof w.label==='string'&&w.label.trim()?w.label.trim()+': ':'';
+    const reset=_formatQuotaResetIn(w.reset_at,now);
+    lines.push(name+_formatQuotaPercentShort(w.remaining_percent)+' remaining'+(reset?' · resets in '+reset:''));
+  }
+  const details=accountLimits&&Array.isArray(accountLimits.details)?accountLimits.details:[];
+  for(const detail of details){
+    if(typeof detail==='string'&&detail.trim()) lines.push(detail.trim());
+  }
+  return lines;
 }
 function _providerQuotaIndicatorText(status){
   if(!status||status.status!=='available') return null;
   const provider=status.display_name||status.provider||'Provider';
   const accountLimits=status.account_limits||null;
   if(accountLimits&&Array.isArray(accountLimits.windows)&&accountLimits.windows.length){
-    const w=accountLimits.windows.find(x=>x&&Number.isFinite(Number(x.remaining_percent)))||accountLimits.windows[0];
-    const remaining=_formatQuotaPercentShort(w&&w.remaining_percent);
-    if(remaining) return {label:remaining, title:provider+' — '+(status.message||'Provider usage loaded')+' — '+remaining+' remaining'};
+    // Multi-window providers (rolling/5-hour, weekly, monthly): by default the most
+    // constrained window, since the lowest remaining share is the limit hit first.
+    const w=_selectQuotaChipWindow(accountLimits.windows);
+    const remaining=w?_formatQuotaPercentShort(w.remaining_percent):'';
+    const windowLabel=w&&typeof w.label==='string'&&w.label.trim()?w.label.trim()+': ':'';
+    if(remaining){
+      const lines=_providerQuotaWindowLines(accountLimits);
+      const head=provider+' — '+(status.message||'Provider usage loaded');
+      // One window keeps the single-line form; several list every period on its own line.
+      if(lines.length<=1) return {label:remaining, title:head+' — '+(lines[0]||windowLabel+remaining+' remaining')};
+      return {label:remaining, title:head+'\n'+lines.join('\n')};
+    }
   }
   const quota=status.quota||null;
   if(quota){
@@ -4443,6 +4509,8 @@ function renderProviderQuotaIndicator(status){
     clearProviderQuotaIndicator();
     return;
   }
+  _providerQuotaLastStatus=status;
+  _initProviderQuotaTitleRefresh();
   label.textContent=text.label;
   chip.title=text.title;
   if(mobileLabel) mobileLabel.textContent=text.label;
@@ -4512,6 +4580,28 @@ window.addEventListener('visibilitychange',()=>{
     void refreshProviderQuotaIndicator(_currentQuotaProvider());
   }
 });
+// Reset countdowns are computed when the title is built; rebuild it on hover/focus
+// so "resets in" is current without waiting for the next quota fetch.
+function _refreshProviderQuotaTitle(){
+  const chip=$('providerQuotaChip');
+  if(!chip||chip.hidden||!_providerQuotaLastStatus) return;
+  const text=_providerQuotaIndicatorText(_providerQuotaLastStatus);
+  if(!text) return;
+  chip.title=text.title;
+  const mobileAction=$('composerMobileQuotaAction');
+  if(mobileAction) mobileAction.title=text.title;
+}
+// Bound lazily from renderProviderQuotaIndicator (hover only matters once the chip has drawn),
+// so this block runs no top-level DOM code.
+let _providerQuotaTitleRefreshBound=false;
+function _initProviderQuotaTitleRefresh(){
+  if(_providerQuotaTitleRefreshBound) return;
+  const chip=$('providerQuotaChip');
+  if(!chip||typeof chip.addEventListener!=='function') return;
+  chip.addEventListener('mouseenter',_refreshProviderQuotaTitle);
+  chip.addEventListener('focus',_refreshProviderQuotaTitle);
+  _providerQuotaTitleRefreshBound=true;
+}
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};

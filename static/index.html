@@ -1355,6 +1355,15 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_quota_chip">Displays an ambient remaining-quota indicator (e.g. OpenRouter credit balance) in the composer footer. Default off. Only visible on wide displays (≥1400px) when enabled, to keep the composer uncluttered on laptop and standard desktop widths.</div>
             </div>
             <div class="settings-field">
+              <label for="settingsQuotaChipWindow" data-i18n="settings_label_quota_chip_window">Quota chip window</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_quota_chip_window">For providers with several limits (e.g. 5-hour, weekly, monthly), which one the chip shows. The quota panel always lists all of them.</div>
+              <select id="settingsQuotaChipWindow" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                <option value="most_constrained" data-i18n="settings_quota_chip_window_most_constrained">Most constrained (lowest remaining)</option>
+                <option value="shortest" data-i18n="settings_quota_chip_window_shortest">Shortest window (e.g. 5-hour / rolling)</option>
+                <option value="longest" data-i18n="settings_quota_chip_window_longest">Longest window (e.g. weekly / monthly)</option>
+              </select>
+            </div>
+            <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsShowConversationOutline" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_conversation_outline">Show conversation outline</span>
