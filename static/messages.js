@@ -1846,6 +1846,10 @@ async function send(){
     }
   }
   if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
+  if(!S.session){
+    _restoreComposerDraftAfterFailedSend(text,[...S.pendingFiles],null,null);
+    return;
+  }
 
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;

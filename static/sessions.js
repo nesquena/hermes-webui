@@ -236,20 +236,37 @@ function _adoptRegenerationRevision(sessionPayload){
   }
 }
 
-async function _restoreRememberedNewChatDraftSession() {
+async function _restoreRememberedNewChatDraftSession(requiredWorkspace=null, stillOwnsPane=null) {
   let sid = '';
   try { sid = localStorage.getItem(NEW_CHAT_DRAFT_SESSION_KEY) || ''; } catch (_) { sid = ''; }
   if (!sid || (S.session && S.session.session_id === sid)) return false;
   try {
     const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+    if (stillOwnsPane && !stillOwnsPane()) return false;
     const session = data && data.session;
     if (!_isRestorableNewChatDraftSession(session, true)) {
       _clearRememberedNewChatDraftSession(sid);
       return false;
     }
-    await loadSession(sid, {skipLineageResolve:true});
+    // Callers that need a specific workspace (the delete flow passes the
+    // deleted conversation's workspace) only reuse the draft when it belongs
+    // there. On mismatch, keep the remembered key: the draft stays valid for
+    // the ordinary New Chat flow, and the caller continues on its own (e.g.
+    // starts a fresh chat in the deleted workspace).
+    if (requiredWorkspace && session.workspace !== requiredWorkspace) return false;
+    if (stillOwnsPane && !stillOwnsPane()) return false;
+    await loadSession(sid, {
+      skipLineageResolve:true,
+      // A delete-triggered replacement owns this exact load. Tell its caller
+      // which generation loadSession allocated so the load does not supersede
+      // itself, while any later sidebar navigation still does.
+      onLoadClaim:generation=>{
+        if(stillOwnsPane) stillOwnsPane(null,generation);
+      },
+    });
     return !!(S.session && S.session.session_id === sid);
   } catch (_) {
+    if (stillOwnsPane && !stillOwnsPane()) return false;
     _clearRememberedNewChatDraftSession(sid);
     return false;
   }
@@ -2347,8 +2364,17 @@ async function newSession(flash, options={}){
     if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
     return _newSessionInFlight;
   }
+  // Only the caller that owns a new POST creates an intent generation. A caller
+  // joining that POST must share its ownership; otherwise it can invalidate the
+  // response both callers are waiting for and leave the composer sessionless.
+  const newSessionIntentGeneration=(Number.isSafeInteger(S._newSessionIntentGeneration)
+    ? S._newSessionIntentGeneration
+    : 0)+1;
+  S._newSessionIntentGeneration=newSessionIntentGeneration;
   _setNewSessionPending(true);
   _newSessionInFlight=(async()=>{
+    const stillOwnsPane=(options&&typeof options.stillOwnsPane==='function')?options.stillOwnsPane:null;
+    if(stillOwnsPane&&!stillOwnsPane(newSessionIntentGeneration)) return {superseded:true};
     // Intent-time picker epoch; see the refresh below.
     let newSessionClaim=(typeof _projectPickerOpenEpoch==='number')?_projectPickerOpenEpoch:0;
     // Starting a brand-new chat must not carry named context blocks selected in
@@ -2391,11 +2417,14 @@ async function newSession(flash, options={}){
     // Project-bound workspace (quick-create with bindings) wins first,
     // then explicit profile-switch, then current conversation, then profile default.
     // Provenance lets the server recover only a deleted inherited path; explicit paths stay strict.
-    const switchWs=S._profileSwitchWorkspace;
+    const hasExplicitWorkspace=options&&Object.prototype.hasOwnProperty.call(options,'workspace');
+    const switchWs=hasExplicitWorkspace?options.workspace:S._profileSwitchWorkspace;
     S._profileSwitchWorkspace=null;
-    const sessionWs=(!switchWs&&S.session)?S.session.workspace:null;
-    const boundWs=(options&&options.workspace)||null;
-    const inheritWs=boundWs||switchWs||sessionWs||(S._profileDefaultWorkspace||null);
+    const sessionWs=(!hasExplicitWorkspace&&!switchWs&&S.session)?S.session.workspace:null;
+    const boundWs=hasExplicitWorkspace?switchWs:null;
+    const inheritWs=hasExplicitWorkspace
+      ? boundWs
+      : switchWs||sessionWs||(S._profileDefaultWorkspace||null);
     const reqBody={
       workspace:inheritWs,
       profile:S.activeProfile||'default',
@@ -2511,6 +2540,10 @@ async function newSession(flash, options={}){
     if(S.session&&S.session.session_id&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(S.session.session_id);
     if(options&&typeof options.pickerClaimEpoch==='number') newSessionClaim=options.pickerClaimEpoch;
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
+    // A delete-owned New Chat can settle after the user has already opened a
+    // different session/profile. Keep the server-created empty session off
+    // screen instead of letting an older POST response reclaim the pane/URL.
+    if(stillOwnsPane&&!stillOwnsPane(newSessionIntentGeneration)) return {superseded:true,session:data&&data.session};
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
@@ -2559,7 +2592,7 @@ async function newSession(flash, options={}){
         if(typeof _applyReasoningChip==='function') _applyReasoningChip((st&&st.reasoning_effort)||boundEffort, st||{});
       }catch(_){ /* effort is a preference; a failed apply must not fail the session */ }
     }
-    if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);
+    if(!(options&&options.worktree)&&!(options&&options.preserveRememberedDraftPointer)) _rememberNewChatDraftSession(S.session);
     if(flash)S.session._flash=true;
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
     _setActiveSessionUrl(S.session.session_id);
@@ -2784,6 +2817,7 @@ async function loadSession(sid){
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   const _loadGeneration = ++_loadSessionGeneration;
+  if(typeof opts.onLoadClaim==='function') opts.onLoadClaim(_loadGeneration);
   const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
   _loadingSessionId = sid;
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
@@ -6135,15 +6169,25 @@ async function _deleteSelectedSessionsBatch(){
   const retainedCount=_worktreeResponseCount(results);
   const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
   deletedIds.forEach(_clearHandoffStorageForSession);
+  let newChatAfterDeleteResult=null;
   if(S.session&&deletedIds.includes(S.session.session_id)){
-    S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
+    const deletedWorkspace=S.session.workspace||null;
+    const startNewChatAfterDelete=typeof window!=='undefined'&&window._newChatOnSessionDelete===true;
+    const deleteNewChatOwner=startNewChatAfterDelete?_deleteNewChatOwnerSnapshot():null;
+    S.session=null;S.messages=[];S.entries=[];S.busy=false;S.activeStreamId=null;
+    if(typeof updateSendBtn==='function') updateSendBtn();
+    localStorage.removeItem('hermes-webui-session');
     if(typeof _syncProviderQuotaForActiveContext==='function') _syncProviderQuotaForActiveContext();
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
-    const remaining=await api('/api/sessions'+_sessionListQueryString());
-    if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
-    else{
-      _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete);
-      $('msgInner').innerHTML='';$('emptyState').style.display='';
+    if(startNewChatAfterDelete){
+      newChatAfterDeleteResult=await _startNewChatAfterDeletingCurrentSession(deletedWorkspace,deleteNewChatOwner);
+    }else{
+      const remaining=await api('/api/sessions'+_sessionListQueryString());
+      if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
+      else{
+        _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete);
+        $('msgInner').innerHTML='';$('emptyState').style.display='';
+      }
     }
   }
   if(failures.length){
@@ -6152,12 +6196,20 @@ async function _deleteSelectedSessionsBatch(){
     showToast(_sessionDeleteErrorMessage(failures[0].error)+' ('+deletedIds.length+'/'+ids.length+')',0,'error');
     _selectedSessions.clear();
     failures.forEach(f=>_selectedSessions.add(f.sid));
+    if(newChatAfterDeleteResult&&newChatAfterDeleteResult.error){
+      const error=newChatAfterDeleteResult.error;
+      showToast(t('session_batch_delete_new_chat_failed',error&&error.message||error),0,'error');
+    }
     await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
     _updateBatchActionBar();
     return;
   }
   if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');
   else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');
+  if(newChatAfterDeleteResult&&newChatAfterDeleteResult.error){
+    const error=newChatAfterDeleteResult.error;
+    showToast(t('session_batch_delete_new_chat_failed',error&&error.message||error),0,'error');
+  }
   exitSessionSelectMode();await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
 }
 function _showBatchProjectPicker(openerEl){
@@ -11855,6 +11907,129 @@ async function removeWorktree(session){
   }
 }
 
+// Opt-in helper (new_chat_on_session_delete, default off): both delete paths
+// call this when the just-deleted conversation was the one being viewed. Reuse
+// the remembered empty New Chat draft when one exists (same as the "+" button),
+// but only when that draft belongs to the deleted conversation's workspace;
+// otherwise ask newSession() for a fresh chat in that workspace so the user
+// stays where they were working.
+function _deleteNewChatProfileGeneration(){
+  try{return typeof _profileSwitchGeneration==='number'?_profileSwitchGeneration:0;}
+  catch(_){return 0;}
+}
+
+function _deleteNewChatOwnerSnapshot(){
+  return {
+    loadGeneration:_loadSessionGeneration,
+    profileGeneration:_deleteNewChatProfileGeneration(),
+    newSessionGeneration:Number.isSafeInteger(S._newSessionIntentGeneration)
+      ? S._newSessionIntentGeneration
+      : 0,
+    activeProfile:(S.activeProfile||'default'),
+  };
+}
+
+function _deleteNewChatOwnerIsCurrent(owner,newSessionGeneration=null,loadGeneration=null){
+  if(!owner) return true;
+  const expectedNewSessionGeneration=newSessionGeneration===null
+    ? owner.newSessionGeneration
+    : newSessionGeneration;
+  const expectedLoadGeneration=loadGeneration===null
+    ? owner.loadGeneration
+    : loadGeneration;
+  return !S.session
+    && _loadSessionGeneration===expectedLoadGeneration
+    && _deleteNewChatProfileGeneration()===owner.profileGeneration
+    && (Number.isSafeInteger(S._newSessionIntentGeneration)?S._newSessionIntentGeneration:0)===expectedNewSessionGeneration
+    && (S.activeProfile||'default')===owner.activeProfile;
+}
+
+function _showEmptyConversationAfterDelete(){
+  S.session=null;S.messages=[];S.entries=[];
+  S.busy=false;S.activeStreamId=null;
+  if(typeof updateSendBtn==='function') updateSendBtn();
+  try{localStorage.removeItem('hermes-webui-session');}catch(_){}
+  try{if(typeof _appRootPath==='function') history.replaceState(null,'',_appRootPath());}catch(_){}
+  const title=$('topbarTitle');if(title)title.textContent=assistantDisplayName();
+  const meta=$('topbarMeta');if(meta)meta.textContent='Start a new conversation';
+  const messages=$('msgInner');if(messages)messages.innerHTML='';
+  const empty=$('emptyState');if(empty)empty.style.display='';
+  const tree=$('fileTree');if(tree)tree.innerHTML='';
+  if(typeof syncAppTitlebar==='function') syncAppTitlebar();
+}
+
+async function _startNewChatAfterDeletingCurrentSession(deletedWorkspace, owner=null){
+  let ownedNewSessionGeneration=null;
+  let ownedLoadGeneration=null;
+  const stillOwnsPane=(newSessionGeneration=null,loadGeneration=null)=>{
+    if(newSessionGeneration!==null) ownedNewSessionGeneration=newSessionGeneration;
+    if(loadGeneration!==null) ownedLoadGeneration=loadGeneration;
+    return _deleteNewChatOwnerIsCurrent(
+      owner,
+      ownedNewSessionGeneration===null?null:ownedNewSessionGeneration,
+      ownedLoadGeneration===null?null:ownedLoadGeneration,
+    );
+  };
+  if(typeof _restoreRememberedNewChatDraftSession==='function'
+     && await _restoreRememberedNewChatDraftSession(deletedWorkspace,stillOwnsPane)) return {restored:true};
+  if(!stillOwnsPane()) return {superseded:true};
+  let rememberedDraftSid='';
+  try{rememberedDraftSid=localStorage.getItem(NEW_CHAT_DRAFT_SESSION_KEY)||'';}catch(_){}
+  // An ordinary New Chat may already own a POST (and its workspace). Join it
+  // without installing the deleted session's one-shot workspace override.
+  if(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight){
+    try{
+      const pendingResult=await _newSessionInFlight;
+      if(S.session||pendingResult&&pendingResult.superseded) return {superseded:true};
+    }catch(error){
+      if(stillOwnsPane()) _showEmptyConversationAfterDelete();
+      return {error};
+    }
+  }
+  if(deletedWorkspace) S._profileSwitchWorkspace=deletedWorkspace;
+  try{
+    const newSessionOptions={
+      stillOwnsPane,
+      preserveRememberedDraftPointer:!!rememberedDraftSid,
+    };
+    // A project filter may bind a different default workspace. This delete
+    // continuation owns the deleted conversation's known workspace, so pass it
+    // explicitly instead of letting project binding replace the one-shot flag.
+    // Unknown stays implicit; the confirmed-missing retry below stays null.
+    if(deletedWorkspace) newSessionOptions.workspace=deletedWorkspace;
+    const result=await newSession(false,newSessionOptions);
+    return result&&result.superseded?{superseded:true}:{created:true};
+  }catch(error){
+    // The deleted conversation's workspace may have disappeared from disk.
+    // Only the pre-creation workspace validation error permits another POST.
+    // A lost response or other ambiguous failure may already have created a chat.
+    const missingWorkspace=error&&error.status===400
+      &&String(error.message||'').startsWith('Path does not exist: ');
+    if(deletedWorkspace&&missingWorkspace&&stillOwnsPane()){
+      try{
+        const retry=await newSession(false,{
+          stillOwnsPane,
+          preserveRememberedDraftPointer:!!rememberedDraftSid,
+          // The rejected explicit path may also be the browser's cached profile
+          // default. Send an explicit null so the server chooses its own valid
+          // default instead of newSession() reintroducing the vanished path.
+          workspace:null,
+        });
+        return retry&&retry.superseded?{superseded:true}:{created:true};
+      }catch(retryError){
+        error=retryError;
+      }
+    }
+    if(stillOwnsPane()){
+      _showEmptyConversationAfterDelete();
+    }
+    return {error};
+  }finally{
+    if(deletedWorkspace&&S._profileSwitchWorkspace===deletedWorkspace){
+      S._profileSwitchWorkspace=null;
+    }
+  }
+}
 // Wire codes from /api/session/delete are for clients, not for people: map the
 // bounded refusals to a sentence the user can act on (#8323 review item 3).
 function _sessionDeleteErrorMessage(err){
@@ -11907,6 +12082,7 @@ async function deleteSession(sid, beforeDelete=null){
   }
   const response=deleteResult&&deleteResult.response;
   const cleanupFailed=!!(response&&response.state_db_cleanup_failed);
+  let newChatAfterDeleteResult=null;
   _forgetComposerDraftLocalFallback(sid);
   if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
   if(!optimisticRendered){
@@ -11914,27 +12090,43 @@ async function deleteSession(sid, beforeDelete=null){
     _optimisticallyRemoveSessionFromList(sid);
   }
   if(S.session&&S.session.session_id===sid){
-    S.session=null;S.messages=[];S.entries=[];
+    // Keep the deleted conversation's workspace so the opt-in new chat below
+    // stays where the user was working.
+    const _deletedWorkspace=(S.session&&S.session.workspace)||(session&&session.workspace)||null;
+    const _startNewChatAfterDelete=typeof window!=='undefined'&&window._newChatOnSessionDelete===true;
+    const _deleteNewChatOwner=_startNewChatAfterDelete?_deleteNewChatOwnerSnapshot():null;
+    S.session=null;S.messages=[];S.entries=[];S.busy=false;S.activeStreamId=null;
+    if(typeof updateSendBtn==='function') updateSendBtn();
     if(typeof _syncProviderQuotaForActiveContext==='function') _syncProviderQuotaForActiveContext();
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
     localStorage.removeItem('hermes-webui-session');
-    // load the most recent remaining session, or show blank if none left
-    const remaining=await api('/api/sessions'+_sessionListQueryString());
-    if(remaining.sessions&&remaining.sessions.length){
-      await loadSession(remaining.sessions[0].session_id);
+    if(_startNewChatAfterDelete){
+      // Opt-in (default off): start a new chat instead of loading the most
+      // recent remaining session.
+      newChatAfterDeleteResult=await _startNewChatAfterDeletingCurrentSession(_deletedWorkspace,_deleteNewChatOwner);
     }else{
-      _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete);
-      const _tt=$('topbarTitle');if(_tt)_tt.textContent=assistantDisplayName();
-      const _tm=$('topbarMeta');if(_tm)_tm.textContent='Start a new conversation';
-      $('msgInner').innerHTML='';
-      $('emptyState').style.display='';
-      $('fileTree').innerHTML='';
-      if(typeof S!=='undefined') S.session=null;
-      if(typeof syncAppTitlebar==='function') syncAppTitlebar();
+      // load the most recent remaining session, or show blank if none left
+      const remaining=await api('/api/sessions'+_sessionListQueryString());
+      if(remaining.sessions&&remaining.sessions.length){
+        await loadSession(remaining.sessions[0].session_id);
+      }else{
+        _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete);
+        const _tt=$('topbarTitle');if(_tt)_tt.textContent=assistantDisplayName();
+        const _tm=$('topbarMeta');if(_tm)_tm.textContent='Start a new conversation';
+        $('msgInner').innerHTML='';
+        $('emptyState').style.display='';
+        $('fileTree').innerHTML='';
+        if(typeof S!=='undefined') S.session=null;
+        if(typeof syncAppTitlebar==='function') syncAppTitlebar();
+      }
     }
   }
   if(cleanupFailed) showToast(t('delete_failed'),0,'error');
   else showToast(_sessionResponseRetainsWorktree(response,session)?t('session_deleted_worktree'):t('session_deleted'));
+  if(newChatAfterDeleteResult&&newChatAfterDeleteResult.error){
+    const error=newChatAfterDeleteResult.error;
+    showToast(t('session_delete_new_chat_failed',error&&error.message||error),0,'error');
+  }
   if(optimisticRendered) void renderSessionList().finally(()=>_optimisticallyRemovedSessionIds.delete(sid));
   else await renderSessionList();
   return !cleanupFailed;
