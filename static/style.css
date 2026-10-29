@@ -3908,8 +3908,13 @@ body.resizing .sidebar{transition:none!important;}
 
 /* ── Tool call cards ── */
 /* Running indicator dot (pulsing) */
-@keyframes wlpulse{0%,100%{box-shadow:0 0 0 0 var(--accent-bg-strong);}50%{box-shadow:0 0 0 5px rgba(255,215,0,0);}}
+/* The dot core stays solid (full-opacity contrast in every theme); the pulse
+   lives on a ::after ring animated with transform:scale + opacity — both
+   compositor-only, so no scene repaint per frame (UX gate: an opacity-only
+   pulse on the dot itself dropped to ~1.6:1 contrast in light theme). */
+@keyframes wlring{0%{transform:scale(1);opacity:.45;}100%{transform:scale(2.4);opacity:0;}}
 .tool-card-running-dot{
+  position:relative;
   display:inline-block;
   width:7px;
   height:7px;
@@ -3918,9 +3923,20 @@ body.resizing .sidebar{transition:none!important;}
   opacity:1;
   flex-shrink:0;
   vertical-align:middle;
-  animation:wlpulse 1.3s ease-in-out infinite;
 }
-.tl-rundot{width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0;animation:wlpulse 1.3s ease-in-out infinite;}
+.tool-card-running-dot::after,.tl-rundot::after{
+  content:"";
+  position:absolute;
+  inset:0;
+  border-radius:50%;
+  background:var(--accent);
+  animation:wlring 1.3s ease-out infinite;
+  pointer-events:none;
+}
+.tl-rundot{position:relative;width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0;}
+@media (prefers-reduced-motion:reduce){
+  .tool-card-running-dot::after,.tl-rundot::after{animation:none;opacity:0;}
+}
 /* Show more button inside tool card result */
 .tool-card-more{background:none;border:none;color:var(--blue);font-size:10px;cursor:pointer;padding:3px 0 0;opacity:.7;display:block;}
 .tool-card-more:hover{opacity:1;}
@@ -4302,8 +4318,17 @@ body.resizing .sidebar{transition:none!important;}
 .tool-group-body .tool-card-row{width:100%;max-width:100%;margin:0;box-sizing:border-box;}
 .tool-worklog-tool-group-body .tool-card-icon,
 .tool-group-body .tool-card-icon{display:none;}
+/* #7495 UX gate: the compact header keeps ~5px of left room for the running
+   dot — the ::after ring scales to 2.4x of the 7px dot (~4.9px past the dot
+   each side), and with padding-left:0 the dot sat on the card's
+   overflow:hidden edge, clipping the ring straight (D shape) in the default
+   Compact Worklog mode. Applies to EVERY compact worklog card header — the
+   standalone live running card included, not only grouped rows — so running
+   and completed rows share one left inset and the completed→grouped move
+   doesn't shift the row by those pixels. */
+.tool-worklog-list .tool-card-header,
 .tool-worklog-tool-group-body .tool-card-header,
-.tool-group-body .tool-card-header{margin-left:0;padding-left:0;}
+.tool-group-body .tool-card-header{margin-left:0;padding-left:5px;}
 .tool-worklog-tool-group-body .tool-card-detail,
 .tool-group-body .tool-card-detail{width:100%;max-width:100%;box-sizing:border-box;}
 .agent-activity-status{display:grid;grid-template-columns:18px minmax(0,1fr) auto;align-items:start;gap:var(--space-2);padding:5px 0;color:var(--muted);font-size:var(--font-size-xs);line-height:1.45;border-bottom:1px solid color-mix(in srgb,var(--border-subtle) 60%,transparent);}
@@ -4318,11 +4343,6 @@ body.resizing .sidebar{transition:none!important;}
 .tool-call-group-label{font-weight:600;color:var(--muted);position:relative;display:inline-block;overflow:hidden;}
 .tool-call-group[data-live-tool-call-group="1"] .tool-call-group-label{
   color:var(--muted);
-}
-@media (prefers-reduced-motion: reduce){
-  .tool-card-running-dot{
-    animation:none;
-  }
 }
 .tool-card{background:var(--surface-subtle);border:1px solid var(--border);border-left:2px solid var(--border-muted);border-radius:8px;margin:0;overflow:hidden;transition:border-color .15s,background .15s;}
 .tl{background:transparent;border:0;border-left:0;border-radius:0;margin:0;overflow:visible;transition:none;}
@@ -4632,9 +4652,24 @@ body.resizing .sidebar{transition:none!important;}
 .transparent-event-progress::after{
   content:none;
 }
+/* The running segment is 60% of the track. Translate it across the clip
+   instead of changing offsets and relaying out the transcript each frame. */
 @keyframes transparent-progress-shimmer{
-  0%{left:0;right:100%;}
-  100%{left:100%;right:0;}
+  0%{transform:translateX(-100%);}
+  100%{transform:translateX(200%);}
+}
+@media (prefers-reduced-motion:reduce){
+  /* #7495 UX gate: with the animation simply stopped, the 60%-wide segment
+     froze at the left edge and read as determinate progress stuck at 60%,
+     then jumped to 100% on completion. Render the running state as a
+     full-width faint rail instead — no motion, no fake percent, and the
+     completion geometry no longer changes. Declared after the
+     [data-progress-percent] width rule so it wins at equal specificity. */
+  .transparent-event-progress[data-progress-running="1"]::before{
+    animation:none;
+    left:0;right:0;width:100%;
+    transition:none;
+  }
 }
 .transparent-event-row + .transparent-event-row::before{
   content:none;
