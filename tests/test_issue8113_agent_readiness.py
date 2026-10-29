@@ -261,6 +261,29 @@ def _staged_copy(tmp_path: Path, source: Path, *, name: str = "hermes-agent-src"
     return stage
 
 
+@pytest.mark.parametrize("use_alias", [False, True], ids=["same-path", "symlink"])
+def test_auto_install_same_stage_as_agent_has_no_warning(tmp_path, ambient_umask, capsys, use_alias):
+    """#8555: Docker already selected the stage, whose manifest names the mount."""
+    from api.startup import auto_install_agent_deps
+
+    mount = _agent(tmp_path, "hermes-agent")
+    staged = _staged_copy(tmp_path, mount)
+    stage_path = staged
+    if use_alias:
+        stage_path = tmp_path / "stage-link"
+        stage_path.symlink_to(staged, target_is_directory=True)
+    env = {
+        "HERMES_WEBUI_AGENT_DIR": str(staged),
+        STAGE_ENV: str(stage_path),
+        "HERMES_WEBUI_AUTO_INSTALL": "1",
+    }
+    with patch.dict("os.environ", env, clear=False), patch("subprocess.run") as run:
+        run.return_value = MagicMock(returncode=0, stderr="")
+        assert auto_install_agent_deps(expected_agent_dir=staged) is True
+    assert str(staged / "requirements.txt") in run.call_args[0][0]
+    assert "Ignoring staged agent copy" not in capsys.readouterr().out
+
+
 def test_auto_install_targets_the_writable_staged_copy(tmp_path, ambient_umask):
     """The `:ro` mount can never satisfy the install that would fix #8113."""
     from api.startup import _agent_install_dir

@@ -399,6 +399,10 @@ def _agent_install_dir(agent_dir: Path) -> Path:
         # between redirect the install to a directory nothing had validated.
         try:
             staged = Path(raw).expanduser().resolve(strict=True)
+            # Docker may already run the authorized Agent from this stage.
+            # Its manifest names the original mount, not another copy of itself.
+            if staged == agent_dir.resolve():
+                return agent_dir
         except (OSError, RuntimeError, ValueError):
             # Missing, unresolvable or `~unknown-user`: never fatal at startup.
             return agent_dir
