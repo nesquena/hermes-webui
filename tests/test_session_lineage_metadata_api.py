@@ -105,6 +105,189 @@ def _save_webui_session(sid, *, title, updated_at):
     return session
 
 
+@pytest.mark.parametrize("include_lineage_metadata", [False, True])
+@pytest.mark.parametrize("archived", [False, True])
+def test_imported_cli_sidebar_refreshes_after_external_append(
+    _isolate, monkeypatch, tmp_path, include_lineage_metadata, archived
+):
+    """An imported sidecar must not shadow later CLI writes to state.db."""
+    monkeypatch.setattr(models, "get_last_workspace", lambda **kwargs: str(tmp_path))
+    sid = "external_cli_sidebar"
+    messages = [
+        {"role": "user", "content": "Initial question", "timestamp": 1000.0},
+        {"role": "assistant", "content": "Initial answer", "timestamp": 1001.0},
+    ]
+    conn = _ensure_state_db(_isolate)
+    try:
+        _ensure_messages_table(conn)
+        _insert_state_row(conn, sid, source="cli", started_at=1000.0)
+        for message in messages:
+            _insert_state_message(conn, sid, **message)
+        session = models.import_cli_session(
+            sid, "My custom title", messages, profile="research",
+            created_at=1000.0, updated_at=1001.0,
+        )
+        session.archived = archived
+        session.save(touch_updated_at=False)
+        sidecar_path = models.SESSION_DIR / f"{sid}.json"
+        original_sidecar = sidecar_path.read_bytes()
+        original_index = models.SESSION_INDEX_FILE.read_bytes()
+
+        def sidebar_row():
+            return next(row for row in all_sessions(
+                include_lineage_metadata=include_lineage_metadata,
+                sidebar_metadata_only=True,
+            ) if row["session_id"] == sid)
+
+        assert sidebar_row()["last_message_at"] == 1001.0
+        _insert_state_message(conn, sid, role="user", content="External follow-up", timestamp=1002.0)
+        _insert_state_message(conn, sid, role="assistant", content="External answer", timestamp=1003.0)
+        # Deliberately leave sessions.message_count stale: the messages table
+        # owns the actual count and activity timestamp.
+        # The external-session projection already sees fresh SQLite activity;
+        # only the imported sidebar projection used to stay stale.
+        projected = models.read_importable_agent_session_rows(_isolate)
+        assert next(item for item in projected if item["id"] == sid)["last_activity"] == 1003.0
+        row = sidebar_row()
+        assert row["last_message_at"] == 1003.0
+        assert row["updated_at"] == 1003.0
+        assert row["message_count"] == 4
+        assert row["title"] == "My custom title"
+        assert row["profile"] == "research"
+        assert row["archived"] is archived
+        assert "_state_db_message_count" not in row
+        assert "_state_db_last_message_at" not in row
+        assert sidebar_row() == row
+        assert sidecar_path.read_bytes() == original_sidecar
+        assert models.SESSION_INDEX_FILE.read_bytes() == original_index
+        assert session.messages == messages
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("include_lineage_metadata", [False, True])
+@pytest.mark.parametrize("state_history", ["truncated", "deleted_messages", "deleted_session"])
+def test_imported_cli_sidebar_does_not_restore_removed_activity(
+    _isolate, include_lineage_metadata, state_history
+):
+    sid = "removed_cli_sidebar"
+    session = Session(
+        session_id=sid, title="Retained title", profile="default",
+        messages=[{"role": "user", "content": "Retained question", "timestamp": 1000.0}],
+        updated_at=1004.0, truncation_watermark=1004.0,
+        truncation_boundary=1000.0,
+    )
+    session.save(touch_updated_at=False)
+    conn = _ensure_state_db(_isolate)
+    try:
+        _ensure_messages_table(conn)
+        if state_history != "deleted_session":
+            # The denormalized count may outlive deleted message rows.
+            _insert_state_row(conn, sid, source="cli", started_at=1000.0)
+        if state_history == "truncated":
+            for timestamp in (1000.0, 1001.0, 1002.0, 1003.0):
+                _insert_state_message(conn, sid, role="assistant", content="Old row", timestamp=timestamp)
+        original_sidecar = (models.SESSION_DIR / f"{sid}.json").read_bytes()
+        row = next(row for row in all_sessions(
+            include_lineage_metadata=include_lineage_metadata,
+            sidebar_metadata_only=True,
+        ) if row["session_id"] == sid)
+        assert row["message_count"] == 1
+        assert row["last_message_at"] == 1000.0
+        assert row["updated_at"] == 1004.0
+        assert (models.SESSION_DIR / f"{sid}.json").read_bytes() == original_sidecar
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("source", ["cli", "webui", "subagent"])
+@pytest.mark.parametrize("actual_count", [0, 1, 4])
+def test_sidebar_override_count_authority_is_cli_only_and_bounded(
+    _isolate, source, actual_count,
+):
+    conn = _ensure_state_db(_isolate)
+    try:
+        _ensure_messages_table(conn)
+        for sid in ("counted", "outside_cap"):
+            _insert_state_row(conn, sid, source=source, started_at=1000.0)
+            conn.execute("UPDATE sessions SET message_count = 9 WHERE id = ?", (sid,))
+            for i in range(actual_count):
+                _insert_state_message(
+                    conn, sid, role="assistant", content="Actual row",
+                    timestamp=1003.0 + i,
+                )
+        conn.commit()
+        metadata = models._read_state_db_sidebar_overrides(
+            _isolate, {"counted", "outside_cap"}, count_session_ids={"counted"},
+        )
+        assert metadata["counted"]["_state_db_message_count"] == (
+            actual_count if source == "cli" else 9
+        )
+        assert metadata["outside_cap"]["_state_db_message_count"] == 9
+        assert "_state_db_last_message_at" not in metadata["outside_cap"]
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("include_lineage_metadata", [False, True])
+@pytest.mark.parametrize("sidebar_metadata_only", [False, True])
+@pytest.mark.parametrize("indexed", [False, True])
+@pytest.mark.parametrize("actual_count", [0, 1, 4])
+def test_imported_cli_sidebar_uses_actual_count_with_stale_high_counter(
+    _isolate, include_lineage_metadata, sidebar_metadata_only,
+    indexed, actual_count,
+):
+    """A stale count of nine must not invent growth or inflate real growth."""
+    sid = "stale_high_cli_sidebar"
+    messages = [
+        {"role": "user", "content": "Initial question", "timestamp": 1000.0},
+        {"role": "assistant", "content": "Initial answer", "timestamp": 1001.0},
+    ]
+    session = Session(
+        session_id=sid, title="Retained title", profile="research",
+        messages=messages, updated_at=1001.0,
+        source_tag="cli", session_source="cli", is_cli_session=True,
+    )
+    session.save(touch_updated_at=False)
+    if not indexed:
+        # A corrupt index takes the real full-scan fallback without rebuilding it.
+        models.SESSION_INDEX_FILE.write_text("not-json", encoding="utf-8")
+    conn = _ensure_state_db(_isolate)
+    try:
+        _ensure_messages_table(conn)
+        _insert_state_row(conn, sid, source="cli", started_at=1000.0)
+        conn.execute("UPDATE sessions SET message_count = 9 WHERE id = ?", (sid,))
+        conn.commit()
+        for i in range(actual_count):
+            _insert_state_message(
+                conn, sid, role="assistant", content="Surviving or appended row",
+                timestamp=1003.0 + i,
+            )
+        sidecar_path = models.SESSION_DIR / f"{sid}.json"
+        original_sidecar = sidecar_path.read_bytes()
+        original_index = models.SESSION_INDEX_FILE.read_bytes()
+        original_db = _isolate.read_bytes()
+
+        row = next(row for row in all_sessions(
+            include_lineage_metadata=include_lineage_metadata,
+            sidebar_metadata_only=sidebar_metadata_only,
+        ) if row["session_id"] == sid)
+
+        assert row["message_count"] == (actual_count if actual_count > 2 else 2)
+        expected_last = 1003.0 + actual_count - 1 if actual_count > 2 else 1001.0
+        assert row["last_message_at"] == expected_last
+        assert row["updated_at"] == expected_last
+        assert row["title"] == "Retained title"
+        assert row["profile"] == "research"
+        assert row["is_cli_session"] is True
+        assert sidecar_path.read_bytes() == original_sidecar
+        assert models.SESSION_INDEX_FILE.read_bytes() == original_index
+        assert _isolate.read_bytes() == original_db
+        assert session.messages == messages
+    finally:
+        conn.close()
+
+
 def test_all_sessions_exposes_state_db_lineage_metadata_for_webui_json_sessions(_isolate):
     """PR #1358 can only collapse rows when /api/sessions exposes lineage keys."""
     conn = _ensure_state_db(_isolate)
