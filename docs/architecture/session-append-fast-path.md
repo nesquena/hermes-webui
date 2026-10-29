@@ -35,7 +35,7 @@ already-loaded session reach this path; other external-refresh reasons clear
 | `msg_after=N` | The client's last rendered absolute row index; the response must start strictly after it. Mutually exclusive with `msg_before` (paging wins). |
 | `anchor_fp` | FNV-1a digest of the anchor row's **public projection** (internal fields stripped, content redacted) — the exact bytes the client rendered. Minted browser-side; the server re-derives it. |
 | `transcript_generation` | The generation the client's view was built under. Bumped only on destructive rewrites (truncate/retry/undo). |
-| `prefix_fp` | The server-computed digest over rows `[0, N+1)` of the merged display document, echoed back from the load that established the client's view. Server-minted and server-verified; the browser only stores and returns it. |
+| `prefix_fp` | The server-computed digest over rows `[0, N+1)` of the merged display document, echoed back from the load that established the client's view. Server-minted and server-verified; the browser only stores and returns it. Coverage is the whole projected row minus the explicit exclusion set (`_PREFIX_FP_EXCLUDED_FIELDS`), hydrated anchor scenes included; on a display-merge cache hit it is reused from the cache entry instead of re-minted. |
 | `msg_limit` | Bounds the **returned window** only. It never selects the limited-display document: an append request's anchor validation and merge run against the full display document, exactly like master's bare GET. |
 
 `anchor_fp` and `prefix_fp` are deliberately different mechanisms:
@@ -55,13 +55,20 @@ can never serve rows the client should not keep.
 `prefix_fp` is the check that closes the non-destructive-edit hole: the
 generation bump only reports destructive rewrites, so a settled-reasoning
 backfill or a saved attachment on an *earlier* row would otherwise leave the
-client stitching a stale prefix onto a fresh tail. The digest covers the
-render-relevant fields of each row (`role`, `content`, `reasoning`,
-`attachments`, `tool_calls` — the latter two including their ids) and is
-complete by construction: any rendered difference anywhere in `[0, N+1)`
-changes it. It is a fingerprint rather than a revision counter because a
-counter must be bumped by every writer that touches an earlier row, and one
-missed writer means silently stale rows.
+client stitching a stale prefix onto a fresh tail. The digest is complete by
+construction (2026-10-29 finding 2): each covered row is hashed as the
+browser receives it — the whole projected row minus an explicit exclusion set
+(`_PREFIX_FP_EXCLUDED_FIELDS` = `_PUBLIC_MESSAGE_INTERNAL_FIELDS`, exactly the
+fields stripped before delivery) — so any *new* rendered field is covered by
+default instead of being missed by a whitelist. Rows carrying a saved
+anchor-activity scene are hydrated first (scene records are stored on the
+session, never on rows), and the session tool calls feed that hydration, so a
+scene save or a `_source` change also moves the digest. It is a fingerprint
+rather than a revision counter because a counter must be bumped by every
+writer that touches an earlier row, and one missed writer means silently
+stale rows. On a display-merge cache hit the whole-document digest is reused
+from the cache entry (guarded by a scene/tool-call digest) so ordinary
+windowed opens do not pay for re-hashing every row.
 
 ## Response fields
 
@@ -78,10 +85,13 @@ missed writer means silently stale rows.
 - **The append never takes the limited-display branch.** One predicate,
   `_limited_display_request = msg_limit is numeric and not append_request`,
   gates the `since_timestamp` computation, the display-merge cache probe, the
-  stable-signature state.db load, and the exact owner-position resolution.
-  On a cache hit the probe empties `state_db_messages`; letting an append
-  reach that branch merged the sidecar with nothing and dropped state.db-only
-  rows from the answer.
+  stable-signature state.db load, the exact owner-position resolution, and
+  the limited/full document branch itself (the two-condition form
+  `msg_limit is not None and _msg_after is None` was removed: it disagreed
+  with the predicate only on requests carrying both `msg_after` and
+  `msg_before`, which the frontend never sends). On a cache hit the probe
+  empties `state_db_messages`; letting an append reach that branch merged the
+  sidecar with nothing and dropped state.db-only rows from the answer.
 - **The append window is the contiguous suffix** starting at `msg_after + 1`.
   Renderable rows decide how many rows fit the `msg_limit` budget; they never
   decide where the window begins, so a tool-result row that landed after the

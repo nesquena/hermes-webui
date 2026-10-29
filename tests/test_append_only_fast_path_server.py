@@ -103,11 +103,20 @@ def test_prefix_fingerprint_refuses_a_nondestructive_earlier_row_edit():
     # A missing digest fails closed: an older client loses only the fast path
     # and takes the authoritative full fetch — master's behaviour.
     assert _append_fast_path_anchor(s, rows, "1999", anchor_fp, "0", None) is None
-    # The digest covers the RENDER-RELEVANT fields, not the whole row: an
-    # internal-field-only change is not a rendered difference.
+    # The digest covers every field the projection delivers (whole row minus
+    # the explicit exclusion set — 2026-10-29 finding 2): an excluded field
+    # (stripped before the browser sees the row) is not a rendered difference.
     internal = [dict(r) for r in rows]
-    internal[500]["_internal_note"] = "not rendered"
+    internal[500]["_row_id"] = "state-db-row-123"
     assert _append_fast_path_anchor(s, internal, "1999", anchor_fp, "0", held_fp) == 1999
+    # A field the projection DELIVERS — even an unknown one — is covered by
+    # default: a new rendered field cannot be missed again.
+    delivered = [dict(r) for r in rows]
+    delivered[500]["_internal_note"] = "not rendered"
+    assert (
+        _append_fast_path_anchor(s, delivered, "1999", anchor_fp, "0", held_fp)
+        is None
+    )
     # An attachment edit is render-relevant and must refuse.
     attachments = [dict(r) for r in rows]
     attachments[500]["attachments"] = [{"id": "a1", "name": "saved.png"}]
@@ -420,7 +429,7 @@ def test_warm_cache_append_with_no_new_rows_keeps_every_row(monkeypatch, tmp_pat
     ]
     state_db = sidecar + [_state_db_only_reply()]
 
-    routes, _ = _warm_cache_append_harness(monkeypatch, tmp_path, sidecar, state_db)
+    routes, captured = _warm_cache_append_harness(monkeypatch, tmp_path, sidecar, state_db)
     _warm_display_cache(routes)
     # Premise: the cache really is warm for this session (the probe would hit).
     import api.models as models
@@ -430,11 +439,17 @@ def test_warm_cache_append_with_no_new_rows_keeps_every_row(monkeypatch, tmp_pat
         "cache did not warm — the repro needs a live cache entry"
     )
 
+    # The client's held digest comes from the load that established its view
+    # (the warm msg_limit=30 response covers [0, 602)). It cannot be
+    # recomputed from the raw fixture rows: the full-row digest (2026-10-29
+    # finding 2) also covers timestamps, and state.db-origin rows carry REAL
+    # timestamps (floats) where the fixture has ints.
+    held_fp = captured["payload"]["session"]["prefix_fp"]
     session = _append_get(
         routes,
         msg_after=601,
         anchor_row=_state_db_only_reply(),
-        prefix_fp=_display_prefix_fingerprint(state_db, 602),
+        prefix_fp=held_fp,
     )
     assert session.get("message_count") == 602, (
         "warm-cache append answered with the sidecar-only document — a reply "
@@ -545,4 +560,243 @@ def test_append_window_clipped_tool_diff_signals_truncation(monkeypatch, tmp_pat
     assert session.get("_messages_truncated") is True, (
         "a clipped append-window tool diff left _messages_truncated False — "
         "the client would keep the preview with no missing-content signal"
+    )
+
+
+# ── 2026-10-29 re-gate, finding 2: the fingerprint must cover EVERYTHING the
+# browser renders ──────────────────────────────────────────────────────────────
+# The original whitelist (_PREFIX_FP_FIELDS: role/content/reasoning/
+# attachments/tool_calls) missed rows' hydrated anchor-activity scenes and the
+# _source stamp: a scene save changed only s.anchor_activity_scenes (records +
+# sidecar, never a row) and a _source change altered what the browser renders
+# (delegation_wakeup rows are hidden), but neither moved the digest — so the
+# next focus reload accepted an empty append and kept the stale view. The
+# digest is now INVERTED: each row is hashed as the browser receives it (the
+# projected display row), minus an explicit exclusion set (only the fields
+# stripped before delivery). These tests are red-before: each one fails on the
+# unmodified whitelist digest and passes on the inverted one.
+
+def _scene_record(message_index, final_answer):
+    """One persisted anchor-activity-scene record for an assistant row.
+
+    Mirrors the write shape of /api/session/anchor-scene (routes.py
+    _handle_session_anchor_scene): the record is stored under
+    ``s.anchor_activity_scenes`` and never touches the message rows.
+    """
+    return {
+        "version": "anchor_activity_scene_record_v1",
+        "message_index": message_index,
+        "message_ref": "",
+        "stream_id": "",
+        "scene": {
+            "mode": "compact_worklog",
+            "final_answer": final_answer,
+            "activity_rows": [
+                {"role": "thinking", "text": "saved reasoning", "order": 0},
+            ],
+        },
+        "updated_at": 1700000001,
+    }
+
+
+def test_prefix_fingerprint_mint_tracks_anchor_scene_saves():
+    """2026-10-29 review finding 2: a saved anchor scene renders a worklog on
+    the assistant row, but the whitelist digest ignored it (the scene record
+    never modifies a row). The mint must change once the record exists.
+
+    RED-before: on the unmodified whitelist digest this errors with
+    TypeError (no ``scenes`` parameter exists), because the digest had no
+    input channel for scene records at all.
+    """
+    rows = _make_rows(2001)
+    held_fp = _display_prefix_fingerprint(rows, 2000)
+    scenes = {"index:1501": _scene_record(1501, "m1501")}
+    fresh_fp = _display_prefix_fingerprint(rows, 2000, scenes=scenes, tool_calls=None)
+    assert fresh_fp != held_fp, (
+        "a saved anchor-activity scene changed no row, so the whitelist digest "
+        "was blind to it — the next focus reload accepted an empty append and "
+        "kept the worklog absent (maintainer's exact repro)"
+    )
+
+
+def test_append_verify_refuses_after_anchor_scene_save():
+    """2026-10-29 review finding 2, verify side: the client's view was
+    established BEFORE the scene save, so its echoed prefix_fp predates the
+    rendered worklog. The append must be refused (authoritative full fetch
+    carries the worklog), not accepted as an empty append.
+
+    RED-before: the unmodified verifier ignores s.anchor_activity_scenes and
+    accepts the append (returns the anchor index).
+    """
+    rows = _make_rows(2001)
+    held_fp = _display_prefix_fingerprint(rows, 2000)
+    s = _FakeSession(generation=0)
+    s.anchor_activity_scenes = {"index:1501": _scene_record(1501, "m1501")}
+    anchor_fp = _append_anchor_fingerprint(
+        _public_message_projection(rows[1999], _enabled=True)
+    )
+    assert _append_fast_path_anchor(s, rows, "1999", anchor_fp, "0", held_fp) is None, (
+        "the client's pre-save digest must refuse the append after a scene "
+        "save — the saved scene renders a worklog the client does not have"
+    )
+
+
+def test_prefix_fingerprint_tracks_source_field_changes():
+    """2026-10-29 review finding 2: the browser renders rows differently based
+    on ``_source`` (ui.js filters delegation_wakeup rows out of the visible
+    transcript), but ``_source`` was outside the five-field whitelist. A
+    _source change must move the digest.
+
+    RED-before: the whitelist digest is identical before/after, so the first
+    assertion fails on unmodified code.
+    """
+    rows = _make_rows(2001)
+    held_fp = _display_prefix_fingerprint(rows, 2000)
+    edited = [dict(r) for r in rows]
+    edited[500]["_source"] = "delegation_wakeup"
+    assert _display_prefix_fingerprint(edited, 2000) != held_fp, (
+        "a _source change alters what the browser renders (delegation_wakeup "
+        "rows are hidden) but the whitelist digest ignored it"
+    )
+    s = _FakeSession(generation=0)
+    anchor_fp = _append_anchor_fingerprint(
+        _public_message_projection(edited[1999], _enabled=True)
+    )
+    assert _append_fast_path_anchor(s, edited, "1999", anchor_fp, "0", held_fp) is None
+
+
+def test_prefix_fingerprint_exclusion_set_is_explicit_and_rendered_fields_covered():
+    """2026-10-29 review finding 2 (design directive): the digest is inverted —
+    whole row minus an EXPLICIT exclusion set of fields known not to render.
+    This test enumerates that set (so a future rendered field is covered by
+    default rather than missed) and pins the default-coverage property.
+
+    RED-before: _PREFIX_FP_EXCLUDED_FIELDS does not exist on the unmodified
+    whitelist implementation.
+    """
+    from api.helpers import _PUBLIC_MESSAGE_INTERNAL_FIELDS
+    from api.routes import _PREFIX_FP_EXCLUDED_FIELDS
+
+    # The exclusion set is exactly the fields stripped before delivery by
+    # _public_message_projection / scrub_internal_replay_fields: anything else
+    # on a row reaches the browser and must be covered by default.
+    assert frozenset(_PREFIX_FP_EXCLUDED_FIELDS) == frozenset(
+        _PUBLIC_MESSAGE_INTERNAL_FIELDS
+    )
+    for rendered in (
+        "role",
+        "content",
+        "reasoning",
+        "attachments",
+        "tool_calls",
+        "_source",  # rendered: delegation_wakeup rows are hidden/filtered
+        "_anchor_activity_scene",  # rendered: the saved worklog
+        "_anchor_stream_id",  # travels with the rendered scene
+        "timestamp",
+        "ts",
+        "_ts",
+        "tool_call_id",
+    ):
+        assert rendered not in _PREFIX_FP_EXCLUDED_FIELDS, rendered
+
+    rows = _make_rows(50)
+    fp = _display_prefix_fingerprint(rows, 50)
+    # Default coverage: a NEW unlisted field (as a future rendered field would
+    # be) changes the digest without touching the exclusion set.
+    extra = [dict(r) for r in rows]
+    extra[10]["_future_rendered_field"] = "x"
+    assert _display_prefix_fingerprint(extra, 50) != fp
+    # An excluded field never churns the digest: it is stripped before the
+    # browser sees the row, so it is not a rendered difference.
+    internal = [dict(r) for r in rows]
+    internal[10]["_row_id"] = "state-db-row-123"
+    internal[10]["api_content"] = {"role": "assistant", "content": "raw"}
+    assert _display_prefix_fingerprint(internal, 50) == fp
+
+
+# ── 2026-10-29 should-fix 1: memoise the mint on display-cache hits ──────────
+# The mint hashes the WHOLE document on every windowed GET, even when the
+# display-merge cache just supplied the identical document (550 ms on the
+# 32 MiB shape). The digest now rides on the display-merge cache entry and is
+# reused on hits while the scene records / tool calls are unchanged.
+
+def _warm_get(routes):
+    import types
+
+    routes._handle_session_get(
+        None,
+        types.SimpleNamespace(
+            path="/api/session",
+            query="session_id=cont-child&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1",
+        ),
+    )
+
+
+def test_display_cache_hit_reuses_the_minted_prefix_fingerprint(monkeypatch, tmp_path):
+    """should-fix 1: a warm display-merge cache must not pay for re-hashing
+    the whole document — the response prefix_fp comes from the entry.
+
+    RED-before: on the unmodified code every GET re-mints, so the second
+    (warm) GET still calls _display_prefix_fingerprint and this fails.
+    """
+    sidecar = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"p{i}",
+         "timestamp": 1700000000 + i}
+        for i in range(601)
+    ]
+    state_db = sidecar + [_state_db_only_reply()]
+    routes, captured = _warm_cache_append_harness(monkeypatch, tmp_path, sidecar, state_db)
+
+    _warm_get(routes)  # cold: builds the entry and mints the digest
+    first_session = captured["payload"]["session"]
+    assert first_session.get("prefix_fp")
+
+    calls = []
+    orig = routes._display_prefix_fingerprint
+    monkeypatch.setattr(
+        routes,
+        "_display_prefix_fingerprint",
+        lambda *a, **k: (calls.append(1), orig(*a, **k))[-1],
+    )
+    _warm_get(routes)  # warm: the entry's digest must be reused
+    second_session = captured["payload"]["session"]
+    assert calls == [], (
+        "a display-cache hit re-minted the whole-document digest — ordinary "
+        "windowed opens must not pay for it (should-fix 1)"
+    )
+    assert second_session.get("prefix_fp") == first_session.get("prefix_fp")
+
+
+def test_display_cache_memo_tracks_anchor_scene_saves(monkeypatch, tmp_path):
+    """should-fix 1 + finding 2: a scene save (which writes the sidecar and so
+    invalidates the merge-cache key) must yield a fresh digest on the next
+    load — the memo can never hand out a pre-save digest.
+
+    RED-before: the unmodified mint is scene-blind, so the post-save digest
+    equals the pre-save one and this fails.
+    """
+    sidecar = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"p{i}",
+         "timestamp": 1700000000 + i}
+        for i in range(601)
+    ]
+    state_db = sidecar + [_state_db_only_reply()]
+    routes, captured = _warm_cache_append_harness(monkeypatch, tmp_path, sidecar, state_db)
+
+    _warm_get(routes)
+    before = captured["payload"]["session"]["prefix_fp"]
+    assert before
+
+    import api.models as models
+
+    s = models.get_session("cont-child")
+    # Row 151 is an assistant row inside this 602-row document.
+    s.anchor_activity_scenes = {"index:151": _scene_record(151, "p151")}
+    s.save(touch_updated_at=False, skip_index=True)
+
+    _warm_get(routes)
+    after = captured["payload"]["session"]["prefix_fp"]
+    assert after != before, (
+        "a scene save rendered a new worklog but the next load minted the "
+        "same digest — the memo (or the digest) ignored the scene records"
     )

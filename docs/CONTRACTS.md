@@ -143,12 +143,16 @@ contributor guidance; it does not change runtime behavior or CI gates.
   (any failed check answers with the authoritative full transcript — master's
   shape), the server-computed `prefix_fp` coverage rule (minted over
   `[0, coverage end)` on every load, recomputed over `[0, msg_after + 1)` on
-  every append), and the server/client invariants (the append never takes the
-  limited-display branch; the window is the contiguous suffix after the
-  anchor; the client keeps the loaded tool-card list across the metadata
-  replacement). Start here before changing the append request/response shape,
-  the state.db loader or display-merge cache decisions on that path, or the
-  client-side merge in `static/sessions.js` (#7925, #7899).
+  every append; each row hashed as the browser receives it — the whole
+  projected row minus the explicit `_PREFIX_FP_EXCLUDED_FIELDS` set, hydrated
+  anchor scenes included — and reused from the display-merge cache entry on a
+  hit), and the server/client invariants (one `_limited_display_request`
+  predicate gates the limited-display branch; the append never takes it; the
+  window is the contiguous suffix after the anchor; the client keeps the
+  loaded tool-card list across the metadata replacement). Start here before
+  changing the append request/response shape, the state.db loader or
+  display-merge cache decisions on that path, or the client-side merge in
+  `static/sessions.js` (#7925, #7899).
 - [`docs/architecture/session-channel-lifecycle.md`](architecture/session-channel-lifecycle.md):
   current contract for the per-session SSE channel and the per-turn stream lifecycle: the state
   layers and their authoritative writers, the writer-side subscriber-liveness signal plus the

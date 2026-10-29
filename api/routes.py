@@ -3520,6 +3520,7 @@ from api.helpers import (
     _redact_text,
     _CLIENT_DISCONNECT_ERRORS,
     split_media_token_ref,
+    _PUBLIC_MESSAGE_INTERNAL_FIELDS,
 )
 from api.agent_health import build_agent_health_payload
 from api.gateway_chat import gateway_chat_config_status
@@ -11027,16 +11028,42 @@ def _append_anchor_fingerprint(row) -> str:
     return _base36_fixed_width(hash_value)
 
 
-# Fields whose rendered form the prefix fingerprint covers (#7925 re-gate,
-# 2026-10-27 review, finding 4). The maintainer's directive: role, content,
-# reasoning, attachments, tool_calls and their ids — everything the browser
-# renders from a row. Internal/ephemeral fields are deliberately excluded:
-# they change without any rendered difference and must not force a full
-# fetch.
-_PREFIX_FP_FIELDS = ("role", "content", "reasoning", "attachments", "tool_calls")
+# Fields the prefix fingerprint must NOT cover (#7925 re-gate, 2026-10-29
+# review, finding 2). The 10-27 whitelist (_PREFIX_FP_FIELDS: role, content,
+# reasoning, attachments, tool_calls) was incomplete by construction: it
+# missed every rendered field added later (_source stamps, hydrated
+# anchor-activity scenes), and a scene save changed no row at all, so the
+# digest was blind to a rendered worklog. The list is now INVERTED: each row
+# is hashed as the browser receives it (the projected display row), minus this
+# explicit exclusion set. The set is exactly _PUBLIC_MESSAGE_INTERNAL_FIELDS —
+# the fields scrub_internal_replay_fields / _public_message_projection strip
+# before delivery — so anything else on a row reaches the browser and is
+# covered by default: a new rendered field cannot be missed again.
+# tests/test_append_only_fast_path_server.py enumerates the set and pins the
+# default-coverage property.
+_PREFIX_FP_EXCLUDED_FIELDS = frozenset(_PUBLIC_MESSAGE_INTERNAL_FIELDS)
 
 
-def _display_prefix_fingerprint(messages, count) -> str:
+def _display_aux_fingerprint(value) -> "str | None":
+    """Deterministic digest of a small session-level value (anchor scene
+    records or session tool calls) that can change rendered rows without
+    touching the merged document. Used to guard the memoized prefix
+    fingerprint; None means \"cannot fingerprint, do not reuse\"."""
+    try:
+        return hashlib.sha256(
+            json.dumps(
+                value,
+                sort_keys=True,
+                ensure_ascii=False,
+                default=str,
+                separators=(",", ":"),
+            ).encode("utf-8", "surrogatepass")
+        ).hexdigest()
+    except Exception:
+        return None
+
+
+def _display_prefix_fingerprint(messages, count, *, scenes=None, tool_calls=None) -> str:
     """Server-computed digest over rows ``[0, count)`` of a display document.
 
     Returned as ``prefix_fp`` on every full or limited load; an append-only
@@ -11044,15 +11071,25 @@ def _display_prefix_fingerprint(messages, count) -> str:
     over ``[0, msg_after + 1)``, refusing the append on any mismatch
     (alongside the ``transcript_generation`` check).
 
+    Coverage is complete by construction (2026-10-29 review, finding 2): each
+    row is hashed as the browser receives it — the whole projected row minus
+    ``_PREFIX_FP_EXCLUDED_FIELDS``, which is exactly the field set stripped
+    before delivery. A new rendered field is therefore covered by default;
+    only fields known not to render are excluded. Rows with a saved
+    anchor-activity scene are hydrated first (``scenes``), so a scene save
+    changes the digest even though it never modifies a row; session-level
+    ``tool_calls`` feed that hydration exactly like the response path.
+
     Why a fingerprint rather than a revision counter: it is complete by
     construction. A counter must be bumped by every writer that touches an
-    earlier row (settled reasoning, saved attachments, anything added later),
-    and one missed writer means silently stale rows. Hashing the prefix costs
-    milliseconds — far less than resending the rows it protects.
+    earlier row (settled reasoning, saved attachments, scene saves, anything
+    added later), and one missed writer means silently stale rows. Hashing the
+    prefix costs milliseconds — far less than resending the rows it protects.
 
     Both minting and verification happen server-side over the same merged
-    document, so no browser-side re-derivation (and no JS/Python byte-parity
-    constraint, unlike the single-row anchor digest) is required.
+    document (scenes/tool_calls read off the same session object), so no
+    browser-side re-derivation (and no JS/Python byte-parity constraint,
+    unlike the single-row anchor digest) is required.
     """
     try:
         total = int(count)
@@ -11062,6 +11099,13 @@ def _display_prefix_fingerprint(messages, count) -> str:
     rows = list(messages or [])
     if total < 0:
         total = 0
+    if scenes:
+        rows = _hydrate_anchor_activity_scenes(
+            rows,
+            scenes,
+            message_offset=0,
+            tool_calls=tool_calls,
+        )
     for row in rows[:total]:
         if not isinstance(row, dict):
             # Deterministic stand-in: a non-dict row still occupies a slot.
@@ -11069,7 +11113,11 @@ def _display_prefix_fingerprint(messages, count) -> str:
             continue
         digest.update(
             json.dumps(
-                {field: row.get(field) for field in _PREFIX_FP_FIELDS},
+                {
+                    key: value
+                    for key, value in row.items()
+                    if key not in _PREFIX_FP_EXCLUDED_FIELDS
+                },
                 sort_keys=True,
                 ensure_ascii=False,
                 separators=(",", ":"),
@@ -11081,6 +11129,71 @@ def _display_prefix_fingerprint(messages, count) -> str:
         )
         digest.update(b"\x1f")
     return digest.hexdigest()
+
+
+def _build_prefix_fingerprint_entry(session, messages):
+    """Digest value stored on a display-merge cache entry, with the inputs
+    that can change rendered rows without touching the merged document
+    (anchor scene records, session tool calls) as a reuse guard.
+
+    The mint reuses it on a cache hit while ``meta`` matches, so ordinary
+    windowed opens do not pay for re-hashing the whole document (2026-10-29
+    review, should-fix 1). The scene/tool-call guard keeps a hit from handing
+    out a pre-save digest when a scene changed in-process without a sidecar
+    write; a persisted scene save invalidates the entry's key via the sidecar
+    stat signature anyway.
+    """
+    if not messages:
+        return None
+    scenes = getattr(session, "anchor_activity_scenes", None) or None
+    tool_calls = getattr(session, "tool_calls", None) or None
+    digest = _display_prefix_fingerprint(
+        messages,
+        len(messages),
+        scenes=scenes,
+        tool_calls=tool_calls,
+    )
+    if not digest:
+        return None
+    return {
+        "meta": (
+            _display_aux_fingerprint(scenes) if scenes else None,
+            _display_aux_fingerprint(tool_calls) if tool_calls else None,
+        ),
+        "digest": digest,
+    }
+
+
+def _mint_display_prefix_fingerprint(session, messages, count, cached):
+    """Mint the response's ``prefix_fp``, reusing the display-merge cache
+    entry's digest when the document, scene records, and tool calls are all
+    unchanged (#7925 re-gate, 2026-10-29 review, should-fix 1).
+
+    ``cached`` is the out-param list filled by ``_display_merge_cached_messages``
+    (the usable entry's ``prefix_fp`` dict, or None). The reuse is only valid
+    for full coverage (``count == len(messages)``), which is exactly the shape
+    of every display-cache-hit response: the merge cache is never probed for
+    append requests (whose coverage can end mid-document) or msg_before
+    paging.
+    """
+    scenes = getattr(session, "anchor_activity_scenes", None) or None
+    tool_calls = getattr(session, "tool_calls", None) or None
+    meta = (
+        _display_aux_fingerprint(scenes) if scenes else None,
+        _display_aux_fingerprint(tool_calls) if tool_calls else None,
+    )
+    if cached and count == len(messages):
+        entry = cached[0] if isinstance(cached, list) and cached else None
+        if isinstance(entry, dict) and entry.get("meta") == meta:
+            digest = entry.get("digest")
+            if isinstance(digest, str) and digest:
+                return digest
+    return _display_prefix_fingerprint(
+        messages,
+        count,
+        scenes=scenes,
+        tool_calls=tool_calls,
+    )
 
 
 def _append_fast_path_anchor(s, all_messages, msg_after_raw, anchor_fp_raw, generation_raw, prefix_fp_raw=None) -> "int | None":
@@ -11100,11 +11213,14 @@ def _append_fast_path_anchor(s, all_messages, msg_after_raw, anchor_fp_raw, gene
        stripped, content redacted), so a rewrite of the seam row or a change
        in what the client would render is detected.
     4. ``prefix_fp`` matches a fresh digest over rows ``[0, after_idx + 1)``
-       of the merged display document (#7925 re-gate, 2026-10-27 finding 4).
-       The generation bump only reports DESTRUCTIVE rewrites; this digest
-       also catches a non-destructive edit of an earlier row (settled
-       reasoning backfill, saved attachments) that no writer reports. A
-       missing digest fails closed — an older client loses only the fast path.
+       of the merged display document (#7925 re-gate, 2026-10-27 finding 4;
+       2026-10-29 finding 2). The generation bump only reports DESTRUCTIVE
+       rewrites; this digest also catches a non-destructive edit of an earlier
+       row (settled reasoning backfill, saved attachments) that no writer
+       reports, plus rendered data that changes no row at all (a saved
+       anchor-activity scene, a ``_source`` stamp) — the digest covers each
+       row as the browser receives it, hydrated scenes included. A missing
+       digest fails closed — an older client loses only the fast path.
     """
     try:
         after_idx = int(msg_after_raw)
@@ -11132,7 +11248,12 @@ def _append_fast_path_anchor(s, all_messages, msg_after_raw, anchor_fp_raw, gene
     projected = _public_message_projection(anchor_row, _enabled=_redact_enabled)
     if _append_anchor_fingerprint(projected) != str(anchor_fp_raw):
         return None
-    if _display_prefix_fingerprint(all_messages, after_idx + 1) != str(prefix_fp_raw):
+    if _display_prefix_fingerprint(
+        all_messages,
+        after_idx + 1,
+        scenes=getattr(s, "anchor_activity_scenes", None) or None,
+        tool_calls=getattr(s, "tool_calls", None) or None,
+    ) != str(prefix_fp_raw):
         return None
     return after_idx
 
@@ -11294,7 +11415,7 @@ def _display_rebased_tool_calls(tool_calls, owner_positions):
     return projected
 
 
-def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None, owner_positions=None):
+def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None, owner_positions=None, _prefix_fp_out=None):
     """Return the memoized merged transcript, or None when it can't be reused.
 
     Lets GET /api/session skip loading the state.db rows entirely on a hit. That
@@ -11306,6 +11427,12 @@ def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None
     Fail-closed by construction: returns None whenever the session is active,
     the key cannot be built, or the cached entry does not match, and the caller
     then performs the normal full load + merge.
+
+    ``_prefix_fp_out`` (optional): when provided, a list the usable entry's
+    memoized ``prefix_fp`` value (``_build_prefix_fingerprint_entry`` shape, or
+    None when the entry predates the memo) is appended to on a hit, so the
+    response mint can skip re-hashing the whole document (#7925 re-gate,
+    2026-10-29 should-fix 1).
     """
     if msg_before is not None or _display_merge_session_is_active(session):
         return None
@@ -11339,6 +11466,8 @@ def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None
                 return None
             owner_positions.clear()
             owner_positions.update(entry["owner_positions"])
+        if _prefix_fp_out is not None:
+            _prefix_fp_out.append(entry.get("prefix_fp"))
         _display_merge_cache.move_to_end(sid, last=True)
         return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
 
@@ -11481,13 +11610,23 @@ def _limited_webui_messages_for_display_with_sidecar(
             cache_key = None
     if cache_key is not None:
         sid = str(getattr(session, "session_id", "") or "")
+        # #7925 re-gate (2026-10-29 should-fix 1): memoise the whole-document
+        # prefix digest on the entry so a cache hit does not re-hash every row
+        # (550 ms on the 32 MiB shape). Computed outside the lock; guarded by
+        # the scene/tool-call meta so an in-process scene change cannot reuse
+        # a pre-save digest, and invalidated with the entry's key by any
+        # sidecar write (scene saves persist through the sidecar).
+        prefix_fp_entry = _build_prefix_fingerprint_entry(session, merged)
         with _display_merge_cache_lock:
-            _display_merge_cache[sid] = {
+            entry = {
                 "key": cache_key,
                 "messages": merged,
                 "owner_positions": projected_owners,
                 "stored_at": time.monotonic(),
             }
+            if prefix_fp_entry is not None:
+                entry["prefix_fp"] = prefix_fp_entry
+            _display_merge_cache[sid] = entry
             _display_merge_cache.move_to_end(sid, last=True)
             while len(_display_merge_cache) > _DISPLAY_MERGE_CACHE_MAX:
                 _display_merge_cache.popitem(last=False)
@@ -16043,6 +16182,10 @@ def _handle_session_get(handler, parsed) -> bool:
         # reused without loading the state.db rows; must exist for every
         # branch below, including the ones that never probe the cache.
         _display_cache_hit = None
+        # #7925 re-gate (2026-10-29 should-fix 1): out-param the memoized
+        # whole-document prefix digest out of the cache probe; the mint reuses
+        # it on a hit instead of re-hashing every row.
+        _prefix_fp_out = []
         _display_state_db_signature = None
         _display_owner_positions = ({} if load_messages and _cancelled_journal_turn_owner(
             getattr(s, "messages", None) or [], include_live_partial=True
@@ -16097,6 +16240,7 @@ def _handle_session_get(handler, parsed) -> bool:
                     limited_sidecar_messages,
                     msg_before=msg_before,
                     owner_positions=_display_owner_positions,
+                    _prefix_fp_out=_prefix_fp_out,
                 )
             if _display_cache_hit is not None:
                 state_db_messages = []
@@ -16150,18 +16294,26 @@ def _handle_session_get(handler, parsed) -> bool:
                 # different slices of the same stitched conversation, merge
                 # them chronologically and dedupe exact repeats.
                 _all_msgs = _merged_session_messages_for_display(s, cli_messages)
-            elif msg_limit is not None and _msg_after is None:
+            elif _limited_display_request:
                 # The limited-display path is for bounded windows whose caller
-                # accepts a windowed document. An append-only fast-path request
-                # (#7925) carries msg_limit to bound the RETURNED window, but
-                # its anchor validation runs against the full display document:
-                # the limited path skips the lineage merge, so a continuation
-                # session's _all_msgs holds only the child's rows and every
-                # append anchor (an absolute index into the merged transcript)
-                # reads as out-of-range. The refusal then answers with the
-                # limited document instead of the authoritative full one and
-                # the client collapses to the child's rows. Route append
-                # requests down the full path; the window below stays bounded.
+                # accepts a windowed document. One predicate
+                # (`_limited_display_request = msg_limit is not None and not
+                # append_request`) now gates this branch exactly like the
+                # since_timestamp loader, the display-merge cache probe, and
+                # the exact owner-position resolution above (#7925 re-gate,
+                # 2026-10-29 should-fix 2): the old two-condition form
+                # (`msg_limit is not None and _msg_after is None`) disagreed
+                # with it on requests carrying both msg_after and msg_before.
+                # An append-only fast-path request (#7925) carries msg_limit
+                # to bound the RETURNED window, but its anchor validation runs
+                # against the full display document: the limited path skips
+                # the lineage merge, so a continuation session's _all_msgs
+                # holds only the child's rows and every append anchor (an
+                # absolute index into the merged transcript) reads as
+                # out-of-range. The refusal then answers with the limited
+                # document instead of the authoritative full one and the
+                # client collapses to the child's rows. Route append requests
+                # down the full path; the window below stays bounded.
                 if _display_cache_hit is not None:
                     _all_msgs = _display_cache_hit
                 else:
@@ -16508,15 +16660,22 @@ def _handle_session_get(handler, parsed) -> bool:
         raw["_msg_limit_max"] = _MAX_MSG_LIMIT
         if _append_mode_anchor is not None:
             raw["_append_only"] = True
-        # #7925 re-gate (2026-10-27 review, finding 4): mint the prefix
-        # fingerprint over rows [0, K) of the merged display document, where
-        # K is the absolute index just past this response's coverage (a full
-        # load covers [0, len); a windowed or append load covers [0,
-        # offset+len)). The client stores it with its view and echoes it on
-        # the next append request. Contract: docs/CONTRACTS.md.
+        # #7925 re-gate (2026-10-27 review, finding 4; 2026-10-29 finding 2 +
+        # should-fix 1): mint the prefix fingerprint over rows [0, K) of the
+        # merged display document, where K is the absolute index just past
+        # this response's coverage (a full load covers [0, len); a windowed or
+        # append load covers [0, offset+len)). Each row is hashed as the
+        # browser receives it (whole projected row minus the explicit
+        # exclusion set, hydrated anchor scenes included), so a scene save or
+        # a _source change moves the digest. On a display-cache hit the
+        # digest rides on the cache entry and is reused instead of re-hashing
+        # the whole document. Contract: docs/CONTRACTS.md.
         if load_messages and _all_msgs:
-            raw["prefix_fp"] = _display_prefix_fingerprint(
-                _all_msgs, _messages_offset + len(_truncated_msgs)
+            raw["prefix_fp"] = _mint_display_prefix_fingerprint(
+                s,
+                _all_msgs,
+                _messages_offset + len(_truncated_msgs),
+                _prefix_fp_out,
             )
         _t4 = _time.monotonic()
         if _diag: _diag.stage("t4_after_compact_and_merge")
