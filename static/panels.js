@@ -4706,13 +4706,14 @@ async function loadInsights(animate) {
   // its own token; only the newest token may render.
   const reqToken = ++_insightsReqToken;
   try {
-    const [data, wikiStatus, skillUsage] = await Promise.all([
+    const [data, wikiStatus, skillUsage, traffic] = await Promise.all([
       api(`/api/insights?${qs.toString()}`),
       api('/api/wiki/status').catch(err => ({status:'error', error: err.message || String(err)})),
       api('/api/skills/usage').catch(() => ({usage:{}, skill_names:[], total_invocations:0, unique_skills_used:0})),
+      api(`/api/insights/traffic?${qs.toString()}`).catch(() => null),
     ]);
     if (reqToken !== _insightsReqToken) return;
-    _renderInsights(data, box, wikiStatus, skillUsage);
+    _renderInsights(data, box, wikiStatus, skillUsage, traffic);
     if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
     if (typeof pollSystemHealth === 'function') void pollSystemHealth();
   } catch(e) {
@@ -5041,7 +5042,47 @@ function _renderSkillUsage(d) {
   return `<div class="insights-card" id="skillUsageCard"><div class="insights-card-title">${esc(t('insights_skill_usage_title'))}</div><div class="skill-usage-grid" style="margin-bottom:8px"><div><span>${esc(t('insights_skill_usage_total'))}</span><strong>${totalInvocations.toLocaleString()}</strong></div><div><span>${esc(t('insights_skill_usage_skills_used'))}</span><strong>${uniqueUsed}/${skillNames.length}</strong></div></div><div class="insights-table skill-usage-table"><div class="insights-table-head"><span>${esc(t('insights_skill_usage_col_skill'))}</span><span>${esc(t('insights_skill_usage_col_uses'))}</span><span>${esc(t('insights_skill_usage_col_views'))}</span><span>${esc(t('insights_skill_usage_col_patches'))}</span><span>${esc(t('insights_skill_usage_col_share'))}</span></div>${rows}</div><div class="wiki-status-footer" style="margin-top:8px">${esc(t('insights_skill_usage_footer'))}</div></div>`;
 }
 
-function _renderInsights(d, box, wikiStatus, skillUsage) {
+function _renderTrafficPanel(traffic) {
+  if (!traffic) {
+    return `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_traffic_title'))}</div><div class="insights-empty">${esc(t('insights_no_usage_data'))}</div></div>`;
+  }
+
+  function _renderIpTable(items, periodLabel) {
+    if (!items || !items.length) {
+      return `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_traffic_inbound'))} · ${esc(periodLabel)}</div><div class="insights-empty">No data</div></div>`;
+    }
+    const rows = items.map((item, idx) => {
+      const display = item.domain && item.domain !== item.ip ? `${esc(item.ip)} (${esc(item.domain)})` : esc(item.ip);
+      return `<div class="insights-table-row"><span>${idx + 1}</span><span class="insights-address-cell" title="${esc(item.ip)}${item.domain && item.domain !== item.ip ? ' / ' + esc(item.domain) : ''}">${display}</span><span>${item.count.toLocaleString()}</span></div>`;
+    }).join('');
+    return `<div class="insights-card insights-traffic-card"><div class="insights-card-title">${esc(t('insights_traffic_inbound'))} · ${esc(periodLabel)}</div><div class="insights-table insights-traffic-table"><div class="insights-table-head"><span>${esc(t('insights_traffic_col_rank'))}</span><span>${esc(t('insights_traffic_col_address'))}</span><span>${esc(t('insights_traffic_col_count'))}</span></div>${rows}</div></div>`;
+  }
+
+  function _renderDomainTable(items, periodLabel) {
+    if (!items || !items.length) {
+      return `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_traffic_outbound'))} · ${esc(periodLabel)}</div><div class="insights-empty">No data</div></div>`;
+    }
+    const rows = items.map((item, idx) => {
+      return `<div class="insights-table-row"><span>${idx + 1}</span><span class="insights-address-cell" title="${esc(item.domain)}">${esc(item.domain)}</span><span>${item.calls.toLocaleString()}</span></div>`;
+    }).join('');
+    return `<div class="insights-card insights-traffic-card"><div class="insights-card-title">${esc(t('insights_traffic_outbound'))} · ${esc(periodLabel)}</div><div class="insights-table insights-traffic-table"><div class="insights-table-head"><span>${esc(t('insights_traffic_col_rank'))}</span><span>${esc(t('insights_traffic_col_address'))}</span><span>${esc(t('insights_traffic_col_count'))}</span></div>${rows}</div></div>`;
+  }
+
+  return `
+    <div class="insights-traffic-section">
+      <div class="insights-traffic-row">
+        ${_renderIpTable(traffic.inbound_ips_day, t('insights_traffic_period_day'))}
+        ${_renderIpTable(traffic.inbound_ips_month, t('insights_traffic_period_month'))}
+      </div>
+      <div class="insights-traffic-row">
+        ${_renderDomainTable(traffic.outbound_domains_day, t('insights_traffic_period_day'))}
+        ${_renderDomainTable(traffic.outbound_domains_month, t('insights_traffic_period_month'))}
+      </div>
+    </div>
+  `;
+}
+
+function _renderInsights(d, box, wikiStatus, skillUsage, traffic) {
   const fmtNum = n => Number(n || 0).toLocaleString();
   const fmtCost = c => {
     const value = Number(c || 0);
@@ -5203,6 +5244,7 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
       </div>
       ${dowHtml}
       ${hodHtml}
+      ${_renderTrafficPanel(traffic)}
       <div style="text-align:center;color:var(--muted);font-size:10px;margin-top:12px;opacity:.6">${esc(rangeLabel)}</div>
     `;
 }

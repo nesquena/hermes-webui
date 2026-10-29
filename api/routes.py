@@ -14678,6 +14678,257 @@ def _handle_insights(handler, parsed) -> bool:
     })
 
 
+def _parse_nginx_date(dt_str):
+    """Parse nginx log date string like '28/Oct/2026:15:09:36 +0700'."""
+    try:
+        import datetime as _dt_mod
+        # Strip timezone for parsing
+        dt_clean = dt_str.split()[0]
+        dt = _dt_mod.datetime.strptime(dt_clean, "%d/%b/%Y:%H:%M:%S")
+        return dt
+    except Exception:
+        return None
+
+
+def _parse_nginx_logs(start_dt, end_dt):
+    """Parse nginx access logs and return top 10 inbound IPs for the given window.
+    
+    Uses subprocess + sudo tail to read /var/log/nginx/access.log safely.
+    """
+    # Build a combined access log view: current + rotated logs
+    # We use `cat` on all files to get the full history
+    log_files = ["/var/log/nginx/access.log"] + sorted(
+        Path("/var/log/nginx").glob("access.log.*")
+    )
+    
+    # Filter to files that exist and are readable (we'll use sudo)
+    readable = []
+    for f in log_files:
+        if f.exists():
+            readable.append(str(f))
+    
+    if not readable:
+        return []
+    
+    # Use `sudo tail -n +1` to read all lines from all files
+    # We cat all files in order (oldest first) to maintain date ordering
+    ip_counts = collections.Counter()
+    
+    nginx_date_re = re.compile(r'^(\S+) \S+ \S+ \[([^\]]+)\]')
+    
+    # Process files - oldest first
+    for filepath in sorted(readable, key=lambda p: (
+        int(re.search(r'\.log\.(\d+)', p).group(1)) if re.search(r'\.log\.(\d+)', p) else 999
+    )):
+        try:
+            result = subprocess.run(
+                ["sudo", "cat", filepath],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode != 0:
+                continue
+            
+            for line in result.stdout.splitlines():
+                m = nginx_date_re.match(line)
+                if m:
+                    ip = m.group(1)
+                    dt_str = m.group(2)
+                    dt = _parse_nginx_date(dt_str)
+                    if dt and start_dt <= dt <= end_dt:
+                        ip_counts[ip] += 1
+        except Exception:
+            continue
+    
+    return ip_counts.most_common(10)
+
+
+def _get_outbound_domains(start_dt, end_dt):
+    """Query Hermes state.db for top 10 outbound provider domains in the window."""
+    try:
+        from api.models import _active_state_db_path
+        db_path = _active_state_db_path()
+        if not db_path or not db_path.exists():
+            return []
+        
+        with closing(open_state_db_readonly(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT RTRIM(smu.billing_base_url, '/') as billing_base_url, SUM(smu.api_call_count) as calls
+                FROM session_model_usage smu
+                JOIN sessions s ON s.id = smu.session_id
+                WHERE smu.billing_base_url IS NOT NULL 
+                  AND smu.billing_base_url != ''
+                  AND s.started_at >= ?
+                  AND s.started_at <= ?
+                GROUP BY RTRIM(smu.billing_base_url, '/')
+                ORDER BY calls DESC
+                LIMIT 10
+            """, (start_dt.timestamp(), end_dt.timestamp()))
+            rows = cur.fetchall()
+            
+            result = []
+            for r in rows:
+                url = r["billing_base_url"]
+                # Extract domain from URL
+                try:
+                    from urllib.parse import urlparse
+                    parsed = urlparse(url)
+                    domain = parsed.netloc or url
+                except Exception:
+                    domain = url
+                result.append({
+                    "domain": domain,
+                    "url": url,
+                    "calls": r["calls"],
+                })
+            return result
+    except Exception:
+        return []
+
+
+def _handle_insights_traffic(handler, parsed) -> bool:
+    """Return top 10 inbound IPs and outbound domains for a given time window."""
+    import collections as _collections
+    import re as _re
+    from urllib.parse import urlparse as _urlparse
+    from datetime import datetime as _datetime, timedelta as _timedelta
+    
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    
+    def _window_ts(vals):
+        if not vals:
+            return None
+        v = vals[0]
+        if not isinstance(v, str):
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+            try:
+                y, mo, d = map(int, v.split("-"))
+                ts = time.mktime((y, mo, d, 0, 0, 0, 0, 0, -1))
+                lt = time.localtime(ts)
+                if (lt.tm_year, lt.tm_mon, lt.tm_mday) != (y, mo, d):
+                    return None
+                return ("date", ts)
+            except (OverflowError, ValueError, OSError):
+                return None
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(f):
+            return None
+        return ("num", f)
+    
+    start_meta = _window_ts(query.get("start", []))
+    end_meta = _window_ts(query.get("end", []))
+    
+    now = time.time()
+    start_ts = None
+    end_ts = None
+    end_exclusive = True
+    
+    if start_meta is not None or end_meta is not None:
+        start_ts = start_meta[1] if start_meta else None
+        end_ts = end_meta[1] if end_meta else None
+        if end_meta is None:
+            end_ts = now
+            end_exclusive = False
+        if end_ts > now:
+            end_ts = now
+        if start_ts is None:
+            start_ts = end_ts - 30 * 86400
+        # Ensure valid
+        if start_ts is None or end_ts is None or start_ts > end_ts:
+            start_ts = None
+            end_ts = None
+    else:
+        # Trailing mode: last 30 days
+        days = min(max(int(query.get("days", ["30"])[0]), 1), 365)
+        end_ts = now
+        start_ts = end_ts - (days - 1) * 86400
+        end_exclusive = False
+    
+    if start_ts is None:
+        start_dt = _datetime.now() - _timedelta(days=30)
+        end_dt = _datetime.now()
+    else:
+        start_dt = _datetime.fromtimestamp(start_ts)
+        end_dt = _datetime.fromtimestamp(end_ts)
+    
+    # Inbound IPs from nginx logs
+    # For day and month windows
+    one_day_ago = _datetime.now() - _timedelta(days=1)
+    day_start = _datetime(one_day_ago.year, one_day_ago.month, one_day_ago.day)
+    month_start = _datetime.now() - _timedelta(days=30)
+    
+    ip_counts_day = _collections.Counter()
+    ip_counts_month = _collections.Counter()
+    
+    log_files = ["/var/log/nginx/access.log"] + sorted(
+        Path("/var/log/nginx").glob("access.log.*")
+    )
+    readable = [str(f) for f in log_files if Path(f).exists()]
+    if not readable:
+        readable = ["/var/log/nginx/access.log"]
+    
+    nginx_date_re = re.compile(r'^(\S+) \S+ \S+ \[([^\]]+)\]')
+    
+    # Sort files: current first (most recent), then rotated by number descending
+    def sort_key(p):
+        m = re.search(r'\.log\.(\d+)', p)
+        if m:
+            return (-int(m.group(1)), p)
+        return (0, p)
+    
+    for filepath in sorted(readable, key=sort_key):
+        try:
+            result = subprocess.run(
+                ["sudo", "cat", filepath],
+                capture_output=True, text=True, timeout=60
+            )
+            if result.returncode != 0:
+                continue
+            for line in result.stdout.splitlines():
+                m = nginx_date_re.match(line)
+                if m:
+                    ip = m.group(1)
+                    dt = _parse_nginx_date(m.group(2))
+                    if dt:
+                        if day_start <= dt <= _datetime.now():
+                            ip_counts_day[ip] += 1
+                        if month_start <= dt <= _datetime.now():
+                            ip_counts_month[ip] += 1
+        except Exception:
+            continue
+    
+    # Outbound domains from Hermes state.db
+    out_day = _get_outbound_domains(day_start, _datetime.now())
+    out_month = _get_outbound_domains(month_start, _datetime.now())
+    
+    def _ip_to_domain(ip):
+        try:
+            import socket as _socket
+            hostname, _, _ = _socket.gethostbyaddr(ip)
+            return hostname
+        except Exception:
+            return ip
+    
+    def _format_ips(counter):
+        return [{"ip": ip, "count": count, "domain": _ip_to_domain(ip)} 
+                for ip, count in counter.most_common(10)]
+    
+    return j(handler, {
+        "inbound_ips_day": _format_ips(ip_counts_day),
+        "inbound_ips_month": _format_ips(ip_counts_month),
+        "outbound_domains_day": out_day,
+        "outbound_domains_month": out_month,
+    })
+
+
 def _project_os_workspace_read(repo_root: Path, rel: str) -> dict | None:
     try:
         return read_file_content(repo_root, rel)
@@ -16592,6 +16843,8 @@ def handle_get(handler, parsed) -> bool:
     # ── Insights / knowledge status ──
     if parsed.path == "/api/insights":
         return _handle_insights(handler, parsed)
+    if parsed.path == "/api/insights/traffic":
+        return _handle_insights_traffic(handler, parsed)
     if parsed.path == "/api/project-os/dashboard":
         return _handle_project_os_dashboard(handler, parsed)
 
