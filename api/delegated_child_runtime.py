@@ -17,12 +17,21 @@ _STORE = STATE_DIR / "delegated_child_runtime.json"
 _TERMINAL_STATES = {"completed", "failed", "cancelled", "unknown"}
 _VISIBLE_STATES = _TERMINAL_STATES | {"running"}
 _EVENTS = {"subagent.start", "subagent.tool", "subagent.progress", "subagent.complete"}
+# Keep a quiet live child visible through long provider calls, then treat its
+# last callback as stale. Persisted terminal results use a shorter reload window.
+_LIVE_TTL_SECONDS = 60 * 60
 _TERMINAL_TTL_SECONDS = 15 * 60
 _MAX_TERMINAL_RECORDS = 256
 
 
 def _key(profile: Any, child_session_id: Any) -> tuple[str, str] | None:
-    profile_value = str(profile or "").strip()
+    profile_value = str(profile or "").strip() or "default"
+    from api.profiles import _profiles_match
+
+    # Match the session-list cache: the empty/default profile and any renamed
+    # root-profile alias share one runtime record.
+    if _profiles_match(profile_value, "default"):
+        profile_value = "default"
     child_value = str(child_session_id or "").strip()
     return (profile_value, child_value) if child_value else None
 
@@ -50,7 +59,7 @@ def _prune_live_records(now: float | None = None) -> bool:
     expired = [
         key
         for key, record in _LIVE.items()
-        if now - (_coerce_timestamp(record.get("updated_at")) or 0) >= _TERMINAL_TTL_SECONDS
+        if now - (_coerce_timestamp(record.get("updated_at")) or 0) >= _LIVE_TTL_SECONDS
     ]
     for key in expired:
         _LIVE.pop(key, None)

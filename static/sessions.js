@@ -8948,6 +8948,7 @@ function _delegatedChildRuntimeBadge(child){
     cancelled:t('delegated_child_runtime_cancelled'),
     unknown:t('delegated_child_runtime_unknown'),
   };
+  if(state==='unknown'||!labels[state]) return null;
   const badge=document.createElement('span');
   badge.className=`session-child-runtime session-child-runtime-${labels[state]?state:'unknown'}`;
   badge.textContent=labels[state]||labels.unknown;

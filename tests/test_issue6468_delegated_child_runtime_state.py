@@ -2,18 +2,25 @@
 
 import ast
 import json
+import os
 import subprocess
+import sys
+import threading
 import textwrap
 from pathlib import Path
 
 from api import delegated_child_runtime as runtime
+from api import gateway_chat, profiles
 from api import routes
 
 
 def _isolated_runtime(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(runtime, "_STORE", tmp_path / "delegated-child-runtime.json")
     monkeypatch.setattr(runtime, "_MAX_TERMINAL_RECORDS", 4)
+    monkeypatch.setattr(runtime, "_LIVE_TTL_SECONDS", 60)
     monkeypatch.setattr(runtime, "_TERMINAL_TTL_SECONDS", 60)
+    monkeypatch.setattr(profiles, "_root_profile_name_cache", {"default"})
+    monkeypatch.setattr(profiles, "_root_profile_name_cache_loaded", True)
     runtime.reset_runtime_for_tests()
 
 
@@ -202,16 +209,103 @@ def test_terminal_state_is_sticky_against_late_non_terminal_event(monkeypatch, t
     }
 
 
-def test_persisted_terminal_fallback_survives_live_projection_clear(monkeypatch, tmp_path):
+def test_persisted_terminal_fallback_is_loaded_after_process_restart(monkeypatch, tmp_path):
     _isolated_runtime(monkeypatch, tmp_path)
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(runtime, "_STORE", state_dir / "delegated_child_runtime.json")
 
     runtime.record_subagent_event(
-        "profile-b", "subagent.complete", {"child_session_id": "child-3", "status": "timeout"}
+        "default",
+        "subagent.start",
+        {"child_session_id": "child-live"},
+        owner_session_id="parent-restart",
     )
-    runtime.clear_live_runtime()
-    assert runtime.child_runtime("profile-b", "child-3") == {
-        "runtime_state": "failed",
-        "runtime_reason": "timeout",
+    runtime.record_subagent_event(
+        "default",
+        "subagent.complete",
+        {"child_session_id": "child-complete", "status": "timeout"},
+        owner_session_id="parent-restart",
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(tmp_path / "home"),
+            "HERMES_HOME": str(tmp_path / "hermes"),
+            "HERMES_WEBUI_STATE_DIR": str(state_dir),
+            "HERMES_WEBUI_AGENT_DIR": str(tmp_path / "no-agent"),
+        }
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json; from api.delegated_child_runtime import child_runtime; "
+            "print(json.dumps({'live': child_runtime('default', 'child-live'), "
+            "'complete': child_runtime('default', 'child-complete')}))",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    restarted_state = json.loads(result.stdout.strip().splitlines()[-1])
+    assert restarted_state == {
+        "live": {"runtime_state": "unknown", "runtime_reason": ""},
+        "complete": {"runtime_state": "failed", "runtime_reason": "timeout"},
+    }
+
+
+def test_missing_and_renamed_root_profiles_share_runtime_state(monkeypatch, tmp_path):
+    _isolated_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr(profiles, "_root_profile_name_cache", {"default", "root-alias"})
+    monkeypatch.setattr(profiles, "_root_profile_name_cache_loaded", True)
+
+    assert runtime.record_subagent_event(
+        None,
+        "subagent.complete",
+        {"child_session_id": "child-root", "status": "ok"},
+        owner_session_id="parent-root",
+    )
+
+    expected = {"runtime_state": "completed", "runtime_reason": "ok"}
+    assert runtime.child_runtime("default", "child-root") == expected
+    assert runtime.child_runtime("root-alias", "child-root") == expected
+    assert routes._sidebar_session_response_item(
+        {
+            "session_id": "child-root",
+            "relationship_type": "child_session",
+            "source_tag": "subagent",
+            "profile": "default",
+        }
+    )["runtime_state"] == "completed"
+
+
+def test_gateway_subagent_frames_do_not_claim_local_runtime_state(monkeypatch, tmp_path):
+    _isolated_runtime(monkeypatch, tmp_path)
+    forwarded = []
+
+    class _Response:
+        def __iter__(self):
+            yield b'data: {"event":"subagent.start","child_session_id":"child-gateway"}\n'
+            yield b"data: [DONE]\n"
+
+    gateway_chat._relay_gateway_run_events(
+        _Response(),
+        "parent-gateway",
+        "stream-gateway",
+        "run-gateway",
+        "https://gateway.example",
+        "",
+        put_gateway_event=lambda event, payload: forwarded.append((event, payload)),
+        cancel_event=threading.Event(),
+    )
+
+    assert forwarded == []
+    assert runtime.child_runtime("default", "child-gateway") == {
+        "runtime_state": "unknown",
+        "runtime_reason": "",
     }
 
 
@@ -244,6 +338,8 @@ def test_corrupt_persisted_store_degrades_to_unknown_then_recovers_on_next_write
 
 def test_stale_live_runtime_expires_without_followup_event(monkeypatch, tmp_path):
     _isolated_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr(runtime, "_LIVE_TTL_SECONDS", 120)
+    monkeypatch.setattr(runtime, "_TERMINAL_TTL_SECONDS", 30)
     now = [1000.0]
     monkeypatch.setattr(runtime.time, "time", lambda: now[0])
 
@@ -258,7 +354,13 @@ def test_stale_live_runtime_expires_without_followup_event(monkeypatch, tmp_path
         "runtime_reason": "subagent.start",
     }
 
-    now[0] = 1065.0
+    now[0] = 1035.0
+    assert runtime.child_runtime("profile-live", "child-live") == {
+        "runtime_state": "running",
+        "runtime_reason": "subagent.start",
+    }
+
+    now[0] = 1121.0
     assert runtime.child_runtime("profile-live", "child-live") == {
         "runtime_state": "unknown",
         "runtime_reason": "",
@@ -568,8 +670,19 @@ const forkBadge = badgeFactory(document, t)({{
   session_id: 'fork-2',
   runtime_state: 'running',
 }});
+const unknownBadge = badgeFactory(document, t)({{
+  relationship_type: 'child_session',
+  source_tag: 'subagent',
+  runtime_state: 'unknown',
+}});
+const missingStateBadge = badgeFactory(document, t)({{
+  relationship_type: 'child_session',
+  source_tag: 'subagent',
+}});
 if (!delegatedBadge) throw new Error('delegated child should render a badge');
 if (forkBadge !== null) throw new Error('fork child must stay on the dedicated renderer path');
+if (unknownBadge !== null) throw new Error('unknown child state should not render a badge');
+if (missingStateBadge !== null) throw new Error('missing child state should not render a badge');
 const openCalls = [];
 const childList = {{
   children: [],
