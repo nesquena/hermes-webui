@@ -16265,6 +16265,65 @@ def _handle_session_get(handler, parsed) -> bool:
         return j(handler, {"session": public_session_projection(sess)})
 
 
+def _validated_messaging_profile(raw) -> str | None:
+    """Validate an operator-supplied profile name against the profile id shape.
+
+    Without this, a ``profile`` in the body would let a request resolve an
+    arbitrary HERMES_HOME and write outside the profiles tree.
+    """
+    profile = str(raw or "").strip()
+    if not profile:
+        return None
+    from api.profiles import _PROFILE_ID_RE
+
+    if profile != "default" and not _PROFILE_ID_RE.fullmatch(profile):
+        raise ValueError(f"Invalid profile: {profile!r}")
+    return profile
+
+
+def _handle_messaging_platforms_list(handler, parsed):
+    """List messaging channel status for a profile (never token values)."""
+    from api.messaging import MessagingError, list_platforms
+
+    try:
+        profile = _validated_messaging_profile(
+            parse_qs(getattr(parsed, "query", "") or "").get("profile", [None])[0]
+        )
+        return j(handler, list_platforms(profile))
+    except ValueError as exc:
+        return bad(handler, str(exc))
+    except MessagingError as exc:
+        return bad(handler, exc.message, status=exc.status)
+    except Exception:
+        logger.exception("Failed to list messaging platforms")
+        return bad(handler, "Failed to read messaging channel settings.", status=500)
+
+
+def _handle_messaging_platform_update(handler, platform_id, body):
+    """Validate + persist a channel config for one profile (write-mostly)."""
+    from api.messaging import MessagingError, update_platform
+
+    body = body or {}
+    try:
+        profile = _validated_messaging_profile(body.get("profile"))
+        payload = update_platform(
+            platform_id,
+            body.get("token"),
+            allowed_users=body.get("allowed_users"),
+            allow_all_users=body.get("allow_all_users"),
+            apply=bool(body.get("apply")),
+            profile=profile,
+        )
+    except ValueError as exc:
+        return bad(handler, str(exc))
+    except MessagingError as exc:
+        return bad(handler, exc.message, status=exc.status)
+    except Exception:
+        logger.exception("Failed to update messaging platform %s", platform_id)
+        return bad(handler, "Failed to save messaging channel settings.", status=500)
+    return j(handler, payload)
+
+
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
     proxy_result = _handle_extension_sidecar_proxy(handler, parsed, "GET")
@@ -17606,6 +17665,12 @@ def handle_get(handler, parsed) -> bool:
     # ── Gateway Status (GET) ──
     if parsed.path == "/api/gateway/status":
         return j(handler, _gateway_status_payload())
+
+    # ── Messaging Platforms (GET) ──
+    # Write-mostly status listing: configured/enabled + allowlist only, never a
+    # bot token (#8071). Profile-scoped to the active profile by default.
+    if parsed.path == "/api/messaging/platforms":
+        return _handle_messaging_platforms_list(handler, parsed)
 
     # ── MCP Servers (GET) ──
     if parsed.path == "/api/mcp/servers":
@@ -21643,6 +21708,12 @@ def handle_put(handler, parsed) -> bool:
         return bad(handler, str(exc), status=status)
     if not _guard_request_session_visibility(handler, parsed, body=body, method="PUT"):
         return True
+    if parsed.path.startswith("/api/messaging/platforms/"):
+        # Platform ids are case-sensitive-ish config keys but fold_api_path
+        # lowercases the match path; read the platform id from the matched path
+        # and normalise inside the handler.
+        platform_id = parsed.path[len("/api/messaging/platforms/"):]
+        return _handle_messaging_platform_update(handler, platform_id, body)
     if parsed.path.startswith("/api/mcp/servers/"):
         # MCP server names are case-sensitive config keys: capture from the
         # original-case path, not the folded matching path.

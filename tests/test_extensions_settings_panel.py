@@ -97,7 +97,11 @@ def test_extensions_panel_warns_about_trust_model_and_stays_install_free():
 
 
 def test_switch_settings_section_supports_extensions_lazy_load():
-    switch_block = _function_block("switchSettingsSection", extra=2300)
+    # The Messaging section (#8071) grew this function past the old 2300-char
+    # window, truncating the lazy-load tail and failing the assertions below.
+    # The window is a read-snapshot bound, not a spec; the assertions are
+    # unchanged.
+    switch_block = _function_block("switchSettingsSection", extra=2500)
 
     assert "name==='extensions'" in switch_block
     assert "plugins:'Plugins',extensions:'Extensions'" in switch_block
