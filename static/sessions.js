@@ -10085,38 +10085,38 @@ async function _handleGroupedProjectDrop(e,targetProject,targetLabel){
   return _moveSessionToProject(session,targetProjectId,targetLabel);
 }
 
-function _bindGroupedProjectDropTarget(hdr,targetProject,targetLabel){
+function _bindGroupedProjectDropTarget(target,targetProject,targetLabel,highlightTarget=target){
   let enterDepth=0;
   const protectedEligibilityFor=(e)=>{
     if(!_isSessionProjectMoveDrag(e.dataTransfer)) return {session:null,eligibility:{eligible:false}};
     const session=(_allSessions||[]).find(item=>item&&item.session_id===_activeSidebarProjectDragSessionId);
     return {session,eligibility:_projectMoveEligibility(session,targetProject||{project_id:null})};
   };
-  const clear=()=>{enterDepth=0;hdr.classList.remove('drag-over');};
-  hdr._sessionProjectDragReset=clear;
-  hdr.addEventListener('dragenter',(e)=>{
+  const clear=()=>{enterDepth=0;highlightTarget.classList.remove('drag-over');};
+  highlightTarget._sessionProjectDragReset=clear;
+  target.addEventListener('dragenter',(e)=>{
     const {eligibility}=protectedEligibilityFor(e);
     if(!eligibility.eligible){clear();if(e.dataTransfer)e.dataTransfer.dropEffect='none';return;}
-    enterDepth++;hdr.classList.add('drag-over');
+    enterDepth++;highlightTarget.classList.add('drag-over');
   });
-  hdr.addEventListener('dragover',(e)=>{
+  target.addEventListener('dragover',(e)=>{
     const {eligibility}=protectedEligibilityFor(e);
     if(eligibility.eligible){
       e.preventDefault();
       e.dataTransfer.dropEffect='move';
-      hdr.classList.add('drag-over');
+      highlightTarget.classList.add('drag-over');
     }else{if(e.dataTransfer)e.dataTransfer.dropEffect='none';clear();}
   });
-  hdr.addEventListener('dragleave',(e)=>{
-    if(!e.relatedTarget||!hdr.contains(e.relatedTarget)){clear();return;}
+  target.addEventListener('dragleave',(e)=>{
+    if(!e.relatedTarget||!target.contains(e.relatedTarget)){clear();return;}
     enterDepth=Math.max(0,enterDepth-1);
-    if(enterDepth===0) hdr.classList.remove('drag-over');
+    if(enterDepth===0) highlightTarget.classList.remove('drag-over');
   });
-  hdr.addEventListener('drop',async(e)=>{
+  target.addEventListener('drop',async(e)=>{
     clear();if(typeof _clearGroupedProjectHighlights==='function') _clearGroupedProjectHighlights();
     await _handleGroupedProjectDrop(e,targetProject,targetLabel);
   });
-  hdr.addEventListener('dragend',clear);
+  target.addEventListener('dragend',clear);
 }
 
 function _findGroupedActiveRow(list, activeSidForSidebar, renderedSidebarRows){
@@ -10632,7 +10632,10 @@ function renderSessionListFromCache(){
       const hdr=document.createElement('div');
       hdr.className='session-date-header'+(g.isPinned?' pinned':'')+(Object.prototype.hasOwnProperty.call(g,'dropProjectId')?' project-session-header':'');
       if(Object.prototype.hasOwnProperty.call(g,'dropProjectId')) hdr.classList.add('session-project-group-header');
-      if(Object.prototype.hasOwnProperty.call(g,'dropProjectId')){hdr.dataset.projectId=g.dropProjectId||'';_bindGroupedProjectDropTarget(hdr,g.project||null,g.label);}
+      if(Object.prototype.hasOwnProperty.call(g,'dropProjectId')){
+        hdr.dataset.projectId=g.dropProjectId||'';
+        _bindGroupedProjectDropTarget(wrapper,g.project||null,g.label,hdr);
+      }
       const caret=document.createElement('span');caret.className='session-date-caret';caret.textContent='\u25BE';
       const label=document.createElement('span');label.className='session-project-group-label';label.textContent=g.label;
       if(g.project&&g.project.color){
@@ -10821,9 +10824,21 @@ function renderSessionListFromCache(){
       const dragHandle=document.createElement('span');
       dragHandle.className='session-drag-grip session-project-drag-handle';
       dragHandle.setAttribute('aria-hidden','true');
+      dragHandle.draggable=true;
       dragHandle.textContent='⋮⋮';
       dragHandle.title=typeof t==='function'?t('sidebar_group_drag_to_project'):'Drag to move to a project';
-      titleRow.appendChild(dragHandle);
+      dragHandle.addEventListener('dragstart',(e)=>{
+        e.stopPropagation();
+        if(!e.dataTransfer) return;
+        e.dataTransfer.effectAllowed='move';
+        _setSessionProjectDragData(e.dataTransfer,s.session_id);
+        el.classList.add('dragging');
+      });
+      dragHandle.addEventListener('dragend',()=>{
+        _clearSessionProjectDragData();
+        el.classList.remove('dragging');
+      });
+      el.appendChild(dragHandle);
     }
     if(s.pinned&&!isPinnedGroup){
       const pinInd=document.createElement('span');

@@ -239,6 +239,11 @@ const SESSION_ARCHIVED_MAX_LOADED_LIMIT = 100;
 const SESSION_LIST_FLIP_TIMEOUT_MS = 0;
 const SESSION_REFLOW_TIMEOUT_MS = 0;
 function closeSessionActionMenu() {}
+function _projectPickerBlocksRepaint() { return false; }
+function _captureSessionOpenControlFocus() { return null; }
+function _restoreSessionOpenControlFocus() {}
+function _installSessionOpenControl() {}
+function _activateRowWithoutPointer() {}
 function _purgeStaleInflightEntries() {}
 function _activeSessionIdForSidebar() { return null; }
 function _sessionRowsWithActiveEphemeralSession(rows) { return rows; }
@@ -257,6 +262,7 @@ function _partitionSidebarSessionRows(rows) {
     projectIdFor: s => s.project_id || null,
   };
 }
+function _renderSidebarRowsFromPartition(partition) { return partition.sessionsRaw; }
 function _scopedSidebarReferenceRows() { return []; }
 function _renderSidebarRowsFromRawSessions(rows) { return rows; }
 function _sessionSourceTabCount(_filter, webuiCount) { return webuiCount ?? 0; }
@@ -282,6 +288,7 @@ function _sessionSegmentCount() { return 0; }
 function _sessionLineageBadgeTooltip() { return ''; }
 function _sessionForkTooltip() { return ''; }
 function _sessionFullTitleTooltip() { return ''; }
+function _sessionChildBadgeTooltip() { return ''; }
 function _sourceKeyForSession() { return 'webui'; }
 function _getChannelLabel() { return ''; }
 function _truncatedSessionId(s) { return s.session_id; }
@@ -398,7 +405,7 @@ let activeSid = null;
 let _sessionVisibleSidebarIds = [];
 let _selectedSessions = new Set();
 let _allProjects = Array.from({length:PROJECT_COUNT}, (_, index) => ({project_id:`project-${index}`, name:WRAPPED_PROJECT_BAR ? `Project ${index} with a deliberately long name` : 'Project 0'}));
-let _allSessions = Array.from({length:ROW_TOTAL}, (_, index) => ({session_id:`session-${index}`, project_id:index % (PROJECT_COUNT + 1) === PROJECT_COUNT ? null : `project-${index % PROJECT_COUNT}`, ts:index}));
+let _allSessions = Array.from({length:ROW_TOTAL}, (_, index) => ({session_id:`session-${index}`, project_id:index % (PROJECT_COUNT + 1) === PROJECT_COUNT ? null : `project-${index % PROJECT_COUNT}`, ts:index, message_count:index}));
 let _sessionListSkeletonActive = false;
 let _renamingSid = null;
 let _sessionActionMenu = null;
@@ -419,6 +426,12 @@ let _archivedCliCount = 0;
 let _archivedWebuiCount = 0;
 let _pendingSessionReflowPositions = null;
 let _expandedChildSessionKeys = new Set();
+window._sidebarDensity = TOTAL === 81 ? 'detailed' : 'compact';
+if(TOTAL===81&&ROW_TOTAL>20){
+  _allSessions[8].search_preview='A matching conversation excerpt that adds another visible line below the title.';
+  _allSessions[12]._child_sessions=[{session_id:'child-12',session_source:'webui',ts:12}];
+  _expandedChildSessionKeys.add('session-12');
+}
 let _sessionListLastScrollAt = 0;
 let _sessionVirtualScrollList = null;
 let _sessionVirtualScrollRaf = 0;
@@ -436,6 +449,11 @@ const SESSION_ARCHIVED_MAX_LOADED_LIMIT = 100;
 const SESSION_LIST_FLIP_TIMEOUT_MS = 0;
 const SESSION_REFLOW_TIMEOUT_MS = 0;
 function closeSessionActionMenu() {}
+function _projectPickerBlocksRepaint() { return false; }
+function _captureSessionOpenControlFocus() { return null; }
+function _restoreSessionOpenControlFocus() {}
+function _installSessionOpenControl() {}
+function _activateRowWithoutPointer() {}
 function _purgeStaleInflightEntries() {}
 function _activeSessionIdForSidebar() { return activeSid; }
 function _sessionRowsWithActiveEphemeralSession(rows) { return rows; }
@@ -454,6 +472,7 @@ function _partitionSidebarSessionRows(rows) {
     projectIdFor: s => s.project_id || null,
   };
 }
+function _renderSidebarRowsFromPartition(partition) { return partition.sessionsRaw; }
 function _scopedSidebarReferenceRows() { return []; }
 function _renderSidebarRowsFromRawSessions(rows) { return rows; }
 function _sessionSourceTabCount(_filter, webuiCount) { return webuiCount ?? 0; }
@@ -484,9 +503,13 @@ function _sourceKeyForSession() { return 'webui'; }
 function _getChannelLabel() { return ''; }
 function _truncatedSessionId(session) { return session.session_id; }
 function _sessionTitleForForkParent(session) { return session.session_id; }
+function _nestedChildTitle(session) { return session.session_id; }
+function _sessionChildBadgeTooltip() { return ''; }
 function _lineageSegmentsForRender() { return []; }
 function _lineageReportCacheKey() { return ''; }
-function _sessionSearchContentPreview() { return ''; }
+function _sessionSearchContentPreview(session) { return session&&session.search_preview||''; }
+function _lineageReportNeedsFetch() { return false; }
+function _formatSessionModelWithGateway() { return ''; }
 function _appendHighlightedText(element, text) { element.textContent = text; }
 function _buildSessionRenameStarter() { return () => {}; }
 function _sessionStateTooltip() { return ''; }
@@ -510,27 +533,6 @@ function _sessionVirtualSpacer(height, where) {
 }
 let groupedResyncCalls = 0;
 function _resyncSessionVirtualWindowAfterRender() { groupedResyncCalls += 1; }
-function _renderOneSession(session) {
-  const row = document.createElement('div');
-  row.className = 'session-item' + (session.session_id === activeSid ? ' active' : '');
-  row.style.cssText = 'height:52px;min-height:52px;box-sizing:border-box;flex:0 0 52px;margin:0;';
-  row.dataset.sid = session.session_id;
-  const text = document.createElement('div');
-  text.className = 'session-text';
-  const titleRow = document.createElement('div');
-  titleRow.className = 'session-title-row';
-  const title = document.createElement('span');
-  title.className = 'session-title';
-  title.textContent = session.session_id;
-  titleRow.appendChild(title);
-  text.appendChild(titleRow);
-  const meta = document.createElement('div');
-  meta.className = 'session-meta';
-  meta.textContent = 'production-equivalent session metadata';
-  text.appendChild(meta);
-  row.appendChild(text);
-  return row;
-}
 function t(key) { return key === 'sidebar_group_unassigned' ? 'Unassigned' : key; }
     __GROUPS__
     __ENTRIES__
@@ -618,6 +620,8 @@ try {
     const productionWindow=_sessionVirtualWindow;
     _sessionVirtualWindow=(opts)=>({...productionWindow(opts),virtualized:false,start:0,end:opts.total,topPad:0,bottomPad:0});
     renderSessionListFromCache();
+    const measuredRows=[...list.querySelectorAll('.session-item[data-sid]')];
+    window.groupedGeometry.rowHeights=measuredRows.map(row=>row.getBoundingClientRect().height);
     list.scrollTop=Math.floor((list.scrollHeight-list.clientHeight)*(WRAPPED_PROJECT_BAR?0.15:0.25));
     const requiredIds=visibleIds();
     _sessionVirtualWindow=productionWindow;
@@ -679,6 +683,9 @@ try {
             if total > 80:
                 assert observed["requiredIds"], (total, case, observed)
                 assert observed["requiredIdsMissing"] == [], (total, case, observed["requiredIdsMissing"], observed["materializedIds"])
+                if total == 81:
+                    heights = observed["rowHeights"]
+                    assert max(heights) - min(heights) > 10, (total, case, heights)
             assert observed["sourceTabsHeight"] > 0 if case[0] else observed["sourceTabsHeight"] == 0
             if case[1]:
                 assert observed["projectBarHeight"] > 40
@@ -879,7 +886,7 @@ process.stdout.write(JSON.stringify(_buildSessionSidebarGroups(rows,false,projec
 
 def test_picker_keeps_projects_visible_for_default_profile_aliases():
     picker = _extract_js_function(SESSIONS_JS, "_showProjectPicker")
-    assert "if (_profileHidesProject(p.profile)) continue;" in picker
+    assert "if (_profileHidesProject(p.profile)) return null;" in picker
     assert "projProfile === 'default' || sessionProfile === 'default'" in picker
 
 
@@ -905,13 +912,13 @@ def test_project_chip_is_a_valid_drop_target():
 
 def test_nested_dragleave_resets_header_depth_outside_target():
     bind = _extract_js_function(SESSIONS_JS, "_bindGroupedProjectDropTarget")
-    assert "hdr._sessionProjectDragReset=clear" in SESSIONS_JS
-    assert "if(!e.relatedTarget||!hdr.contains(e.relatedTarget)){clear();return;}" in bind
+    assert "highlightTarget._sessionProjectDragReset=clear" in bind
+    assert "if(!e.relatedTarget||!target.contains(e.relatedTarget)){clear();return;}" in bind
 
 
 def test_grouped_drag_move_routes_through_session_move_api():
     assert "api('/api/session/move'" in SESSIONS_JS
-    assert "_bindGroupedProjectDropTarget(hdr,g.project||null,g.label)" in SESSIONS_JS
+    assert "_bindGroupedProjectDropTarget(wrapper,g.project||null,g.label,hdr)" in SESSIONS_JS
     assert "project:{project_id:projectId}" in SESSIONS_JS
     assert "_projectMoveEligibility(session,targetProject||{project_id:null})" in SESSIONS_JS
     assert "SESSION_PROJECT_DRAG_MIME='application/x-hermes-webui-session-id'" in SESSIONS_JS
@@ -1158,7 +1165,8 @@ if (keepSwipe(true, true, true)) throw new Error('read-only row should not keep 
 def test_grouped_drag_uses_title_row_and_blocks_embedded_controls():
     assert "titleRow.classList.add('session-title-row-draggable');" in SESSIONS_JS
     assert "titleRow.draggable=true;" in SESSIONS_JS
-    assert "dragHandle.draggable=true;" not in SESSIONS_JS
+    assert "dragHandle.draggable=true;" in SESSIONS_JS
+    assert "el.appendChild(dragHandle);" in SESSIONS_JS
     assert "titleRow.addEventListener('dragstart',(e)=>{" in SESSIONS_JS
     for selector in (".session-lineage-count", ".session-lineage-segments", ".session-lineage-segment", ".session-child-count", ".session-child-sessions", ".session-child-session"):
         assert selector in SESSIONS_JS
@@ -1226,9 +1234,10 @@ def test_grouped_drag_affordance_is_hover_revealed_and_unassigned_header_is_styl
         r"\.session-item:focus-within \.session-project-drag-handle\{visibility:visible;opacity:1;pointer-events:auto;\}",
         (ROOT / "static" / "style.css").read_text(encoding="utf-8"),
     )
-    assert ".session-title-row-draggable{cursor:grab;}" in (ROOT / "static" / "style.css").read_text(encoding="utf-8")
     assert ".session-project-drag-handle{display:inline-block;" in (ROOT / "static" / "style.css").read_text(encoding="utf-8")
     assert "visibility:hidden;opacity:0;pointer-events:none;" in (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    assert ".session-title-row-draggable{cursor:grab;}" not in (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    assert ".session-title-row-draggable:active{cursor:grabbing;}" not in (ROOT / "static" / "style.css").read_text(encoding="utf-8")
     assert "session-project-group-header" in SESSIONS_JS
     assert ".project-session-header.drag-over" in (ROOT / "static" / "style.css").read_text(encoding="utf-8")
     assert ".project-chip.drag-over{background:var(--accent-bg-strong);outline:1px solid var(--accent);}" in (ROOT / "static" / "style.css").read_text(encoding="utf-8")
@@ -1242,11 +1251,18 @@ def test_grouped_drag_playwright_keeps_title_geometry_stable_on_hover():
 <html>
   <body>
     <div style="width:280px;padding:16px;">
-      <button type="button" class="session-item">
+      <button type="button" class="session-item" id="grouped-row">
+        <span class="session-drag-grip session-project-drag-handle">⋮⋮</span>
+        <div class="session-text">
+          <div class="session-title-row session-title-row-draggable">
+            <span class="session-title">Grouped sidebar geometry proof title</span>
+          </div>
+        </div>
+      </button>
+      <button type="button" class="session-item" id="pinned-row">
         <div class="session-text">
           <div class="session-title-row">
-            <span class="session-project-drag-handle">⋮⋮</span>
-            <span class="session-title">Grouped sidebar geometry proof title</span>
+            <span class="session-title">Pinned sidebar geometry proof title</span>
           </div>
         </div>
       </button>
@@ -1262,24 +1278,35 @@ def test_grouped_drag_playwright_keeps_title_geometry_stable_on_hover():
         page = browser.new_page()
         page.set_content(markup)
         page.add_style_tag(content=style)
-        row = page.locator(".session-title-row")
-        title = page.locator(".session-title")
-        handle = page.locator(".session-project-drag-handle")
+        row = page.locator("#grouped-row .session-title-row")
+        title = page.locator("#grouped-row .session-title")
+        handle = page.locator("#grouped-row .session-project-drag-handle")
+        pinned_title = page.locator("#pinned-row .session-title")
         before = {
             "row": row.bounding_box(),
             "title": title.bounding_box(),
+            "pinned_title": pinned_title.bounding_box(),
             "handle": handle.bounding_box(),
+            "row_cursor": row.evaluate("el => getComputedStyle(el).cursor"),
+            "handle_cursor": handle.evaluate("el => getComputedStyle(el).cursor"),
         }
-        page.hover(".session-item")
+        page.hover("#grouped-row")
         page.wait_for_timeout(50)
         after = {
             "row": row.bounding_box(),
             "title": title.bounding_box(),
+            "pinned_title": pinned_title.bounding_box(),
             "handle": handle.bounding_box(),
         }
         browser.close()
     assert before["handle"] is not None
     assert after["handle"] is not None
+    assert abs(before["title"]["x"] - before["pinned_title"]["x"]) < 0.1
+    assert abs(after["title"]["x"] - after["pinned_title"]["x"]) < 0.1
+    assert before["handle"]["x"] + before["handle"]["width"] <= before["title"]["x"]
+    assert after["handle"]["x"] + after["handle"]["width"] <= after["title"]["x"]
+    assert before["row_cursor"] == "pointer"
+    assert before["handle_cursor"] == "grab"
     assert abs(before["handle"]["width"] - after["handle"]["width"]) < 0.1
     assert abs(before["row"]["x"] - after["row"]["x"]) < 0.1
     assert abs(before["row"]["width"] - after["row"]["width"]) < 0.1
@@ -1623,11 +1650,19 @@ const s = sourceSession;
 const el = source;
 const titleRow = source;
 __SOURCE_BINDING__
+const validGroup = document.createElement('div');
+validGroup.className = 'session-date-group project-session-group';
+validGroup.id = 'native-valid-group';
+validGroup.style.cssText = 'display:block;width:120px;height:80px;';
 const valid = document.createElement('div');
-valid.className = 'project-chip';
-valid.id = 'native-valid';
+valid.className = 'session-project-group-header';
 valid.textContent = 'valid';
-valid.style.cssText = 'display:block;width:120px;height:40px;';
+valid.style.cssText = 'display:block;width:120px;height:30px;';
+const validRow = document.createElement('div');
+validRow.id = 'native-valid-row';
+validRow.textContent = 'row inside target group';
+validRow.style.cssText = 'display:block;width:120px;height:40px;';
+validGroup.append(valid,validRow);
 const unassigned = document.createElement('div');
 unassigned.className = 'session-project-group-header';
 unassigned.id = 'native-unassigned';
@@ -1648,13 +1683,15 @@ failed.className = 'project-chip';
 failed.id = 'native-failed';
 failed.textContent = 'failed';
 failed.style.cssText = 'display:block;width:120px;height:40px;';
-document.body.append(source, valid, unassigned, same, invalid, failed);
-_bindGroupedProjectDropTarget(valid, {project_id:'target',profile:'alpha'}, 'Target');
+document.body.append(source, validGroup, unassigned, same, invalid, failed);
+let validRowDragoverHighlightedHeader = false;
+validGroup.addEventListener('dragover',()=>{validRowDragoverHighlightedHeader=valid.classList.contains('drag-over');});
+_bindGroupedProjectDropTarget(validGroup, {project_id:'target',profile:'alpha'}, 'Target', valid);
 _bindGroupedProjectDropTarget(unassigned, null, 'Unassigned');
 _bindGroupedProjectDropTarget(same, null, 'Unassigned');
 _bindGroupedProjectDropTarget(invalid, {project_id:'other',profile:'beta'}, 'Other');
 _bindGroupedProjectDropTarget(failed, {project_id:'failed-target',profile:'alpha'}, 'Failed');
-window.nativeDragState = {valid, unassigned, same, invalid, failed, source};
+window.nativeDragState = {valid, validGroup, validRow, unassigned, same, invalid, failed, source, get validRowDragoverHighlightedHeader(){return validRowDragoverHighlightedHeader;}};
 """
     fixture = fixture.replace("__SOURCE_BINDING__", source_binding)
     with playwright_factory() as playwright:
@@ -1662,7 +1699,7 @@ window.nativeDragState = {valid, unassigned, same, invalid, failed, source};
         page = browser.new_page()
         page.set_content("<!doctype html><html><body></body></html>")
         page.add_script_tag(content=fixture)
-        page.drag_and_drop("#native-source", "#native-valid")
+        page.drag_and_drop("#native-source", "#native-valid-row")
         page.drag_and_drop("#native-source", "#native-unassigned")
         page.drag_and_drop("#native-source", "#native-same")
         page.drag_and_drop("#native-source", "#native-invalid")
@@ -1679,6 +1716,7 @@ window.nativeDragState = {valid, unassigned, same, invalid, failed, source};
   invalidClass: nativeDragState.invalid.classList.contains('drag-over'),
   failedClass: nativeDragState.failed.classList.contains('drag-over'),
   validTargetIsProjectChip: nativeDragState.valid.classList.contains('project-chip'),
+  validRowDragoverHighlightedHeader: nativeDragState.validRowDragoverHighlightedHeader,
 })
 """)
         browser.close()
@@ -1691,8 +1729,9 @@ window.nativeDragState = {valid, unassigned, same, invalid, failed, source};
     assert observed["toasts"] == ["Moved to Target", "Removed from project", "Move failed: failed-target blocked"]
     assert observed["projectId"] is None
     assert observed["validClass"] is False
+    assert observed["validRowDragoverHighlightedHeader"] is True
     assert observed["unassignedClass"] is False
     assert observed["sameClass"] is False
     assert observed["invalidClass"] is False
     assert observed["failedClass"] is False
-    assert observed["validTargetIsProjectChip"] is True
+    assert observed["validTargetIsProjectChip"] is False
