@@ -9821,6 +9821,27 @@ function _sessionAttentionState(s){
   return {kind,count,severity:String(attention.severity||''),label,title};
 }
 
+// #8447: the per-session failure state ("last turn failed at the provider").
+// Pure function over the sanitized `failure_summary` the sidebar row carries.
+// The summary never contains the raw provider error text — only the mapped
+// layer/code and the retryable flag — so the label and tooltip can be built
+// from it alone.
+function _sessionFailureState(s){
+  const summary=s&&s.failure_summary&&typeof s.failure_summary==='object'?s.failure_summary:null;
+  if(!summary||String(summary.kind||'')!=='failed_turn')return null;
+  const layer=typeof summary.layer==='string'?summary.layer:'';
+  const code=typeof summary.code==='string'?summary.code:'';
+  const retryable=summary.retryable===true;
+  const reason=layer||code||'unknown';
+  const label=(typeof t==='function')
+    ?t('session_failure_label',reason)
+    :'Last turn failed';
+  const title=(typeof t==='function')
+    ?t('session_failure_title',reason)
+    :(retryable?'Last turn failed (retryable)':'Last turn failed (not retryable)');
+  return {layer,code,retryable,reason,label,title};
+}
+
 function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
   return (s.message_count||0)>0 ||
     _sessionAttentionState(s) ||
@@ -11264,6 +11285,18 @@ function renderSessionListFromCache(){
     if(attention&&attention.title) state.title=attention.title;
     else if(_stateTip) state.title=_stateTip;
     el.appendChild(state);
+    // #8447: a session whose last turn failed at the provider must not look
+    // like a healthy idle row. The marker carries only the sanitized
+    // layer/code and the retryable flag — never the raw provider error text.
+    const failure=_sessionFailureState(s);
+    if(failure){
+      const marker=document.createElement('span');
+      marker.className='session-failure-indicator'+(failure.retryable?' is-retryable':' is-terminal');
+      marker.textContent='!';
+      marker.title=failure.title;
+      marker.setAttribute('aria-label',failure.title);
+      el.appendChild(marker);
+    }
     // Single trigger button that opens a shared dropdown menu
     let actions=null;
     if(!readOnly){

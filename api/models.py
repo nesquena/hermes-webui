@@ -1824,6 +1824,7 @@ class Session:
                  gateway_run=None,
                  delegation_reservation=None,
                  delegation_cutoff_ts=None,
+                 failure_summary=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -1976,6 +1977,10 @@ class Session:
         self.delegation_reservation = delegation_reservation if isinstance(delegation_reservation, dict) else None
         # Last clear/truncation: Gateway delegation rows written before it are never woken into context.
         self.delegation_cutoff_ts = delegation_cutoff_ts if isinstance(delegation_cutoff_ts, (int, float)) else None
+        # #8447: the sanitized per-session failure state, derived from the
+        # Agent's failed_turn boundary rows. Recomputed on every save; a
+        # session whose last turn succeeded carries None.
+        self.failure_summary = failure_summary if isinstance(failure_summary, dict) else None
         # #5854: a compact fingerprint of anchor_activity_scenes ({scene_key:
         # updated_at}) persisted BEFORE the messages array so the sidebar-poll
         # freshness check can compare scene freshness without parsing the full
@@ -2089,6 +2094,7 @@ class Session:
             'process_wakeup_pause',
             'share_token', 'share_created_at',
             'gateway_run', 'delegation_reservation', 'delegation_cutoff_ts',
+            'failure_summary',
         ]
         guarded_messages, exact_replay_rows_removed = _deduplicate_exact_stable_messages(self.messages)
         if exact_replay_rows_removed:
@@ -2098,6 +2104,14 @@ class Session:
                 self.session_id,
             )
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
+        # #8447: derive the per-session failure state from the Agent's
+        # boundary rows and persist it in the metadata prefix, so the sidebar
+        # can show "last turn failed" without reading the transcript on every
+        # poll. The value is recomputed on every save from the same guarded
+        # message array that is written in this same atomic write, so it can
+        # never disagree with the transcript. A session whose last turn
+        # succeeded carries no summary at all.
+        meta['failure_summary'] = _session_failure_summary(guarded_messages or [])
         # #5854: message_count and a compact anchor-scene fingerprint go in the
         # metadata prefix (BEFORE messages) so load_metadata_only() and the
         # sidebar-poll freshness check never have to parse the full (250-480KB)
@@ -2672,6 +2686,10 @@ class Session:
             'gateway_routing': self.gateway_routing,
             'gateway_routing_history': self.gateway_routing_history,
             'last_used_model': self.last_used_model,
+            # #8447: the sanitized per-session failure state. Only emitted when
+            # the session's last turn failed, so a healthy row carries no
+            # extra field at all.
+            **({'failure_summary': self.failure_summary} if self.failure_summary else {}),
             'manual_title': self.manual_title,
             # Only emit 'parent_session_id' when set (the /branch fork link, #1342).
             # Sessions without a fork must not leak None — see test_session_lineage_metadata_api.
@@ -11756,6 +11774,49 @@ def _decode_state_db_content(value):
     return decoded
 
 
+_STATE_DB_DISPLAY_METADATA_JSON_COLUMNS = frozenset({'display_metadata'})
+
+
+def _sanitize_state_db_display_metadata(value):
+    """Reduce Agent display metadata to the fields safe for a display row.
+
+    The Agent stamps ``display_metadata`` on a failed turn as::
+
+        {"error": "<raw provider text>",
+         "error_surface": {"layer": "billing", "code": "billing",
+                           "retryable": false, "provider": "...",
+                           "model": "..."}}
+
+    The raw ``error`` string can embed provider URLs and account hints, so it
+    never leaves this function.  Only the allow-listed ``error_surface``
+    fields survive, and only when they are plain scalars — anything else is
+    dropped so a malformed payload cannot widen the shape.
+
+    Returns a dict with at most ``layer``, ``code`` and ``retryable``.
+    """
+    if isinstance(value, bytes):
+        value = value.decode('utf-8', errors='replace')
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            return {}
+    if not isinstance(value, dict):
+        return {}
+    surface = value.get('error_surface')
+    if not isinstance(surface, dict):
+        return {}
+    clean = {}
+    for key in ('layer', 'code'):
+        raw = surface.get(key)
+        if isinstance(raw, str) and raw.strip():
+            clean[key] = raw.strip()[:64]
+    retryable = surface.get('retryable')
+    if isinstance(retryable, bool):
+        clean['retryable'] = retryable
+    return clean
+
+
 def _project_state_db_message(row, available, id_col, optional, *, include_row_identity=False):
     """Authoritative state.db row → WebUI message projection (#6826 r4).
 
@@ -11775,6 +11836,15 @@ def _project_state_db_message(row, available, id_col, optional, *, include_row_i
             continue
         value = row[col]
         if value in (None, ''):
+            continue
+        if col in _STATE_DB_DISPLAY_METADATA_JSON_COLUMNS:
+            # Sanitized on the way in: the raw provider error text carried by
+            # display_metadata must never reach a projection, a session row,
+            # or a provider request.
+            sanitized = _sanitize_state_db_display_metadata(value)
+            if not sanitized:
+                continue
+            msg[col] = sanitized
             continue
         if col in {'tool_calls', 'reasoning_details', 'codex_reasoning_items', 'codex_message_items'}:
             value = _json_loads_if_string(value)
@@ -11916,6 +11986,12 @@ def get_state_db_session_messages(
                 # sidecar in the WebUI's internal history; the provider-safe
                 # projection strips it before any direct API request.
                 'api_content',
+                # Agent display columns: ``display_kind`` names the boundary
+                # row kind (e.g. 'failed_turn') and ``display_metadata``
+                # carries the sanitized failure surface.  Older schemas do
+                # not have them, so both stay optional.
+                'display_kind',
+                'display_metadata',
             ]
             id_col = ['id'] if 'id' in available else []
             revision_cols = []
@@ -12332,6 +12408,7 @@ def get_state_db_regeneration_tail_snapshot(
                 'tool_call_id', 'tool_calls', 'tool_name', 'reasoning',
                 'reasoning_details', 'codex_reasoning_items', 'reasoning_content',
                 'codex_message_items', 'api_content',
+                'display_kind', 'display_metadata',
             ]
             tail_select = ['id', 'role', 'content', 'timestamp'] if 'id' in available else ['role', 'content', 'timestamp']
             for col in optional + (['active'] if 'active' in available else []):
@@ -13231,6 +13308,12 @@ _SESSION_MESSAGE_DISPLAY_METADATA_KEYS = (
     # overwritten in place. Display-only metadata: must survive the
     # sidecar/state.db merge exactly like the other keys above.
     "_media_snapshots",
+    # Agent display fields: the boundary row kind and the sanitized failure
+    # surface.  A duplicate row must not lose them, otherwise the failure
+    # state disappears the moment the sidecar and state.db rows are
+    # reconciled.
+    "display_kind",
+    "display_metadata",
 )
 
 
@@ -13240,6 +13323,74 @@ def _message_display_metadata_value_present(value) -> bool:
     if isinstance(value, (dict, list, tuple, set)) and not value:
         return False
     return True
+
+
+def _session_failure_summary(messages) -> dict | None:
+    """Derive the per-session failure state from the Agent's boundary rows.
+
+    The Agent stamps ``display_kind='failed_turn'`` on the boundary row of a
+    turn that failed at the provider, and carries a sanitized failure surface
+    in ``display_metadata``.  The summary answers one question: *does the last
+    turn-bearing row of this session represent a failure?*
+
+    Rules, in order:
+
+    * A later **successful terminal turn** clears the state.  "Terminal"
+      means a row that is neither a failure row nor interim activity: an
+      assistant row without tool calls is a completed turn, and so is a
+      user row that is followed by no further row at all.
+    * An **interim** assistant row (tool calls, tool result, or a reasoning
+      row) is *not* a success signal.  A failed turn can be an assistant row
+      itself, and tool activity can precede another failed turn, so clearing
+      on it would erase the failure while the session is still failing.
+    * A failure row with no usable metadata still yields a summary, with the
+      generic ``detail='unknown'``.  The verdict is never guessed: a missing
+      ``error_surface`` does not become a billing conclusion.
+    * The returned dict carries only sanitized fields — ``layer``, ``code``
+      and ``retryable`` come from the already-sanitized ``display_metadata``;
+      the raw provider error text is never included.
+
+    Returns ``None`` when the session's last turn-bearing row is not a
+    failure, so a healthy session carries no failure state at all.
+    """
+    if not isinstance(messages, list):
+        return None
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        role = message.get('role')
+        if role == 'user':
+            # A user row with no later turn is a session that ended on a
+            # request that never produced a turn.  That is not a provider
+            # failure, so it clears any earlier one.
+            return None
+        if role != 'assistant':
+            # Tool results and other non-assistant rows are interim.
+            continue
+        kind = message.get('display_kind')
+        if isinstance(kind, str) and kind.strip():
+            if kind.strip() != 'failed_turn':
+                # Some other boundary kind: not a failure, so nothing to show.
+                return None
+            summary: dict = {'kind': 'failed_turn'}
+            metadata = message.get('display_metadata')
+            if isinstance(metadata, dict):
+                for key in ('layer', 'code'):
+                    value = metadata.get(key)
+                    if isinstance(value, str) and value.strip():
+                        summary[key] = value.strip()[:64]
+                retryable = metadata.get('retryable')
+                if isinstance(retryable, bool):
+                    summary['retryable'] = retryable
+            if 'layer' not in summary and 'code' not in summary:
+                summary['detail'] = 'unknown'
+            return summary
+        # An assistant row without a display_kind: interim when it carries
+        # tool calls, a completed turn otherwise.
+        if message.get('tool_calls'):
+            continue
+        return None
+    return None
 
 
 def _merge_session_display_metadata(target: dict | None, source: dict | None) -> None:
