@@ -88,11 +88,27 @@ def _reattach_helper_src() -> str:
     return SESSIONS_JS[start:end]
 
 
-def _pending_resolver_src() -> str:
+def _ui_epsilon_decl() -> str:
+    """The ui.js precision epsilon, hoisted above the sessions.js slice.
+
+    Since #8543 sessions.js derives ``_RECOVERED_PROMPT_TS_EPSILON`` from
+    ``_PENDING_ACTIVE_TURN_TS_EPSILON`` with a ``typeof`` probe, and ``typeof``
+    on a lexically declared but not-yet-initialised binding throws (TDZ). The
+    const therefore has to be declared before the sessions slice is evaluated.
+    """
+    start = UI_JS.find("const _PENDING_ACTIVE_TURN_TS_EPSILON")
+    assert start != -1, "the epsilon constant is gone from static/ui.js"
+    return UI_JS[start:UI_JS.find("\n", start)]
+
+
+def _pending_resolver_src(include_epsilon: bool = True) -> str:
     """The REAL pending resolver (getPendingSessionMessage and everything it
     closes over) from ui.js, exactly as static/index.html loads them."""
     start = UI_JS.find("const _PENDING_ACTIVE_TURN_TS_EPSILON")
     assert start != -1, "the epsilon constant is gone from static/ui.js"
+    if not include_epsilon:
+        # Hoisted by _ui_epsilon_decl(); a second `const` is a redeclaration.
+        start = UI_JS.find("\n", start) + 1
     end = UI_JS.find("async function checkInflightOnBoot", start)
     assert end != -1
     block = UI_JS[start:end]
@@ -156,9 +172,10 @@ function _driveCase(label, session, base, inflight) {
 def _harness(body: str) -> str:
     return "\n".join([
         "const assert = require('assert');",
+        _ui_epsilon_decl(),
         _reattach_helper_src(),
         _FALLBACK_HELPERS,
-        _pending_resolver_src(),
+        _pending_resolver_src(include_epsilon=False),
         "var INFLIGHT = {};",
         _DRIVER,
         _function_decl(SESSIONS_JS, "_hasInflightTailUserDuplicate") or "",
@@ -590,9 +607,10 @@ async function api() { return { stream_id: 's1', pending_started_at: 200 }; }
 """
     src = "\n".join([
         "const assert = require('assert');",
+        _ui_epsilon_decl(),
         _reattach_helper_src(),
         _FALLBACK_HELPERS,
-        _pending_resolver_src(),
+        _pending_resolver_src(include_epsilon=False),
         _DRIVER,
         _function_decl(SESSIONS_JS, "_hasInflightTailUserDuplicate") or "",
         _function_decl(SESSIONS_JS, "_prepareRunningLiveTail") or "",
