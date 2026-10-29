@@ -19382,31 +19382,6 @@ def handle_post(handler, parsed) -> bool:
             logger.debug("Failed to delete run journal for deleted session %s", sid)
         # The weak lock registry releases this entry automatically after all
         # holders and waiters drop their strong references.
-        # Prune the completion-dedup entry too. The reaper sweeps it once the
-        # completion is delivered (drained from PENDING); a session deleted
-        # while a completion is still pending would otherwise keep its entry.
-        try:
-            from api.background_process import forget_bg_task_completion_dedup
-
-            forget_bg_task_completion_dedup(sid)
-        except Exception:
-            logger.debug("Failed to prune bg-task dedup entry for deleted session %s", sid)
-        try:
-            from api.terminal import close_terminal
-            close_terminal(sid)
-        except Exception:
-            logger.debug("Failed to close workspace terminal for deleted session %s", sid)
-        # Also delete from CLI state.db for CLI sessions shown in sidebar,
-        # but never erase external messaging channel memory via WebUI delete.
-        state_db_cleanup_failed = False
-        if not is_messaging_session:
-            try:
-                from api.models import delete_cli_session
-
-                state_db_cleanup_failed = not delete_cli_session(sid)
-            except Exception:
-                state_db_cleanup_failed = True
-                logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
         try:
             forget_runtime_owner(sid, profile=event_profile)
         except Exception:
