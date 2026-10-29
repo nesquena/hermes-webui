@@ -39,26 +39,27 @@ class TestIssue907LiveModelDedup:
         )
 
     def test_normId_handles_multi_colon_ollama_ids(self):
-        """_normId must strip ONLY the first colon so multi-colon Ollama tag IDs
+        """_modelPickerOptionIdentity must strip ONLY the provider prefix so multi-colon Ollama IDs
         (e.g. '@ollama-cloud:qwen3-vl:235b-instruct' vs bare 'qwen3-vl:235b-instruct')
-        still dedup correctly. JS `split(':',2)[1]` with limit=2 TRUNCATES in JS
-        (unlike Python's split), so the naive variant would lose the tag suffix
-        and mis-dedup.
+        still dedup correctly.
         """
-        fn_idx = UI_JS.find('function _addLiveModelsToSelect(')
+        fn_idx = UI_JS.find('function _modelPickerOptionIdentity(')
         assert fn_idx != -1
-        fn_body = UI_JS[fn_idx:fn_idx + 2000]
-        # The implementation must use indexOf/substring or split().slice(1).join(),
-        # not split(':', 2)[1] which truncates the tail.
-        good = 'indexOf' in fn_body or "slice(1).join(':')" in fn_body
+        fn_end = UI_JS.find('\nfunction _deduplicateModelPickerOptions(', fn_idx)
+        assert fn_end != -1
+        fn_body = UI_JS[fn_idx:fn_end]
+        # The general-provider path must strip only the first colon.
+        good = "value=value.substring(value.indexOf(':')+1)" in fn_body or (
+            "value=value.split(':').slice(1).join(':')" in fn_body
+        )
         assert good, (
-            "_normId must strip only the first colon to preserve Ollama multi-colon "
+            "_modelPickerOptionIdentity must strip only the first colon to preserve Ollama multi-colon "
             "tag IDs (e.g. @ollama-cloud:qwen3-vl:235b-instruct). Use "
-            "substring(indexOf(':')+1) or split(':').slice(1).join(':') — NOT "
+            "value.substring(value.indexOf(':')+1) or value.split(':').slice(1).join(':') — NOT "
             "split(':', 2)[1] which silently truncates in JS."
         )
         assert "split(':',2)[1]" not in fn_body and "split(':', 2)[1]" not in fn_body, (
-            "_normId still uses split(':', 2)[1] which truncates multi-colon IDs in JS; "
+            "_modelPickerOptionIdentity still uses split(':', 2)[1] which truncates multi-colon IDs in JS; "
             "use indexOf/substring instead."
         )
 

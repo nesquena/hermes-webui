@@ -88,14 +88,14 @@ def test_timestamp_hidden_when_attention_state_is_present():
     # padding-right was 86px when the timestamp was position:absolute. Now that
     # the timestamp lives in the flex flow of .session-title-row, the rest
     # state needs no right reservation; hover/streaming/unread/menu-open/
-    # focus-within all expand to 40px to make room for the absolute action
+    # keyboard focus all expand to 40px to make room for the absolute action
     # button + attention indicator.
     assert ".session-item{padding:8px 8px;" in STYLE_CSS
     # PR #1110: :hover removed from the COMBINED padding-right rule (touch layout-shift fix).
     # Instead, hover padding is restored via @media (hover:hover) which only applies to
     # devices with a real hover capability (mouse). Touch/iPad devices satisfy hover:none
     # and skip that block, preventing the layout-reflow mid-tap bug.
-    assert ".session-item.streaming,.session-item.unread,.session-item.needs-attention,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}" in STYLE_CSS
+    assert ".session-item.streaming,.session-item.unread,.session-item.needs-attention,.session-item:has(:focus-visible),.session-item.menu-open{padding-right:40px;}" in STYLE_CSS
     # Desktop hover padding restored via media query (mouse devices only)
     assert "@media (hover:hover)" in STYLE_CSS
     assert ".session-item:hover{padding-right:40px;}" in STYLE_CSS
@@ -119,8 +119,8 @@ def test_timestamp_hidden_when_attention_state_is_present():
     )
     assert "margin-left:auto" in session_time_block
     assert ".session-item:hover .session-time" in STYLE_CSS
-    assert ".session-item.streaming:not(:hover):not(:focus-within):not(.menu-open) .session-actions" in STYLE_CSS
-    assert ".session-item.unread:not(:hover):not(:focus-within):not(.menu-open) .session-actions" in STYLE_CSS
+    assert ".session-item.streaming:not(:hover):not(:has(:focus-visible)):not(.menu-open) .session-actions" in STYLE_CSS
+    assert ".session-item.unread:not(:hover):not(:has(:focus-visible)):not(.menu-open) .session-actions" in STYLE_CSS
 
 
 def test_plain_mouse_hover_does_not_mark_session_row_dragging():

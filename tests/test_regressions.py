@@ -588,7 +588,10 @@ def test_queue_card_cross_session_clear_called_before_draft_save(cleanup_test_se
         "const draftText = ($('msg') || {}).value || '';",
         "const draftFiles = S.pendingFiles ? [...S.pendingFiles] : [];",
         "try {",
-        "await _saveComposerDraftNow(currentSid, draftText, draftFiles);",
+        # #7855 (round 7+): the save now also carries the departing session's
+        # restored continuation token as a 4th argument. The ordering this
+        # test pins (clear → capture → await) is unchanged.
+        "await _saveComposerDraftNow(currentSid, draftText, draftFiles, _switchContId);",
     )
     positions = [cross_block.index(step) for step in ordered_steps]
     assert positions == sorted(positions), (

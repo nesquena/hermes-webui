@@ -131,6 +131,14 @@ KANBAN_PROJECT_CHIP_LIMIT = 200
 # system-chip answer wherever they are projected, so the same background row can
 # never report two different project chips.
 BACKGROUND_CLI_SOURCES = ("cron", "webhook", "kanban")
+# Sources kept out of the 20-row interactive window and its unassigned refill.
+# One-shot runs (`hermes -z`) are added on top of the background sources:
+# agents that delegate through them can start hundreds a day, which used to push
+# Desktop/TUI/CLI conversations out of the window (#8265). Unlike the background
+# sources they keep normal project chips, so a project-assigned one-shot run is
+# still recovered by the assigned pass, and an explicitly requested one resolves
+# through get_cli_session_by_id().
+INTERACTIVE_WINDOW_EXCLUDED_CLI_SOURCES = BACKGROUND_CLI_SOURCES + ("oneshot",)
 _CLI_SESSIONS_CACHE_TTL_SECONDS = 5.0
 # While a turn is actively streaming, hold the CLI/cron projection longer than
 # one poll interval (mirrors the route-level #4808 hold-down). The frontend
@@ -1722,6 +1730,8 @@ class Session:
                  share_token=None,
                  share_created_at=None,
                  gateway_run=None,
+                 delegation_reservation=None,
+                 delegation_cutoff_ts=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -1845,6 +1855,10 @@ class Session:
         self.share_token = str(share_token).strip() if share_token else None
         self.share_created_at = share_created_at
         self.gateway_run = gateway_run if isinstance(gateway_run, dict) else None
+        # Gateway delegation rows leased for this session's next accepted turn (api.gateway_delegation_wakeup).
+        self.delegation_reservation = delegation_reservation if isinstance(delegation_reservation, dict) else None
+        # Last clear/truncation: Gateway delegation rows written before it are never woken into context.
+        self.delegation_cutoff_ts = delegation_cutoff_ts if isinstance(delegation_cutoff_ts, (int, float)) else None
         # #5854: a compact fingerprint of anchor_activity_scenes ({scene_key:
         # updated_at}) persisted BEFORE the messages array so the sidebar-poll
         # freshness check can compare scene freshness without parsing the full
@@ -1946,7 +1960,7 @@ class Session:
             'enabled_toolsets', 'composer_draft',
             'process_wakeup_pause',
             'share_token', 'share_created_at',
-            'gateway_run',
+            'gateway_run', 'delegation_reservation', 'delegation_cutoff_ts',
         ]
         guarded_messages, exact_replay_rows_removed = _deduplicate_exact_stable_messages(self.messages)
         if exact_replay_rows_removed:
@@ -7699,28 +7713,48 @@ def _agent_state_db_path(*, profile=None) -> Path | None:
     return db_path
 
 
-def agent_session_rows_existing(
-    session_ids: list[str] | set[str] | frozenset[str],
-    *,
-    profile=None,
-) -> frozenset[str]:
-    """Return session ids confirmed present in the agent ``sessions`` table.
+def _strict_agent_state_db_path(*, profile=None) -> Path | None:
+    """Return only the state.db owned by *profile*, without fallback.
 
-    Used by the sidebar orphan-prune path (#3238) to batch existence probes
-    instead of opening one SQLite connection per candidate row.
-
-    Degrades safely to ``frozenset(wanted)`` (assume all present) on any error,
-    when the DB is missing, or when the ``sessions`` table is absent — matching
-    ``agent_session_row_exists()`` so a transient failure never causes pruning.
+    Destructive absence checks must not answer a named-profile query from the
+    active profile's database.  An unavailable explicit profile is therefore
+    unknown (``None``), not an invitation to consult another profile.
     """
-    wanted = {str(sid).strip() for sid in (session_ids or []) if str(sid or "").strip()}
-    if not wanted:
-        return frozenset()
     try:
-        import sqlite3
-    except ImportError:
-        return frozenset(wanted)
-    db_path = _agent_state_db_path(profile=profile)
+        if isinstance(profile, str) and profile:
+            from api.profiles import (
+                _is_isolated_profile_mode,
+                _isolated_profile_name,
+                _profiles_match,
+            )
+
+            # The generic resolver intentionally clamps every lookup to the
+            # pinned home in isolated mode.  That is safe for reads, but a
+            # destructive absence check must not mistake the pinned profile's
+            # DB for a foreign logical owner's DB.  Root aliases remain valid
+            # through the canonical profile matcher.
+            if _is_isolated_profile_mode() and not _profiles_match(
+                profile,
+                _isolated_profile_name(),
+            ):
+                return None
+            db_path = _get_profile_home(profile) / 'state.db'
+        else:
+            db_path = _strict_active_state_db_path()
+        # Inside the try: an inaccessible profile directory makes exists()
+        # raise PermissionError, which must fail closed (retain), never 500.
+        if db_path is None or not db_path.exists():
+            return None
+    except Exception:
+        return None
+    return db_path
+
+
+def _agent_session_rows_existing_at_path(
+    wanted: set[str],
+    db_path: Path | None,
+) -> frozenset[str]:
+    """Probe *wanted* at one authoritative path, failing closed."""
     if db_path is None:
         return frozenset(wanted)
     try:
@@ -7744,11 +7778,55 @@ def agent_session_rows_existing(
             return frozenset(existing)
     except Exception:
         logger.debug(
-            "agent_session_rows_existing probe failed for %d ids",
+            "agent session existence probe failed for %d ids",
             len(wanted),
             exc_info=True,
         )
         return frozenset(wanted)
+
+
+def agent_session_rows_existing(
+    session_ids: list[str] | set[str] | frozenset[str],
+    *,
+    profile=None,
+) -> frozenset[str]:
+    """Return session ids confirmed present in the agent ``sessions`` table.
+
+    Used by the sidebar orphan-prune path (#3238) to batch existence probes
+    instead of opening one SQLite connection per candidate row.
+
+    Degrades safely to ``frozenset(wanted)`` (assume all present) on any error,
+    when the DB is missing, or when the ``sessions`` table is absent — matching
+    ``agent_session_row_exists()`` so a transient failure never causes pruning.
+    """
+    wanted = {str(sid).strip() for sid in (session_ids or []) if str(sid or "").strip()}
+    if not wanted:
+        return frozenset()
+    return _agent_session_rows_existing_at_path(
+        wanted,
+        _agent_state_db_path(profile=profile),
+    )
+
+
+def agent_session_rows_existing_strict(
+    session_ids: list[str] | set[str] | frozenset[str],
+    *,
+    profile=None,
+) -> frozenset[str]:
+    """Return rows confirmed by the row-owning profile's state.db only.
+
+    This is the destructive-prune variant.  Missing, unreadable, or
+    unresolvable profile databases fail closed to "all present"; unlike the
+    legacy helper, a missing named-profile DB never falls back to the active
+    profile DB.
+    """
+    wanted = {str(sid).strip() for sid in (session_ids or []) if str(sid or "").strip()}
+    if not wanted:
+        return frozenset()
+    return _agent_session_rows_existing_at_path(
+        wanted,
+        _strict_agent_state_db_path(profile=profile),
+    )
 
 
 def agent_session_zero_message_sids(
@@ -9767,6 +9845,7 @@ def _load_cli_sessions_uncached(
     kanban_project_limit: int | None | bool = KANBAN_PROJECT_CHIP_LIMIT,
     include_claude_code: bool = True,
     _with_completeness: bool = False,
+    session_ids: tuple[str, ...] | None = None,
 ) -> list | _CliSessionsLoadResult:
     cli_sessions = []
     projection_complete = True
@@ -9977,10 +10056,12 @@ def _load_cli_sessions_uncached(
         # out of this 20-row interactive window prevents a busy worker source
         # (especially kanban) from evicting every CLI/TUI/ACP conversation.
         # Spelled as a literal on purpose: tests/test_issue2841_show_cron_sessions_toggle.py
-        # reads this line as source text. Must stay equal to BACKGROUND_CLI_SOURCES
-        # (pinned by test_background_source_exclusion_literal_matches_the_constant).
-        exclude_sources=("cron", "webhook", "kanban") if source_filter is None else None,
+        # reads this line as source text. Must stay equal to
+        # INTERACTIVE_WINDOW_EXCLUDED_CLI_SOURCES (pinned by
+        # test_background_source_exclusion_literal_matches_the_constant).
+        exclude_sources=("cron", "webhook", "kanban", "oneshot") if source_filter is None else None,
         include_sources=None if source_filter is None else (source_filter,),
+        **({'session_ids': session_ids} if session_ids is not None else {}),
     )
     if source_filter is None:
         # The interactive window above is a MIXED budget of assigned and
@@ -9992,7 +10073,12 @@ def _load_cli_sessions_uncached(
         #      owes to an unassigned conversation (#6659 review findings 1-2).
         # Both passes are keyed on the LOGICAL conversation (lineage), never the
         # raw row, so compression segments cannot consume either budget.
+        # The assigned recovery pass skips only the true background sources, so
+        # a one-shot run filed under a project stays reachable from its chip.
+        # The unassigned refill skips one-shot runs too: refilling the window
+        # with them would undo #8265.
         interactive_excluded = BACKGROUND_CLI_SOURCES
+        unassigned_refill_excluded = INTERACTIVE_WINDOW_EXCLUDED_CLI_SOURCES
         first_pass_count = len(state_rows)
         represented_rows: dict[str, dict] = {}
 
@@ -10430,7 +10516,7 @@ def _load_cli_sessions_uncached(
                             db_path,
                             limit=query_limit,
                             log=logger,
-                            exclude_sources=interactive_excluded,
+                            exclude_sources=unassigned_refill_excluded,
                             project_assignment='unassigned',
                             return_window_exhaustion=True,
                         ),
@@ -10820,6 +10906,49 @@ def _load_cli_sessions_uncached(
             logger.debug("Kanban sidebar second pass failed", exc_info=True)
 
     return _result()
+
+
+def get_cli_session_by_id(
+    session_id: str,
+    source_filter: str,
+    *,
+    all_profiles: bool = False,
+) -> dict:
+    """Resolve one ``source_filter`` session by id, outside any recency window.
+
+    The sidebar views are bounded by recency, so a session the user explicitly
+    opens can sit outside every one of them (an older one-shot run, #8265). This
+    reads exactly that row from the active profile's state.db, or from every
+    profile's when ``all_profiles`` is set, through the same projection the
+    sidebar uses, so the row carries the same profile, workspace and project
+    fields. Returns {} when no profile owns it.
+    """
+    sid = str(session_id or '').strip()
+    source = _normalize_cli_session_source_filter(source_filter)
+    if not sid or not source:
+        return {}
+    if all_profiles:
+        contexts, _cache_key = _all_profiles_cli_contexts()
+    else:
+        hermes_home, db_path, cli_profile, _cache_key = _resolve_cli_sessions_context(source)
+        contexts = [(hermes_home, db_path, cli_profile)]
+    for ctx_home, ctx_db_path, ctx_profile in contexts:
+        try:
+            rows = _load_cli_sessions_uncached(
+                ctx_home,
+                ctx_db_path,
+                ctx_profile,
+                source_filter=source,
+                include_claude_code=False,
+                session_ids=(sid,),
+            )
+        except (OSError, sqlite3.Error):
+            logger.debug("Explicit CLI session lookup skipped profile %s", ctx_profile, exc_info=True)
+            continue
+        for row in rows:
+            if row.get('session_id') == sid:
+                return row
+    return {}
 
 
 def get_cli_sessions(
@@ -14242,6 +14371,13 @@ def _merge_session_messages_append_only_impl(
             state_messages = [row for row in state_messages if id(row) in suffix_row_ids]
         post_cancel_state = bool(state_messages)
     _reconcile_api_content_sidecars(sidecar_messages, state_messages)
+    # Rows admitted from state.db in this invocation stay individually
+    # addressable for the #7237 [False] stopped-context splice (see the
+    # `_stopped_db_successor` stamp below). Capture their object ids now,
+    # before the merge loop, because only THIS list's rows may be stamped.
+    _admitted_state_row_objects = {
+        id(row) for row in state_messages if isinstance(row, dict)
+    }
     # The reconciler's quarantine sets are invocation-local. Mirror the
     # identity-bucket guards here because this append-only merge has its own
     # row-id fast path that must not re-admit a row isolated above.
@@ -15038,6 +15174,32 @@ def _merge_session_messages_append_only_impl(
         else:
             merged_messages.append(msg)
         _remember_merged_message(msg, source="state")
+    # #7237 [False] maintainer-call resolution (durable discriminator): when a
+    # terminal partial/error carrier exists but the selected history does NOT
+    # own it (`owns_live_partial` False — the "earlier identical clocks cannot
+    # veto" shape), the assistant rows this merge ADMITS from state.db beyond
+    # the selected context ARE the stopped-context successors. Stamp them so
+    # the Agent-replay splice guard can keep them individually addressable:
+    # streaming._sanitize_messages_for_api rides the stamp through the
+    # projection as the transient `_replay_stop` marker and
+    # `_replay_pair_is_cancelled_history_splice` protects the pair. A plain
+    # float-clock historical pair never enters through this admission path, so
+    # it still merges exactly like the installed Agent (round-5/6 contract).
+    if (
+        incoming_provenance == "state_db"
+        and cancelled_journal_owner_messages is not None
+        and not owns_live_partial
+        and _sidecar_has_terminal_partial_error(owner_messages, live_only=True)
+    ):
+        sidecar_row_objects = {id(row) for row in sidecar_messages if isinstance(row, dict)}
+        for row in merged_messages:
+            if (
+                isinstance(row, dict)
+                and id(row) in _admitted_state_row_objects
+                and id(row) not in sidecar_row_objects
+                and row.get("role") == "assistant"
+            ):
+                row["_stopped_db_successor"] = True
     return merged_messages
 
 

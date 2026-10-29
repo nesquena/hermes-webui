@@ -418,7 +418,7 @@ def test_deduplicate_context_messages_cleans_polluted_current_user_in_result():
         {"role": "assistant", "content": "pushing now"},
     ]
 
-    cleaned = _dedupe_replayed_context_messages(
+    cleaned, _protected = _dedupe_replayed_context_messages(
         previous_context,
         result_messages,
         CURRENT_TURN,
@@ -472,7 +472,7 @@ def test_dedupe_replayed_context_handles_repair_replaced_tail_user_row():
         {"role": "assistant", "content": "pushing now"},
     ]
 
-    cleaned = _dedupe_replayed_context_messages(
+    cleaned, _protected = _dedupe_replayed_context_messages(
         previous_context,
         result_messages,
         CURRENT_TURN,
@@ -507,7 +507,7 @@ def test_dedupe_replayed_context_handles_multihop_repair_replaced_tail_row():
         {"role": "assistant", "content": "pushing now"},
     ]
 
-    cleaned = _dedupe_replayed_context_messages(
+    cleaned, _protected = _dedupe_replayed_context_messages(
         previous_context,
         result_messages,
         CHAIN_CURRENT,
@@ -811,7 +811,7 @@ def test_dedupe_replayed_context_preserves_historical_row_with_merge_shape():
         {"role": "assistant", "content": "new response"},
     ]
 
-    cleaned = _dedupe_replayed_context_messages(
+    cleaned, _protected = _dedupe_replayed_context_messages(
         previous_context,
         result_messages,
         CURRENT_TURN,

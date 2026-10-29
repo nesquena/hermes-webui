@@ -12,6 +12,10 @@ which the #7556 review flagged as an undocumented runtime contract.
 - **On disk:** one `models_cache.json` per profile under the WebUI state
   directory (`_get_models_cache_path()`), stamped with `_schema_version` and
   `_webui_version`.
+- **Parse memo:** one process-wide single slot, `_models_disk_payload_memo`,
+  guarded by `_models_disk_payload_memo_lock`. It is NOT a cache of the catalog
+  and never outlives a single session visit — see
+  [The parse memo](#the-parse-memo-third-layer) below.
 - **Cold path:** `get_available_models(prefer_cache=...)`; the `prefer_cache`
   branch never starts a live provider rebuild.
 - **Hot path:** `_endpoint_advertised_model_ids()` reads only the published
@@ -56,6 +60,95 @@ Codex selections are qualified as `@openai-codex:<model>` before the
 same-provider bare-ID shortcut. This keeps a live-discovered Codex model routed
 to Codex even if another configured provider advertises the same ID. The
 separate OpenAI API catalog does not determine Codex subscription availability.
+
+## The parse memo (third layer)
+
+`_read_models_cache_disk_payload()` parses the disk snapshot and leaves the
+result in a single process-wide slot, `_models_disk_payload_memo`, so the
+session-visit freshness precheck and the loader that follows it in the same call
+do not `json.load` the same file twice. It is a parse handoff, not a third
+cache with its own freshness policy: it can only ever save the parse that
+happens microseconds later inside one call.
+
+### File key
+
+The slot is keyed on `(path, st_mtime_ns, st_size, st_ino, st_dev)`. The stat
+identity is taken from `os.fstat(f.fileno())` of the descriptor `json.load`
+actually parsed, *after* `open()` — never from a separate `cache_path.stat()`
+that runs before it. Key and payload therefore come from the same descriptor and
+cannot disagree, so there is no precheck-then-open window to race.
+
+`st_ino`/`st_dev` are load-bearing, not decoration. The real writer replaces the
+file with a temp file plus `os.replace()`, which mints a new inode, while Linux
+inode timestamps come from the coarse clock: a rapid same-size rewrite can carry
+the same `st_mtime_ns` and the same `st_size`. Keyed on `(mtime_ns, size)`
+alone, that generation is indistinguishable from the old one and the previous
+catalog is served back.
+
+### Generation fence
+
+The stat identity says *which bytes* were parsed. It does not say *which
+catalog generation* they belonged to, and those are not the same thing: a
+rebuild is not guaranteed to change any part of the stat key. A same-size
+rewrite inside the coarse-clock mtime tick, on a filesystem that reissues the
+freed inode, produces a file whose `(st_mtime_ns, st_size, st_ino, st_dev)` is
+identical to the pre-rebuild one.
+
+So the entry also carries the catalog generation (`_models_rebuild_seq`) that
+was current when the payload was parsed, and that generation fences the entry
+on both sides:
+
+- The **producer** captures the generation before it opens the file and
+  publishes its entry only while that generation is still current. An
+  invalidation that lands during the parse supersedes the bytes it parsed, so
+  those bytes are never published.
+- The **consumer** rejects an entry whose generation is no longer current, and
+  drops it rather than leaving it resident.
+
+Both are required, and neither alone is sufficient.
+`invalidate_models_cache()` clears the slot *before* it advances the
+generation, so a producer that captured the old generation can publish into
+that gap — the entry is published while the generation is still current, and
+the generation advances afterwards. Only the consumer's own check rejects it.
+
+This matters because the epoch guard in `get_available_models_for_session_visit()`
+cannot catch it: `disk_epoch` is read *after* the freshness precheck, so it
+already holds the post-invalidation value and compares equal to the current
+one. The generation fence is the only thing that distinguishes the
+pre-invalidation catalog from the rebuilt one at that point.
+
+### Consume-once ownership
+
+The slot is **consume-once**: a hit clears the slot before returning, and every
+later read re-parses. The memo hands its payload to exactly one reader.
+
+This is what keeps the ownership invariant that predates the memo: a
+pre-#7932-era read always produced a fresh `json.load`, so each caller owned its
+catalog exclusively and could mutate it freely. Callers do mutate what they
+receive — `_annotate_fast_tier_model_groups` writes `supports_fast_tier` into
+the model dicts, and `warm_models_catalog_provenance_if_cold` publishes them
+into the process-wide `_available_models_cache` without a deepcopy. Handing the
+same nested dicts to a second reader would make one caller's in-place edits
+visible to the other, and the corrupted catalog would then be served to a later
+read as though it had just come off disk.
+
+The read-validate-clear path runs entirely under `_models_disk_payload_memo_lock`
+— not just the clear. Reading the slot and then calling `stat()` releases the
+GIL, so without the full-scope lock two threads can both enter, both pass
+validation, and both return the same object, which would make the consume step a
+no-op in exactly the case it exists for. The producer's slot write takes the
+same lock.
+
+A visit served from the *memory* cache never reaches the loader that would
+consume the precheck's parse, so it drops the slot instead. Without that, the
+abandoned entry keeps a whole parsed catalog resident (about 2.2 MB at 5,000
+models) and an unrelated later read can pick it up — which is what breaks the
+"never outlives a single session visit" rule above.
+
+`None` in the payload slot is a real answer — "this file parsed, but not to a
+dict" — and is distinct from `_MODELS_DISK_PAYLOAD_UNSET`, which means "no memo
+entry, read the file yourself". An unreadable or unparseable file clears the
+slot so the next reader retries from scratch.
 
 ## Invariant: deny-lists are one-directional
 
@@ -110,6 +203,33 @@ The switch keeps the disk snapshot because it is keyed per profile and
 new catalog input must become an axis first. `delete_profile_api()` and
 `create_profile_api()` unlink `models_cache.<name>.json`, so a recreated profile
 never inherits the old catalog.
+
+### The parse memo is dropped on every invalidation
+
+`invalidate_models_cache()` clears `_models_disk_payload_memo` under
+`_models_disk_payload_memo_lock` before it touches the disk snapshot, including
+the `delete_disk=False` profile-switch path where the snapshot is deliberately
+kept. Clearing memory alone is not a no-op here, because the memo is the one
+cache that would otherwise survive.
+
+None of the memo's key components is guaranteed to change across a rebuild: the
+writer can land inside the same coarse-clock mtime tick at an identical size,
+and a filesystem that reuses inodes can reissue the same `st_ino`/`st_dev` pair.
+A surviving entry therefore keeps matching the freshly rebuilt file, and the
+next reader consumes the **pre-invalidation** catalog — uncopied, per the
+consume-once rule above — so its in-place edits would corrupt it for every
+reader after it. Leaving a stale memo populated across an invalidation is a
+correctness bug, not a missed optimization: a test that seeded its own provider
+saw a previous test's catalog win because the memory cache was cleared while
+the memo was not.
+
+Clearing the slot is not sufficient on its own, because the slot is cleared
+*before* the generation advances. A producer that parsed the pre-invalidation
+file can publish into that gap, and the stat identity of the rebuilt file can
+still match the published entry. The
+[generation fence](#generation-fence) is what closes that window: the
+published entry records the generation it was parsed under, and both the
+producer and the consumer refuse to hand out a superseded generation.
 
 Credential eviction is part of the same epoch-reset critical section as memory
 invalidation, before rebuild admission reopens. Full invalidation clears all
@@ -167,6 +287,28 @@ snapshot survives it and is served without a live rebuild, each source-axis
 change or a delete/recreate forces a fresh rebuild, and a same-path config
 edit still deletes the snapshot.
 
+`tests/test_issue8302_models_cache_memo_identity.py` covers the parse memo's
+runtime invariants: two concurrent consumers never receive the same catalog
+object (the read-validate-clear path is mutually exclusive, and exactly one wins
+the single-use slot), a same-size `os.replace` rewrite is not served from the
+memo, `invalidate_models_cache()` drops the slot, and the single-parse fast path
+still works for an unchanged file.
+
+`tests/test_issue8302_models_cache_memo_invalidation_epoch.py` covers the
+generation fence and the memo's lifetime: an invalidation that overlaps a
+session visit's precheck must not let the visit serve the pre-invalidation
+catalog (the rebuild keeps the file's stat identity identical, so only the
+generation can tell the two apart), a memo entry from a superseded generation is
+never served, and a visit served from the memory cache drops the precheck parse
+instead of leaving a parsed catalog resident.
+
+`tests/test_issue8302_models_cache_memo_contract_doc.py` covers this document:
+it names the memo under "What is cached", records its file key, generation
+fence, consume-once ownership and invalidation rules, and re-checks every
+`api/config.py` symbol the contract names so the doc cannot drift away from the
+code.
+
 ## References
 
-Issues/PRs: #2443, #7540, #7556, #7558. RCAs: `t_d127953d`, `t_16551f61`.
+Issues/PRs: #2443, #7540, #7556, #7558, #7723, #8302. RCAs: `t_d127953d`,
+`t_16551f61`.
