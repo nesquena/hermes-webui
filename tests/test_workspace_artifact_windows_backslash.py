@@ -31,8 +31,18 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 
 def _extract_function(source: str, name: str) -> str:
-    start = source.index(f"async function {name}(" if f"async function {name}(" in source else f"function {name}(")
-    brace = source.index("{", start)
+    marker = f"async function {name}(" if f"async function {name}(" in source else f"function {name}("
+    start = source.index(marker)
+    paren = source.index("(", start)
+    paren_depth = 0
+    for index in range(paren, len(source)):
+        if source[index] == "(":
+            paren_depth += 1
+        elif source[index] == ")":
+            paren_depth -= 1
+            if paren_depth == 0:
+                break
+    brace = source.index("{", index)
     depth = 0
     for pos in range(brace, len(source)):
         if source[pos] == "{":
@@ -53,11 +63,15 @@ def _run_artifact_open(path: str, workspace: str, entries_by_dir: dict) -> dict:
     """
     open_artifact = _extract_function(WORKSPACE_JS, "openArtifactPath")
     path_exists = _extract_function(WORKSPACE_JS, "_workspacePathExists")
+    normalize_path = _extract_function(WORKSPACE_JS, "_normalizeWorkspaceRelPath")
+    route_for_path = _extract_function(WORKSPACE_JS, "_workspaceRouteForPath")
+    route_for_path_rel = _extract_function(WORKSPACE_JS, "_workspaceRouteForPathRel")
     entries_json = json.dumps(entries_by_dir)
     driver = f"""
 const S = {{ session: {{ session_id: 't', workspace: {json.dumps(workspace)} }} }};
 const calls = [];
 function switchWorkspacePanelTab() {{}}
+function _workspaceEscapeGrantForPath() {{ return null; }}
 function t(key) {{ return key; }}
 function setStatus(msg) {{ calls.push({{status: msg}}); }}
 function openFile(rel) {{ calls.push({{open: rel}}); }}
@@ -66,8 +80,11 @@ async function api(url) {{
   const m = url.match(/[?&]path=([^&]*)/);
   const dir = m ? decodeURIComponent(m[1]) : '.';
   calls.push({{api: dir}});
-  return {{ entries: (ENTRIES_BY_DIR[dir] || []).map(name => ({{name, path: name}})) }};
+  return {{ entries: (ENTRIES_BY_DIR[dir] || []).map(name => ({{name, path: name}})), has_more:false, cursor:null }};
 }}
+{normalize_path}
+{route_for_path_rel}
+{route_for_path}
 {path_exists}
 {open_artifact}
 (async () => {{

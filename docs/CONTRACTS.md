@@ -20,6 +20,11 @@ contributor guidance; it does not change runtime behavior or CI gates.
 - [`CHANGELOG.md`](../CHANGELOG.md): release history maintained by the release
   workflow. Read it for context, but do not edit it in ordinary contributor PRs;
   put release-note-ready wording in the PR body instead.
+- [`ARCHITECTURE.md`](../ARCHITECTURE.md): the workspace listing contract;
+  `/api/list` and `/api/escape/list` return up to 200 entries with `has_more`
+  and a signed continuation cursor. The cursor follows the current rank and
+  name ordering, while the response signature hashes the entries returned on
+  that page, matching `dir_signature()` and its tests.
 
 ## Runtime, durability, and state contracts
 

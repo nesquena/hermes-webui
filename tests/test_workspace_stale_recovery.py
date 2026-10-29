@@ -370,12 +370,13 @@ def test_list_dir_recovers_missing_implicit_session_workspace(monkeypatch, tmp_p
     monkeypatch.setattr(routes, "get_session", lambda _sid: session)
     monkeypatch.setattr(routes, "get_last_workspace", lambda: str(fallback))
 
-    def fake_list_dir(workspace_path, rel_path):
+    def fake_list_dir_page(workspace_path, rel_path, cursor=None):
         captured["workspace"] = workspace_path
         captured["rel_path"] = rel_path
-        return []
+        assert cursor is None
+        return {"entries": [], "has_more": False, "cursor": None}
 
-    monkeypatch.setattr(routes, "list_dir", fake_list_dir)
+    monkeypatch.setattr(routes, "list_dir_page", fake_list_dir_page)
     monkeypatch.setattr(routes, "dir_signature", lambda *_args: "sig")
     monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: payload)
 
@@ -389,6 +390,8 @@ def test_list_dir_recovers_missing_implicit_session_workspace(monkeypatch, tmp_p
     assert payload == {
         "entries": [],
         "signature": "sig",
+        "has_more": False,
+        "cursor": None,
         "path": ".",
         "workspace": str(fallback.resolve()),
         "workspace_recovered": True,
@@ -419,11 +422,12 @@ def test_list_recovery_stays_bound_when_global_fallback_changes(
     monkeypatch.setattr(
         routes, "get_last_workspace", lambda: selected["workspace"]
     )
-    def capture_list(workspace_path, _rel):
+    def capture_list(workspace_path, _rel, cursor=None):
         captured["listed"] = workspace_path
-        return []
+        assert cursor is None
+        return {"entries": [], "has_more": False, "cursor": None}
 
-    monkeypatch.setattr(routes, "list_dir", capture_list)
+    monkeypatch.setattr(routes, "list_dir_page", capture_list)
     monkeypatch.setattr(routes, "dir_signature", lambda *_args: "sig")
     monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: payload)
 
@@ -499,7 +503,7 @@ def test_list_recovery_persistence_failure_fails_closed(monkeypatch, tmp_path):
     fallback = tmp_path / "fallback"
     fallback.mkdir()
     stale = tmp_path / "deleted-workspace"
-    calls = {"list_dir": 0}
+    calls = {"list_dir_page": 0}
     session = SimpleNamespace(
         session_id="sess-save-fails",
         workspace=str(stale),
@@ -512,8 +516,10 @@ def test_list_recovery_persistence_failure_fails_closed(monkeypatch, tmp_path):
     monkeypatch.setattr(routes, "get_last_workspace", lambda: str(fallback))
     monkeypatch.setattr(
         routes,
-        "list_dir",
-        lambda *_args: calls.__setitem__("list_dir", calls["list_dir"] + 1),
+        "list_dir_page",
+        lambda *_args, **_kwargs: calls.__setitem__(
+            "list_dir_page", calls["list_dir_page"] + 1
+        ),
     )
     monkeypatch.setattr(
         routes,
@@ -527,7 +533,7 @@ def test_list_recovery_persistence_failure_fails_closed(monkeypatch, tmp_path):
 
     assert payload["status"] >= 400
     assert "persist" in payload["error"].lower()
-    assert calls["list_dir"] == 0
+    assert calls["list_dir_page"] == 0
     assert session.workspace == str(stale)
 
 
@@ -537,7 +543,7 @@ def test_list_dir_does_not_recover_unpersistable_cli_workspace(
     stale = tmp_path / "deleted-cli-workspace"
     fallback = tmp_path / "fallback"
     fallback.mkdir()
-    calls = {"fallback": 0, "list_dir": 0}
+    calls = {"fallback": 0, "list_dir_page": 0}
 
     monkeypatch.setattr(routes, "get_session", lambda _sid: (_ for _ in ()).throw(KeyError(_sid)))
     monkeypatch.setattr(
@@ -553,8 +559,10 @@ def test_list_dir_does_not_recover_unpersistable_cli_workspace(
     monkeypatch.setattr(routes, "get_last_workspace", get_fallback)
     monkeypatch.setattr(
         routes,
-        "list_dir",
-        lambda *_args: calls.__setitem__("list_dir", calls["list_dir"] + 1),
+        "list_dir_page",
+        lambda *_args, **_kwargs: calls.__setitem__(
+            "list_dir_page", calls["list_dir_page"] + 1
+        ),
     )
     monkeypatch.setattr(
         routes,
@@ -567,7 +575,7 @@ def test_list_dir_does_not_recover_unpersistable_cli_workspace(
     )
 
     assert payload["status"] == 404
-    assert calls == {"fallback": 0, "list_dir": 0}
+    assert calls == {"fallback": 0, "list_dir_page": 0}
 
 
 @pytest.mark.parametrize(
@@ -589,7 +597,7 @@ def test_list_dir_preserves_remote_workspace_rejection(
     fallback_path = tmp_path / "fallback"
     fallback_path.mkdir()
     session = SimpleNamespace(session_id="sess-list-remote", workspace=candidate)
-    calls = {"fallback": 0, "list_dir": 0}
+    calls = {"fallback": 0, "list_dir_page": 0}
 
     monkeypatch.setattr(
         api_config,
@@ -603,12 +611,12 @@ def test_list_dir_preserves_remote_workspace_rejection(
         calls["fallback"] += 1
         return fallback_path
 
-    def fake_list_dir(*_args):
-        calls["list_dir"] += 1
-        return []
+    def fake_list_dir_page(*_args, **_kwargs):
+        calls["list_dir_page"] += 1
+        return {"entries": [], "has_more": False, "cursor": None}
 
     monkeypatch.setattr(routes, "get_last_workspace", fallback)
-    monkeypatch.setattr(routes, "list_dir", fake_list_dir)
+    monkeypatch.setattr(routes, "list_dir_page", fake_list_dir_page)
     monkeypatch.setattr(
         routes,
         "bad",
@@ -622,4 +630,4 @@ def test_list_dir_preserves_remote_workspace_rejection(
     assert isinstance(payload, dict)
     assert payload["status"] == 404
     assert "Path does not exist" in payload["error"]
-    assert calls == {"fallback": 0, "list_dir": 0}
+    assert calls == {"fallback": 0, "list_dir_page": 0}

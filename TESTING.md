@@ -731,6 +731,18 @@ EXPECT:
   - Files have type-appropriate icons (camera for images, notepad for markdown, etc.)
 FAIL: Right panel is blank, error, or all files show generic icon regardless of type.
 
+### T5.1b: Load More Workspace Entries
+SETUP: Workspace contains a directory with at least 201 direct children.
+STEPS:
+  1. Open the Files pane and navigate to that directory.
+  2. Confirm the first 200 rows and the load-more row appear.
+  3. Activate load more with a pointer and with Enter or Space.
+EXPECT:
+  - The next entries appear without duplicates.
+  - The load-more row disappears when the directory is complete.
+  - An authorized external directory keeps its virtual path and read-only rows on later pages.
+FAIL: Entries are missing or duplicated, the control is absent, or an external page becomes writable.
+
 ### T5.2: Navigate Into a Directory
 SETUP: Workspace has at least one subdirectory.
 STEPS:

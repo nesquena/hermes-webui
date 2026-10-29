@@ -282,11 +282,17 @@ function _workspaceRouteForPathRel(path, kind, opts={}){
     params.set('token', grant.token);
     if(kind === 'raw' && opts.download) params.set('download', '1');
     if(kind === 'raw' && opts.inline) params.set('inline', '1');
-    if(kind === 'list') return `/api/escape/list?${params.toString()}`;
+    if(kind === 'list'){
+      if(opts.cursor) params.set('cursor', String(opts.cursor));
+      return `/api/escape/list?${params.toString()}`;
+    }
     if(kind === 'read') return `/api/escape/file/read?${params.toString()}`;
     if(kind === 'raw') return `/api/escape/file/raw?${params.toString()}`;
   }
-  if(kind === 'list') return `/api/list?session_id=${sessionId}&path=${encodeURIComponent(normalizedPath || '.')}`;
+  if(kind === 'list'){
+    const cursor=opts.cursor?`&cursor=${encodeURIComponent(String(opts.cursor))}`:'';
+    return `/api/list?session_id=${sessionId}&path=${encodeURIComponent(normalizedPath || '.')}${cursor}`;
+  }
   if(kind === 'read') return `/api/file?session_id=${sessionId}&path=${encodeURIComponent(normalizedPath || '.')}`;
   if(kind === 'raw'){
     const extra = [];
@@ -632,14 +638,24 @@ function projectSessionArtifactsForOwner(sessionId){
   return true;
 }
 
-async function _workspacePathExists(path){
+async function _workspacePathExists(path, isCurrent=()=>true){
   if(!S.session||!path) return false;
   const parts=String(path).replace(/\\/g,'/').split('/').filter(Boolean);
   const name=parts.pop();
   if(!name) return false;
   const dir=parts.length?parts.join('/'):'.';
-  const data=await api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(dir)}`);
-  return (data.entries||[]).some(entry=>entry&&((entry.path===path)||entry.name===name));
+  let cursor=null;
+  while(true){
+    if(!isCurrent()) return false;
+    const route=_workspaceRouteForPath(dir,'list',{cursor});
+    if(!route) return false;
+    const data=await api(route);
+    if(!isCurrent()) return false;
+    if((data.entries||[]).some(entry=>entry&&((entry.path===path)||entry.name===name))) return true;
+    if(!data.has_more) return false;
+    if(!data.cursor||data.cursor===cursor) throw new Error('Directory listing cursor did not advance');
+    cursor=data.cursor;
+  }
 }
 
 /**
@@ -861,13 +877,20 @@ async function openArtifactPath(path){
   // is in flight must retire this artifact click; otherwise openFile(rel) would
   // take fresh ownership and open the old path in the new context.
   const artGen=typeof _previewOpenGen==='number'?_previewOpenGen:null;
+  const artSession=S.session;
   const artSid=S.session&&S.session.session_id;
+  const artProfile=String(S.activeProfile||(S.session&&S.session.profile)||'default');
+  const artWorkspace=String(S.session&&S.session.workspace||'');
   const artWsGen=typeof _wsTreeGen==='number'?_wsTreeGen:null;
   const _artifactClickOwned=()=>(clickGen===null||clickGen===_artifactClickGen)
-    &&(artGen===null||artWsGen===null
-      ||(typeof _previewOpenOwned==='function'&&_previewOpenOwned(artGen,artSid,artWsGen)));
+    &&(typeof _workspaceRequestIsCurrent!=='function'
+      ?(artGen===null||artWsGen===null
+        ||(typeof _previewOpenOwned==='function'&&_previewOpenOwned(artGen,artSid,artWsGen)))
+      :_workspaceRequestIsCurrent(artSession,String(artSid||''),artProfile,artWorkspace,artWsGen,null)
+        &&(artGen===null||typeof _previewOpenOwned!=='function'
+          ||_previewOpenOwned(artGen,artSid,artWsGen)));
   try{
-    const exists=await _workspacePathExists(rel);
+    const exists=await _workspacePathExists(rel,_artifactClickOwned);
     if(!_artifactClickOwned()||!_dismissalUnchanged()) return false;
     if(!exists){
       setStatus(t('file_open_failed'));
@@ -928,20 +951,28 @@ const _WS_SKELETON_ROWS = [
   {w: 39, indent: 1},
 ];
 
-// Workspace-tree render generation. loadDir() captures this at call time and
-// discards its render/cache writes if a newer generation started meanwhile.
+// Workspace-tree generation. A new loadDir() call and a profile switch advance
+// it, so a response from an older tree cannot update the visible listing.
 // #4671 CORE: an empty-session profile switch REUSES the same session_id, so
 // loadDir()'s session_id guard alone can't reject a pre-switch /api/list response
 // that resolves after the new profile's loadDir('.') — it would paint the previous
-// workspace's files over the switched-to profile. switchToProfile() bumps this
-// UNCONDITIONALLY at switch start (even when the workspace panel is closed, since
-// loadDir('.') still runs then), so the stale response is rejected.
+// workspace's files over the switched-to profile. switchToProfile() also bumps
+// this at switch start, even when the workspace panel is closed.
 let _wsTreeGen = 0;
 function bumpWorkspaceTreeGen(){
   _wsTreeGen = (typeof _wsTreeGen === 'number' ? _wsTreeGen : 0) + 1;
   return _wsTreeGen;
 }
 if(typeof window!=='undefined') window.bumpWorkspaceTreeGen = bumpWorkspaceTreeGen;
+
+function _workspaceRequestIsCurrent(session, sessionId, profile, workspace, treeGen, currentDir){
+  return S.session===session
+    &&String(S.session&&S.session.session_id||'')===sessionId
+    &&String(S.activeProfile||(S.session&&S.session.profile)||'default')===profile
+    &&String(S.session&&S.session.workspace||'')===workspace
+    &&treeGen===_wsTreeGen
+    &&(currentDir===null||String(S.currentDir||'.')===currentDir);
+}
 
 function showWorkspaceTreeSkeleton(){
   const tree = $('fileTree');
@@ -989,32 +1020,51 @@ async function loadDir(path, opts={}){
   const preservePreview=!!(opts&&opts.preservePreview);
   const refreshExpanded=!!(opts&&opts.refreshExpanded);
   if(!S.session)return;
-  const sessionId=S.session.session_id;
-  const treeGen=_wsTreeGen;  // #4671: capture the workspace-tree generation. A profile
-                             // switch bumps it (bumpWorkspaceTreeGen), so a stale response
-                             // from the previous workspace — which would pass the session_id
-                             // guard because an empty-session switch reuses the same id — is
-                             // rejected here instead of painting the wrong profile's files.
+  const requestPath=path||'.';
+  bumpWorkspaceTreeGen();
+  const session=S.session;
+  const sessionId=String(session.session_id||'');
+  const profile=String(S.activeProfile||session.profile||'default');
+  let workspace=String(session.workspace||'');
+  const treeGen=_wsTreeGen;
+  let cacheRef=null;
+  const _loadIsCurrent=()=>_workspaceRequestIsCurrent(
+    session,sessionId,profile,workspace,treeGen,requestPath
+  )&&(cacheRef===null||S._dirCache===cacheRef);
   try{
     if(!path||path==='.'||refreshExpanded){
       if(typeof _syncWorkspaceBirthtimeSupportScope==='function') _syncWorkspaceBirthtimeSupportScope((S.session&&S.session.workspace)||'');
       S._dirCache={};
       _restoreExpandedDirs();  // restore per-workspace expanded state after root and refresh resets
     }
-    S.currentDir=path||'.';
+    cacheRef=S._dirCache;
+    S._dirCursor=null;
+    S._dirHasMore=false;
+    S._dirLoadingMore=false;
+    S.currentDir=requestPath;
+    const route=_workspaceRouteForPath(requestPath, 'list');
     const data=await api(
-      _workspaceRouteForPath(path, 'list') ||
-      `/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path||'.')}`
+      route ||
+      `/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(requestPath)}`
     );
-    if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
+    if(!_loadIsCurrent())return;
+    if(data.has_more&&(!data.cursor||typeof data.cursor!=='string')){
+      const error=new Error('Directory listing did not return a continuation cursor');
+      error.status=500;
+      throw error;
+    }
     if(data.workspace_recovered&&data.workspace){
       S.session.workspace=String(data.workspace);
+      workspace=String(data.workspace);
       S._dirCache={};
+      cacheRef=S._dirCache;
       _restoreExpandedDirs();
       if(typeof syncWorkspaceDisplays==='function')syncWorkspaceDisplays();
       if(typeof syncTerminalButton==='function')syncTerminalButton();
       showToast(t('workspace_recovered_notice',S.session.workspace),5000,'warning');
     }
+    S._dirCursor=data.cursor||null;
+    S._dirHasMore=!!data.has_more;
     S.entries=data.entries||[];renderBreadcrumb();renderFileTree();
     // #2673 — refresh Artifacts tab when its source data (the file tree) updates.
     if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
@@ -1024,13 +1074,29 @@ async function loadDir(path, opts={}){
       const expanded=S._expandedDirs||new Set();
       const pending=[...expanded].filter(dirPath=>!S._dirCache[dirPath]);
       if(pending.length){
-        const results=await Promise.all(pending.map(dirPath=>
-          api(_workspaceRouteForPath(dirPath, 'list'))
-            .then(dc=>({dirPath,entries:dc.entries||[]}))
-            .catch(()=>({dirPath,entries:[]}))
-        ));
-        if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
-        for(const {dirPath,entries} of results) S._dirCache[dirPath]=entries;
+        const cacheRef=S._dirCache;
+        const results=await Promise.all(pending.map(async dirPath=>{
+          const prior=S._dirCache[dirPath];
+          const isCurrent=()=>_loadIsCurrent()
+            &&S._dirCache===cacheRef
+            &&S._dirCache[dirPath]===prior;
+          try{
+            const entries=await _fetchAllPages(_workspaceRouteForPath(dirPath,'list'),isCurrent);
+            return {dirPath,entries,error:null,isCurrent};
+          }catch(error){
+            return {dirPath,entries:null,error,isCurrent};
+          }
+        }));
+        if(!_loadIsCurrent())return;
+        for(const {dirPath,entries,error,isCurrent} of results){
+          if(!isCurrent())continue;
+          if(error){
+            _workspaceShowListingFailure(error,dirPath);
+            continue;
+          }
+          if(entries===null)continue;
+          S._dirCache[dirPath]=entries;
+        }
       }
       if(expanded.size>0)renderFileTree();
     }
@@ -1055,12 +1121,14 @@ async function loadDir(path, opts={}){
     // Fetch git info for workspace root (non-blocking)
     if(!path||path==='.') _refreshGitBadge();
   }catch(e){
-    const grant = _workspaceEscapeGrantForPath(path);
+    if(!_loadIsCurrent())return;
+    const grant = _workspaceEscapeGrantForPath(requestPath);
     if(grant && e && e.status===403){
       _clearWorkspaceEscapeGrant(grant.path);
       showToast(t('external_link_grant_expired') || t('file_open_failed'), 5000, 'error');
       return;
     }
+    _workspaceShowListingFailure(e,requestPath);
     console.warn('loadDir',e);
   }
 }
@@ -1069,6 +1137,126 @@ function refreshWorkspacePanel(){
   if(!S.session)return;
   const targetDir = S.currentDir || '.';
   loadDir(targetDir,{refreshExpanded:true});
+}
+
+async function _fetchAllPages(baseUrl,isCurrent=()=>true){
+  if(!baseUrl)return [];
+  const entries=[];
+  let cursor=null;
+  while(true){
+    if(!isCurrent())return null;
+    const separator=baseUrl.includes('?')?'&':'?';
+    const url=cursor
+      ?`${baseUrl}${separator}cursor=${encodeURIComponent(cursor)}`
+      :baseUrl;
+    const data=await api(url);
+    if(!isCurrent())return null;
+    entries.push(...(Array.isArray(data.entries)?data.entries:[]));
+    if(!data.has_more)return entries;
+    if(!data.cursor||data.cursor===cursor){
+      throw new Error('Directory listing cursor did not advance');
+    }
+    cursor=String(data.cursor);
+  }
+}
+
+function _workspaceShowListingFailure(error,path){
+  const status=Number(error&&error.status||0);
+  const grant=_workspaceEscapeGrantForPath(path);
+  if(status===403&&grant){
+    _clearWorkspaceEscapeGrant(grant.path);
+    showToast(t('external_link_grant_expired')||t('file_open_failed'),5000,'error');
+    return 'grant-expired';
+  }
+  if(status===400||status===404||status===409){
+    showToast(t('workspace_listing_expired'),4000,'warning');
+    return 'expired';
+  }
+  showToast(t('workspace_listing_failed')||t('file_open_failed'),5000,'error');
+  return 'failed';
+}
+
+function _renderLoadMoreRow(){
+  const tree=typeof $==='function'?$('fileTree'):null;
+  if(!tree)return;
+  const existing=tree.querySelector('.ws-load-more-row');
+  if(existing)existing.remove();
+  if(!S._dirHasMore||!S._dirCursor)return;
+  const row=document.createElement('div');
+  row.className='ws-load-more-row file-item';
+  row.style.paddingLeft='8px';
+  row.textContent=t('load_more_entries',S.entries.length)
+    ||`Showing ${S.entries.length} entries · Load more`;
+  row.setAttribute('role','button');
+  row.setAttribute('tabindex','0');
+  row.setAttribute('aria-disabled',S._dirLoadingMore?'true':'false');
+  row.onclick=()=>_loadMoreDir();
+  row.onkeydown=event=>{
+    if(event.key==='Enter'||event.key===' '){
+      event.preventDefault();
+      _loadMoreDir();
+    }
+  };
+  tree.appendChild(row);
+}
+
+async function _loadMoreDir(){
+  if(!S.session||!S._dirCursor||!S._dirHasMore||S._dirLoadingMore)return;
+  const cursor=String(S._dirCursor);
+  const path=String(S.currentDir||'.');
+  const session=S.session;
+  const sessionId=String(session.session_id||'');
+  const profile=String(S.activeProfile||session.profile||'default');
+  const workspace=String(session.workspace||'');
+  const treeGen=_wsTreeGen;
+  const treeIsCurrent=()=>_workspaceRequestIsCurrent(
+    session,sessionId,profile,workspace,treeGen,path
+  );
+  const requestIsCurrent=()=>treeIsCurrent()&&String(S._dirCursor||'')===cursor;
+  S._dirLoadingMore=true;
+  try{
+    const route=_workspaceRouteForPath(path,'list',{cursor});
+    if(!route)return;
+    const data=await api(route);
+    if(!requestIsCurrent())return;
+    if(data.has_more&&(!data.cursor||String(data.cursor)===cursor)){
+      const error=new Error('Directory listing cursor did not advance');
+      error.status=400;
+      throw error;
+    }
+    const seen=new Set((S.entries||[]).map(entry=>String(entry&&entry.path||'')));
+    const fresh=(Array.isArray(data.entries)?data.entries:[]).filter(entry=>{
+      if(!entry)return false;
+      const entryPath=String(entry.path||'');
+      if(seen.has(entryPath))return false;
+      seen.add(entryPath);
+      return true;
+    });
+    S.entries=(S.entries||[]).concat(fresh);
+    S._dirCursor=data.cursor||null;
+    S._dirHasMore=!!data.has_more;
+  }catch(error){
+    if(!requestIsCurrent())return;
+    const status=Number(error&&error.status||0);
+    if(status===400||status===403||status===404||status===409){
+      S._dirCursor=null;
+      S._dirHasMore=false;
+    }
+    _workspaceShowListingFailure(error,path);
+  }finally{
+    if(treeIsCurrent()){
+      S._dirLoadingMore=false;
+      renderFileTree();
+    }
+  }
+}
+
+if(typeof renderFileTree==='function'){
+  const _renderFileTreeForPaging=renderFileTree;
+  renderFileTree=function(){
+    _renderFileTreeForPaging();
+    _renderLoadMoreRow();
+  };
 }
 
 async function _refreshGitBadge(){
