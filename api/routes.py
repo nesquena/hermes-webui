@@ -9036,11 +9036,12 @@ def _resolve_compatible_session_model_state(
     # state, so a normalized display answer silently reroutes the next turn
     # to a backend the user did not pick.
     #
-    # Only fires when BOTH model and provider are present AND the request is
-    # an ``@provider:model`` form whose provider is statically known or
-    # configured. Everything else must fall through to the
-    # compatibility-repair path below, because that path is what fixes stuck
-    # stale selections:
+    # Only fires when the persisted ``model`` carries an ``@provider:model``
+    # form whose provider is statically known or configured, AND the session
+    # either stored no provider (the hint is then the only routing target it
+    # names) or stored one that matches the hint. Everything else must fall
+    # through to the compatibility-repair path below, because that path is
+    # what fixes stuck stale selections:
     #
     #   * a provider that no longer exists (``@removed:mistral-large`` /
     #     ``removed``) has nothing left to preserve — the browser echoes the
@@ -9056,14 +9057,27 @@ def _resolve_compatible_session_model_state(
     #     ``openai-codex`` — a stale OpenRouter-shaped id from before Codex
     #     persisted its provider) are exactly what compatibility repair exists
     #     for; a cold wakeup must still repair them to the active default.
-    if catalog.get("_non_authoritative") and model and requested_provider:
+    #
+    # ``requested_provider`` must NOT be a precondition (re-gate 2026-10-29):
+    # a session can persist only the qualified hint (``@copilot:gpt-5.5``)
+    # with an empty ``model_provider`` column. Requiring the stored provider
+    # there sent the hint through the repair path, which rewrote the display
+    # answer to ``gpt-5.5 / openai-codex``; the browser echoes that into
+    # ``S.session`` and the next ``/api/chat/start`` routes to a backend the
+    # user never picked.
+    if catalog.get("_non_authoritative") and model:
         _bare_model_hint, _hinted_provider = _split_provider_qualified_model(model)
         if _hinted_provider and _provider_is_known_or_configured(
             _hinted_provider
-        ) and _non_authoritative_hint_matches_requested_provider(
-            _hinted_provider, requested_provider
+        ) and (
+            not requested_provider
+            or _non_authoritative_hint_matches_requested_provider(
+                _hinted_provider, requested_provider
+            )
         ):
-            return model, requested_provider, False
+            # Hand back the hinted provider when the session stored none: it
+            # is the routing target the persisted model already names.
+            return model, requested_provider or _hinted_provider, False
 
     # Profile-aware resolution: when the caller supplies profile context
     # (not an explicit per-chat override), use the profile's provider and

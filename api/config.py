@@ -11463,16 +11463,25 @@ def get_available_models(
 
     _exit_stack = _ExitStack()
     if prefer_cache and not wait_for_inflight_rebuild:
-        if not _available_models_cache_lock.acquire(blocking=False):
-            # Lock busy → an in-flight rebuild owns it. Serve the best
-            # lock-free snapshot now; never wait on the builder.
-            if disk_groups is not None:
+        _admitted = _available_models_cache_lock.acquire(blocking=False)
+        if not _admitted and _cache_build_in_progress:
+            # Lock busy AND a rebuild is in flight → the builder owns the
+            # lock across ``build_done.wait()``. Serve the best lock-free
+            # snapshot now; never wait on the builder.
+            if disk_groups is not None and disk_epoch == _models_rebuild_seq:
                 # The rebuild this caller overlaps may be the one that is
                 # adding the provider the persisted pair names, so even a
                 # fully valid disk snapshot is not authoritative here (#7568
                 # CORE). Deep-copy before marking: the on-disk cache loader
                 # owns no shared state, but later callers must still see a
                 # clean document.
+                #
+                # The epoch fence is the same one the post-lock path applies
+                # below (re-gate 2026-10-29): an invalidation that advanced
+                # ``_models_rebuild_seq`` after this unlocked read means these
+                # bytes may describe the catalog it just cleared. Serving them
+                # would hand out a stale default the invalidation deliberately
+                # dropped.
                 return _mark_non_authoritative_catalog(
                     copy.deepcopy(disk_groups),
                     reason="no_wait_lock_busy_disk_cache",
@@ -11486,6 +11495,17 @@ def get_available_models(
                 copy.deepcopy(_minimal_static_models_catalog()),
                 reason="no_wait_minimal_static_catalog",
             )
+        if not _admitted:
+            # Lock busy but NO rebuild is in flight: the holder is one of the
+            # short authoritative critical sections that deep-copy the catalog
+            # under this lock (1 ms at 15 models, 32 ms at 5,000). Queue behind
+            # it and serve the authoritative answer. Downgrading on ANY busy
+            # lock marked ordinary display reads non-authoritative — with a
+            # warm cache and no rebuild, concurrent readers got the minimal
+            # catalog in 27-40 of 80 answers, which echoed aliases (``claude``
+            # for ``anthropic``) and left legacy pairs unrepaired (#7568
+            # re-gate 2026-10-29).
+            _available_models_cache_lock.acquire()
         _exit_stack.callback(_available_models_cache_lock.release)
 
     # Durable commits queued while the catalog lock is held, run after it is

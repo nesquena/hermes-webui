@@ -416,3 +416,136 @@ def test_display_prefer_cache_beats_a_real_builder_holding_the_lock(monkeypatch)
         "a resolution that overlapped a real rebuild must be marked "
         "non-authoritative so no caller routes on it"
     )
+
+
+# ── #7568 re-gate 2026-10-29: lock admission + epoch fence ─────────────────
+
+
+def _disk_catalog(provider_id: str) -> dict:
+    return {
+        "active_provider": provider_id,
+        "default_model": "stale-default",
+        "configured_model_badges": {},
+        "groups": [
+            {"provider_id": provider_id, "models": [], "extra_models": []}
+        ],
+    }
+
+
+def _hold_lock(seconds: float = 0.6):
+    release_event = threading.Event()
+    holder = threading.Thread(
+        target=_hold_lock_briefly,
+        args=(cfg._available_models_cache_lock, release_event, seconds),
+        daemon=True,
+    )
+    holder.start()
+    time.sleep(0.15)  # let the holder actually own the lock
+    return holder, release_event
+
+
+def test_lock_busy_without_rebuild_keeps_the_authoritative_answer(monkeypatch):
+    """should-fix (#7568 re-gate 2026-10-29): a short-lived holder that is NOT
+    a rebuild must not push a display reader onto the minimal catalog.
+
+    Every authoritative fast path holds ``_available_models_cache_lock`` while
+    it deep-copies the catalog (1 ms at 15 models, 32 ms at 5,000). With a warm
+    cache and NO rebuild in flight, those brief holds were indistinguishable
+    from a budget-length rebuild, so concurrent readers received a
+    non-authoritative minimal catalog in 27-40 of 80 answers. The visible
+    damage: an alias echo (``claude`` for ``anthropic``) and legacy pairs left
+    unrepaired, because the non-authoritative marker tells the display
+    resolver to preserve instead of repair.
+    """
+    _warm_catalog(monkeypatch, provider_ids=["anthropic"])
+    monkeypatch.setattr(cfg, "_cache_build_in_progress", False, raising=False)
+
+    holder, release_event = _hold_lock()
+    try:
+        result = cfg.get_available_models(
+            prefer_cache=True, wait_for_inflight_rebuild=False
+        )
+    finally:
+        release_event.set()
+        holder.join(timeout=3.0)
+
+    assert result.get("_non_authoritative") is None, (
+        "a busy-but-not-rebuilding lock downgraded an ordinary display "
+        "resolution — the reader must queue for the short holder instead"
+    )
+    assert [g["provider_id"] for g in result.get("groups", [])] == ["anthropic"], (
+        "the reader must serve the warm authoritative snapshot, not the "
+        "minimal static catalog"
+    )
+
+
+def test_lock_busy_disk_fallback_serves_uninvalidated_snapshot(monkeypatch):
+    """Control for the epoch fence: with no invalidation between the unlocked
+    disk read and the lock-busy return, the disk snapshot IS the intended
+    non-authoritative fallback (same reason the post-lock path would use it).
+    """
+    _cold_caches(monkeypatch)
+    monkeypatch.setattr(
+        cfg,
+        "_load_models_cache_from_disk",
+        lambda: _disk_catalog("disk-provider"),
+    )
+    monkeypatch.setattr(cfg, "_cache_build_in_progress", True, raising=False)
+
+    holder, release_event = _hold_lock()
+    try:
+        result = cfg.get_available_models(
+            prefer_cache=True, wait_for_inflight_rebuild=False
+        )
+    finally:
+        release_event.set()
+        holder.join(timeout=3.0)
+
+    assert result.get("_non_authoritative") is True
+    assert result.get("_non_authoritative_reason") == "no_wait_lock_busy_disk_cache"
+    assert [g["provider_id"] for g in result.get("groups", [])] == ["disk-provider"]
+
+
+def test_lock_busy_disk_fallback_is_epoch_fenced(monkeypatch):
+    """should-fix (#7568 re-gate 2026-10-29): the lock-busy disk fallback must
+    honor the same ``disk_epoch == _models_rebuild_seq`` fence as the post-lock
+    path.
+
+    Reproduces the invalidation race: the unlockeded disk read captures epoch
+    N, an invalidation advances ``_models_rebuild_seq`` before the fallback
+    returns, and the lock is busy. Serving those bytes would hand out a
+    catalog the invalidation deliberately cleared — the post-lock path fences
+    exactly this case, and the lock-busy path must not be a hole in it.
+    """
+    _cold_caches(monkeypatch)
+
+    def _load_then_invalidate():
+        # Simulate invalidation landing AFTER the epoch was captured at the
+        # top of get_available_models but BEFORE the lock-busy return.
+        monkeypatch.setattr(
+            cfg, "_models_rebuild_seq", cfg._models_rebuild_seq + 1, raising=False
+        )
+        return _disk_catalog("invalidated-disk-provider")
+
+    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", _load_then_invalidate)
+    monkeypatch.setattr(cfg, "_cache_build_in_progress", True, raising=False)
+
+    holder, release_event = _hold_lock()
+    try:
+        result = cfg.get_available_models(
+            prefer_cache=True, wait_for_inflight_rebuild=False
+        )
+    finally:
+        release_event.set()
+        holder.join(timeout=3.0)
+
+    assert result.get("_non_authoritative_reason") != "no_wait_lock_busy_disk_cache", (
+        "the lock-busy path served a disk snapshot the invalidation had "
+        "already advanced past — it must apply the epoch fence"
+    )
+    assert result.get("_non_authoritative_reason") == "no_wait_minimal_static_catalog"
+    assert [
+        g.get("provider_id") for g in result.get("groups", [])
+    ] != ["invalidated-disk-provider"], (
+        "the invalidated disk default leaked into the display answer"
+    )

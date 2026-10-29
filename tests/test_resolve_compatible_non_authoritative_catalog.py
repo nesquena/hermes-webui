@@ -336,6 +336,80 @@ def test_resolver_still_repairs_legacy_codex_model_against_non_authoritative_cat
 
 
 # ---------------------------------------------------------------------------
+# 1c. Missing stored provider — the qualified hint is the only routing target
+#     (re-gate #7568, 2026-10-29, nesquena-hermes CORE)
+# ---------------------------------------------------------------------------
+
+
+def test_resolver_preserves_qualified_hint_when_session_stored_no_provider(
+    no_copilot_in_providers_cfg,
+):
+    """A session persisted as ``@copilot:gpt-5.5`` with an EMPTY
+    ``model_provider`` column must keep the qualified hint when the catalog
+    is non-authoritative.
+
+    The guard used to require ``requested_provider``, so this shape fell
+    through to the compatibility-repair path: the display answer became
+    ``gpt-5.5 / openai-codex``, the browser echoed it into
+    ``S.session.model`` / ``model_provider``, and the next
+    ``/api/chat/start`` silently routed to a backend the user never picked.
+    The persisted hint already names the routing target, so it must be
+    preserved and its provider handed back.
+    """
+    with patch(
+        "api.routes.get_available_models",
+        return_value=_NON_AUTHORITATIVE_COPILOT_LACKING_CATALOG,
+    ):
+        effective_model, effective_provider, normalized = (
+            routes._resolve_compatible_session_model_state(
+                "@copilot:gpt-5.5", None
+            )
+        )
+
+    assert effective_model == "@copilot:gpt-5.5", (
+        "a session with no stored provider lost its qualified hint against a "
+        f"non-authoritative catalog: got {effective_model!r}"
+    )
+    assert effective_provider == "copilot", (
+        "the hinted provider must be returned when the session stored none — "
+        f"got {effective_provider!r}"
+    )
+    assert normalized is False, (
+        "preserving the persisted hint is not a repair; callers must not "
+        "treat it as a normalized answer"
+    )
+
+
+def test_resolver_still_repairs_legacy_form_when_session_stored_no_provider(
+    no_copilot_in_providers_cfg,
+):
+    """Control for the widened guard: dropping the ``requested_provider``
+    precondition must NOT start preserving legacy non-``@`` ids.
+
+    ``openai/gpt-5.4-mini`` carries no usable provider hint
+    (``_split_provider_qualified_model`` returns ``provider=None`` for the
+    legacy OpenRouter-shaped form), so it must still be repaired to the
+    catalog's active default even when the session stored no provider.
+    """
+    with patch(
+        "api.routes.get_available_models",
+        return_value=_NON_AUTHORITATIVE_COPILOT_LACKING_CATALOG,
+    ):
+        effective_model, effective_provider, normalized = (
+            routes._resolve_compatible_session_model_state(
+                "openai/gpt-5.4-mini", None
+            )
+        )
+
+    assert effective_model == "gpt-5.5"
+    assert effective_provider == "openai-codex"
+    assert normalized is True, (
+        "legacy non-@ forms must still run the compatibility repair — the "
+        "widened guard must only preserve a real provider-qualified hint"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 2. Display response — what GET /api/session?resolve_model=1 returns
 # ---------------------------------------------------------------------------
 
