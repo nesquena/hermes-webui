@@ -2076,8 +2076,13 @@ async function send(){
       return;
     }
     _forgetDepartingUploadDraft(activeSid, _uploadOp);
-  }finally{
+    _releaseDepartingUploadOp(_uploadOp);
+  }catch(e){
+    // Failure returns above keep the op for the deferred persist. An unexpected
+    // throw still drops it. This is not a finally: the first finally in this
+    // file is the send-lock cleanup, and it must not own the /use directive.
     if(!_holdDepartingUploadOp) _releaseDepartingUploadOp(_uploadOp);
+    throw e;
   }
   // Clear the uploading status now that upload is done — if we don't clear here
   // it stays visible for the entire duration of the agent stream, since
