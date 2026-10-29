@@ -89,6 +89,11 @@ globalThis.NO_PROJECT_FILTER = '__NO_PROJECT_FILTER__';
 globalThis._activeProject = '';
 globalThis._sessionSourceFilter = 'webui';
 globalThis._newSessionInFlight = null;
+// #8356: newSession() now clears _loadingSessionId and advances
+// _loadSessionGeneration when it takes the pane; declare both here so the
+// extracted source runs in this harness.
+globalThis._loadingSessionId = null;
+globalThis._loadSessionGeneration = 0;
 globalThis._messagesTruncated = false;
 globalThis._oldestIdx = 0;
 globalThis.INFLIGHT = {};

@@ -356,7 +356,7 @@ def test_legacy_approval_records_run_id_for_response_relay():
         relay_session.active_stream_id = stream_id
         captured = {}
 
-        def fake_request_json(self, req):
+        def fake_request_json(self, req, **_kwargs):
             captured["url"] = req.full_url
             captured["body"] = json.loads(req.data)
             return {"ok": True}
@@ -664,7 +664,7 @@ def test_mirrored_run_id_survives_active_stream_loss():
     relay_session.active_stream_id = None
     captured = {}
 
-    def fake_request_json(self, req):
+    def fake_request_json(self, req, **_kwargs):
         captured["url"] = req.full_url
         captured["body"] = json.loads(req.data)
         return {"ok": True}
