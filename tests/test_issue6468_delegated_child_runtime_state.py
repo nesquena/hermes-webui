@@ -1,12 +1,12 @@
 """Focused proof for delegated child runtime ownership in issue #6468."""
 
 import ast
+import copy
 import json
 import os
 import subprocess
 import sys
 import threading
-import textwrap
 from pathlib import Path
 
 from api import delegated_child_runtime as runtime
@@ -24,45 +24,49 @@ def _isolated_runtime(monkeypatch, tmp_path: Path):
     runtime.reset_runtime_for_tests()
 
 
-def _build_streaming_on_tool():
+def _build_streaming_on_tool(*, record_event, publish_changed, session, session_id):
     source = Path("api/streaming.py").read_text(encoding="utf-8")
     module = ast.parse(source)
-    lines = source.splitlines()
     on_tool = next(
         node
         for node in ast.walk(module)
         if isinstance(node, ast.FunctionDef) and node.name == "on_tool"
     )
-    reasoning_branch = next(
-        node
-        for node in ast.walk(on_tool)
+    branch_index = next(
+        index
+        for index, node in enumerate(on_tool.body)
         if isinstance(node, ast.If)
-        and isinstance(node.test, ast.Compare)
-        and isinstance(node.test.left, ast.Name)
-        and node.test.left.id == "event_type"
-        and len(node.test.ops) == 1
-        and isinstance(node.test.ops[0], ast.In)
-        and len(node.test.comparators) == 1
-        and isinstance(node.test.comparators[0], (ast.Tuple, ast.List, ast.Set))
-        and {item.value for item in node.test.comparators[0].elts if isinstance(item, ast.Constant)}
-        == {"reasoning.available", "_thinking"}
+        and any(
+            isinstance(candidate, ast.Call)
+            and isinstance(candidate.func, ast.Attribute)
+            and candidate.func.attr == "startswith"
+            and isinstance(candidate.func.value, ast.Name)
+            and candidate.func.value.id == "event_type"
+            and candidate.args
+            and isinstance(candidate.args[0], ast.Constant)
+            and candidate.args[0].value == "subagent."
+            for candidate in ast.walk(node.test)
+        )
     )
-    snippet = textwrap.dedent(
-        "\n".join(lines[on_tool.lineno - 1:reasoning_branch.lineno - 1])
-    )
-    builder = (
-        "def _build_on_tool(_flush_reasoning_buffer, record_subagent_event, "
-        "publish_session_list_changed, s):\n"
-        "    _reasoning_segments = {}\n"
-        "    _current_reasoning_idx = 0\n"
-        "    _tool_boundary_advanced = False\n"
-        "    session_id = getattr(s, 'session_id', None)\n"
-        f"{textwrap.indent(snippet, '    ')}\n"
-        "    return on_tool\n"
-    )
-    namespace = {}
-    exec(builder, namespace)
-    return namespace["_build_on_tool"]
+    callback = copy.deepcopy(on_tool)
+    callback.name = "_on_tool_under_test"
+    callback.decorator_list = []
+    callback.body = [
+        node
+        for node in callback.body[: branch_index + 1]
+        if not isinstance(node, ast.Nonlocal)
+    ]
+    test_module = ast.Module(body=[callback], type_ignores=[])
+    ast.fix_missing_locations(test_module)
+    namespace = {
+        "_flush_reasoning_buffer": lambda: None,
+        "record_subagent_event": record_event,
+        "publish_session_list_changed": publish_changed,
+        "s": session,
+        "session_id": session_id,
+    }
+    exec(compile(test_module, "api/streaming.py", "exec"), namespace)
+    return namespace["_on_tool_under_test"]
 
 
 def test_relayed_lifecycle_events_project_bounded_state_through_on_tool(monkeypatch, tmp_path):
@@ -78,13 +82,13 @@ def test_relayed_lifecycle_events_project_bounded_state_through_on_tool(monkeypa
         profile = "profile-a"
         session_id = "parent-a"
 
-    on_tool = _build_streaming_on_tool()(
-        lambda: None,
-        _record,
-        lambda reason, profile=None, session_id=None: invalidations.append(
+    on_tool = _build_streaming_on_tool(
+        record_event=_record,
+        publish_changed=lambda reason, profile=None, session_id=None: invalidations.append(
             (reason, profile, session_id)
         ),
-        _Session(),
+        session=_Session(),
+        session_id="parent-a",
     )
 
     on_tool(
@@ -126,13 +130,13 @@ def test_on_tool_invalidates_only_when_visible_runtime_state_changes(monkeypatch
         profile = "profile-b"
         session_id = "parent-b"
 
-    on_tool = _build_streaming_on_tool()(
-        lambda: None,
-        runtime.record_subagent_event,
-        lambda reason, profile=None, session_id=None: invalidations.append(
+    on_tool = _build_streaming_on_tool(
+        record_event=runtime.record_subagent_event,
+        publish_changed=lambda reason, profile=None, session_id=None: invalidations.append(
             (reason, profile, session_id)
         ),
-        _Session(),
+        session=_Session(),
+        session_id="parent-b",
     )
 
     on_tool("subagent.start", "delegate_task", "preview", {}, child_session_id="child-2")
