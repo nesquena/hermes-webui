@@ -40,6 +40,34 @@ def _extract_async_function(source: str, name: str) -> str:
     raise AssertionError(f"could not find balanced function body for {name}")
 
 
+def _extract_function(source: str, name: str) -> str:
+    marker = f"function {name}("
+    start = source.find(marker)
+    assert start >= 0, f"{name} not found"
+    params_depth = 0
+    body_start = -1
+    for idx in range(start, len(source)):
+        char = source[idx]
+        if char == "(":
+            params_depth += 1
+        elif char == ")":
+            params_depth -= 1
+        elif char == "{" and params_depth == 0:
+            body_start = idx
+            break
+    assert body_start >= 0, f"could not find function body for {name}"
+    depth = 0
+    for idx in range(body_start, len(source)):
+        char = source[idx]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : idx + 1]
+    raise AssertionError(f"could not find balanced function body for {name}")
+
+
 def _run_node(script: str) -> dict:
     assert NODE is not None
     result = subprocess.run(
@@ -51,6 +79,7 @@ def _run_node(script: str) -> dict:
 @pytest.mark.skipif(NODE is None, reason="node is required")
 def test_list_recovery_updates_authoritative_workspace_and_visible_controls():
     load_dir = _extract_async_function(WORKSPACE_JS, "loadDir")
+    request_is_current = _extract_function(WORKSPACE_JS, "_workspaceRequestIsCurrent")
     script = f"""
 const events=[];
 const S={{session:{{session_id:'sid-1',workspace:'/deleted'}},_dirCache:{{old:true}}}};
@@ -68,6 +97,7 @@ function syncTerminalButton(){{events.push(['terminal',S.session.workspace]);}}
 function showToast(message,duration,kind){{events.push(['toast',message,duration,kind]);}}
 function t(key,path){{return key+':'+path;}}
 function _refreshGitBadge(){{}}
+{request_is_current}
 {load_dir}
 (async()=>{{
   await loadDir('.');
@@ -78,7 +108,7 @@ function _refreshGitBadge(){{}}
 
     assert payload["workspace"] == "/fallback-a"
     assert payload["entries"] == [{"name": "a"}]
-    assert payload["treeGen"] == 0
+    assert payload["treeGen"] == 1
     assert ["restore", "/fallback-a"] in payload["events"]
     assert ["display", "/fallback-a"] in payload["events"]
     assert ["terminal", "/fallback-a"] in payload["events"]
@@ -94,6 +124,7 @@ function _refreshGitBadge(){{}}
 @pytest.mark.skipif(NODE is None, reason="node is required")
 def test_explicit_workspace_switch_invalidates_an_inflight_recovery_response():
     load_dir = _extract_async_function(WORKSPACE_JS, "loadDir")
+    request_is_current = _extract_function(WORKSPACE_JS, "_workspaceRequestIsCurrent")
     switch_workspace = _extract_async_function(PANELS_JS, "switchToWorkspace")
     script = f"""
 const events=[];
@@ -134,6 +165,7 @@ function setStatus(message){{events.push(['status',message]);}}
 function getWorkspaceFriendlyName(path){{return path;}}
 function $(id){{return null;}}
 let _currentPanel='workspace';
+{request_is_current}
 {load_dir}
 {switch_workspace}
 (async()=>{{
@@ -151,7 +183,7 @@ let _currentPanel='workspace';
 
     assert payload["workspace"] == "/explicit-c"
     assert payload["entries"] == [{"name": "from-c"}]
-    assert payload["treeGen"] == 1
+    assert payload["treeGen"] == 3
     assert payload["listCalls"] == 2
     assert not any(
         event[0] == "toast" and "workspace_recovered_notice" in event[1]
