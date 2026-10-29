@@ -2510,14 +2510,30 @@ async function forkFromMessage(msgIdx, btn){
   // since loading full history (e.g. the outline) re-bases indices without a
   // re-render (#2184).
   const forkRow=btn&&btn.closest?btn.closest('[data-msg-idx]'):null;
+  if(forkRow&&forkRow.dataset&&forkRow.dataset.displayOnly==='1'){
+    // Recovered display-only prompts have no canonical index, so any
+    // keep_count derived from the row would fork the wrong point.
+    showToast('This prompt is not in the saved transcript yet; fork becomes available once it is saved.',3000);
+    return;
+  }
   if(forkRow&&typeof _rowCurrentRawIdx==='function') msgIdx=_rowCurrentRawIdx(forkRow,msgIdx-1)+1;
   // During streaming, only block fork if the clicked message is the
   // currently-streaming (live) message itself.  Past messages that are
   // already committed server-side can be forked immediately without
   // waiting for the stream to finish.
   if(S.busy){
-    const _msg=(Array.isArray(S.messages)&&S.messages[msgIdx-1])||null;
-    const _isLastMsg=msgIdx>=(Array.isArray(S.messages)?S.messages.length:0);
+    // msgIdx is now the CANONICAL window-relative index (recovered
+    // display-only rows excluded), but the busy guard inspects the rendered
+    // array, which still holds those rows. Map back to the real current array
+    // position before checking _live/_pending and the last-display-row rule,
+    // otherwise the guard lands on the recovered prompt, blocking a fork of
+    // the committed row right after it) or misses a live row entirely.
+    const sessionIdx=(msgIdx-1)+((typeof _messageSessionIndexBase==='function')?_messageSessionIndexBase():0);
+    const realIdx=(typeof _messageRawIdxForSessionIndex==='function')
+      ?_messageRawIdxForSessionIndex(sessionIdx)
+      :(msgIdx-1);
+    const _msg=(Array.isArray(S.messages)&&realIdx>=0&&realIdx<S.messages.length)?S.messages[realIdx]:null;
+    const _isLastMsg=realIdx>=(Array.isArray(S.messages)?S.messages.length:0)-1;
     if((_msg&&(_msg._live||_msg._pending))||_isLastMsg){
       showToast('Cannot fork a message still being generated.',3000);
       return;
