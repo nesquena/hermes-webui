@@ -50,6 +50,23 @@ class _HealthHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+def _stdlib_ssl_context_class() -> type:
+    """The stdlib ``ssl.SSLContext``, even after ``truststore.inject_into_ssl()``.
+
+    Hermes Agent's ``agent/ssl_verify.py`` injects truststore process-wide, and an
+    earlier test in the same pytest process can import it. truststore's
+    ``SSLContext.wrap_socket`` then verifies a peer chain even on this
+    server-side listening socket, which has none yet, and raises
+    ``AttributeError: 'NoneType' object has no attribute 'get_unverified_chain'``.
+    Walk back to the stdlib class rather than patching global SSL state (same
+    approach as ``tests/test_bootstrap_port_preflight.py``).
+    """
+    cls = ssl.SSLContext
+    while cls.__module__ != "ssl" and cls.__bases__:
+        cls = cls.__bases__[0]
+    return cls
+
+
 class _Server:
     """Minimal /health server, optionally TLS-wrapped, on a background thread."""
 
@@ -57,7 +74,7 @@ class _Server:
         self.port = _free_port()
         self.httpd = http.server.HTTPServer(("127.0.0.1", self.port), _HealthHandler)
         if cert and key:
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx = _stdlib_ssl_context_class()(ssl.PROTOCOL_TLS_SERVER)
             ctx.load_cert_chain(cert, key)
             self.httpd.socket = ctx.wrap_socket(self.httpd.socket, server_side=True)
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)

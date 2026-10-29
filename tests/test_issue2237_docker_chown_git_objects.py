@@ -24,7 +24,8 @@ def test_home_chown_skips_hermes_agent_subtree():
         ".git/objects) so a :ro multi-container mount doesn't EROFS-fail "
         "the chown."
     )
-    assert 'chown -h "${WANTED_UID}:${WANTED_GID}"' in INIT_SCRIPT
+    assert 'chown -h "$owner"' in INIT_SCRIPT
+    assert 'chown_home_hermeswebui "${WANTED_UID}:${WANTED_GID}" {} +' in INIT_SCRIPT
 
 
 def test_home_chown_helper_documents_readonly_mount_compat():
