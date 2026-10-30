@@ -14266,6 +14266,14 @@ function _gatewayActionButton(action){
   return `<button class="sm-btn gateway-action-btn" data-gateway-action="${esc(action)}" onclick="_gatewayAction(${jsArg(action)})" ${_gatewayActionInFlight?'disabled':''} style="padding:5px 10px;font-size:12px">${esc(labels[action]||action)}</button>`;
 }
 function _gatewayActionControls(r){
+  // Lifecycle actions drive the LOCAL `hermes gateway` CLI. Offer them only when
+  // the server proved that CLI controls the Gateway shown here (#8391); a remote
+  // or unproven Gateway stays read-only. Missing capability fails closed.
+  const managed=!!(r&&r.lifecycle&&r.lifecycle.managed===true);
+  if(!managed){
+    const icon=typeof li==='function'?`<span style="display:inline-flex;flex-shrink:0;margin-top:2px">${li('lock',12)}</span>`:'';
+    return `<div class="gateway-external-note" style="display:flex;align-items:flex-start;gap:6px;margin-top:10px;font-size:12px;line-height:1.45;color:var(--muted)">${icon}<span>${esc(t('gateway_external_managed'))}</span></div>`;
+  }
   const actions=(r&&r.running)?['stop','restart']:['start'];
   return `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px">${actions.map(_gatewayActionButton).join('')}</div>`;
 }
