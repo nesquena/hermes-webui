@@ -695,10 +695,36 @@ def _gateway_ownership_proven(home_key: str, endpoint: str) -> bool:
         return False
 
 
+_DEFAULT_GATEWAY_START_COMMAND = "hermes gateway start"
+
+
+def _gateway_start_command(profile: str | None = None) -> str:
+    """The ``hermes gateway start`` command line for the capability's profile.
+
+    Mirrors the profile rule of ``routes._run_gateway_lifecycle_command`` (the
+    Settings Start button): the explicit ``profile`` if given, else the active
+    profile name; ``--profile <name>`` only when that name is non-empty and not
+    ``default``. Only a valid profile id is ever echoed back to the browser;
+    anything else (or any error) falls back to the plain command.
+    """
+    try:
+        from api.profiles import _PROFILE_ID_RE, get_active_profile_name
+
+        name = str((profile if profile is not None else get_active_profile_name()) or "").strip()
+        if not name or name == "default":
+            return _DEFAULT_GATEWAY_START_COMMAND
+        if _PROFILE_ID_RE.fullmatch(name):
+            return f"hermes --profile {name} gateway start"
+    except Exception:
+        logger.debug("Could not resolve profile for the Gateway start hint", exc_info=True)
+    return _DEFAULT_GATEWAY_START_COMMAND
+
+
 def gateway_lifecycle_capability(profile: str | None = None) -> dict[str, Any]:
     """Return whether WebUI's local CLI controls the Gateway it monitors.
 
-    ``{"managed": bool, "reason": str}``:
+    ``{"managed": bool, "reason": str}`` (plus ``start_command`` for
+    ``local_gateway_unproven``, see below):
 
     * No remote Gateway URL configured: status comes from this host's
       active-profile Gateway files, which is exactly what ``hermes gateway
@@ -710,9 +736,19 @@ def gateway_lifecycle_capability(profile: str | None = None) -> dict[str, Any]:
       persisted proof keeps Start available after Stop/crash and lets a failed
       restart be retried. A loopback URL alone is not proof: Docker port maps
       and SSH tunnels also answer on 127.0.0.1.
+    * A loopback URL with a resolvable endpoint and profile home but no proof
+      yet (no live Gateway PID for the profile, no persisted record for this
+      home + endpoint) -> not managed (``local_gateway_unproven``). Only the
+      reason differs from ``external_gateway``, so the UI can tell a stopped
+      Gateway of this machine apart from one that runs elsewhere; every
+      lifecycle entrypoint still refuses it. This result alone also carries
+      ``start_command``: the exact one-time CLI start for the target profile
+      (``hermes gateway start``, or ``hermes --profile <name> gateway start``
+      for a named profile, like the Settings Start button runs).
     * Anything else with a remote URL -> not managed (``external_gateway``).
 
-    Fail-closed: any error while proving local ownership reports unmanaged.
+    Fail-closed: any error while proving local ownership, or an endpoint or
+    profile home that does not resolve, reports ``external_gateway``.
     """
     remote_base = _remote_gateway_base_url()
     if remote_base is None:
@@ -730,6 +766,14 @@ def gateway_lifecycle_capability(profile: str | None = None) -> dict[str, Any]:
                     return {"managed": True, "reason": "local_gateway"}
                 if _gateway_ownership_proven(home_key, endpoint):
                     return {"managed": True, "reason": "local_gateway"}
+                # Loopback, but never seen running for this home + endpoint
+                # (e.g. upgraded while the Gateway was stopped). Still
+                # unmanaged; the distinct reason only changes the UI copy.
+                return {
+                    "managed": False,
+                    "reason": "local_gateway_unproven",
+                    "start_command": _gateway_start_command(profile),
+                }
     except Exception:
         pass
     return {"managed": False, "reason": "external_gateway"}
