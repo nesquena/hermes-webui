@@ -6734,6 +6734,13 @@ function renderModelDropdown(){
   _custRow.className='model-custom-row';
   _custRow.innerHTML=`<input class="model-custom-input" type="text" placeholder="${esc(t('model_custom_placeholder')||'e.g. openai/gpt-5.4')}" spellcheck="false" autocomplete="off"><button class="model-custom-btn" title="Use this model">${li('plus',12)}</button>`;
   const _ci=_custRow.querySelector('.model-custom-input');
+  // IME: a committing Enter must not submit the custom model id. This listener
+  // is registered before the submit handler further down, and at the target
+  // phase listeners run in registration order — so stopImmediatePropagation()
+  // below wins and the bubble handler never sees the composing keypress.
+  _ci.addEventListener('keydown',e=>{
+    if(e.key==='Enter'&&window._isImeEnter&&window._isImeEnter(e)){e.stopImmediatePropagation();e.stopPropagation();}
+  },true);
   const _cb=_custRow.querySelector('.model-custom-btn');
   const _configuredRank=(badge)=>{
     if(!badge) return Number.POSITIVE_INFINITY;
@@ -11715,7 +11722,7 @@ function _renderQueueChips(sid){
         }
       }
     };
-    msgSpan.onkeydown=(e)=>{if(e.key==='Enter'){e.preventDefault();msgSpan.blur();}if(e.key==='Escape'){msgSpan.textContent=entryText||'—';msgSpan.blur();}};
+    msgSpan.onkeydown=(e)=>{if(e.key==='Enter'){if(window._isImeEnter&&window._isImeEnter(e))return;e.preventDefault();msgSpan.blur();}if(e.key==='Escape'){msgSpan.textContent=entryText||'—';msgSpan.blur();}};
     // Compact badges (files, model, profile)
     const badges=document.createElement('span');
     badges.className='queue-card-badges';
