@@ -745,7 +745,12 @@ _installPwaSidebarSwipeGesture();
 const _SIDEBAR_COLLAPSED_KEY='hermes-webui-sidebar-collapsed';
 
 function _isDesktopWidth(){
-  try{return window.matchMedia('(min-width:641px)').matches;}catch(_){return true;}
+  // hwc: phone-landscape — short coarse screens stay on the phone sidebar.
+  try{
+    const wide=window.matchMedia('(min-width:641px)').matches;
+    if(window.matchMedia('(max-height: 600px) and (pointer: coarse)').matches) return false;
+    return wide;
+  }catch(_){return true;}
 }
 
 function _isSidebarCollapsed(){
