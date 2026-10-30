@@ -277,6 +277,10 @@ does not match the touched subsystem.
   failures.
 - [`docs/EXTENSIONS.md`](EXTENSIONS.md): administrator-controlled WebUI
   extension injection.
+- [`docs/skills.md`](skills.md): the Skills panel contract — directory vs
+  plugin-registered skills, the qualified `plugin:skill` name as the identity,
+  the availability rules (disabled set, platform eligibility, profile scope),
+  and why plugin-provided skills are read-only in the panel.
 
 ## Quick redline checklist
 

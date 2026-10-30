@@ -2582,7 +2582,11 @@ let _skillCommandCacheReady=false;
 function _skillCommandSlug(name){
   const raw=String(name||'').trim().toLowerCase();
   if(!raw)return'';
-  return raw.replace(/[\s_]+/g,'-').replace(/[^a-z0-9-]/g,'').replace(/-{2,}/g,'-').replace(/^-+|-+$/g,'');
+  // Keep ':' so plugin-qualified names like ``superpowers:brainstorming`` survive
+  // the picker. Stripping it collapsed the namespace into the skill name
+  // (``superpowersbrainstorming``), producing a dropdown label that resolved
+  // back to nothing when selected (#7770).
+  return raw.replace(/[\s_]+/g,'-').replace(/[^a-z0-9:-]/g,'').replace(/-{2,}/g,'-').replace(/^-+|-+$/g,'');
 }
 function _getReservedSlashCommandSlugs(){
   const reserved=new Set(COMMANDS.map(c=>String(c&&c.name||'').trim().toLowerCase()).filter(Boolean));
@@ -2601,7 +2605,26 @@ function _buildSkillCommandEntry(skill){
   const slug=_skillCommandSlug(skillName);
   if(!slug)return null;
   if(_getReservedSlashCommandSlugs().has(slug)) return null;
-  return{name:slug,desc:String(skill&&skill.description||'').trim()||t('slash_skill_desc'),source:'skill',skillName};
+  // A plugin-qualified id must round-trip VERBATIM. The Agent keys plugin
+  // skills as ``/<namespace>:<skill>`` and resolves that exact spelling
+  // (``resolve_skill_command_key`` tries the qualified form before the
+  // underscore/hyphen fallback), so slugifying ``my_plugin:my_skill`` into
+  // ``my-plugin:my-skill`` produced a command the Agent cannot resolve (#7770).
+  // Directory skills keep the slug: their Agent-side key is the slug too.
+  const isPlugin=!!(skill&&skill.source==='plugin');
+  const name=isPlugin?skillName.toLowerCase():slug;
+  const entry={name,desc:String(skill&&skill.description||'').trim()||t('slash_skill_desc'),source:'skill',skillName};
+  // Carry the plugin namespace so the row can be labelled as plugin-provided.
+  // The backend sends `plugin` for plugin-registered skills (#7770); derive it
+  // from the qualified name when the marker is absent so an older backend (or a
+  // directory skill that merely contains a colon) is not mislabelled.
+  if(isPlugin&&skill.plugin){
+    entry.plugin=String(skill.plugin);
+  }else if(isPlugin&&skillName.includes(':')){
+    const ns=skillName.split(':',1)[0].trim();
+    if(ns) entry.plugin=ns;
+  }
+  return entry;
 }
 function _buildBundleCommandEntry(bundle){
   const slug=_skillCommandSlug(bundle&&bundle.name);
