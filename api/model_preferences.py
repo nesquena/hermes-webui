@@ -36,6 +36,21 @@ def _request_profile():
     return get_active_profile_name() or 'default'
 
 
+def _canonical_profile_owner(profile):
+    """Canonical owner identity for stored preferences.
+
+    api.profiles treats a renamed root profile as the SAME owner as the legacy
+    'default' alias (#1612: ``_is_root_profile`` / ``_profiles_match``).  Keying
+    the pin store on the raw request string instead would silently switch stores
+    the moment the root profile is renamed — the old file stays on disk, the new
+    code just reads a different path, and every existing pin looks lost.  Resolve
+    the alias through the canonical contract so both names share one store.
+    """
+    name = profile.strip() if isinstance(profile, str) and profile.strip() else 'default'
+    from api.profiles import _is_root_profile
+    return 'default' if _is_root_profile(name) else name
+
+
 def _state_dir():
     from api.config import STATE_DIR
     return Path(STATE_DIR)
@@ -45,9 +60,10 @@ def _pins_file(state_dir):
     profile = _request_profile()
     if not isinstance(profile, str) or not _SAFE_ID.fullmatch(profile) or profile in ('.', '..'):
         raise PreferencesError('Invalid profile')
+    owner = _canonical_profile_owner(profile)
     root = Path(state_dir)
-    if profile != 'default':
-        root = root / 'model_preferences' / profile
+    if owner != 'default':
+        root = root / 'model_preferences' / owner
     return root / 'model_preferences.json'
 
 
@@ -159,6 +175,7 @@ def set_pin(state_dir, model, provider, pinned):
 
 
 def _native_writable_sessions(session_dir, profile):
+    from api.profiles import _profiles_match
     try:
         entries = json.loads((session_dir / '_index.json').read_text(encoding='utf-8'))
     except FileNotFoundError:
@@ -172,9 +189,17 @@ def _native_writable_sessions(session_dir, profile):
         sid = e.get('session_id')
         if not isinstance(sid, str) or not _SAFE_ID.fullmatch(sid) or sid in ('.', '..'):
             continue
-        if (e.get('profile') or 'default') != profile:
+        # Alias match, not a raw string compare: a renamed root profile owns the
+        # same sessions the legacy 'default' tag names (api/profiles contract).
+        if not _profiles_match(e.get('profile'), profile):
             continue
-        if e.get('read_only') or e.get('is_cli_session') or e.get('parent_session_id'):
+        # A parent link is lineage provenance, not automation provenance:
+        # /api/session/branch (and the compression-recovery continuation) create
+        # an ordinary writable WebUI session that carries parent_session_id with
+        # session_source="fork". Automation children that also carry a parent
+        # link stay excluded via read_only / is_cli_session / the source check
+        # below (subagent children are recovered view-only, CLI imports are CLI).
+        if e.get('read_only') or e.get('is_cli_session'):
             continue
         sources = [e.get(k) for k in ('source_tag', 'raw_source', 'session_source')]
         if any(s and s not in ('webui', 'fork') for s in sources):
@@ -221,6 +246,7 @@ def _automation_turn(event):
 
 
 def _scan_usage(state_dir, profile, now):
+    from api.profiles import _profiles_match
     sessions = Path(state_dir) / 'sessions'
     native = _native_writable_sessions(sessions, profile)
     submitted, compensated = {}, set()
@@ -249,7 +275,14 @@ def _scan_usage(state_dir, profile, now):
                         continue
                     if e.get('source') not in (None, '', 'webui'):
                         continue
-                    if e.get('profile') not in (None, '', profile):
+                    # Same alias contract as the index filter above.  An event
+                    # with no profile stamp inherits its session's owner, which
+                    # the index filter already resolved: legacy journals predate
+                    # the profile field, and re-tagging history is not this
+                    # module's job.  A tagged row must alias-match the active
+                    # profile, so a renamed root still owns its 'default' rows.
+                    row_profile = e.get('profile')
+                    if row_profile and not _profiles_match(row_profile, profile):
                         continue
                     if _automation_turn(e):
                         continue
