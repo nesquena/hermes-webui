@@ -210,6 +210,68 @@ def _registry_transaction():
             yield
 
 
+def _retirement_generation_unlocked(sid: str) -> int:
+    """The generation at which *sid*'s intent was retired; 0 when it was not.
+
+    Callers must hold ``_LOCK``. Both the durable tombstone and the legacy
+    in-memory stamp are consulted, exactly like the handoff adoption and the
+    rollback restore do, so every reader honours ONE retirement authority.
+    """
+    return max(
+        int(_TOMBSTONES.get(sid) or 0),
+        int(_RETIRED_GENERATIONS.get(sid) or 0),
+    )
+
+
+def _record_is_retired(sid: str, record: dict) -> bool:
+    """True when a retirement newer than *record* covers it.
+
+    #7862 re-gate round 16 (CORE finding 3): plain-record restoration and the
+    merge adoption both checked only deleted-session membership, so a record
+    that outlived its own clear was republished. The handoff adoption already
+    compared the handoff's ORIGINAL generation against the tombstone; a record
+    carries that generation too, so the same comparison applies.
+
+    A generation-less record (a v1 upgrade) has nothing to compare and is never
+    treated as retired: it is assigned a fresh generation at restore time.
+    Callers must hold ``_LOCK``.
+    """
+    generation = int(record.get("generation") or 0)
+    retired_at = _retirement_generation_unlocked(sid)
+    return bool(retired_at and generation and generation <= retired_at)
+
+
+def _dirty_restore_survives_the_merge(sid: str, record: dict, fence: dict) -> bool:
+    """True when the failed-restore exemption still covers *record*.
+
+    #7862 re-gate round 16 (CORE finding 3). The exemption exists so a warm
+    ENOSPC rollback restore is not dropped by the next unrelated transaction's
+    "absent on disk => gone" rule.
+
+    The fence is the ATTEMPT-SCOPED identity of the restored intent: the
+    continuation token is minted per intent and the generation per arm, and
+    only the attempt that consumed that intent holds the receipt that produced
+    this record -- so "same token AND same generation" is exactly "the record
+    this attempt restored". Anything else (a re-arm, a peer's newer intent) is
+    a different intent and is NOT covered.
+
+    The exemption also ends the moment a retirement newer than that generation
+    exists. Without that, a peer's clear was imported while the dirty record
+    was unconditionally retained, and the next unrelated snapshot republished a
+    goal the user had already stopped.
+
+    Callers must hold ``_LOCK``.
+    """
+    generation = int(record.get("generation") or 0)
+    if generation != int(fence.get("generation") or 0):
+        return False
+    if str(record.get("continuation_id") or "") != str(
+        fence.get("continuation_id") or ""
+    ):
+        return False
+    return not _record_is_retired(sid, record)
+
+
 def _merge_disk_state_unlocked() -> None:
     """Reload the durable state into memory; callers hold a transaction.
 
@@ -250,8 +312,16 @@ def _merge_disk_state_unlocked() -> None:
       (``_publish_continuation_mirror_unlocked``) together with the marker,
       or the /goal orphan sweep strips the marker;
     * a session whose rollback-restore write failed (warm-path ENOSPC) is
-      exempt from the \"absent on disk => gone\" drop until its record
-      lands.
+      exempt from the \"absent on disk => gone\" drop until its record lands
+      -- but only while the durable state still describes the SAME intent: a
+      newer retirement tombstone ends the exemption (round 16, CORE finding 3);
+    * the COMPLETE durable handoff table is reconciled per key, not unioned: a
+      key disk carries is authoritative (an updated stream binding included), a
+      locally retained key disk no longer carries was discharged or revoked by
+      a peer and is dropped, and a token this process deliberately withheld
+      from disk (an adoption conversion) is kept (round 16, CORE findings 1-2);
+    * a durable record covered by a retirement tombstone is not adopted: the
+      registry retirement is the same authority the handoff adoption honours.
     """
     from api.config import PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_RECORDS
 
@@ -298,17 +368,39 @@ def _merge_disk_state_unlocked() -> None:
         # disk copy. Dropping it here ("absent on disk => gone") made the
         # warm retry run as an ordinary turn; the session stays exempt until
         # its record lands on disk again.
-        if sid in _RESTORE_WRITE_FAILED_SESSIONS:
+        #
+        # #7862 re-gate round 16 (CORE finding 3): the exemption is FENCED by
+        # the token and generation the restore put in memory, and a newer
+        # retirement tombstone ends it. Without that fence a peer's clear was
+        # imported while the dirty record was unconditionally retained, and
+        # the next unrelated snapshot republished a cleared goal next to its
+        # own newer tombstone.
+        fence = _RESTORE_WRITE_FAILED_SESSIONS.get(sid)
+        if fence is not None and _dirty_restore_survives_the_merge(
+            sid, PENDING_GOAL_CONTINUATION_RECORDS.get(sid) or {}, fence
+        ):
             continue
+        _RESTORE_WRITE_FAILED_SESSIONS.pop(sid, None)
         # A peer consumed or retired this intent: the durable state is the
         # truth, and this stale copy must not be re-spent or republished.
         PENDING_GOAL_CONTINUATION_RECORDS.pop(sid, None)
         PENDING_GOAL_CONTINUATION.discard(sid)
         _RETIRED_GENERATIONS.pop(sid, None)
     for sid, record in disk.items():
+        # #7862 re-gate round 16 (CORE finding 3): a durable record covered by
+        # a retirement tombstone describes an intent the user explicitly
+        # stopped. Adopting it here is what republished a cleared goal; the
+        # same authority the handoff adoption already honours applies to plain
+        # records. A v1-upgraded record (generation 0) has no generation to
+        # compare and is assigned one below, exactly like the adoption does.
+        if _record_is_retired(sid, record):
+            PENDING_GOAL_CONTINUATION_RECORDS.pop(sid, None)
+            PENDING_GOAL_CONTINUATION.discard(sid)
+            _RETIRED_GENERATIONS.pop(sid, None)
+            continue
         if sid in _RESTORE_WRITE_FAILED_SESSIONS:
             # The warm-ENOSPC exemption is satisfied: the record IS on disk.
-            _RESTORE_WRITE_FAILED_SESSIONS.discard(sid)
+            _RESTORE_WRITE_FAILED_SESSIONS.pop(sid, None)
         live = PENDING_GOAL_CONTINUATION_RECORDS.get(sid)
         if live is None:
             # A peer armed an intent this process never saw: adopt it so
@@ -333,12 +425,35 @@ def _merge_disk_state_unlocked() -> None:
     # handoff table. Before, disk handoffs were loaded but ignored and
     # snapshots serialised only local tokens, so process B's unrelated write
     # erased process A's in-flight handoff and a cold restore lost A's
-    # continuation. In-memory tokens stay authoritative (a same-transaction
-    # pop + write is what retires one durably); keys absent from memory are
-    # adopted so every snapshot carries them.
+    # continuation.
+    #
+    # #7862 re-gate round 16 (CORE finding 2): that merge only ADDED keys
+    # missing locally, which is a union -- and a union lets a stale local copy
+    # undo a peer's committed change. It is now a RECONCILIATION, per key:
+    #
+    #   * disk carries the key -> disk is authoritative. A key this process
+    #     cached before the owner bound its stream identity (or before the
+    #     owner discharged it after the launch) is REPLACED by the durable
+    #     copy, so an unrelated snapshot can neither drop the stream identity
+    #     nor republish a spent admission;
+    #   * disk does NOT carry the key and this process still holds it -> a peer
+    #     discharged or revoked it durably. The local copy is stale evidence
+    #     for an admission that no longer exists and is dropped, so it cannot
+    #     be republished. The one exception is a token this process
+    #     deliberately withheld from disk -- an adoption conversion, whose
+    #     in-memory copy is the receipt's liveness anchor (round 10);
+    #   * a takeover therefore REVOKES the attempt it displaced: the adoption
+    #     removed the durable handoff, so the old owner's next merge drops its
+    #     local copy and its stream binding refuses instead of launching a
+    #     second goal worker (round 16, CORE finding 1).
     for key, record in disk_handoffs.items():
-        if key not in _CONTINUATION_HANDOFF_TOKENS:
-            _CONTINUATION_HANDOFF_TOKENS[key] = dict(record)
+        _CONTINUATION_HANDOFF_TOKENS[key] = dict(record)
+    for key in [k for k in _CONTINUATION_HANDOFF_TOKENS if k not in disk_handoffs]:
+        if _CONTINUATION_HANDOFF_TOKENS[key].get("_handoff_adopted_into_record"):
+            # Withheld from disk by design, not lost: keep the conversion
+            # marker and the token it anchors.
+            continue
+        del _CONTINUATION_HANDOFF_TOKENS[key]
 _GENERATION = 0  # bumped under _LOCK on every accepted mutation (arm/retire)
 _LAST_LOAD_ERROR: Optional[str] = None
 _LAST_WRITE_ERROR: Optional[str] = None
@@ -404,7 +519,15 @@ _MAX_CONTINUATION_HANDOFFS = 64
 # absent on disk, so the next unrelated transaction's merge must not drop it
 # ("absent on disk => gone") — that is what turned the warm retry into an
 # ordinary turn. Exempt until the record lands on disk again.
-_RESTORE_WRITE_FAILED_SESSIONS: "set[str]" = set()
+#
+# #7862 re-gate round 16 (CORE finding 3): the exemption is a FENCE, not a
+# session-wide pardon. It records the continuation token AND the generation of
+# the intent the restore put in memory, so a merge can tell "the same dirty
+# restore, still waiting to land" from "a peer retired this intent at a newer
+# generation since". Retaining it unconditionally let a cleared goal come back:
+# the merge imported the peer's tombstone, kept the dirty record, and the next
+# unrelated snapshot republished it next to the newer tombstone.
+_RESTORE_WRITE_FAILED_SESSIONS: "dict[str, dict]" = {}
 
 
 def _next_generation_unlocked() -> int:
@@ -557,7 +680,18 @@ def reclaim_goal_continuation_receipt(session_id: str, attempt_id: str = "") -> 
 
     Returns True when a live receipt was refreshed. Never raises into the chat
     path.
+
+    #7862 re-gate round 16 (CORE finding 1): the handoff's clock is now a
+    DURABLE OWNERSHIP LEASE, and this is its renewal. The route explicitly
+    allows an admission to outlive the reclaim window, so a liveness report
+    that refreshed only this process's dictionaries left the durable clock
+    stale: a cold restore read the expired lease as proof the owner had died
+    and took the admission over while the owner was still running. The renewal
+    is therefore committed in the same registry transaction as every other
+    mutation, so a peer's restore sees an owner that is still reporting.
     """
+    from api.config import PENDING_GOAL_CONTINUATION_RECORDS
+
     sid = str(session_id or "").strip()
     attempt = str(attempt_id or "").strip()
     if not sid:
@@ -581,7 +715,45 @@ def reclaim_goal_continuation_receipt(session_id: str, attempt_id: str = "") -> 
             handoff = _CONTINUATION_HANDOFF_TOKENS.get(key)
             if handoff is not None:
                 handoff["_handoff_minted_at"] = now
+        lease_keys = [k for k in keys if k in _CONTINUATION_HANDOFF_TOKENS]
+    if not lease_keys:
         return True
+    try:
+        with _registry_transaction():
+            # Reload under the cross-process lock: a peer may have discharged
+            # or taken the admission over since the in-memory refresh above.
+            _merge_disk_state_unlocked()
+            renewed = [k for k in lease_keys if k in _CONTINUATION_HANDOFF_TOKENS]
+            for key in renewed:
+                _CONTINUATION_HANDOFF_TOKENS[key]["_handoff_minted_at"] = now
+            if not renewed:
+                logger.warning(
+                    "Goal continuation registry: the admission for session %s "
+                    "(attempt %s) no longer exists durably, so its ownership "
+                    "lease could not be renewed",
+                    sid,
+                    lease_keys[0][1],
+                )
+                return True
+            if not _write_registry_unlocked(
+                PENDING_GOAL_CONTINUATION_RECORDS,
+                context=f"lease-renew sid={sid} attempt={lease_keys[0][1]}",
+            ):
+                # The lease stays stale on disk, which only matters if this
+                # attempt then stalls past the window without renewing again.
+                logger.warning(
+                    "Goal continuation registry: the ownership lease for session "
+                    "%s (attempt %s) could not be renewed durably",
+                    sid,
+                    lease_keys[0][1],
+                )
+    except _RegistryLockUnavailable:
+        logger.error(
+            "Goal continuation registry: the ownership lease for session %s "
+            "could not be renewed: the cross-process lock is unavailable",
+            sid,
+        )
+    return True
 
 
 def record_goal_continuation_stream(
@@ -637,11 +809,31 @@ def record_goal_continuation_stream(
             # state under the cross-process lock before mutating.
             _merge_disk_state_unlocked()
             if key not in _CONTINUATION_HANDOFF_TOKENS:
-                # A retire/rollback between the check and the transaction
-                # discharged the admission; nothing left to bind. Not an
-                # error — the launch it describes is gone with the intent.
-                return True
+                # #7862 re-gate round 16 (CORE finding 1): this process HAD an
+                # admission for this attempt (checked above under ``_LOCK``),
+                # and the merge just dropped it. The only way a durable
+                # handoff disappears is that a peer discharged it after the
+                # launch, or a cold restore took the admission over once the
+                # ownership lease expired -- and a takeover removes the handoff
+                # from the durable table. Either way this attempt no longer
+                # owns the continuation, so its stream identity must NOT be
+                # bound: the route launches on this Boolean, and binding here
+                # is how the second goal worker for one intent appeared.
+                logger.error(
+                    "Goal continuation admission for session %s (attempt %s) "
+                    "was discharged or taken over by another process; refusing "
+                    "to bind its stream identity",
+                    sid,
+                    key[1],
+                )
+                return False
             _CONTINUATION_HANDOFF_TOKENS[key]["_handoff_stream_id"] = stream
+            # #7862 re-gate round 16 (CORE finding 1): binding is the last thing
+            # an owner does before its worker executes, so it is also the last
+            # renewal of the ownership lease. Without it an admission that
+            # legitimately outlived the reclaim window could be taken over
+            # between the consume and the launch.
+            _CONTINUATION_HANDOFF_TOKENS[key]["_handoff_minted_at"] = time.time()
             if _write_registry_unlocked(
                 PENDING_GOAL_CONTINUATION_RECORDS,
                 context=f"handoff-stream sid={sid} attempt={key[1]}",
@@ -1118,13 +1310,24 @@ def load_goal_continuation_tombstones() -> dict:
 
 
 def session_has_registry_state(session_id: str) -> bool:
-    """True when any durable registry state exists for *session_id*.
+    """True when any registry state exists for *session_id*.
 
     #7862 re-gate round 15 (should-fix): a session delete used to write an
     fsynced registry snapshot with a tombstone for EVERY session, goal or
     not. The delete path calls this first and returns early when there is no
     record, handoff or receipt — a no-goal delete must not touch the
     registry at all. Never raises.
+
+    #7862 re-gate round 16 (CORE finding 4): the local cache is NOT
+    authoritative. It only holds what THIS process observed, so a process that
+    never saw a peer's durable state answered False — and the delete route then
+    set ``continuation_retired = True`` without consulting or retiring that
+    state, leaving the peer's private continuation prompt claimable on disk
+    while acknowledging retirement. The decision is therefore taken from the
+    AUTHORITATIVE durable state, under the transaction: the file lock plus a
+    reload, which is the same read every other registry writer trusts. A lock
+    this process cannot take fails CLOSED — an absence it cannot prove must
+    never be allowed to skip a retirement.
     """
     from api.config import PENDING_GOAL_CONTINUATION_RECORDS
 
@@ -1138,7 +1341,23 @@ def session_has_registry_state(session_id: str) -> bool:
             return True
         if any(k[0] == sid for k in _ROLLBACK_RECEIPTS):
             return True
-    return False
+    try:
+        with _registry_transaction():
+            # Reload the durable state under the cross-process lock: the merge
+            # is what makes a peer's record, handoff or tombstone visible here.
+            _merge_disk_state_unlocked()
+            if sid in PENDING_GOAL_CONTINUATION_RECORDS:
+                return True
+            if any(k[0] == sid for k in _CONTINUATION_HANDOFF_TOKENS):
+                return True
+            # A retirement tombstone is evidence the intent is already gone, so
+            # it does not by itself justify another fsynced snapshot.
+            return False
+    except _RegistryLockUnavailable:
+        # Cannot prove absence from authoritative state: do not skip the
+        # retirement. The retire that follows refuses honestly instead, and the
+        # delete reports a non-durable retirement.
+        return True
 
 
 def arm_pending_goal_continuation(
@@ -1671,10 +1890,18 @@ def restore_pending_goal_continuation(session_id: str, record: dict) -> bool:
             # it ("absent on disk => gone") and the warm retry would run as an
             # ordinary turn; the session stays exempt from that drop until its
             # record lands on disk again.
+            #
+            # #7862 re-gate round 16 (CORE finding 3): the exemption is a FENCE
+            # recording the token and generation of the intent just restored,
+            # so the merge can tell this dirty restore from a newer retirement
+            # a peer committed in the meantime.
             if _restore_committed:
-                _RESTORE_WRITE_FAILED_SESSIONS.discard(sid)
+                _RESTORE_WRITE_FAILED_SESSIONS.pop(sid, None)
             else:
-                _RESTORE_WRITE_FAILED_SESSIONS.add(sid)
+                _RESTORE_WRITE_FAILED_SESSIONS[sid] = {
+                    "generation": int(restored.get("generation") or 0),
+                    "continuation_id": str(restored.get("continuation_id") or ""),
+                }
                 logger.warning(
                     "Goal continuation registry: rollback restored session %s in "
                     "memory but its snapshot write failed; the record is exempt "
@@ -1911,6 +2138,32 @@ def restore_goal_continuations() -> int:
                         }
                     )
                     continue
+                # #7862 re-gate round 16 (CORE finding 3): plain-record
+                # restoration used to check ONLY deleted-session membership,
+                # so a record that outlived its own clear (a failed warm
+                # rollback republished next to a newer tombstone) came back on
+                # the next boot. The handoff adoption already refuses a
+                # handoff whose generation is covered by the retirement
+                # tombstone; a record carries the same generation, so it is
+                # held to the SAME authority.
+                if _record_is_retired(sid, record):
+                    logger.info(
+                        "Goal continuation registry: refusing to restore the "
+                        "record for session %s (generation %d <= retired "
+                        "generation %d)",
+                        sid,
+                        int(record.get("generation") or 0),
+                        _retirement_generation_unlocked(sid),
+                    )
+                    dropped += 1
+                    _RETIRED_LOG.append(
+                        {
+                            "session_id": sid,
+                            "reason": "record_restore_refused_retired",
+                            "at": time.time(),
+                        }
+                    )
+                    continue
                 if sid in PENDING_GOAL_CONTINUATION or sid in PENDING_GOAL_CONTINUATION_RECORDS:
                     continue
                 generation = _next_generation_unlocked()
@@ -1990,6 +2243,19 @@ def restore_goal_continuations() -> int:
                         attempt,
                         int(time.time() - _handoff_minted_at),
                     )
+                    # #7862 re-gate round 16 (CORE finding 2): this restore
+                    # deliberately does not run the generic merge, so the
+                    # skipped handoff never entered the local table — and the
+                    # closing snapshot below serialises only that table. When
+                    # this same restore recovers an unrelated record or drops
+                    # another entry, the snapshot therefore ERASED the live
+                    # peer's admission from disk and a crash of its owner had
+                    # nothing left to recover. Preserve it: the entry is copied
+                    # verbatim from disk, so republishing it is a no-op, and
+                    # the merge's per-key reconciliation still lets a later
+                    # bind or discharge win (this is not an unconditional
+                    # union).
+                    _CONTINUATION_HANDOFF_TOKENS[(sid, attempt)] = dict(record)
                     continue
                 # #7862 re-gate round 3 (finding 5): a handoff carrying a STREAM
                 # id is only evidence that an admission RECORDED an identity — the
