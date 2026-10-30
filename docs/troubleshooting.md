@@ -487,6 +487,30 @@ working-tree edits remain intact. Custom mappings (including mappings into
 local tags or branches), explicit refspecs, and other failures retain their
 normal diagnostics and require manual inspection instead of automatic pruning.
 
+## Update fetch is cancelled before it completes
+
+**Symptom.** Update check or apply reports that a fetch was cancelled at its
+deadline, although a manual fetch eventually succeeds.
+
+**Why.** A fetch can spend time waiting for the remote and then start automatic
+Git maintenance. In a partial clone, maintenance can itself download missing
+historical objects. The updater gives each fetch/pull 60 seconds and disables
+automatic maintenance for that command only; repository configuration is not
+changed. Ref-collision recovery retains its one bounded retry. Check and apply
+requests allow five minutes for the sequential operations and cleanup.
+
+**Recovery.** On timeout the updater kills the command's process group on POSIX.
+On Windows it requests tree termination with `taskkill /T /F`, falling back to
+killing the root process if that fails; an already-exited parent can prevent
+Windows from finding its descendants. It never deletes Git lock files.
+Existing maintenance started outside this command is not cancelled.
+Run repository maintenance separately while the Agent is idle if needed.
+
+**When to file a bug.** Include sanitized Git stderr, Git version, whether this
+is a partial clone, and whether child processes survive the cancelled command.
+A remote can still exceed the deadline; a timeout does not by itself prove an
+authentication failure or a merge conflict.
+
 ## Update check reports a Git authentication or fetch failure
 
 **Symptom.** The update status is stale or reports `fetch failed`, `Authentication failed`, or

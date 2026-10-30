@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -56,6 +57,7 @@ CACHE_TTL = 1800  # 30 minutes
 _AGENT_GATEWAY_RESTART_RETRY_DELAY_S = 1.0
 _FORCE_DIRTY_PROBE_TIMEOUT = 5
 _GIT_DIAGNOSTIC_MAX_CHARS = 300
+_GIT_NETWORK_TIMEOUT = 60
 
 _FETCH_NETWORK_FAILURE_SIGNATURES = (
     'could not resolve host',
@@ -69,10 +71,9 @@ _FETCH_NETWORK_FAILURE_SIGNATURES = (
     'tls connection was non-properly terminated',
     'ssl certificate problem',
 )
-# `_run_git` reports a command it cancelled at its own timeout as
-# "git <args> timed out after <n>s". That line is our deadline, not a network
-# symptom: the apply fetch runs with a 15 s budget, so classify the marker as
-# a timeout with its bound. libcurl's real "Operation timed out after <n>
+# `_run_git` reports a cancelled command as "git <args> timed out after <n>s";
+# classify that marker as the updater deadline, not a network symptom. libcurl's
+# real "Operation timed out after <n>
 # milliseconds" stalls are not `git `-prefixed and keep network guidance.
 _FETCH_DEADLINE_TIMEOUT_RE = re.compile(
     r'^git (?P<operation>.+?) timed out after (?P<bound>\d+(?:\.\d+)?)s$',
@@ -264,6 +265,47 @@ def _wait_until_restart_safe(poll_seconds: float = 2.0, max_wait_seconds: float 
     return snapshot
 
 
+def _run_network_git(argv, *, cwd, env, timeout):
+    """Keep network helpers in an owned process group until completion."""
+    process = subprocess.Popen(
+        argv, cwd=str(cwd), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding='utf-8', errors='replace',
+        creationflags=windows_hide_flags(), start_new_session=(os.name != 'nt'),
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except BaseException as exc:
+        if os.name == 'nt':
+            taskkill = os.path.join(
+                os.environ.get('SystemRoot', r'C:\Windows'), 'System32', 'taskkill.exe',
+            )
+            try:
+                subprocess.run(
+                    [taskkill, '/PID', str(process.pid), '/T', '/F'],
+                    capture_output=True, timeout=5, creationflags=windows_hide_flags(),
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            process.kill()
+        else:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            # An already-exited Windows parent can leave descendants holding pipes.
+            process.stdout.close()
+            process.stderr.close()
+            process.wait(timeout=5)
+            raise exc from None
+        if isinstance(exc, subprocess.TimeoutExpired):
+            raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr) from exc
+        raise
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
 def _run_git(args, cwd, timeout=10):
     """Run a git command and return (useful output, ok).
 
@@ -291,21 +333,27 @@ def _run_git(args, cwd, timeout=10):
         )
         env = noninteractive_git_env(cwd, env, executable=git_executable, args=args)
     try:
-        r = subprocess.run(
-            noninteractive_git_argv(
+        if is_network_command:
+            argv = noninteractive_git_argv(
                 args,
                 executable=git_executable,
                 credential_config=credential_config,
-            ) if is_network_command else [git_executable] + args,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            encoding='utf-8',
-            errors='replace',
-            env=env,
-            creationflags=windows_hide_flags(),
-        )
+            )
+            # Maintenance can lazy-fetch historical objects and detach past our deadline.
+            argv[1:1] = ['-c', 'maintenance.auto=false', '-c', 'gc.auto=0']
+            r = _run_network_git(argv, cwd=cwd, env=env, timeout=timeout)
+        else:
+            r = subprocess.run(
+                [git_executable] + args,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                encoding='utf-8',
+                errors='replace',
+                env=env,
+                creationflags=windows_hide_flags(),
+            )
         # On non-UTF-8 locales (e.g. Chinese Windows GBK), a binary git
         # output that fails to decode used to leave r.stdout = None and crash
         # the whole import with AttributeError. Guard against None defensively.
@@ -342,7 +390,10 @@ def _run_git(args, cwd, timeout=10):
         # out, so run it through the same credential scrub the fetch path uses.
         # limit=sys.maxsize: never truncate. Redaction can lengthen the text, so len(raw) would cut its tail.
         detail = _sanitize_git_diagnostic(raw, limit=sys.maxsize)
-        return detail or f"git {' '.join(args)} timed out after {timeout}s", False
+        deadline = _sanitize_git_diagnostic(
+            f"git {' '.join(args)} timed out after {timeout}s", limit=sys.maxsize,
+        )
+        return f'{deadline}\n{detail}' if detail else deadline, False
     except FileNotFoundError:
         return 'git executable not found', False
     except OSError as exc:
@@ -1334,7 +1385,7 @@ def _check_repo_branch(path, name, *, fetch=True):
 
     # Fetch latest from origin (network call, cached by TTL)
     if fetch:
-        _, fetch_ok = _run_git(['fetch', 'origin', '--quiet'], path, timeout=15)
+        _, fetch_ok = _run_git(['fetch', 'origin', '--quiet'], path, timeout=_GIT_NETWORK_TIMEOUT)
         if not fetch_ok:
             return {'name': name, 'behind': 0, 'error': 'fetch failed'}
 
@@ -1564,7 +1615,7 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     # after a squash-merge that re-points a release tag at a new SHA) jams
     # the update path indefinitely with "would clobber existing tag" errors.
     # See #2756.
-    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--tags', '--force'], path, timeout=15)
+    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--tags', '--force'], path, timeout=_GIT_NETWORK_TIMEOUT)
     if not fetch_ok:
         release_info = _check_repo_release(path, name, channel)
         message = 'fetch failed'
@@ -2297,7 +2348,7 @@ def apply_force_update(target: str, channel=None) -> dict:
         # --force so a remote re-tag (e.g. squash-merge that re-points an
         # existing release tag) doesn't jam the apply path with "would clobber
         # existing tag". See #2756.
-        fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
+        fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=_GIT_NETWORK_TIMEOUT)
         if not fetch_ok:
             return {
                 'ok': False,
@@ -2447,7 +2498,7 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
 
     # Fetch before attempting pull, so the remote ref is current.
     # --force so a remote re-tag doesn't block the update path (see #2756).
-    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
+    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=_GIT_NETWORK_TIMEOUT)
     if not fetch_ok:
         if _is_git_lock_error(fetch_out):
             return {
@@ -2519,7 +2570,7 @@ def _apply_update_inner(target, channel=DEFAULT_UPDATE_CHANNEL):
         pull_args.extend([remote, branch])
     else:
         pull_args.extend(['origin', compare_ref])
-    pull_out, pull_ok = _run_git(pull_args, path, timeout=30)
+    pull_out, pull_ok = _run_git(pull_args, path, timeout=_GIT_NETWORK_TIMEOUT)
     if not pull_ok:
         # Every pull-failure message below interpolates git's own output, and
         # git echoes the remote URL (token included) when a pull dies. Scrub
