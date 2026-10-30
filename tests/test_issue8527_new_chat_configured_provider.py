@@ -995,3 +995,621 @@ def test_new_session_without_switch_reset_still_uses_the_picker():
     assert body.get("model_provider") == "openai", (
         f"the picker's own provider must still travel; got {body.get('model_provider')!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Maintainer re-gate (2026-10-31, round 2): the one-shot reset gate must
+# survive the catalog hydration that follows a model-less profile switch.
+#
+# populateModelDropdown() released ``S._profileSwitchModelReset`` the moment
+# the /api/models payload arrived (static/ui.js, right after the payload is
+# parsed) — BEFORE it knew whether the picker could actually be rebuilt. The
+# supported no-groups/no-configured-fallback branch then returned before the
+# ``sel.innerHTML=''`` clear, so the PREVIOUS profile's option stayed in the
+# picker with the gate already released, and the next newSession()
+# (static/sessions.js, picker fallback) adopted that stale pair:
+#
+#   1. switch to new-profile with no configured model -> model-less POST ✓
+#   2. catalog returns {active_provider:null, default_model:'',
+#      configured_model_badges:{}, groups:[]} -> gate released, option kept ✗
+#   3. New Chat again -> {profile:'new-profile', model:'old/model',
+#      model_provider:'old-route'} ✗
+#
+# The tests below drive the REAL switch writer, the REAL populateModelDropdown
+# (composed with the REAL picker identity/provider/application helpers
+# extracted verbatim from static/ui.js) and the REAL newSession, so the whole
+# guard/picker lifecycle is observed instead of a refresh stub that clears the
+# globals directly.
+# ---------------------------------------------------------------------------
+
+UI_JS = ROOT / "static" / "ui.js"
+
+# The picker helpers populateModelDropdown composes with — extracted verbatim
+# so option identity, provider provenance and the selection reconciliation are
+# the production implementations rather than test doubles.
+_UI_PICKER_FUNCTIONS = [
+    "_getOptionProviderId",
+    "_providerFromModelValue",
+    "_modelPickerOptionIdentity",
+    "_deduplicateModelPickerOptions",
+    "_modelStateForSelect",
+    "_captureModelDropdownSelection",
+    "_findModelInDropdown",
+    "_refreshOpenModelDropdown",
+    "_applyModelToDropdown",
+    "_ensureModelOptionInDropdown",
+    "_reconcileModelDropdownSelection",
+]
+
+_REFRESH_DRIVER_BODY = r"""
+const fs = require('fs');
+const vm = require('vm');
+const srcSessions = fs.readFileSync(process.argv[1], 'utf8');
+const srcPanels = fs.readFileSync(process.argv[2], 'utf8');
+const srcUi = fs.readFileSync(process.argv[3], 'utf8');
+const scenario = JSON.parse(process.argv[4]);
+
+const calls = [];
+const newSessionBodies = [];
+const noop = () => {};
+const promiseNoop = () => Promise.resolve();
+
+// ---- minimal <select id="modelSelect"> stand-in ---------------------------
+function makeSelect(groups, initialValue) {
+  const sel = {id: 'modelSelect', tagName: 'SELECT', options: [], selectedIndex: -1, selectedOptions: []};
+  Object.defineProperty(sel, 'value', {
+    get() { return this._value || ''; },
+    set(v) {
+      this._value = v;
+      const idx = this.options.findIndex((o) => o.value === v);
+      this.selectedIndex = idx;
+      this.selectedOptions = idx >= 0 ? [this.options[idx]] : [];
+    }
+  });
+  Object.defineProperty(sel, 'innerHTML', {
+    get() { return ''; },
+    set(_v) { this.options = []; this._groups = []; this.value = ''; }
+  });
+  sel._groups = [];
+  sel.appendChild = function(node) {
+    if (node && node.tagName === 'OPTGROUP') {
+      this._groups.push(node);
+      for (const opt of node.children || []) {
+        opt.parentElement = node;
+        this.options.push(opt);
+      }
+    } else if (node) {
+      node.parentElement = null;
+      this.options.push(node);
+    }
+    if (!this.options.length) return;
+    if (this.selectedIndex < 0) this.value = this.options[0].value;
+    else if (this._value) this.value = this._value;
+  };
+  sel.querySelector = function(selector) {
+    return String(selector).includes('option') ? (this.options[0] || null) : null;
+  };
+  sel.querySelectorAll = function(selector) {
+    return String(selector) === 'optgroup' ? (this._groups || []) : [];
+  };
+  for (const group of groups || []) {
+    const og = {
+      tagName: 'OPTGROUP',
+      label: group.provider || '',
+      dataset: {provider: group.provider_id || ''},
+      children: [],
+      appendChild(opt) { opt.parentElement = this; this.children.push(opt); },
+      removeChild(opt) {
+        const idx = this.children.indexOf(opt);
+        if (idx >= 0) this.children.splice(idx, 1);
+        const oi = sel.options.indexOf(opt);
+        if (oi >= 0) {
+          sel.options.splice(oi, 1);
+          sel.value = sel.value;
+        }
+      },
+    };
+    for (const item of group.options || []) {
+      og.children.push({
+        tagName: 'OPTION',
+        value: item.value,
+        textContent: item.label || item.value,
+        title: '',
+        dataset: Object.assign({}, item.dataset || {}),
+      });
+    }
+    sel.appendChild(og);
+  }
+  sel.value = initialValue || '';
+  return sel;
+}
+
+const _modelSelect = makeSelect(
+  scenario.modelSelect && scenario.modelSelect.groups,
+  scenario.modelSelect && scenario.modelSelect.value
+);
+
+const document = {
+  baseURI: 'http://127.0.0.1/hermes/',
+  title: '',
+  createElement(tag) {
+    const upper = String(tag).toUpperCase();
+    if (upper === 'OPTGROUP') {
+      return {
+        tagName: 'OPTGROUP',
+        label: '',
+        dataset: {},
+        children: [],
+        appendChild(opt) { opt.parentElement = this; this.children.push(opt); },
+      };
+    }
+    return {tagName: upper, value: '', textContent: '', title: '', dataset: {}, parentElement: null};
+  },
+};
+const localStorage = {getItem() { return null; }, setItem() {}, removeItem() {}};
+
+const S = Object.assign({
+  activeProfile: 'default',
+  activeProfileIsDefault: true,
+  session: scenario.session || null,
+  messages: scenario.messages || [],
+  toolCalls: [],
+  _profileSwitchWorkspace: null,
+  _profileDefaultWorkspace: null,
+  _pendingSessionToolsets: null,
+}, scenario.S || {});
+
+const ctx = {
+  S: S,
+  $: (id) => (id === 'modelSelect' ? _modelSelect : null),
+  api: (url, opts) => {
+    calls.push(url);
+    if (url === '/api/profile/switch') {
+      return Promise.resolve(scenario.switchData);
+    }
+    if (url === '/api/session/new') {
+      let body = null;
+      try { body = JSON.parse((opts && opts.body) || 'null'); } catch (_) { body = null; }
+      newSessionBodies.push(body);
+      return Promise.resolve({
+        session: {
+          session_id: 'new-sid',
+          messages: [],
+          model: (body && body.model) || null,
+          model_provider: (body && body.model_provider) || null,
+        },
+      });
+    }
+    return Promise.resolve({});
+  },
+  window: {
+    _defaultModel: scenario.defaultModel,
+    _activeProvider: scenario.activeProvider,
+    _clearPendingSelections: noop,
+    invalidateSlashSkillCaches: undefined,
+  },
+  document: document,
+  localStorage: localStorage,
+  fetch: async (url) => {
+    const href = String(url);
+    if (href.includes('api/models')) {
+      return {json: async () => scenario.modelsPayload};
+    }
+    throw new Error('unexpected fetch ' + href);
+  },
+  URL: URL,
+  Map: Map,
+  Set: Set,
+  Symbol: Symbol,
+  showToast: noop,
+  t: (v) => v,
+  updateQueueBadge: noop,
+  clearLiveToolCards: noop,
+  syncTopbar: noop,
+  renderMessages: noop,
+  loadDir: () => ({catch: noop}),
+  refreshSessionList: noop,
+  _allProjects: [],
+  _activeProject: scenario.activeProject || null,
+  NO_PROJECT_FILTER: '__no_project__',
+  _newSessionInFlight: null,
+  _newSessionPendingText: () => '',
+  _setNewSessionPending: noop,
+  _messagesTruncated: false,
+  _oldestIdx: 0,
+  _projectBindingsForNewSession: () => ({}),
+  _profileMatchesActiveProfile: () => true,
+  _readEmptyComposerModelOverride: () => scenario.explicitOverride || null,
+  _readPersistedModelState: () => null,
+  _clearExplicitPickerPick: noop,
+  _clearEmptyComposerModelOverride: noop,
+  _adoptRegenerationRevision: noop,
+  _rememberNewChatDraftSession: noop,
+  _setActiveSessionUrl: noop,
+  _setLiveAssistantTps: noop,
+  _setSessionViewedCount: noop,
+  _syncCtxIndicator: noop,
+  _applyReasoningChip: noop,
+  _hydrateTodosFromSession: noop,
+  _announceNewSessionWorkspace: noop,
+  _deferWorkspaceRefreshForSession: noop,
+  _retireProjectPickerForExplicitRepaint: noop,
+  _loadSessionGeneration: 0,
+  _sessionSourceFilter: null,
+  _clearRestoredGoalContinuationDraft: noop,
+  updateSendBtn: noop,
+  setStatus: noop,
+  setComposerStatus: noop,
+  startSessionStream: noop,
+  // switchToProfile / _switchProfileForSessionLoad module vars + stubs.
+  _profileSwitchGeneration: 0,
+  _profileSwitchInFlight: 0,
+  _profileSwitchOpeningExistingSession: false,
+  _workspacePanelMode: 'closed',
+  _skillsData: null,
+  _workspaceList: null,
+  _tabVisReconcilePending: 0,
+  _renamingSid: null,
+  _sessionListSkeletonActive: false,
+  _invalidateSessionListRenders: noop,
+  _setProfileSwitchListEmbargo: noop,
+  showSessionListSkeleton: noop,
+  bumpWorkspaceTreeGen: noop,
+  showWorkspaceTreeSkeleton: noop,
+  clearWorkspaceTreeSkeleton: noop,
+  _resetCronUnreadForProfileSwitch: noop,
+  _clearPersistedModelState: noop,
+  startGatewaySSE: noop,
+  applyBotName: noop,
+  refreshProfileTransitionReasoningChip: noop,
+  animateNextSessionListRefresh: noop,
+  renderSessionList: promiseNoop,
+  _openProfileSwitchSessionBrowser: noop,
+  _profileSwitchPanelLoad: promiseNoop,
+  closeSessionActionMenu: noop,
+  // populateModelDropdown collaborators (the picker helpers themselves are
+  // extracted verbatim below; these are the leaf DOM/fetch stubs).
+  getModelLabel: (v) => v,
+  syncModelChip: () => { calls.push('syncModelChip'); },
+  _fetchLiveModels: () => { calls.push('_fetchLiveModels'); },
+  _redirectIfUnauth: () => false,
+  _sortModelPickerEntries: (values) => values,
+  renderModelDropdown: noop,
+  _positionModelDropdown: noop,
+  // The ordinary post-switch background refresh only RECORDS its position —
+  // the real populateModelDropdown driven below owns the gate, so this stub
+  // must never touch the globals (that indirection is what let the premature
+  // release hide).
+  _refreshProfileSwitchBackground: () => { calls.push('_refreshProfileSwitchBackground'); },
+  Object, JSON, Promise, Array, String, Number, Boolean, Math, RegExp, Date,
+  Error, TypeError, console, setTimeout, isNaN, parseInt, parseFloat,
+};
+
+const proxy = new Proxy(ctx, {
+  get(target, prop) { if (prop in target) return target[prop]; return noop; },
+  has() { return true; },
+});
+const context = vm.createContext(proxy);
+vm.runInContext('var _dynamicModelLabels = {};', context);
+for (const name of __PICKER_FNS__) {
+  vm.runInContext(extractFunction(srcUi, name), context);
+}
+vm.runInContext(extractAsyncFunction(srcUi, 'populateModelDropdown'), context);
+vm.runInContext(extractAsyncFunction(srcSessions, 'newSession'), context);
+vm.runInContext(extractAsyncFunction(srcPanels, 'switchToProfile'), context);
+vm.runInContext(extractAsyncFunction(srcSessions, '_switchProfileForSessionLoad'), context);
+
+const snapshot = () => JSON.parse(vm.runInContext(`JSON.stringify({
+  guard: !!S._profileSwitchModelReset,
+  defaultModel: window._defaultModel,
+  activeProvider: window._activeProvider,
+  pickerValue: $('modelSelect').value,
+  pickerOptions: $('modelSelect').options.map((o) => ({value: o.value, provider: _getOptionProviderId(o)})),
+})`, context));
+
+const switched = scenario.flow === 'loadSwitch'
+  ? context._switchProfileForSessionLoad(scenario.switchName)
+  : (scenario.flow === 'switch' ? context.switchToProfile(scenario.switchName) : Promise.resolve());
+
+switched
+  // The real post-switch catalog hydration (same call shape the session-load
+  // refresh uses).
+  .then(() => context.populateModelDropdown({freshness: 'session_visit'}))
+  .then(() => {
+    const afterRefresh = snapshot();
+    // "Create another conversation" — the caller that exposed the stale pair.
+    return context.newSession(false, scenario.newSessionOptions || {}).then(() => afterRefresh);
+  })
+  .then((afterRefresh) => {
+    process.stdout.write(JSON.stringify({
+      ok: true,
+      calls: calls,
+      newSessionBodies: newSessionBodies,
+      afterRefresh: afterRefresh,
+      afterNewSession: snapshot(),
+    }));
+  })
+  .catch((err) => {
+    process.stdout.write(JSON.stringify({ok: false, error: String((err && err.stack) || err)}));
+  });
+"""
+
+
+def _run_refresh_driver(scenario: dict) -> dict:
+    """Drive the REAL profile-switch writer, the REAL populateModelDropdown and
+    the REAL newSession in that order; report the guard/picker state after the
+    catalog hydration plus every ``/api/session/new`` payload."""
+    driver = (
+        _EXTRACTOR
+        + _REFRESH_DRIVER_BODY.replace("__PICKER_FNS__", json.dumps(_UI_PICKER_FUNCTIONS))
+    )
+    proc = subprocess.run(
+        [NODE_BIN, "-e", driver, str(SESSIONS_JS), str(PANELS_JS), str(UI_JS), json.dumps(scenario)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    out = (proc.stdout or "").strip()
+    if not out:
+        raise AssertionError(f"refresh driver produced no output; stderr={proc.stderr[:2000]}")
+    return json.loads(out.splitlines()[-1])
+
+
+# A model-less destination: api/profiles.py legitimately returns a null
+# default_model for a profile that configures none.
+_MODEL_LESS_SWITCH_DATA = {"active": _SWITCH_NAME, "is_default": False, "default_model": None}
+
+# The empty catalog the backend ships for such a profile: no groups, no
+# configured fallback, no active provider.
+_EMPTY_CATALOG_PAYLOAD = {
+    "active_provider": None,
+    "default_model": "",
+    "configured_model_badges": {},
+    "groups": [],
+}
+
+# A populated fallback-model response: no server groups, but the destination's
+# configured badges synthesize a group (the supported configured-fallback
+# branch). Same model id as the stale picker option, DIFFERENT provider — the
+# identity collision where a same-value option must not keep the previous
+# profile's provenance.
+_POPULATED_FALLBACK_PAYLOAD = {
+    "active_provider": None,
+    "default_model": "",
+    "configured_model_badges": {"gpt-5.1": {"provider": "new-route"}},
+    "groups": [],
+}
+
+# A stale same-model picker: the dropdown still holds the PREVIOUS profile's
+# selection with the previous profile's provider (the catalog refresh has not
+# rebuilt it yet), exactly as it looks when the switch's auto-created session
+# POST goes out.
+_STALE_SAME_MODEL_PICKER = {
+    "value": _DEST_DEFAULT,
+    "groups": [
+        {
+            "provider": "Old route",
+            "provider_id": "old-route",
+            "options": [
+                {
+                    "value": _DEST_DEFAULT,
+                    "label": "Gemini 2.5 Pro",
+                    "dataset": {"provider": "old-route"},
+                },
+            ],
+        },
+    ],
+}
+
+_STALE_BARE_PICKER = {
+    "value": "gpt-5.1",
+    "groups": [
+        {
+            "provider": "Old route",
+            "provider_id": "old-route",
+            "options": [
+                {"value": "gpt-5.1", "label": "GPT-5.1", "dataset": {"provider": "old-route"}},
+            ],
+        },
+    ],
+}
+
+
+def _model_less_switch_scenario(flow, models_payload, model_select, **extra):
+    """A tab on the OLD profile (session + picker hydrated from its catalog)
+    switching to a model-less destination, followed by the catalog hydration
+    and another New Chat.
+
+    ``flow='switch'`` is the canonical switchToProfile chain (it auto-creates
+    the first session BEFORE the refresh); ``flow='loadSwitch'`` is the
+    sessions.js writer chain the maintainer reproduced.
+    """
+    scenario = {
+        "flow": flow,
+        "switchName": _SWITCH_NAME,
+        "switchData": _MODEL_LESS_SWITCH_DATA,
+        "modelsPayload": models_payload,
+        # Stale globals + picker from the previous profile.
+        "defaultModel": _DEST_DEFAULT,
+        "activeProvider": "old-route",
+        "session": _OLD_SESSION if flow == "switch" else None,
+        "messages": _OLD_MESSAGES if flow == "switch" else [],
+        "modelSelect": model_select,
+    }
+    scenario.update(extra)
+    return scenario
+
+
+@pytest.mark.parametrize("flow", ["switch", "loadSwitch"])
+def test_empty_catalog_after_model_less_switch_keeps_the_gate_and_drops_the_stale_picker(flow):
+    """An empty catalog must not release the reset gate NOR keep the stale option.
+
+    RED on the reviewed head: populateModelDropdown released the gate as soon
+    as the payload arrived and returned before clearing the <select>, so the
+    next New Chat posted the previous profile's pair
+    (``model:'google/gemini-2.5-pro', model_provider:'old-route'``) under the
+    new profile's name.
+    """
+    result = _run_refresh_driver(_model_less_switch_scenario(
+        flow, _EMPTY_CATALOG_PAYLOAD, _STALE_SAME_MODEL_PICKER,
+    ))
+    assert result["ok"], result.get("error")
+    bodies = result["newSessionBodies"]
+    assert bodies, "the chained New Chat must actually POST /api/session/new"
+    if flow == "switch":
+        assert len(bodies) == 2, (
+            f"the canonical switch auto-creates one session and the chained New Chat "
+            f"creates the second; got {len(bodies)} POSTs"
+        )
+        first = bodies[0]
+        assert first.get("model") in (None, ""), (
+            "the switch's own auto-created session must stay model-less; got "
+            f"{first.get('model')!r}"
+        )
+    second = bodies[-1]
+    assert second.get("profile") == _SWITCH_NAME, (
+        f"the request must be scoped to the destination profile; got {second.get('profile')!r}"
+    )
+    assert second.get("model") in (None, ""), (
+        "an empty catalog (no groups, no configured fallback) must not let the next "
+        f"New Chat fall back to the previous profile's picker; got {second.get('model')!r} "
+        "(#8527 profile-switch re-gate)"
+    )
+    assert second.get("model_provider") in (None, ""), (
+        "an empty catalog must not pin the previous profile's provider on the next "
+        f"New Chat; got {second.get('model_provider')!r} (#8527 profile-switch re-gate)"
+    )
+    after = result["afterRefresh"]
+    assert after["guard"], (
+        "the one-shot reset gate must stay armed through empty/failed hydration — "
+        "releasing it before the picker is rebuilt is the lifecycle gap"
+    )
+    assert after["pickerOptions"] == [], (
+        "the previous profile's options must be quarantined when the destination "
+        f"catalog is empty; retained {after['pickerOptions']!r}"
+    )
+    assert after["pickerValue"] in (None, ""), (
+        f"the picker must not keep a selectable stale value; got {after['pickerValue']!r}"
+    )
+
+
+@pytest.mark.parametrize("flow", ["switch", "loadSwitch"])
+def test_populated_fallback_model_releases_the_gate_with_fresh_provenance(flow):
+    """A populated fallback-model response must rebuild the picker and only THEN
+    release the gate, so the next New Chat carries the DESTINATION's pair.
+
+    RED on the reviewed head: the gate was released before the rebuild and the
+    reconciliation re-applied the previous profile's selection, so the same
+    model id came back with the OLD provider ('old-route').
+    """
+    result = _run_refresh_driver(_model_less_switch_scenario(
+        flow, _POPULATED_FALLBACK_PAYLOAD, _STALE_BARE_PICKER,
+    ))
+    assert result["ok"], result.get("error")
+    bodies = result["newSessionBodies"]
+    second = bodies[-1]
+    assert second.get("model") == "gpt-5.1", (
+        f"the destination's configured fallback model must be sent; got {second.get('model')!r}"
+    )
+    assert second.get("model_provider") == "new-route", (
+        "after the destination catalog rehydrates, the picker fallback must carry "
+        f"the DESTINATION's provider; got {second.get('model_provider')!r} — the "
+        "previous profile's 'old-route' must not survive a same-model rebuild "
+        "(#8527 profile-switch re-gate)"
+    )
+    after = result["afterRefresh"]
+    assert not after["guard"], (
+        "the reset gate must be released once the current profile's picker has "
+        "actually been rebuilt/reconciled"
+    )
+    providers = sorted({str(o.get("provider") or "") for o in after["pickerOptions"]})
+    assert "old-route" not in providers, (
+        f"the stale option must not be reconciled back into the picker; got {after['pickerOptions']!r}"
+    )
+    assert after["pickerValue"] == "gpt-5.1", (
+        f"the rebuilt picker must select the destination's model; got {after['pickerValue']!r}"
+    )
+
+
+def test_empty_catalog_still_admits_a_fresh_explicit_composer_pick():
+    """A FRESH empty-composer pick is not stale state: it must survive the armed
+    gate (newSession consults it ahead of the picker/persisted fallbacks).
+
+    Control arm for the quarantine above — an over-broad fix that blocked
+    every fallback during empty hydration would break the user's explicit
+    choice.
+    """
+    result = _run_refresh_driver(_model_less_switch_scenario(
+        "loadSwitch",
+        _EMPTY_CATALOG_PAYLOAD,
+        _STALE_SAME_MODEL_PICKER,
+        explicitOverride={"model": "fresh/pick", "model_provider": "fresh-route"},
+    ))
+    assert result["ok"], result.get("error")
+    bodies = result["newSessionBodies"]
+    second = bodies[-1]
+    assert second.get("model") == "fresh/pick", (
+        f"a fresh explicit composer pick must survive the armed gate; got {second.get('model')!r}"
+    )
+    assert second.get("model_provider") == "fresh-route", (
+        f"the explicit pick's own provider must travel; got {second.get('model_provider')!r}"
+    )
+
+
+def test_ordinary_refresh_without_a_pending_reset_still_preserves_the_selection():
+    """Control: outside a profile switch the rebuild keeps reconciling the
+    user's in-page selection (#4363) — the reset-aware skip is scoped to the
+    armed gate only.
+    """
+    result = _run_refresh_driver({
+        "flow": "none",
+        "modelsPayload": {
+            "active_provider": "openai",
+            "default_model": "",
+            "configured_model_badges": {},
+            "groups": [
+                {
+                    "provider": "OpenAI",
+                    "provider_id": "openai",
+                    "models": [
+                        {"id": "gpt-5.1", "label": "GPT-5.1"},
+                        {"id": "gpt-5.1-mini", "label": "GPT-5.1 mini"},
+                    ],
+                },
+            ],
+        },
+        "defaultModel": None,
+        "activeProvider": "openai",
+        "session": None,
+        "messages": [],
+        "modelSelect": {
+            "value": "gpt-5.1",
+            "groups": [
+                {
+                    "provider": "OpenAI",
+                    "provider_id": "openai",
+                    "options": [
+                        {"value": "gpt-5.1", "label": "GPT-5.1", "dataset": {"provider": "openai"}},
+                    ],
+                },
+            ],
+        },
+    })
+    assert result["ok"], result.get("error")
+    bodies = result["newSessionBodies"]
+    assert len(bodies) == 1, f"expected exactly one New Chat POST; got {len(bodies)}"
+    body = bodies[0]
+    assert body.get("model") == "gpt-5.1", (
+        f"the ordinary picker fallback must still win; got {body.get('model')!r}"
+    )
+    assert body.get("model_provider") == "openai", (
+        f"the picker's own provider must still travel; got {body.get('model_provider')!r}"
+    )
+    after = result["afterRefresh"]
+    assert after["pickerValue"] == "gpt-5.1", (
+        f"the rebuild must preserve the in-page selection; got {after['pickerValue']!r}"
+    )
+    assert after["pickerOptions"] == [
+        {"value": "gpt-5.1", "provider": "openai"},
+        {"value": "gpt-5.1-mini", "provider": "openai"},
+    ], f"the rebuilt catalog must be intact; got {after['pickerOptions']!r}"

@@ -193,7 +193,11 @@ def test_boot_model_dropdown_explicitly_requests_profile_default_precedence():
 
 
 def test_populate_model_dropdown_reconciles_selection_after_rebuild():
-    assert "const previousSelection=_captureModelDropdownSelection(sel);" in UI_JS
+    # #8527 re-gate: the capture is now reset-aware — while a profile-switch
+    # model reset is pending the dropdown's selection belongs to the PREVIOUS
+    # profile, so it is quarantined (null) instead of reconciled back in.
+    assert "const previousSelection=(typeof S!=='undefined'&&S&&S._profileSwitchModelReset)" in UI_JS
+    assert ":_captureModelDropdownSelection(sel);" in UI_JS
     assert "_reconcileModelDropdownSelection(sel,data,previousSelection,opts);" in UI_JS
     snippet = _reconcile_selection_snippet()
     assert "preferProfileDefaultOnFreshBoot" in snippet
@@ -209,6 +213,41 @@ def test_populate_model_dropdown_reconciles_selection_after_rebuild():
     assert "_ensureModelOptionInDropdown(modelId, sel, providerId)" in snippet
     assert "_readPersistedModelState()" not in snippet
     assert "localStorage.getItem('hermes-webui-model')" not in snippet
+
+
+def test_populate_model_dropdown_releases_the_switch_reset_only_after_the_rebuild():
+    """#8527 re-gate: the one-shot profile-switch model reset
+    (``S._profileSwitchModelReset``) must be released only AFTER the picker has
+    been rebuilt and reconciled.
+
+    Releasing it when the /api/models payload arrives let the
+    no-groups/no-configured-fallback branch return with the gate already open
+    while the PREVIOUS profile's option was still selected — the next
+    newSession() then adopted that stale pair. The empty-result branch must
+    keep the gate armed and quarantine the stale options instead.
+    """
+    start = UI_JS.index("async function populateModelDropdown")
+    end = UI_JS.index("function _addLiveModelsToSelect", start)
+    body = UI_JS[start:end]
+    release = body.index("S._profileSwitchModelReset=false")
+    reconcile = body.index(
+        "_reconcileModelDropdownSelection(sel,data,previousSelection,opts);"
+    )
+    assert reconcile < release, (
+        "the reset gate must be released after the picker is rebuilt/reconciled, "
+        "not when the payload arrives"
+    )
+    # The empty-result branch (no groups, no configured fallback) must neither
+    # release the gate nor keep the previous profile's options selectable.
+    empty_branch = body[
+        body.index("if(!groups.length){"):body.index("// Clear existing options")
+    ]
+    assert "sel.innerHTML='';" in empty_branch, (
+        "an empty catalog must quarantine the previous profile's options"
+    )
+    assert "_profileSwitchModelReset=false" not in empty_branch, (
+        "the reset gate must stay armed through empty hydration"
+    )
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
