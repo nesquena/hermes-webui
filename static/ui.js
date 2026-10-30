@@ -13824,8 +13824,12 @@ function dismissReconnect() {
 // agent runs with memory off for a reason that outlives the turn (an outdated
 // Hermes Agent, or a memory provider another profile already uses). One quiet,
 // dismissible notice above the composer says why and what to do. Dismissal is
-// remembered per session and reason; a completed turn that reports no status
-// clears it (memory is back). No status (healthy sessions, older servers): the
+// remembered per session and reason. Only an explicit healthy status clears it
+// (a `memory_status` frame with state `ok`, sent when the turn's agent is the
+// session's lasting agent with memory on); a turn that reports nothing (a
+// transient one-turn failure, an older server) leaves it as it is. A reload
+// restores it from the run journal snapshot; a compression continuation carries
+// it to the new session. No status (healthy sessions, older servers): the
 // element stays `hidden`, so normal sessions never see a layout change.
 const MEMORY_OFF_NOTICE_KEYS={
   agent_outdated:'memory_off_agent_outdated',
@@ -13833,32 +13837,64 @@ const MEMORY_OFF_NOTICE_KEYS={
   provider_shared_instance:'memory_off_provider_shared_instance',
 };
 const MEMORY_OFF_DISMISS_PREFIX='hermes-webui-memory-off-dismissed:';
-const _memoryOffStatusBySession=new Map(); // session_id -> {reason, streams:Set}
+const _memoryOffStatusBySession=new Map(); // session_id -> {reason}
 const _memoryOffAnnounced=new Set(); // `${sid}:${reason}` announced on this page
 function _memoryOffDismissKey(sid,reason){return MEMORY_OFF_DISMISS_PREFIX+sid+':'+reason;}
 function _memoryOffDismissed(sid,reason){
   try{return localStorage.getItem(_memoryOffDismissKey(sid,reason))==='1';}catch(_){return false;}
+}
+function _isMemoryOffReason(reason){
+  return Object.prototype.hasOwnProperty.call(MEMORY_OFF_NOTICE_KEYS,reason);
 }
 // Returns true when `d` is a memory_off frame (handled here), false otherwise.
 function noteMemoryOffStatus(d){
   if(!d||d.type!=='memory_off') return false;
   const reason=String(d.reason||'');
   const sid=String(d.session_id||'');
-  if(!sid||!Object.prototype.hasOwnProperty.call(MEMORY_OFF_NOTICE_KEYS,reason)) return true;
-  const prior=_memoryOffStatusBySession.get(sid);
-  const streams=(prior&&prior.reason===reason)?prior.streams:new Set();
-  if(d.stream_id) streams.add(String(d.stream_id));
-  _memoryOffStatusBySession.set(sid,{reason,streams});
+  if(!sid||!_isMemoryOffReason(reason)) return true;
+  _memoryOffStatusBySession.set(sid,{reason});
   syncMemoryOffNotice();
   return true;
 }
-// A finished turn of `sid` that never reported memory_off means memory is on again.
-function settleMemoryOffNoticeAfterTurn(sid,streamId){
-  const status=sid?_memoryOffStatusBySession.get(String(sid)):null;
-  if(!status||!streamId||status.streams.has(String(streamId))) return;
-  _memoryOffStatusBySession.delete(String(sid));
-  _memoryOffAnnounced.delete(String(sid)+':'+status.reason);
+// The server confirmed memory is on for `d.session_id`: clear the notice and its
+// dismissal (a later memory-off for this session is news again). Returns true
+// when `d` is such a status.
+function noteMemoryOkStatus(d){
+  if(!d||d.state!=='ok') return false;
+  const sid=String(d.session_id||'');
+  if(!sid) return false;
+  const status=_memoryOffStatusBySession.get(sid);
+  _memoryOffStatusBySession.delete(sid);
+  if(status) _memoryOffAnnounced.delete(sid+':'+status.reason);
+  try{for(const reason of Object.keys(MEMORY_OFF_NOTICE_KEYS)) localStorage.removeItem(_memoryOffDismissKey(sid,reason));}catch(_){}
   syncMemoryOffNotice();
+  return true;
+}
+// Reload/reattach: the live stream resumes after the warning's seq, so restore the
+// status the run journal snapshot carries for the session being loaded.
+function restoreMemoryStatusFromSnapshot(sid,status){
+  sid=String(sid||'');
+  if(!sid||!status||typeof status!=='object') return false;
+  if(status.state==='ok') return noteMemoryOkStatus({state:'ok',session_id:sid});
+  const reason=String(status.reason||'');
+  if(!_isMemoryOffReason(reason)) return false;
+  return noteMemoryOffStatus({type:'memory_off',session_id:sid,reason});
+}
+// Compression continuation (`fromSid` -> `toSid`): the conversation and its agent
+// continue in the new session, so does the notice, its dismissal and the fact that
+// it was announced. The old entry stays (no flicker before the pane switches).
+function migrateMemoryOffNotice(fromSid,toSid){
+  fromSid=String(fromSid||'');toSid=String(toSid||'');
+  if(!fromSid||!toSid||fromSid===toSid) return false;
+  const status=_memoryOffStatusBySession.get(fromSid);
+  if(!status) return false;
+  _memoryOffStatusBySession.set(toSid,{reason:status.reason});
+  if(_memoryOffDismissed(fromSid,status.reason)){
+    try{localStorage.setItem(_memoryOffDismissKey(toSid,status.reason),'1');}catch(_){}
+  }
+  if(_memoryOffAnnounced.has(fromSid+':'+status.reason)) _memoryOffAnnounced.add(toSid+':'+status.reason);
+  syncMemoryOffNotice();
+  return true;
 }
 function syncMemoryOffNotice(){
   const notice=$('memoryOffNotice');

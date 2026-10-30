@@ -2440,6 +2440,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!Array.isArray(INFLIGHT[activeSid].activityBurstAnchors)) INFLIGHT[activeSid].activityBurstAnchors=[];
   if(INFLIGHT[activeSid].currentActivityBurstId===undefined) INFLIGHT[activeSid].currentActivityBurstId=0;
   if(INFLIGHT[activeSid].currentLiveSegmentSeq===undefined) INFLIGHT[activeSid].currentLiveSegmentSeq=0;
+  // #8517: a reattach resumes after the memory-off warning's seq; restore the status
+  // the run journal snapshot carried for this stream (dismissal still applies).
+  if(INFLIGHT[activeSid].memoryStatus&&(!_priorInflightStreamId||_priorInflightStreamId===streamId)){
+    const _snapshotMemoryStatus=INFLIGHT[activeSid].memoryStatus;
+    delete INFLIGHT[activeSid].memoryStatus;
+    try{ if(typeof restoreMemoryStatusFromSnapshot==='function') restoreMemoryStatusFromSnapshot(activeSid,_snapshotMemoryStatus); }catch(_){}
+  }
   let assistantText='';
   let reasoningText='';
   if(S.session&&S.session.session_id===activeSid&&S.activeStreamId===streamId&&typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
@@ -6761,10 +6768,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _cancelThrottledSnapshotTimer();
-      // #8517: a finished turn that reported no memory_off clears the notice.
-      try{ if(typeof settleMemoryOffNoticeAfterTurn==='function') settleMemoryOffNoticeAfterTurn(activeSid,streamId); }catch(_){}
       const _doneData=JSON.parse(e.data);
       const _doneEvent=e;
+      // #8517: compression continuation (activeSid -> done.session): carry the
+      // memory-off notice to the continuing session before the completion repaint.
+      // A finished turn never clears it; only an explicit memory_status ok does.
+      try{
+        const _continuationSid=_doneData&&_doneData.session&&_doneData.session.session_id;
+        if(_continuationSid&&String(_continuationSid)!==String(activeSid)&&typeof migrateMemoryOffNotice==='function') migrateMemoryOffNotice(activeSid,_continuationSid);
+      }catch(_){}
       const _finishDone=()=>{
         // Bug A fix: cancel any pending rAF and mark stream finalized before
         // the DOM is settled by renderMessages, so no trailing token/reasoning rAF
@@ -7364,6 +7376,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       });
     });
 
+    source.addEventListener('memory_status',e=>{
+      // #8517: explicit per-turn memory status; `ok` (memory is on for this
+      // session's lasting agent) is the only thing that clears the notice.
+      try{
+        const _memoryStatus=JSON.parse(e.data);
+        if(_memoryStatus&&typeof noteMemoryOkStatus==='function'&&String(_memoryStatus.session_id||'')===String(activeSid)) noteMemoryOkStatus(_memoryStatus);
+      }catch(_){}
+    });
+
     source.addEventListener('warning',e=>{
       // Non-fatal warning from server (e.g. fallback activated, retrying)
       // #8517: memory is off for this session's agent. The status is keyed by
@@ -7625,7 +7646,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       })();
     });
 
-    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
+    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','memory_status','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
     }
   }

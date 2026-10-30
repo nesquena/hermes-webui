@@ -111,6 +111,48 @@ def test_reattach_after_the_warning_restores_the_notice_from_the_journal_snapsho
     assert any("after_seq=20" in u for u in urls), urls
 
 
+def test_reload_through_load_session_restores_the_notice(browser):
+    """The real reload path: ``loadSession`` reads the session payload's run journal
+    snapshot, resumes the stream after the warning (after_seq=20), and shows the
+    notice from the snapshot's memory status."""
+    snapshot = {
+        "session_id": "s1", "stream_id": "st1", "last_seq": 20, "last_event_id": "st1:20",
+        "last_assistant_text": "Working", "messages": [], "tool_calls": [],
+        "memory_status": {"state": "external_off", "reason": "provider_shared_instance", "scope": "external"},
+    }
+    session = {
+        "session_id": "s1", "title": "Notice gate", "workspace": "/tmp/notice-gate", "messages": [],
+        "message_count": 0, "model": "", "active_stream_id": "st1", "pending_user_message": "hi",
+        "pending_started_at": 1, "runtime_journal": {"active": True, "stream_id": "st1"},
+        "runtime_journal_snapshot": snapshot,
+    }
+
+    def route(r):
+        if urlsplit(r.request.url).path == "/api/session":
+            r.fulfill(json={"session": session})
+        else:
+            _route(r)
+
+    ctx = browser.new_context(viewport={"width": 1280, "height": 900}, service_workers="block")
+    ctx.add_init_script(_INIT)
+    pg = ctx.new_page()
+    errors: list[str] = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    pg.route("**/*", route)
+    try:
+        pg.goto("http://notice-gate.test/", wait_until="load")
+        assert pg.evaluate("()=>$('memoryOffNotice').hidden") is True
+        pg.evaluate("async()=>{await loadSession('s1');}")
+        pg.wait_for_timeout(200)
+        state = pg.evaluate("""()=>({sid:S.session&&S.session.session_id,hidden:$('memoryOffNotice').hidden,
+          reason:$('memoryOffNotice').dataset.reason||'',urls:fixtureSources.map(s=>s.url)})""")
+        assert any("api/chat/stream?" in u and "after_seq=20" in u for u in state["urls"]), state
+        assert (state["sid"], state["hidden"], state["reason"]) == ("s1", False, "provider_shared_instance"), state
+        assert errors == []
+    finally:
+        ctx.close()
+
+
 def test_reattach_respects_a_dismissal(page):
     page.evaluate("()=>localStorage.setItem('hermes-webui-memory-off-dismissed:s1:provider_shared_instance','1')")
     hidden = page.evaluate("""()=>{

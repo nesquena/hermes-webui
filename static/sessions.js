@@ -1952,6 +1952,8 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
     currentActivityBurstId:Number(snapshot.current_activity_burst_id||snapshot.currentActivityBurstId||0)||0,
     currentLiveSegmentSeq:Number(snapshot.current_live_segment_seq||snapshot.currentLiveSegmentSeq||0)||0,
     activityBurstAnchors,
+    // #8517: the memory status the run journal recorded before the replay cursor.
+    memoryStatus:(snapshot.memory_status&&typeof snapshot.memory_status==='object')?snapshot.memory_status:null,
   };
 }
 
@@ -3251,6 +3253,14 @@ async function loadSession(sid){
   const serverLiveSnapshot=activeStreamId
     ? _serverLiveSnapshotInflight(S.session.runtime_journal_snapshot, S.session.pending_attachments||[])
     : null;
+  // #8517: the stream resumes after the memory-off warning's seq (whichever live
+  // state wins below), so restore the status the snapshot carries for this run.
+  {
+    const _journalSnapshot=activeStreamId?S.session.runtime_journal_snapshot:null;
+    if(_journalSnapshot&&_journalSnapshot.memory_status&&String(_journalSnapshot.stream_id||'')===String(activeStreamId)&&typeof restoreMemoryStatusFromSnapshot==='function'){
+      try{ restoreMemoryStatusFromSnapshot(sid,_journalSnapshot.memory_status); }catch(_){}
+    }
+  }
   const hadLiveRecoveryInflight=!!INFLIGHT[sid];
   const liveRecoveryInflight=_selectLiveRecoveryInflight(INFLIGHT[sid], serverLiveSnapshot, activeStreamId);
   if(liveRecoveryInflight){
