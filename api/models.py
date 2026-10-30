@@ -6975,17 +6975,27 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
             _finish_full_session_resolve(session_id, event)
 
 
+class _DraftOwnerFields(dict):
+    """Metadata plus whether all draft fields were validated or absent at EOF."""
+    complete = True
+
+
 def _read_draft_owner_fields(path, fields):
     """Read selected top-level values, skipping other JSON without retaining it.
 
-    Modern files validate the complete metadata header through the first
-    messages-array opener, even with oversized metadata. Legacy layouts with
-    missing provenance validate through EOF, once per uncached file revision.
+    Validate the complete header through the first messages-array opener when
+    the required fields are present, otherwise through EOF. A field mapping
+    retains every key but requires only its true-valued keys at that boundary.
     Neither the transcript nor skipped string values are materialized.
     """
     string_special = re.compile(r'["\\\x00-\x1f]')
     wanted = set(fields)
-    data = {}
+    # A mapping selects all retained fields and flags the required header set.
+    header_fields = (
+        {key for key, required in fields.items() if required}
+        if isinstance(fields, dict) else wanted
+    )
+    data = _DraftOwnerFields()
     with open(path, 'r', encoding='utf-8') as stream:
         buf, pos = '', 0
 
@@ -7098,12 +7108,13 @@ def _read_draft_owner_fields(path, fields):
             expect(':')
             whitespace()
             if key == 'messages':
-                # Only the first transcript boundary can finish a modern header.
+                # Only the first transcript boundary can finish a header.
                 # Seeing every field once is not enough: later header duplicates
                 # use the same last-value semantics as json.loads(). A legacy
-                # layout missing any field must instead validate through EOF.
-                if in_header and wanted <= data.keys() and peek() == '[':
+                # layout missing any required field validates through EOF.
+                if in_header and header_fields <= data.keys() and peek() == '[':
                     take()
+                    data.complete = wanted <= data.keys()
                     return data
                 in_header = False
             keep = key in wanted
@@ -7126,11 +7137,28 @@ def _read_draft_owner_fields(path, fields):
 def _draft_owner_metadata(path, signature):
     # Retain ownership fields only, never messages. Atomic replacement or an
     # external metadata edit invalidates the cache even on a warm Session hit.
-    fields = ('session_id', 'title', 'workspace', 'profile', 'composer_draft',
-              'source_tag', 'raw_source', 'session_source',
-              'pre_compression_snapshot', 'pre_compression_continuation_session_id',
-              'parent_session_id')
-    return _read_draft_owner_fields(path, fields)
+    return {}
+
+
+def _cached_draft_owner_fields(path, signature, *, profile_only=False):
+    metadata = _draft_owner_metadata(path, signature)
+    # Full draft facts also answer profile reads; profile-only facts must never
+    # establish absent provenance or authorize draft writes.
+    if 'draft' in metadata:
+        return metadata['draft']
+    key = 'profile' if profile_only else 'draft'
+    if key not in metadata:
+        fields = (
+            'session_id', 'title', 'workspace', 'profile', 'composer_draft',
+            'source_tag', 'raw_source', 'session_source',
+            'pre_compression_snapshot', 'pre_compression_continuation_session_id',
+            'parent_session_id')
+        if profile_only:
+            fields = {field: field in ('session_id', 'profile') for field in fields}
+        data = _read_draft_owner_fields(path, fields)
+        metadata['draft' if data.complete else key] = data
+        return data
+    return metadata[key]
 
 
 def get_session_for_draft(sid, *, allow_missing_cached=False):
@@ -7141,7 +7169,7 @@ def get_session_for_draft(sid, *, allow_missing_cached=False):
     try:
         stat = path.stat()
         signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-        data = _draft_owner_metadata(path, signature)
+        data = _cached_draft_owner_fields(path, signature)
     except FileNotFoundError:
         with LOCK:
             cached = SESSIONS.get(sid)
@@ -7179,7 +7207,7 @@ def get_session_profile_readonly(sid):
     try:
         stat = path.stat()
         signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-        data = _draft_owner_metadata(path, signature)
+        data = _cached_draft_owner_fields(path, signature, profile_only=True)
     except FileNotFoundError:
         raise KeyError(sid) from None
     if not isinstance(data, dict) or data.get('session_id') != sid:
