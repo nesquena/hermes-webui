@@ -259,6 +259,8 @@ curl -sS "${GATEWAY_BASE_URL%/}/health/detailed" | jq '.gateway_state, .state'
 If the service name differs in your compose file, `docker compose -f docker-compose.two-container.yml ps` lists the running services.
 For container-to-container diagnostics, set one of `HERMES_API_URL` or `HERMES_WEBUI_GATEWAY_BASE_URL` in the WebUI environment, then restart WebUI.
 
+In these multi-container setups the Gateway runs in the `hermes-agent` service, not in the WebUI container, so WebUI reports it as managed outside WebUI (#8391): the Gateway card in System Settings shows a note instead of Start/Stop/Restart, the agent-health banner has no Restart button, and `POST /api/gateway/start|stop|restart` answers `409` with `code: gateway_externally_managed`. Restart the Gateway where it runs, for example `docker compose -f docker-compose.two-container.yml restart hermes-agent`.
+
 Refs #2785, #4483.
 
 ## Three-service unified setup (v0.14+)

@@ -2234,6 +2234,17 @@ def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
     status = str(restart_result.get("status") or "")
     if status in {"completed", "in_progress"}:
         return True, restart_result
+    if status == "external":
+        # The monitored Gateway is managed outside WebUI (#8391). The Agent
+        # checkout update itself succeeded; the shared helper launched nothing,
+        # and the response reports ``gateway_restart: "external"`` rather than
+        # claiming the external runtime restarted. No retry: retrying cannot
+        # change ownership.
+        logger.info(
+            "Agent updated; gateway restart skipped because the monitored Gateway "
+            "is managed outside WebUI"
+        )
+        return True, restart_result
     if status != "failed":
         return False, restart_result
 
