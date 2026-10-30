@@ -1752,6 +1752,10 @@ def _gateway_status_payload() -> dict:
             "reason": health_reason,
             "gateway_state": health_gateway_state,
         },
+        # Server-owned lifecycle capability (#8391): the UI only offers
+        # Start/Stop/Restart when the local CLI controls the monitored Gateway,
+        # and the lifecycle routes enforce the same answer.
+        "lifecycle": gateway_lifecycle_capability(),
     }
 
 
@@ -1811,6 +1815,21 @@ def _handle_gateway_lifecycle(handler, action: str, body: dict):
     # the lock for at most _GATEWAY_LIFECYCLE_TIMEOUT_SECONDS).
     if action not in {"start", "stop", "restart"}:
         return bad(handler, "unsupported gateway action", 400)
+    # Ownership policy before the lock and before any subprocess (#8391): the
+    # local `hermes gateway` CLI must not act on a Gateway WebUI only monitors.
+    capability = gateway_lifecycle_capability()
+    if not capability.get("managed"):
+        return j(
+            handler,
+            {
+                "ok": False,
+                "error": GATEWAY_EXTERNALLY_MANAGED_MESSAGE,
+                "code": "gateway_externally_managed",
+                "action": action,
+                "lifecycle": capability,
+            },
+            status=409,
+        )
     if not _GATEWAY_ACTION_LOCK.acquire(blocking=False):
         return j(
             handler,
@@ -3629,7 +3648,11 @@ from api.helpers import (
     _CLIENT_DISCONNECT_ERRORS,
     split_media_token_ref,
 )
-from api.agent_health import build_agent_health_payload
+from api.agent_health import (
+    GATEWAY_EXTERNALLY_MANAGED_MESSAGE,
+    build_agent_health_payload,
+    gateway_lifecycle_capability,
+)
 from api.gateway_chat import gateway_chat_config_status
 from api.request_diagnostics import RequestDiagnostics
 from api.system_health import build_system_health_payload
@@ -15644,6 +15667,19 @@ def _handle_health_restart(handler) -> bool:
             status=429,
         )
 
+    if outcome.get("status") == "external":
+        # The monitored Gateway is not controlled by this WebUI (#8391); the
+        # shared helper refused before launching anything.
+        return j(
+            handler,
+            {
+                "ok": False,
+                "error": outcome.get("message", GATEWAY_EXTERNALLY_MANAGED_MESSAGE),
+                "code": "gateway_externally_managed",
+            },
+            status=409,
+        )
+
     return j(
         handler,
         {"ok": False, "error": outcome.get("message", "Internal error running restart")},
@@ -16839,6 +16875,7 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/health/agent":
         payload = build_agent_health_payload()
         payload["gateway_chat"] = gateway_chat_config_status()
+        payload["gateway_lifecycle"] = gateway_lifecycle_capability()
         j(handler, payload)
         return True
 
