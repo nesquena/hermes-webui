@@ -9891,21 +9891,40 @@ function _sessionAttentionState(s){
 // Pure function over the sanitized `failure_summary` the sidebar row carries.
 // The summary never contains the raw provider error text — only the mapped
 // layer/code and the retryable flag — so the label and tooltip can be built
-// from it alone.
+// from it alone. `retryable` is tri-state: true / false / null. An absent or
+// malformed producer flag stays null (unknown) — an unknown failure must not
+// be presented as a proven-terminal one.
 function _sessionFailureState(s){
   const summary=s&&s.failure_summary&&typeof s.failure_summary==='object'?s.failure_summary:null;
   if(!summary||String(summary.kind||'')!=='failed_turn')return null;
   const layer=typeof summary.layer==='string'?summary.layer:'';
   const code=typeof summary.code==='string'?summary.code:'';
-  const retryable=summary.retryable===true;
+  const retryable=summary.retryable===true?true:(summary.retryable===false?false:null);
   const reason=layer||code||'unknown';
   const label=(typeof t==='function')
     ?t('session_failure_label',reason)
     :'Last turn failed';
-  const title=(typeof t==='function')
-    ?t('session_failure_title',reason)
-    :(retryable?'Last turn failed (retryable)':'Last turn failed (not retryable)');
+  let title;
+  if(typeof t==='function'){
+    title=t('session_failure_title',reason);
+  }else if(retryable===true){
+    title='Last turn failed (retryable)';
+  }else if(retryable===false){
+    title='Last turn failed (not retryable)';
+  }else{
+    title='Last turn failed (retryability unknown)';
+  }
   return {layer,code,retryable,reason,label,title};
+}
+
+// #8447: the marker's CSS class derives from the tri-state retryability.
+// Unknown stays visually neutral (is-unknown) instead of claiming the
+// failure is terminal.
+function _sessionFailureMarkerClass(state){
+  if(!state)return '';
+  if(state.retryable===true)return 'session-failure-indicator is-retryable';
+  if(state.retryable===false)return 'session-failure-indicator is-terminal';
+  return 'session-failure-indicator is-unknown';
 }
 
 function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
@@ -11376,7 +11395,7 @@ function renderSessionListFromCache(){
     const failure=_sessionFailureState(s);
     if(failure){
       const marker=document.createElement('span');
-      marker.className='session-failure-indicator'+(failure.retryable?' is-retryable':' is-terminal');
+      marker.className=_sessionFailureMarkerClass(failure);
       marker.textContent='!';
       marker.title=failure.title;
       marker.setAttribute('aria-label',failure.title);

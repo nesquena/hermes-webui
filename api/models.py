@@ -1467,7 +1467,17 @@ def _load_session_from_path(path: Path) -> "Session | None":
         session_id = path.stem
     if path.parent == SESSION_DIR:
         data = _apply_session_draft_overlay(data, session_id)
-    return Session(**data)
+    session = Session(**data)
+    if 'failure_summary' not in data:
+        # #8447: cold index rebuild of a sidecar written before the summary
+        # derivation existed (or advanced directly by the Agent) acquires the
+        # state here without saving.
+        session.failure_summary = _session_failure_summary_backfill(
+            session.session_id,
+            profile=session.profile,
+            transcript=session.messages,
+        )
+    return session
 
 
 def _lookup_index_message_count(session_id):
@@ -2112,6 +2122,16 @@ class Session:
         # never disagree with the transcript. A session whose last turn
         # succeeded carries no summary at all.
         meta['failure_summary'] = _session_failure_summary(guarded_messages or [])
+        # #8447: publish the same guarded-transcript-derived value to the
+        # resident object — compact(), and therefore the sidebar index
+        # projection this save writes below (a shallow copy of self), both
+        # read ``self.failure_summary``. Without this the JSON prefix and the
+        # in-memory/index copies disagree: a newly failed session would write
+        # the right summary while its resident object still carried the
+        # pre-failure value, and the reverse transition would keep a stale
+        # failure after the transcript cleared it. Clearing is included: a
+        # recovered session gets ``None`` here, exactly like the JSON.
+        self.failure_summary = meta['failure_summary']
         # #5854: message_count and a compact anchor-scene fingerprint go in the
         # metadata prefix (BEFORE messages) so load_metadata_only() and the
         # sidebar-poll freshness check never have to parse the full (250-480KB)
@@ -2400,6 +2420,18 @@ class Session:
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         data = _apply_session_draft_overlay(data, sid)
         session = cls(**data)
+        if 'failure_summary' not in data:
+            # #8447: a sidecar written before the summary derivation existed
+            # (or one the Agent advanced directly) has no summary key at all.
+            # Acquire it WITHOUT saving: the Agent's state.db is authoritative
+            # for turn outcomes (bounded, revision-gated tail read), and a
+            # pure-WebUI session with no Agent rows falls back to the loaded
+            # transcript.
+            session.failure_summary = _session_failure_summary_backfill(
+                session.session_id,
+                profile=session.profile,
+                transcript=session.messages,
+            )
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
@@ -2479,6 +2511,16 @@ class Session:
             # it (see _validated_pending_hidden_wakeup_at).
             parsed['_pending_hidden_wakeup_transcript_absent'] = True
             session = cls(**parsed)
+            if 'failure_summary' not in parsed:
+                # #8447: a sidecar written before the summary derivation
+                # existed has no summary key at all.  The transcript is
+                # intentionally not loaded here, so acquire the summary from
+                # the Agent's state.db through the bounded, revision-gated
+                # tail read — never save a metadata-only stub.
+                session.failure_summary = _session_failure_summary_backfill(
+                    session.session_id,
+                    profile=session.profile,
+                )
             sidecar_message_count = _parse_nonnegative_int(parsed.get('message_count'))
             index_message_count = None
             if sidecar_message_count is None:
@@ -11354,6 +11396,15 @@ def _load_cli_sessions_uncached(
         except Exception:
             logger.debug("Kanban sidebar second pass failed", exc_info=True)
 
+    # #8447: an already-settled failed turn owned by the Agent has no WebUI
+    # save to derive its summary from, so none of the rows projected above
+    # would carry the failure state at all.  Backfill through a bounded,
+    # revision-gated state.db tail read — never a full transcript scan.
+    try:
+        _backfill_cli_session_failure_summaries(cli_sessions, db_path)
+    except Exception:
+        logger.debug("CLI session failure-summary backfill failed", exc_info=True)
+
     return _result()
 
 
@@ -13325,33 +13376,105 @@ def _message_display_metadata_value_present(value) -> bool:
     return True
 
 
-def _session_failure_summary(messages) -> dict | None:
-    """Derive the per-session failure state from the Agent's boundary rows.
+# #8447: ``display_metadata`` on a failed_turn row arrives in two supported
+# shapes.  The state.db reader projects it to the flattened
+# ``{layer, code, retryable}``, while the Agent's own result messages carry
+# the raw nested ``{"error": "<provider text>", "error_surface": {...}}`` and
+# reach the sidecar without passing through that projector.  Both must reduce
+# to the same sanitized surface below — and the raw provider error text,
+# which can embed provider URLs and account hints, must not survive either
+# path.
+_SESSION_FAILURE_SURFACE_KEYS = ('layer', 'code')
 
-    The Agent stamps ``display_kind='failed_turn'`` on the boundary row of a
-    turn that failed at the provider, and carries a sanitized failure surface
-    in ``display_metadata``.  The summary answers one question: *does the last
-    turn-bearing row of this session represent a failure?*
 
-    Rules, in order:
+def _normalize_session_failure_surface(value) -> dict:
+    """Reduce either ``display_metadata`` ingress to one safe flat surface.
 
-    * A later **successful terminal turn** clears the state.  "Terminal"
-      means a row that is neither a failure row nor interim activity: an
-      assistant row without tool calls is a completed turn, and so is a
-      user row that is followed by no further row at all.
-    * An **interim** assistant row (tool calls, tool result, or a reasoning
-      row) is *not* a success signal.  A failed turn can be an assistant row
-      itself, and tool activity can precede another failed turn, so clearing
-      on it would erase the failure while the session is still failing.
-    * A failure row with no usable metadata still yields a summary, with the
-      generic ``detail='unknown'``.  The verdict is never guessed: a missing
-      ``error_surface`` does not become a billing conclusion.
-    * The returned dict carries only sanitized fields — ``layer``, ``code``
-      and ``retryable`` come from the already-sanitized ``display_metadata``;
-      the raw provider error text is never included.
+    Accepts the projector's flattened ``{layer, code, retryable}`` or the
+    Agent's nested ``{error, error_surface: {...}}`` and returns a dict with
+    at most ``layer``, ``code`` and ``retryable``.  ``retryable`` is tri-state
+    at the surface level: only an explicit boolean is carried, so an absent
+    or malformed flag stays *unknown* instead of becoming a false ``False``.
+    """
+    if isinstance(value, bytes):
+        value = value.decode('utf-8', errors='replace')
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            return {}
+    if not isinstance(value, dict):
+        return {}
+    surface = value.get('error_surface')
+    source = surface if isinstance(surface, dict) else value
+    clean: dict = {}
+    for key in _SESSION_FAILURE_SURFACE_KEYS:
+        raw = source.get(key)
+        if isinstance(raw, str) and raw.strip():
+            clean[key] = raw.strip()[:64]
+    retryable = source.get('retryable')
+    if isinstance(retryable, bool):
+        clean['retryable'] = retryable
+    return clean
 
-    Returns ``None`` when the session's last turn-bearing row is not a
-    failure, so a healthy session carries no failure state at all.
+
+def _message_row_visible_text(content) -> str:
+    """Plain-text view of a transcript ``content`` (string or part list)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                parts.append(
+                    str(part.get('text') or part.get('content') or part.get('input_text') or '')
+                )
+            else:
+                parts.append(str(part or ''))
+        return '\n'.join(parts)
+    return ''
+
+
+def _assistant_row_is_settled_success(message) -> bool:
+    """True only for a genuinely settled successful assistant answer.
+
+    This is the *only* discriminator that clears a session's failure state.
+    It must be strict: the streaming error-settlement path appends an
+    assistant row stamped ``_error=True`` (api/streaming.py), an interrupted
+    turn leaves a ``_partial`` row, and reasoning rows carry no final text —
+    all of those are failure/interim presentation, not recovery, and each
+    would satisfy a naive "plain assistant row" test.
+    """
+    if not isinstance(message, dict) or message.get('role') != 'assistant':
+        return False
+    if message.get('_error') is True or message.get('_partial') is True:
+        return False
+    if message.get('display_kind'):
+        return False
+    if message.get('tool_calls'):
+        return False
+    return bool(_message_row_visible_text(message.get('content')).strip())
+
+
+# Sentinel for "the scan window carried no decisive row at all".  Only a
+# bounded window can hit it; full transcripts end on a decisive row by
+# construction (the last turn-bearing row is a failure, a success, or a bare
+# user request — all decisive).
+_FAILURE_STATE_UNDECIDED = object()
+
+
+def _reduce_session_failure_state(messages):
+    """Scan ``messages`` backwards and return its failure-state verdict.
+
+    Returns one of:
+
+    * a summary dict (the last turn-bearing row is a ``failed_turn``);
+    * ``None`` (a genuinely settled successful turn cleared the state);
+    * ``_FAILURE_STATE_UNDECIDED`` (every row in the window is interim).
+
+    Nothing else counts as recovery.  User rows and tool rows are a new
+    request in flight, not proof of success — a real failure → new user →
+    tool-call/result sequence must NOT clear before an actual answer lands.
     """
     if not isinstance(messages, list):
         return None
@@ -13359,38 +13482,310 @@ def _session_failure_summary(messages) -> dict | None:
         if not isinstance(message, dict):
             continue
         role = message.get('role')
-        if role == 'user':
-            # A user row with no later turn is a session that ended on a
-            # request that never produced a turn.  That is not a provider
-            # failure, so it clears any earlier one.
-            return None
         if role != 'assistant':
-            # Tool results and other non-assistant rows are interim.
+            # User and tool rows are interim activity, never a success
+            # signal.  (A trailing user row with no turn is a request that
+            # never produced a turn — not a provider failure either, but it
+            # preserves an earlier one rather than attesting to recovery.)
             continue
         kind = message.get('display_kind')
         if isinstance(kind, str) and kind.strip():
             if kind.strip() != 'failed_turn':
-                # Some other boundary kind: not a failure, so nothing to show.
-                return None
+                # Some other boundary kind: not a success signal.  Only a
+                # settled answer clears the state.
+                continue
             summary: dict = {'kind': 'failed_turn'}
-            metadata = message.get('display_metadata')
-            if isinstance(metadata, dict):
-                for key in ('layer', 'code'):
-                    value = metadata.get(key)
-                    if isinstance(value, str) and value.strip():
-                        summary[key] = value.strip()[:64]
-                retryable = metadata.get('retryable')
-                if isinstance(retryable, bool):
-                    summary['retryable'] = retryable
+            summary.update(_normalize_session_failure_surface(
+                message.get('display_metadata')
+            ))
             if 'layer' not in summary and 'code' not in summary:
+                # No usable surface: the generic verdict, never a guessed
+                # billing conclusion.
                 summary['detail'] = 'unknown'
             return summary
-        # An assistant row without a display_kind: interim when it carries
-        # tool calls, a completed turn otherwise.
-        if message.get('tool_calls'):
-            continue
+        if _assistant_row_is_settled_success(message):
+            return None
+        # Reasoning, partial, error-display and tool-call rows are interim.
+        continue
+    return _FAILURE_STATE_UNDECIDED
+
+
+def _session_failure_summary(messages) -> dict | None:
+    """Derive the per-session failure state from the Agent's boundary rows.
+
+    The Agent stamps ``display_kind='failed_turn'`` on the boundary row of a
+    turn that failed at the provider, and carries a failure surface in
+    ``display_metadata``.  The summary answers one question: *does the last
+    turn-bearing row of this session represent a failure?*
+
+    Rules, in order:
+
+    * A later **genuinely settled successful answer** clears the state: an
+      assistant row with final visible text and no tool calls, that is not an
+      ``_error`` or ``_partial`` marker and carries no boundary kind.
+    * Everything else preserves the failure: reasoning rows, partial and
+      error-display rows, tool calls/results, user rows (including a new
+      request after the failure), and other boundary kinds.
+    * A failure row with no usable metadata still yields a summary, with the
+      generic ``detail='unknown'``.  The verdict is never guessed: a missing
+      ``error_surface`` does not become a billing conclusion.
+    * ``display_metadata`` may arrive nested (Agent result messages) or
+      flattened (state.db projector); both reduce to the same sanitized
+      surface, and the raw provider error text never survives.
+    * ``retryable`` is tri-state: only an explicit boolean is carried, so an
+      unknown failure is not presented as a proven-terminal one.
+
+    Returns ``None`` when the session's last turn-bearing row is not a
+    failure, so a healthy session carries no failure state at all; a scan
+    that found no decisive row also yields ``None`` (never a guessed verdict).
+    """
+    state = _reduce_session_failure_state(messages)
+    if state is _FAILURE_STATE_UNDECIDED:
         return None
-    return None
+    return state
+
+
+# ── cold acquisition/backfill ─────────────────────────────────────────────
+#
+# A session whose sidecar was written before the summary derivation existed
+# (or one owned by the Agent, which never goes through a WebUI save) has no
+# ``failure_summary`` key at all.  The Agent's state.db is the authoritative
+# record of turn outcomes, so the backfill reads a bounded tail of that
+# session's rows — never the full transcript — and is revision-gated so an
+# unchanged database costs one content-fingerprint probe, not a scan:
+#
+# * ``_SESSION_FAILURE_FINGERPRINT_CACHE`` memoizes the per-database content
+#   fingerprint for a short TTL (a busy poll loop must not re-probe the whole
+#   DB per row);
+# * ``_SESSION_FAILURE_SUMMARY_CACHE`` stores the derived summary per
+#   (db_path, session_id) stamped with the fingerprint and the session's
+#   largest active row id.  A matching stamp reuses the value without
+#   touching state.db; a changed fingerprint triggers one tiny revision probe
+#   per session, and only a genuinely moved tail re-runs the bounded read.
+_SESSION_FAILURE_TAIL_WINDOW = 24
+_SESSION_FAILURE_TAIL_WINDOW_WIDE = 256
+_SESSION_FAILURE_SUMMARY_CACHE_MAX = 2048
+_SESSION_FAILURE_SUMMARY_LOCK = threading.Lock()
+_SESSION_FAILURE_SUMMARY_CACHE: "collections.OrderedDict[tuple, tuple]" = collections.OrderedDict()
+_SESSION_FAILURE_FINGERPRINT_TTL = 0.5
+_SESSION_FAILURE_FINGERPRINT_LOCK = threading.Lock()
+_SESSION_FAILURE_FINGERPRINT_CACHE: "dict[str, tuple[tuple | None, float]]" = {}
+
+
+def _state_db_failure_fingerprint(db_path) -> tuple | None:
+    """Commit-reliable, short-TTL memo of the state.db content fingerprint."""
+    now = time.monotonic()
+    cache_key = str(db_path)
+    with _SESSION_FAILURE_FINGERPRINT_LOCK:
+        cached = _SESSION_FAILURE_FINGERPRINT_CACHE.get(cache_key)
+        if cached is not None and now - cached[1] < _SESSION_FAILURE_FINGERPRINT_TTL:
+            return cached[0]
+    fingerprint = _sqlite_content_fingerprint(db_path)
+    if fingerprint is None:
+        # A failed probe (e.g. transient lock) must not suppress derivation:
+        # don't memoize it, so the next call retries.
+        return None
+    with _SESSION_FAILURE_FINGERPRINT_LOCK:
+        _SESSION_FAILURE_FINGERPRINT_CACHE[cache_key] = (fingerprint, now)
+        if len(_SESSION_FAILURE_FINGERPRINT_CACHE) > 64:
+            oldest = min(
+                _SESSION_FAILURE_FINGERPRINT_CACHE,
+                key=lambda key: _SESSION_FAILURE_FINGERPRINT_CACHE[key][1],
+            )
+            del _SESSION_FAILURE_FINGERPRINT_CACHE[oldest]
+    return fingerprint
+
+
+def _state_db_failure_tail_row(row, cols: set) -> dict:
+    """One raw state.db tail row → the reducer's message shape.
+
+    ``display_metadata`` is deliberately kept in its raw nested form rather
+    than run through ``_project_state_db_message``: the reducer's normalizer
+    is the single place both ingresses converge, and this keeps the backfill
+    exercised against the Agent's actual nested payload.
+    """
+    message = {'role': row['role']}
+    message['content'] = _decode_state_db_content(row['content'])
+    if 'tool_calls' in cols:
+        message['tool_calls'] = _json_loads_if_string(row['tool_calls']) if row['tool_calls'] else None
+    if 'display_kind' in cols:
+        message['display_kind'] = row['display_kind']
+    if 'display_metadata' in cols:
+        raw = row['display_metadata']
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                raw = None
+        message['display_metadata'] = raw
+    return message
+
+
+def _read_state_db_failure_tail(db_path, sid) -> tuple[dict | None, int | None]:
+    """Bounded reverse scan of the session's active rows.
+
+    Returns ``(summary, revision)`` where ``revision`` is the largest row id
+    seen (the caller's revision gate) or ``None`` when the read is
+    unsupported.  The window is widened once when every row in it is interim
+    activity; a still-undecided tail yields ``None`` (never a guessed
+    verdict).
+    """
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(messages)")
+            cols = {str(row['name']) for row in cur.fetchall()}
+            if not {'session_id', 'role'} <= cols:
+                return None, None
+            active_clause = ""
+            if 'active' in cols:
+                active_clause = " AND (active IS NULL OR active != 0)"
+            order_col = 'id' if 'id' in cols else ('timestamp' if 'timestamp' in cols else None)
+            select = ['role', 'content', 'display_kind', 'display_metadata']
+            if 'tool_calls' in cols:
+                select.append('tool_calls')
+            if order_col:
+                select.append(order_col)
+            order_clause = f" ORDER BY {order_col} DESC" if order_col else ""
+            for window in (_SESSION_FAILURE_TAIL_WINDOW, _SESSION_FAILURE_TAIL_WINDOW_WIDE):
+                cur.execute(
+                    f"SELECT {', '.join(select)} FROM messages "
+                    f"WHERE session_id = ?{active_clause}{order_clause} LIMIT ?",
+                    (sid, window),
+                )
+                rows = cur.fetchall()
+                revision = None
+                if order_col and order_col == 'id' and rows and rows[0]['id'] is not None:
+                    revision = int(rows[0]['id'])
+                state = _reduce_session_failure_state([
+                    _state_db_failure_tail_row(row, cols) for row in reversed(rows)
+                ])
+                if state is not _FAILURE_STATE_UNDECIDED:
+                    return state, revision
+                if len(rows) < window:
+                    return None, revision
+            return None, revision
+    except Exception:
+        logger.debug(
+            "state.db failure-summary tail read failed for session %s at %s",
+            sid, db_path, exc_info=True,
+        )
+        return None, None
+
+
+def _session_failure_summary_from_state_db(sid, db_path) -> dict | None:
+    """Acquire the failure summary from state.db — bounded and revision-gated.
+
+    Used by the cold list/detail backfill for sessions whose sidecar carries
+    no precomputed summary.  Never scans the transcript: a repeating poll on
+    an unchanged database costs one memoized content-fingerprint probe, and a
+    changed database costs one tiny per-session revision probe unless that
+    session's own tail actually moved.
+    """
+    if not sid or db_path is None:
+        return None
+    try:
+        if not Path(db_path).exists():
+            return None
+    except OSError:
+        return None
+    cache_key = (str(db_path), str(sid))
+    fingerprint = _state_db_failure_fingerprint(db_path)
+    if fingerprint is not None:
+        with _SESSION_FAILURE_SUMMARY_LOCK:
+            entry = _SESSION_FAILURE_SUMMARY_CACHE.get(cache_key)
+            if entry is not None and entry[0] == fingerprint:
+                _SESSION_FAILURE_SUMMARY_CACHE.move_to_end(cache_key)
+                return entry[2]
+            cached_revision = entry[1] if entry is not None else None
+        if cached_revision is not None:
+            # The database changed elsewhere; is THIS session's tail moved?
+            try:
+                with closing(open_state_db_readonly(db_path)) as conn:
+                    conn.row_factory = sqlite3.Row
+                    cur = conn.cursor()
+                    cur.execute("PRAGMA table_info(messages)")
+                    cols = {str(row['name']) for row in cur.fetchall()}
+                    if 'id' not in cols or 'session_id' not in cols:
+                        cached_revision = None
+                    else:
+                        active_clause = ""
+                        if 'active' in cols:
+                            active_clause = " AND (active IS NULL OR active != 0)"
+                        row = cur.execute(
+                            f"SELECT MAX(id) AS max_id FROM messages "
+                            f"WHERE session_id = ?{active_clause}",
+                            (sid,),
+                        ).fetchone()
+                        current_revision = int(row['max_id']) if row and row['max_id'] is not None else None
+                        if current_revision is not None and current_revision == cached_revision:
+                            with _SESSION_FAILURE_SUMMARY_LOCK:
+                                updated = (
+                                    _SESSION_FAILURE_SUMMARY_CACHE.get(cache_key)
+                                )
+                                if updated is not None and updated[1] == cached_revision:
+                                    _SESSION_FAILURE_SUMMARY_CACHE[cache_key] = (
+                                        fingerprint, cached_revision, updated[2],
+                                    )
+                                    _SESSION_FAILURE_SUMMARY_CACHE.move_to_end(cache_key)
+                                    return updated[2]
+            except Exception:
+                logger.debug(
+                    "state.db failure-summary revision probe failed for session %s",
+                    sid, exc_info=True,
+                )
+    summary, revision = _read_state_db_failure_tail(db_path, sid)
+    if revision is not None and fingerprint is not None:
+        with _SESSION_FAILURE_SUMMARY_LOCK:
+            _SESSION_FAILURE_SUMMARY_CACHE[cache_key] = (fingerprint, revision, summary)
+            _SESSION_FAILURE_SUMMARY_CACHE.move_to_end(cache_key)
+            while len(_SESSION_FAILURE_SUMMARY_CACHE) > _SESSION_FAILURE_SUMMARY_CACHE_MAX:
+                _SESSION_FAILURE_SUMMARY_CACHE.popitem(last=False)
+    return summary
+
+
+def _session_failure_summary_backfill(sid, *, profile=None, transcript=None) -> dict | None:
+    """Acquire the failure summary for a sidecar that carries none.
+
+    A sidecar written before #8447 (or one the Agent advanced directly) has
+    no ``failure_summary`` key at all.  The Agent's state.db is authoritative
+    for turn outcomes, so ask it first through the bounded, revision-gated
+    tail read; a pure-WebUI session with no Agent rows falls back to the
+    transcript in hand.  Never saves: an acquisition must not rewrite an
+    unrelated sidecar or materialize a metadata-only stub.
+    """
+    db_path = _agent_state_db_path(profile=profile)
+    summary = None
+    if db_path is not None:
+        summary = _session_failure_summary_from_state_db(sid, db_path)
+    if summary is None and transcript is not None:
+        summary = _session_failure_summary(transcript)
+    return summary
+
+
+def _backfill_cli_session_failure_summaries(rows, db_path) -> None:
+    """Attach ``failure_summary`` to Agent-sidebar rows that lack one.
+
+    The direct Agent session-list dictionaries carry no summary because they
+    never pass through a WebUI ``Session.save()``.  Rows that already carry
+    one are left alone; the rest are answered by the bounded, revision-gated
+    state.db tail read (rows whose session has no failure state simply stay
+    without the field).
+    """
+    if not rows or db_path is None:
+        return
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get('failure_summary'):
+            continue
+        sid = str(row.get('session_id') or '').strip()
+        if not sid:
+            continue
+        summary = _session_failure_summary_from_state_db(sid, db_path)
+        if summary:
+            row['failure_summary'] = summary
 
 
 def _merge_session_display_metadata(target: dict | None, source: dict | None) -> None:
@@ -13398,11 +13793,52 @@ def _merge_session_display_metadata(target: dict | None, source: dict | None) ->
     if not isinstance(target, dict) or not isinstance(source, dict):
         return
     for key in _SESSION_MESSAGE_DISPLAY_METADATA_KEYS:
+        if key == 'display_metadata':
+            _merge_display_metadata_value(target, source)
+            continue
         if _message_display_metadata_value_present(target.get(key)):
             continue
         value = source.get(key)
         if _message_display_metadata_value_present(value):
             target[key] = copy.deepcopy(value)
+
+
+def _merge_display_metadata_value(target: dict, source: dict) -> None:
+    """Converge the two ``display_metadata`` ingresses on one sanitized shape.
+
+    The state.db projector emits the flattened ``{layer, code, retryable}``,
+    while the Agent's own result messages carry the nested
+    ``{"error": "<raw provider text>", "error_surface": {...}}`` and reach the
+    sidecar without passing through that projector.  A nonempty nested target
+    would otherwise win the generic presence-based merge and keep the raw
+    payload — losing the normalized surface AND persisting the raw provider
+    error text into the transcript.
+
+    Rules (failed_turn rows only; every other boundary kind keeps the
+    presence-based merge so its metadata is never dropped):
+
+    * a normalized target surface is kept as-is;
+    * a raw nested target is replaced by its normalized form;
+    * a target with no usable surface adopts the source's normalized surface
+      when there is one;
+    * a source with no usable surface is never adopted.
+    """
+    if str(target.get('display_kind') or source.get('display_kind') or '').strip() != 'failed_turn':
+        value = source.get('display_metadata')
+        if (
+            not _message_display_metadata_value_present(target.get('display_metadata'))
+            and _message_display_metadata_value_present(value)
+        ):
+            target['display_metadata'] = copy.deepcopy(value)
+        return
+    normalized_target = _normalize_session_failure_surface(target.get('display_metadata'))
+    normalized_source = _normalize_session_failure_surface(source.get('display_metadata'))
+    if normalized_target:
+        if target.get('display_metadata') != normalized_target:
+            target['display_metadata'] = normalized_target
+        return
+    if normalized_source:
+        target['display_metadata'] = dict(normalized_source)
 
 
 def _state_db_row_identity_details(message: dict | None) -> tuple[str | None, bool]:

@@ -196,6 +196,56 @@ def test_i18n_defines_the_failure_keys_in_every_locale():
     assert title_count == label_count, (label_count, title_count)
 
 
+def test_failure_state_keeps_retryability_tristate():
+    """An absent (or malformed) producer flag stays null — an unknown failure
+    must not be presented as a proven-terminal one."""
+    unknown = json.loads(_failure_state(json.dumps({
+        "session_id": "s1",
+        "failure_summary": {"kind": "failed_turn", "layer": "billing"},
+    })))
+    assert unknown["retryable"] is None
+
+    terminal = json.loads(_failure_state(json.dumps({
+        "session_id": "s1",
+        "failure_summary": {"kind": "failed_turn", "layer": "billing",
+                            "retryable": False},
+    })))
+    assert terminal["retryable"] is False
+
+    retryable = json.loads(_failure_state(json.dumps({
+        "session_id": "s1",
+        "failure_summary": {"kind": "failed_turn", "layer": "upstream",
+                            "retryable": True},
+    })))
+    assert retryable["retryable"] is True
+
+
+def _marker_class(arg: str) -> str:
+    """Run the real ``_sessionFailureMarkerClass`` over one JSON state."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + r"""
+const fn = eval('(' + extractFunc('_sessionFailureMarkerClass') + ')');
+process.stdout.write(fn(JSON.parse(process.argv[2])) || '');
+"""
+    return _run_with_arg(source, arg)
+
+
+def test_marker_class_reflects_tristate_retryability():
+    assert _marker_class(json.dumps({"retryable": True})) == (
+        "session-failure-indicator is-retryable"
+    )
+    assert _marker_class(json.dumps({"retryable": False})) == (
+        "session-failure-indicator is-terminal"
+    )
+    assert _marker_class(json.dumps({"retryable": None})) == (
+        "session-failure-indicator is-unknown"
+    )
+    assert _marker_class(json.dumps({})) == (
+        "session-failure-indicator is-unknown"
+    )
+    assert _marker_class(json.dumps(None)) == ""
+
+
 def test_sessions_js_contains_the_failure_marker_hook():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     assert "session-failure-indicator" in js

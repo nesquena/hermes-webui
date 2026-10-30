@@ -23,8 +23,11 @@ These pin the whole path:
 They also pin the negative: the raw provider error text must never reach the
 sidebar row, the session summary, or a provider request payload.
 """
+import collections
 import json
 import sqlite3
+
+import pytest
 
 import api.models as models
 from api.route_session_list_cache import _SIDEBAR_SESSION_RESPONSE_FIELDS
@@ -103,6 +106,68 @@ def _insert_row(conn, *, row_id, role, content, ts, display_kind=None,
         f"INSERT INTO messages ({', '.join(columns)}) VALUES ({placeholders})",
         values,
     )
+
+
+def _make_agent_state_db(path, *, with_display_columns=True):
+    """State.db for the Agent sidebar projection: sessions + messages."""
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY, title TEXT, model TEXT, message_count INTEGER,
+            started_at REAL, source TEXT, parent_session_id TEXT,
+            ended_at REAL, end_reason TEXT, session_source TEXT
+        )
+        """
+    )
+    display_cols = (
+        ", display_kind TEXT, display_metadata TEXT"
+        if with_display_columns
+        else ""
+    )
+    conn.execute(
+        """
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT,
+            content TEXT, timestamp REAL, tool_calls TEXT, active INTEGER
+            {display_cols}
+        )
+        """.format(display_cols=display_cols)
+    )
+    conn.commit()
+    conn.close()
+
+
+def _reset_failure_caches(monkeypatch):
+    """Isolate the revision-gated backfill caches per test."""
+    monkeypatch.setattr(
+        models, "_SESSION_FAILURE_SUMMARY_CACHE", collections.OrderedDict()
+    )
+    monkeypatch.setattr(models, "_SESSION_FAILURE_FINGERPRINT_CACHE", {})
+
+
+@pytest.fixture
+def fake_agent_home(tmp_path, monkeypatch):
+    """Point profile resolvers at a temporary HERMES_HOME + projects.json."""
+    home = tmp_path / "hermes"
+    home.mkdir()
+
+    import api.config as cfg
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: home)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: None)
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name == "default")
+
+    projects_file = tmp_path / "projects.json"
+    monkeypatch.setattr(cfg, "PROJECTS_FILE", projects_file)
+    monkeypatch.setattr(models, "PROJECTS_FILE", projects_file)
+    monkeypatch.setattr(models, "_projects_migrated", True)
+    projects_file.write_text("[]", encoding="utf-8")
+
+    models.clear_cli_sessions_cache()
+    yield home
+    models.clear_cli_sessions_cache()
 
 
 # ── the projector sanitizes display_metadata ───────────────────────────────
@@ -374,3 +439,462 @@ def test_compact_emits_the_summary_only_when_the_session_failed():
     healthy.messages = [{"role": "assistant", "content": "ok"}]
     healthy.failure_summary = models._session_failure_summary(healthy.messages)
     assert "failure_summary" not in healthy.compact()
+
+
+# ── the reducer requires a genuine successful settlement (#8603 r1) ────────
+
+def test_summary_survives_the_webui_error_settlement_row():
+    """The streaming error-settlement path appends an assistant ``_error=True``
+    row and saves; that row must not read as recovery."""
+    summary = models._session_failure_summary([
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "display_kind": "failed_turn",
+         "display_metadata": {"layer": "billing", "retryable": False}},
+        {"role": "assistant", "content": "**Error:** provider said no",
+         "_error": True},
+    ])
+    assert summary is not None
+    assert summary["layer"] == "billing"
+    assert summary["retryable"] is False
+
+
+def test_summary_survives_a_partial_row():
+    summary = models._session_failure_summary([
+        {"role": "assistant", "display_kind": "failed_turn",
+         "display_metadata": {"layer": "upstream", "retryable": True}},
+        {"role": "assistant", "content": "partial text", "_partial": True},
+    ])
+    assert summary is not None
+    assert summary["layer"] == "upstream"
+
+
+def test_summary_survives_a_reasoning_row():
+    summary = models._session_failure_summary([
+        {"role": "assistant", "display_kind": "failed_turn",
+         "display_metadata": {"layer": "billing"}},
+        {"role": "assistant", "content": "", "reasoning": "thinking..."},
+    ])
+    assert summary is not None
+    assert summary["layer"] == "billing"
+
+
+def test_summary_survives_user_and_tool_activity_after_a_failure():
+    """A real failure → new user → tool-call/result sequence must NOT clear
+    before an actual answer lands."""
+    summary = models._session_failure_summary([
+        {"role": "assistant", "display_kind": "failed_turn",
+         "display_metadata": {"layer": "billing"}},
+        {"role": "user", "content": "try again"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "1"}]},
+        {"role": "tool", "content": "tool output", "tool_name": "bash"},
+    ])
+    assert summary is not None
+    assert summary["kind"] == "failed_turn"
+    assert summary["layer"] == "billing"
+
+
+def test_summary_clears_only_after_a_genuine_settled_answer():
+    summary = models._session_failure_summary([
+        {"role": "assistant", "display_kind": "failed_turn",
+         "display_metadata": {"layer": "billing"}},
+        {"role": "user", "content": "try again"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "1"}]},
+        {"role": "tool", "content": "tool output", "tool_name": "bash"},
+        {"role": "assistant", "content": "done"},
+    ])
+    assert summary is None
+
+
+def test_summary_does_not_clear_on_a_non_failure_boundary_kind():
+    summary = models._session_failure_summary([
+        {"role": "assistant", "display_kind": "failed_turn",
+         "display_metadata": {"layer": "billing"}},
+        {"role": "assistant", "display_kind": "boundary_row",
+         "display_metadata": {"layer": "other"}},
+    ])
+    assert summary is not None
+    assert summary["layer"] == "billing"
+
+
+# ── both display_metadata ingresses converge on one sanitized shape ────────
+
+def test_summary_normalizes_the_agents_nested_metadata():
+    """The Agent's result messages carry ``{error, error_surface:{...}}``
+    (direct ingress, no projector); the summary must match the projected
+    flattened shape exactly."""
+    flattened = models._session_failure_summary([
+        {"role": "assistant", "display_kind": "failed_turn",
+         "display_metadata": {"layer": "billing", "code": "billing",
+                              "retryable": False}},
+    ])
+    nested = models._session_failure_summary([
+        {"role": "assistant", "display_kind": "failed_turn",
+         "display_metadata": {
+             "error": "HTTP 402: out of credits at https://secret.example",
+             "error_surface": {"layer": "billing", "code": "billing",
+                               "retryable": False, "provider": "custom"},
+         }},
+    ])
+    assert nested == flattened
+    assert "secret.example" not in json.dumps(nested)
+
+
+def test_summary_keeps_retryability_unknown_when_absent():
+    """Tri-state retryability: an absent producer flag must not collapse to
+    the terminal false."""
+    summary = models._session_failure_summary([
+        {"role": "assistant", "display_kind": "failed_turn",
+         "display_metadata": {"layer": "upstream"}},
+    ])
+    assert summary == {"kind": "failed_turn", "layer": "upstream"}
+    assert "retryable" not in summary
+
+
+def test_summary_treats_a_non_boolean_retryable_as_unknown():
+    summary = models._session_failure_summary([
+        {"role": "assistant", "display_kind": "failed_turn",
+         "display_metadata": {"layer": "upstream", "retryable": "maybe"}},
+    ])
+    assert summary == {"kind": "failed_turn", "layer": "upstream"}
+    assert "retryable" not in summary
+
+
+# ── the duplicate merge converges the ingresses ────────────────────────────
+
+def test_merge_replaces_a_nested_target_with_the_normalized_surface():
+    """A nonempty nested target must not keep its raw payload: the duplicate
+    merge adopts the normalized shape, and the raw provider error text never
+    rides on in the transcript."""
+    target = {"role": "assistant", "display_kind": "failed_turn",
+              "display_metadata": {
+                  "error": "HTTP 402 at https://secret.example",
+                  "error_surface": {"layer": "billing", "code": "billing",
+                                    "retryable": False}}}
+    source = {"role": "assistant", "display_kind": "failed_turn",
+              "display_metadata": {"layer": "billing", "code": "billing",
+                                   "retryable": False}}
+    models._merge_session_display_metadata(target, source)
+    assert target["display_metadata"] == {
+        "layer": "billing", "code": "billing", "retryable": False,
+    }
+    assert "secret.example" not in json.dumps(target)
+
+
+def test_merge_adopts_the_normalized_surface_over_a_useless_nested_target():
+    target = {"role": "assistant", "display_kind": "failed_turn",
+              "display_metadata": {"error": "boom"}}
+    source = {"role": "assistant", "display_kind": "failed_turn",
+              "display_metadata": {"layer": "upstream", "retryable": True}}
+    models._merge_session_display_metadata(target, source)
+    assert target["display_metadata"] == {"layer": "upstream", "retryable": True}
+    assert "boom" not in json.dumps(target)
+
+
+def test_merge_keeps_non_failure_metadata_presence_based():
+    """Boundary kinds other than failed_turn keep the generic merge — their
+    metadata must never be dropped."""
+    target = {"role": "assistant", "display_kind": "steer"}
+    source = {"role": "assistant", "display_kind": "steer",
+              "display_metadata": {"anything": "kept"}}
+    models._merge_session_display_metadata(target, source)
+    assert target["display_metadata"] == {"anything": "kept"}
+
+
+# ── save() publishes the summary to resident object + index (both directions)
+
+def _point_session_dir_at(monkeypatch, session_dir):
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", collections.OrderedDict())
+
+
+def test_save_publishes_summary_to_resident_and_index(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    _point_session_dir_at(monkeypatch, session_dir)
+
+    session = models.Session(session_id="sess-save", messages=[
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "display_kind": "failed_turn",
+         "display_metadata": {"layer": "billing", "code": "billing",
+                              "retryable": False}},
+    ])
+    expected = {"kind": "failed_turn", "layer": "billing", "code": "billing",
+                "retryable": False}
+    session.save()
+    # Resident object: compact() must read the just-derived value, not the
+    # pre-save one.
+    assert session.failure_summary == expected
+    assert session.compact()["failure_summary"] == expected
+    # Sidecar JSON prefix.
+    on_disk = json.loads(
+        (session_dir / "sess-save.json").read_text(encoding="utf-8")
+    )
+    assert on_disk["failure_summary"] == expected
+    # Sidebar index projection (second save exercises the targeted patch
+    # path; the first rebuilt the whole index).
+    session.save()
+    index = json.loads(
+        (session_dir / "_index.json").read_text(encoding="utf-8")
+    )
+    assert index[0]["session_id"] == "sess-save"
+    assert index[0]["failure_summary"] == expected
+
+
+def test_save_clears_summary_on_recovery(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    _point_session_dir_at(monkeypatch, session_dir)
+
+    session = models.Session(session_id="sess-recover", messages=[
+        {"role": "assistant", "display_kind": "failed_turn",
+         "display_metadata": {"layer": "billing", "retryable": False}},
+        {"role": "user", "content": "again"},
+        {"role": "assistant", "content": "recovered"},
+    ])
+    # A stale marker the resident object still carries from before recovery.
+    session.failure_summary = {"kind": "failed_turn", "layer": "billing",
+                               "retryable": False}
+    session.save()
+    assert session.failure_summary is None
+    assert "failure_summary" not in session.compact()
+    on_disk = json.loads(
+        (session_dir / "sess-recover.json").read_text(encoding="utf-8")
+    )
+    assert on_disk["failure_summary"] is None
+    session.save()
+    index = json.loads(
+        (session_dir / "_index.json").read_text(encoding="utf-8")
+    )
+    assert index[0]["session_id"] == "sess-recover"
+    assert "failure_summary" not in index[0]
+
+
+# ── cold acquisition / backfill (#8603 r2) ─────────────────────────────────
+
+def _write_legacy_sidecar(session_dir, sid, messages):
+    """A sidecar written before the summary derivation existed: no
+    ``failure_summary`` key at all."""
+    payload = {
+        "session_id": sid,
+        "title": "Legacy",
+        "created_at": 1.0,
+        "updated_at": 2.0,
+        "message_count": len(messages),
+        "messages": messages,
+    }
+    (session_dir / f"{sid}.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+
+def test_cold_full_load_acquires_summary_from_state_db(tmp_path, monkeypatch):
+    """A session whose sidecar has no summary key at all must surface the
+    already-settled failure through a cold full load — without a WebUI save."""
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    conn = sqlite3.connect(str(db))
+    _insert_failed_turn(conn, session_id="sess-1", row_id=2, ts=1000.0)
+    _insert_row(conn, row_id=1, role="user", content="old", ts=900.0)
+    conn.commit()
+    conn.close()
+    _point_models_at(monkeypatch, db)
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    _point_session_dir_at(monkeypatch, session_dir)
+    _write_legacy_sidecar(session_dir, "sess-1", [
+        {"role": "user", "content": "old", "timestamp": 900.0},
+    ])
+
+    session = models.Session.load("sess-1")
+    assert session.failure_summary == {
+        "kind": "failed_turn", "layer": "billing", "code": "billing",
+        "retryable": False,
+    }
+    # The failed_turn row lives in state.db; the sidecar must NOT have been
+    # rewritten by the load.
+    assert "failure_summary" not in json.loads(
+        (session_dir / "sess-1.json").read_text(encoding="utf-8")
+    )
+
+
+def test_cold_metadata_only_load_acquires_summary_without_saving_stub(
+    tmp_path, monkeypatch
+):
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    conn = sqlite3.connect(str(db))
+    _insert_failed_turn(conn, session_id="sess-1", row_id=1, ts=1000.0)
+    conn.commit()
+    conn.close()
+    _point_models_at(monkeypatch, db)
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    _point_session_dir_at(monkeypatch, session_dir)
+    _write_legacy_sidecar(session_dir, "sess-1", [
+        {"role": "user", "content": "old", "timestamp": 900.0},
+    ])
+    before = (session_dir / "sess-1.json").stat()
+
+    session = models.Session.load_metadata_only("sess-1")
+    assert session._loaded_metadata_only is True
+    assert session.failure_summary == {
+        "kind": "failed_turn", "layer": "billing", "code": "billing",
+        "retryable": False,
+    }
+    # The sidecar was not rewritten into a stub by the acquisition.
+    after = (session_dir / "sess-1.json").stat()
+    assert (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns, before.st_size)
+    assert "message_count" in json.loads(
+        (session_dir / "sess-1.json").read_text(encoding="utf-8")
+    )
+
+
+def test_agent_owned_list_rows_carry_the_summary(fake_agent_home, monkeypatch):
+    """The direct Agent session-list dictionaries must carry the summary —
+    they never pass through a WebUI save."""
+    db = fake_agent_home / "state.db"
+    _make_agent_state_db(db)
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO sessions (id, title, model, message_count, started_at, "
+        "source) VALUES ('agent-sess', 'Agent run', 'gpt-x', 2, 1.0, 'cli')"
+    )
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp) "
+        "VALUES ('agent-sess', 'user', 'hi', 1.0)"
+    )
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp, "
+        "display_kind, display_metadata) VALUES "
+        "('agent-sess', 'assistant', 'Your request was not processed.', 2.0, "
+        "'failed_turn', ?)",
+        (json.dumps({
+            "error": "HTTP 402 out of credits at https://secret.example",
+            "error_surface": {"layer": "billing", "code": "billing",
+                              "retryable": False},
+        }),),
+    )
+    conn.commit()
+    conn.close()
+    _reset_failure_caches(monkeypatch)
+
+    sessions = models._load_cli_sessions_uncached(
+        fake_agent_home, db, "default"
+    )
+    assert [s["session_id"] for s in sessions] == ["agent-sess"]
+    assert sessions[0]["failure_summary"] == {
+        "kind": "failed_turn", "layer": "billing", "code": "billing",
+        "retryable": False,
+    }
+    payload = json.dumps(sessions)
+    assert "secret.example" not in payload
+
+
+def test_list_row_summary_clears_after_external_agent_advancement(
+    fake_agent_home, monkeypatch
+):
+    """Append a genuine successful turn straight into state.db (the Agent
+    advancing the session, no WebUI save) → the next list build drops the
+    failure marker."""
+    db = fake_agent_home / "state.db"
+    _make_agent_state_db(db)
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO sessions (id, title, model, message_count, started_at, "
+        "source) VALUES ('agent-sess', 'Agent run', 'gpt-x', 2, 1.0, 'cli')"
+    )
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp) "
+        "VALUES ('agent-sess', 'user', 'hi', 1.0)"
+    )
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp, "
+        "display_kind, display_metadata) VALUES "
+        "('agent-sess', 'assistant', 'Your request was not processed.', 2.0, "
+        "'failed_turn', ?)",
+        (json.dumps({"error_surface": {"layer": "billing", "retryable": False}}),),
+    )
+    conn.commit()
+    conn.close()
+    _reset_failure_caches(monkeypatch)
+    # The fingerprint memo would otherwise serve the pre-insert fingerprint
+    # for its TTL; force a re-probe so this test observes the Agent's
+    # advancement immediately (production tolerates the TTL's freshness lag).
+    monkeypatch.setattr(models, "_SESSION_FAILURE_FINGERPRINT_TTL", 0.0)
+
+    first = models._load_cli_sessions_uncached(fake_agent_home, db, "default")
+    assert first[0]["failure_summary"]["kind"] == "failed_turn"
+
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp) "
+        "VALUES ('agent-sess', 'assistant', 'recovered', 3.0)"
+    )
+    conn.commit()
+    conn.close()
+
+    second = models._load_cli_sessions_uncached(fake_agent_home, db, "default")
+    assert "failure_summary" not in second[0]
+
+
+def test_backfill_skips_the_tail_read_when_state_db_is_unchanged(
+    tmp_path, monkeypatch
+):
+    """Revision gate: a repeating poll on an unchanged database issues no
+    second tail read at all."""
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    conn = sqlite3.connect(str(db))
+    _insert_failed_turn(conn, session_id="sess-1", row_id=1, ts=1000.0)
+    conn.commit()
+    conn.close()
+    _reset_failure_caches(monkeypatch)
+
+    reads = []
+    real_open = models.open_state_db_readonly
+
+    def counting_open(db_path, *args, **kwargs):
+        reads.append(str(db_path))
+        return real_open(db_path, *args, **kwargs)
+
+    monkeypatch.setattr(models, "open_state_db_readonly", counting_open)
+
+    expected = {"kind": "failed_turn", "layer": "billing", "code": "billing",
+                "retryable": False}
+    first = models._session_failure_summary_from_state_db("sess-1", db)
+    second = models._session_failure_summary_from_state_db("sess-1", db)
+    assert first == expected
+    assert second == expected
+    # The first call runs the bounded tail read; the second is answered by
+    # the fingerprint/revision gate (the only other connection is the
+    # fingerprint probe, which opens its own sqlite3 connection).
+    assert len(reads) == 1, reads
+
+
+def test_backfill_is_bounded_and_never_guesses_beyond_the_window(
+    tmp_path, monkeypatch
+):
+    """The acquisition is a bounded tail read: once every row in the widened
+    window is interim activity, it reports no summary instead of scanning the
+    whole transcript."""
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    conn = sqlite3.connect(str(db))
+    _insert_failed_turn(conn, session_id="sess-1", row_id=1, ts=1000.0)
+    for index in range(models._SESSION_FAILURE_TAIL_WINDOW_WIDE + 8):
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, timestamp, "
+            "tool_calls, active) VALUES (?,?,?,?,?,?,1)",
+            (100 + index, "sess-1", "assistant", "", 2000.0 + index,
+             json.dumps([{"id": "t%d" % index}])),
+        )
+    conn.commit()
+    conn.close()
+    _reset_failure_caches(monkeypatch)
+
+    # The failure sits beyond BOTH bounded windows; the answer must be "no
+    # marker", never a guessed verdict.
+    assert models._session_failure_summary_from_state_db("sess-1", db) is None

@@ -1758,6 +1758,12 @@
     color:var(--warning);
     background:color-mix(in srgb,var(--warning) 16%,transparent);
   }
+  .session-failure-indicator.is-unknown{
+    /* #8447: unknown retryability stays neutral — nothing claims the
+       failure is terminal (or retryable) when the producer never said. */
+    color:var(--muted);
+    background:color-mix(in srgb,var(--muted) 16%,transparent);
+  }
   /* Timestamp lives in the flex flow of .session-title-row (not absolute) so
      the title's flex:1 bound stops at the timestamp's left edge and stops
      running underneath it. margin-left:auto pushes it to the row's right
