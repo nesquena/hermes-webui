@@ -2435,6 +2435,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(_priorInflightStreamId&&_priorInflightStreamId!==streamId){
     INFLIGHT[activeSid].lastRunJournalSeq=0;
     INFLIGHT[activeSid].lastRunJournalEventId='';
+    // #8517: a snapshot's memory status belongs to the stream it came from; drop it so a
+    // later reattach of this new stream cannot restore it (Codex r2).
+    delete INFLIGHT[activeSid].memoryStatus;
   }
   INFLIGHT[activeSid].streamId=streamId;
   if(!Array.isArray(INFLIGHT[activeSid].activityBurstAnchors)) INFLIGHT[activeSid].activityBurstAnchors=[];
