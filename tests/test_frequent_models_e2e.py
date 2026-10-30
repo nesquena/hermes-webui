@@ -3,7 +3,9 @@ import json
 import time
 import pytest
 from tests._pytest_port import BASE, TEST_STATE_DIR
-from tests.test_models_preferences_backend import _wipe_state, _write_sidecar, _write_index, _append_journal
+from tests.test_models_preferences_backend import (_append_journal, _wipe_state,
+                                                  _write_index, _write_sidecar,
+                                                  open_composer_picker)
 
 
 @pytest.mark.parametrize("mobile", [False, True])
@@ -31,7 +33,8 @@ def test_real_page_pin_refresh_search_unpin_and_provider_selection(mobile):
         page.wait_for_function("typeof renderModelDropdown==='function' && typeof api==='function'")
         # Catalog injected via the real public loader; preferences API remains real.
         page.evaluate('async()=>{await populateModelDropdown();await _loadModelFrequentPrefs();}')
-        page.evaluate('async()=>{await newSession(false);await toggleModelDropdown();}')
+        page.evaluate('async()=>{await newSession(false);}')
+        open_composer_picker(page)
         dd=page.locator('#composerModelDropdown')
         freq=dd.locator('[data-group="__frequent__"]')
         assert freq.locator('.model-opt').count()==1
@@ -61,7 +64,8 @@ def test_real_page_pin_refresh_search_unpin_and_provider_selection(mobile):
         assert data['pins']==[{'model':'model-a','provider':'custom:two'}]
         page.reload(wait_until='domcontentloaded')
         page.wait_for_function("typeof renderModelDropdown==='function'")
-        page.evaluate('async()=>{await populateModelDropdown();await _loadModelFrequentPrefs();await toggleModelDropdown();}')
+        page.evaluate('async()=>{await populateModelDropdown();await _loadModelFrequentPrefs();}')
+        open_composer_picker(page)
         freq=page.locator('#composerModelDropdown [data-group="__frequent__"]')
         assert freq.locator('.model-opt').count()==2
         assert 'custom:two:model-a' in freq.locator('.model-opt').first.inner_text()

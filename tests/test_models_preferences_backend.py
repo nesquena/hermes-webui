@@ -356,3 +356,24 @@ def test_corrupt_pins_refuses_overwrite():
                          {"model": "recovered", "provider": "p", "pinned": True})
     assert status == 400
     assert PINS_FILE.read_text(encoding="utf-8") == "{{{ not json"
+
+
+def open_composer_picker(page):
+    """Open the composer model picker without racing the phone-boundary close.
+
+    ``_onPhoneBoundaryChange`` in static/ui.js closes the picker whenever the
+    ``(max-width: 640px)`` media query flips, which a headless viewport (or a
+    device rotating between portrait and desktop width) can still do right
+    after load. Settle the layout first, then open and assert; a late boundary
+    event that closed it again is retried instead of surfacing as a hidden-row
+    timeout.
+    """
+    page.wait_for_timeout(400)
+    for _ in range(3):
+        if page.evaluate("()=>document.getElementById('composerModelDropdown').classList.contains('open')"):
+            return
+        page.evaluate("()=>toggleModelDropdown()")
+        page.wait_for_timeout(150)
+    page.wait_for_function(
+        "()=>document.getElementById('composerModelDropdown').classList.contains('open')",
+        timeout=5000)

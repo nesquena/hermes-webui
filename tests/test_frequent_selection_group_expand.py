@@ -11,6 +11,8 @@ import time
 
 import pytest
 
+from tests.test_models_preferences_backend import open_composer_picker
+
 from tests._pytest_port import BASE
 from tests.test_models_preferences_backend import (_wipe_state, _write_sidecar,
                                                    _write_index, _append_journal)
@@ -62,7 +64,7 @@ def _open_picker(page, catalog, select_value):
       renderModelDropdown();
     }''', select_value)
     assert page.evaluate("document.getElementById('modelSelect').value") == select_value
-    page.evaluate('async()=>{await toggleModelDropdown();}')
+    open_composer_picker(page)
     page.wait_for_function(
         "() => !!document.querySelector('#composerModelDropdown [data-group=\"__frequent__\"] .model-opt')")
 

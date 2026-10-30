@@ -19,8 +19,9 @@ import time
 import pytest
 
 from tests._pytest_port import BASE
-from tests.test_models_preferences_backend import (_wipe_state, _write_sidecar,
-                                                   _write_index, _append_journal)
+from tests.test_models_preferences_backend import (_append_journal, _wipe_state,
+                                                   _write_index, _write_sidecar,
+                                                   open_composer_picker)
 
 
 def _frequent_model_row_layout(page):
@@ -118,7 +119,8 @@ def test_provider_tag_sits_directly_after_name_with_primary_badge_and_far_right_
             "typeof renderModelDropdown==='function' && typeof api==='function'")
         page.evaluate(
             'async()=>{await populateModelDropdown();await _loadModelFrequentPrefs();}')
-        page.evaluate('async()=>{await newSession(false);await toggleModelDropdown();}')
+        page.evaluate('async()=>{await newSession(false);}')
+        open_composer_picker(page)
 
         dd = page.locator('#composerModelDropdown')
         freq = dd.locator('[data-group="__frequent__"]')
