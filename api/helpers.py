@@ -1838,7 +1838,9 @@ def redact_session_data(session_dict: dict) -> dict:
     from api.process_event_utils import build_active_turn_token
     _active_turn_token = build_active_turn_token(session_dict.get("active_stream_id"), session_dict.get("pending_started_at"))
     for key, value in session_dict.items():
-        if key in _PUBLIC_MESSAGE_INTERNAL_FIELDS:
+        if key in _PUBLIC_MESSAGE_INTERNAL_FIELDS or key in {
+            '_composer_draft', '_composer_draft_session_id', '_draft_identity_persisted',
+        }:
             continue
         if key == 'title' and isinstance(value, str):
             result[key] = _redact_text(value, _enabled=_enabled)
