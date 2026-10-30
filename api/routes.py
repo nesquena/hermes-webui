@@ -4,6 +4,7 @@ Extracted from server.py (Sprint 11) so server.py is a thin shell.
 """
 
 import html as _html
+import contextlib
 import copy
 import hashlib
 import inspect
@@ -40,6 +41,12 @@ from api.agent_runtime import (
     agent_runtime_stale_payload,
     ensure_agent_runtime_current,
     require_ai_agent_class,
+)
+from api.memory_profile_scope import (
+    construct_memoryless_helper_agent,
+    construct_profile_scoped_agent,
+    profile_home_turn_scope,
+    session_profile_home_or_empty,
 )
 from api.agent_sessions import (
     MESSAGING_SOURCES,
@@ -7359,11 +7366,12 @@ def _forwarded_client_ip_from_trusted_proxy(handler, consult_real_ip: bool = Tru
         and then the raw peer. The local-origin gate, trusted-header SSO and other
         consumers that predate #7863 keep exactly the resolution they had.
       * ``False`` never reads ``X-Real-IP`` at all and goes straight to the raw
-        peer. This is the request-log path only: the structured log is a security
-        boundary (its ``forwarded_for`` feed fail2ban), and ``X-Real-IP`` is a
-        second client-writable header (nginx relays client-supplied values through
-        by default instead of overwriting it), so honoring it there would
-        reintroduce #7863 through a different header.
+        peer. The request log and the login rate limiter use it: the structured
+        log is a security boundary (its ``forwarded_for`` feed fail2ban), and
+        ``X-Real-IP`` is a second client-writable header (nginx relays
+        client-supplied values through by default instead of overwriting it), so
+        honoring it there would reintroduce #7863 through a different header, and
+        on the login limiter would let a client pick its bucket (#8591).
 
     The XFF walk is identical either way — the right-most hop was appended by the
     trusted peer itself, so it carries the same guarantee with or without the
@@ -7422,17 +7430,24 @@ def _forwarded_client_ip_from_trusted_proxy(handler, consult_real_ip: bool = Tru
         real_ip = handler.headers.get("X-Real-IP", "").strip()
         if real_ip:
             return real_ip
-    # Without a forwarded chain the trusted proxy is speaking for itself. On the
-    # request-log path (consult_real_ip=False) this is also the fail-closed
-    # fallback: no forwarded chain, no forwarded identity.
+    # Without a forwarded chain the trusted proxy is speaking for itself. With
+    # consult_real_ip=False (the request log, the login limiter) this is also the
+    # fail-closed fallback: no forwarded chain, no forwarded identity.
     return _request_client_ip(handler)
 
 
 def _login_client_ip(handler) -> str:
     """Client IP that the login rate limiter keys on.
 
-    Behind a reverse proxy the raw socket peer is the proxy, so every user
-    would share one bucket. Consult the forwarded chain only when
+    By default this is the raw socket peer, exactly as v0.52.544 keyed it
+    (#8595). Per-client buckets behind a reverse proxy are an explicit opt-in,
+    HERMES_WEBUI_LOGIN_RATE_LIMIT_PER_CLIENT=1, because they rest on a contract
+    the code cannot check: the listed proxy must append to or overwrite
+    X-Forwarded-For. A proxy that relays the client's own header unchanged (a
+    bare nginx proxy_pass) would let every client choose its bucket, and a
+    relayed hop looks exactly like an appended one.
+
+    With the opt-in, the forwarded chain is consulted only when
     HERMES_WEBUI_TRUST_FORWARDED_FOR=1 and the raw peer is listed in
     HERMES_WEBUI_TRUSTED_PROXY_CIDRS. Implicit loopback trust is not enough:
     a direct loopback or SSH-tunnel client could otherwise send a new
@@ -7447,6 +7462,10 @@ def _login_client_ip(handler) -> str:
     of both headers is checked, as the resolver reads them all: fall back to the
     raw peer when they differ, a field is empty, X-Real-IP is repeated with
     different values, or a value is not an IP address.
+
+    A request with no X-Forwarded-For keys on the raw peer even when X-Real-IP
+    is a valid address: X-Real-IP alone may be the client's own value relayed
+    by the proxy, so it never selects a bucket by itself.
     """
     import ipaddress
 
@@ -7457,14 +7476,26 @@ def _login_client_ip(handler) -> str:
             single = handler.headers.get(name)
             return [single] if single is not None else []
 
-    if _truthy_env("HERMES_WEBUI_TRUST_FORWARDED_FOR"):
+    if _truthy_env("HERMES_WEBUI_LOGIN_RATE_LIMIT_PER_CLIENT") and _truthy_env(
+        "HERMES_WEBUI_TRUST_FORWARDED_FOR"
+    ):
         try:
             peer = ipaddress.ip_address(_request_client_ip(handler))
-            if _ip_in_networks(peer, _trusted_proxy_networks(include_loopback=False)):
-                client = ipaddress.ip_address(_forwarded_client_ip_from_trusted_proxy(handler))
-                xff = _fields("X-Forwarded-For")
+            xff = _fields("X-Forwarded-For")
+            # Only a non-empty X-Forwarded-For chain can name the client: its
+            # right-most hop is appended by the trusted proxy itself. X-Real-IP
+            # alone is client-writable (nginx relays a client-supplied value
+            # unless the config overwrites it), so with no XFF the resolver's
+            # X-Real-IP fallback would let every attempt pick a fresh bucket.
+            # Resolve with consult_real_ip=False, as the request log does.
+            if xff and all(v.strip() for v in xff) and _ip_in_networks(
+                peer, _trusted_proxy_networks(include_loopback=False)
+            ):
+                client = ipaddress.ip_address(
+                    _forwarded_client_ip_from_trusted_proxy(handler, consult_real_ip=False)
+                )
                 real_ips = {ipaddress.ip_address(v.strip()) for v in _fields("X-Real-IP")}
-                if all(v.strip() for v in xff) and real_ips <= {client}:
+                if real_ips <= {client}:
                     return str(client)
         except ValueError:
             pass
@@ -18104,16 +18135,20 @@ def _llm_update_summary(system_prompt: str, user_prompt: str, active_profile: st
 
         AIAgent = require_ai_agent_class()
 
-        agent = AIAgent(
-            model=_main_model,
-            provider=_main_provider,
-            base_url=_main_base_url,
-            api_key=_main_api_key,
-            platform="webui",
-            quiet_mode=True,
-            enabled_toolsets=[],
-            session_id=f"updates-summary-{uuid.uuid4().hex[:8]}",
-            **_agent_bundle_kwargs(AIAgent, _bundle),
+        agent = construct_memoryless_helper_agent(
+            AIAgent,
+            dict(
+                model=_main_model,
+                provider=_main_provider,
+                base_url=_main_base_url,
+                api_key=_main_api_key,
+                platform="webui",
+                quiet_mode=True,
+                enabled_toolsets=[],
+                session_id=f"updates-summary-{uuid.uuid4().hex[:8]}",
+                **_agent_bundle_kwargs(AIAgent, _bundle),
+            ),
+            purpose="update summary",
         )
         result = agent.run_conversation(
             user_message=user_prompt,
@@ -30187,6 +30222,9 @@ def _handle_chat_sync(handler, body):
         old_session_key = os.environ.get("HERMES_SESSION_KEY")
         os.environ["HERMES_EXEC_ASK"] = "1"
         os.environ["HERMES_SESSION_KEY"] = s.session_id
+    # #8517 all-r1 finding 4: the session's profile home is held from agent
+    # construction through the end of run_conversation (closed in ``finally``).
+    _sync_turn_scope = contextlib.ExitStack()
     try:
         AIAgent = require_ai_agent_class()
 
@@ -30298,19 +30336,38 @@ def _handle_chat_sync(handler, body):
             # rotation (agent.session_id advancing to a fresh continuation) is
             # visible to the settle below.
             _sync_session_id = s.session_id
-            agent = AIAgent(
-                model=_model,
-                provider=_provider,
-                base_url=_base_url,
-                api_key=_api_key,
-                # Identify browser-originated sessions as WebUI so Hermes Agent
-                # does not inject CLI-specific terminal/output guidance.
-                platform="webui",
-                quiet_mode=True,
-                enabled_toolsets=_resolve_cli_toolsets(),
+            # #8517: this agent uses memory, so it is built inside the session's own
+            # profile home (fails closed to no memory if that cannot be set). The
+            # agent is not cached, so the cacheable flag is unused.
+            # all-r1 finding 4: the home stays held for the whole synchronous turn,
+            # not just construction. The Agent's providers check the caller's home on
+            # every hook and the built-in MEMORY.md store resolves the home on every
+            # write, so a turn run after the scope is restored follows the shared env
+            # mirror (another profile after a UI switch). If the home cannot be held
+            # for the turn, the agent is built without memory.
+            _sync_profile_home = session_profile_home_or_empty(s)
+            _sync_turn_scope_reason = _sync_turn_scope.enter_context(
+                profile_home_turn_scope(_sync_profile_home)
+            )
+            agent, _ = construct_profile_scoped_agent(
+                AIAgent,
+                dict(
+                    model=_model,
+                    provider=_provider,
+                    base_url=_base_url,
+                    api_key=_api_key,
+                    # Identify browser-originated sessions as WebUI so Hermes Agent
+                    # does not inject CLI-specific terminal/output guidance.
+                    platform="webui",
+                    quiet_mode=True,
+                    enabled_toolsets=_resolve_cli_toolsets(),
+                    session_id=s.session_id,
+                    **_routing_kwargs,
+                    **_agent_bundle_kwargs(AIAgent, _bundle),
+                ),
+                profile_home=_sync_profile_home,
                 session_id=s.session_id,
-                **_routing_kwargs,
-                **_agent_bundle_kwargs(AIAgent, _bundle),
+                fail_closed_reason=_sync_turn_scope_reason,
             )
             from api.streaming import (
                 _WEBUI_PROGRESS_PROMPT,
@@ -30422,6 +30479,8 @@ def _handle_chat_sync(handler, body):
             )
             result = agent.run_conversation(**_sync_run_kwargs)
     finally:
+        # #8517 all-r1 finding 4: the turn is over; release the session's profile home.
+        _sync_turn_scope.close()
         # Same as the streaming worker's teardown: mirror the workspace into the
         # Agent-created state.db row on every exit, including a raised turn.
         try:
@@ -31108,16 +31167,20 @@ def _llm_git_commit_message(system_prompt: str, user_prompt: str, session=None) 
 
         AIAgent = require_ai_agent_class()
 
-        agent = AIAgent(
-            model=_main_model,
-            provider=_main_provider,
-            base_url=_main_base_url,
-            api_key=_main_api_key,
-            platform="webui",
-            quiet_mode=True,
-            enabled_toolsets=[],
-            session_id=f"git-commit-message-{uuid.uuid4().hex[:8]}",
-            **_agent_bundle_kwargs(AIAgent, _bundle),
+        agent = construct_memoryless_helper_agent(
+            AIAgent,
+            dict(
+                model=_main_model,
+                provider=_main_provider,
+                base_url=_main_base_url,
+                api_key=_main_api_key,
+                platform="webui",
+                quiet_mode=True,
+                enabled_toolsets=[],
+                session_id=f"git-commit-message-{uuid.uuid4().hex[:8]}",
+                **_agent_bundle_kwargs(AIAgent, _bundle),
+            ),
+            purpose="git commit message",
         )
         result = agent.run_conversation(
             user_message=user_prompt,
@@ -33345,18 +33408,25 @@ def _handle_session_compress(handler, body):
         )
         approx_tokens = _estimate_messages_tokens_rough(original_messages)
 
-        agent = AIAgent(
-            model=resolved_model,
-            provider=resolved_provider,
-            base_url=resolved_base_url,
-            api_key=resolved_api_key,
-            # Identify browser-originated sessions as WebUI so Hermes Agent
-            # does not inject CLI-specific terminal/output guidance.
-            platform="webui",
-            quiet_mode=True,
-            enabled_toolsets=_resolve_cli_toolsets(),
-            session_id=sid,
-            **_agent_bundle_kwargs(AIAgent, _bundle),
+        # #8517: compression only needs the model. Building it with memory would
+        # re-initialise a shared provider instance for whatever profile the UI is
+        # on now, and this session's next cached turn would write into that bank.
+        agent = construct_memoryless_helper_agent(
+            AIAgent,
+            dict(
+                model=resolved_model,
+                provider=resolved_provider,
+                base_url=resolved_base_url,
+                api_key=resolved_api_key,
+                # Identify browser-originated sessions as WebUI so Hermes Agent
+                # does not inject CLI-specific terminal/output guidance.
+                platform="webui",
+                quiet_mode=True,
+                enabled_toolsets=_resolve_cli_toolsets(),
+                session_id=sid,
+                **_agent_bundle_kwargs(AIAgent, _bundle),
+            ),
+            purpose="manual compression",
         )
         compressed = agent.context_compressor.compress(
             original_messages,
@@ -34041,16 +34111,20 @@ def _handle_handoff_summary(handler, body):
                 "fallback": True,
             })
 
-        agent = AIAgent(
-            model=resolved_model,
-            provider=resolved_provider,
-            base_url=resolved_base_url,
-            api_key=resolved_api_key,
-            platform="webui",
-            quiet_mode=True,
-            enabled_toolsets=[],
-            session_id=sid,
-            **_agent_bundle_kwargs(AIAgent, _bundle),
+        agent = construct_memoryless_helper_agent(
+            AIAgent,
+            dict(
+                model=resolved_model,
+                provider=resolved_provider,
+                base_url=resolved_base_url,
+                api_key=resolved_api_key,
+                platform="webui",
+                quiet_mode=True,
+                enabled_toolsets=[],
+                session_id=sid,
+                **_agent_bundle_kwargs(AIAgent, _bundle),
+            ),
+            purpose="handoff summary",
         )
 
         summary_system_prompt = (

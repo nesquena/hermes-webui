@@ -14,9 +14,13 @@ on:
       - 'tests/browser_conversation_lifecycle.py'
       - 'tests/sidebar_terminal_barrier_server.py'
       - 'tests/browser_historical_transcript_hydration.py'
+      - 'tests/browser_virtual_transcript_anchor.py'
       - 'tests/browser_reconnect_scene_redraw.py'
       - 'tests/browser_settle_visibility_7676.py'
       - 'tests/browser_approval_first_click.py'
+      - 'tests/browser_live_scene_energy.py'
+      - 'tests/browser_progress_animation.py'
+      - 'tests/browser_running_ring_inset.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - '.github/workflows/conversation-lifecycle.yml'
@@ -29,9 +33,13 @@ on:
       - 'tests/browser_conversation_lifecycle.py'
       - 'tests/sidebar_terminal_barrier_server.py'
       - 'tests/browser_historical_transcript_hydration.py'
+      - 'tests/browser_virtual_transcript_anchor.py'
       - 'tests/browser_reconnect_scene_redraw.py'
       - 'tests/browser_settle_visibility_7676.py'
       - 'tests/browser_approval_first_click.py'
+      - 'tests/browser_live_scene_energy.py'
+      - 'tests/browser_progress_animation.py'
+      - 'tests/browser_running_ring_inset.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - '.github/workflows/conversation-lifecycle.yml'
@@ -60,6 +68,8 @@ jobs:
             scenario: terminal-error
           - name: historical-transcript-hydration
             script: tests/browser_historical_transcript_hydration.py
+          - name: virtual-transcript-anchor
+            script: tests/browser_virtual_transcript_anchor.py
           - name: reconnect-scene-redraw
             script: tests/browser_reconnect_scene_redraw.py
             browsers: chromium
@@ -77,6 +87,15 @@ jobs:
           # regression land green.
           - name: approval-first-click
             script: tests/browser_approval_first_click.py
+          - name: live-scene-energy
+            script: tests/browser_live_scene_energy.py
+            browsers: chromium
+          - name: progress-animation
+            script: tests/browser_progress_animation.py
+            browsers: chromium
+          - name: running-ring-inset
+            script: tests/browser_running_ring_inset.py
+            browsers: chromium
     steps:
       - uses: actions/checkout@v4
 
@@ -90,6 +109,15 @@ jobs:
             **/pyproject.toml
             .github/workflows/conversation-lifecycle.yml
 
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          # Key on the lockfiles + this workflow: a dependency bump that moves
+          # the Playwright version rebuilds the cache instead of replaying a
+          # browser tree the installed driver can't launch.
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements*.txt', '.github/workflows/conversation-lifecycle.yml') }}
+
       - name: Install browser gate dependencies
         run: |
           python -m pip install --upgrade pip
@@ -100,6 +128,11 @@ jobs:
         env:
           LIFECYCLE_ARTIFACT_DIR: lifecycle-artifacts
           HISTORICAL_HYDRATION_ARTIFACT_DIR: lifecycle-artifacts
+          # #8228 greptile P2: the virtual-transcript-anchor gate wrote its
+          # screenshot/snapshot/server log to a private temp dir, so a red
+          # matrix entry uploaded no evidence. Point it at the one directory
+          # the upload step below collects.
+          VIRTUAL_ANCHOR_ARTIFACT_DIR: lifecycle-artifacts
           LIFECYCLE_SCENARIO: ${{ matrix.scenario }}
           BROWSERS: ${{ matrix.browsers }}
         run: python ${{ matrix.script }}
