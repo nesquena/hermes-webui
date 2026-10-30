@@ -41,6 +41,15 @@ _MODULE = 'api.updates'
 class TestApplyUpdateDiagnostics:
     """New code paths introduced in PR #227."""
 
+    @pytest.fixture(autouse=True)
+    def _mock_clean_preflight(self, monkeypatch):
+        # These tests exercise pull diagnostics; real-Git preflight has its own suite.
+        from api import updates
+        monkeypatch.setattr(updates, '_describe_checkout_sync', lambda *a: {
+            'relationship': 'behind', 'ahead': 0, 'behind': 1,
+            'dirty': False, 'dirty_tracked': False,
+        })
+
     def _apply(self, target, run_git_side_effect):
         """Call _apply_update_inner with _apply_lock bypassed and _run_git mocked."""
         from api import updates

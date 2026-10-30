@@ -26,6 +26,16 @@ import functools
 
 import pytest
 
+@pytest.fixture
+def mock_clean_update_preflight(monkeypatch):
+    """Keep mocked pull/restart tests independent of checkout classification."""
+    import api.updates as updates
+    monkeypatch.setattr(updates, '_describe_checkout_sync', lambda *a: {
+        'relationship': 'behind', 'ahead': 0, 'behind': 1,
+        'dirty': False, 'dirty_tracked': False,
+    })
+
+
 REPO = pathlib.Path(__file__).parent.parent
 
 
@@ -364,6 +374,7 @@ class TestUpdateChecker:
         assert seen == [('http://hermes-agent:8642/health', 0.75)]
 
 
+@pytest.mark.usefixtures("mock_clean_update_preflight")
 class TestConflictError:
     """#813 — conflict error must include flag + recovery command."""
 
@@ -634,6 +645,7 @@ class TestApplyUpdateRestartSafety:
         assert sleeps == [0.25]
 
 
+@pytest.mark.usefixtures("mock_clean_update_preflight")
 class TestSuccessfulUpdateReturnsRestartScheduled:
     """#814 — successful apply_update must return restart_scheduled: True."""
 
@@ -827,6 +839,7 @@ class TestApplyForceUpdate:
         assert result['ok'] is False
 
 
+@pytest.mark.usefixtures("mock_clean_update_preflight")
 class TestAgentUpdateRequiresGatewayRestart:
     """Agent updates must prove gateway restart before returning ok=True."""
 
