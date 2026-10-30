@@ -1139,23 +1139,27 @@ def read_importable_agent_session_rows(
             # (non-text blocks rendered as a marker) restores the plaintext
             # shape every guard expects.
             if 'content' in message_cols:
-                # ``LIMIT -1`` (no-op limit) keeps the SQLite flattener from
-                # re-inlining the JSON1 decode into every one of the ~3000
-                # content references below. Inlined, each copy carries the
-                # GROUP_CONCAT aggregate and the statement blows past SQLite's
-                # aggregate-terms cap ("more than 2000 aggregate terms").
-                #
                 # #7681 re-gate: the JSON expansion runs as a FROM-level
                 # table function (``LEFT JOIN JSON_EACH(...)``) with the
-                # per-message GROUP_CONCAT aggregated over it. The previous
-                # scalar form made the listing's plan report a CORRELATED
-                # SCALAR SUBQUERY — the decode was re-evaluated per candidate
-                # instead of once per message — which broke the pre-aggregated
-                # listing guarantee the readonly review follow-ups assert.
+                # per-message GROUP_CONCAT aggregated over it and grouped by
+                # the message rowid. The previous scalar form made the
+                # listing's plan report a CORRELATED SCALAR SUBQUERY — the
+                # decode was re-evaluated per candidate instead of once per
+                # message — which broke the pre-aggregated listing guarantee
+                # the readonly review follow-ups assert.
+                #
+                # The grouping also keeps the SQLite flattener from
+                # re-inlining the JSON1 decode into every one of the ~3000
+                # content references the guards below use (inlined, each copy
+                # carries the GROUP_CONCAT aggregate and the statement blows
+                # past SQLite's aggregate-terms cap, "more than 2000
+                # aggregate terms"). No ``LIMIT -1`` guard is needed for that
+                # any more — and adding one would put a second LIMIT in the
+                # statement, which the sidebar-cap test forbids.
                 join_clause = (
                     "LEFT JOIN ("
                     + _plaintext_content_join_sql("mq.content")
-                    + " LIMIT -1) m"
+                    + ") m"
                     " ON m.session_id = s.id"
                 )
             else:
