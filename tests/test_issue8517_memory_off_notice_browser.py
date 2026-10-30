@@ -219,3 +219,30 @@ def test_stale_ok_from_an_earlier_stream_does_not_erase_a_newer_dismissal(page):
         dismissal:localStorage.getItem('hermes-webui-memory-off-dismissed:s1:provider_shared_instance')};
     }""" % (_SNAPSHOT_ST1 % "{state:'ok'}"))
     assert state == {"shown": True, "hidden": True, "dismissal": "1"}, state
+
+
+# Codex r3: a compressed turn that ends with `apperror` (not `done`) also adopts the
+# continuation session; the notice and its dismissal must follow it there too.
+_APPERROR_S2 = ("fixtureStream().emit('apperror',{type:'provider_error',message:'Provider failed',"
+                "session_id:'s2',old_session_id:'s1',new_session_id:'s2',continuation_session_id:'s2',"
+                "session:{...S.session,session_id:'s2',messages:[{role:'assistant',content:'Partial',timestamp:123}],"
+                "message_count:1}},'st1:9');")
+_COMPRESSED_S2 = ("fixtureStream().emit('compressed',{session_id:'s1',old_session_id:'s1',new_session_id:'s2',"
+                  "continuation_session_id:'s2'});")
+
+
+def test_compression_then_apperror_keeps_the_notice_on_the_continuation(page):
+    page.evaluate("()=>{attachLiveStream('s1','st1'); fixtureStream().emit('warning',%s,'st1:2');}" % _OFF)
+    page.evaluate("()=>{%s %s}" % (_COMPRESSED_S2, _APPERROR_S2))
+    page.wait_for_timeout(50)
+    after = page.evaluate("()=>{syncTopbar(); return (%s)();}" % _STATE)
+    assert after == {"sid": "s2", "hidden": False, "reason": "provider_shared_instance"}, after
+
+
+def test_compression_then_apperror_carries_the_dismissal(page):
+    page.evaluate("()=>{attachLiveStream('s1','st1'); fixtureStream().emit('warning',%s,'st1:2'); dismissMemoryOffNotice();}" % _OFF)
+    page.evaluate("()=>{%s %s}" % (_COMPRESSED_S2, _APPERROR_S2))
+    page.wait_for_timeout(50)
+    state = page.evaluate("""()=>({sid:S.session&&S.session.session_id,hidden:$('memoryOffNotice').hidden,
+      dismissal:localStorage.getItem('hermes-webui-memory-off-dismissed:s2:provider_shared_instance')})""")
+    assert state == {"sid": "s2", "hidden": True, "dismissal": "1"}, state
