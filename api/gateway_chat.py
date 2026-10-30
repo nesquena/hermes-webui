@@ -550,7 +550,9 @@ def _gateway_request_environ(
         # request.  Startup normalization may also have copied the old alias
         # into the cached canonical slot; that derived value must not freeze
         # later key rotations.  Only a canonical key that the launcher really
-        # exported keeps precedence over the fresh owner profile values.
+        # exported keeps precedence over a fresh owner alias. An explicit
+        # owner canonical key still wins, matching permanent dotenv reload
+        # and restart recovery, including canonical-key rotations.
         launcher_exported_canonical = str(
             _profiles._INITIAL_GATEWAY_DEPLOYMENT_ENV.get(
                 _WEBUI_GATEWAY_API_KEY_ENV
@@ -558,8 +560,8 @@ def _gateway_request_environ(
             or ""
         ).strip()
         resolved_key = (
-            launcher_exported_canonical
-            or profile_canonical
+            profile_canonical
+            or launcher_exported_canonical
             or profile_alias
             or launcher_canonical
             or shared_alias
