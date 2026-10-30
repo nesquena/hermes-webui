@@ -86,6 +86,7 @@ from api.memory_profile_scope import (
     agent_has_memory,
     call_as_session_owner,
     construct_profile_scoped_agent,
+    memory_notice_payload,
     session_profile_home_or_empty,
     turn_memory_reason,
 )
@@ -15971,6 +15972,17 @@ def _run_agent_streaming(
                     _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
                 put('cancel', _cancel_event_payload('Cancelled by user'))
                 return
+
+            # #8517 follow-up: tell the UI when this session's agent runs with memory
+            # off for a reason that outlives the turn (codes only, no paths). Cached
+            # agents keep their status, so every turn reports it; the UI shows it once.
+            try:
+                _memory_notice = memory_notice_payload(agent, session_id=session_id, stream_id=stream_id)
+            except Exception:
+                _memory_notice = None
+                logger.debug('[webui] #8517: memory status unavailable for session %s', session_id, exc_info=True)
+            if _memory_notice is not None:
+                put('warning', _memory_notice)
 
             # Cache publication is already fenced with Stop above. Keep LRU
             # eviction and any memory-provider close outside the stream lock.

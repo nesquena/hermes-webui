@@ -193,8 +193,8 @@ def test_status_reader_tolerates_foreign_and_mock_agents(scope):
     assert scope.memory_status_for_agent(None) is None
     assert scope.memory_status_for_agent(MagicMock()) is None
     assert scope.memory_status_for_agent(types.SimpleNamespace()) is None
-    forged = types.SimpleNamespace(_webui_memory_status={"reason": "/etc/passwd", "scope": "all"})
-    assert scope.memory_status_for_agent(forged) is None
+    for forged in ("/etc/passwd", {"reason": "agent_outdated"}, 1):
+        assert scope.memory_status_for_agent(types.SimpleNamespace(_webui_memory_status=forged)) is None
 
 
 def test_notice_payload_shape_has_no_paths(legacy_hc, homes, scope):

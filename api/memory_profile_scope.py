@@ -40,6 +40,7 @@ refused BEFORE ``initialize`` runs and builds without that provider.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import functools
 import importlib
 import inspect
@@ -231,6 +232,97 @@ def agent_has_memory(agent: Any) -> bool:
         getattr(agent, "_memory_manager", None) is not None
         or getattr(agent, "_memory_store", None) is not None
     )
+
+
+# ── what the user is told (#8517 follow-up) ──────────────────────────────────
+#
+# The reasons above are logged for the operator; the user only sees that memory
+# does not work. ``construct_profile_scoped_agent`` therefore records, on the agent
+# it returns, a status for the reasons that hold beyond this one turn, and the
+# streaming path sends it to the UI (``memory_notice_payload``) as a ``warning`` SSE
+# frame of ``type: "memory_off"``. A cached agent keeps its status, so every turn of
+# that session reports it again; the UI shows it once. Codes, never paths:
+#
+# * ``agent_outdated``: Agent < v0.18.0, every memory store off for every profile;
+# * ``agent_no_instance_claim``: Agent without ``claim_instance`` serving several
+#   profiles, external memory providers off (built-in memory still on);
+# * ``provider_shared_instance``: the provider handed out one shared instance that
+#   another profile already owns, so it is off for this profile until the WebUI
+#   restarts (built-in memory still on).
+#
+# A turn-level scope failure (memory off for this one turn, the agent is not cached
+# and the next turn retries) is not reported: the user has nothing to act on, the
+# next turn normally has memory again, and a notice that flickers on and off per
+# turn would only alarm. Its server WARNING stays.
+
+MEMORY_OFF_AGENT_OUTDATED = "agent_outdated"
+MEMORY_OFF_AGENT_NO_INSTANCE_CLAIM = "agent_no_instance_claim"
+MEMORY_OFF_PROVIDER_SHARED_INSTANCE = "provider_shared_instance"
+_MEMORY_OFF_SCOPES = {
+    MEMORY_OFF_AGENT_OUTDATED: "all",
+    MEMORY_OFF_AGENT_NO_INSTANCE_CLAIM: "external",
+    MEMORY_OFF_PROVIDER_SHARED_INSTANCE: "external",
+}
+# English text for clients that predate the notice: their ``warning`` listener shows
+# ``message`` as a composer status. The UI proper renders its own i18n copy by code.
+_MEMORY_OFF_MESSAGES = {
+    MEMORY_OFF_AGENT_OUTDATED: (
+        "Memory is off: this Hermes Agent version can't keep each profile's memory "
+        "separate. Update Hermes Agent to turn it back on."
+    ),
+    MEMORY_OFF_AGENT_NO_INSTANCE_CLAIM: (
+        "Memory providers are off: this Hermes Agent version can't keep them separate "
+        "across profiles. Built-in memory still works. Update Hermes Agent to turn them back on."
+    ),
+    MEMORY_OFF_PROVIDER_SHARED_INSTANCE: (
+        "Your memory provider is off for this profile: another profile is already using it. "
+        "Built-in memory still works. Restart WebUI, or update the provider "
+        "(for example mnemosyne-hermes 0.7.2 or later)."
+    ),
+}
+_MEMORY_STATUS_ATTR = "_webui_memory_status"
+# Shared-instance refusals made by the guard during one construction (same thread:
+# the Agent initialises its memory providers inside ``AIAgent.__init__``).
+_construction_refusals: contextvars.ContextVar[Optional[list]] = contextvars.ContextVar(
+    "webui_issue8517_construction_refusals", default=None,
+)
+
+
+def _set_memory_status(agent: Any, reason: str) -> None:
+    try:
+        setattr(agent, _MEMORY_STATUS_ATTR, reason)
+    except Exception:
+        logger.debug("[webui] #8517: could not record the memory status on the agent", exc_info=True)
+
+
+def memory_status_for_agent(agent: Any) -> Optional[dict]:
+    """``{"state", "reason", "scope"}`` when ``agent`` was built with memory off for a
+    reason that outlives the turn, else None (healthy agent, one-turn fail-closed
+    build, or any object this module did not build)."""
+    try:
+        reason = vars(agent).get(_MEMORY_STATUS_ATTR) if agent is not None else None
+    except TypeError:  # no instance __dict__ (slots): never built here
+        return None
+    if not isinstance(reason, str) or reason not in _MEMORY_OFF_SCOPES:
+        return None
+    scope = _MEMORY_OFF_SCOPES[reason]
+    return {"state": "off" if scope == "all" else "external_off", "reason": reason, "scope": scope}
+
+
+def memory_notice_payload(agent: Any, *, session_id: str, stream_id: str = "") -> Optional[dict]:
+    """The ``warning`` SSE payload telling the UI why memory is off for this session's
+    agent, or None when there is nothing to tell. Codes and fixed text only."""
+    status = memory_status_for_agent(agent)
+    if status is None:
+        return None
+    return {
+        "type": "memory_off",
+        "session_id": str(session_id or ""),
+        "stream_id": str(stream_id or ""),
+        "reason": status["reason"],
+        "scope": status["scope"],
+        "message": _MEMORY_OFF_MESSAGES[status["reason"]],
+    }
 
 
 def _enter_profile_home(profile_home: str, target_key: Optional[str]) -> tuple[Callable[[], None], Optional[str]]:
@@ -450,8 +542,18 @@ def construct_profile_scoped_agent(
                 "" if stable_for_process else " and not cached",
             )
             agent = _build_without_memory(agent_cls, agent_kwargs, params, keep_builtin=keep_builtin)
+            if stable_for_process:
+                _set_memory_status(
+                    agent,
+                    MEMORY_OFF_AGENT_NO_INSTANCE_CLAIM if keep_builtin else MEMORY_OFF_AGENT_OUTDATED,
+                )
             return agent, stable_for_process
-        agent = agent_cls(**agent_kwargs)
+        refusals: list = []
+        refusals_token = _construction_refusals.set(refusals)
+        try:
+            agent = agent_cls(**agent_kwargs)
+        finally:
+            _construction_refusals.reset(refusals_token)
         state, bound_key = _bound_memory_home_key(agent)
         if state == "bound" and bound_key != target_key:
             logger.warning(
@@ -473,6 +575,10 @@ def construct_profile_scoped_agent(
                 "memory provider bound; relying on the profile home override set for "
                 "construction. Upgrade the Agent to verify it.",
             )
+        if refusals:
+            # The guard refused a shared provider instance another profile owns; the
+            # Agent dropped it and kept the rest. Holds until the WebUI restarts.
+            _set_memory_status(agent, MEMORY_OFF_PROVIDER_SHARED_INSTANCE)
         return agent, True
     finally:
         restore()
@@ -671,6 +777,9 @@ def _claim_for_profile(original: Callable[[Any, Any], bool], provider: Any, home
                 _instance_owners[pid] = (_instance_ref(provider), key)
             return True
     name = getattr(provider, "name", "?")
+    refusals = _construction_refusals.get()
+    if refusals is not None:
+        refusals.append(name)
     _log_once(
         f"shared:{name}:{owner}:{key}",
         "[webui] #8517: memory provider %r is disabled for profile home %r: the plugin "
