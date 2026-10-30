@@ -6,7 +6,6 @@ its provider group again duplicates the row and pushes the rest of the list
 down. Groups still auto-expand for a selection that is NOT in the frequent
 group (upstream behaviour, guarded below so the fix cannot over-remove it).
 """
-import json
 import time
 
 import pytest

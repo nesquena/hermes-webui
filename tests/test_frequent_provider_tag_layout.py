@@ -13,7 +13,6 @@ Run from the repo root (state dir must live outside the production Hermes home):
   env -u HERMES_WEBUI_TEST_STATE_DIR TMPDIR=/tmp \
       python -m pytest tests/test_frequent_provider_tag_layout.py -q --tb=short
 """
-import json
 import time
 
 import pytest
@@ -134,11 +133,11 @@ def test_provider_tag_sits_directly_after_name_with_primary_badge_and_far_right_
         # ── Primary invariants ─────────────────────────────────────────────
         assert layout['nameIsProviderNextSibling'], (
             'provider tag must be the immediate nextElementSibling of the name. '
-            f'row children (cls,text): {list(zip(layout["classes"], layout["texts"]))}'
+            f'row children (cls,text): {list(zip(layout["classes"], layout["texts"], strict=False))}'
         )
         assert layout['providerBeforeBadge'], (
             'PRIMARY badge must render AFTER the provider tag. '
-            f'row children (cls,text): {list(zip(layout["classes"], layout["texts"]))}'
+            f'row children (cls,text): {list(zip(layout["classes"], layout["texts"], strict=False))}'
         )
         assert 'primary' in layout['badgeText'].lower(), (
             f'Expected a PRIMARY badge, got badge text={layout["badgeText"]!r}'

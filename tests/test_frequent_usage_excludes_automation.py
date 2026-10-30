@@ -11,10 +11,8 @@ machine-injected message reach the same journal and must be dropped:
 A user message that merely *mentions* these phrases must still count.
 """
 
-import json
 import time
 
-from tests._pytest_port import BASE
 from tests.test_models_preferences_backend import (
     _append_journal,
     _get,

@@ -1,8 +1,7 @@
 """Full WebUI + real preferences API + Chromium, no live LLM requests."""
-import json
 import time
 import pytest
-from tests._pytest_port import BASE, TEST_STATE_DIR
+from tests._pytest_port import BASE
 from tests.test_models_preferences_backend import (_append_journal, _wipe_state,
                                                   _write_index, _write_sidecar,
                                                   open_composer_picker)
