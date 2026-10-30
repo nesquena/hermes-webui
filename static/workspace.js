@@ -968,6 +968,7 @@ function showWorkspaceTreeSkeleton(){
     }
     wrap.appendChild(row);
   }
+  if(typeof a11yTreeReset==='function') a11yTreeReset(tree, {focusTo: $('workspaceFilesTab')});
   tree.innerHTML = '';
   tree.appendChild(wrap);
   tree.style.display = '';
@@ -995,6 +996,9 @@ async function loadDir(path, opts={}){
                              // from the previous workspace — which would pass the session_id
                              // guard because an empty-session switch reuses the same id — is
                              // rejected here instead of painting the wrong profile's files.
+  // A root refresh renders twice (partial, then complete). This object owns
+  // the keyboard position carried between the two; every exit drops it.
+  let refill=null;
   try{
     if(!path||path==='.'||refreshExpanded){
       if(typeof _syncWorkspaceBirthtimeSupportScope==='function') _syncWorkspaceBirthtimeSupportScope((S.session&&S.session.workspace)||'');
@@ -1015,7 +1019,15 @@ async function loadDir(path, opts={}){
       if(typeof syncTerminalButton==='function')syncTerminalButton();
       showToast(t('workspace_recovered_notice',S.session.workspace),5000,'warning');
     }
-    S.entries=data.entries||[];renderBreadcrumb();renderFileTree();
+    // A root refresh cleared the expanded folders' listings; this first render
+    // is partial when the block below will render again once they load.
+    const refillsExpanded=(!path||path==='.'||refreshExpanded)&&!!(S._expandedDirs&&S._expandedDirs.size);
+    // The scope names this tree (session, generation, workspace): a keyboard
+    // position is only ever carried within one tree (a11y-helpers.js). Row
+    // paths are workspace-relative, so the folder shown does not matter.
+    const treeScope=[sessionId,treeGen,(S.session&&S.session.workspace)||''].join('\n');
+    if(refillsExpanded) refill={};
+    S.entries=data.entries||[];renderBreadcrumb();renderFileTree({partial:refill,scope:treeScope});
     // #2673 — refresh Artifacts tab when its source data (the file tree) updates.
     if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
     // Pre-fetch contents of restored expanded dirs so they render without a second click
@@ -1032,7 +1044,7 @@ async function loadDir(path, opts={}){
         if(!S.session||S.session.session_id!==sessionId||treeGen!==_wsTreeGen)return;
         for(const {dirPath,entries} of results) S._dirCache[dirPath]=entries;
       }
-      if(expanded.size>0)renderFileTree();
+      if(expanded.size>0)renderFileTree({completesRefill:refill,scope:treeScope});
     }
     if(!preservePreview&&typeof clearPreview==='function'){
       const hiddenEdits=typeof _previewHasUnsavedEdits==='function'&&_previewHasUnsavedEdits();
@@ -1062,6 +1074,10 @@ async function loadDir(path, opts={}){
       return;
     }
     console.warn('loadDir',e);
+  }finally{
+    // Aborted (session/workspace changed), failed, or nothing left to refill:
+    // a carried position must not reach a later, unrelated refill.
+    if(refill&&typeof a11yTreeDropCarry==='function') a11yTreeDropCarry($('fileTree'), refill);
   }
 }
 

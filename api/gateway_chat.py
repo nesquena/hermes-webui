@@ -54,6 +54,53 @@ GATEWAY_RUN_ID_WAIT_TIMEOUT = 5.0
 # stream_id -> (base_url, api_key) of the Gateway the stream's run lives on, for Stop
 # and approval replies; a reattached run's Gateway need not be the process profile's.
 _STREAM_ENDPOINTS: dict[str, tuple[str, str]] = {}
+# #7293: streams whose resumable Gateway run identity (the exact request before
+# admission, then the run id) has been durably saved in the session. Only these
+# survive a WebUI restart (``_resume_gateway_run_for_session`` reattaches them),
+# so only these are left out of restart blocking and shutdown-drain accounting.
+# A legacy /v1/chat/completions relay never records one, and a Runs API launch
+# has none until its first successful save; both count as WebUI-owned work.
+_DURABLE_RUN_STREAMS: set[str] = set()
+_DURABLE_RUN_STREAMS_LOCK = threading.Lock()
+
+
+def _mark_gateway_run_durable(stream_id: str) -> None:
+    stream_id = str(stream_id or "").strip()
+    if stream_id:
+        with _DURABLE_RUN_STREAMS_LOCK:
+            _DURABLE_RUN_STREAMS.add(stream_id)
+
+
+class GatewayHandoffCancelled(RuntimeError):
+    """Stop or a server settle cancelled the stream before its durable handoff (#7293)."""
+
+
+def _publish_gateway_run_durable(stream_id: str) -> bool:
+    """Mark ``stream_id`` durable iff it is still registered and not cancelled.
+
+    Runs on the STREAMS_LOCK edge where Stop and the server settle publish a
+    cancellation, so exactly one of the two wins (#7293).
+    """
+    with STREAMS_LOCK:
+        flag = CANCEL_FLAGS.get(stream_id)
+        if stream_id not in STREAMS or (flag is not None and flag.is_set()):
+            return False
+        _mark_gateway_run_durable(stream_id)
+        return True
+
+
+def gateway_run_durably_resumable(stream_id: str) -> bool:
+    """True once ``stream_id``'s Gateway run identity is saved for reattachment.
+
+    Stays true until the stream's Gateway state is released: a later save that
+    clears the record also persists the turn's terminal state, so the run is
+    either reattachable from disk or already settled there.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return False
+    with _DURABLE_RUN_STREAMS_LOCK:
+        return stream_id in _DURABLE_RUN_STREAMS
 
 
 def gateway_run_endpoint(run_id: str) -> tuple[str, str]:
@@ -175,6 +222,8 @@ def release_gateway_stream_state(stream_id: str, *, finish_pending: bool = True)
     _clear_gateway_run_starting(stream_id)
     with _STREAM_RUN_STARTING_CONDITION:
         _STREAM_ENDPOINTS.pop(stream_id, None)
+    with _DURABLE_RUN_STREAMS_LOCK:
+        _DURABLE_RUN_STREAMS.discard(stream_id)
 
 
 def gateway_run_id_pending(stream_id: str) -> bool:
@@ -1232,7 +1281,17 @@ def _run_gateway_runs_api_streaming(
         update_active_run(stream_id, phase="gateway-request")
         # Persist the exact body first: a restart before the run id is saved replays this admission.
         if on_run_id is not None:
-            on_run_id("", request=run_body)
+            try:
+                on_run_id("", request=run_body)
+            except GatewayHandoffCancelled:
+                # Cancelled before the handoff was durable: never submit the run (#7293).
+                from api.streaming import _server_settle_reason, _worker_cancel_event_payload
+
+                server_settled = _server_settle_reason(stream_id) is not None
+                put_gateway_event("cancel", _worker_cancel_event_payload(stream_id) if server_settled else {
+                    "message": "Cancelled by user",
+                })
+                return None, {}
         run_id = _admit_gateway_run(url_runs, headers, run_body, stream_id)
     except Exception:
         _finish_gateway_run_starting(stream_id)
@@ -1693,16 +1752,34 @@ _REATTACH_SCAN_HEAD_BYTES = 16 * 1024
 
 
 def _record_gateway_run(session_id: str, stream_id: str, run_id: str, request=None, **extra) -> None:
-    """Persist the run id (or, before admission, the exact request) so a restarted WebUI can reattach."""
+    """Persist the run id (or, before admission, the exact request) so a restarted WebUI can reattach.
+
+    The request record is the run's durable handoff (#7293): when the stream was
+    cancelled or detached first, it is withdrawn and ``GatewayHandoffCancelled``
+    stops the admission.
+    """
     try:
         with _get_session_agent_lock(session_id):
             session = get_session(session_id)
             if not _stream_writeback_is_current(session, stream_id):
+                if not run_id:
+                    raise GatewayHandoffCancelled(stream_id)
                 return
+            previous = session.gateway_run
             session.gateway_run = {"run_id": run_id, "stream_id": stream_id, **extra}
             if not run_id:
                 session.gateway_run["request"] = request
             session.save(touch_updated_at=False)
+            # Only now can a restart reattach this run (#7293 drain accounting).
+            if not _publish_gateway_run_durable(stream_id) and not run_id:
+                # Cancelled or detached while saving: withdraw the replayable request.
+                session.gateway_run = previous
+                try:
+                    session.save(touch_updated_at=False)
+                finally:  # even a failed withdrawal never admits the run
+                    raise GatewayHandoffCancelled(stream_id)
+    except GatewayHandoffCancelled:
+        raise
     except Exception:
         logger.warning("Failed to persist gateway run %s for session %s", run_id, session_id, exc_info=True)
         if not run_id:
@@ -2180,6 +2257,10 @@ def _resume_gateway_run_for_session(session) -> bool:
     with STREAMS_LOCK:
         if stream_id in STREAMS:
             return False
+        # The record being reattached was loaded from the saved session: a restart
+        # can reattach it again, so it is not WebUI-owned drain work (#7293). Durable
+        # before the drain can see the stream, so no settle ever selects it.
+        _mark_gateway_run_durable(stream_id)
         STREAMS[stream_id] = create_stream_channel()
         CANCEL_FLAGS[stream_id] = CANCEL_FLAGS.get(stream_id, threading.Event())
         # Ownership token: Stop can detach this stream (and a successor could even
@@ -2326,11 +2407,14 @@ def _settle_gateway_terminal_error(
 def _settle_gateway_cancelled_turn(session_id, stream_id) -> None:
     """Keep the prompt, the streamed partial, and a cancel marker when the run ended cancelled and Stop did not already settle it."""
     from api.streaming import (
+        CANCEL_INITIATOR_SERVER,
+        CANCEL_INITIATOR_USER,
         _CANCEL_MARKER_PATTERNS,
         _build_partial_message,
         _materialize_pending_user_turn_before_error,
         _partial_marker_already_present,
         _persist_cancelled_turn,
+        _server_settle_reason,
     )
 
     with _get_session_agent_lock(session_id):
@@ -2420,7 +2504,14 @@ def _settle_gateway_cancelled_turn(session_id, stream_id) -> None:
         session.pending_attachments = []
         session.pending_started_at = None
         session.pending_user_source = None
-        _persist_cancelled_turn(session, message="Cancelled by gateway")
+        # A server settle (#7293) that cancelled this launch before its handoff can
+        # lose the session lock to this worker: write its marker, not a user one.
+        _server_reason = _server_settle_reason(stream_id)
+        _persist_cancelled_turn(
+            session,
+            message=_server_reason or "Cancelled by gateway",
+            initiator=CANCEL_INITIATOR_SERVER if _server_reason is not None else CANCEL_INITIATOR_USER,
+        )
         session.gateway_run = None
         session.save()
 
