@@ -86,7 +86,7 @@ from api.memory_profile_scope import (
     agent_has_memory,
     call_as_session_owner,
     construct_profile_scoped_agent,
-    memory_notice_payload,
+    memory_turn_status_event,
     session_profile_home_or_empty,
     turn_memory_reason,
 )
@@ -15830,8 +15830,15 @@ def _run_agent_streaming(
             # Mirrors gateway _agent_cache.  Keeps _user_turn_count alive so
             # injectionFrequency: "first-turn" actually suppresses after turn 1.
             _cache_new_agent = False
+            # #8517 notice (Codex r1 finding 2): which agent's memory state this turn
+            # reports: a reused cached agent / a cacheable build is the session's
+            # lasting state; a cached agent bypassed for a one-turn memoryless agent
+            # still carries the session's lasting reason.
+            _ephemeral_cacheable = False
+            _memory_reused_agent = None
+            _memory_bypassed_agent = None
             if ephemeral:
-                agent, _ = construct_profile_scoped_agent(
+                agent, _ephemeral_cacheable = construct_profile_scoped_agent(
                     _AIAgent, _agent_kwargs, profile_home=_profile_home,
                     agent_params=_agent_params, session_id=session_id,
                     fail_closed_reason=_turn_memory_reason,
@@ -15874,8 +15881,10 @@ def _run_agent_streaming(
                                 # Leave it cached for the next scoped turn; this turn
                                 # gets a memoryless, uncached agent built below.
                                 _bypassed_memory_agent = True
+                                _memory_bypassed_agent = _cached_agent
                             else:
                                 agent = _cached_agent
+                                _memory_reused_agent = _cached_agent
                                 SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
                                 logger.debug('[webui] Reusing cached agent for session %s', session_id)
                         else:
@@ -15973,16 +15982,26 @@ def _run_agent_streaming(
                 put('cancel', _cancel_event_payload('Cancelled by user'))
                 return
 
-            # #8517 follow-up: tell the UI when this session's agent runs with memory
-            # off for a reason that outlives the turn (codes only, no paths). Cached
-            # agents keep their status, so every turn reports it; the UI shows it once.
+            # #8517 follow-up: tell the UI this session's memory status for the turn
+            # (codes only, no paths): ``memory_off`` when its agent (or the cached agent
+            # a transient turn bypassed) runs with memory off for a reason that outlives
+            # the turn, an explicit ``memory_status`` ok when the turn's agent is the
+            # session's lasting agent with none, nothing when unknown (transient turn).
             try:
-                _memory_notice = memory_notice_payload(agent, session_id=session_id, stream_id=stream_id)
+                _memory_lasting = not _turn_memory_reason and (
+                    _cache_new_agent
+                    or (ephemeral and _ephemeral_cacheable)
+                    or (_memory_reused_agent is not None and agent is _memory_reused_agent)
+                )
+                _memory_event = memory_turn_status_event(
+                    agent, session_id=session_id, stream_id=stream_id,
+                    lasting=bool(_memory_lasting), cached_agent=_memory_bypassed_agent,
+                )
             except Exception:
-                _memory_notice = None
+                _memory_event = None
                 logger.debug('[webui] #8517: memory status unavailable for session %s', session_id, exc_info=True)
-            if _memory_notice is not None:
-                put('warning', _memory_notice)
+            if _memory_event is not None:
+                put(*_memory_event)
 
             # Cache publication is already fenced with Stop above. Keep LRU
             # eviction and any memory-provider close outside the stream lock.

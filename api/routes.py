@@ -45,6 +45,7 @@ from api.agent_runtime import (
 from api.memory_profile_scope import (
     construct_memoryless_helper_agent,
     construct_profile_scoped_agent,
+    memory_status_from_journal_events,
     profile_home_turn_scope,
     session_profile_home_or_empty,
 )
@@ -4839,6 +4840,9 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         "last_assistant_text": assistant_text,
         "last_reasoning_text": reasoning_text,
         "runtime_model": runtime_model_from_events(session_id, stream_id, events),
+        # #8517 notice (Codex r1 finding 1): a reload resumes after the warning's seq,
+        # so the snapshot it restores carries the latest memory status (codes only).
+        "memory_status": memory_status_from_journal_events(events),
         "activity_burst_anchors": activity_burst_anchors,
         "current_activity_burst_id": current_activity_burst_id,
         "current_live_segment_seq": current_live_segment_seq,

@@ -250,10 +250,22 @@ def agent_has_memory(agent: Any) -> bool:
 #   another profile already owns, so it is off for this profile until the WebUI
 #   restarts (built-in memory still on).
 #
-# A turn-level scope failure (memory off for this one turn, the agent is not cached
-# and the next turn retries) is not reported: the user has nothing to act on, the
-# next turn normally has memory again, and a notice that flickers on and off per
-# turn would only alarm. Its server WARNING stays.
+# Every turn reports one of three things (``memory_turn_status_event``):
+#
+# * ``warning``/``memory_off``: the turn's agent, or on a turn-level scope failure
+#   the session's cached agent this turn bypassed, has one of the lasting reasons;
+# * ``memory_status``/``state: "ok"``: the turn's agent is the session's lasting
+#   agent (cached, or built cacheable) and none of the reasons applies. This explicit
+#   healthy status is the only thing that clears the notice in the UI;
+# * nothing: status unknown. A turn-level scope failure (memory off for this one turn,
+#   the agent is not cached and the next turn retries) whose session has no cached
+#   agent with a lasting reason: the user has nothing to act on, and the UI keeps
+#   what it shows. Its server WARNING stays.
+#
+# ``memory_status`` is its own SSE event, not a ``warning``: older clients show any
+# warning's ``message`` (or "Warning") as a composer status. The run journal keeps
+# both frames, so the recovery snapshot carries the latest one
+# (``memory_status_from_journal_events``) for a reload that resumes after it.
 
 MEMORY_OFF_AGENT_OUTDATED = "agent_outdated"
 MEMORY_OFF_AGENT_NO_INSTANCE_CLAIM = "agent_no_instance_claim"
@@ -323,6 +335,64 @@ def memory_notice_payload(agent: Any, *, session_id: str, stream_id: str = "") -
         "scope": status["scope"],
         "message": _MEMORY_OFF_MESSAGES[status["reason"]],
     }
+
+
+def memory_ok_payload(*, session_id: str, stream_id: str = "") -> dict:
+    """The ``memory_status`` SSE payload saying this session's memory is on (no
+    WebUI-imposed limit applies to its lasting agent)."""
+    return {
+        "type": "memory_status",
+        "state": "ok",
+        "session_id": str(session_id or ""),
+        "stream_id": str(stream_id or ""),
+    }
+
+
+def memory_turn_status_event(
+    agent: Any,
+    *,
+    session_id: str,
+    stream_id: str = "",
+    lasting: bool,
+    cached_agent: Any = None,
+) -> Optional[tuple[str, dict]]:
+    """``(event, payload)`` to send for this turn's memory status, or None (unknown).
+
+    ``agent`` runs the turn. ``lasting`` is True when it is the session's lasting
+    agent: reused from the cache, or built cacheable on a turn whose profile home
+    held. ``cached_agent`` is the session's cached agent when a turn-level scope
+    failure bypassed it for a one-turn memoryless agent: its lasting reason still
+    holds, so it is reported instead of going quiet (Codex r1 finding 2)."""
+    payload = memory_notice_payload(agent, session_id=session_id, stream_id=stream_id)
+    if payload is None and cached_agent is not None and cached_agent is not agent:
+        payload = memory_notice_payload(cached_agent, session_id=session_id, stream_id=stream_id)
+    if payload is not None:
+        return "warning", payload
+    if lasting:
+        return "memory_status", memory_ok_payload(session_id=session_id, stream_id=stream_id)
+    return None
+
+
+def memory_status_from_journal_events(events: Any) -> Optional[dict]:
+    """The latest memory status a run journal recorded: ``{"state", "reason",
+    "scope"}`` for a ``memory_off`` warning with a known reason, ``{"state": "ok"}``
+    for an explicit healthy status, else None. Codes only; anything else is ignored."""
+    status: Optional[dict] = None
+    for event in events or ():
+        if not isinstance(event, dict):
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        name = event.get("event") or event.get("type")
+        if name == "warning" and payload.get("type") == "memory_off":
+            reason = payload.get("reason")
+            if isinstance(reason, str) and reason in _MEMORY_OFF_SCOPES:
+                scope = _MEMORY_OFF_SCOPES[reason]
+                status = {"state": "off" if scope == "all" else "external_off", "reason": reason, "scope": scope}
+        elif name == "memory_status" and payload.get("state") == "ok":
+            status = {"state": "ok"}
+    return status
 
 
 def _enter_profile_home(profile_home: str, target_key: Optional[str]) -> tuple[Callable[[], None], Optional[str]]:
