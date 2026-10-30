@@ -282,7 +282,7 @@ def test_tool_event_flushes_pending_text_before_inserting_activity():
     before an already-visible Activity row.
     """
     tool_handler = MESSAGES_JS.split("source.addEventListener('tool',e=>{", 1)[1].split("source.addEventListener('tool_complete'", 1)[0]
-    flush_pos = tool_handler.find("_flushPendingSegmentRender({force:true});")
+    flush_pos = tool_handler.find("_flushPendingSegmentRender({force:true,skipAnchorProcessProse:true});")
     append_pos = tool_handler.find("appendLiveToolCard(tc")
     assert flush_pos != -1 and append_pos != -1
     assert flush_pos < append_pos
@@ -340,7 +340,7 @@ def test_orphan_tool_complete_does_not_create_blank_text_segment_without_pending
     orphan_branch = complete_handler.split("if(tc._createdByComplete){", 1)[1].split("} else {", 1)[0]
     guard_pos = orphan_branch.find("String(pendingDisplayText||'').trim()")
     force_pos = orphan_branch.find("ensureAssistantRow(true);")
-    flush_pos = orphan_branch.find("_flushPendingSegmentRender({force:true});")
+    flush_pos = orphan_branch.find("_flushPendingSegmentRender({force:true,skipAnchorProcessProse:true});")
     append_pos = orphan_branch.find("appendLiveToolCard(tc")
     assert guard_pos != -1 and force_pos != -1 and flush_pos != -1 and append_pos != -1
     assert guard_pos < force_pos < flush_pos < append_pos
