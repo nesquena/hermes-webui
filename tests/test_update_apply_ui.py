@@ -25,7 +25,7 @@ const updateData = JSON.parse(process.argv[1]);
 const responses = JSON.parse(process.argv[2]);
 const uiPath = process.argv[3];
 const src = fs.readFileSync(uiPath, 'utf8');
-const start = src.indexOf('async function applyUpdates()');
+const start = src.indexOf('async function applyUpdates(');
 const end = src.indexOf('function _showUpdateError', start);
 const snippet = src.slice(start, end);
 
@@ -134,7 +134,7 @@ def test_update_apply_network_error_has_recovery_message_not_raw_failed_to_fetch
 def test_update_apply_structured_server_errors_still_use_json_message_path():
     """Server-reachable JSON errors must keep the existing targeted message path."""
     src = _ui_js()
-    apply_start = src.index("async function applyUpdates()")
+    apply_start = src.index("async function applyUpdates(")
     show_error_call = src.index("_showUpdateError(target,res);", apply_start)
     reset_button = src.index("resetApplyButton(0);", show_error_call)
     assert show_error_call < reset_button
@@ -144,7 +144,7 @@ def test_update_apply_structured_server_errors_still_use_json_message_path():
 def test_update_apply_successful_stash_conflict_displays_recovery_message():
     """ok=True stash conflicts must show the server recovery message before restarting."""
     src = _ui_js()
-    apply_start = src.index("async function applyUpdates()")
+    apply_start = src.index("async function applyUpdates(")
     next_fn = src.index("function _showUpdateError", apply_start)
     body = src[apply_start:next_fn]
 
@@ -163,7 +163,7 @@ def test_update_apply_successful_stash_conflict_displays_recovery_message():
 def test_update_apply_multiple_stash_conflicts_are_aggregated_not_overwritten():
     """Multiple ok=True stash conflicts must preserve every target recovery message."""
     src = _ui_js()
-    apply_start = src.index("async function applyUpdates()")
+    apply_start = src.index("async function applyUpdates(")
     next_fn = src.index("function _showUpdateError", apply_start)
     body = src[apply_start:next_fn]
 
@@ -191,7 +191,7 @@ def test_update_apply_network_error_classifier_ignores_http_status_errors():
 def test_update_apply_prevents_duplicate_apply_requests_while_in_flight():
     """Double-clicks should not send a second update apply request during restart race windows."""
     src = _ui_js()
-    apply_start = src.index("async function applyUpdates()")
+    apply_start = src.index("async function applyUpdates(")
     next_fn = src.index("function _showUpdateError", apply_start)
     body = src[apply_start:next_fn]
     assert "window._updateApplyInFlight" in body
