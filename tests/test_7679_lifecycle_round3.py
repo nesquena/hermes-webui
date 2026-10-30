@@ -355,13 +355,13 @@ def _build_vm(body: str) -> str:
     # reviewer's composition ends in a real POST, not a state assertion. Sliced
     # by BRACES (not a blank-line marker): a marker cut the function short and
     # took the following declarations with it, which broke the other scenarios.
-    ui_part += "\n" + _brace_block(UI, "async function forceUpdate(btn){")
+    ui_part += "\n" + _brace_block(UI, "async function forceUpdate(")
     # #7679 (maintainer 10-12 / Greptile P2 "Recovery tests skip real
     # producers"): the successor recovery must be created by the REAL caller,
     # not by the test writing the generation, the grant and the button state
     # by hand. ``applyUpdates()`` is that caller, and ``_showUpdateError()``
     # is what it calls when the server reports a conflict.
-    ui_part += "\n" + _brace_block(UI, "async function applyUpdates(){")
+    ui_part += "\n" + _brace_block(UI, "async function applyUpdates(")
     ui_part += "\n" + _brace_block(UI, "function _showUpdateError(target,res){")
     # applyUpdates' failure path formats its message through these helpers.
     ui_part += "\n" + _brace_block(UI, "function _isUpdateApplyNetworkError(error){")

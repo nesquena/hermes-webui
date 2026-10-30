@@ -182,8 +182,8 @@ def _build_vm(body: str) -> str:
     ui_part += _extract(UI, 'function _formatManualUpdateInstruction(', '\nfunction _formatUpdateCheckError')
     ui_part += _extract(UI, 'function _formatUpdateTargetStatus(', '\nfunction _formatUpdateDirtyStatus')
     # The real producers under test.
-    ui_part += '\n' + _brace_block(UI, 'async function forceUpdate(btn){')
-    ui_part += '\n' + _brace_block(UI, 'async function applyUpdates(){')
+    ui_part += '\n' + _brace_block(UI, 'async function forceUpdate(')
+    ui_part += '\n' + _brace_block(UI, 'async function applyUpdates(')
     ui_part += '\n' + _brace_block(UI, 'function _showUpdateError(target,res){')
     ui_part += '\nfunction _i18nUpdateText(k,f){const v=t(k);return (v&&v!==k)?v:f;}\nfunction _renderUpdateWhatsNewLinks(){}\n'
     panels_part = _extract(PANELS, 'async function checkUpdatesNow(', '\n// \u2500\u2500 Auxiliary Models')
