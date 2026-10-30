@@ -130,6 +130,22 @@ def sse_unsubscribe(session_id: str, q: queue.Queue) -> None:
                 _clarify_sse_subscribers.pop(session_id, None)
 
 
+def _push_clarify(session_key: str, push_data: dict | None) -> None:
+    """Best-effort closed-app push for the request that is now active.
+
+    Must be called outside ``_lock``. Deduped per clarify_id inside web_push,
+    so calling it for the same head more than once is harmless.
+    """
+    if not push_data:
+        return
+    try:
+        from api.web_push import notify_clarify_required
+
+        notify_clarify_required(session_key, push_data)
+    except Exception:
+        pass
+
+
 def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
     """Queue a pending clarify request and notify the UI callback if registered."""
     data = _with_timeout_metadata(data)
@@ -171,7 +187,9 @@ def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
         cb = _gateway_notify_cbs.get(session_key)
         # Notify SSE subscribers from inside _lock for ordering guarantees.
         _clarify_sse_notify(session_key, dict(gw_queue[0].data), len(gw_queue))
+        push_data = dict(entry.data) if gw_queue[0] is entry else None
     publish_session_list_changed("attention_pending")
+    _push_clarify(session_key, push_data)
     if cb:
         try:
             cb(data)
@@ -212,13 +230,16 @@ def resolve_clarify(session_key: str, response: str, resolve_all: bool = False) 
             _pending.pop(session_key, None)
             return 0
         entries = list(q) if resolve_all else [q.pop(0)]
+        next_push = None
         if q:
             _pending[session_key] = q[0].data
             _clarify_sse_notify(session_key, dict(q[0].data), len(q))
+            next_push = dict(q[0].data)
         else:
             _clear_queue_locked(session_key)
             _clarify_sse_notify(session_key, None, 0)
     publish_session_list_changed("attention_resolved")
+    _push_clarify(session_key, next_push)
     count = 0
     for entry in entries:
         entry.result = response
@@ -237,12 +258,15 @@ def resolve_clarify_by_id(session_key: str, clarify_id: str, response: str) -> b
         if not q:
             _pending.pop(session_key, None)
             return False
+        next_push = None
         for i, entry in enumerate(q):
             if entry.clarify_id == clarify_id:
                 q.pop(i)
                 if q:
                     _pending[session_key] = q[0].data
                     _clarify_sse_notify(session_key, dict(q[0].data), len(q))
+                    if i == 0:
+                        next_push = dict(q[0].data)
                 else:
                     _clear_queue_locked(session_key)
                     _clarify_sse_notify(session_key, None, 0)
@@ -251,5 +275,8 @@ def resolve_clarify_by_id(session_key: str, clarify_id: str, response: str) -> b
                 publish_session_list_changed("attention_resolved")
                 entry.result = response
                 entry.event.set()
-                return True
-        return False
+                break
+        else:
+            return False
+    _push_clarify(session_key, next_push)
+    return True
