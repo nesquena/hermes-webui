@@ -85,7 +85,7 @@ Crash windows (the claims a restart can recover from disk alone):
 | `409` | `idempotency_outcome_unknown` | Recovered pending claim with no recorded outcome (crash window). No retry hint — do **not** blind-retry; check the session or use a new key. |
 | `409` | `session_profile_mismatch` | The replayed session belongs to a different profile (same refusal the keyless path gives). |
 | `410` | `idempotency_key_expired` | The key's retention window elapsed (24h default); the turn may have run. |
-| `503` | `idempotency_store_unavailable` | The durable claim store could not be read or written; the request failed closed and **no turn was admitted** — retry with the same key. |
+| `503` | `idempotency_store_unavailable` | The durable claim store could not be read or written. A failure before the turn is admitted starts no turn; a failure while recording an already-admitted turn means the turn IS running but its acceptance could not be made replayable. Either way the key stays claimed — retry with the same key (the retry replays the admitted turn or is refused, never duplicated). |
 | `503` | `idempotency_replay_unavailable` | The stored result is a stale failure; it was released so the same key can be retried as a fresh request. |
 | `404` | — | The replayed session cannot be found / its ownership metadata is unreadable (keyless parity). |
 

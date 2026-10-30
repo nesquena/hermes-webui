@@ -3031,3 +3031,273 @@ def test_legacy_v2_store_without_tombstone_status_loads(idem_env, tmp_path):
     with pytest.raises(IdempotencyKeyExpired) as excinfo:
         store.claim("old-key", "fp", profile="default")
     assert "previously completed" not in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# WAL torn-EOF recovery (#7782 review round 2)
+# ---------------------------------------------------------------------------
+
+
+def _wal_path_for(store):
+    """The write-ahead log path that belongs to ``store``."""
+    return store.path.with_name(store.path.name + ".wal")
+
+
+def _torn_completion_tail(key: str, seq: int = 9000) -> str:
+    """A well-formed completion op for a DIFFERENT key, serialized exactly
+    the way ``_append_wal_locked`` writes one — but WITHOUT the trailing
+    newline. This is an append whose last byte never reached the disk: the
+    op was never fsync-acknowledged, so no restart may treat it as
+    committed, and the file must not be left un-terminated.
+    """
+    return json.dumps(
+        {
+            "op": "put",
+            "seq": seq,
+            "key": f"default|{key}",
+            "record": {
+                "key": f"default|{key}",
+                "request_fingerprint": "torn-fp",
+                "status": "complete",
+                "profile": "default",
+                "session_id": "idem-session",
+                "stream_id": "stream-torn",
+                "turn_id": "turn-torn",
+                "claimed_at": time.time(),
+                "completed_at": time.time(),
+            },
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _readable_wal_ops(wal_path) -> list[dict]:
+    """Every parseable op currently in the WAL (a torn tail may not parse)."""
+    ops = []
+    for line in wal_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            ops.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return ops
+
+
+def test_json_valid_torn_eof_is_dropped_before_the_next_append(idem_env):
+    """#7782 review defect 1: a final WAL line that is complete JSON but
+    has NO trailing newline is an append that was never acknowledged —
+    every acknowledged op is one newline-terminated, fsync'd line (see
+    ``_append_wal_locked``). The old replay accepted the tail as a
+    committed op and left the file un-terminated, so the NEXT append
+    concatenated onto it mid-line; the following restart then either
+    failed closed as mid-file corruption or truncated the concatenated
+    line away, losing the acknowledged completion (the maintainer's
+    replay: the original key was admitted a second time, recorder 3
+    instead of 2).
+
+    Recovery must drop the uncommitted suffix durably, and a new
+    claim/completion followed by another cold reload must then work:
+    the original key replays, never re-admits.
+    """
+    from api.idempotency import IdempotencyStore, set_idempotency_store
+
+    env = idem_env
+    body = {"session_id": env.session.session_id, "message": "hello"}
+    key_a = "torn-eof-key-a"
+
+    status, payload = env.run_handler(body, key_header=key_a)
+    assert status == 200
+    assert payload["stream_id"] == "stream-1"
+    assert len(env.recorder.calls) == 1
+
+    wal = _wal_path_for(env.store)
+    assert wal.read_text(encoding="utf-8").endswith("\n")
+    with open(wal, "a", encoding="utf-8") as fh:
+        fh.write(_torn_completion_tail("torn-eof-phantom"))
+
+    # Cold reload: the uncommitted suffix must be dropped (never
+    # replayed) and the WAL re-framed before anything appends again.
+    restarted = IdempotencyStore(path=env.store._path)
+    set_idempotency_store(restarted)
+    restarted._ensure_loaded()
+    assert restarted.lookup("torn-eof-phantom") is None, (
+        "an op without its trailing newline was never acknowledged — "
+        "replaying it resurrects a phantom claim"
+    )
+    rec = restarted.lookup(key_a)
+    assert rec is not None
+    assert rec.status == "complete"
+    assert rec.stream_id == "stream-1"
+    assert wal.read_text(encoding="utf-8").endswith("\n"), (
+        "the WAL must be re-framed (newline-terminated) after recovery, "
+        "or the next append concatenates mid-line"
+    )
+
+    # A new claim/completion appends cleanly onto the repaired WAL.
+    status, payload = env.run_handler(body, key_header="torn-eof-key-b")
+    assert status == 200
+    assert payload["stream_id"] == "stream-2"
+    assert len(env.recorder.calls) == 2
+
+    # Another cold reload: both keys are durable and the retry of the
+    # ORIGINAL key replays instead of admitting a third turn.
+    final = IdempotencyStore(path=env.store._path)
+    set_idempotency_store(final)
+    final._ensure_loaded()
+    b_rec = final.lookup("torn-eof-key-b")
+    assert b_rec is not None
+    assert b_rec.stream_id == "stream-2"
+    status, payload = env.run_handler(body, key_header=key_a)
+    assert status == 200
+    assert payload["stream_id"] == "stream-1"
+    assert payload.get("replayed_from_idempotency_key") is True
+    assert len(env.recorder.calls) == 2
+
+
+def test_malformed_torn_eof_is_truncated_and_keeps_the_prefix(idem_env):
+    """Control for ``test_json_valid_torn_eof_is_dropped_before_the_next_append``:
+    a torn tail that is NOT valid JSON was already repaired before this
+    round (the old whole-file rewrite). The byte-offset repair must keep
+    the same observable behavior: the acknowledged prefix survives, a new
+    claim/completion appends cleanly, and another cold reload still
+    replays the original key instead of re-admitting it.
+    """
+    from api.idempotency import IdempotencyStore, set_idempotency_store
+
+    env = idem_env
+    body = {"session_id": env.session.session_id, "message": "hello"}
+    key_a = "torn-malformed-key-a"
+
+    status, payload = env.run_handler(body, key_header=key_a)
+    assert status == 200
+    assert payload["stream_id"] == "stream-1"
+    assert len(env.recorder.calls) == 1
+
+    wal = _wal_path_for(env.store)
+    with open(wal, "a", encoding="utf-8") as fh:
+        fh.write('{"op":"put","seq":9000,"key":"default|torn')  # torn mid-JSON
+
+    restarted = IdempotencyStore(path=env.store._path)
+    set_idempotency_store(restarted)
+    restarted._ensure_loaded()
+    assert restarted.lookup("torn") is None
+    rec = restarted.lookup(key_a)
+    assert rec is not None
+    assert rec.status == "complete"
+    assert rec.stream_id == "stream-1"
+    assert wal.read_text(encoding="utf-8").endswith("\n")
+
+    status, payload = env.run_handler(body, key_header="torn-malformed-key-b")
+    assert status == 200
+    assert payload["stream_id"] == "stream-2"
+    assert len(env.recorder.calls) == 2
+
+    final = IdempotencyStore(path=env.store._path)
+    set_idempotency_store(final)
+    final._ensure_loaded()
+    b_rec = final.lookup("torn-malformed-key-b")
+    assert b_rec is not None
+    assert b_rec.stream_id == "stream-2"
+    status, payload = env.run_handler(body, key_header=key_a)
+    assert status == 200
+    assert payload["stream_id"] == "stream-1"
+    assert payload.get("replayed_from_idempotency_key") is True
+    assert len(env.recorder.calls) == 2
+
+
+def test_torn_tail_repair_failure_fails_closed_and_keeps_the_prefix(
+    idem_env, monkeypatch
+):
+    """#7782 review defect 2: the torn-tail repair used to rewrite the WHOLE
+    WAL through ``Path.write_text`` — a truncating open, so an I/O error
+    mid-write (ENOSPC) destroyed the acknowledged prefix, and the
+    swallowed exception let admission continue on in-memory-only state.
+    Replayed against the real handler/store with that exact failure
+    schedule, the original key was admitted a SECOND time after the
+    restart (recorder 3 instead of 2) — a duplicate turn.
+
+    The repair must touch only the invalid suffix through a
+    descriptor-bound byte offset, be durable before the store is used
+    again, and on ANY failure keep the store unloaded: 503
+    ``idempotency_store_unavailable`` with zero new turns, the
+    acknowledged prefix intact on disk, and — once the fault clears —
+    the old completed key still survives another restart (the retry
+    replays).
+    """
+    import errno
+
+    import api.idempotency as idem_mod
+    from api.idempotency import (
+        IdempotencyStore,
+        IdempotencyStoreUnavailable,
+        set_idempotency_store,
+    )
+
+    env = idem_env
+    body = {"session_id": env.session.session_id, "message": "hello"}
+    key = "repair-fail-key"
+
+    status, payload = env.run_handler(body, key_header=key)
+    assert status == 200
+    assert payload["stream_id"] == "stream-1"
+    assert len(env.recorder.calls) == 1
+
+    wal = _wal_path_for(env.store)
+    # A torn final line that IS newline-terminated (garbage content): the
+    # torn-tail repair path — the exact site of the old whole-file
+    # rewrite.
+    with open(wal, "a", encoding="utf-8") as fh:
+        fh.write('{"op":"put","seq":9000,"key":"default|torn\n')
+
+    real_ftruncate = os.ftruncate
+    fail = {"on": True}
+
+    def _flaky_ftruncate(fd, size):
+        if fail["on"]:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_ftruncate(fd, size)
+
+    # The replacement repair primitive is the descriptor-bound truncate;
+    # fail it the way the maintainer replayed the ENOSPC schedule.
+    monkeypatch.setattr(idem_mod.os, "ftruncate", _flaky_ftruncate)
+
+    # Recovery cannot be made durable: the store stays unloaded.
+    restarted = IdempotencyStore(path=env.store._path)
+    with pytest.raises(IdempotencyStoreUnavailable):
+        restarted._ensure_loaded()
+    assert restarted._loaded is False
+
+    # Every request fails closed: 503, zero admitted turns.
+    set_idempotency_store(restarted)
+    status, payload = env.run_handler(body, key_header="repair-fail-second")
+    assert status == 503
+    assert payload.get("code") == "idempotency_store_unavailable"
+    assert len(env.recorder.calls) == 1, (
+        "a failed recovery must admit zero new turns"
+    )
+
+    # The acknowledged prefix is intact on disk: a failed repair must not
+    # rewrite (and truncate) the WAL.
+    assert any(
+        op.get("op") == "put"
+        and op.get("key") == f"default|{key}"
+        and op.get("record", {}).get("stream_id") == "stream-1"
+        for op in _readable_wal_ops(wal)
+    ), "the acknowledged completion must survive a failed repair on disk"
+
+    # With the fault cleared the recovery completes, and the old completed
+    # key survives another restart: the retry REPLAYS.
+    fail["on"] = False
+    healed = IdempotencyStore(path=env.store._path)
+    set_idempotency_store(healed)
+    healed._ensure_loaded()
+    status, payload = env.run_handler(body, key_header=key)
+    assert status == 200
+    assert payload["stream_id"] == "stream-1"
+    assert payload.get("replayed_from_idempotency_key") is True
+    assert len(env.recorder.calls) == 1, (
+        "the completed key must replay once the repair heals — a second "
+        "admission is the duplicate turn this store exists to prevent"
+    )

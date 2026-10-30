@@ -733,15 +733,78 @@ class IdempotencyStore:
                 "with its namespaced key"
             )
 
+    def _repair_wal_locked(self, path: Path, size: int, why: str) -> None:
+        """Truncate the WAL to ``size`` bytes through ONE descriptor.
+
+        The only WAL repair primitive (#7782 review round 2): it removes
+        just the uncommitted / invalid suffix and never rewrites the
+        acknowledged prefix, so an I/O error mid-repair cannot lose an
+        acknowledged op — the old ``Path.write_text`` repair opened the
+        file with truncation, and an ENOSPC during that rewrite destroyed
+        the very prefix it was meant to keep. The truncation is fsync'd
+        before returning (recovery must be durable before the store
+        admits more work), and ANY failure raises
+        ``IdempotencyStoreUnavailable`` with the store left unloaded, so
+        admission stops instead of continuing on in-memory-only state.
+
+        Must be called with ``self._lock`` held.
+        """
+        try:
+            fd = os.open(path, os.O_RDWR)
+        except OSError as exc:
+            self._loaded = False
+            raise IdempotencyStoreUnavailable(
+                f"could not open idempotency WAL {path} for repair "
+                f"({why}): {exc}"
+            ) from exc
+        try:
+            os.ftruncate(fd, size)
+            try:
+                os.fsync(fd)
+            except OSError as exc:
+                # Same tolerance as the append / snapshot paths: only the
+                # two "this filesystem cannot fsync" errors are tolerable
+                # (tmpfs / overlayfs). A REAL I/O error means the repair
+                # may never reach the platter, so the store fails closed
+                # rather than admitting work against a WAL whose framing
+                # it cannot prove.
+                if exc.errno not in {errno.EINVAL, errno.ENOTSUP}:
+                    raise
+        except OSError as exc:
+            self._loaded = False
+            raise IdempotencyStoreUnavailable(
+                f"could not repair idempotency WAL {path} ({why}): {exc}"
+            ) from exc
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
     def _replay_wal_locked(self, path: Path) -> None:
         """Replay the write-ahead log on top of the loaded snapshot.
 
         Ops whose ``seq`` is at or below the snapshot watermark are no-ops
         (they are already in the snapshot — e.g. after a compaction whose
-        WAL truncate failed). A malformed line with only a torn tail after
-        it (an append that was never fsync-acknowledged) is truncated at the
-        last valid line; a malformed line FOLLOWED by valid lines is
-        mid-file corruption and fails closed.
+        WAL truncate failed).
+
+        Recovery is conservative about the EOF framing: every acknowledged
+        op is written as ONE line ending in ``"\\n"`` and fsync'd before
+        the mutation returns (see ``_append_wal_locked``), so bytes after
+        the last newline belong to an append that was never acknowledged —
+        a torn write, or a power loss that ate the tail after fsync
+        returned. A tail that happens to be complete JSON is no exception:
+        replaying it would resurrect an op the store never acknowledged,
+        and leaving the file un-terminated would make the NEXT append
+        concatenate mid-line, turning the following restart into mid-file
+        corruption (a permanent 503) or a torn-tail truncation that
+        destroys acknowledged ops. The uncommitted suffix is therefore
+        dropped durably — through ``_repair_wal_locked`` — before the
+        committed lines are parsed. A malformed line with only a torn tail
+        after it is repaired the same way; a malformed line FOLLOWED by
+        valid lines is mid-file corruption and fails closed. Any repair
+        failure keeps the store unloaded (``IdempotencyStoreUnavailable``)
+        and admits zero new turns.
         """
         try:
             raw = path.read_text(encoding="utf-8")
@@ -752,6 +815,24 @@ class IdempotencyStore:
             ) from exc
         if not raw.strip():
             return
+        # Uncommitted suffix: everything after the last newline. Drop it
+        # before anything else touches the WAL, so no later append can
+        # concatenate onto an un-terminated line (#7782 review round 2).
+        boundary = raw.rfind("\n") + 1
+        if boundary < len(raw):
+            prefix_bytes = len(raw[:boundary].encode("utf-8"))
+            self._repair_wal_locked(
+                path, prefix_bytes, "uncommitted tail after the last newline"
+            )
+            logger.warning(
+                "idempotency: dropped %d uncommitted WAL bytes at %s "
+                "(the append was never acknowledged)",
+                len(raw.encode("utf-8")) - prefix_bytes,
+                path,
+            )
+            raw = raw[:boundary]
+            if not raw.strip():
+                return
         lines = raw.split("\n")
         entries: list[dict] = []
         invalid_index: int | None = None
@@ -781,22 +862,22 @@ class IdempotencyStore:
                     f"idempotency WAL {path} is corrupt at line "
                     f"{invalid_index + 1}"
                 )
-            good = [l for l in lines[:invalid_index] if l.strip()]
-            try:
-                path.write_text(
-                    "\n".join(good) + ("\n" if good else ""), encoding="utf-8"
+            # Torn final line: repair ONLY the invalid suffix, at the byte
+            # offset where that line starts, so the acknowledged prefix is
+            # never rewritten (a whole-file rewrite could destroy it
+            # mid-write, and the old swallowed exception then let
+            # admission continue on in-memory-only state).
+            offset = len(
+                "".join(f"{line}\n" for line in lines[:invalid_index]).encode(
+                    "utf-8"
                 )
-                logger.warning(
-                    "idempotency: truncated torn WAL tail at %s (line %d)",
-                    path,
-                    invalid_index + 1,
-                )
-            except OSError:
-                logger.warning(
-                    "idempotency: could not truncate torn WAL tail at %s",
-                    path,
-                    exc_info=True,
-                )
+            )
+            self._repair_wal_locked(path, offset, "torn tail")
+            logger.warning(
+                "idempotency: truncated torn WAL tail at %s (line %d)",
+                path,
+                invalid_index + 1,
+            )
         for op in entries:
             seq = int(op["seq"])
             if seq <= self._seq:
