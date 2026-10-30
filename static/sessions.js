@@ -64,9 +64,56 @@ const _composerDraftPostPromisesBySid = new Map();
 let _composerDraftIntentSequence = 0;
 const _COMPOSER_DRAFT_RESTORE_SUPPRESS_MS = 30000;
 
-function _setComposerDraftLocalIntent(sid, text, files) {
-  const intent = Object.freeze({
+const _composerDraftRetryTimers = new Map();
+const _COMPOSER_DRAFT_PENDING_PREFIX = 'hermes-composer-pending:v1:';
+function _composerDraftProfile() { return S.activeProfile || 'default'; }
+function _composerDraftPendingKey(sid, profile=_composerDraftProfile()) {
+  return _COMPOSER_DRAFT_PENDING_PREFIX + JSON.stringify([profile, sid]);
+}
+function _readComposerDraftPending(sid) {
+  try { return JSON.parse(localStorage.getItem(_composerDraftPendingKey(sid)) || 'null'); }
+  catch (_) { return null; }
+}
+function _composerDraftIntentIsCurrent(sid, intent) {
+  if (!intent || intent.profile !== _composerDraftProfile()
+      || _composerDraftLocalFallbackBySid.get(sid) !== intent) return false;
+  const stored = _readComposerDraftPending(sid);
+  // Storage may be unavailable; the in-page latest-intent guard still applies.
+  return !intent.durable || !!(stored && stored.token === intent.token);
+}
+function _removeComposerDraftPending(sid, intent) {
+  if (!intent || intent.profile !== _composerDraftProfile()) return;
+  const stored = _readComposerDraftPending(sid);
+  if (stored && stored.token === intent.token) {
+    try { localStorage.removeItem(_composerDraftPendingKey(sid)); } catch (_) {}
+  }
+}
+function _retryComposerDraft(sid, intent, attempt=0) {
+  if (!_composerDraftIntentIsCurrent(sid, intent)) return;
+  clearTimeout(_composerDraftRetryTimers.get(sid));
+  _composerDraftRetryTimers.set(sid, setTimeout(() => {
+    _composerDraftRetryTimers.delete(sid);
+    if (!_composerDraftIntentIsCurrent(sid, intent)) return;
+    _postComposerDraftPayload(sid, {text:intent.text, files:_composerDraftFilesForPersist(intent.files)},
+      intent, intent.goal_continuation_id, attempt + 1).catch(() => {});
+  }, Math.min(1000 * (2 ** Math.min(attempt, 5)), 30000)));
+}
+function _setComposerDraftLocalIntent(sid, text, files, goalContinuationId='', pending=null) {
+  if (typeof _composerDraftRetryTimers !== 'undefined') clearTimeout(_composerDraftRetryTimers.get(sid));
+  const record = pending || {
     text: String(text || ''),
+    goal_continuation_id: String(goalContinuationId || '').trim(),
+    token: `${Date.now()}:${Math.random()}`,
+  };
+  let durable = !!pending;
+  if (!pending) {
+    try {
+      localStorage.setItem(_composerDraftPendingKey(sid), JSON.stringify({...record, files:_composerDraftFilesForPersist(files)}));
+      durable = true;
+    } catch (_) {}
+  }
+  const intent = Object.freeze({
+    ...record, profile: S.activeProfile || 'default', durable, recovered: !!pending,
     files: Object.freeze(Array.isArray(files) ? files.filter(Boolean).slice() : []),
     sequence: ++_composerDraftIntentSequence,
   });
@@ -76,6 +123,8 @@ function _setComposerDraftLocalIntent(sid, text, files) {
 }
 
 function _forgetComposerDraftLocalFallback(sid) {
+  if (typeof _removeComposerDraftPending === 'function') _removeComposerDraftPending(sid, _composerDraftLocalFallbackBySid.get(sid));
+  if (typeof _composerDraftRetryTimers !== 'undefined') clearTimeout(_composerDraftRetryTimers.get(sid));
   _composerDraftLatestIntentSequenceBySid.set(sid, ++_composerDraftIntentSequence);
   _composerDraftLocalFallbackBySid.delete(sid);
 }
@@ -262,7 +311,9 @@ function _saveComposerDraft(sid, text, files) {
   const liveFiles = Array.isArray(files) ? files.filter(Boolean).slice() : [];
   const normalizedFiles = _composerDraftFilesForPersist(files);
   const normalizedDraft = { text: normalizedText, files: normalizedFiles };
-  const intent = _setComposerDraftLocalIntent(sid, normalizedText, liveFiles);
+  const continuation = typeof _peekRestoredGoalContinuationDraft === 'function' ? _peekRestoredGoalContinuationDraft() : null;
+  const continuationId = continuation && String(continuation.text || '').trim() === normalizedText.trim() ? continuation.id : '';
+  const intent = _setComposerDraftLocalIntent(sid, normalizedText, liveFiles, continuationId);
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
     _clearComposerDraftRestoreSuppression(sid);
     _composerDraftKnownPayloadSessions.add(sid);
@@ -281,9 +332,7 @@ function _saveComposerDraft(sid, text, files) {
   // when its bound text equals the text being saved; any other autosave sends
   // an explicit empty token so a stale binding can never be stored next to an
   // edited draft (round-7 rule) nor left orphaned server-side.
-  const _restoredCont = (typeof _peekRestoredGoalContinuationDraft === 'function')
-    ? _peekRestoredGoalContinuationDraft()
-    : null;
+  const _restoredCont = continuation;
   _draftSaveTimer = setTimeout(() => {
     let _autosaveContId = '';
     if (_restoredCont && _restoredCont.id
@@ -332,6 +381,7 @@ function _handleComposerDraftPostFailure(error, sid, text, files, intent=null) {
   const fallbacks = typeof _composerDraftLocalFallbackBySid === 'undefined'
     ? null : _composerDraftLocalFallbackBySid;
   const failedIntent = intent || (error && error._composerDraftIntent);
+  if (failedIntent && failedIntent.profile !== (S.activeProfile || 'default')) return;
   if (failedIntent && fallbacks && fallbacks.get(sid) !== failedIntent) return;
   const latest = fallbacks && fallbacks.get(sid);
   const reportedText = latest ? latest.text : normalizedText;
@@ -357,7 +407,7 @@ function _handleComposerDraftPostFailure(error, sid, text, files, intent=null) {
   }
 }
 
-function _postComposerDraftPayload(sid, draft, intent=null, goalContinuationId='') {
+function _postComposerDraftPayload(sid, draft, intent=null, goalContinuationId='', retryAttempt=0) {
   const requestSid = _safeDraftSessionId(sid);
   if (!requestSid) return Promise.resolve();
   const normalizedText = String((draft && draft.text) || '');
@@ -394,9 +444,15 @@ function _postComposerDraftPayload(sid, draft, intent=null, goalContinuationId='
     _composerDraftPostPromisesBySid.set(targetSid, pending);
     const dispatch = () => {
       try {
+        if (intent && typeof _composerDraftIntentIsCurrent === 'function'
+            && !_composerDraftIntentIsCurrent(requestSid, intent)) {
+          resolveWrite(null);
+          return;
+        }
         if (beforeDispatch) beforeDispatch();
         resolveWrite(api('/api/session/draft', {
           method: 'POST',
+          retries: 0,
           body: JSON.stringify({ session_id: targetSid, ...bodyPayload }),
         }));
       } catch (error) {
@@ -437,15 +493,28 @@ function _postComposerDraftPayload(sid, draft, intent=null, goalContinuationId='
   });
   return request.then((response) => {
     if (intent && _composerDraftLocalFallbackBySid.get(requestSid) !== intent) return response;
+    if (intent && typeof _composerDraftIntentIsCurrent === 'function'
+        && !_composerDraftIntentIsCurrent(requestSid, intent)) return response;
+    if (!response) throw new Error('Composer draft was not acknowledged');
     const responseSid = _composerDraftResponseSessionId(response, postedSid);
     if (intent && responseSid !== requestSid
         && (_composerDraftLatestIntentSequenceBySid.get(responseSid) || 0) > intent.sequence) {
       return response;
     }
-    if (intent) _composerDraftLocalFallbackBySid.delete(requestSid);
+    if (intent) {
+      if (typeof _removeComposerDraftPending === 'function') _removeComposerDraftPending(requestSid, intent);
+      if (typeof _composerDraftRetryTimers !== 'undefined') clearTimeout(_composerDraftRetryTimers.get(requestSid));
+      _composerDraftLocalFallbackBySid.delete(requestSid);
+    }
     remember(responseSid);
     return response;
   }, (error) => {
+    let code = '';
+    try { code = JSON.parse(error.body).code; } catch (_) {}
+    if (intent && typeof _retryComposerDraft === 'function' && postedSid === requestSid && error && (!error.status || error.status >= 500
+        || (error.status === 409 && code === 'draft_authority_unconfirmed'))) {
+      _retryComposerDraft(requestSid, intent, retryAttempt);
+    }
     if (intent && error && (typeof error === 'object' || typeof error === 'function')) {
       try { Object.defineProperty(error, '_composerDraftIntent', { value: intent }); } catch (_) { }
     }
@@ -510,7 +579,7 @@ function _saveComposerDraftNow(sid, text, files, goalContinuationId) {
       && !_composerDraftLocalFallbackBySid.has(sid)) {
     return Promise.resolve();
   }
-  const intent = _setComposerDraftLocalIntent(sid, normalizedText, liveFiles);
+  const intent = _setComposerDraftLocalIntent(sid, normalizedText, liveFiles, normalizedGoalContId);
   return _postComposerDraftPayload(sid, normalizedDraft, intent, normalizedGoalContId);
 }
 
@@ -529,7 +598,16 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   const preserveActiveInput = !!(opts && opts.preserveActiveInput);
   const restoreSid = targetSid || (S.session && S.session.session_id);
   let localFallback = restoreSid && _composerDraftLocalFallbackBySid.get(restoreSid);
+  if (localFallback && typeof _composerDraftIntentIsCurrent === 'function'
+      && !_composerDraftIntentIsCurrent(restoreSid, localFallback)) localFallback = null;
+  const pending = restoreSid && typeof _readComposerDraftPending === 'function' && _readComposerDraftPending(restoreSid);
+  if (!localFallback && pending && typeof pending.text === 'string' && Array.isArray(pending.files)
+      && typeof pending.token === 'string') {
+    localFallback = _setComposerDraftLocalIntent(restoreSid, pending.text, pending.files, pending.goal_continuation_id, pending);
+    _retryComposerDraft(restoreSid, localFallback);
+  }
   if (localFallback) {
+    draft = localFallback;
     text = localFallback.text;
     files = localFallback.files;
   }
@@ -561,7 +639,7 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
 
   // Restore process-local File references only for their owning session. The
   // server metadata shape cannot recreate browser File objects.
-  S.pendingFiles = useLocalFallback ? localFallback.files.slice() : [];
+  S.pendingFiles = useLocalFallback && !localFallback.recovered ? localFallback.files.slice() : [];
   if (typeof renderTray === 'function') renderTray();
 
   // If there's no text and no files, clear the textarea (a previous session's
@@ -612,11 +690,7 @@ function _clearComposerDraft(sid, text, files) {
   // the draft was submitted, and the next session to restore that draft would
   // inherit it.
   const intent = _setComposerDraftLocalIntent(sid, '', []);
-  return _postComposerDraftPayload(sid, { text: '', files: [] }, intent).catch(() => {
-    if (_composerDraftLocalFallbackBySid.get(sid) === intent) {
-      _composerDraftLocalFallbackBySid.delete(sid);
-    }
-  });
+  return _postComposerDraftPayload(sid, { text: '', files: [] }, intent).catch(() => {});
 }
 
 // Clear sid's saved draft only if it still equals text/files (server-side

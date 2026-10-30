@@ -83,6 +83,33 @@ Subagent preflight retains the state.db source check and persisted
 source_tag/raw_source/session_source precedence. Persisted metadata is checked
 again before writing; all other routes keep their original shared preflight.
 
+## Client pending edits and recovery
+
+Before debounce or dispatch, the browser retains the latest unacknowledged edit
+(including an empty clear, attachment metadata and its goal-continuation token)
+in localStorage under `hermes-composer-pending:v1:` plus the JSON-encoded
+`[activeProfile, session_id]`. This is a pending write, not a second server draft
+authority. A fresh page restoring that profile/session projects the pending edit
+instead of an older server draft and schedules its persistence. Live `File`
+objects remain in memory only; recovered metadata cannot recreate file bytes or
+populate the attachment tray as uploadable Files.
+
+An ordinary `draft_authority_unconfirmed` 409 or transient network/server failure
+schedules a 1/2/4/8/16/30-second capped exponential backoff. Each dispatch (also
+queued dispatches), retry and acknowledgement checks the captured profile and
+latest intent; a durable token prevents an old realm's retry or acknowledgement
+from replaying/removing a replacement intent. Clear supersedes the old edit and
+keeps its own pending empty record until acknowledged. Authorization refusals and
+failed moved-session replays are not automatically retried in-page; pending
+content remains recoverable. Existing moved-session target guards still apply.
+
+Successful acknowledgement removes only its matching pending record. Storage
+unavailability/quota failures retain in-page recovery and guarded retry, but
+cannot guarantee recovery after reload. Pending writes are resumed when their
+own profile/session is restored, not replayed globally into the active profile.
+Cross-tab server writes remain last-arrival-wins; this is not server-side
+cross-device intent ordering or an atomic cross-tab localStorage transaction.
+
 ## Compression and lifecycle synchronization
 
 Session property reads use a draft identity pinned at construction. A temporary
