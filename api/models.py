@@ -13562,6 +13562,12 @@ def _session_failure_summary(messages) -> dict | None:
 #   largest active row id.  A matching stamp reuses the value without
 #   touching state.db; a changed fingerprint triggers one tiny revision probe
 #   per session, and only a genuinely moved tail re-runs the bounded read.
+#
+# The list-level backfill answers a whole sidebar page at once
+# (``_session_failure_summaries_from_state_db``): one fingerprint probe, ONE
+# read-only connection, and one revision/tail statement per chunk of
+# sessions.  Per-row connections made a poll over N sessions cost N opens —
+# and N × 5s whenever state.db was briefly locked by a writer.
 _SESSION_FAILURE_TAIL_WINDOW = 24
 _SESSION_FAILURE_TAIL_WINDOW_WIDE = 256
 _SESSION_FAILURE_SUMMARY_CACHE_MAX = 2048
@@ -13570,6 +13576,13 @@ _SESSION_FAILURE_SUMMARY_CACHE: "collections.OrderedDict[tuple, tuple]" = collec
 _SESSION_FAILURE_FINGERPRINT_TTL = 0.5
 _SESSION_FAILURE_FINGERPRINT_LOCK = threading.Lock()
 _SESSION_FAILURE_FINGERPRINT_CACHE: "dict[str, tuple[tuple | None, float]]" = {}
+# A batched state.db read must never stall the /api/sessions hot path: the
+# sqlite3 default busy timeout (5s) turned one briefly-held writer lock into
+# a per-row 5s wait.  Same rationale — and budget — as the fingerprint probe.
+_STATE_DB_FAILURE_BUSY_TIMEOUT_MS = 50
+# Bound the IN (...) list per statement so the SQL stays portable across
+# SQLite builds with small host-parameter limits.
+_STATE_DB_FAILURE_SID_CHUNK = 400
 
 
 def _state_db_failure_fingerprint(db_path) -> tuple | None:
@@ -13621,6 +13634,55 @@ def _state_db_failure_tail_row(row, cols: set) -> dict:
     return message
 
 
+def _state_db_failure_tail_select(cols: set, order_col) -> list:
+    """Column list for a bounded failure-tail read (single or batched)."""
+    select = ['role', 'content']
+    if 'display_kind' in cols:
+        select.append('display_kind')
+    if 'display_metadata' in cols:
+        select.append('display_metadata')
+    if 'tool_calls' in cols:
+        select.append('tool_calls')
+    if order_col:
+        select.append(order_col)
+    return select
+
+
+def _state_db_failure_tail_verdict(rows, cols: set, order_col):
+    """Decide one already-fetched, newest-first tail window.
+
+    Shared by the single-session reader and the batched list reader so both
+    agree on every schema — including the ones whose ``id`` column is not an
+    integer, where an unparseable revision reports "unread" rather than a
+    verdict.
+    """
+    revision = None
+    if order_col and order_col == 'id' and rows and rows[0]['id'] is not None:
+        try:
+            revision = int(rows[0]['id'])
+        except (TypeError, ValueError):
+            return None, None
+    state = _reduce_session_failure_state([
+        _state_db_failure_tail_row(row, cols) for row in reversed(rows)
+    ])
+    return state, revision
+
+
+def _state_db_failure_tail_decision(rows, cols: set, order_col):
+    """The two-window narrowing decision over one pre-fetched tail.
+
+    ``rows`` are newest-first and already bounded by the wide window, which
+    is what lets the batched reader widen without re-querying.
+    """
+    for window in (_SESSION_FAILURE_TAIL_WINDOW, _SESSION_FAILURE_TAIL_WINDOW_WIDE):
+        state, revision = _state_db_failure_tail_verdict(rows[:window], cols, order_col)
+        if state is not _FAILURE_STATE_UNDECIDED:
+            return state, revision
+        if len(rows) < window:
+            return None, revision
+    return None, revision
+
+
 def _read_state_db_failure_tail(db_path, sid) -> tuple[dict | None, int | None]:
     """Bounded reverse scan of the session's active rows.
 
@@ -13642,11 +13704,7 @@ def _read_state_db_failure_tail(db_path, sid) -> tuple[dict | None, int | None]:
             if 'active' in cols:
                 active_clause = " AND (active IS NULL OR active != 0)"
             order_col = 'id' if 'id' in cols else ('timestamp' if 'timestamp' in cols else None)
-            select = ['role', 'content', 'display_kind', 'display_metadata']
-            if 'tool_calls' in cols:
-                select.append('tool_calls')
-            if order_col:
-                select.append(order_col)
+            select = _state_db_failure_tail_select(cols, order_col)
             order_clause = f" ORDER BY {order_col} DESC" if order_col else ""
             for window in (_SESSION_FAILURE_TAIL_WINDOW, _SESSION_FAILURE_TAIL_WINDOW_WIDE):
                 cur.execute(
@@ -13655,12 +13713,7 @@ def _read_state_db_failure_tail(db_path, sid) -> tuple[dict | None, int | None]:
                     (sid, window),
                 )
                 rows = cur.fetchall()
-                revision = None
-                if order_col and order_col == 'id' and rows and rows[0]['id'] is not None:
-                    revision = int(rows[0]['id'])
-                state = _reduce_session_failure_state([
-                    _state_db_failure_tail_row(row, cols) for row in reversed(rows)
-                ])
+                state, revision = _state_db_failure_tail_verdict(rows, cols, order_col)
                 if state is not _FAILURE_STATE_UNDECIDED:
                     return state, revision
                 if len(rows) < window:
@@ -13672,6 +13725,207 @@ def _read_state_db_failure_tail(db_path, sid) -> tuple[dict | None, int | None]:
             sid, db_path, exc_info=True,
         )
         return None, None
+
+
+def _state_db_failure_batch_tails(cur, cols: set, active_clause: str, order_col,
+                                  sids: list, limit: int) -> dict:
+    """Newest-first tail rows for many sessions in one statement.
+
+    Returns ``{sid: [rows newest-first]}``.  A single windowed statement
+    answers the whole chunk; a build without window functions (or a schema
+    with no column to order by) falls back to one bounded query per session
+    on the SAME connection, so the caller still pays one state.db open.
+    """
+    tails: dict = {}
+    if not sids:
+        return tails
+    select = _state_db_failure_tail_select(cols, order_col)
+    columns = ", ".join(select)
+    if order_col and sqlite3.sqlite_version_info >= (3, 25, 0):
+        placeholders = ",".join("?" for _ in sids)
+        cur.execute(
+            f"SELECT session_id, {columns} FROM ("
+            f"SELECT session_id, {columns}, "
+            f"ROW_NUMBER() OVER ("
+            f"PARTITION BY session_id ORDER BY {order_col} DESC"
+            f") AS _failure_tail_rank "
+            f"FROM messages "
+            f"WHERE session_id IN ({placeholders}){active_clause}"
+            f") WHERE _failure_tail_rank <= ? "
+            f"ORDER BY session_id, _failure_tail_rank",
+            (*sids, limit),
+        )
+        for row in cur.fetchall():
+            tails.setdefault(str(row['session_id']), []).append(row)
+        return tails
+    order_clause = f" ORDER BY {order_col} DESC" if order_col else ""
+    for sid in sids:
+        cur.execute(
+            f"SELECT {columns} FROM messages "
+            f"WHERE session_id = ?{active_clause}{order_clause} LIMIT ?",
+            (sid, limit),
+        )
+        tails[sid] = cur.fetchall()
+    return tails
+
+
+def _session_failure_summaries_from_state_db(sids, db_path) -> dict:
+    """Acquire failure summaries for MANY sessions on one state.db open.
+
+    The list-level backfill used to answer every sidebar row with its own
+    connection (open + revision probe + tail read), so a poll over N sessions
+    cost N opens — and N × 5s whenever state.db was briefly locked by a
+    writer.  Everything the single-session reader decides is decided here in
+    bulk instead: one fingerprint probe, one read-only connection, one
+    revision probe and one bounded tail statement per chunk of sessions.
+
+    Same contract as :func:`_session_failure_summary_from_state_db`: a
+    fingerprint-stamped cache hit is reused untouched, a changed fingerprint
+    costs one tiny revision probe per session and only a genuinely moved tail
+    re-runs the bounded read, a session with no failure state maps to
+    ``None`` (never a guessed verdict), and nothing is ever written.
+    """
+    resolved: dict = {}
+    if not sids or db_path is None:
+        return resolved
+    try:
+        if not Path(db_path).exists():
+            return resolved
+    except OSError:
+        return resolved
+
+    db_key = str(db_path)
+    wanted = [str(sid) for sid in sids if sid]
+    fingerprint = _state_db_failure_fingerprint(db_path)
+    cached: list = []   # (sid, cached_revision) — needs a revision probe
+    pending: list = []  # no usable cache stamp — needs the bounded tail read
+    with _SESSION_FAILURE_SUMMARY_LOCK:
+        for sid in wanted:
+            entry = _SESSION_FAILURE_SUMMARY_CACHE.get((db_key, sid))
+            if entry is None:
+                pending.append(sid)
+            elif fingerprint is not None and entry[0] == fingerprint:
+                resolved[sid] = entry[2]
+            elif entry[1] is not None:
+                cached.append((sid, entry[1]))
+            else:
+                pending.append(sid)
+    if fingerprint is None:
+        # An unreadable fingerprint is NOT evidence the database is unchanged
+        # (a transient lock must not suppress derivation), so every session
+        # falls back to the bounded tail read — exactly as the single-session
+        # reader does.
+        pending.extend(sid for sid, _revision in cached)
+        cached = []
+    if not pending and not cached:
+        # Every session was answered by the fingerprint/revision gate.
+        return resolved
+
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute(
+                f"PRAGMA busy_timeout={_STATE_DB_FAILURE_BUSY_TIMEOUT_MS}"
+            )
+            cur.execute("PRAGMA table_info(messages)")
+            cols = {str(row['name']) for row in cur.fetchall()}
+            if not {'session_id', 'role'} <= cols:
+                return resolved
+            active_clause = ""
+            if 'active' in cols:
+                active_clause = " AND (active IS NULL OR active != 0)"
+            order_col = (
+                'id' if 'id' in cols
+                else ('timestamp' if 'timestamp' in cols else None)
+            )
+
+            # 1) one revision probe for every session whose cached summary
+            #    may be stale: has THIS session's own tail moved?
+            if cached and order_col == 'id':
+                current: dict = {}
+                for start in range(0, len(cached), _STATE_DB_FAILURE_SID_CHUNK):
+                    chunk = [sid for sid, _rev in cached[start:start + _STATE_DB_FAILURE_SID_CHUNK]]
+                    placeholders = ",".join("?" for _ in chunk)
+                    try:
+                        cur.execute(
+                            f"SELECT session_id, MAX(id) AS max_id FROM messages "
+                            f"WHERE session_id IN ({placeholders}){active_clause} "
+                            f"GROUP BY session_id",
+                            tuple(chunk),
+                        )
+                        for row in cur.fetchall():
+                            current[str(row['session_id'])] = (
+                                int(row['max_id']) if row['max_id'] is not None else None
+                            )
+                    except Exception:
+                        # An unreadable probe is not a verdict: these sessions
+                        # fall back to the bounded tail read, as the
+                        # single-session reader does.
+                        logger.debug(
+                            "state.db failure-summary batch revision probe failed",
+                            exc_info=True,
+                        )
+                        for sid, _revision in cached[start:start + _STATE_DB_FAILURE_SID_CHUNK]:
+                            current.pop(sid, None)
+                for sid, cached_revision in cached:
+                    if current.get(sid) != cached_revision:
+                        pending.append(sid)
+                        continue
+                    with _SESSION_FAILURE_SUMMARY_LOCK:
+                        entry = _SESSION_FAILURE_SUMMARY_CACHE.get((db_key, sid))
+                        if entry is None or entry[1] != cached_revision:
+                            pending.append(sid)
+                            continue
+                        _SESSION_FAILURE_SUMMARY_CACHE[(db_key, sid)] = (
+                            fingerprint, cached_revision, entry[2],
+                        )
+                        _SESSION_FAILURE_SUMMARY_CACHE.move_to_end((db_key, sid))
+                    resolved[sid] = entry[2]
+            elif cached:
+                # No per-session revision to gate on: re-read the tails.
+                pending.extend(sid for sid, _revision in cached)
+
+            # 2) one bounded tail statement per chunk for the rest, widening
+            #    once (as the single-session reader does) when every row in
+            #    the narrow window is interim activity.
+            for start in range(0, len(pending), _STATE_DB_FAILURE_SID_CHUNK):
+                chunk = pending[start:start + _STATE_DB_FAILURE_SID_CHUNK]
+                narrow = _state_db_failure_batch_tails(
+                    cur, cols, active_clause, order_col, chunk,
+                    _SESSION_FAILURE_TAIL_WINDOW,
+                )
+                widening = [
+                    sid for sid in chunk
+                    if len(narrow.get(sid) or []) == _SESSION_FAILURE_TAIL_WINDOW
+                ]
+                wide = (
+                    _state_db_failure_batch_tails(
+                        cur, cols, active_clause, order_col, widening,
+                        _SESSION_FAILURE_TAIL_WINDOW_WIDE,
+                    )
+                    if widening else {}
+                )
+                for sid in chunk:
+                    rows = wide.get(sid) or narrow.get(sid) or []
+                    state, revision = _state_db_failure_tail_decision(
+                        rows, cols, order_col
+                    )
+                    resolved[sid] = state
+                    if revision is not None and fingerprint is not None:
+                        with _SESSION_FAILURE_SUMMARY_LOCK:
+                            _SESSION_FAILURE_SUMMARY_CACHE[(db_key, sid)] = (
+                                fingerprint, revision, state,
+                            )
+                            _SESSION_FAILURE_SUMMARY_CACHE.move_to_end((db_key, sid))
+                            while len(_SESSION_FAILURE_SUMMARY_CACHE) > _SESSION_FAILURE_SUMMARY_CACHE_MAX:
+                                _SESSION_FAILURE_SUMMARY_CACHE.popitem(last=False)
+    except Exception:
+        logger.debug(
+            "state.db failure-summary batched read failed at %s", db_path,
+            exc_info=True,
+        )
+    return resolved
 
 
 def _session_failure_summary_from_state_db(sid, db_path) -> dict | None:
@@ -13772,18 +14026,36 @@ def _backfill_cli_session_failure_summaries(rows, db_path) -> None:
     one are left alone; the rest are answered by the bounded, revision-gated
     state.db tail read (rows whose session has no failure state simply stay
     without the field).
+
+    The whole page is acquired in ONE batched read: answering a row at a time
+    cost one state.db connection per row, so a sidebar poll over N sessions
+    opened state.db N times (and waited out N writer locks).
     """
     if not rows or db_path is None:
         return
+    wanted = []
+    seen = set()
     for row in rows:
         if not isinstance(row, dict):
             continue
         if row.get('failure_summary'):
             continue
         sid = str(row.get('session_id') or '').strip()
-        if not sid:
+        if not sid or sid in seen:
             continue
-        summary = _session_failure_summary_from_state_db(sid, db_path)
+        seen.add(sid)
+        wanted.append(sid)
+    if not wanted:
+        return
+    summaries = _session_failure_summaries_from_state_db(wanted, db_path)
+    if not summaries:
+        return
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get('failure_summary'):
+            continue
+        summary = summaries.get(str(row.get('session_id') or '').strip())
         if summary:
             row['failure_summary'] = summary
 

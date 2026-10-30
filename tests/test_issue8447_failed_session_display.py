@@ -26,6 +26,7 @@ sidebar row, the session summary, or a provider request payload.
 import collections
 import json
 import sqlite3
+import time
 
 import pytest
 
@@ -898,3 +899,98 @@ def test_backfill_is_bounded_and_never_guesses_beyond_the_window(
     # The failure sits beyond BOTH bounded windows; the answer must be "no
     # marker", never a guessed verdict.
     assert models._session_failure_summary_from_state_db("sess-1", db) is None
+
+
+def _make_many_session_state_db(db, *, count=12):
+    """``count`` sessions, every third one ending in a failed turn."""
+    conn = sqlite3.connect(str(db))
+    failed = set()
+    for index in range(count):
+        sid = "sess-%02d" % index
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, timestamp) "
+            "VALUES (?,?,?,?,?)",
+            (index * 2 + 1, sid, "user", "hi", 1000.0 + index),
+        )
+        if index % 3 == 0:
+            failed.add(sid)
+            _insert_failed_turn(
+                conn, session_id=sid, row_id=index * 2 + 2, ts=1001.0 + index
+            )
+    conn.commit()
+    conn.close()
+    return failed
+
+
+def _counting_state_db_open(monkeypatch):
+    """Count every read-only state.db connection the module opens."""
+    reads = []
+    real_open = models.open_state_db_readonly
+
+    def counting_open(db_path, *args, **kwargs):
+        reads.append(str(db_path))
+        return real_open(db_path, *args, **kwargs)
+
+    monkeypatch.setattr(models, "open_state_db_readonly", counting_open)
+    return reads
+
+
+def test_list_backfill_reads_every_session_on_one_state_db_open(
+    tmp_path, monkeypatch
+):
+    """The list-level backfill must answer N rows from ONE state.db open.
+
+    Answering a row at a time opened state.db once per session, so a sidebar
+    poll over N sessions paid N connections (and N writer-lock waits).
+    """
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    failed = _make_many_session_state_db(db)
+    _reset_failure_caches(monkeypatch)
+    reads = _counting_state_db_open(monkeypatch)
+
+    rows = [{"session_id": "sess-%02d" % index} for index in range(12)]
+    # A row that already carries a summary is left exactly as it is.
+    rows.append({"session_id": "sess-99", "failure_summary": {"kind": "kept"}})
+    rows.append({"session_id": ""})
+
+    models._backfill_cli_session_failure_summaries(rows, db)
+
+    assert len(reads) == 1, reads
+    assert {row["session_id"] for row in rows[:12]
+            if "failure_summary" in row} == failed
+    assert rows[-2]["failure_summary"] == {"kind": "kept"}
+    assert "failure_summary" not in rows[-1]
+    marked = rows[0]
+    assert marked["failure_summary"] == {
+        "kind": "failed_turn", "layer": "billing", "code": "billing",
+        "retryable": False,
+    }
+
+
+def test_list_backfill_does_not_wait_out_a_writer_lock(tmp_path, monkeypatch):
+    """A briefly-held writer lock costs one fast-failed read, not one 5s
+    busy-wait per row (the sidebar poll must never stall on a lock)."""
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    _make_many_session_state_db(db)
+    _reset_failure_caches(monkeypatch)
+    reads = _counting_state_db_open(monkeypatch)
+
+    lock = sqlite3.connect(str(db), isolation_level=None)
+    lock.execute("BEGIN EXCLUSIVE")
+    rows = [{"session_id": "sess-%02d" % index} for index in range(12)]
+    try:
+        started = time.monotonic()
+        models._backfill_cli_session_failure_summaries(rows, db)
+        elapsed = time.monotonic() - started
+    finally:
+        lock.rollback()
+        lock.close()
+
+    # One open, answered fast: the batch never re-opens per row.
+    assert len(reads) == 1, reads
+    assert elapsed < 10.0, elapsed
+    # An unreadable database is "unknown", never "known zero": no row invents
+    # a verdict, and none of them silently claims a healthy session.
+    assert all("failure_summary" not in row for row in rows)
