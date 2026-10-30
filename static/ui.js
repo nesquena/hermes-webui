@@ -5823,6 +5823,18 @@ const _liveModelCache={};
 // preventing premature fallback to the first static model (#1169).
 const _liveModelFetchPending=new Set();
 
+// #6919: the providers-panel "Refresh Models" button clears the SERVER's
+// live-models cache; this is the matching browser-side eviction so the next
+// _fetchLiveModels() actually re-fetches instead of serving the stale page
+// cache. providerId omitted -> clear every provider.
+function invalidateLiveModelCache(providerId){
+  if(providerId){
+    delete _liveModelCache[providerId];
+  }else{
+    for(const k in _liveModelCache) delete _liveModelCache[k];
+  }
+}
+
 function _addLiveModelsToSelect(provider, models, sel){
   if(!provider||!models||!models.length||!sel) return 0;
   const currentVal=sel.value;

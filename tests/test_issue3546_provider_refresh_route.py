@@ -83,7 +83,9 @@ class TestRefreshRouteExists:
     def test_route_returns_ok_with_provider(self):
         src = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
         idx = src.find('"/api/models/refresh"')
-        block = src[idx : idx + 500]
+        # Window widened past 500 for the #6919 branch comments added above the
+        # return; the assertions target the return line itself.
+        block = src[idx : idx + 800]
         assert '"ok"' in block and '"provider"' in block, (
             "/api/models/refresh must return {ok: true, provider: provider_id} "
             "so the frontend can confirm the operation succeeded."
@@ -109,4 +111,29 @@ class TestFrontendRefreshPath:
         assert "e.status===404" in body or "e.status === 404" in body, (
             "_refreshProviderModels catch block must check e.status===404 to "
             "show a friendly message when the route is missing on older backends."
+        )
+
+
+class TestRefreshInvalidatesLiveModelCache:
+    """#6919: a Refresh Models click must also bust the browser-side
+    _liveModelCache, or the success toast is followed by the same stale list."""
+
+    def test_ui_exposes_invalidate_live_model_cache(self):
+        src = _read_static("ui.js")
+        assert "function invalidateLiveModelCache(" in src, (
+            "ui.js must expose invalidateLiveModelCache(providerId) — the "
+            "browser-side eviction for the per-page _liveModelCache (#6919)."
+        )
+        assert "delete _liveModelCache[" in src, (
+            "invalidateLiveModelCache must delete the provider entry from "
+            "_liveModelCache (#6919)."
+        )
+
+    def test_dropdown_rebuild_calls_invalidate_live_model_cache(self):
+        panels = _read_static("panels.js")
+        body = _extract_function_body(panels, "function _refreshModelDropdownsAfterProviderChange(")
+        assert "invalidateLiveModelCache" in body, (
+            "_refreshModelDropdownsAfterProviderChange must call "
+            "invalidateLiveModelCache() before rebuilding the dropdowns so the "
+            "stale per-page list cannot survive a Refresh Models click (#6919)."
         )

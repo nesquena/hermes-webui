@@ -2489,6 +2489,9 @@ _OPENAI_COMPAT_ENDPOINTS = {
 _LIVE_MODELS_CACHE_TTL = 60.0
 _LIVE_MODELS_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 _LIVE_MODELS_CACHE_LOCK = threading.RLock()
+# #6919: bumped by POST /api/models/refresh; responses that captured an older
+# generation must not repopulate the cache with pre-refresh bytes.
+_LIVE_MODELS_CACHE_GENERATION = 0
 
 
 def _active_profile_for_live_models_cache() -> str:
@@ -2529,6 +2532,27 @@ def _set_cached_live_models(key: tuple[str, str], payload: dict) -> None:
 def _clear_live_models_cache() -> None:
     with _LIVE_MODELS_CACHE_LOCK:
         _LIVE_MODELS_CACHE.clear()
+
+
+def _invalidate_live_models_cache(provider: str) -> None:
+    """Evict the live-models entry for the active profile + provider (#6919)."""
+    key = _live_models_cache_key(provider)
+    with _LIVE_MODELS_CACHE_LOCK:
+        _LIVE_MODELS_CACHE.pop(key, None)
+
+
+def _live_models_generation() -> int:
+    with _LIVE_MODELS_CACHE_LOCK:
+        return _LIVE_MODELS_CACHE_GENERATION
+
+
+def _bump_live_models_generation() -> int:
+    """Fence in-flight live-model responses: a response started before a
+    refresh must not write its stale payload back into the cache."""
+    global _LIVE_MODELS_CACHE_GENERATION
+    with _LIVE_MODELS_CACHE_LOCK:
+        _LIVE_MODELS_CACHE_GENERATION += 1
+        return _LIVE_MODELS_CACHE_GENERATION
 
 
 from api import route_session_list_cache as _route_session_list_cache
@@ -18807,6 +18831,11 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "provider is required")
         from api.config import invalidate_provider_models_cache
         invalidate_provider_models_cache(provider_id)
+        # #6919: also evict the live-models cache (normalized key) and fence
+        # in-flight responses against repopulation.
+        from api.config import _resolve_provider_alias
+        _invalidate_live_models_cache(_resolve_provider_alias(provider_id))
+        _bump_live_models_generation()
         return j(handler, {"ok": True, "provider": provider_id})
 
     if parsed.path == "/api/reasoning":
@@ -25788,11 +25817,16 @@ def _handle_live_models(handler, parsed):
         provider = _resolve_provider_alias(provider)
 
         cache_key = _live_models_cache_key(provider)
+        generation = _live_models_generation()
         cached = _get_cached_live_models(cache_key)
         if cached is not None:
             return j(handler, cached)
 
         def _finish(payload: dict):
+            # #6919 generation fence: a response that started before a
+            # models refresh must not repopulate the cache with stale bytes.
+            if _live_models_generation() != generation:
+                return j(handler, payload)
             _set_cached_live_models(cache_key, payload)
             return j(handler, payload)
 
