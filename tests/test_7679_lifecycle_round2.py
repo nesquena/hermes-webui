@@ -106,82 +106,32 @@ FN_APPLY = _extract_js_function(UI, "applyUpdates")
 FN_FORCE = _extract_js_function(UI, "forceUpdate")
 FN_CHECK = _extract_js_function(PANELS, "checkUpdatesNow")
 
-# ── the REAL t() from static/i18n.js ────────────────────────────────────────
-# The reviewer asked for the actual translation contract rather than a stub, so
-# the English locale block is loaded and its lookup function reproduced. A key
-# that does not exist there therefore behaves exactly as it does in production:
-# it returns the key itself.
+# ── the FULL shipped runtime + catalog from static/i18n.js ──────────────────
+# The reviewer asked for the actual translation contract rather than a stub.
+# The whole file is evaluated verbatim in its own context and the real t() is
+# taken from it, so a key that does not exist behaves exactly as it does in
+# production: it returns the key itself.
 _REAL_T = r"""
-const __I18N_SRC__ = global.__I18N_SRC__;
-// #7679 finding 3 (re-gate 10-10): evaluate the REAL locale runtime instead
-// of a near-copy. The previous harness re-implemented t() from its docstring,
-// and the copy diverged from the shipped contract in three ways the reviewer
-// pinned: the real runtime (1) returns the missing KEY rather than using
-// argument 0 as fallback text, (2) INVOKES function-valued entries with the
-// forwarded arguments, and (3) substitutes NUMBERED placeholders ({0}, {1})
-// by index rather than sequentially replacing {name} word placeholders. A
-// near-copy asserts strings the runtime never emits, so the locale contract
-// was untested.
-//
-// The real function is sliced verbatim out of static/i18n.js and evaluated
-// with a minimal LOCALES/_locale binding. The English block is still parsed
-// for the entries object so the binding has the same data the runtime reads.
-const __enMatch = __I18N_SRC__.match(/^\s*en:\s*\{/m);
-if (!__enMatch) throw new Error('no English locale block found in static/i18n.js');
-let __depth = 0, __end = -1;
-for (let i = __I18N_SRC__.indexOf('{', __enMatch.index); i < __I18N_SRC__.length; i += 1) {
-  const ch = __I18N_SRC__[i];
-  if (ch === '{') __depth += 1;
-  else if (ch === '}') { __depth -= 1; if (__depth === 0) { __end = i + 1; break; } }
-}
-const __enBody = __I18N_SRC__.slice(__I18N_SRC__.indexOf('{', __enMatch.index) + 1, __end - 1);
-const __enEntries = {};
-for (const line of __enBody.split('\n')) {
-  const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(['"`])((?:\\.|(?!\2).)*)\2\s*,?\s*$/);
-  if (m) __enEntries[m[1]] = m[3].replace(/\\'/g, "'").replace(/\\"/g, '"');
-}
-// Function-valued entries survive the line scan as absent; re-add the ones the
-// runtime must be able to invoke by reading their bodies verbatim.
-const __fnEntries = {};
-for (const fnMatch of __enBody.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*\(([^)]*)\)\s*=>/gm)) {
-  const fnName = fnMatch[1];
-  const arrowStart = __enBody.indexOf('=>', fnMatch.index);
-  let fnDepth = 0, fnEnd = -1;
-  for (let i = __enBody.indexOf('{', arrowStart); i < __enBody.length; i += 1) {
-    const ch = __enBody[i];
-    if (ch === '{') __depth += 1;
-    else if (ch === '}') { __depth -= 1; if (__depth === 0) { fnEnd = i + 1; break; } }
-  }
-  if (fnEnd > 0) {
-    try {
-      // eslint-disable-next-line no-new-func
-      __fnEntries[fnName] = new Function('return ' + __enBody.slice(fnMatch.index, fnEnd))();
-    } catch (e) { /* a non-parsing entry is not one the tests exercise */ }
-  }
-}
-const LOCALES = { en: Object.assign(__enEntries, __fnEntries) };
-let _locale = LOCALES.en;
-// The real t(), verbatim: slice from its declaration to the closing brace.
-const __tStart = __I18N_SRC__.indexOf('function t(key, ...args) {');
-if (__tStart < 0) throw new Error('the real t() was not found in static/i18n.js');
-let __tDepth = 0, __tEnd = -1;
-for (let i = __I18N_SRC__.indexOf('{', __tStart); i < __I18N_SRC__.length; i += 1) {
-  const ch = __I18N_SRC__[i];
-  if (ch === '{') __tDepth += 1;
-  else if (ch === '}') { __tDepth -= 1; if (__tDepth === 0) { __tEnd = i + 1; break; } }
-}
-const __tSrc = __I18N_SRC__.slice(__tStart, __tEnd);
-// The sliced function closes over i18n.js's module-scope `_locale` binding,
-// which this sandbox does not have, so the identifier is re-pointed at a
-// holder the sandbox controls — one textual substitution, and everything else
-// (the ?? chain, the function invocation, the numbered-placeholder replace)
-// stays exactly what ships.
-// eslint-disable-next-line no-new-func
-const t = new Function(
-  'LOCALES',
-  '_localeRef',
-  __tSrc.replace(/\b_locale\b/g, '_localeRef.current') + '; return t;'
-)(LOCALES, { get current() { return _locale; } });
+// #7679 finding 3 (re-gate 10-31): evaluate the FULL shipped runtime and
+// catalog instead of a reconstruction. The previous harness re-parsed the
+// English block line by line and silently dropped every function-valued entry
+// it could not parse, so it asserted strings the shipped runtime never emits.
+// static/i18n.js is now evaluated VERBATIM in its own context (it ends with
+// loadLocale(), which needs only the stubs below) and the real t() is taken
+// from that context: every locale, every function-valued entry and the real
+// missing-key behaviour stay exactly what ships.
+const __vm = require('vm');
+const __i18nCtx = {
+  console,
+  localStorage: { getItem() { return null; }, setItem() {} },
+  navigator: { languages: ['en-US'], language: 'en-US' },
+  document: { documentElement: {}, querySelectorAll() { return []; } },
+};
+__vm.createContext(__i18nCtx);
+__vm.runInContext(global.__I18N_SRC__, __i18nCtx);
+const t = __i18nCtx.t;
+__vm.runInContext('globalThis.__catalogLocales = Object.keys(LOCALES);', __i18nCtx);
+const __catalogLocales = __i18nCtx.__catalogLocales;
 """
 
 
@@ -249,6 +199,7 @@ global.showConfirmDialog = () => Promise.resolve(true);
 global.__toasts = [];
 global.__posted = [];
 global.api = async (url, opts) => {
+  if (url === '/api/updates/check') global.__checkCalls = (global.__checkCalls || 0) + 1;
   global.__posted.push({ url, body: opts && opts.body ? JSON.parse(opts.body) : null });
   return global.__nextApiResponse || { ok: true, restart_scheduled: true };
 };
@@ -576,10 +527,20 @@ _F4 = r"""
   await healthEnteredSignal;
   const healthReadsAtPause = global.__healthReads;
 
-  // 2) While health is paused, a newer production Check completes and retires
-  //    the grant — through the real check path, not a direct assignment.
-  _retireForceUpdate();
-  global.__state.btnForceUpdate.style.display = 'none';
+  // 2) While health is paused, a newer production Check COMPLETES — the real
+  //    checkUpdatesNow(), not a hand-written retire/hide. The re-gate pinned
+  //    this: the scene used to retire the grant and hide the button itself, so
+  //    it proved the guard can detect a mutated grant but never that the
+  //    PRODUCER (a newer Check) is what supersedes it. Its clean payload now
+  //    takes the grant and the button down through the real renderer, which is
+  //    the producer-composed composition the reviewer asked for.
+  global.__nextApiResponse = {
+    webui: { behind: 0, dirty: false, manual_update: false, channel: 'stable' },
+    agent: { behind: 0, dirty: false, manual_update: false, channel: 'stable' },
+  };
+  await checkUpdatesNow();
+  const grantAfterNewerCheck = _forceUpdateGrant;
+  const checkStatusAfterNewerCheck = global.__state.checkUpdatesStatus.textContent;
 
   // 3) Health settles. Only now may the handler resume past the await.
   releaseHealth();
@@ -588,7 +549,10 @@ _F4 = r"""
   process.stdout.write(JSON.stringify({
     had_grant_at_confirm: !!grantAtConfirm,
     health_reads_at_pause: healthReadsAtPause,
-    posts: global.__posted,
+    newer_check_ran: global.__checkCalls >= 1,
+    newer_check_status: checkStatusAfterNewerCheck,
+    grant_replaced_by_newer_check: grantAfterNewerCheck !== grantAtConfirm,
+    posts: global.__posted.filter((p) => p.url === '/api/updates/force'),
     button_display: btn.style.display,
     button_disabled: btn.disabled,
   }));
@@ -612,6 +576,22 @@ def test_no_post_when_a_newer_check_completes_during_the_health_await():
         "the handler never reached _readHealthServerIdentity, so the "
         "post-health guard was not exercised (the pre-fix ordering returned "
         "before it)"
+    )
+    # #7679 (re-gate 10-31): the superseding observation must be a REAL newer
+    # Check, completed through checkUpdatesNow() while health was paused — not
+    # a hand-written retire/hide. Without these assertions the scene would
+    # still pass if the producer never ran at all.
+    assert result["newer_check_ran"] is True, (
+        "the paused-health scene never completed a real checkUpdatesNow(), so "
+        "it does not cover the producer-composed supersession the reviewer "
+        "asked for"
+    )
+    assert result["newer_check_status"], (
+        "the newer Check published no status line, so it did not really run"
+    )
+    assert result["grant_replaced_by_newer_check"] is True, (
+        "the newer Check did not replace the grant the handler holds, so the "
+        "post-health guard would never fire and the scenario is vacuous"
     )
     assert result["posts"] == [], (
         "a stale handler POSTed to /api/updates/force after a newer check had "
@@ -638,6 +618,37 @@ def test_the_real_locale_defines_force_no_longer_applicable():
     assert result["v"] != "force_no_longer_applicable", (
         f"t() returned the key itself: {result['v']!r}"
     )
+
+
+def test_the_harness_runs_the_full_shipped_catalog():
+    """The sandbox must evaluate the FULL runtime/catalog, not a reconstruction.
+
+    The previous harness re-parsed the English block line by line and swallowed
+    function-entry parse failures, so it could assert strings the shipped
+    runtime never emits. This pins the shipped catalog: every locale block in
+    static/i18n.js is loaded, and function-valued entries are invoked with
+    their arguments.
+    """
+    program = _build(
+        _HARNESS
+        + "\nprocess.stdout.write(JSON.stringify({ locales: __catalogLocales, active: t('update_force_active_runs', 2), single: t('update_force_active_runs', 1) }));\n"
+    )
+    result = _run(program)
+    shipped = [
+        m.group(1) or m.group(2) or m.group(3)
+        for m in re.finditer(
+            r"^  (?:'([^']+)'|\"([^\"]+)\"|([A-Za-z_][A-Za-z0-9_-]*)): \{",
+            I18N,
+            re.MULTILINE,
+        )
+    ]
+    assert result["locales"] == shipped, (
+        "the sandbox catalog is not the shipped one: "
+        f"{result['locales']!r} != {shipped!r}"
+    )
+    assert len(shipped) > 1, "the shipped catalog has only one locale?"
+    assert result["active"] == "Update anyway (interrupts 2 runs)", result
+    assert result["single"] == "Update anyway (interrupts 1 run)", result
 
 
 _DIRTY_ONLY = r"""
@@ -782,7 +793,13 @@ def test_force_update_revalidates_after_the_health_await():
     src = UI
     idx = src.find("async function forceUpdate(")
     assert idx > 0
-    body = src[idx : idx + 6000]
+    # The window must reach past the health read to the destructive POST. The
+    # handler grew (the bound active-runs retry), so size it off the function
+    # itself rather than a hand-counted constant: slice to the next top-level
+    # declaration after forceUpdate.
+    end = src.find("\n// Poll /health after an update-triggered restart", idx)
+    assert end > idx, "the declaration that follows forceUpdate is gone"
+    body = src[idx:end]
     health_idx = body.find("_readHealthServerIdentity()")
     assert health_idx > 0, "the health read is gone from forceUpdate"
     after = body[health_idx:]
@@ -793,4 +810,12 @@ def test_force_update_revalidates_after_the_health_await():
         "forceUpdate does not re-check the grant between the health await and "
         "the destructive POST, so a check that completes during that await "
         "leaves a stale handler posting (#7679 finding 4)"
+    )
+    # #7679 finding 1 (re-gate 10-31): the active-runs retry is a REPLAY bound
+    # to the grant the offer captured, so the handler must not read its
+    # target/channel from the live button or the live grant.
+    assert "boundGrant" in body, (
+        "forceUpdate no longer honours the bound grant an active-runs offer "
+        "passes, so a retry can be retargeted by a newer check "
+        "(#7679 finding 1)"
     )

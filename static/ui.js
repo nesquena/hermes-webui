@@ -14598,10 +14598,20 @@ function _reconcileObsoleteUpdateControls(data, recoveryGenerationAtCheck){
   const mayRetire=_recoveryObservationMayRetire(data, recoveryGenerationAtCheck);
   const forceBtn=(typeof $==='function')?$('btnForceUpdate'):null;
   const clearLockBtn=(typeof $==='function')?$('btnClearUpdateLock'):null;
-  const keepAgent=(btn)=>{
-    // Preserve an Agent recovery control a NEWER observation established: a
-    // live target plus a recovery state that has not been proven gone.
-    if(!btn||btn.dataset.target!=='agent') return false;
+  // #7679 finding 2 (re-gate 10-31): resolve OWNERSHIP for BOTH supported
+  // targets and BOTH recovery kinds before retiring anything. The old
+  // predicate (keepAgent) rejected any non-Agent control before it ever looked
+  // at the generation, so a WebUI Force or Clear-lock control that a NEWER
+  // applyUpdates() had just published — with its own owner stamp and its own
+  // grant — was retired, hidden, disabled and detargeted by an older rejected
+  // Check purely because its target was WebUI. That is the very bug the Agent
+  // carve-out was written for, still present on the sibling target.
+  const keepRecoveryControl=(btn)=>{
+    // Preserve a recovery control a NEWER observation established: a live
+    // target plus a recovery state that has not been proven gone.
+    if(!btn) return false;
+    const btnTarget=btn.dataset?btn.dataset.target:'';
+    if(btnTarget!=='agent'&&btnTarget!=='webui') return false;
     if(btn.style.display!=='inline-block'||btn.disabled) return false;
     if(mayRetire) return false;
     // #7679 (maintainer 10-12): OWNERSHIP, not visibility, decides. A control
@@ -14617,8 +14627,8 @@ function _reconcileObsoleteUpdateControls(data, recoveryGenerationAtCheck){
       ? _controlIsNewerThan(btn, recoveryGenerationAtCheck)
       : false;
   };
-  const keepForce=keepAgent(forceBtn);
-  const keepLock=keepAgent(clearLockBtn);
+  const keepForce=keepRecoveryControl(forceBtn);
+  const keepLock=keepRecoveryControl(clearLockBtn);
   if(!keepForce){
     _retireForceUpdate();
   }
@@ -14650,7 +14660,7 @@ function _reconcileObsoleteUpdateControls(data, recoveryGenerationAtCheck){
       if(recovery.force===true||recovery.force===null||recovery.force===undefined){
         _grantForceUpdate('agent', agentState?agentState.channel:null);
       }
-    }else if(_forceUpdateGrant&&_forceUpdateGrant.target==='agent'){
+    }else if(_forceUpdateGrant&&(_forceUpdateGrant.target==='agent'||_forceUpdateGrant.target==='webui')){
       // No authoritative recovery state in this observation: renew the
       // successor's own grant exactly as it was armed, so the preserved
       // button keeps working for the recovery it was created for.
@@ -14659,6 +14669,12 @@ function _reconcileObsoleteUpdateControls(data, recoveryGenerationAtCheck){
       // button's own target is not authority to arm a destructive action
       // (maintainer 10-12: "Do not manufacture a grant from the button's
       // target alone").
+      //
+      // #7679 finding 2 (re-gate 10-31): BOTH supported targets renew here.
+      // The old condition accepted an Agent grant only, so a preserved WebUI
+      // successor kept its (retired) visibility without a live grant and
+      // forceUpdate() returned before the confirmation — the inert-decoy
+      // defect, on the WebUI side.
       _grantForceUpdate(_forceUpdateGrant.target, _forceUpdateGrant.channel||null);
     }
   }
@@ -15010,6 +15026,9 @@ async function applyUpdates(opts){
       if(!res.ok){
         _showUpdateError(target,res);
         if(res.restart_blocked&&res.force_available){
+          // #7679 finding 1 (re-gate 10-31): this retry re-sends the APPLY,
+          // which consumes no Force grant, so there is no grant to bind — the
+          // offer's target is the one captured here and the replay carries it.
           _renderActiveRunsForceOffer(target,res,()=>applyUpdates({forceActiveRuns:true}));
         }
         resetApplyButton(0);
@@ -15093,7 +15112,19 @@ function _activeRunsUpdateText(key,count,fallback){
 // force_active_runs:true; the server then saves those runs as interrupted
 // before it restarts. Gateway runs that a restart can reattach are not counted
 // and keep running in the Gateway.
-function _renderActiveRunsForceOffer(target,res,resend){
+//
+// #7679 finding 1 (re-gate 10-31): the offer is BOUND to the authority the
+// user originally confirmed. ``grant`` is the force grant that armed the
+// destructive request when the server refused it, and ``target`` is captured
+// once here — never re-read from the shared legacy button, which a newer Check
+// may have retargeted. Without that binding the retry re-read the live button
+// and the live grant, so a newer Check that retargeted the button from WebUI
+// to Agent (and minted the Agent grant) turned a confirmed WebUI destruction
+// into an Agent one, and the replay skipped the discard confirmation because
+// forceActiveRuns was set. The bound grant/target/channel therefore travel
+// with the retry, and a replaced grant is refused even when it carries the
+// same target and channel — identity, not shape, is the authority.
+function _renderActiveRunsForceOffer(target,res,resend,grant){
   const errEl=$('updateError');
   if(!errEl||typeof resend!=='function') return;
   const prior=$('btnForceUpdateActiveRuns');
@@ -15102,6 +15133,10 @@ function _renderActiveRunsForceOffer(target,res,resend){
   // way forward (on the conflict path its re-send also carries the hard reset).
   const legacyForceBtn=$('btnForceUpdate');
   if(legacyForceBtn) legacyForceBtn.style.display='none';
+  // The immutable identity of the request this offer replays. ``grant`` is
+  // null for the Apply / Clear-lock retries, which consume no Force grant.
+  const boundGrant=(grant&&typeof grant==='object')?grant:null;
+  const boundTarget=target;
   const rawCount=Number(res&&res.active_runs)||Number(res&&res.active_streams)||1;
   const count=Math.max(1,Math.floor(rawCount));
   const plural=count===1?'':'s';
@@ -15115,7 +15150,7 @@ function _renderActiveRunsForceOffer(target,res,resend){
   btn.style.background='var(--error,#e05)';
   btn.style.color='#fff';
   btn.style.borderColor='var(--error,#e05)';
-  btn.dataset.target=target;
+  btn.dataset.target=boundTarget;
   btn.textContent=label;
   btn.onclick=async()=>{
     if(btn.disabled) return;
@@ -15131,10 +15166,30 @@ function _renderActiveRunsForceOffer(target,res,resend){
       focusCancel:true,
     });
     if(!confirmed) return;
+    // #7679 finding 1 (re-gate 10-31): revalidate the BOUND grant across the
+    // interrupt confirmation. Only the grant this offer was created for may
+    // authorize the replay; a newer check, a channel change or an Apply retry
+    // may have retired it — and possibly minted a same-shaped replacement —
+    // while the dialog was open, and the confirmation the user just gave was
+    // for the original request, not for that one.
+    if(boundGrant){
+      const grantReplaced=(typeof _forceUpdateGrant==='undefined')||!_forceUpdateGrant||_forceUpdateGrant!==boundGrant;
+      const grantEpochStale=(typeof _isUpdateCheckStale==='function')&&_isUpdateCheckStale(boundGrant.epoch);
+      if(grantReplaced||grantEpochStale){
+        const msg=((typeof t==='function')?t('force_no_longer_applicable','Force update is no longer applicable — the update state changed. Please check again.'):'Force update is no longer applicable — the update state changed. Please check again.');
+        const errEl2=$('updateError');
+        if(errEl2){errEl2.textContent=msg;errEl2.style.display='block';}
+        else showToast(msg,5000,'error');
+        return;
+      }
+    }
     btn.disabled=true;
     btn.textContent=_i18nUpdateText('update_updating','Updating\u2026');
     try{
-      await resend();
+      // The replay carries the ORIGINAL authority with it: the retry must
+      // build its request from the bound grant (target + channel), never from
+      // whatever the shared button or the live grant say now.
+      await resend({grant:boundGrant,target:boundTarget});
     }finally{
       if(btn.isConnected){btn.disabled=false;btn.textContent=label;}
     }
@@ -15174,6 +15229,9 @@ async function applyClearUpdateLock(btn,opts){
       if(errEl){errEl.textContent=msg;errEl.style.display='block';}
       else showToast(msg);
       if(res.restart_blocked&&res.force_available){
+        // #7679 finding 1 (re-gate 10-31): the Clear-lock retry consumes no
+        // Force grant either (it POSTs /api/updates/clear_lock), so nothing is
+        // bound here beyond the target the offer captured.
         _renderActiveRunsForceOffer(target,res,()=>applyClearUpdateLock(btn,{forceActiveRuns:true}));
       }
     }
@@ -15285,16 +15343,27 @@ async function _readHealthServerIdentity() {
   }
 }
 async function forceUpdate(btn,opts){
-  const target=btn&&btn.dataset.target;
-  if(!target) return;
+  const optsObj=opts||{};
+  const liveTarget=btn&&btn.dataset.target;
   // #7293: the active-runs override re-sends this request after its own
   // confirmation; the discard-local-changes confirmation was already given.
-  const forceActiveRuns=!!(opts&&opts.forceActiveRuns===true);
+  const forceActiveRuns=!!(optsObj&&optsObj.forceActiveRuns===true);
+  // #7679 finding 1 (re-gate 10-31): an active-runs retry is a REPLAY of the
+  // request the user already confirmed, so its authority is the grant the
+  // offer captured when the server refused — an immutable target/channel pair.
+  // Reading the target from the live button (which a newer Check may have
+  // retargeted) and the grant from the live binding (which that Check
+  // replaced) turned a WebUI confirmation into an Agent destruction. Both
+  // travel in opts.grant; a fresh click (no opts.grant) still reads the live
+  // state, exactly as before.
+  const boundGrant=(forceActiveRuns&&optsObj.grant&&typeof optsObj.grant==='object')?optsObj.grant:null;
+  const target=(forceActiveRuns&&boundGrant)?boundGrant.target:liveTarget;
+  if(!target) return;
   // #7679 finding 1: bind the destructive POST to the grant that actually
   // armed this button. Only a live grant (produced by the initiating
   // check/apply, carrying the target + the channel that target offered) may
   // be confirmed; a button without a grant has no authority to discard.
-  const grantSnapshot=(typeof _forceUpdateGrant!=='undefined')?_forceUpdateGrant:null;
+  const grantSnapshot=(forceActiveRuns&&boundGrant)?boundGrant:((typeof _forceUpdateGrant!=='undefined')?_forceUpdateGrant:null);
   if(!grantSnapshot||grantSnapshot.target!==target){
     // The active-runs offer is its OWN control, and the banner reset that
     // hides a stale Force button does not touch it. Refuse LOUDLY there
@@ -15321,10 +15390,13 @@ async function forceUpdate(btn,opts){
   // channel change, or an Apply retry — including while the confirm was open —
   // retires the grant, so it must never authorize the destructive POST. The
   // active-runs re-send arrives with its own confirmation already given and is
-  // held to the same rule.
+  // held to the same rule: its grant is the BOUND one, so a replacement — even
+  // one with the same target and channel — is rejected here too. A retry must
+  // also still point at the control it was confirmed for: a newer Check can
+  // retarget (or detarget) the shared button.
   const stale=(typeof _forceUpdateGrant==='undefined')||_forceUpdateGrant!==grantSnapshot
     || (typeof _isUpdateCheckStale==='function'&&_isUpdateCheckStale(grantSnapshot.epoch))
-    || target!==(btn&&btn.dataset.target);
+    || liveTarget!==target;
   if(stale){
     const msg=((typeof t==='function')?t('force_no_longer_applicable','Force update is no longer applicable — the update state changed. Please check again.'):'Force update is no longer applicable — the update state changed. Please check again.');
     const errEl=$('updateError');
@@ -15375,7 +15447,12 @@ async function forceUpdate(btn,opts){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
       btn.disabled=false;btn.textContent='Force update';btn.style.display='inline-block';
       if(res.restart_blocked&&res.force_available){
-        _renderActiveRunsForceOffer(target,res,()=>forceUpdate(btn,{forceActiveRuns:true}));
+        // #7679 finding 1 (re-gate 10-31): bind the offer to the grant that
+        // armed THIS request. The retry replays it (target + channel frozen),
+        // so a newer Check that retargets the shared button and mints a
+        // replacement grant cannot turn this confirmation into a different
+        // destruction.
+        _renderActiveRunsForceOffer(target,res,(bound)=>forceUpdate(btn,{forceActiveRuns:true,grant:bound&&bound.grant?bound.grant:null}),grantSnapshot);
       }
       return;
     }

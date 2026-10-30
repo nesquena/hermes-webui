@@ -13157,10 +13157,15 @@ async function checkUpdatesNow(channelOverride){
     if(typeof _reconcileObsoleteUpdateControls==='function'){
       _reconcileObsoleteUpdateControls(null, _recoveryGenerationAtCheck);
     }else{
+      // #7679 finding 2 (re-gate 10-31): this fallback runs only when the
+      // reconciler is unavailable, but it carried the same Agent-only target
+      // bug — it retired a newer WebUI recovery control. Ownership is
+      // resolved for BOTH supported targets here too.
+      const _isRecoveryTarget=(value)=>value==='agent'||value==='webui';
       const _forceBtn=$('btnForceUpdate');
-      if(_forceBtn&&_forceBtn.dataset.target!=='agent'){_forceBtn.disabled=true;_forceBtn.style.display='none';_forceBtn.dataset.target='';}
+      if(_forceBtn&&!_isRecoveryTarget(_forceBtn.dataset.target)){_forceBtn.disabled=true;_forceBtn.style.display='none';_forceBtn.dataset.target='';}
       const _lockBtn=$('btnClearUpdateLock');
-      if(_lockBtn&&_lockBtn.dataset.target!=='agent'){_lockBtn.disabled=true;_lockBtn.style.display='none';_lockBtn.dataset.target='';}
+      if(_lockBtn&&!_isRecoveryTarget(_lockBtn.dataset.target)){_lockBtn.disabled=true;_lockBtn.style.display='none';_lockBtn.dataset.target='';}
     }
   } finally {
     // #7679 finding 2 (round 2): the SAME ownership question applies to the

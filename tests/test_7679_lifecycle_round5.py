@@ -118,58 +118,30 @@ global.api = async (url, opts) => {
 
 
 def _locale_runtime() -> str:
-    """Evaluate the REAL locale runtime (i18n.js) instead of a copy.
+    """Evaluate the FULL shipped runtime and catalog, not a reconstruction.
 
-    The catalog is read out of the shipped ``static/i18n.js`` and the REAL
-    ``t()`` implementation is sliced verbatim, so the sandbox cannot drift
-    from the shipped contract (the reviewer pinned three such drifts in the
-    previous round: the missing-key return value, function-valued entries and
-    numbered-placeholder substitution).
+    The reviewer pinned the previous harness: it re-parsed the English block
+    line by line and silently dropped every function-valued entry it could not
+    parse, so the sandbox asserted strings the shipped runtime never emits.
+    ``static/i18n.js`` is now evaluated VERBATIM in its own context (it ends
+    with ``loadLocale()``, which needs only the stubs below) and the real
+    ``t()`` is taken from that context — the whole catalog, every locale, every
+    function-valued entry, the real missing-key behaviour.
     """
     return r"""
-const __i18nSrc = global.__I18N_SRC__;
-const __enMatch = __i18nSrc.match(/^\s*en:\s*\{/m);
-let __depth = 0, __end = -1;
-for (let i = __i18nSrc.indexOf('{', __enMatch.index); i < __i18nSrc.length; i += 1) {
-  const ch = __i18nSrc[i];
-  if (ch === '{') __depth += 1;
-  else if (ch === '}') { __depth -= 1; if (__depth === 0) { __end = i + 1; break; } }
-}
-const __enBody = __i18nSrc.slice(__i18nSrc.indexOf('{', __enMatch.index) + 1, __end - 1);
-const __enEntries = {};
-for (const line of __enBody.split('\n')) {
-  const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(['"`])((?:\\.|(?!\2).)*)\2\s*,?\s*$/);
-  if (m) __enEntries[m[1]] = m[3].replace(/\\'/g, "'").replace(/\\"/g, '"');
-}
-const __fnEntries = {};
-for (const fnMatch of __enBody.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*\(([^)]*)\)\s*=>/gm)) {
-  const arrowStart = __enBody.indexOf('=>', fnMatch.index);
-  let fnDepth = 0, fnEnd = -1;
-  for (let i = __enBody.indexOf('{', arrowStart); i < __enBody.length; i += 1) {
-    const ch = __enBody[i];
-    if (ch === '{') fnDepth += 1;
-    else if (ch === '}') { fnDepth -= 1; if (fnDepth === 0) { fnEnd = i + 1; break; } }
-  }
-  if (fnEnd > 0) {
-    try {
-      __fnEntries[fnMatch[1]] = new Function('return ' + __enBody.slice(fnMatch.index, fnEnd))();
-    } catch (e) { /* not an entry the scenarios exercise */ }
-  }
-}
-const LOCALES = { en: Object.assign(__enEntries, __fnEntries) };
-let _locale = LOCALES.en;
-const __tStart = __i18nSrc.indexOf('function t(key, ...args) {');
-let __tDepth = 0, __tEnd = -1;
-for (let i = __i18nSrc.indexOf('{', __tStart); i < __i18nSrc.length; i += 1) {
-  const ch = __i18nSrc[i];
-  if (ch === '{') __tDepth += 1;
-  else if (ch === '}') { __tDepth -= 1; if (__tDepth === 0) { __tEnd = i + 1; break; } }
-}
-const t = new Function(
-  'LOCALES',
-  '_localeRef',
-  __i18nSrc.slice(__tStart, __tEnd).replace(/\b_locale\b/g, '_localeRef.current') + '; return t;'
-)(LOCALES, { get current() { return _locale; } });
+const __vm = require('vm');
+const __i18nCtx = {
+  console,
+  localStorage: { getItem() { return null; }, setItem() {} },
+  navigator: { languages: ['en-US'], language: 'en-US' },
+  document: { documentElement: {}, querySelectorAll() { return []; } },
+};
+__vm.createContext(__i18nCtx);
+__vm.runInContext(global.__I18N_SRC__, __i18nCtx);
+const t = __i18nCtx.t;
+__vm.runInContext('globalThis.__catalogLocales = Object.keys(LOCALES);', __i18nCtx);
+const __catalogLocales = __i18nCtx.__catalogLocales;
+
 """
 
 
@@ -669,3 +641,35 @@ def test_the_obsolete_control_does_not_fire_alongside_the_newer_one():
     assert result['state']['target'] == 'agent', result
     assert len(result['posts']) == 1, result
     assert result['posts'][0]['body']['target'] == 'agent', result
+
+
+def test_the_harness_runs_the_full_shipped_catalog():
+    """The sandbox must evaluate the FULL runtime/catalog, not a reconstruction.
+
+    The previous harness re-parsed the English block line by line and swallowed
+    function-entry parse failures, so it could assert strings the shipped
+    runtime never emits.
+    """
+    body = r"""
+process.stdout.write(JSON.stringify({
+  locales: __catalogLocales,
+  active: t('update_force_active_runs', 2),
+  missing: t('__no_such_key__'),
+}));
+"""
+    result = _run_node(_build_vm(body))
+    import re as _re
+
+    shipped = [
+        m.group(1) or m.group(2) or m.group(3)
+        for m in _re.finditer(
+            r"^  (?:'([^']+)'|\"([^\"]+)\"|([A-Za-z_][A-Za-z0-9_-]*)): \{",
+            I18N,
+            _re.MULTILINE,
+        )
+    ]
+    assert result["locales"] == shipped, (
+        f"the sandbox catalog is not the shipped one: {result['locales']!r} != {shipped!r}"
+    )
+    assert result["active"] == "Update anyway (interrupts 2 runs)", result
+    assert result["missing"] == "__no_such_key__", result

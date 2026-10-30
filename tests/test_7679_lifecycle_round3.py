@@ -42,8 +42,9 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UI = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 PANELS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
-# #7679 finding 3 (re-gate 10-10): the harness evaluates the REAL t() sliced
-# out of static/i18n.js, so the file has to be available to the sandbox.
+# #7679 finding 3 (re-gate 10-31): the harness evaluates the FULL shipped
+# static/i18n.js runtime and catalog, so the file has to be available to the
+# sandbox.
 I18N = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 
 NODE = shutil.which("node")
@@ -148,7 +149,7 @@ def test_the_rejection_path_reconciles_obsolete_controls():
     )
 
 
-def test_the_rejection_reconciliation_preserves_a_newer_agent_recovery():
+def test_the_rejection_reconciliation_preserves_a_newer_recovery():
     """Finding 1 + 2 together: retire the OWNED control, not the recovery.
 
     Rendering an empty payload from the catch block would hide independently
@@ -156,14 +157,60 @@ def test_the_rejection_reconciliation_preserves_a_newer_agent_recovery():
     visible in the source.
     """
     idx = PANELS.find("async function checkUpdatesNow(")
+    assert idx > 0
     body = PANELS[idx:]
     catch_body = body[body.find("} catch(e){"):]
-    assert "dataset.target!=='agent'" in catch_body or (
-        "_reconcileObsoleteUpdateControls(data)" in catch_body
-    ), (
-        "the rejection path does not distinguish the owned WebUI control from "
-        "an independently newer Agent recovery (#7679 findings 1 and 2)"
+    assert "_reconcileObsoleteUpdateControls(null," in catch_body, (
+        "the rejection path does not hand the failing check's captured "
+        "generation to the reconciler (#7679 findings 1 and 2)"
     )
+    # The fallback that runs only when the reconciler is unavailable carried
+    # the same Agent-only target bug: it retired a newer WebUI recovery.
+    # Ownership must be resolved for BOTH supported targets (re-gate 10-31).
+    fallback = catch_body[catch_body.find("}else{"):]
+    assert "dataset.target!=='agent'" not in fallback, (
+        "the rejection fallback still retires any non-Agent control, so a "
+        "newer WebUI recovery is erased by an older rejected Check "
+        "(#7679 finding 2)"
+    )
+    assert "'webui'" in fallback, (
+        "the rejection fallback does not recognise the WebUI recovery target "
+        "(#7679 finding 2)"
+    )
+
+
+def test_the_harness_runs_the_full_shipped_catalog():
+    """The sandbox must evaluate the FULL runtime/catalog, not a reconstruction.
+
+    The previous harness re-parsed the English block line by line and swallowed
+    function-entry parse failures, so it could assert strings the shipped
+    runtime never emits.
+    """
+    body = r"""
+process.stdout.write(JSON.stringify({
+  locales: __catalogLocales,
+  active: t('update_force_active_runs', 3),
+  missing: t('__no_such_key__'),
+}));
+"""
+    out = _run_node(_build_vm(body))
+    assert out.returncode == 0, out.stderr
+    payload = json.loads(out.stdout.strip().splitlines()[-1])
+    import re as _re
+
+    shipped = [
+        m.group(1) or m.group(2) or m.group(3)
+        for m in _re.finditer(
+            r"^  (?:'([^']+)'|\"([^\"]+)\"|([A-Za-z_][A-Za-z0-9_-]*)): \{",
+            I18N,
+            _re.MULTILINE,
+        )
+    ]
+    assert payload["locales"] == shipped, (
+        f"the sandbox catalog is not the shipped one: {payload['locales']!r} != {shipped!r}"
+    )
+    assert payload["active"] == "Update anyway (interrupts 3 runs)", payload
+    assert payload["missing"] == "__no_such_key__", payload
 
 
 def test_the_banner_preserves_a_newer_recovery_grant():
@@ -244,69 +291,27 @@ def test_the_dirty_only_banner_does_not_say_available():
 
 _HARNESS_HEAD = r"""
 const assert = require('assert');
-// Minimal locale runtime: a known key returns its text, an unknown key returns
-// the key itself (production behaviour). The extra arguments are interpolation
-// values, not fallback text — finding 3 (round 3) was precisely that confusion.
-global.__enEntries = {
-  update_dirty_local_changes: 'Local changes detected',
-  update_force: 'Force update',
-  settings_up_to_date: 'Up to date',
-  settings_check_now: 'Check now',
-  settings_update_check_failed: 'Update check failed',
-  settings_update_no_git: 'No git repository',
-  update_now: 'Update Now',
-  update_updating: 'Updating\u2026',
+// #7679 finding 3 (re-gate 10-31): evaluate the FULL shipped runtime and
+// catalog instead of a reconstruction. The previous harness re-parsed the
+// English block line by line and silently dropped every function-valued entry
+// it could not parse, so it asserted strings the shipped runtime never emits.
+// static/i18n.js is now evaluated VERBATIM in its own context (it ends with
+// loadLocale(), which needs only the stubs below) and the real t() is taken
+// from that context: every locale, every function-valued entry, the real
+// missing-key behaviour.
+const __vm = require('vm');
+const __i18nCtx = {
+  console,
+  localStorage: { getItem() { return null; }, setItem() {} },
+  navigator: { languages: ['en-US'], language: 'en-US' },
+  document: { documentElement: {}, querySelectorAll() { return []; } },
 };
-// #7679 finding 3 (re-gate 10-10): the REAL t(), sliced verbatim out of
-// static/i18n.js and re-pointed at this sandbox's locale binding. The copy
-// that used to live here diverged from the shipped contract in three ways the
-// reviewer pinned: the real runtime returns the missing KEY rather than using
-// argument 0 as fallback text, INVOKES function-valued entries with the
-// forwarded arguments, and substitutes NUMBERED placeholders ({0}, {1}) by
-// index rather than sequentially replacing {name} word placeholders.
-const __i18nSrc = global.__I18N_SRC__;
-const __enMatch = __i18nSrc.match(/^\s*en:\s*\{/m);
-let __depth = 0, __end = -1;
-for (let i = __i18nSrc.indexOf('{', __enMatch.index); i < __i18nSrc.length; i += 1) {
-  const ch = __i18nSrc[i];
-  if (ch === '{') __depth += 1;
-  else if (ch === '}') { __depth -= 1; if (__depth === 0) { __end = i + 1; break; } }
-}
-const __enBody = __i18nSrc.slice(__i18nSrc.indexOf('{', __enMatch.index) + 1, __end - 1);
-const __enEntries = {};
-for (const line of __enBody.split('\n')) {
-  const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(['"`])((?:\\.|(?!\2).)*)\2\s*,?\s*$/);
-  if (m) __enEntries[m[1]] = m[3].replace(/\\'/g, "'").replace(/\\"/g, '"');
-}
-const __fnEntries = {};
-for (const fnMatch of __enBody.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*\(([^)]*)\)\s*=>/gm)) {
-  const arrowStart = __enBody.indexOf('=>', fnMatch.index);
-  let fnDepth = 0, fnEnd = -1;
-  for (let i = __enBody.indexOf('{', arrowStart); i < __enBody.length; i += 1) {
-    const ch = __enBody[i];
-    if (ch === '{') fnDepth += 1;
-    else if (ch === '}') { fnDepth -= 1; if (fnDepth === 0) { fnEnd = i + 1; break; } }
-  }
-  if (fnEnd > 0) {
-    try {
-      __fnEntries[fnMatch[1]] = new Function('return ' + __enBody.slice(fnMatch.index, fnEnd))();
-    } catch (e) { /* not an entry the scenarios exercise */ }
-  }
-}
-const LOCALES = { en: Object.assign(__enEntries, __fnEntries) };
-let _locale = LOCALES.en;
-const __tStart = __i18nSrc.indexOf('function t(key, ...args) {');
-let __tDepth = 0, __tEnd = -1;
-for (let i = __i18nSrc.indexOf('{', __tStart); i < __i18nSrc.length; i += 1) {
-  const ch = __i18nSrc[i];
-  if (ch === '{') __tDepth += 1;
-  else if (ch === '}') { __tDepth -= 1; if (__tDepth === 0) { __tEnd = i + 1; break; } }
-}
-const t = new Function(
-  'LOCALES',
-  '_localeRef',
-  __i18nSrc.slice(__tStart, __tEnd).replace(/\b_locale\b/g, '_localeRef.current') + '; return t;'
-)(LOCALES, { get current() { return _locale; } });
+__vm.createContext(__i18nCtx);
+__vm.runInContext(global.__I18N_SRC__, __i18nCtx);
+const t = __i18nCtx.t;
+__vm.runInContext('globalThis.__catalogLocales = Object.keys(LOCALES);', __i18nCtx);
+const __catalogLocales = __i18nCtx.__catalogLocales;
+
 global.__toasts = [];
 global.__posted = [];
 global.__state = {
