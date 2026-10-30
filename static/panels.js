@@ -14277,7 +14277,7 @@ function _gatewayLocalUnprovenNoteHtml(lifecycle){
   // escaped text are added after esc(), so the note stays XSS-safe.
   const raw=lifecycle&&lifecycle.start_command;
   const command=(typeof raw==='string'&&raw.trim())?raw:'hermes gateway start';
-  const codeStyle='font-family:var(--font-mono,monospace);font-size:11px;background:var(--code-bg);padding:1px 5px;border-radius:4px;white-space:pre-wrap;overflow-wrap:anywhere;-webkit-box-decoration-break:clone;box-decoration-break:clone';
+  const codeStyle='font-family:var(--font-mono,monospace);font-size:11px;background:var(--code-bg);padding:1px 5px;border-radius:4px;white-space:pre-wrap;overflow-wrap:anywhere';
   // Keep each `--flag` whole when the chip wraps: a break inside `--profile`
   // left a bare `--` at the line end, which reads as the end-of-options marker.
   // The pattern only matches `--` plus letters/hyphens in the already escaped
