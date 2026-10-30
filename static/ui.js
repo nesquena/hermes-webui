@@ -1017,6 +1017,28 @@ function _markMessageVirtualMeasurementsSettled(windowMetrics){
   _messageVirtualMeasurementCycleKey=_messageVirtualMeasurementCycleKeyFor(windowMetrics);
   _resetMessageVirtualMeasurementBurst();
 }
+// Identity-only height reuse — the #8228 re-review (2026-10-15) found the
+// fingerprint/digest reuse machinery structurally broken on tool transcripts
+// and costly on every append, and explicitly accepted restoring identity-only
+// matching:
+//   - The tool digest was sealed inside _syncMessageVirtualHeightCache, which
+//     renderMessages calls BEFORE it derives the settled S.toolCalls list. The
+//     first seal hashed settled:null; every later seal hashed the derived item
+//     (carrying assistant_msg_idx / done), so the two never matched — one
+//     mismatching row defeated the all-or-nothing reuse: on a virtualized tool
+//     transcript 0 of 189 heights were kept, and 0 via loadSession(force).
+//   - Sealing ran on every length-change sync even with virtualization off: a
+//     3.6 MB tool-output session paid ~63 ms median per appended message.
+//   - The cached _rfp inverted matching after an in-place mutation: a fresh
+//     object equal to the pre-mutation content was refused, while one equal to
+//     the current (mutated) content reused the height measured for the old
+//     content.
+// Identity-only matching is the pre-PR baseline and is safe in both directions:
+// in-session appends keep the same message objects, so their measured heights
+// carry over; loadSession(force) replaces S.messages with fresh objects, so
+// those rows are re-measured instead of reusing a possibly-stale height (the
+// conservative direction — this is what the review's [SILENT] width/font-size
+// point refers to: identity-only discards rather than risk a wrong height).
 function _messageVirtualHeightEntryMatches(previousEntry, nextEntry){
   return !!(
     previousEntry&&nextEntry&&
@@ -1031,14 +1053,26 @@ function _messageVirtualHeightPrefixEntryMatches(previousEntry, nextEntry){
   );
 }
 function _syncMessageVirtualHeightCache(visWithIdx){
-  const nextEntries=Array.isArray(visWithIdx)
-    ? visWithIdx.map(entry=>entry?{rawIdx:entry.rawIdx,m:entry.m}:entry)
-    : [];
+  const _entryCount=Array.isArray(visWithIdx)?visWithIdx.length:0;
   if(
     _messageVirtualHeightCacheLen===S.messages.length &&
     _messageVirtualHeightCacheSrc===S.messages &&
-    _messageVirtualHeightCacheEntries.length===nextEntries.length
+    _messageVirtualHeightCacheEntries.length===_entryCount
   ) return;
+  // Build the next-entry view only AFTER the early-return above: this function
+  // runs on every render / scroll window recompute, so the no-op check keeps a
+  // steady-state scroll from paying the O(messages) entry build. (nextEntries
+  // length equals visWithIdx length for both arrays and non-arrays, so the
+  // check above is equivalent to the former nextEntries.length test.)
+  // Entries carry the identity only: the #8228 re-review accepted dropping the
+  // sealed tool digest — it was computed before renderMessages derived
+  // S.toolCalls, so the settled state never matched across passes (0/189
+  // heights kept on a virtualized tool transcript) and the per-append walk
+  // cost ~63 ms on large tool sessions. Reuse is decided by message-object
+  // identity alone (see _messageVirtualHeightEntryMatches).
+  const nextEntries=Array.isArray(visWithIdx)
+    ? visWithIdx.map(entry=>entry?{rawIdx:entry.rawIdx,m:entry.m}:entry)
+    : [];
   const previousEntries=Array.isArray(_messageVirtualHeightCacheEntries)?_messageVirtualHeightCacheEntries:[];
   const previousHeights=Array.isArray(_messageVirtualHeightCache)?_messageVirtualHeightCache.slice():[];
   let nextHeights=null;
@@ -1325,10 +1359,85 @@ function _captureMessageViewportAnchor(){
   const container=$('messages');
   if(!container) return null;
   const containerRect=container.getBoundingClientRect();
-  const rows=Array.from(container.querySelectorAll('[data-msg-idx]'));
+  // The fallback scan below reads getBoundingClientRect() once per row just to
+  // find the first row whose bottom edge crosses the container's top edge. On
+  // long transcripts that per-row scan was the hot spot (#7695 measured 18,682
+  // forced synchronous layouts / 21.8s cumulative). Rendered rows stack
+  // vertically in document order, so their bottom edges are monotonic — a
+  // binary search over the RENDERED rows finds the same row in O(log n) rect
+  // reads, with no dependency on the height cache (works identically in
+  // virtualized and full-render modes). An earlier cache-accumulation attempt
+  // was inert as written: estimated heights for rows above the render window
+  // always drifted, the search landed off-anchor, and the correctness gate
+  // then always fell back — a real-browser proof now lives in
+  // tests/browser_virtual_transcript_anchor.py (review finding on #8228).
+  // The per-row scan below stays as the safety net for an empty row set or a
+  // thrown error.
+  // Opt-out: window.__vmFastAnchor=false disables the fast path.
+  try{
+    const _fast=(typeof window==='undefined')||window.__vmFastAnchor!==false;
+    if(_fast){
+      // #8228 CORE: search ONLY the rows that actually lay out. In the default
+      // compact_worklog mode every tool-call assistant message also renders a
+      // hidden `assistant-segment-worklog-source` row (display:none!important —
+      // style.css) that still carries data-msg-idx, and `assistant-segment-anchor`
+      // rows are display:none too. A hidden row's rect is all zeros, so bottom
+      // edges across the FULL [data-msg-idx] set are no longer monotonic and
+      // the binary search lands arbitrarily far from the true anchor
+      // (reproduced in real Chromium: row 539 / 88,424 px below the container
+      // top instead of row 15; mobile virtualization anchored row 127 instead
+      // of visible row 75). Excluding the two hidden classes restores
+      // monotonicity; the fallback scan below uses the SAME predicate so fast
+      // and slow can never disagree about which rows are candidates.
+      const rows=container.querySelectorAll('[data-msg-idx]:not(.assistant-segment-worklog-source):not(.assistant-segment-anchor)');
+      const rowCount=rows?rows.length:0;
+      if(rowCount){
+        // First row with bottom > containerRect.top + 1 — the exact predicate
+        // of the per-row fallback scan below, located in log2(rowCount) reads.
+        let lo=0, hi=rowCount-1, hit=-1;
+        while(lo<=hi){
+          const mid=(lo+hi)>>1;
+          const probeRect=rows[mid].getBoundingClientRect();
+          if(probeRect.bottom>containerRect.top+1){ hit=mid; hi=mid-1; }
+          else { lo=mid+1; }
+        }
+        if(hit>=0){
+          // The binary search assumes laid-out row bottoms are monotonic; the
+          // :not() query restores that for the two display:none classes. As a
+          // defense in depth, if the nearest laid-out previous row ALSO crosses
+          // the container's top edge the hit is not provably the first covering
+          // row, so fall back to the per-row scan below.
+          const predOk=(hit===0)||!(rows[hit-1].getBoundingClientRect().bottom>containerRect.top+1);
+          if(predOk){
+            const row=rows[hit];
+            const rawIdx=Number(row&&row.dataset&&row.dataset.msgIdx);
+            if(Number.isFinite(rawIdx)){
+              // Re-read the HIT row's rect: the search probed midpoints, and
+              // topOffset must describe the returned row itself.
+              const rect=row.getBoundingClientRect();
+              const sessionIdx=Number(row&&row.dataset&&row.dataset.sessionMsgIdx);
+              const spacer=container.querySelector('[data-virtual-spacer="before"]');
+              const topPadBefore=spacer?parseFloat(spacer.style.height||'0')||0:0;
+              return {
+                rawIdx,
+                sessionIdx:Number.isFinite(sessionIdx)?sessionIdx:_messageSessionIndexForRawIdx(rawIdx),
+                key:row&&row.dataset?String(row.dataset.messageAnchorKey||''):'',
+                topOffset:rect.top-containerRect.top,
+                topPadBefore,
+                scrollHeightAtCapture:container.scrollHeight,
+                inputGeneration:typeof _messageScrollInputGeneration==='number' ? _messageScrollInputGeneration : 0,
+              };
+            }
+          }
+        }
+      }
+    }
+  }catch(_e){ /* fast path failed: fall back silently to the original per-row path */ }
+  const rows=Array.from(container.querySelectorAll('[data-msg-idx]:not(.assistant-segment-worklog-source):not(.assistant-segment-anchor)'));
   for(const row of rows){
     const rawIdx=Number(row&&row.dataset&&row.dataset.msgIdx);
     if(!Number.isFinite(rawIdx)) continue;
+    if(typeof window!=='undefined'){window.__vmAnchorFallbackRowReads=(window.__vmAnchorFallbackRowReads||0)+1;}
     const rect=row.getBoundingClientRect();
     if(rect.bottom>containerRect.top+1){
       const sessionIdx=Number(row&&row.dataset&&row.dataset.sessionMsgIdx);
@@ -5360,9 +5469,9 @@ function _refreshOpenModelDropdown(){
   const sdd=$('settingsModelDropdown');
   if(sdd&&sdd.classList&&sdd.classList.contains('open')&&typeof renderModelDropdown==='function'){
     // Re-rendering the OPEN settings picker (e.g. when a late live-model fetch
-    // resolves) must not re-grab search focus on touch — same coarse-pointer rule
-    // as openSettingsModelDropdown, or the mobile keyboard pops after opening.
-    const _coarsePointer=(typeof window.matchMedia==='function')&&window.matchMedia('(pointer: coarse)').matches;
+    // resolves) must not re-grab search focus. Autofocus is off inside
+    // renderModelDropdown for every caller, so this path inherits the rule and
+    // the old per-call coarse-pointer gate is gone.
     renderModelDropdown({
       dropdownId:'settingsModelDropdown',
       selectId:'settingsModel',
@@ -5370,7 +5479,6 @@ function _refreshOpenModelDropdown(){
       closeDropdown:closeSettingsModelDropdown,
       selectModel:selectSettingsModelFromDropdown,
       scopeNoteText:t('settings_desc_model')||'Used for new conversations. Existing conversations keep their selected model.',
-      autoFocusSearch:!_coarsePointer,
     });
   }
 }
@@ -6123,7 +6231,15 @@ function _positionModelDropdown(){
     if(dd.parentNode!==document.body) document.body.appendChild(dd);
     dd.classList.add('model-dropdown--floating');
     const anchorRect=anchor.getBoundingClientRect();
-    const visualViewport=window.visualViewport;
+    // Validated read (#8531): garbage fold-transition viewport geometry must
+    // fall back to window dimensions. Inlined + self-contained for the
+    // extracted-function Node harness (no boot.js in that scope).
+    const vvRaw=window.visualViewport;
+    const visualViewport=vvRaw
+      &&Number.isFinite(Number(vvRaw.height))&&Number(vvRaw.height)>0&&Number(vvRaw.height)<=window.innerHeight*1.5
+      &&Number.isFinite(Number(vvRaw.width))&&Number(vvRaw.width)>0&&Number(vvRaw.width)<=window.innerWidth*1.5
+      ?{height:Number(vvRaw.height),width:Number(vvRaw.width),offsetTop:Math.max(0,Number(vvRaw.offsetTop)||0),offsetLeft:Math.max(0,Number(vvRaw.offsetLeft)||0)}
+      :null;
     const viewportWidth=Math.max(1,Number(visualViewport&&visualViewport.width)||window.innerWidth||1);
     const viewportHeight=Math.max(1,Number(visualViewport&&visualViewport.height)||window.innerHeight||1);
     const viewportTop=Math.max(0,Number(visualViewport&&visualViewport.offsetTop)||0);
@@ -6339,16 +6455,74 @@ function _mountSearchableModelSelect(opts={}){
   return {searchInput,selectEl,customInput,customButton};
 }
 
+// Which node owns keyboard focus when a model picker opens. ONE rule for both
+// pickers: on a device with a keyboard in play (desktop, or a tablet with a real
+// keyboard) focus the search input so the first character — and IME composition —
+// lands there; on a touch-only device focus the container instead, so no software
+// keyboard covers the list. boot.js owns the device detection (#3076); the typeof
+// guard keeps this file self-contained for the node harness and any load order.
+function _modelPickerPrefersSearchFocus(){
+  try{
+    if(typeof _isTouchOnlyDevice==='function') return !_isTouchOnlyDevice();
+  }catch(_e){}
+  return true;
+}
+function _modelPickerFocusTarget(dd){
+  if(!dd) return null;
+  if(_modelPickerPrefersSearchFocus()){
+    const si=dd.querySelector('.model-search-input');
+    if(si) return si;
+  }
+  return (typeof dd.focus==='function')?dd:null;
+}
+// Focus AFTER the dropdown is open and positioned: the phone path reparents the
+// menu onto <body>, and a reparent detaches the focused node, while a
+// display:none node ignores focus() outright. preventScroll keeps the scroll
+// position the active-row logic just set.
+function _focusModelPicker(dd){
+  const target=_modelPickerFocusTarget(dd);
+  if(!target) return;
+  try{ target.focus({preventScroll:true}); }
+  catch(_e){ try{ target.focus(); }catch(_e2){} }
+}
+
 function renderModelDropdown(){
   const opts=arguments[0]||{};
   const dd=$(opts.dropdownId||'composerModelDropdown');
   const sel=$(opts.selectId||'modelSelect');
   if(!dd||!sel) return;
+  // Focusability + announced name for the focus target. A plain <div> is not
+  // focusable, so focus() would silently do nothing and arrow-key navigation
+  // would be dead — tabindex="-1" makes it programmatically focusable without
+  // adding it to the tab order. `role="group"` + the picker's label give a screen
+  // reader something to announce when the container takes focus (touch-only
+  // devices, see _modelPickerFocusTarget); the search input announces itself.
+  if(!dd.hasAttribute('tabindex')) dd.setAttribute('tabindex','-1');
+  if(!dd.hasAttribute('role')) dd.setAttribute('role','group');
+  const _pickerLabel=opts.label||'Model picker';
+  if(!dd.hasAttribute('aria-label')) dd.setAttribute('aria-label',_pickerLabel);
+  // Capture who held focus BEFORE this render tears the children down
+  // (dd.innerHTML='' below). Without autofocus, a re-render triggered by a late
+  // live-model fetch or a preferences refresh would silently drop a user who is
+  // mid-word in the search box — the input node is replaced, so
+  // document.activeElement is already <body> by the time _filterModels runs.
+  const _focusBeforeRender=(typeof document!=='undefined')?document.activeElement:null;
+  const _searchHadFocusBefore=!!(_focusBeforeRender
+    &&_focusBeforeRender.classList
+    &&_focusBeforeRender.classList.contains('model-search-input')
+    &&typeof dd.contains==='function'&&dd.contains(_focusBeforeRender));
+  const _ddHadFocusBefore=!!(_focusBeforeRender&&_focusBeforeRender===dd);
   if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,sel.value);
-  // Whether the search input should auto-grab focus on (re-)render. Default true
-  // preserves the composer picker's behavior exactly; the settings picker passes
-  // false on coarse-pointer devices so opening it doesn't pop the mobile keyboard.
-  const _autoFocusSearch=opts.autoFocusSearch!==false;
+  // This picker is a CHOOSER, so opening it must never pop the software keyboard
+  // on a touch-only device — the list would sit behind the IME. But a desktop
+  // user (or a tablet with a real keyboard) SHOULD be able to type straight away,
+  // IME included (#8530), so the OPEN paths focus the search box there, after the
+  // dropdown is visible and positioned. That ordering is the fix for #8530: a
+  // display:none node ignores focus(), which is why the old early `_si.focus()`
+  // looked like a no-op. The decision lives in _modelPickerFocusTarget(); the
+  // renderer itself never auto-focuses, it only preserves an existing focus
+  // across re-renders (see _searchHadFocusBefore / _ddHadFocusBefore).
+  const _autoFocusSearch=false;
   const selectFromDropdown=typeof opts.selectModel==='function'
     ? opts.selectModel
     : (value,provider)=>selectModelFromDropdown(value,provider);
@@ -7048,7 +7222,18 @@ function renderModelDropdown(){
       noResult.style.textAlign='center';
       dd.appendChild(noResult);
     }
-    if(_autoFocusSearch||_hadFocus) _si.focus();
+    // Rebuilding replaced every child, so focus must be handed to the nodes that
+    // exist NOW: `_si` is the pre-render input, and focusing a detached node is a
+    // no-op in a browser. Restore the search input for a user who was typing in
+    // it (`_hadFocus`) or whose input a top-level re-render replaced
+    // (`_searchHadFocusBefore`); otherwise hand the container back so arrow-key
+    // navigation survives a background refresh.
+    const _siNow=dd.querySelector('.model-search-input');
+    if(_autoFocusSearch||_hadFocus||_searchHadFocusBefore){
+      if(_siNow){ try{ _siNow.focus(); }catch(_e){} }
+    }else if(_ddHadFocusBefore){
+      try{ dd.focus({preventScroll:true}); }catch(_e){ try{ dd.focus(); }catch(_e2){} }
+    }
   };
   _si.addEventListener('input',()=>_filterModels(_si.value));
   // Keyboard navigation through filtered model rows (#2791).
@@ -7069,8 +7254,36 @@ function renderModelDropdown(){
     if(typeof row.scrollIntoView==='function') row.scrollIntoView({block:'nearest'});
     if(typeof _nudgeModelRowBelowStickyStack==='function') _nudgeModelRowBelowStickyStack(dd,row);
   };
-  _si.addEventListener('keydown',e=>{
-    if(e.key==='Escape'){closeDropdown();return;}
+  // Keyboard contract for the picker, shared so it works whether focus sits on
+  // the search input (desktop open, or a user who tapped it) or on the dropdown
+  // container (touch-only open). Escape closes, arrows move the highlight, Enter
+  // picks it, and a printable character starts a search.
+  const _modelPickerKey=(e)=>{
+    // Innermost layer first: stop the key here so the document-level Escape handler
+    // (boot.js) does not also close the Settings panel, clear the session search or
+    // cancel a message edit behind the picker. A second Escape reaches those.
+    if(e.key==='Escape'){e.preventDefault();e.stopPropagation();closeDropdown();return;}
+    // Printable character while the CONTAINER holds focus (touch-only device with
+    // a hardware keyboard, or a container focused by assistive tech). Hand it to
+    // the search box. Without preventDefault+stopPropagation the key ALSO reaches
+    // the global j/k session switcher in sessions.js and changes the chat behind
+    // the open menu, while the filter stays empty.
+    if(e.target===dd&&typeof e.key==='string'&&e.key.length===1
+       &&!e.ctrlKey&&!e.metaKey&&!e.altKey){
+      e.preventDefault();
+      if(typeof e.stopPropagation==='function') e.stopPropagation();
+      const si=dd.querySelector('.model-search-input');
+      if(si){
+        si.focus();
+        si.value=(typeof si.value==='string'?si.value:'')+e.key;
+        // Programmatic value changes don't fire `input`; dispatch it so the real
+        // filtering listener runs (the minimal-DOM harness feeds the same event
+        // through its listener list). Fall back to the filter directly.
+        try{ si.dispatchEvent(new Event('input',{bubbles:true})); }
+        catch(_e){ try{ _filterModels(si.value); }catch(_e2){} }
+      }
+      return;
+    }
     if(e.key==='ArrowDown'||e.key==='ArrowUp'||e.key==='Enter'){
       const rows=_visibleModelRows();
       if(!rows.length){if(e.key==='Enter') e.preventDefault();return;}
@@ -7083,13 +7296,28 @@ function renderModelDropdown(){
         if(pick) pick.click();
       }
     }
-  });
+  };
+  _si.addEventListener('keydown',e=>{_modelPickerKey(e);});
+  // The container only handles keys when IT holds focus (`e.target!==dd` returns
+  // early), so events bubbling up from the search/custom inputs are never handled
+  // twice. Bind ONCE and dispatch through a slot the current render refreshes:
+  // `dd` survives every re-render (only its children are replaced), so
+  // re-binding would stack duplicate listeners, while a closure captured at first
+  // render would keep pointing at the detached search input.
+  dd._modelPickerKey=_modelPickerKey;
+  if(!dd._modelPickerKeyBound){
+    dd._modelPickerKeyBound=true;
+    dd.addEventListener('keydown',e=>{
+      if(e.target!==dd) return;
+      if(typeof dd._modelPickerKey==='function') dd._modelPickerKey(e);
+    });
+  }
   _si.addEventListener('click',e=>e.stopPropagation());
   _sc.onclick=()=>{ _si.value=''; _filterModels(''); _si.focus(); };
   _sc.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){ _si.value=''; _filterModels(''); _si.focus(); e.preventDefault(); }});
   const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;selectFromDropdown(v,null);_ci.value='';};
   _cb.onclick=_applyCustom;
-  _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){closeDropdown();}});
+  _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){e.preventDefault();e.stopPropagation();closeDropdown();}});
   _ci.addEventListener('click',e=>e.stopPropagation());
   dd.appendChild(_scopeNote);
   dd.appendChild(_searchRow);
@@ -7165,7 +7393,7 @@ async function toggleModelDropdown(){
     if(ready&&typeof ready.catch==='function') ready.catch(()=>{});
   }
   if(dd.classList.contains('open')) return;
-  renderModelDropdown();
+  renderModelDropdown({label:'Conversation model'});
   dd.classList.add('open');
   _positionModelDropdown();
   _syncModelDropdownStickyInsets(dd);
@@ -7173,17 +7401,55 @@ async function toggleModelDropdown(){
   if(activeRow&&typeof activeRow.scrollIntoView==='function') activeRow.scrollIntoView({block:'center'});
   _nudgeModelRowBelowStickyStack(dd,activeRow);
   chip.classList.add('active');
+  chip.setAttribute('aria-expanded','true');
   const mobileAction=$('composerMobileModelAction');
-  if(mobileAction) mobileAction.classList.add('active');
+  if(mobileAction){
+    mobileAction.classList.add('active');
+    mobileAction.setAttribute('aria-expanded','true');
+  }
+  // Hand keyboard focus to the target this device expects: the search box when a
+  // keyboard is in play (type immediately, IME works), the container on a
+  // touch-only device (no software keyboard over the list). Runs AFTER
+  // _positionModelDropdown because the phone path reparents the menu onto <body>
+  // and a reparent detaches the focused node.
+  _focusModelPicker(dd);
+}
+
+// Closing a picker that still holds keyboard focus hands focus back to the button
+// that opened it (the menu-button pattern). Otherwise the focused node is hidden,
+// focus falls to <body>, Tab restarts at the page edge, and the next `k` switches
+// the conversation through the global J/K binding (which ignores keys on buttons).
+// Only when focus is still inside the picker: a close caused by a click elsewhere,
+// or by another panel that already moved focus, keeps that target. Must run before
+// the phone path's reparent in closeModelDropdown, which detaches the focused node.
+function _returnModelPickerFocus(dd, anchors){
+  if(!dd||typeof document==='undefined') return;
+  const active=document.activeElement;
+  if(!active||!(active===dd||(typeof dd.contains==='function'&&dd.contains(active)))) return;
+  for(const el of anchors||[]){
+    if(!el||el.disabled||typeof el.focus!=='function') continue;
+    // A display:none anchor (the desktop chip on a phone, the phone action on a
+    // desktop) has no layout box, and focusing it would be a silent no-op.
+    if(typeof el.getClientRects==='function'&&!el.getClientRects().length) continue;
+    try{el.focus({preventScroll:true});}catch(_){continue;}
+    if(document.activeElement===el) return;
+  }
 }
 
 function closeModelDropdown(){
   const dd=$('composerModelDropdown');
   const chip=$('composerModelChip');
   const mobileAction=$('composerMobileModelAction');
+  if(dd&&dd.classList.contains('open')&&typeof _returnModelPickerFocus==='function') _returnModelPickerFocus(dd,[mobileAction,chip]);
   if(dd) dd.classList.remove('open');
-  if(chip) chip.classList.remove('active');
-  if(mobileAction) mobileAction.classList.remove('active');
+  if(chip){
+    chip.classList.remove('active');
+    chip.setAttribute('aria-expanded','false');
+  }
+  if(mobileAction){
+    mobileAction.classList.remove('active');
+    mobileAction.setAttribute('aria-expanded','false');
+  }
   // If the phone path reparented the menu onto <body>, put it back in the
   // footer and clear the fixed-position inline styles so the DOM returns to its
   // baseline shape and the next desktop open anchors correctly (#6080).
@@ -7193,6 +7459,7 @@ function closeModelDropdown(){
 function closeSettingsModelDropdown(){
   const dd=$('settingsModelDropdown');
   const chip=$('settingsModelChip');
+  if(dd&&dd.classList.contains('open')&&typeof _returnModelPickerFocus==='function') _returnModelPickerFocus(dd,[chip]);
   if(dd) dd.classList.remove('open');
   if(chip){
     chip.classList.remove('active');
@@ -7232,11 +7499,10 @@ function openSettingsModelDropdown(){
   const sel=$('settingsModel');
   const chip=$('settingsModelChip');
   if(!dd||!sel) return;
-  // Auto-focus the search on desktop only. On touch (coarse pointer) grabbing focus
-  // pops the on-screen keyboard the instant the chip is tapped — the composer picker
-  // doesn't do it either, so match that behavior on touch. Computed before render so
-  // renderModelDropdown's own initial focus is suppressed too (not just the outer one).
-  const _coarsePointer=(typeof window.matchMedia==='function')&&window.matchMedia('(pointer: coarse)').matches;
+  // Same single rule as the composer picker (see _modelPickerFocusTarget): a
+  // device with a keyboard focuses the search box after the dropdown is visible,
+  // a touch-only device focuses the container so no IME covers the list. The
+  // setTimeout keeps the async ordering upstream already needed for this panel.
   renderModelDropdown({
     dropdownId:'settingsModelDropdown',
     selectId:'settingsModel',
@@ -7244,19 +7510,14 @@ function openSettingsModelDropdown(){
     closeDropdown:closeSettingsModelDropdown,
     selectModel:selectSettingsModelFromDropdown,
     scopeNoteText:t('settings_desc_model')||'Used for new conversations. Existing conversations keep their selected model.',
-    autoFocusSearch:!_coarsePointer,
+    label:t('settings_label_model')||'Default Model',
   });
   dd.classList.add('open');
   if(chip){
     chip.classList.add('active');
     chip.setAttribute('aria-expanded','true');
   }
-  if(!_coarsePointer){
-    setTimeout(()=>{
-      const input=dd.querySelector('.model-search-input');
-      if(input) input.focus();
-    },0);
-  }
+  setTimeout(()=>{ _focusModelPicker(dd); },0);
 }
 
 function toggleSettingsModelDropdown(){
@@ -9181,6 +9442,15 @@ function _transparentEventTimestampSeconds(row, opts){
   }
   if(opts.live===true) return _activityNowSeconds();
   return null;
+}
+function _syncTransparentEventTimestampVisibility(row){
+  const header=row&&row.querySelector('.tool-card-header,.thinking-card-header');
+  if(!header) return;
+  const enabled=!(typeof window!=='undefined'&&window._transparentEventTimestamps===false);
+  // A cache hit with unchanged preferences must remain free of DOM writes.
+  if(!!header.querySelector('.transparent-event-time')!==enabled){
+    _syncTransparentEventTimestamp(row,header,{});
+  }
 }
 function _syncTransparentEventTimestamp(row, header, opts){
   if(!row||!header) return null;
@@ -13674,6 +13944,15 @@ function _showAgentHealthAlert(payload){
   if(title) title.textContent='Hermes agent is not responding';
   const state=payload&&payload.details&&payload.details.gateway_state?` State: ${payload.details.gateway_state}.`:'';
   if(details) details.textContent=`Gateway heartbeat failed.${state} Messages may not be delivered until it comes back.`;
+  const restartBtn=$('btnRestartGateway');
+  if(restartBtn){
+    // The restart drives the LOCAL gateway CLI; hide it unless the server
+    // proved WebUI controls the monitored Gateway (#8391). Fails closed.
+    const lifecycle=payload&&payload.gateway_lifecycle;
+    const managed=!!(lifecycle&&lifecycle.managed===true);
+    restartBtn.hidden=!managed;
+    restartBtn.style.display=managed?'':'none';
+  }
   banner.hidden=false;
   banner.classList.add('visible');
 }
@@ -14167,9 +14446,12 @@ function _formatUpdateApplyExceptionMessage(error){
   const message=(error&&error.message)||String(error||'unknown error');
   return _i18nUpdateText('update_failed_prefix','Update failed: ')+message;
 }
-async function applyUpdates(){
+async function applyUpdates(opts){
   if(window._updateApplyInFlight) return;
   window._updateApplyInFlight=true;
+  // #7293: true only on the re-send after the user explicitly confirmed
+  // interrupting the WebUI agent runs that made the server refuse the update.
+  const forceActiveRuns=!!(opts&&opts.forceActiveRuns===true);
   const updateText=(key,fallback)=>(typeof _i18nUpdateText==='function'?_i18nUpdateText(key,fallback):fallback);
   const btn=$('btnApplyUpdate');
   const resetApplyButton=(delayMs)=>{
@@ -14209,9 +14491,13 @@ async function applyUpdates(){
       const _applyBody={target};
       const _ch=window._updateData?.[target]?.channel;
       if(_ch==='stable'||_ch==='experimental') _applyBody.channel=_ch;
+      if(forceActiveRuns) _applyBody.force_active_runs=true;
       const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:120000});
       if(!res.ok){
         _showUpdateError(target,res);
+        if(res.restart_blocked&&res.force_available){
+          _renderActiveRunsForceOffer(target,res,()=>applyUpdates({forceActiveRuns:true}));
+        }
         resetApplyButton(0);
         return;
       }
@@ -14265,16 +14551,82 @@ function _showUpdateError(target,res){
     clearLockBtn.style.display='inline-block';
   }
 }
-async function applyClearUpdateLock(btn){
+function _activeRunsUpdateText(key,count,fallback){
+  if(typeof t==='function'){
+    const val=t(key,count);
+    if(val&&val!==key) return val;
+  }
+  return fallback;
+}
+// #7293: the server refuses a WebUI-initiated update/restart while WebUI agent
+// runs are active (restart_blocked + force_available). Offer one explicit,
+// confirmed override that re-sends the same request with
+// force_active_runs:true; the server then saves those runs as interrupted
+// before it restarts. Gateway runs that a restart can reattach are not counted
+// and keep running in the Gateway.
+function _renderActiveRunsForceOffer(target,res,resend){
+  const errEl=$('updateError');
+  if(!errEl||typeof resend!=='function') return;
+  const prior=$('btnForceUpdateActiveRuns');
+  if(prior&&prior.parentNode) prior.parentNode.remove();
+  // Never show two red force buttons: while this offer is up it is the one
+  // way forward (on the conflict path its re-send also carries the hard reset).
+  const legacyForceBtn=$('btnForceUpdate');
+  if(legacyForceBtn) legacyForceBtn.style.display='none';
+  const rawCount=Number(res&&res.active_runs)||Number(res&&res.active_streams)||1;
+  const count=Math.max(1,Math.floor(rawCount));
+  const plural=count===1?'':'s';
+  const label=_activeRunsUpdateText('update_force_active_runs',count,'Update anyway (interrupts '+count+' run'+plural+')');
+  const actions=document.createElement('div');
+  actions.style.marginTop='6px';
+  const btn=document.createElement('button');
+  btn.type='button';
+  btn.id='btnForceUpdateActiveRuns';
+  btn.className='update-btn';
+  btn.style.background='var(--error,#e05)';
+  btn.style.color='#fff';
+  btn.style.borderColor='var(--error,#e05)';
+  btn.dataset.target=target;
+  btn.textContent=label;
+  btn.onclick=async()=>{
+    if(btn.disabled) return;
+    const confirmed=await showConfirmDialog({
+      title:_activeRunsUpdateText('update_force_active_runs_title',count,'Interrupt active runs?'),
+      message:_activeRunsUpdateText(
+        'update_force_active_runs_message',
+        count,
+        count+' WebUI agent run'+(count===1?' is':'s are')+' still working. Updating now restarts the server and stops '+(count===1?'it':'them')+'; '+(count===1?'it is':'each one is')+' saved as interrupted. Wait for '+(count===1?'it':'them')+' to finish if you can.'
+      ),
+      confirmLabel:_activeRunsUpdateText('update_force_active_runs_confirm',count,'Interrupt and update'),
+      danger:true,
+      focusCancel:true,
+    });
+    if(!confirmed) return;
+    btn.disabled=true;
+    btn.textContent=_i18nUpdateText('update_updating','Updating\u2026');
+    try{
+      await resend();
+    }finally{
+      if(btn.isConnected){btn.disabled=false;btn.textContent=label;}
+    }
+  };
+  actions.appendChild(btn);
+  errEl.appendChild(actions);
+  errEl.style.display='block';
+}
+async function applyClearUpdateLock(btn,opts){
   if(window._clearLockInFlight) return;
   const target=btn.dataset.target;
   if(!target) return;
+  const forceActiveRuns=!!(opts&&opts.forceActiveRuns===true);  // #7293
   window._clearLockInFlight=true;
   btn.disabled=true;
   const originalLabel=btn.textContent;
   btn.textContent='Checking lock…';
   try{
-    const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify({target}),timeoutMs:60000});
+    const _clearBody={target};
+    if(forceActiveRuns) _clearBody.force_active_runs=true;
+    const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify(_clearBody),timeoutMs:60000});
     if(res.ok){
       sessionStorage.removeItem('hermes-update-checked');
       sessionStorage.removeItem('hermes-update-dismissed');
@@ -14292,6 +14644,9 @@ async function applyClearUpdateLock(btn){
       const errEl=$('updateError');
       if(errEl){errEl.textContent=msg;errEl.style.display='block';}
       else showToast(msg);
+      if(res.restart_blocked&&res.force_available){
+        _renderActiveRunsForceOffer(target,res,()=>applyClearUpdateLock(btn,{forceActiveRuns:true}));
+      }
     }
   }catch(e){
     const msg='Lock-check request failed: '+((e&&e.message)||String(e));
@@ -14400,26 +14755,38 @@ async function _readHealthServerIdentity() {
     return null;
   }
 }
-async function forceUpdate(btn){
+async function forceUpdate(btn,opts){
   const target=btn&&btn.dataset.target;
   if(!target) return;
-  const confirmed=await showConfirmDialog({
-    title:'Force update '+target+'?',
-    message:'This will discard all local changes and delete untracked files in the '+target+' repo, then reset to the latest remote version. This cannot be undone.',
-    confirmLabel:'Force update',
-    danger:true,
-    focusCancel:true,
-  });
-  if(!confirmed) return;
+  // #7293: the active-runs override re-sends this request after its own
+  // confirmation; the discard-local-changes confirmation was already given.
+  const forceActiveRuns=!!(opts&&opts.forceActiveRuns===true);
+  if(!forceActiveRuns){
+    const confirmed=await showConfirmDialog({
+      title:'Force update '+target+'?',
+      message:'This will discard all local changes and delete untracked files in the '+target+' repo, then reset to the latest remote version. This cannot be undone.',
+      confirmLabel:'Force update',
+      danger:true,
+      focusCancel:true,
+    });
+    if(!confirmed) return;
+  }
   btn.disabled=true;btn.textContent='Force updating\u2026';
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';}
   try{
     const baselineServerIdentity = await _readHealthServerIdentity();
-    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify((()=>{const b={target};const _ch=window._updateData?.[target]?.channel;if(_ch==='stable'||_ch==='experimental')b.channel=_ch;return b;})()),timeoutMs:120000});
+    const _forceBody={target};
+    const _ch=window._updateData?.[target]?.channel;
+    if(_ch==='stable'||_ch==='experimental') _forceBody.channel=_ch;
+    if(forceActiveRuns) _forceBody.force_active_runs=true;
+    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify(_forceBody),timeoutMs:120000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
-      btn.disabled=false;btn.textContent='Force update';
+      btn.disabled=false;btn.textContent='Force update';btn.style.display='inline-block';
+      if(res.restart_blocked&&res.force_available){
+        _renderActiveRunsForceOffer(target,res,()=>forceUpdate(btn,{forceActiveRuns:true}));
+      }
       return;
     }
     showToast('Force update applied — restarting…');
@@ -17338,33 +17705,78 @@ function _anchorSceneWorklogGroup(blocks, opts){
   if(opts&&opts.turnStartedAt!==undefined&&opts.turnStartedAt!==null) group.setAttribute('data-turn-started-at',String(opts.turnStartedAt));
   return group;
 }
+// Tool DOM is expensive and usually immutable while prose streams. Keep the
+// signature on the node, not in a global cache: removing a turn drops its cache,
+// and HTML-restored nodes take the normal build/rehydration path once. Include
+// the full row so in-place result/argument corrections cannot reuse stale HTML.
+function _anchorSceneToolRenderSignature(row, opts){
+  if(!row||row.role!=='tool') return null;
+  return JSON.stringify([row,opts||{},document.documentElement.lang,
+    typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling()]);
+}
+function _anchorSceneDataRowKey(row, streamId){
+  const id=String(row.row_id||row.local_id||'').trim();
+  if(!id) return '';
+  return `${String(streamId||'').trim()}\u0000${id}\u0000${String(row.role||'activity').trim()}\u0000${String(row.source_event_type||'').trim()}`;
+}
+function _anchorScenePlaceChildren(parent, nodes){
+  let next=null;
+  for(let i=nodes.length-1;i>=0;i--){
+    const node=nodes[i];
+    if(node.parentNode!==parent||node.nextSibling!==next) parent.insertBefore(node,next);
+    next=node;
+  }
+  const keep=new Set(nodes);
+  Array.from(parent.children).forEach(node=>{if(!keep.has(node)) node.remove();});
+}
 function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   const list=_toolWorklogListEl(group);
   if(!group||!list) return false;
-  list.innerHTML='';
-  let wrote=false;
+  const existing=new Map();
+  list.querySelectorAll('[data-anchor-scene-row="1"]').forEach(node=>{
+    const key=_transparentLiveRowKey(node,'');
+    if(key) existing.set(key,node);
+  });
+  const children=[];
   let currentTools=null;
+  let toolNodes=[];
+  const flushTools=()=>{
+    if(currentTools){
+      const mounted=Array.from(currentTools.querySelectorAll('[data-anchor-row-role="tool"]'));
+      const unchanged=mounted.length===toolNodes.length&&mounted.every((node,i)=>node===toolNodes[i]);
+      if(!unchanged) _anchorScenePlaceChildren(currentTools,toolNodes);
+      currentTools._anchorSceneToolsStable=unchanged;
+    }
+    currentTools=null;
+    toolNodes=[];
+  };
   for(const row of rows){
-    const node=_anchorSceneNodeForRow(row,opts);
+    const key=_anchorSceneDataRowKey(row,'');
+    const previous=key?existing.get(key):null;
+    const signature=_anchorSceneToolRenderSignature(row,opts);
+    const node=signature&&previous&&previous._anchorToolRenderSignature===signature
+      ? previous : _anchorSceneNodeForRow(row,opts);
     if(!node) continue;
+    if(signature) node._anchorToolRenderSignature=signature;
     if(row.role==='tool'){
       if(!currentTools){
-        currentTools=document.createElement('div');
+        const parent=previous&&previous.closest('.wl-step-tools[data-worklog-tools="1"]');
+        currentTools=parent&&parent.parentElement===list&&!children.includes(parent)
+          ? parent : document.createElement('div');
         currentTools.className='wl-step-tools tool-worklog-tools';
         currentTools.setAttribute('data-worklog-tools','1');
-        list.appendChild(currentTools);
+        children.push(currentTools);
       }
-      currentTools.appendChild(node);
+      toolNodes.push(node);
     }else{
-      currentTools=null;
-      list.appendChild(node);
+      flushTools();
+      children.push(node);
     }
-    wrote=true;
   }
-  if(wrote){
-    _syncToolCallGroupSummary(group);
-  }
-  return wrote;
+  flushTools();
+  _anchorScenePlaceChildren(list,children);
+  if(children.length) _syncToolCallGroupSummary(group);
+  return !!children.length;
 }
 function _liveProcessedWorklogAnchorScore(group, index){
   if(!group) return -1;
@@ -17604,8 +18016,22 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
     : null;
   const scrollSnapshot=_captureMessageScrollSnapshot();
   const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
-  blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
-  blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"],.interim-collapse-toggle').forEach(el=>el.remove());
+  const activityKey=`live:${streamId||S.activeStreamId||'anchor'}`;
+  // The retained group must still be LIVE: an interim_assistant boundary
+  // finalizes the group in place (closeCurrentLiveActivityGroup ->
+  // _finalizeLiveActivityDisclosureGroup strips data-live-tool-call-group and
+  // collapses it) while leaving data-anchor-scene-owner="1". Reusing that
+  // finalized group kept re-rendering into a collapsed, static frame — tools
+  // and later live prose after the boundary never appeared while the turn was
+  // still busy. Requiring the live flag makes the sweep remove the finalized
+  // group so _anchorSceneWorklogGroup builds a fresh live one (#7495 re-gate).
+  const retainedGroup=blocks.querySelector(`.tool-worklog-group[data-anchor-scene-owner="1"][data-live-tool-call-group="1"][data-tool-worklog-key="${CSS.escape(activityKey)}"]`);
+  blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>{
+    if(el!==retainedGroup&&!(retainedGroup&&retainedGroup.contains(el))) el.remove();
+  });
+  blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"],.interim-collapse-toggle').forEach(el=>{
+    if(el!==retainedGroup&&!(retainedGroup&&retainedGroup.contains(el))) el.remove();
+  });
   blocks.querySelectorAll('[data-live-assistant="1"]').forEach(el=>{
     el.classList.add('assistant-segment-worklog-source');
     el.setAttribute('aria-hidden','true');
@@ -17697,12 +18123,24 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   const renderedRows=[];
   for(const row of rows){
     const rowEventTs=typeof _anchorSceneRowTimestampSeconds==='function'?_anchorSceneRowTimestampSeconds(row):null;
-    const node=_anchorSceneTransparentNodeForRow(row,{
+    const rowOpts={
       live:true,
       settled:false,
       streamId:streamId||S.activeStreamId||'',
       sessionId:S.session&&S.session.session_id,
-    });
+    };
+    const signature=_anchorSceneToolRenderSignature(row,rowOpts);
+    const dataKey=_anchorSceneDataRowKey(row,activeStreamId);
+    const cached=dataKey?preserveByKey.get(dataKey):null;
+    if(signature&&cached&&cached._anchorToolRenderSignature===signature){
+      // Timestamp visibility is presentation state, independent of tool content.
+      // Reconcile it in place so toggles preserve disclosure and text selection.
+      _syncTransparentEventTimestampVisibility(cached);
+      preserveByKey.delete(dataKey);
+      renderedRows.push(cached);
+      continue;
+    }
+    const node=_anchorSceneTransparentNodeForRow(row,rowOpts);
     if(!node) continue;
     const key = _transparentLiveRowKey(node, activeStreamId);
     const existing = key ? preserveByKey.get(key) : null;
@@ -17713,13 +18151,18 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
       : node;
     if(existing) preserveByKey.delete(key);
     if(!renderedNode) continue;
+    if(signature) renderedNode._anchorToolRenderSignature=signature;
     renderedRows.push(renderedNode);
   }
-  const transparentLiveRowAlreadyPositioned=(node, expectedNextSibling)=>!!(
-    node &&
-    node.parentElement===blocks &&
-    node.nextSibling===expectedNextSibling
-  );
+  const transparentLiveRowAlreadyPositioned=(node, expectedNextSibling)=>{
+    if(!node||node.parentElement!==blocks) return false;
+    let next=node.nextSibling;
+    // Streaming may insert a hidden legacy prose anchor between visible rows.
+    // It owns stream metadata, not scene order; moving an unchanged tool past
+    // it needlessly clears selection in Safari/Chromium.
+    while(next&&next.nodeType===1&&next.hidden&&next.getAttribute('data-live-assistant')==='1') next=next.nextSibling;
+    return next===expectedNextSibling;
+  };
   let expectedNextSibling=(liveFooter&&liveFooter.parentElement===blocks) ? liveFooter : null;
   for(let i=renderedRows.length-1;i>=0;i--){
     const renderedNode=renderedRows[i];
@@ -19916,7 +20359,17 @@ window._bindHermesExtensionMessageActions=function(){
 function _addBoundedHash(add, value, depth){
   if(value==null){ add('null'); return; }
   const t=typeof value;
-  if(t==='string'){ add(value.length); add(value); return; }
+  if(t==='string'){
+    add(value.length);
+    // #8228 re-gate (2026-10-20): hash the WHOLE string. An earlier round
+    // sampled only length + head/tail for long `data:` payloads, which made
+    // equal-length strings with an unchanged head/tail and a different MIDDLE
+    // collide — e.g. rendered `data:text/plain,...` message text and tool
+    // payloads, where _sessionHtmlCache then serves stale HTML. The unrendered
+    // native image parts are excluded where they belong, on the message
+    // projection in _addMessageRenderHash, so this shared helper stays exact.
+    add(value); return;
+  }
   if(t==='number'||t==='boolean'){ add(t); add(value); return; }
   if(t==='object'){ _hashObjectInto(add, value, (depth||0)+1); return; }
   add(t); add(String(value));
@@ -19948,6 +20401,40 @@ function _hashObjectInto(add, value, depth){
   for(let i=0;i<keys.length;i++){ add(keys[i]); add(i); _addBoundedHash(add, value[keys[i]], depth); }
 }
 
+// One definition for every render-affecting message property, feeding the
+// session-HTML cache signature (_messageRenderCacheSignature).
+//
+// The former implementation hand-listed fields, and the #8228 review found the
+// list had drifted: `reasoning_content` (the field the row renderer reads
+// FIRST — see _assistantReasoningPayloadText) was never hashed, `_statusCard`
+// stringified to "[object Object]", `_anchor_activity_scene` and the
+// partial-tool argument payloads were missing, and joined tool results were
+// invisible entirely (they live on other messages). A hand list can always
+// drift again the moment the row renderer learns a new field, so this now
+// deep-hashes the ENTIRE message object: every key, array element and nested
+// object, insertion-ordered, through the same bounded, cycle-safe walk
+// (_hashObjectInto) the signature already used for structured payloads.
+// Over-coverage only costs a redundant re-render; under-coverage serves stale
+// HTML from the session cache, so the conservative direction is deliberate.
+function _addMessageRenderHash(add, m){
+  if(!m||typeof m!=='object'){ add('missing'); return; }
+  // #8228 re-gate (2026-10-20): exclude ONLY the native image parts msgContent()
+  // never draws (`image` / `image_url` / `input_image`) — a pasted screenshot
+  // rides on the user message as an `image_url` data URI (api/helpers.py:1593
+  // exempts it from redaction), so hashing it whole cost ~13x per render on a
+  // vision-heavy session (35 ms -> 450 ms on 320 messages with 8 x 1.44 MB
+  // images). The exclusion is a message PROJECTION: a shallow copy with a
+  // filtered content array, never a mutation of the caller's object. Every
+  // other field — including rendered text that happens to start with `data:` —
+  // is hashed in full, so a middle-only edit still changes the signature.
+  const unrendered=p=>!!p&&(p.type==='image'||p.type==='image_url'||p.type==='input_image');
+  if(Array.isArray(m.content)&&m.content.some(unrendered)){
+    _addBoundedHash(add, Object.assign({}, m, {content:m.content.filter(p=>!unrendered(p))}));
+    return;
+  }
+  _addBoundedHash(add, m);
+}
+
 function _messageRenderCacheSignature(){
   let hash=2166136261;
   function add(value){
@@ -19961,32 +20448,17 @@ function _messageRenderCacheSignature(){
   }
   const messages=Array.isArray(S.messages)?S.messages:[];
   add(messages.length);
+  /* The per-message render surface is hashed by _addMessageRenderHash, which
+     deep-hashes the ENTIRE message object — msgContent(m), m.tool_calls,
+     m._partial_tool_calls, reasoning (including reasoning_content), the
+     activity scene, status cards, attachments and content-array parts are all
+     covered, with no hand-maintained field list that can drift (review
+     finding on #8228). One hash per message: the earlier explicit
+     msgContent/tool_calls extractions re-hashed content the object walk
+     already covers, doubling the cost on large tool sessions (371 ms vs
+     135 ms measured on a 3.6 MB transcript — #8228 re-review). */
   for(const m of messages){
-    if(!m||typeof m!=='object'){ add('missing'); continue; }
-    add(m.role);add(m.timestamp);add(m._ts);add(m._error);add(m._statusCard);
-    add(msgContent(m));
-    if(Array.isArray(m.content)){
-      add('content-array');
-      m.content.forEach(part=>{
-        if(!part||typeof part!=='object'){ add(part); return; }
-        add(part.type);add(part.id);add(part.name);add(part.text);add(part.content);
-      });
-    }
-    if(Array.isArray(m.tool_calls)){
-      add('message-tool-calls');add(m.tool_calls.length);
-      m.tool_calls.forEach(tc=>{
-        add(tc&&tc.id);add(tc&&tc.name);add(tc&&tc.type);
-        add(tc&&tc.function&&tc.function.name);
-        // function.arguments is already a string — streamed in full, no copy.
-        _addBoundedHash(add, tc&&tc.function&&tc.function.arguments);
-      });
-    }
-    if(Array.isArray(m._partial_tool_calls)){
-      add('partial-tool-calls');add(m._partial_tool_calls.length);
-      m._partial_tool_calls.forEach(tc=>{add(tc&&tc.id);add(tc&&tc.name);add(tc&&tc.snippet);});
-    }
-    if(_messageHasReasoningPayload(m)) add(m.reasoning||m.thinking||m._reasoning||'reasoning');
-    if(Array.isArray(m.attachments)) m.attachments.forEach(a=>_addBoundedHash(add, a));
+    _addMessageRenderHash(add, m);
   }
   const toolCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
   add('settled-tool-calls');add(toolCalls.length);
@@ -20117,6 +20589,7 @@ function _assistantToolAnchorIdxForMessage(messages, rawIdx){
   if(_assistantMessageHasVisibleContent(current)) return rawIdx;
   if(_assistantReasoningPayloadText(current)) return rawIdx;
   for(let idx=rawIdx-1;idx>=0;idx--){
+    if(list[idx]&&list[idx].role==='user') break;
     if(_assistantMessageHasVisibleContent(list[idx])) return idx;
   }
   return rawIdx;
@@ -23498,6 +23971,9 @@ function _toolGroupIcon(rows){
 }
 function _syncToolRowsContainer(tools, isLiveWorklog){
   if(!tools) return;
+  // Scene reconciliation already proved these exact card nodes unchanged.
+  // Do not detach them just to recreate an identical disclosure wrapper.
+  if(tools._anchorSceneToolsStable) return;
   const existingGroup=tools.querySelector(':scope > .tool-worklog-tool-group,:scope > .tool-group[data-tool-worklog-tool-group="1"]');
   const wasOpen=!!(existingGroup&&existingGroup.classList&&existingGroup.classList.contains('open'));
   const rows=_directWorklogToolRows(tools);
@@ -25853,7 +26329,7 @@ if(!S._expandedDirs) S._expandedDirs=new Set();
 // Cache of fetched directory contents: path -> entries[]
 if(!S._dirCache) S._dirCache={};
 
-function renderFileTree(){
+function renderFileTree(opts={}){
   const box=$('fileTree');
   // #5657: capture the scroll position before wiping the container. box.innerHTML=''
   // detaches every row, collapsing scrollHeight so the browser clamps scrollTop to 0;
@@ -25865,7 +26341,24 @@ function renderFileTree(){
   // BELOW the clicked disclosure, so the clicked row keeps its offset from the top (no
   // getBoundingClientRect anchor delta needed — that's only for prepend-above cases).
   const prevScrollTop=box?box.scrollTop:0;
+  // Same class of loss as the scroll position above, one layer up: innerHTML=''
+  // detaches every row, so the roving tab stop would be rebuilt onto the FIRST
+  // row and the keyboard user thrown back to the top of the tree by the very
+  // act of expanding a directory. Remembered by entry path (the index shifts
+  // when rows appear), restored after the render tail. A root load passes
+  // opts.scope naming the tree, and a root refresh its refill object as
+  // opts.partial on its first render and opts.completesRefill on the second
+  // (see loadDir).
+  const prevTreeFocus=(typeof a11yTreeRememberFocus==='function')
+    ? a11yTreeRememberFocus(box, {completesRefill: (opts&&opts.completesRefill)||null}) : null;
   box.innerHTML='';
+  // No rows will be rendered: the container is not a tree any more, and focus
+  // that was on a row goes to the Files tab instead of dropping to <body>.
+  const treeEmptied=()=>{
+    if(typeof a11yTreeReset==='function') a11yTreeReset(box,{
+      hadFocus: !!(prevTreeFocus&&prevTreeFocus.hadFocus), focusTo: $('workspaceFilesTab'),
+    });
+  };
   // Cache current dir entries
   S._dirCache[S.currentDir||'.']=S.entries;
   // Show empty-state when no workspace is set or the directory is empty (#703)
@@ -25874,6 +26367,8 @@ function renderFileTree(){
   if(!hasWorkspace){
     _syncWorkspaceBirthtimeSupportScope('');
     if(emptyEl){emptyEl.textContent=t('workspace_empty_no_path');emptyEl.style.display='flex';}
+    // Before hiding the box: a hidden element may already have lost focus.
+    treeEmptied();
     box.style.display='none';
     return;
   }
@@ -25883,11 +26378,26 @@ function renderFileTree(){
   const visibleEntries=_workspaceEntriesForRender(S.entries);
   if(!visibleEntries.length){
     if(emptyEl){emptyEl.textContent=t('workspace_empty_dir');emptyEl.style.display='flex';}
+    treeEmptied();
     return;
   }
   _renderTreeItems(box, visibleEntries, 0);
+  // The container must be a TREE, not a set of loose divs: without role=tree a
+  // screen reader neither announces it nor offers its own navigation, and
+  // without a name the user does not know what they entered. Called after EVERY
+  // render because innerHTML='' above destroys the rows; the helper is
+  // idempotent and binds its keyboard listener only once.
+  if(typeof a11yTree==='function'){
+    a11yTree(box, {label: t('workspace_tree_aria')});
+  }
   // #5657: restore the pre-wipe scroll position now that the tree is tall again.
   if(box) box.scrollTop=prevScrollTop;
+  // Restore the keyboard position last, after every row carries its contract.
+  // Falls back to a neighbouring or the first row when the remembered entry is
+  // gone, so the tree always keeps exactly one tab stop. A partial render (a
+  // root refresh before the expanded folders' listings are back) carries the
+  // missed position to the render that completes it.
+  if(typeof a11yTreeRestoreFocus==='function') a11yTreeRestoreFocus(box, prevTreeFocus, {carry: (opts&&opts.partial)||null, scope: (opts&&opts.scope)||null});
 }
 
 let _wsActiveDragPath=null;
@@ -26044,6 +26554,28 @@ function elideMiddle(str, maxLen = 60) {
   return str.slice(0, half) + '...' + str.slice(str.length - half);
 }
 
+// Delete buttons stay for pointer users but leave the tab order: a tree has a
+// single tab stop, and a hidden "×" stop on every row would defeat it. The
+// Delete key on the focused row runs the same button instead.
+function _treeDeleteButtonA11y(row, del, name){
+  del.type='button';
+  del.tabIndex=-1;
+  del.setAttribute('aria-label', t('delete_entry_aria', name));
+  row.addEventListener('keydown',(e)=>{
+    if(e.key!=='Delete'||e.target!==row||e.altKey||e.ctrlKey||e.metaKey||e.shiftKey) return;
+    e.preventDefault();
+    del.click();
+  });
+}
+
+// Point the renamed row at its new path before the re-render, so the keyboard
+// position follows the entry instead of falling to a neighbour.
+function _treeRowRenamed(oldPath, newName){
+  const box=$('fileTree');
+  const row=box&&box.querySelector(`[data-a11y-tree-path="${CSS.escape(oldPath)}"]`);
+  if(row) row.dataset.a11yTreePath=_workspaceJoinTargetPath(_workspaceParentDir(oldPath), newName);
+}
+
 function _renderTreeItems(container, entries, depth){
   for(const item of entries){
     const el=document.createElement('div');el.className='file-item';
@@ -26078,6 +26610,9 @@ function _renderTreeItems(container, entries, depth){
       arrow.className='file-tree-toggle';
       const isExpanded=S._expandedDirs.has(item.path);
       arrow.textContent=isExpanded?'\u25BE':'\u25B8';
+      // The glyph says nothing to a screen reader; the row's aria-expanded
+      // carries the state.
+      arrow.setAttribute('aria-hidden','true');
       el.appendChild(arrow);
     }else{
       // Keep file icons aligned with sibling directories that occupy this
@@ -26091,6 +26626,8 @@ function _renderTreeItems(container, entries, depth){
     // Icon
     const iconEl=document.createElement('span');
     iconEl.className='file-icon';
+    // The entry kind is in the row's accessible name (".cache folder").
+    iconEl.setAttribute('aria-hidden','true');
     iconEl.innerHTML = isExternalLink
       ? li('external-link', 14)
       : isDirLike
@@ -26161,6 +26698,7 @@ function _renderTreeItems(container, entries, depth){
                 session_id:S.session.session_id,path:item.path,new_name:newName
               })});
               showToast(t('renamed_to')+newName);
+              _treeRowRenamed(item.path,newName);
               // Update expanded dirs cache key if renaming a directory
               if(isDirLike&&S._expandedDirs){
                 S._expandedDirs.delete(item.path);
@@ -26193,10 +26731,12 @@ function _renderTreeItems(container, entries, depth){
     el.appendChild(nameEl);
 
     // Size -- for real files and symlinks that resolve to files
+    let sizeText='';
     if(isFileLike&&item.size){
+      sizeText=`${(item.size/1024).toFixed(1)}k`;
       const sizeEl=document.createElement('span');
       sizeEl.className='file-size';
-      sizeEl.textContent=`${(item.size/1024).toFixed(1)}k`;
+      sizeEl.textContent=sizeText;
       el.appendChild(sizeEl);
     }
 
@@ -26205,12 +26745,14 @@ function _renderTreeItems(container, entries, depth){
       if(!isReadOnlyEscape){
         const del=document.createElement('button');
         del.className='file-del-btn';del.title=t('delete_title');del.textContent='\u00d7';
+        _treeDeleteButtonA11y(el,del,item.name);
         del.onclick=async(e)=>{e.stopPropagation();await deleteWorkspaceFile(item.path,item.name);};
         el.appendChild(del);
       }
     }else if(isDirLike&& !isReadOnlyEscape){
       const del=document.createElement('button');
       del.className='file-del-btn';del.title=t('delete_title');del.textContent='\u00d7';
+      _treeDeleteButtonA11y(el,del,item.name);
       del.onclick=async(e)=>{e.stopPropagation();await deleteWorkspaceDir(item.path,item.name);};
       el.appendChild(del);
     }
@@ -26266,6 +26808,34 @@ function _renderTreeItems(container, entries, depth){
       el.onclick=async()=>openFile(item.path);
     }
 
+    // Tree contract: only here is everything about the row known - whether it
+    // is a directory, whether it is expanded, and which level it is on.
+    if(typeof a11yTreeRow==='function'){
+      // The icon is aria-hidden, so the kind carries what it showed,
+      // including the link icon of an internal symlink.
+      const kind=isExternalLink
+        ? t('tree_external_link_aria')
+        : isLk ? t('tree_symlink_aria')
+        : isDirLike ? t('tree_folder_aria') : t('tree_file_aria');
+      // The single tab stop is placed by a11yTreeRestoreFocus() after the render.
+      a11yTreeRow(el, {
+        level: depth+1,
+        expandable: isDirLike,
+        expanded: isDirLike && S._expandedDirs.has(item.path),
+        // Name first, then the kind and the size column's text, so a screen
+        // reader says what matters most first (word order is up to each
+        // locale).
+        label: t('tree_row_aria', item.name, kind, sizeText),
+        // What the name's tooltip tells pointer users (symlink target, read
+        // only), with the full target rather than the elided one. The rename
+        // hint is mouse-only.
+        description: isLk&&item.target&&!isExternalLink
+          ? t('symlink_link_to').replace('{target}', () => item.target)
+          : (nameEl.title&&nameEl.title!==t('double_click_rename') ? nameEl.title : ''),
+        path: item.path,
+      });
+    }
+
     container.appendChild(el);
 
     // Render children if directory is expanded
@@ -26278,6 +26848,10 @@ function _renderTreeItems(container, entries, depth){
         empty.className='file-item file-empty';
         empty.style.paddingLeft=(8+(depth+1)*16)+'px';
         empty.textContent=t('empty_dir');
+        // A tree may only contain tree items; announce the placeholder as an
+        // inert one so arrowing into an empty folder says so.
+        // Its path (the folder's, plus "/") lets focus survive a re-render.
+        if(typeof a11yTreeRow==='function') a11yTreeRow(empty,{level:depth+2,disabled:true,path:item.path+'/'});
         container.appendChild(empty);
       }
     }
@@ -26466,6 +27040,7 @@ async function _inlineRenameFileItem(item){
   try{
     await api('/api/file/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path,new_name:newName})});
     showToast(t('renamed_to')+newName);
+    _treeRowRenamed(item.path,newName);
     // Update expanded dirs cache key if renaming a directory
     if(isDirLike&&S._expandedDirs){
       S._expandedDirs.delete(item.path);
@@ -26740,4 +27315,11 @@ async function uploadPendingFiles(options={}){
   const extracted=names.filter(n=>n.extracted);
   if(extracted.length)showToast(t('archive_extracted',extracted.reduce((s,n)=>s+n.extracted,0),extracted.length));
   return names;
+}
+
+// Screen reader mode is a general opt-in preference. This setter owns the
+// runtime flag and pushes it to every consumer (currently the terminal).
+function setScreenReaderMode(enabled){
+  window._screenReaderMode=!!enabled;
+  if(typeof applyTerminalScreenReaderMode==='function') applyTerminalScreenReaderMode();
 }
