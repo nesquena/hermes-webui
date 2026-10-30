@@ -2729,6 +2729,30 @@
   .drop-hint svg{opacity:.85;}
   .attach-tray{display:none;flex-wrap:wrap;gap:6px;padding:10px 14px 0;}
   .attach-tray.has-files{display:flex;}
+  /* hwc: oc-attach-tray-scroll — the tray scrolls, the textarea and footer stay put. */
+  .composer-box{
+    max-height:min(70dvh, calc(100dvh - 52px - var(--app-titlebar-safe-top, 0px) - var(--keyboard-bottom-inset, 0px) - 24px));
+    min-height:0;
+  }
+  .composer-box > textarea#msg,
+  .composer-box > .composer-footer{flex-shrink:0;}
+  .attach-tray.has-files{
+    flex:0 1 auto;
+    min-height:0;
+    max-width:100%;
+    max-height:max(64px, min(32dvh, 280px, calc(100dvh - 52px - var(--app-titlebar-safe-top, 0px) - var(--keyboard-bottom-inset, 0px) - 24px - 200px - 72px)));
+    overflow-x:hidden;
+    overflow-y:auto;
+    overscroll-behavior:contain;
+    -webkit-overflow-scrolling:touch;
+  }
+  @media (max-width: 639px), (max-height: 599px) and (pointer: coarse){
+    .attach-tray.has-files{
+      max-height:max(64px, min(32dvh, 280px, calc(100dvh - 52px - var(--app-titlebar-safe-top, 0px) - var(--keyboard-bottom-inset, 0px) - 24px)));
+    }
+    .composer-box:has(.attach-tray.has-files) > textarea#msg{max-height:88px;}
+    .attach-chip button{min-width:44px;min-height:44px;}
+  }
   .attach-chip{display:flex;align-items:center;gap:5px;background:var(--accent-bg);border:1px solid var(--accent-bg-strong);border-radius:8px;padding:4px 10px;font-size:11px;font-weight:500;color:var(--accent-text);}
   .attach-chip button{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;line-height:1;padding:0 0 0 3px;}
   .attach-chip button:hover{color:var(--accent);}
