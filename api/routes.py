@@ -28056,6 +28056,13 @@ def _start_regeneration_stream_locked(
             raise _GoalContinuationCommitFailed(session_id=s.session_id)
         save_attempted = True
         s.save()
+        # The regeneration is accepted from here on: the stream exists and the
+        # turn has started, so a later failure must be reported as an
+        # interrupted-but-accepted turn (``_regeneration_accepted``) instead of
+        # being compensated back. This marker predates the ownership
+        # revalidation below and must stay before it — the revalidation
+        # explicitly clears it when it refuses the launch.
+        accepted = True
         set_last_workspace(workspace, profile=getattr(s, "profile", None))
         # #7862 re-gate round 17 (CORE finding 1): the binding above renewed
         # the admission's ownership lease and then RELEASED its file
@@ -28087,8 +28094,12 @@ def _start_regeneration_stream_locked(
                 s.session_id,
                 goal_continuation_attempt_id,
             )
+            # The launch is refused, so this turn was NOT accepted: clear the
+            # marker again so the surrounding except compensates the start
+            # (worker aborted, registries released, regeneration state
+            # restored) instead of reporting an interrupted-but-accepted turn.
+            accepted = False
             raise _GoalContinuationCommitFailed(session_id=s.session_id)
-        accepted = True
         release_worker.set()
     except Exception as exc:
         abort_worker.set()
