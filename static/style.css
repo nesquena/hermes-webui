@@ -1770,6 +1770,8 @@
   .session-action-opt.is-disabled:hover{background:transparent;}
   .session-action-opt.danger:hover{background:rgba(239,83,80,.08);}
   .session-action-opt.danger .ws-opt-icon,.session-action-opt.danger .ws-opt-name{color:var(--error);}
+  /* Finger-sized rows on a touch screen, as the project picker this menu opens has. */
+  @media (pointer:coarse){.session-action-opt .ws-opt-action{min-height:44px;}}
   @media (prefers-reduced-motion:reduce){
     .session-action-menu{animation:none;will-change:auto;}
     .session-item,.session-item.dragging,.session-item.session-reflowing,.session-item.swipe-committed,.session-item.swipe-removing{transition:none;}
@@ -2009,6 +2011,7 @@
   .update-btn:hover{background:var(--accent-bg-strong);}
   .update-primary{background:var(--accent-bg-strong);border-color:var(--accent);}
   .update-btn:disabled{opacity:0.5;cursor:not-allowed;}
+  @media (pointer:coarse){#updateBanner .update-btn{min-height:44px;padding:8px 14px;}}
   /* ── Composer flyout (approval/clarify slide up from behind composer) ── */
   .composer-flyout{position:relative;height:0;z-index:1;}
   .composer-wrap.terminal-dock-visible .composer-flyout{z-index:4;}
@@ -3562,6 +3565,11 @@
 .ws-dropdown-footer{left:0;right:auto;bottom:calc(100% + 4px);min-width:280px;max-width:min(420px,calc(100vw - 32px));}
 .model-dropdown{display:none;position:absolute;bottom:calc(100% + 4px);left:0;min-width:280px;max-width:min(420px,calc(100vw - 32px));background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:200;overflow:hidden;max-height:min(70vh,640px);overflow-y:auto;}
 .model-dropdown.open{display:block;}
+/* The dropdown container is a programmatic focus target (touch-only devices), and
+   after any key press it matches :focus-visible. The highlighted row already
+   shows where the keyboard is, so Chromium's default ring around the whole menu
+   is noise — suppressed on purpose. */
+.model-dropdown:focus-visible{outline:none;}
 /* Phone path (#6080): the model picker is reparented to <body> and switched to
    position:fixed by _positionModelDropdown() so it escapes the .composer-footer
    containing block (container-type:inline-size, plus a backdrop-filter under the
@@ -3658,6 +3666,7 @@
 .ws-drag-handle:active{cursor:grabbing;}
 .ws-row.dragging{opacity:.35;border:1px dashed var(--accent-bg-strong);}
 .ws-row.drag-over{border-color:var(--accent-text);background:var(--accent-bg);}
+.workspaces-list{flex:1;overflow-y:auto;padding:8px;min-height:0;}
 .ws-action-btn{padding:4px 8px;border-radius:6px;font-size:11px;font-weight:600;border:1px solid var(--border2);background:rgba(255,255,255,.05);color:var(--muted);cursor:pointer;transition:all .15s;white-space:nowrap;}
 .ws-action-btn:hover{background:rgba(255,255,255,.1);color:var(--text);}
 /* ── Profile dropdown + management panel ── */
@@ -3845,7 +3854,8 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
   display:flex;align-items:center;justify-content:center;
   line-height:1;
 }
-.file-item:hover .file-del-btn{ width:16px;opacity:1;margin-left:2px; }
+.file-item:hover .file-del-btn,.file-item:focus-visible .file-del-btn{ width:16px;opacity:1;margin-left:2px; }
+.file-item:focus-visible{ outline:2px solid var(--accent);outline-offset:-2px; }
 .file-del-btn:hover{ color:var(--accent); }
 
 /* file-name must be a flex child that can shrink to zero */
@@ -3906,8 +3916,13 @@ body.resizing .sidebar{transition:none!important;}
 
 /* ── Tool call cards ── */
 /* Running indicator dot (pulsing) */
-@keyframes wlpulse{0%,100%{box-shadow:0 0 0 0 var(--accent-bg-strong);}50%{box-shadow:0 0 0 5px rgba(255,215,0,0);}}
+/* The dot core stays solid (full-opacity contrast in every theme); the pulse
+   lives on a ::after ring animated with transform:scale + opacity — both
+   compositor-only, so no scene repaint per frame (UX gate: an opacity-only
+   pulse on the dot itself dropped to ~1.6:1 contrast in light theme). */
+@keyframes wlring{0%{transform:scale(1);opacity:.45;}100%{transform:scale(2.4);opacity:0;}}
 .tool-card-running-dot{
+  position:relative;
   display:inline-block;
   width:7px;
   height:7px;
@@ -3916,9 +3931,20 @@ body.resizing .sidebar{transition:none!important;}
   opacity:1;
   flex-shrink:0;
   vertical-align:middle;
-  animation:wlpulse 1.3s ease-in-out infinite;
 }
-.tl-rundot{width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0;animation:wlpulse 1.3s ease-in-out infinite;}
+.tool-card-running-dot::after,.tl-rundot::after{
+  content:"";
+  position:absolute;
+  inset:0;
+  border-radius:50%;
+  background:var(--accent);
+  animation:wlring 1.3s ease-out infinite;
+  pointer-events:none;
+}
+.tl-rundot{position:relative;width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0;}
+@media (prefers-reduced-motion:reduce){
+  .tool-card-running-dot::after,.tl-rundot::after{animation:none;opacity:0;}
+}
 /* Show more button inside tool card result */
 .tool-card-more{background:none;border:none;color:var(--blue);font-size:10px;cursor:pointer;padding:3px 0 0;opacity:.7;display:block;}
 .tool-card-more:hover{opacity:1;}
@@ -4300,8 +4326,17 @@ body.resizing .sidebar{transition:none!important;}
 .tool-group-body .tool-card-row{width:100%;max-width:100%;margin:0;box-sizing:border-box;}
 .tool-worklog-tool-group-body .tool-card-icon,
 .tool-group-body .tool-card-icon{display:none;}
+/* #7495 UX gate: the compact header keeps ~5px of left room for the running
+   dot — the ::after ring scales to 2.4x of the 7px dot (~4.9px past the dot
+   each side), and with padding-left:0 the dot sat on the card's
+   overflow:hidden edge, clipping the ring straight (D shape) in the default
+   Compact Worklog mode. Applies to EVERY compact worklog card header — the
+   standalone live running card included, not only grouped rows — so running
+   and completed rows share one left inset and the completed→grouped move
+   doesn't shift the row by those pixels. */
+.tool-worklog-list .tool-card-header,
 .tool-worklog-tool-group-body .tool-card-header,
-.tool-group-body .tool-card-header{margin-left:0;padding-left:0;}
+.tool-group-body .tool-card-header{margin-left:0;padding-left:5px;}
 .tool-worklog-tool-group-body .tool-card-detail,
 .tool-group-body .tool-card-detail{width:100%;max-width:100%;box-sizing:border-box;}
 .agent-activity-status{display:grid;grid-template-columns:18px minmax(0,1fr) auto;align-items:start;gap:var(--space-2);padding:5px 0;color:var(--muted);font-size:var(--font-size-xs);line-height:1.45;border-bottom:1px solid color-mix(in srgb,var(--border-subtle) 60%,transparent);}
@@ -4316,11 +4351,6 @@ body.resizing .sidebar{transition:none!important;}
 .tool-call-group-label{font-weight:600;color:var(--muted);position:relative;display:inline-block;overflow:hidden;}
 .tool-call-group[data-live-tool-call-group="1"] .tool-call-group-label{
   color:var(--muted);
-}
-@media (prefers-reduced-motion: reduce){
-  .tool-card-running-dot{
-    animation:none;
-  }
 }
 .tool-card{background:var(--surface-subtle);border:1px solid var(--border);border-left:2px solid var(--border-muted);border-radius:8px;margin:0;overflow:hidden;transition:border-color .15s,background .15s;}
 .tl{background:transparent;border:0;border-left:0;border-radius:0;margin:0;overflow:visible;transition:none;}
@@ -4414,6 +4444,11 @@ body.resizing .sidebar{transition:none!important;}
 .transparent-event-row:focus-within{
   border-color:var(--border-subtle);
   background:color-mix(in srgb,var(--surface-subtle) 48%,transparent);
+}
+/* Hover on an open row should brighten it, not fade it back below its open tint (62%). */
+.transparent-event-row[data-expanded="1"]:hover,
+.transparent-event-row[data-expanded="1"]:focus-within{
+  background:color-mix(in srgb,var(--surface-subtle) 72%,transparent);
 }
 /* Transparent Stream: both tool AND thinking inner cards must reset to a flat,
    transparent row. The thinking-card previously kept its base accent-bg/border/
@@ -4625,9 +4660,24 @@ body.resizing .sidebar{transition:none!important;}
 .transparent-event-progress::after{
   content:none;
 }
+/* The running segment is 60% of the track. Translate it across the clip
+   instead of changing offsets and relaying out the transcript each frame. */
 @keyframes transparent-progress-shimmer{
-  0%{left:0;right:100%;}
-  100%{left:100%;right:0;}
+  0%{transform:translateX(-100%);}
+  100%{transform:translateX(200%);}
+}
+@media (prefers-reduced-motion:reduce){
+  /* #7495 UX gate: with the animation simply stopped, the 60%-wide segment
+     froze at the left edge and read as determinate progress stuck at 60%,
+     then jumped to 100% on completion. Render the running state as a
+     full-width faint rail instead — no motion, no fake percent, and the
+     completion geometry no longer changes. Declared after the
+     [data-progress-percent] width rule so it wins at equal specificity. */
+  .transparent-event-progress[data-progress-running="1"]::before{
+    animation:none;
+    left:0;right:0;width:100%;
+    transition:none;
+  }
 }
 .transparent-event-row + .transparent-event-row::before{
   content:none;
@@ -6113,6 +6163,21 @@ main.main > #mainPlugin{display:none;}
    past the viewport's height now that its rows are taller there. */
 .project-picker-item:focus-visible{background:rgba(255,255,255,.08);color:var(--text);outline:2px solid var(--focus-ring);outline-offset:-2px;}
 .project-picker-item.active:focus-visible{color:var(--blue);}
+.project-picker-create:focus-visible{background:linear-gradient(rgba(255,255,255,.08),rgba(255,255,255,.08)),var(--sidebar);}
+/* On a light theme the white wash above is invisible and the translucent
+   --focus-ring is about 1.5:1 on the picker: the theme's own hover wash under
+   the pointer, and the skin's --accent-text as the focus ring. Not --accent:
+   on the palest skins (Terracotta, Sienna, Neon Paint) and on the default
+   skin's batch picker it is under 3:1 against the picker; --accent-text is
+   the accent made dark enough to read as text, and is over 4:1 on every skin.
+   "+ New project" keeps its accent tint: the first rule outranks its own hover,
+   so it repeats the opaque form of that hover (the row is sticky and the list
+   scrolls under it). Its focus rule drawing it in full is kept for skins that
+   still dim it with opacity. */
+:root:not(.dark) .project-picker-item:hover{background:var(--hover-bg);}
+:root:not(.dark) .project-picker-create:hover{background:linear-gradient(var(--accent-bg),var(--accent-bg)),var(--sidebar);}
+:root:not(.dark) .project-picker-item:focus-visible{outline-color:var(--accent-text);}
+:root:not(.dark) .project-picker-create:focus-visible{opacity:1;}
 @media (pointer:coarse){.project-picker-item{min-height:44px;padding-top:8px;padding-bottom:8px;font-size:13px;}}
 .project-picker:not(.batch-project-picker){max-height:calc(100dvh - 16px);overflow-y:auto;overscroll-behavior:contain;scroll-padding-bottom:52px;}
 /* The batch picker renders inline in the selection bar, so on touch its 44px rows would push the
