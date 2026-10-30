@@ -2373,8 +2373,8 @@ def test_touch_keyboard_inset_writes_and_clears_css_variable():
         "boot.js must write --keyboard-bottom-inset on touch keyboard viewport changes"
     assert "removeProperty('--keyboard-bottom-inset')" in boot_js, \
         "boot.js must clear --keyboard-bottom-inset when the inset is zero or ineligible"
-    assert "Math.max(0,Math.ceil(window.innerHeight-(vv.height+vv.offsetTop)))" in boot_js, \
-        "boot.js must compute the bottom inset from innerHeight and visualViewport geometry"
+    assert "Math.max(0,Math.ceil(window.innerHeight-(vvOk.height+vvOk.offsetTop)))" in boot_js, \
+        "boot.js must compute the bottom inset from validated visualViewport geometry"
 
 
 def test_touch_keyboard_inset_ignores_pinch_zoom_scale():
@@ -2386,6 +2386,41 @@ def test_touch_keyboard_inset_ignores_pinch_zoom_scale():
         "boot.js must consult visualViewport.scale before treating shrinkage as keyboard occlusion"
     assert "Math.abs((vv.scale||1)-1)>0.05" in boot_js, \
         "boot.js must bail out of the inset when the viewport is pinch-zoomed"
+
+
+def test_visualviewport_garbage_height_is_rejected_everywhere():
+    """Fold/unfold on foldables (iPhone Duo, iOS 27 standalone PWA, #8531) can
+    report visualViewport.height = -33554432 (-2^25) with no corrective resize
+    event until rotation. The inset must be computed from one validated
+    snapshot and CLEARED — not capped — on implausible geometry, window resize
+    must resync the inset even when visualViewport exists, and the sibling
+    visualViewport consumers must share the validator."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    assert "function _plausibleVisualViewport()" in boot_js, \
+        "boot.js must provide a shared visualViewport geometry validator"
+    assert "33554432" in boot_js, \
+        "boot.js must document the observed garbage-height failure mode"
+    fn_start = boot_js.index("function _syncKeyboardBottomInset(){")
+    fn_end = boot_js.index("function _forceMobileViewportReflow(){")
+    fn_body = boot_js[fn_start:fn_end]
+    assert "vvOk=_plausibleVisualViewport()" in fn_body, \
+        "the keyboard inset must be computed from a validated geometry snapshot"
+    assert "Math.max(0,Math.ceil(window.innerHeight-(vvOk.height+vvOk.offsetTop)))" in fn_body, \
+        "the inset computation must use the validated snapshot, not a re-read getter"
+    resize_start = boot_js.index("window.addEventListener('resize'")
+    resize_end = boot_js.index("if(window.visualViewport){", resize_start)
+    resize_block = boot_js[resize_start:resize_end]
+    assert resize_block.index("_syncKeyboardBottomInset();") < resize_block.index("if(!window.visualViewport)"), \
+        "window resize must resync the inset even when visualViewport exists"
+    sessions_js = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
+    assert "function _projectPickerVisibleBounds" in sessions_js and \
+        "Validated read (#8531)" in sessions_js and \
+        "Number(vv.height)>0" in sessions_js, \
+        "sessions.js picker bounds must validate viewport geometry inline (self-contained for the Node harness)"
+    ui_js = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    assert "Validated read (#8531)" in ui_js and \
+        "Number(vvRaw.height)>0" in ui_js, \
+        "ui.js model dropdown must validate viewport geometry inline (self-contained for the Node harness)"
 
 
 def test_touch_keyboard_inset_primes_during_visual_viewport_setup():
