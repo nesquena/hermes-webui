@@ -71,6 +71,8 @@
 
 ### Fixed
 
+- **The Tasks panel no longer freezes while a scheduled job runs.** `/api/crons` list, output, history, status and the run, pause, resume, edit and delete actions now read and write the job store through the Agent's per-thread profile overrides instead of waiting on the process-wide cron lock that a running job holds. In a test with a job holding the lock, readers answered in 0.01-0.03 s instead of 11.5-12 s. Creating a job, and edits that pin a model or provider, still wait for the running job, as before, because they read the process environment. Agents without the per-thread store helpers keep the old locked behaviour. Thanks @tobernguyen and @wuliao0066 for the reports. (#8482, fixes #7295, #6753)
+
 - **The ⋮ conversation menu has finger-sized rows on touch, and the project picker shows keyboard focus on light themes.** On phones and tablets the menu's rows are now 44px tall, the same as the "Move to project" picker it opens; they were 32px. In the project picker, the focused row gets a solid ring in the theme's accent text colour (above 4:1 against the picker in all 21 skins, up from 1.3 to 1.5:1) and a hovered row gets a visible tint on light themes; before, both were nearly invisible on light. The focused sticky "+ New project" row stays opaque over a scrolled list. Thanks @ybai08. (#8135, refs #8044)
 
 - **The model picker takes keyboard focus when it opens.** Opening the composer or Settings model picker now focuses its search box (the list on touch-only devices, so no keyboard pops up), Escape closes only the picker, and focus returns to the chip that opened it. Before, focus stayed on the chip, so typing did nothing and `k` switched the conversation. Thanks @happy5318. (#8445)
