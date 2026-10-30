@@ -250,8 +250,9 @@ def test_goal_continue_set_marker_before_emitting_event():
     after_add = src[add_idx:]
     event_idx = after_add.find("put('goal_continue'")
     assert event_idx != -1, "no goal_continue emission after record registration"
-    # Must be within ~500 chars (close to the registration).
-    assert event_idx < 500, (
+    # Must stay close to the registration (the browser lease hand-off may sit
+    # in between, so allow its few lines).
+    assert event_idx < 800, (
         "register_pending_goal_continuation must immediately precede the "
         "goal_continue SSE emission"
     )

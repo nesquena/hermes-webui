@@ -11470,7 +11470,8 @@ async function handleComposerPrimaryAction(){
   await send();
 }
 
-function setBusy(v){
+// drainQueue:false keeps queued follow-ups parked (e.g. a restored draft must survive).
+function setBusy(v,{drainQueue=true}={}){
   S.busy=v;
   updateSendBtn();
   if(!v){
@@ -11482,7 +11483,7 @@ function setBusy(v){
     updateQueueBadge(sid);
     // Drain one queued message for the finished session after UI settles
     const _isViewedSid=!S.session||sid===S.session.session_id;
-    const next=sid&&_isViewedSid?shiftQueuedSessionMessage(sid):null;
+    const next=drainQueue&&sid&&_isViewedSid?shiftQueuedSessionMessage(sid):null;
     if(next){
       updateQueueBadge(sid);
       setTimeout(()=>{

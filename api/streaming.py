@@ -13789,6 +13789,9 @@ def _run_agent_streaming(
     When ephemeral=True, session mutations are skipped — used by /btw to get
     a streaming answer without persisting to the parent session.
     """
+    # Bound before any exit path: the outer-finally teardown reads them.
+    _detached_goal_continuation_prompt = ''
+    _detached_goal_continuation_id = ''
     _turn_route_model = model
     _turn_route_provider = model_provider
     cancel_event = threading.Event()
@@ -17834,6 +17837,8 @@ def _run_agent_streaming(
             # STREAM_GOAL_RELATED or goal_related parameter).
             try:
                 from api.goals import (
+                    goal_message_key as _goal_message_key,
+                    dispatch_goal_continuation,
                     evaluate_goal_after_turn,
                     has_active_goal,
                     register_pending_goal_continuation,
@@ -17877,7 +17882,7 @@ def _run_agent_streaming(
                         'session_id': session_id,
                         'state': 'continuing' if decision.get('should_continue') else 'idle',
                         'message': _goal_message,
-                        'message_key': decision.get('message_key') or ('goal_continuing' if _goal_message else ''),
+                        'message_key': _goal_message_key(decision),
                         'message_args': decision.get('message_args') or [],
                         'decision': decision,
                     })
@@ -17898,16 +17903,24 @@ def _run_agent_streaming(
                         if not continuation_id:
                             continuation_prompt = ''
                     if continuation_prompt:
-                        put('goal_continue', {
-                            'session_id': session_id,
-                            'continuation_prompt': continuation_prompt,
-                            'continuation_id': continuation_id,
-                            'text': continuation_prompt,
-                            'message': _goal_message,
-                            'message_key': decision.get('message_key') or 'goal_continuing',
-                            'message_args': decision.get('message_args') or [],
-                            'decision': decision,
-                        })
+                        # A browser subscriber holds the dispatch; without one
+                        # the server starts the turn at teardown.
+                        if dispatch_goal_continuation(
+                            session_id, str(continuation_id or ''), q
+                        ):
+                            put('goal_continue', {
+                                'session_id': session_id,
+                                'continuation_prompt': continuation_prompt,
+                                'continuation_id': continuation_id,
+                                'text': continuation_prompt,
+                                'message': _goal_message,
+                                'message_key': _goal_message_key(decision),
+                                'message_args': decision.get('message_args') or [],
+                                'decision': decision,
+                            })
+                        else:
+                            _detached_goal_continuation_prompt = continuation_prompt
+                            _detached_goal_continuation_id = continuation_id or ''
             except Exception as _goal_exc:
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
             with _stream_writeback_stage(_writeback_timings, "done_payload"):
@@ -18715,6 +18728,14 @@ def _run_agent_streaming(
                 session_id,
                 exc_info=True,
             )
+        from api.goals import settle_goal_continuation_after_turn
+
+        settle_goal_continuation_after_turn(
+            session_id,
+            _detached_goal_continuation_prompt,
+            _detached_goal_continuation_id,
+            cancelled=cancel_event.is_set(),
+        )
 
 # ============================================================
 # SECTION: HTTP Request Handler
