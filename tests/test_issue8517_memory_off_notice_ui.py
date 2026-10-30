@@ -2,8 +2,10 @@
 
 Drives the REAL notice block from static/ui.js through node against a tiny mocked
 DOM (the approach of test_goal_command_js_behaviour.py), plus static checks of the
-wiring: the SSE ``warning`` listener, turn settlement, the session-switch sync, the
-markup, the CSS and the i18n keys.
+wiring: the SSE ``warning`` and ``memory_status`` listeners, the journal-snapshot
+restore, the compression-continuation migration, the session-switch sync, the
+markup, the CSS and the i18n keys. The real-page paths are in
+test_issue8517_memory_off_notice_browser.py.
 """
 import json
 import re
