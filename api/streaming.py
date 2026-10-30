@@ -82,6 +82,13 @@ from api.run_journal import RunJournalWriter
 from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
+from api.memory_profile_scope import (
+    agent_has_memory,
+    call_as_session_owner,
+    construct_profile_scoped_agent,
+    session_profile_home_or_empty,
+    turn_memory_reason,
+)
 from api.models import (
     StateDBSessionMessagesSnapshot,
     _cancelled_journal_turn_owner,
@@ -3737,11 +3744,13 @@ def _resolve_streaming_hermes_home_override():
     global _streaming_hermes_home_override_available
     import sys as _sys
 
-    if _streaming_hermes_home_override_available is False:
-        return None
-
+    # #8517 all-r1: a cached negative answer is never trusted. A stale False (an
+    # early failed import, a module swapped later) left the turn-level override
+    # off for the life of the process while construction was still scoped, so
+    # run_conversation, its memory hooks and built-in MEMORY.md writes followed
+    # the shared env mirror (another profile's home). Once loaded this is a dict lookup.
     mod = _sys.modules.get('hermes_constants')
-    if mod is None and _streaming_hermes_home_override_available is None:
+    if mod is None:
         try:
             import hermes_constants  # noqa: F401
             mod = _sys.modules.get('hermes_constants')
@@ -13557,6 +13566,14 @@ def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
         return True
 
     should_close_evicted_agent = True
+    # #8517: the owner's profile, captured before a clean commit discards the
+    # lifecycle entry; the provider shutdown below must run as that profile too.
+    _owner_home = ''
+    try:
+        from api.session_lifecycle import recorded_owner_profile_home
+        _owner_home = recorded_owner_profile_home(session_id)
+    except Exception:
+        logger.debug("No recorded owner profile for evicted session %s", session_id, exc_info=True)
     try:
         _lifecycle_commit_session_memory(session_id, agent=agent, wait=True)
         if not _lifecycle_has_uncommitted_work(session_id):
@@ -13578,7 +13595,13 @@ def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
         shutdown_memory_provider = getattr(agent, 'shutdown_memory_provider', None)
         if callable(shutdown_memory_provider):
             session_messages = vars(agent).get('_session_messages', [])
-            shutdown_memory_provider(session_messages)
+            call_as_session_owner(
+                agent,
+                lambda: shutdown_memory_provider(session_messages),
+                session_id=session_id,
+                owner_home=_owner_home,
+                what="memory provider shutdown",
+            )
     except Exception:
         logger.debug("Failed to shut down evicted agent memory provider for session %s", session_id, exc_info=True)
 
@@ -14297,6 +14320,9 @@ def _run_agent_streaming(
     _streaming_cron_profile_home_token = None
     _turn_pending_source = 'webui'
     _streaming_hermes_home_override_ctx = (None, None, False)
+    # #8517 all-r2 finding 2: memory runs only on a turn that verifiably holds its
+    # session's profile home; set right after the turn-level override below.
+    _turn_memory_reason = 'the turn-level profile home was not established'
     _streaming_skill_home_snapshot = None
     _restore_streaming_skill_home_modules = False
     _acquired_streaming_skill_home_patch_lock = False
@@ -14472,7 +14498,9 @@ def _run_agent_streaming(
             _profile_runtime_env = get_profile_runtime_env(_profile_home_path)
             _safe_profile_runtime_env = filter_runtime_env_for_gateway_parity(_profile_runtime_env)
         except ImportError:
-            _profile_home = os.environ.get('HERMES_HOME', '')
+            # #8517: never the shared HERMES_HOME env mirror (another profile's
+            # worker may hold it); '' turns memory off for the turn.
+            _profile_home = session_profile_home_or_empty(s)
             _profile_runtime_env = {}
             _safe_profile_runtime_env = {}
             patch_skill_home_modules = None
@@ -14535,6 +14563,17 @@ def _run_agent_streaming(
             _profile_home,
         )
         _streaming_hermes_home_override_ctx = _set_streaming_hermes_home_override(_profile_home)
+        # #8517 all-r2 finding 2: the override set here is held until the outermost
+        # finally, across construction AND run_conversation (memory hooks, built-in
+        # MEMORY.md writes). A construction-time scope alone does not cover the turn,
+        # and a cached agent runs no constructor at all, so the decision is made once
+        # for the whole turn: when the override is not set or not effective, every
+        # construction below builds without memory (not cached, unless the Agent has
+        # no override at all: construct_profile_scoped_agent) and a memory-enabled
+        # cached agent is not reused for this turn.
+        _turn_memory_reason = turn_memory_reason(
+            _profile_home, override_installed=bool(_streaming_hermes_home_override_ctx[2]),
+        )
         _set_thread_env(**_thread_env)
         # process_complete agent-wakeup wiring (ours-original, Option B): bind
         # this session's HERMES_SESSION_KEY to its WebUI session_id so the
@@ -15701,7 +15740,11 @@ def _run_agent_streaming(
             # injectionFrequency: "first-turn" actually suppresses after turn 1.
             _cache_new_agent = False
             if ephemeral:
-                agent = _AIAgent(**_agent_kwargs)
+                agent, _ = construct_profile_scoped_agent(
+                    _AIAgent, _agent_kwargs, profile_home=_profile_home,
+                    agent_params=_agent_params, session_id=session_id,
+                    fail_closed_reason=_turn_memory_reason,
+                )
                 logger.debug('[webui] Created ephemeral agent for session %s', session_id)
             else:
                 from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
@@ -15728,14 +15771,22 @@ def _run_agent_streaming(
 
                 agent = None
                 _identity_mismatch_entry = None
+                _bypassed_memory_agent = False
                 with SESSION_AGENT_CACHE_LOCK:
                     _cached = SESSION_AGENT_CACHE.get(session_id)
                     if _cached and _cached[1] == _agent_sig:
                         _cached_agent = _cached[0]
                         if _cached_agent_matches_session(_cached_agent, session_id):
-                            agent = _cached_agent
-                            SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
-                            logger.debug('[webui] Reusing cached agent for session %s', session_id)
+                            if _turn_memory_reason and agent_has_memory(_cached_agent):
+                                # #8517 all-r2 finding 2: this turn cannot hold its
+                                # profile home, and a cached agent keeps its memory.
+                                # Leave it cached for the next scoped turn; this turn
+                                # gets a memoryless, uncached agent built below.
+                                _bypassed_memory_agent = True
+                            else:
+                                agent = _cached_agent
+                                SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
+                                logger.debug('[webui] Reusing cached agent for session %s', session_id)
                         else:
                             _identity_mismatch_entry = SESSION_AGENT_CACHE.pop(session_id, None)
                             logger.warning(
@@ -15743,6 +15794,13 @@ def _run_agent_streaming(
                                 session_id,
                                 _cached_agent_session_identity(_cached_agent),
                             )
+
+                if _bypassed_memory_agent:
+                    logger.warning(
+                        '[webui] #8517: cached agent for session %s not reused this turn: %s '
+                        '(profile home %r). The turn runs without memory.',
+                        session_id, _turn_memory_reason, _profile_home,
+                    )
 
                 if _identity_mismatch_entry is not None:
                     try:
@@ -15811,8 +15869,12 @@ def _run_agent_streaming(
                     if hasattr(agent, '_interrupt_message'):
                         agent._interrupt_message = None
                 else:
-                    agent = _AIAgent(**_agent_kwargs)
-                    _cache_new_agent = True
+                    # #8517: memory bound to this session's profile, else not cached.
+                    agent, _cache_new_agent = construct_profile_scoped_agent(
+                        _AIAgent, _agent_kwargs, profile_home=_profile_home,
+                        agent_params=_agent_params, session_id=session_id,
+                        fail_closed_reason=_turn_memory_reason,
+                    )
 
             if not _register_agent_if_current(agent, _agent_sig if _cache_new_agent else None):
                 with _agent_lock:
@@ -16653,7 +16715,11 @@ def _run_agent_streaming(
                                 _agent_kwargs['acp_args'] = _runtime_bundle['acp_args']
                             if 'credential_pool' in _agent_params:
                                 _agent_kwargs['credential_pool'] = _runtime_bundle['credential_pool']
-                            agent = _AIAgent(**_agent_kwargs)
+                            agent, _heal_cacheable = construct_profile_scoped_agent(
+                                _AIAgent, _agent_kwargs, profile_home=_profile_home,
+                                agent_params=_agent_params, session_id=session_id,
+                                fail_closed_reason=_turn_memory_reason,
+                            )
                             _agent_sig = _compute_agent_cache_signature(
                                 resolved_model,
                                 resolved_api_key,
@@ -16671,6 +16737,8 @@ def _run_agent_streaming(
                                 profile_home=_profile_home,
                                 safe_profile_runtime_env=_safe_profile_runtime_env,
                             )
+                            if not _heal_cacheable:
+                                _agent_sig = None  # #8517: memory scope failed; never cache it
                             if not _register_agent_if_current(agent, _agent_sig):
                                 # Returned-error settlement already owns _agent_lock.
                                 _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
@@ -17474,7 +17542,13 @@ def _run_agent_streaming(
                     # in-memory bookkeeping, not provider I/O, so keep it inside the
                     # per-session writeback lock to preserve completed-turn ordering.
                     try:
-                        from api.session_lifecycle import mark_turn_completed
+                        from api.session_lifecycle import mark_turn_completed, record_owner_profile_home
+                        try:
+                            _owner_profile_home = _profile_home
+                        except NameError:
+                            _owner_profile_home = ''
+                        # #8517: record the owner so boundary commits run as it.
+                        record_owner_profile_home(s.session_id, _owner_profile_home)
                         mark_turn_completed(s.session_id, agent=agent)
                     except Exception:
                         logger.debug("Memory lifecycle mark failed for session %s", s.session_id, exc_info=True)
@@ -18135,7 +18209,11 @@ def _run_agent_streaming(
                         _heal_kwargs['acp_args'] = _runtime_bundle['acp_args']
                     if 'credential_pool' in _agent_params:
                         _heal_kwargs['credential_pool'] = _runtime_bundle['credential_pool']
-                    _heal_agent = _AIAgent(**_heal_kwargs)
+                    _heal_agent, _heal_cacheable = construct_profile_scoped_agent(
+                        _AIAgent, _heal_kwargs, profile_home=_profile_home,
+                        agent_params=_agent_params, session_id=session_id,
+                        fail_closed_reason=_turn_memory_reason,
+                    )
                     # Delta callbacks close over `agent`; the replacement, not
                     # the failed original, owns any successful retry output.
                     agent = _heal_agent
@@ -18156,6 +18234,8 @@ def _run_agent_streaming(
                         profile_home=_profile_home,
                         safe_profile_runtime_env=_safe_profile_runtime_env,
                     )
+                    if not _heal_cacheable:
+                        _agent_sig = None  # #8517: memory scope failed; never cache it
                     if not _register_agent_if_current(_heal_agent, _agent_sig):
                         with _agent_lock:
                             _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
