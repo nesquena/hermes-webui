@@ -309,26 +309,21 @@ def test_clean_history_still_settles_unchanged(tmp_path, monkeypatch):
     )
 
 
-@pytest.mark.parametrize("polluted", [False, True])
-def test_current_image_row_owns_turn_after_dedup(tmp_path, monkeypatch, polluted):
-    """#8574 review (nesquena-hermes 2026-10-28): a multimodal current user
-    row must survive the shrinking identity dedup with durable ownership.
+def _install_multimodal_current_turn_agent(monkeypatch, sid, answer="A2"):
+    """Substitute the fake Agent so the CURRENT user row is multimodal.
 
-    The sync image path mints a turn token but the retained image row carries
-    it only after ``_settle_current_turn_boundary`` runs. When the identity
-    dedup shortens the historical prefix (same-id replay pair removed), the
-    authority's ``current_turn_user_idx`` no longer addresses the current row
-    on the reduced list; the settle then materializes a SECOND plain-text copy
-    of the prompt at the front while the original image row stays un-stamped.
+    The image part rides only on the Agent's returned row (the HTTP fixture
+    submits a text-only prompt) — exactly the shape the #8574 review probes:
+    the sync image path must keep durable ownership of that row while the
+    identity dedup shortens the historical prefix.
     """
-    sid = "image-boundary-" + str(polluted)
     original_setitem = monkeypatch.setitem
 
     def setitem(mapping, key, value):
         if mapping is sys.modules and key == "run_agent":
-            parent = _agent_class(sid, "A2")
+            parent = _agent_class(sid, answer)
 
-            class ImageAgent(parent):
+            class MultimodalCurrentTurnAgent(parent):
                 def run_conversation(self, **kwargs):
                     result = super().run_conversation(**kwargs)
                     result["messages"][-2]["content"] = [
@@ -337,17 +332,113 @@ def test_current_image_row_owns_turn_after_dedup(tmp_path, monkeypatch, polluted
                     ]
                     return result
 
-            value = SimpleNamespace(AIAgent=ImageAgent)
+            value = SimpleNamespace(AIAgent=MultimodalCurrentTurnAgent)
         return original_setitem(mapping, key, value)
 
     monkeypatch.setattr(monkeypatch, "setitem", setitem)
+
+
+def _image_user_rows(rows):
+    return [
+        r
+        for r in rows or []
+        if isinstance(r, dict)
+        and r.get("role") == "user"
+        and isinstance(r.get("content"), list)
+        and any(
+            isinstance(part, dict)
+            and part.get("type") in {"image", "image_url", "input_image"}
+            for part in r["content"]
+        )
+    ]
+
+
+@pytest.mark.parametrize("polluted", [False, True])
+def test_current_image_row_owns_turn_after_dedup(tmp_path, monkeypatch, polluted):
+    """#8574 review (nesquena-hermes 2026-10-28): a multimodal current user
+    row must survive the shrinking identity dedup with durable ownership.
+
+    The sync image path mints a turn token, but before this repair the
+    retained image row carried it only after ``_settle_current_turn_boundary``
+    ran. When the identity dedup shortens the historical prefix (same-id
+    replay pair removed), the authority's ``current_turn_user_idx`` no longer
+    addresses the current row on the reduced list; the settle then
+    materializes a SECOND plain-text copy of the prompt at the front while
+    the original image row stays un-stamped — the current prompt is
+    duplicated, moved before old history, and its ownership differs between
+    display and model context.
+
+    Repair (mirroring the streaming path's pre/post-dedup settlement in
+    ``_settle_result_messages``): stamp the token onto the retained result
+    row while the checkpoint index still addresses the original Agent
+    result, so the token survives the shrinking dedup and the final settle
+    locates the current row by token/retained-row authority. The
+    empty-result fallback and the call-scoped protected rows stay intact.
+    """
+    sid = f"i8574-image-{'dup' if polluted else 'clean'}"
+    _install_multimodal_current_turn_agent(monkeypatch, sid)
     history = _DUPLICATE_HISTORIES["same-id"] if polluted else _CLEAN_HISTORY
-    session = _sync_http_send(tmp_path, monkeypatch, sid, copy.deepcopy(history), "Q2", "A2")
-    rows = session.context_messages
-    image_rows = [r for r in rows if r.get("role") == "user" and isinstance(r.get("content"), list)]
-    assert len(image_rows) == 1
-    assert not [r for r in rows if r.get("role") == "user" and r.get("content") == "Q2"]
-    assert image_rows[0].get("_active_turn_token")
-    assert type(image_rows[0].get("id")) is int
-    assert rows[0]["content"] == "Q1"
-    assert rows[-1]["content"] == "A2"
+    reloaded = _sync_http_send(
+        tmp_path, monkeypatch, sid, copy.deepcopy(history), "Q2", "A2"
+    )
+    assert reloaded is not None
+    context = reloaded.context_messages
+    display = reloaded.messages
+
+    # --- model context: one multimodal current row, no plain-text echo ---
+    plain_q2 = [
+        r
+        for r in context
+        if isinstance(r, dict) and r.get("role") == "user" and r.get("content") == "Q2"
+    ]
+    assert not plain_q2, (
+        "the settle must not materialize a second plain-text copy of the "
+        "current prompt when the identity dedup shortens the historical "
+        f"prefix; got {_contents(context)}"
+    )
+    image_rows = _image_user_rows(context)
+    assert len(image_rows) == 1, (
+        f"exactly one retained image user row must survive the dedup; "
+        f"got {_contents(context)}"
+    )
+    current = image_rows[0]
+    assert current.get("_active_turn_token"), (
+        f"the retained image row must carry the active-turn token; got {current}"
+    )
+    assert type(current.get("id")) is int, (
+        f"the retained image row must keep a valid stable id; got {current}"
+    )
+    assert context[2] is current and context[0]["content"] == "Q1", (
+        f"the current row must stay after the retained history, not at the "
+        f"front; got {_contents(context)}"
+    )
+    assert context[-1]["content"] == "A2", (
+        f"the assistant reply must close the context; got {_contents(context)}"
+    )
+    if polluted:
+        assert _contents(context).count("Q1") == 1 and _contents(context).count("A1") == 1, (
+            f"the replayed duplicate pair must still be collapsed; "
+            f"got {_contents(context)}"
+        )
+
+    # --- display: the normal exchange, with the SAME current-row ownership ---
+    assert _contents(display) == ["Q1", "A1", "Q2", "A2"], (
+        f"the display must show the normal Q1/A1/Q2/A2 exchange; "
+        f"got {_contents(display)}"
+    )
+    display_current = [
+        r
+        for r in display
+        if isinstance(r, dict)
+        and r.get("role") == "user"
+        and r.get("_active_turn_token") == current["_active_turn_token"]
+    ]
+    assert len(display_current) == 1, (
+        "the display must carry exactly one current-turn row; "
+        f"got {_contents(display)}"
+    )
+    assert display_current[0].get("id") == current["id"], (
+        "display and model context must agree on the current row's stable "
+        f"id; display={display_current[0].get('id')} "
+        f"context={current.get('id')}"
+    )
