@@ -272,6 +272,10 @@ context.newSession(false, {}).then(() => {
 # by a NAMED provider that shares the openrouter endpoint with the built-in one.
 _QUALIFIED_DEFAULT = "anthropic/claude-sonnet-5.5"
 _NAMED_PROVIDER = "or-general"
+# The built-in provider that shares the same endpoint — a DIFFERENT credential
+# (OPENROUTER_API_KEY vs the named provider's own key_env). Picking it on
+# purpose must stay distinguishable from the configured named route.
+_BUILTIN_PROVIDER = "openrouter"
 
 
 def test_configured_default_keeps_its_configured_provider():
@@ -373,6 +377,70 @@ def test_configured_default_without_provider_stays_null():
     body = result["body"]
     assert body.get("model_provider") in (None, ""), (
         f"no configured provider must stay unresolved; got {body.get('model_provider')!r}"
+    )
+
+
+def test_deliberate_builtin_route_pick_keeps_the_builtin_provider():
+    """The configured pair must not hijack a DELIBERATE built-in pick.
+
+    Issue #8527's verification criteria ask for the built-in route to be
+    coverable too: when the user explicitly selects the built-in openrouter
+    entry for the very same model id the configured default advertises, that
+    pick must travel verbatim. Sharing an endpoint must not collapse the two
+    provider identities — and the configured-default repair must never
+    overwrite a pick the user actually made.
+
+    This is the guard on the fix itself: it fails if the configured-default
+    branch is allowed to win over an explicit empty-composer pick.
+    """
+    result = _run_driver(
+        {
+            "defaultModel": _QUALIFIED_DEFAULT,
+            "activeProvider": _NAMED_PROVIDER,
+            "S": {"session": None},
+            "explicitOverride": {
+                "model": _QUALIFIED_DEFAULT,
+                "model_provider": _BUILTIN_PROVIDER,
+            },
+        }
+    )
+    assert result["ok"], result.get("error")
+    body = result["body"]
+    assert body.get("model") == _QUALIFIED_DEFAULT
+    assert body.get("model_provider") == _BUILTIN_PROVIDER, (
+        "a deliberate built-in pick must keep the built-in provider; got "
+        f"{body.get('model_provider')!r} — the configured default must not "
+        "hijack a pick the user actually made"
+    )
+
+
+def test_new_chat_after_existing_session_keeps_the_configured_pair():
+    """Starting another chat after an existing session keeps the configured pair.
+
+    Issue #8527's verification criteria ask for the "another chat after an
+    existing session" case. The previous session's provider must not leak
+    into the new session: the configured default wins, and it wins WITH its
+    own configured provider (not the previous session's route).
+    """
+    result = _run_driver(
+        {
+            "defaultModel": _QUALIFIED_DEFAULT,
+            "activeProvider": _NAMED_PROVIDER,
+            "S": {
+                "session": {
+                    "session_id": "old-sid",
+                    "model": _QUALIFIED_DEFAULT,
+                    "model_provider": _BUILTIN_PROVIDER,
+                }
+            },
+        }
+    )
+    assert result["ok"], result.get("error")
+    body = result["body"]
+    assert body.get("model") == _QUALIFIED_DEFAULT
+    assert body.get("model_provider") == _NAMED_PROVIDER, (
+        "the previous session's provider must not leak into the new session; "
+        f"got {body.get('model_provider')!r}"
     )
 
 
