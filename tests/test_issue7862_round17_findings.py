@@ -563,7 +563,6 @@ class TestARefusedBindsRollbackKeepsTheSuccessorsAdmission:
         peer = None
         gate_holder = owner.state_dir
         gate = gate_holder / "r17-rollback-gate"
-        parked = gate_holder / "r17-rollback-parked"
         try:
             cont_id = "d" * 32
             assert (
