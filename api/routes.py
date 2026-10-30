@@ -3637,6 +3637,7 @@ from api.goal_continuation_store import (
     consume_pending_goal_continuation,
     discard_goal_continuation_handoff,
     discard_goal_continuation_rollback_receipt,
+    goal_continuation_attempt_owns_admission,
     normalize_continuation_text,
     pop_goal_continuation_handoff,
     pop_goal_continuation_rollback_receipt,
@@ -27856,8 +27857,16 @@ def _start_regeneration_stream_locked(
     persisted_model=None,
     persisted_model_provider=None,
     goal_continuation_attempt_id: str = "",
+    goal_continuation_admitted: bool = False,
 ):
-    """Commit a retained-row regeneration before releasing its real worker."""
+    """Commit a retained-row regeneration before releasing its real worker.
+
+    ``goal_continuation_admitted`` says the consume for this attempt COMMITTED,
+    so a durable admission handoff exists that this launch owns. Only then does
+    the gated worker's ownership revalidation mean anything: an ordinary
+    regeneration carries an attempt identity but never consumed an intent, and
+    there is no admission to lose (#7862 re-gate round 17, CORE finding 1).
+    """
     from api.session_ops import (
         RegenerationUnavailable,
         apply_regeneration_plan,
@@ -28047,8 +28056,39 @@ def _start_regeneration_stream_locked(
             raise _GoalContinuationCommitFailed(session_id=s.session_id)
         save_attempted = True
         s.save()
-        accepted = True
         set_last_workspace(workspace, profile=getattr(s, "profile", None))
+        # #7862 re-gate round 17 (CORE finding 1): the binding above renewed
+        # the admission's ownership lease and then RELEASED its file
+        # transaction; everything between it and this point — the session save
+        # and the workspace work — ran with no ownership check, and the gated
+        # worker below executes the moment it is released. A peer can take the
+        # admission over inside that window, and elapsed age alone is not a
+        # fence through launch. Revalidate ownership against the durable state
+        # as the last step before the release, so a takeover refuses the
+        # launch HERE: the surrounding except compensates the start (worker
+        # aborted, registries released, regeneration state restored) and the
+        # caller rolls the intent back, instead of the route answering 200 and
+        # running a second goal worker for one intent. The check deliberately
+        # sits before the release rather than inside the parked worker: the
+        # route discharges the admission right after this function returns, so
+        # a worker-side check could not tell "our own launch discharged it"
+        # from "a peer took it over" without a race.
+        if (
+            goal_continuation_admitted
+            and goal_continuation_attempt_id
+            and not goal_continuation_attempt_owns_admission(
+                s.session_id, goal_continuation_attempt_id, stream_id
+            )
+        ):
+            logger.error(
+                "Session %s: the goal-continuation admission for attempt %s "
+                "was discharged or taken over while the regeneration was "
+                "being committed; refusing to release its worker",
+                s.session_id,
+                goal_continuation_attempt_id,
+            )
+            raise _GoalContinuationCommitFailed(session_id=s.session_id)
+        accepted = True
         release_worker.set()
     except Exception as exc:
         abort_worker.set()
@@ -28672,6 +28712,7 @@ def _start_chat_stream_for_session(
                             moa_config=moa_config,
                             backend_is_gateway=backend_is_gateway,
                             goal_continuation_attempt_id=goal_continuation_attempt_id,
+                            goal_continuation_admitted=consumed_goal_continuation,
                         )
                     except Exception:
                         restore_consumed_continuation_markers()

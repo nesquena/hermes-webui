@@ -800,6 +800,28 @@ def record_goal_continuation_stream(
             session_keys = [k for k in _CONTINUATION_HANDOFF_TOKENS if k[0] == sid]
             key = session_keys[0] if session_keys else None
         if key is None or key not in _CONTINUATION_HANDOFF_TOKENS:
+            # #7862 re-gate round 17 (CORE finding 1): a missing LOCAL key is
+            # not by itself "nothing was consumed". If this attempt's consume
+            # minted a rollback receipt that is still live, the admission it
+            # owned was consumed and then REVOKED: a peer discharged it after
+            # a launch, or a takeover consumed it once the ownership lease
+            # expired, and an earlier transaction's reconciliation already
+            # dropped the local copy. The receipt is the provenance a missing
+            # key cannot erase — it is only dropped by a successful launch or
+            # by this attempt's own rollback. Binding now would walk the
+            # genuinely-ordinary route into ``thr.start()`` for an admission
+            # this process no longer owns, which is how a second goal worker
+            # for one intent appeared. Refuse exactly like the in-transaction
+            # refusal below.
+            if _attempt_has_live_receipt_unlocked(sid, attempt):
+                logger.error(
+                    "Goal continuation admission for session %s (attempt %s) "
+                    "was consumed and then revoked; refusing to bind its "
+                    "stream identity",
+                    sid,
+                    attempt or "?",
+                )
+                return False
             # No admission to bind: nothing consumed for this attempt (an
             # ordinary turn, or the intent was never armed). Not an error.
             return True
@@ -857,6 +879,82 @@ def record_goal_continuation_stream(
         # admission stays unsettled; the caller refuses the launch, which
         # for a TRUE continuation is the honest outcome (the same refusal
         # shape as a failed snapshot).
+        return False
+
+
+def _attempt_has_live_receipt_unlocked(sid: str, attempt: str) -> bool:
+    """True when *attempt* still holds the rollback receipt its consume minted.
+
+    #7862 re-gate round 17 (CORE finding 1): the receipt is the provenance of
+    a consume. It is minted in the same transaction as the admission handoff
+    and dropped only by a successful launch, by the attempt's own rollback, or
+    by the bounded sweep once the attempt is provably gone — so a live receipt
+    with no handoff means "consumed and subsequently revoked", never "never
+    consumed". With no ``attempt`` the session's receipt is claimed by
+    insertion order (the legacy single-attempt shape). Callers hold ``_LOCK``.
+    """
+    if attempt:
+        return (sid, attempt) in _ROLLBACK_RECEIPTS
+    return any(key[0] == sid for key in _ROLLBACK_RECEIPTS)
+
+
+def goal_continuation_attempt_owns_admission(
+    session_id: str, attempt_id: str, stream_id: str = ""
+) -> bool:
+    """True when this attempt STILL owns the session's continuation admission.
+
+    #7862 re-gate round 17 (CORE finding 1): the regeneration route renews the
+    ownership lease when it binds the stream identity, then releases the file
+    transaction and does the session save / workspace work before it releases
+    its gated worker. A peer can take the admission over inside that window,
+    and the worker used to execute anyway — elapsed age was treated as a fence
+    through launch, which it is not. This re-reads the durable state under the
+    cross-process lock (the same reload every other mutation performs), so a
+    takeover that consumed the handoff is visible here, and answers whether
+    THIS attempt still owns it.
+
+    Never raises into the chat path. A lock that cannot be taken answers
+    False: ownership cannot be proven, and the caller must not launch on a
+    maybe (the same refusal shape as a failed binding).
+    """
+    sid = str(session_id or "").strip()
+    attempt = str(attempt_id or "").strip()
+    if not sid or not attempt:
+        # No attempt identity to prove ownership for.
+        return False
+    try:
+        with _registry_transaction():
+            _merge_disk_state_unlocked()
+            token = _CONTINUATION_HANDOFF_TOKENS.get((sid, attempt))
+            if token is None:
+                logger.error(
+                    "Goal continuation admission for session %s (attempt %s) "
+                    "no longer exists durably; its worker must not run",
+                    sid,
+                    attempt,
+                )
+                return False
+            bound_stream = str(token.get("_handoff_stream_id") or "")
+            if stream_id and bound_stream and bound_stream != str(stream_id):
+                # The durable admission was re-bound to a different stream:
+                # this attempt is not the one that owns it any more.
+                logger.error(
+                    "Goal continuation admission for session %s (attempt %s) "
+                    "is bound to stream %s, not %s; its worker must not run",
+                    sid,
+                    attempt,
+                    bound_stream,
+                    stream_id,
+                )
+                return False
+            return True
+    except _RegistryLockUnavailable:
+        logger.error(
+            "Goal continuation admission for session %s (attempt %s) could "
+            "not be revalidated: the cross-process lock is unavailable",
+            sid,
+            attempt,
+        )
         return False
 
 
@@ -1061,6 +1159,17 @@ def _record_rollback_receipt_unlocked(sid: str, record: dict, attempt_id: str) -
     attempt = str(attempt_id or "") or "attempt"
     stored = dict(record)
     stored["_receipt_minted_at"] = time.time()
+    # #7862 re-gate round 17 (CORE finding 1): the receipt is this attempt's
+    # PROVENANCE — the in-process evidence that IT consumed the intent. The
+    # handoff it was minted with can be merged away later: a peer takeover or
+    # discharge removes the durable handoff, and the next unrelated
+    # transaction's reconciliation drops the local copy. A missing local key
+    # must not erase that history, so the attempt identity travels with the
+    # receipt. Two consumers read it: the stream binding tells "consumed and
+    # subsequently revoked" (refuse the launch) from "never consumed" (the
+    # genuinely ordinary lock-free path), and the rollback restore mutates
+    # only the losing attempt's own custody instead of the whole session's.
+    stored["attempt_id"] = attempt
     # Keyed by start attempt, so an in-flight attempt's receipt has its own
     # slot no matter how much unrelated traffic arrives.
     _ROLLBACK_RECEIPTS[(sid, attempt)] = stored
@@ -1841,6 +1950,47 @@ def restore_pending_goal_continuation(session_id: str, record: dict) -> bool:
                 # arming drops the session's receipts, so any live record here
                 # is by construction newer.)
                 return False
+            # #7862 re-gate round 17 (CORE finding 2): an empty pending slot is
+            # NOT proof that nobody owns the continuation. A successor attempt
+            # can have CONSUMED it: a cold restore adopts the expired handoff
+            # (preserving the original token/generation, which is not a new
+            # attempt identity) and then spends the restored record as its own
+            # attempt, minting its own durable handoff. The pending-record table
+            # is then empty, so the checks above all pass and this rollback
+            # would recreate the intent beside a RUNNING admission — and the
+            # session-wide handoff drop below would delete the successor's
+            # admission too. Validate against the CURRENT attempt ownership
+            # under this same transaction: a live handoff belonging to any
+            # other attempt is a takeover this receipt lost.
+            losing_attempt = str(record.get("attempt_id") or "").strip()
+            if losing_attempt:
+                for token_key, token in _CONTINUATION_HANDOFF_TOKENS.items():
+                    if token_key[0] != sid:
+                        continue
+                    if token_key[1] == losing_attempt:
+                        # The losing attempt's own custody: the drop below
+                        # spends exactly this, nothing else.
+                        continue
+                    if token.get("_handoff_adopted_into_record"):
+                        # A conversion anchor, not custody: the adoption that
+                        # restored the record this receipt describes already
+                        # spent it (its durable copy is withheld from disk).
+                        continue
+                    logger.warning(
+                        "Goal continuation rollback for session %s refused: "
+                        "attempt %s now owns the admission this receipt "
+                        "describes; the successor's handoff stays untouched",
+                        sid,
+                        token_key[1],
+                    )
+                    _RETIRED_LOG.append(
+                        {
+                            "session_id": sid,
+                            "reason": "rollback_refused_taken_over",
+                            "at": time.time(),
+                        }
+                    )
+                    return False
             # Durable tombstone check: has this session's intent been explicitly
             # retired since this receipt was minted? ``_TOMBSTONES`` is loaded from
             # disk and survives both a restart and unlimited unrelated

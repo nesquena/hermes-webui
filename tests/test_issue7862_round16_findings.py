@@ -126,6 +126,7 @@ def _dump():
         "tombstones": {str(k): int(v) for k, v in tombstones.items()},
         "handoffs": {_key(*k): v for k, v in handoffs.items()},
         "memory_handoffs": sorted(_key(*k) for k in store._CONTINUATION_HANDOFF_TOKENS),
+        "memory_receipts": sorted(_key(*k) for k in store._ROLLBACK_RECEIPTS),
     }
 
 
@@ -394,13 +395,17 @@ main()
 class _Worker:
     """One live WebUI process holding its own view of the registry."""
 
+    def _worker_source(self) -> str:
+        """The program this process runs; subclasses may extend it."""
+        return _WORKER_SOURCE
+
     def __init__(self, tmp_path, name, clock_offset=0.0):
         self.name = name
         self.state_dir = tmp_path / "state"
         self.state_dir.mkdir(parents=True, exist_ok=True)
         (self.state_dir / "config.yaml").write_text("{}\n", encoding="utf-8")
         script = tmp_path / f"gc_worker_{name}.py"
-        script.write_text(_WORKER_SOURCE, encoding="utf-8")
+        script.write_text(self._worker_source(), encoding="utf-8")
         self._stderr_path = tmp_path / f"gc_worker_{name}.stderr"
         env = os.environ.copy()
         env["GC_WORKER_REPO"] = str(REPO_ROOT)
