@@ -18,6 +18,10 @@
 
 ## 1. Overview and Purpose
 
+For stream-local semantic parsing, its live/durable grammar boundaries, and the
+separate post-tool reader, see
+[`Incremental live semantic parsing`](docs/architecture/incremental-stream-semantics.md).
+
 The Hermes Web UI is a lightweight web application that gives you a browser-based
 interface to the Hermes agent that is functionally equivalent to the CLI. It is modeled on
 the Claude-style interface: a sidebar for session management, a central chat area,

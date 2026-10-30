@@ -44,10 +44,15 @@ class TestStreamDisplayStripsThinkBlocksAlways:
         m = re.search(r'function _streamDisplay\(\)\{.*?\n  \}', js, re.DOTALL)
         assert m
         fn = m.group(0)
-        assert "_extractInlineThinkingFromContent" in fn
+        assert "_semanticSnapshot().content" in fn
         helper = _inline_extractor_body(js)
         assert "_thinkPairs" in helper
         assert "text.startsWith(candidate.open,index)" in helper
+        from tests.test_pr7478_stage1_semantics import run_js
+        run_js("reasoningText=liveReasoningText='channel';"
+               "token('<think>inline</think>answer');"
+               "assert.equal(_parseStreamState().content,'answer');"
+               "assert.equal(_parseStreamState().reasoning,'channel\\n\\ninline');")
 
     def test_still_handles_incomplete_think_tag_partial_prefix(self):
         """Existing behaviour preserved: partial `<thi`, `<think` prefixes
@@ -56,6 +61,9 @@ class TestStreamDisplayStripsThinkBlocksAlways:
         m = re.search(r'function _streamDisplay\(\)\{.*?\n  \}', js, re.DOTALL)
         assert m
         fn = m.group(0)
-        assert "_extractInlineThinkingFromContent" in fn
+        assert "_semanticSnapshot().content" in fn
         helper = _inline_extractor_body(js)
         assert "candidate.open.startsWith(rest)" in helper
+        from tests.test_pr7478_stage1_semantics import run_js
+        run_js("token('answer<thi');assert.equal(_parseStreamState().content,'answer');"
+               "token('nk>hidden');assert.equal(_parseStreamState().reasoning,'hidden');")
