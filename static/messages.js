@@ -7316,6 +7316,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(isRecoveryControlMessage){
             if(typeof showToast==='function') showToast('Stream recovery signal received. Restoring transcript...',3500,'error');
           } else if(d.session&&typeof d.session==='object'){
+            // #8517: a compressed turn can end here instead of `done`; carry the
+            // memory-off notice (and its dismissal) to the continuation, as `done` does.
+            try{
+              const _continuationSid=d.session.session_id;
+              if(_continuationSid&&String(_continuationSid)!==String(activeSid)&&typeof migrateMemoryOffNotice==='function') migrateMemoryOffNotice(activeSid,_continuationSid);
+            }catch(_){}
             S.session=d.session;
             const _nextMsgs3018=(d.session.messages||[]).filter(m=>m&&m.role);
             if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);
