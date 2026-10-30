@@ -67,9 +67,15 @@ Crash windows (the claims a restart can recover from disk alone):
   pending record whose turn may never have run — the retry is refused
   with `409 idempotency_outcome_unknown` (no `retry_after_seconds` hint),
   telling the caller to check the session before retrying;
-- a crash **after admission but before the completion write** is
-  reconciled onto the pending claim, so the retry replays the admitted
-  identity instead of starting a second turn;
+- a crash **after admission but before the completion write** does not
+  guarantee a replay: if the admitted identity was never durably
+  attached, the restarted store still finds only the pending record and
+  answers `409 idempotency_outcome_unknown` — it does not invent a
+  provisional or fabricated stream identity. The retry replays the
+  admitted identity only once the persisted record proves it. That is
+  distinct from a **live** completion-write failure, which is reconciled
+  onto the pending claim while the process is still running and then
+  replays the admitted identity instead of starting a second turn;
 - a turn that *was* completed and whose record then expired refuses the
   key with `410` — the message states whether the turn completed or its
   outcome was never recorded.
