@@ -32,7 +32,7 @@ import http.client
 import socket as _socket
 from collections import defaultdict, deque, OrderedDict
 from pathlib import Path
-from contextlib import closing
+from contextlib import closing, nullcontext
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
@@ -1752,6 +1752,10 @@ def _gateway_status_payload() -> dict:
             "reason": health_reason,
             "gateway_state": health_gateway_state,
         },
+        # Server-owned lifecycle capability (#8391): the UI only offers
+        # Start/Stop/Restart when the local CLI controls the monitored Gateway,
+        # and the lifecycle routes enforce the same answer.
+        "lifecycle": gateway_lifecycle_capability(),
     }
 
 
@@ -1811,6 +1815,21 @@ def _handle_gateway_lifecycle(handler, action: str, body: dict):
     # the lock for at most _GATEWAY_LIFECYCLE_TIMEOUT_SECONDS).
     if action not in {"start", "stop", "restart"}:
         return bad(handler, "unsupported gateway action", 400)
+    # Ownership policy before the lock and before any subprocess (#8391): the
+    # local `hermes gateway` CLI must not act on a Gateway WebUI only monitors.
+    capability = gateway_lifecycle_capability()
+    if not capability.get("managed"):
+        return j(
+            handler,
+            {
+                "ok": False,
+                "error": GATEWAY_EXTERNALLY_MANAGED_MESSAGE,
+                "code": "gateway_externally_managed",
+                "action": action,
+                "lifecycle": capability,
+            },
+            status=409,
+        )
     if not _GATEWAY_ACTION_LOCK.acquire(blocking=False):
         return j(
             handler,
@@ -1897,6 +1916,22 @@ def _mark_cron_done(job_id: str):
         _RUNNING_CRON_JOBS.pop(job_id, None)
 
 
+def _claim_cron_run(job_id: str) -> tuple[bool, float]:
+    """Atomically mark *job_id* running unless it already is.
+
+    Returns ``(claimed, elapsed_seconds_of_existing_run)``. Check and insert
+    happen under one ``_RUNNING_CRON_LOCK`` hold so two concurrent Run requests
+    can never both launch a worker (#7295: Run no longer sits behind the global
+    cron env lock that used to serialize them).
+    """
+    with _RUNNING_CRON_LOCK:
+        started = _RUNNING_CRON_JOBS.get(job_id)
+        if started is not None:
+            return False, time.time() - started
+        _RUNNING_CRON_JOBS[job_id] = time.time()
+        return True, 0.0
+
+
 def _is_cron_running(job_id: str) -> tuple[bool, float]:
     """Return (is_running, elapsed_seconds)."""
     with _RUNNING_CRON_LOCK:
@@ -1965,6 +2000,89 @@ def _cron_jobs_for_api(jobs) -> list[dict]:
     return [_cron_job_for_api(job) for job in (jobs or [])]
 
 
+def _cron_output_dir() -> Path:
+    """Cron output root for the current cron scope.
+
+    ``get_cron_output_dir()`` honors ``cron.jobs.use_cron_store()``; the
+    ``OUTPUT_DIR`` module constant is process-global and, while an in-process
+    cron job runs, points at that job's profile (#7295). Older Agents only
+    have the constant, which the lock-based fallback context pins.
+    """
+    import cron.jobs as _cron_jobs
+
+    getter = getattr(_cron_jobs, "get_cron_output_dir", None)
+    if callable(getter):
+        return Path(getter())
+    return Path(_cron_jobs.OUTPUT_DIR)
+
+
+def _cron_agent_jobs_lock():
+    """The Agent's jobs.json lock (in-process RLock + per-store ``.jobs.lock``
+    flock), or a no-op context on Agents that predate it.
+
+    #7295: Create persists a job in two writes (``create_job()`` has no
+    ``profile`` parameter, so the selected execution profile and notification
+    flags land in a follow-up ``update_job()``). List and Run no longer wait on
+    Create's cron env lock, so Create holds this lock across both writes and
+    those readers take it around their read: they see no job or the complete
+    one, never ``profile: null`` (which Run would dispatch to the wrong
+    profile). Enter it INSIDE the cron scope (the flock path follows
+    ``use_cron_store``) and never while waiting for ``_cron_env_lock``: a
+    running in-process job holds that lock and takes this one for its own
+    bookkeeping.
+
+    Only taken when the lock-free per-thread store scope is in use
+    (``_cron_store_scope_helpers()``, which also requires a re-entrant
+    ``_jobs_lock``): the wrapped Agent calls take this lock again. Every other
+    Agent keeps these paths on the legacy env lock (see ``cron_store_scope``),
+    which already serializes them; there an outer hold of a plain-Lock
+    ``_jobs_lock`` (e.g. Agent e5b4cf7bea2) would deadlock Create and Resume.
+    """
+    from api.profiles import _cron_store_scope_helpers
+
+    if _cron_store_scope_helpers() is None:
+        return nullcontext()
+    import cron.jobs as _cron_jobs
+
+    return _cron_jobs._jobs_lock()
+
+
+# Update keys that make an Agent exposing ``_compute_provider_model_snapshots``
+# (e.g. released v2026.9.14) recompute the provider/model snapshots inside
+# ``update_job()``: exactly provider/model/base_url/no_agent there. ``pinned``
+# is a conservative extra: on Agents with ``_apply_pin_update`` it rewrites
+# provider/model in the same update.
+_CRON_SNAPSHOT_RECOMPUTE_KEYS = frozenset({"model", "provider", "base_url", "no_agent", "pinned"})
+
+
+def _cron_update_needs_profile_context(body) -> bool:
+    """True when ``/api/crons/update`` must run on the locked cron context.
+
+    Some updates make the Agent resolve the model/provider from the profile's
+    ``config.yaml`` (whose ``${VAR}`` expansion reads the PROCESS env) and from
+    provider env vars. The lock-free store scope only points the store and
+    ``get_hermes_home()`` at the profile, so those must keep the locked
+    context that points the process env at it, or they save the default's or
+    a running job's values into this profile's job (#7295):
+
+    * ``pinned=True`` without an explicit ``model`` (current Agents pin the
+      main model from config);
+    * on Agents exposing ``_compute_provider_model_snapshots``, any update
+      touching an inference field (snapshot recomputation).
+    """
+    if not isinstance(body, dict):
+        return False
+    if bool(body.get("pinned")) and "model" not in body:
+        return True
+    if _CRON_SNAPSHOT_RECOMPUTE_KEYS.isdisjoint(body):
+        return False
+    try:
+        import cron.jobs as _cron_jobs
+    except Exception:
+        return False
+    return callable(getattr(_cron_jobs, "_compute_provider_model_snapshots", None))
+
+
 _AGENT_CRON_IMPORT_PATH_LOCK = threading.Lock()
 _AGENT_CRON_IMPORT_PATH_READY: str | None = None
 
@@ -2022,7 +2140,7 @@ def _cron_jobs_cross_profile(active_profile: str) -> tuple[list[dict], list[dict
     """
     from cron.jobs import list_jobs
     from api.profiles import (
-        cron_profile_context_for_home,
+        cron_store_scope_for_home,
         get_hermes_home_for_profile,
         list_profiles_api,
     )
@@ -2068,7 +2186,9 @@ def _cron_jobs_cross_profile(active_profile: str) -> tuple[list[dict], list[dict
         seen_homes.add(home_key)
         is_active = _profiles_match(owner_profile, active_profile)
         try:
-            with cron_profile_context_for_home(home):
+            # #7295: per-thread store scope, not the global env lock a running
+            # in-process cron job holds for its whole run.
+            with cron_store_scope_for_home(home), _cron_agent_jobs_lock():
                 jobs = _cron_jobs_for_api(list_jobs(include_disabled=True))
         except Exception:
             if not is_active:
@@ -3528,7 +3648,11 @@ from api.helpers import (
     _CLIENT_DISCONNECT_ERRORS,
     split_media_token_ref,
 )
-from api.agent_health import build_agent_health_payload
+from api.agent_health import (
+    GATEWAY_EXTERNALLY_MANAGED_MESSAGE,
+    build_agent_health_payload,
+    gateway_lifecycle_capability,
+)
 from api.gateway_chat import gateway_chat_config_status
 from api.request_diagnostics import RequestDiagnostics
 from api.system_health import build_system_health_payload
@@ -13126,6 +13250,11 @@ from api.streaming import (
     _CompactEchoIndex,
 )
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
+from api.run_drain import (  # #7293
+    RunAdmissionClosed,
+    assert_run_admission_open_locked,
+    run_admission_closed_response,
+)
 from api.run_journal import (
     runtime_model_from_events,
     _parse_run_journal_event_id as _shared_parse_run_journal_event_id,
@@ -15717,6 +15846,19 @@ def _handle_health_restart(handler) -> bool:
             status=429,
         )
 
+    if outcome.get("status") == "external":
+        # The monitored Gateway is not controlled by this WebUI (#8391); the
+        # shared helper refused before launching anything.
+        return j(
+            handler,
+            {
+                "ok": False,
+                "error": outcome.get("message", GATEWAY_EXTERNALLY_MANAGED_MESSAGE),
+                "code": "gateway_externally_managed",
+            },
+            status=409,
+        )
+
     return j(
         handler,
         {"ok": False, "error": outcome.get("message", "Internal error running restart")},
@@ -16912,6 +17054,7 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/health/agent":
         payload = build_agent_health_payload()
         payload["gateway_chat"] = gateway_chat_config_status()
+        payload["gateway_lifecycle"] = gateway_lifecycle_capability()
         j(handler, payload)
         return True
 
@@ -17639,45 +17782,49 @@ def handle_get(handler, parsed) -> bool:
             "other_profile_count": hidden_other_count,
         })
 
+    # #7295/#6753: cron reads use the per-thread store scope (lock-free on
+    # Agents with cron.jobs.use_cron_store) so a long in-process cron job that
+    # holds the global cron env lock cannot freeze the Tasks panel polls.
     if parsed.path == "/api/crons/output":
-        from api.profiles import cron_profile_context
+        from api.profiles import cron_store_scope
 
-        with cron_profile_context():
-            _ensure_agent_cron_import_path()
+        _ensure_agent_cron_import_path()
+        with cron_store_scope():
             return _handle_cron_output(handler, parsed)
 
     if parsed.path == "/api/crons/history":
-        from api.profiles import cron_profile_context
+        from api.profiles import cron_store_scope
 
-        with cron_profile_context():
-            _ensure_agent_cron_import_path()
+        _ensure_agent_cron_import_path()
+        with cron_store_scope():
             return _handle_cron_history(handler, parsed)
 
     if parsed.path == "/api/crons/run":
-        from api.profiles import cron_profile_context
+        from api.profiles import cron_store_scope
 
-        with cron_profile_context():
-            _ensure_agent_cron_import_path()
+        _ensure_agent_cron_import_path()
+        with cron_store_scope():
             return _handle_cron_run_detail(handler, parsed)
 
     if parsed.path == "/api/crons/recent":
-        from api.profiles import cron_profile_context
+        from api.profiles import cron_store_scope
 
-        with cron_profile_context():
-            _ensure_agent_cron_import_path()
+        _ensure_agent_cron_import_path()
+        with cron_store_scope():
             return _handle_cron_recent(handler, parsed)
 
     if parsed.path == "/api/crons/status":
-        from api.profiles import cron_profile_context
+        from api.profiles import cron_store_scope
 
-        with cron_profile_context():
+        _ensure_agent_cron_import_path()
+        with cron_store_scope():
             return _handle_cron_status(handler, parsed)
 
     if parsed.path == "/api/crons/delivery-options":
-        from api.profiles import cron_profile_context
+        from api.profiles import cron_store_scope
 
-        with cron_profile_context():
-            _ensure_agent_cron_import_path()
+        _ensure_agent_cron_import_path()
+        with cron_store_scope():
             return _handle_cron_delivery_options(handler)
 
     # ── Skills API (GET) ──
@@ -20011,8 +20158,12 @@ def handle_post(handler, parsed) -> bool:
         return _handle_terminal_close(handler, body)
 
     # ── Cron API (POST) ──
-    # See GET-side comment above: wrap in cron_profile_context so writes go
-    # to the TLS-active profile's jobs.json instead of the process default.
+    # Writes go to the TLS-active profile's jobs.json instead of the process
+    # default. Store-only writers use the per-thread scope (#7295): the Agent's
+    # own jobs.json lock (in-process RLock + .jobs.lock flock) serializes them
+    # against a running job's bookkeeping. Create keeps the global env lock:
+    # its selected-profile snapshot repair mutates process env, which must not
+    # overlap a running in-process cron job.
     if parsed.path == "/api/crons/create":
         from api.profiles import cron_profile_context
 
@@ -20021,38 +20172,38 @@ def handle_post(handler, parsed) -> bool:
             return _handle_cron_create(handler, body)
 
     if parsed.path == "/api/crons/update":
-        from api.profiles import cron_profile_context
+        from api.profiles import cron_profile_context, cron_store_scope
 
-        with cron_profile_context():
-            _ensure_agent_cron_import_path()
+        _ensure_agent_cron_import_path()
+        with cron_profile_context() if _cron_update_needs_profile_context(body) else cron_store_scope():
             return _handle_cron_update(handler, body)
 
     if parsed.path == "/api/crons/delete":
-        from api.profiles import cron_profile_context
+        from api.profiles import cron_store_scope
 
-        with cron_profile_context():
-            _ensure_agent_cron_import_path()
+        _ensure_agent_cron_import_path()
+        with cron_store_scope():
             return _handle_cron_delete(handler, body)
 
     if parsed.path == "/api/crons/run":
-        from api.profiles import cron_profile_context
+        from api.profiles import cron_store_scope
 
-        with cron_profile_context():
-            _ensure_agent_cron_import_path()
+        _ensure_agent_cron_import_path()
+        with cron_store_scope():
             return _handle_cron_run(handler, body)
 
     if parsed.path == "/api/crons/pause":
-        from api.profiles import cron_profile_context
+        from api.profiles import cron_store_scope
 
-        with cron_profile_context():
-            _ensure_agent_cron_import_path()
+        _ensure_agent_cron_import_path()
+        with cron_store_scope():
             return _handle_cron_pause(handler, body)
 
     if parsed.path == "/api/crons/resume":
-        from api.profiles import cron_profile_context
+        from api.profiles import cron_store_scope
 
-        with cron_profile_context():
-            _ensure_agent_cron_import_path()
+        _ensure_agent_cron_import_path()
+        with cron_store_scope():
             return _handle_cron_resume(handler, body)
 
     # ── Git workspace ops (POST) ──
@@ -21542,7 +21693,10 @@ def handle_post(handler, parsed) -> bool:
             _apply_channel = None
         from api.updates import apply_update
 
-        return j(handler, apply_update(target, _apply_channel))
+        # #7293: an update refuses while WebUI-owned runs are active unless the
+        # client re-sends it with an explicit, user-confirmed force.
+        _force_active_runs = isinstance(body, dict) and body.get("force_active_runs") is True
+        return j(handler, apply_update(target, _apply_channel, force_active_runs=_force_active_runs))
 
     if parsed.path == "/api/updates/force":
         target = body.get("target", "")
@@ -21553,7 +21707,8 @@ def handle_post(handler, parsed) -> bool:
             _force_channel = None
         from api.updates import apply_force_update
 
-        return j(handler, apply_force_update(target, _force_channel))
+        _force_active_runs = isinstance(body, dict) and body.get("force_active_runs") is True  # #7293
+        return j(handler, apply_force_update(target, _force_channel, force_active_runs=_force_active_runs))
 
     if parsed.path == "/api/updates/clear_lock":
         # Manual-instruction recovery for the .git/index.lock case. The
@@ -21568,7 +21723,8 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, 'target must be "webui" or "agent"')
         from api.updates import apply_clear_lock
 
-        return j(handler, apply_clear_lock(target))
+        _force_active_runs = isinstance(body, dict) and body.get("force_active_runs") is True  # #7293
+        return j(handler, apply_clear_lock(target, force_active_runs=_force_active_runs))
 
     if parsed.path == "/api/updates/summary":
         from api.updates import summarize_update_payload
@@ -26139,7 +26295,7 @@ def _handle_cron_history(handler, parsed):
     Returns lightweight file listing so the frontend can render a run history
     without fetching full output for every run.
     """
-    from cron.jobs import OUTPUT_DIR as CRON_OUT
+    CRON_OUT = _cron_output_dir()
     import re as _re
 
     qs = parse_qs(parsed.query)
@@ -26186,7 +26342,7 @@ def _handle_cron_history(handler, parsed):
 
 def _handle_cron_run_detail(handler, parsed):
     """Return full content of a single cron run output file."""
-    from cron.jobs import OUTPUT_DIR as CRON_OUT
+    CRON_OUT = _cron_output_dir()
     import re as _re
 
     qs = parse_qs(parsed.query)
@@ -26295,7 +26451,7 @@ def _cron_output_snippet(text: str, limit: int = 600) -> str:
 
 
 def _handle_cron_output(handler, parsed):
-    from cron.jobs import OUTPUT_DIR as CRON_OUT
+    CRON_OUT = _cron_output_dir()
     import re as _re
 
     qs = parse_qs(parsed.query)
@@ -26828,6 +26984,12 @@ def _handle_btw(handler, body):
         require(body, "question")
     except ValueError as e:
         return bad(handler, str(e))
+    # #7293: refuse before any session mutation while a restart/update or
+    # shutdown drain has closed run admission (503, code server_draining).
+    _admission_refusal = run_admission_closed_response()
+    if _admission_refusal is not None:
+        _admission_status = _admission_refusal.pop("_status", 503)
+        return j(handler, _admission_refusal, status=_admission_status)
     stale_response = _agent_runtime_barrier_response(runner_local_owned=False)
     if stale_response is not None:
         return j(handler, stale_response, status=409)
@@ -26877,6 +27039,9 @@ def _handle_btw(handler, body):
         stream = create_stream_channel()
         register_stream_owner(stream_id, ephemeral.session_id)
         with STREAMS_LOCK:
+            # #7293: refuse inside the registration edge while a restart/update
+            # or shutdown drain has closed run admission.
+            assert_run_admission_open_locked()
             STREAMS[stream_id] = stream
             # Launch-phase ownership claim (re-gate finding B): the reaper's sweep
             # makes this load-bearing on EVERY registration edge, not just the two
@@ -26910,6 +27075,12 @@ def _handle_background(handler, body):
         require(body, "prompt")
     except ValueError as e:
         return bad(handler, str(e))
+    # #7293: refuse before any session mutation while a restart/update or
+    # shutdown drain has closed run admission (503, code server_draining).
+    _admission_refusal = run_admission_closed_response()
+    if _admission_refusal is not None:
+        _admission_status = _admission_refusal.pop("_status", 503)
+        return j(handler, _admission_refusal, status=_admission_status)
     stale_response = _agent_runtime_barrier_response(runner_local_owned=False)
     if stale_response is not None:
         return j(handler, stale_response, status=409)
@@ -26998,6 +27169,7 @@ def _handle_background(handler, body):
         stream = create_stream_channel()
         register_stream_owner(stream_id, bg.session_id)
         with STREAMS_LOCK:
+            assert_run_admission_open_locked()  # #7293 run-admission fence
             STREAMS[stream_id] = stream
             # Same launch-phase claim as every other registration edge (re-gate
             # finding B): its worker is scheduled below, and until it admits itself
@@ -27927,6 +28099,7 @@ def _start_regeneration_stream_locked(
         stream = create_stream_channel()
         register_stream_owner(stream_id, s.session_id)
         with STREAMS_LOCK:
+            assert_run_admission_open_locked()  # #7293 run-admission fence
             STREAMS[stream_id] = stream
             # Launch-phase ownership claim (#7302 finding 5): published atomically
             # with the registration so the orphan check keeps this stream while its
@@ -28462,6 +28635,7 @@ def _start_chat_stream_for_session(
                     stream = create_stream_channel()
                     register_stream_owner(stream_id, s.session_id)
                     with STREAMS_LOCK:
+                        assert_run_admission_open_locked()  # #7293 run-admission fence
                         STREAMS[stream_id] = stream
                         # Same launch-phase claim as the regeneration path
                         # (#7302 finding 5): the ordinary start has the same
@@ -28995,6 +29169,12 @@ def start_session_turn(
         }
     if not msg:
         return {"error": "message is required", "_status": 400}
+    # #7293: a server-initiated turn honours the same run-admission fence as a
+    # browser chat/start. The refusal is a retryable 503 dict (never a raise),
+    # so wakeup callers re-defer the prompt instead of dropping it.
+    _admission_refusal = run_admission_closed_response()
+    if _admission_refusal is not None:
+        return _admission_refusal
     stale_response = _agent_runtime_barrier_response(runner_local_owned=True)
     if stale_response is not None:
         stale_response["_status"] = 409
@@ -29151,22 +29331,30 @@ def start_session_turn(
                 }
     if _paused_wakeup_response is not None:
         return _paused_wakeup_response
-    resp = _start_run(
-        s,
-        msg=msg,
-        attachments=[],
-        workspace=workspace,
-        model=model,
-        model_provider=model_provider,
-        normalized_model=normalized_model,
-        source=turn_source,
-        route="start_session_turn",
-        process_id=process_id,
-        retry_attempt=retry_attempt,
-        rearm_deferred_wakeup=rearm_deferred_wakeup,
-        consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
-        on_admitted=on_admitted,
-    )
+    try:
+        resp = _start_run(
+            s,
+            msg=msg,
+            attachments=[],
+            workspace=workspace,
+            model=model,
+            model_provider=model_provider,
+            normalized_model=normalized_model,
+            source=turn_source,
+            route="start_session_turn",
+            process_id=process_id,
+            retry_attempt=retry_attempt,
+            rearm_deferred_wakeup=rearm_deferred_wakeup,
+            consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
+            on_admitted=on_admitted,
+        )
+    except RunAdmissionClosed as exc:
+        # #7293: the fence closed between the early check and the registration
+        # edge. The launch already compensated (session snapshot restored,
+        # journal closed as start_compensated); report the retryable refusal.
+        refusal = dict(exc.payload)
+        refusal["_status"] = exc.status
+        return refusal
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────
     # Option Z starts this turn server-side, so NO browser EventSource is
@@ -29727,6 +29915,12 @@ def _handle_chat_start(handler, body, diag=None):
                 {"status": "suppressed", "reason": "silent_control_message"},
                 status=200,
             )
+        # #7293: refuse before any session mutation while a restart/update or
+        # shutdown drain has closed run admission (503, code server_draining).
+        _admission_refusal = run_admission_closed_response()
+        if _admission_refusal is not None:
+            _admission_status = _admission_refusal.pop("_status", 503)
+            return j(handler, _admission_refusal, status=_admission_status)
         if body.get("regenerate") is True:
             from api.runtime_adapter import runtime_adapter_runner_enabled
 
@@ -30181,6 +30375,12 @@ def _current_cwd_sync_target(sid):
 
 def _handle_chat_sync(handler, body):
     """Fallback synchronous chat endpoint (POST /api/chat). Not used by frontend."""
+    # #7293: refuse before any session mutation while a restart/update or
+    # shutdown drain has closed run admission (503, code server_draining).
+    _admission_refusal = run_admission_closed_response()
+    if _admission_refusal is not None:
+        _admission_status = _admission_refusal.pop("_status", 503)
+        return j(handler, _admission_refusal, status=_admission_status)
     stale_response = _agent_runtime_barrier_response(runner_local_owned=False)
     if stale_response is not None:
         return j(handler, stale_response, status=409)
@@ -30729,15 +30929,8 @@ def _handle_cron_create(handler, body):
         badge_notifications = body.get("badge_notifications") is not False
         requested_model = body.get("model") or None
         requested_provider = body.get("provider") or None
-        job = create_job(
-            prompt=body["prompt"],
-            schedule=body["schedule"],
-            name=body.get("name") or None,
-            deliver=body.get("deliver") or "local",
-            skills=body.get("skills") or [],
-            model=requested_model,
-            provider=requested_provider,
-        )
+        # Computed before the jobs lock: the snapshot repair swaps process env
+        # under its own locks and may be slow; it does not depend on the job.
         post_create_updates = {}
         if profile is not None:
             post_create_updates["profile"] = profile
@@ -30752,8 +30945,23 @@ def _handle_cron_create(handler, body):
             post_create_updates["toast_notifications"] = False
         if not badge_notifications:
             post_create_updates["badge_notifications"] = False
-        if post_create_updates:
-            job = update_job(job["id"], post_create_updates) or job
+        # create_job() cannot take these fields, so the record is written
+        # twice; hold the Agent jobs lock across both writes so lock-free
+        # List/Run never read the intermediate record (#7295). We are already
+        # inside cron_profile_context(), so this never waits on the env lock
+        # while holding the jobs lock.
+        with _cron_agent_jobs_lock():
+            job = create_job(
+                prompt=body["prompt"],
+                schedule=body["schedule"],
+                name=body.get("name") or None,
+                deliver=body.get("deliver") or "local",
+                skills=body.get("skills") or [],
+                model=requested_model,
+                provider=requested_provider,
+            )
+            if post_create_updates:
+                job = update_job(job["id"], post_create_updates) or job
         return j(handler, {"ok": True, "job": _cron_job_for_api(job)})
     except Exception as e:
         return j(handler, {"error": str(e)}, status=400)
@@ -30842,15 +31050,17 @@ def _handle_cron_run(handler, body):
         return bad(handler, "job_id required")
     from cron.jobs import get_job
 
-    job = get_job(job_id)
+    # Under the jobs lock so a concurrent Create's two-step write is never
+    # dispatched half-done (profile not yet persisted) (#7295).
+    with _cron_agent_jobs_lock():
+        job = get_job(job_id)
     if not job:
         return bad(handler, "Job not found", 404)
-    # Prevent double-run: reject if the job is already tracked as running
-    already_running, elapsed = _is_cron_running(job_id)
-    if already_running:
+    # Prevent double-run: claim the job atomically; reject if already running.
+    claimed, elapsed = _claim_cron_run(job_id)
+    if not claimed:
         return j(handler, {"ok": False, "job_id": job_id, "status": "already_running",
                             "elapsed": round(elapsed, 1)})
-    _mark_cron_running(job_id)
     # Capture the TLS-active profile home now — the thread runs after the
     # request finishes, so TLS is gone by then.
     #
@@ -30863,12 +31073,17 @@ def _handle_cron_run(handler, body):
     # run unpinned against the process-global HERMES_HOME — so we'd
     # rather let any unexpected exception 500 the request than corrupt
     # cross-profile state.
-    from api.profiles import get_active_hermes_home
+    try:
+        from api.profiles import get_active_hermes_home
 
-    _profile_home = get_active_hermes_home()
-    _execution_profile_home = _profile_home_for_cron_job(job)
-    _event_profile = _event_profile_for_cron_job(job)
-    threading.Thread(target=_run_cron_tracked, args=(job, _profile_home, _execution_profile_home, _event_profile), daemon=True).start()
+        _profile_home = get_active_hermes_home()
+        _execution_profile_home = _profile_home_for_cron_job(job)
+        _event_profile = _event_profile_for_cron_job(job)
+        threading.Thread(target=_run_cron_tracked, args=(job, _profile_home, _execution_profile_home, _event_profile), daemon=True).start()
+    except BaseException:
+        # No worker owns the claim, so nothing else would ever release it.
+        _mark_cron_done(job_id)
+        raise
     return j(handler, {"ok": True, "job_id": job_id, "status": "running"})
 
 
@@ -30890,7 +31105,14 @@ def _handle_cron_resume(handler, body):
         return bad(handler, "job_id required")
     from cron.jobs import resume_job
 
-    result = resume_job(job_id)
+    # resume_job() reads the schedule and computes next_run_at before taking
+    # the Agent's jobs.json lock for its write. Hold that lock across the whole
+    # call so a concurrent Edit cannot land in between and leave the new
+    # schedule paired with the old next_run_at (#7295). cron_store_scope()
+    # only runs lock-free when the Agent has _jobs_lock; otherwise this request
+    # is already inside the legacy locked cron_profile_context().
+    with _cron_agent_jobs_lock():
+        result = resume_job(job_id)
     if result:
         return j(handler, {"ok": True, "job": result})
     return bad(handler, "Job not found", 404)
