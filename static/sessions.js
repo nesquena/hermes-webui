@@ -2447,8 +2447,7 @@ async function newSession(flash, options={}){
     }else if(window._defaultModel){
       // Configured default wins over stale picker/persisted state (#4728).
       newModelState={model:window._defaultModel,model_provider:null};
-      // #8527: keep the configured PAIR — the fallback chain below only covers
-      // unqualified models, so the default's provider must travel with it.
+      // #8527: the configured default must travel with its own provider.
       newModelState.model_provider=window._activeProvider||null;
       usingConfiguredDefault=true;
     }else if(modelSelForNew&&modelSelForNew.value&&typeof _modelStateForSelect==='function'){
