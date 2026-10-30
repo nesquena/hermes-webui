@@ -76,8 +76,10 @@ registry, rendering, outcome hydration, terminal/Steer settlement, and scroll
 ownership remain upstream-owned. No old paint scheduler, DOM-reuse implementation,
 projection cache, or transport-generation fence is introduced here.
 
-Dirty projection and transport-generation ownership are separate sequential stages.
-Passing these parser tests is not evidence that either later stage is implemented.
+Dirty projection is described separately in
+[incremental activity projection](incremental-activity-projection.md).
+Transport-generation ownership remains a later stage. Passing these parser tests
+alone is not evidence that either later stage is implemented.
 
 ## Regression evidence
 

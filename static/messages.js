@@ -3449,6 +3449,29 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     })
     : null);
   let _anchorShadowWarned=false;
+  let _anchorProjection=null;
+  let _anchorProjectionClosed=false;
+  function _anchorProjectionOwnerReplaced(){
+    const live=LIVE_STREAMS[activeSid];
+    const registered=_anchorRegistryMap&&_anchorRegistryMap.get(streamId);
+    // Transport closure releases projection state, not the registry's right to
+    // record failed recovery. Only an actual successor revokes that right.
+    return !!((live&&live.projectActivityScene!==_projectOwnedAnchorActivityScene)||
+      (registered&&registered!==_anchorRegistry));
+  }
+  function _releaseAnchorProjection(projector=_anchorProjection){
+    if(projector) projector.dispose();
+    if(_anchorProjection===projector) _anchorProjection=null;
+  }
+  function _projectOwnedAnchorActivityScene(options){
+    const live=LIVE_STREAMS[activeSid];
+    if(_anchorProjection&&!_anchorProjectionClosed&&live&&
+      live.projectActivityScene===_projectOwnedAnchorActivityScene&&
+      _anchorRegistryMap&&_anchorRegistryMap.get(streamId)===_anchorRegistry){
+      return _anchorProjection.project(options);
+    }
+    return _anchorApi.projectAssistantTurnAnchorActivityScene(_anchorRegistry,options);
+  }
   let _anchorReasoningFlushed=false;
   let _anchorLocalSeq=0;
   if(_anchorRegistryMap&&_anchorRegistry) _anchorRegistryMap.set(streamId,_anchorRegistry);
@@ -3467,6 +3490,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // Applying an event and painting it are separate outcomes. Reasoning uses the
   // optional holder to decide whether a temporary visible fallback is needed.
   function _applyToAnchor(sourceEventType, rawEventData, sseEvent, renderOutcome, options={}){
+    if(_anchorProjectionClosed&&_anchorProjectionOwnerReplaced()) return null;
     if(sourceEventType!=='reasoning') _flushPendingReasoningRender();
     if(renderOutcome&&typeof renderOutcome==='object') renderOutcome.rendered=false;
     if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.applyAssistantTurnAnchorSourceEvent!=='function') return null;
@@ -3487,11 +3511,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     };
     if(eventId) sourceEvent.event_id=eventId;
     try{
+      const previousLength=_anchorRegistry.anchor.activity_events.length;
       const result=_anchorApi.applyAssistantTurnAnchorSourceEvent(
         _anchorRegistry,
         sourceEvent,
         {session_id:activeSid,stream_id:streamId}
       );
+      if(_anchorProjection&&result.applied&&result.normalized.classification==='activity'){
+        _anchorProjection.append(previousLength);
+      }
       const rendered=options&&options.render===false?false:_renderAnchorLiveScene();
       if(renderOutcome&&typeof renderOutcome==='object') renderOutcome.rendered=rendered;
       return result;
@@ -3561,6 +3589,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return !!(result&&(result.applied||result.reason==='duplicate'));
   }
   function _replaceAnchorActivityEventByLocalId(localId, sourceEventType, patch){
+    if(_anchorProjectionClosed&&_anchorProjectionOwnerReplaced()) return null;
     const events=_anchorActivityEvents();
     if(!events||!localId) return null;
     for(let i=events.length-1;i>=0;i--){
@@ -3576,6 +3605,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         },
       };
       events[i]=next;
+      if(_anchorProjection) _anchorProjection.replace(i,event,next);
       return next;
     }
     return null;
@@ -3631,7 +3661,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _projectLiveAnchorActivityScene(){
     if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.projectAssistantTurnAnchorActivityScene!=='function') return null;
     try{
-      return _anchorApi.projectAssistantTurnAnchorActivityScene(_anchorRegistry,{mode:_anchorSceneActiveMode()});
+      return _projectOwnedAnchorActivityScene({mode:_anchorSceneActiveMode()});
     }catch(_){
       return null;
     }
@@ -4889,6 +4919,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   window.__anchorProseIncrementalNode=_anchorProseIncrementalNode;
   function _clearAnchorProseIncrementalNode(){
+    _releaseAnchorProjection();
     if(typeof window!=='undefined'&&window.__anchorProseIncrementalNode===_anchorProseIncrementalNode) window.__anchorProseIncrementalNode=null;
     // Clear the per-parser MEDIA tail for each cached smd parser.
     // _anchorProseSmdCache is a Map<key, {parser, ...}>; we can't
@@ -4978,6 +5009,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         });
       }else{
         events.splice(i,1);
+        if(_anchorProjection) _anchorProjection.invalidate();
       }
       _renderAnchorLiveScene();
       return true;
@@ -6788,10 +6820,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof existingLive.cancelIdleRecovery==='function') existingLive.cancelIdleRecovery();
       try{if(existingLive.source.readyState!==2)existingLive.source.close();}catch(_){ }
     }
-    LIVE_STREAMS[activeSid]={streamId,source,dispose:(reconnecting=false)=>{
+    _anchorProjectionClosed=false;
+    _releaseAnchorProjection();
+    _anchorProjection=_anchorApi&&typeof _anchorApi.createAssistantTurnAnchorActivityProjector==='function'
+      ? _anchorApi.createAssistantTurnAnchorActivityProjector(_anchorRegistry) : null;
+    const projection=_anchorProjection;
+    LIVE_STREAMS[activeSid]={streamId,source,anchorRegistry:_anchorRegistry,
+      projectActivityScene:_projectOwnedAnchorActivityScene,dispose:(reconnecting=false)=>{
+      if(!LIVE_STREAMS[activeSid]||LIVE_STREAMS[activeSid].source!==source) return;
       if(reconnecting) _flushPendingSegmentRender();
       else _streamFinalized=true;
       _cancelAnimationFramePendingStreamRender();
+      _releaseAnchorProjection(projection);
+      if(LIVE_STREAMS[activeSid]&&LIVE_STREAMS[activeSid].source===source) _anchorProjectionClosed=true;
     }};
     _bindSidebarIdleRecovery(LIVE_STREAMS[activeSid]);
 
@@ -8393,7 +8434,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamFadeCleanupReduceMotionListener();
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
     _clearOwnerInflightState();
-    _closeSource(source);
     _clearApprovalForOwner();
     _clearClarifyForOwner('terminal');
     if(S.session&&S.session.session_id===activeSid){
@@ -8444,6 +8484,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         trackBackgroundError(activeSid,_errTitle,'Connection interrupted');
       }
     }
+    // Finish authoritative terminal writes before disposing the projection owner.
+    _closeSource(source);
     _setActivePaneIdleIfOwner();
     _dispatchExtensionTurnLifecycle('turn:error',activeSid,streamId,{
       status:'connection_lost',

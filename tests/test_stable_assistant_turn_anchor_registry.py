@@ -764,7 +764,9 @@ def test_invisible_anchor_outcome_applies_without_repainting_live_scene():
     script = f"""
 const activeSid='sid-owned-outcome';
 const streamId='stream-owned-outcome';
-const _anchorRegistry={{anchor:{{}}}};
+const _anchorRegistry={{anchor:{{activity_events:[]}}}};
+const _anchorProjection=null;
+const _anchorProjectionClosed=false;
 const applied=[];
 const _anchorApi={{
   applyAssistantTurnAnchorSourceEvent(registry,event,context){{
