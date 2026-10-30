@@ -630,14 +630,27 @@ class TestATakenOverAdmissionNeverLaunchesASecondWorker:
                 gate_timeout=90,
             )
             assert started["started"] is True
-            assert owner.call("route_result")["done"] is False, (
-                "the route launch was not paused inside the admission: the "
-                "schedule cannot exercise the binding"
-            )
-            dump = owner.call("dump")
-            assert any(
-                k.startswith(f"{sid}\x00") for k in dump["memory_handoffs"]
-            ), (
+            # The route thread reaches the gate asynchronously: it consumes
+            # the intent and mints the handoff before it parks at the gate.
+            # A single poll therefore races the route thread — the launch is
+            # not finished yet, but the handoff may not exist either. Wait for
+            # the handoff to appear instead of snapshotting once, so the
+            # schedule does not depend on how fast the worker thread runs.
+            deadline = time.time() + 30
+            minted = False
+            while time.time() < deadline:
+                assert owner.call("route_result")["done"] is False, (
+                    "the route launch was not paused inside the admission: the "
+                    "schedule cannot exercise the binding"
+                )
+                dump = owner.call("dump")
+                if any(
+                    k.startswith(f"{sid}\x00") for k in dump["memory_handoffs"]
+                ):
+                    minted = True
+                    break
+                time.sleep(0.05)
+            assert minted, (
                 "the paused route did not mint the admission handoff: the "
                 "schedule cannot exercise the binding"
             )
