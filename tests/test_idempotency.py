@@ -1169,14 +1169,20 @@ def test_unreadable_store_file_fails_closed(idem_env):
     ), "the durable store (snapshot or WAL) must exist after a completed turn"
 
     # Simulate an I/O error on the store file (permissions, EIO, a
-    # truncated/renamed file) by making read_text fail. Force the failure
-    # at the source so it is deterministic for any test user.
-    def boom_read_text(self, *a, **kw):
+    # truncated/renamed file) by making the read fail. Force the failure
+    # at the source so it is deterministic for any test user. The durable
+    # state is read through TWO primitives — the snapshot as text and the
+    # WAL as bytes (the WAL must not be newline-translated, see
+    # ``_replay_wal_locked``) — so both are failed here: whichever one
+    # this store happens to reach must fail closed.
+    def boom_read(self, *a, **kw):
         raise OSError("simulated: cannot read store file")
 
     import pathlib
     real_read_text = pathlib.Path.read_text
-    pathlib.Path.read_text = boom_read_text
+    real_read_bytes = pathlib.Path.read_bytes
+    pathlib.Path.read_text = boom_read
+    pathlib.Path.read_bytes = boom_read
     try:
         # The store must REFUSE to serve, not start empty: silently
         # starting empty is what forgets durable claims and re-admits the
@@ -1185,6 +1191,7 @@ def test_unreadable_store_file_fails_closed(idem_env):
             idem_env.store.reload_from_disk()
     finally:
         pathlib.Path.read_text = real_read_text
+        pathlib.Path.read_bytes = real_read_bytes
 
     # The route path: the durable record still exists, so replay still
     # works — the store never claimed to be empty.
@@ -3301,3 +3308,225 @@ def test_torn_tail_repair_failure_fails_closed_and_keeps_the_prefix(
         "the completed key must replay once the repair heals — a second "
         "admission is the duplicate turn this store exists to prevent"
     )
+
+
+# ---------------------------------------------------------------------------
+# Byte-exact torn-tail repair across line-ending framings (#7782 round 3)
+# ---------------------------------------------------------------------------
+
+
+def _reframe_wal(wal_path, newline: bytes) -> bytes:
+    """Re-frame every WAL line ending as ``newline`` and return the bytes.
+
+    ``_append_wal_locked`` opens the WAL in ordinary text append mode with
+    no explicit newline control, so on Windows its ``"\n"`` is CRLF on
+    disk. These tests replay that supported producer shape on any host:
+    the acknowledged ops are already written, we only rewrite the line
+    endings (JSON escapes real newlines inside strings, so a raw ``\n``
+    byte in the file is always a line terminator, never payload).
+    """
+    raw = wal_path.read_bytes()
+    reframed = raw.replace(b"\r\n", b"\n").replace(b"\n", newline)
+    wal_path.write_bytes(reframed)
+    return reframed
+
+
+def _append_torn_tail(wal_path, tail: str, newline: bytes, *, terminate: bool) -> None:
+    """Append ``tail`` as an interrupted write in ``newline`` framing.
+
+    ``terminate=False`` models an append whose last bytes never reached
+    the disk (a torn write); ``terminate=True`` models a write that did
+    land but whose content is malformed — both are unacknowledged.
+    """
+    data = tail.encode("utf-8")
+    if terminate:
+        data += newline
+    with open(wal_path, "ab") as fh:
+        fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
+def _run_torn_tail_recovery_scenario(
+    idem_env,
+    *,
+    newline: bytes,
+    tail: str,
+    terminate: bool,
+    key_a: str,
+    key_b: str,
+    phantom_key: str,
+) -> None:
+    """Replay the maintainer's round-3 crash matrix for one framing.
+
+    1. Admit key A (200 ``stream-1``), so its claim AND completion ops
+       are acknowledged, fsync'd WAL lines.
+    2. Re-frame those real WAL records with ``newline`` (the Windows
+       text-mode producer shape) and append an interrupted
+       unacknowledged tail.
+    3. Cold-load twice, then retry key A.
+
+    The repair must drop ONLY the unacknowledged tail: the acknowledged
+    prefix has to survive byte-for-byte, so its byte boundary is asserted
+    directly (not just the decoded rows) and the original identity must
+    still replay after another cold load. A second key then proves the
+    repaired WAL is still a sound append target.
+    """
+    from api.idempotency import IdempotencyStore, set_idempotency_store
+
+    env = idem_env
+    body = {"session_id": env.session.session_id, "message": "hello"}
+
+    status, payload = env.run_handler(body, key_header=key_a)
+    assert status == 200
+    assert payload["stream_id"] == "stream-1"
+    assert len(env.recorder.calls) == 1
+
+    wal = _wal_path_for(env.store)
+    # The acknowledged prefix, exactly as a producer using ``newline``
+    # framing would have left it on disk.
+    prefix = _reframe_wal(wal, newline)
+    assert prefix, "the admitted turn must have written acknowledged WAL ops"
+    assert prefix.endswith(newline), (
+        "every acknowledged op is one newline-terminated line"
+    )
+    _append_torn_tail(wal, tail, newline, terminate=terminate)
+    torn = wal.read_bytes()
+    tail_len = len(torn) - len(prefix)
+    assert tail_len > 0
+
+    # Cold load #1: recovery drops the unacknowledged tail durably and
+    # leaves the acknowledged prefix byte-identical.
+    restarted = IdempotencyStore(path=env.store._path)
+    set_idempotency_store(restarted)
+    restarted._ensure_loaded()
+    assert restarted.lookup(phantom_key) is None, (
+        "an op without its trailing newline was never acknowledged — "
+        "replaying it resurrects a phantom claim"
+    )
+    rec = restarted.lookup(key_a)
+    assert rec is not None, "the acknowledged claim must survive recovery"
+    assert rec.status == "complete"
+    assert rec.stream_id == "stream-1"
+    repaired = wal.read_bytes()
+    assert repaired == prefix, (
+        "the repair must remove ONLY the unacknowledged tail: the "
+        f"acknowledged prefix ends at byte {len(prefix)} but the repaired "
+        f"WAL is {len(repaired)} bytes "
+        f"({len(prefix) - len(repaired)} acknowledged bytes lost; "
+        f"{tail_len} unacknowledged tail bytes should have been dropped)"
+    )
+    assert repaired.endswith(newline), (
+        "the WAL must stay framed after recovery, or the next append "
+        "concatenates mid-line"
+    )
+
+    # Cold load #2 on the repaired file: the completion is still a
+    # terminated, parseable line — the regression under test dropped
+    # acknowledged bytes, which made THIS load lose the completion and
+    # answer a same-key retry with 409 outcome_unknown.
+    reloaded = IdempotencyStore(path=env.store._path)
+    set_idempotency_store(reloaded)
+    reloaded._ensure_loaded()
+    rec = reloaded.lookup(key_a)
+    assert rec is not None and rec.status == "complete", (
+        "the completion lost its terminator to the repair — the next cold "
+        "load drops it as an uncommitted suffix"
+    )
+    assert rec.stream_id == "stream-1"
+    assert wal.read_bytes() == prefix
+
+    # A new claim/completion appends cleanly onto the repaired WAL.
+    status, payload = env.run_handler(body, key_header=key_b)
+    assert status == 200
+    assert payload["stream_id"] == "stream-2"
+    assert len(env.recorder.calls) == 2
+
+    # Cold load #3: both keys are durable and the retry of the ORIGINAL
+    # key replays its accepted identity instead of re-admitting it.
+    final = IdempotencyStore(path=env.store._path)
+    set_idempotency_store(final)
+    final._ensure_loaded()
+    b_rec = final.lookup(key_b)
+    assert b_rec is not None
+    assert b_rec.stream_id == "stream-2"
+    status, payload = env.run_handler(body, key_header=key_a)
+    assert status == 200
+    assert payload["stream_id"] == "stream-1"
+    assert payload.get("replayed_from_idempotency_key") is True
+    assert len(env.recorder.calls) == 2, (
+        "the completed key must replay — a second admission is the "
+        "duplicate turn this store exists to prevent"
+    )
+
+
+def test_crlf_wal_unterminated_tail_repair_keeps_the_acknowledged_prefix(
+    idem_env,
+):
+    """#7782 round 3 (blocking): a CRLF-framed WAL whose tail is complete
+    JSON without its terminator. ``Path.read_text`` translates CRLF to LF,
+    so the byte offset handed to ``os.ftruncate`` was computed from the
+    shorter normalized text and cut acknowledged bytes off the prefix —
+    the admitted completion lost its terminator and the next cold load
+    dropped it, turning a same-key retry into 409
+    ``idempotency_outcome_unknown`` instead of replaying the 200 identity.
+    """
+    _run_torn_tail_recovery_scenario(
+        idem_env,
+        newline=b"\r\n",
+        tail=_torn_completion_tail("crlf-eof-phantom"),
+        terminate=False,
+        key_a="crlf-eof-key-a",
+        key_b="crlf-eof-key-b",
+        phantom_key="crlf-eof-phantom",
+    )
+
+
+def test_crlf_wal_terminated_malformed_tail_repair_keeps_the_prefix(
+    idem_env,
+):
+    """#7782 round 3 (blocking), torn-tail branch: the same CRLF
+    normalization defect at the second truncation boundary — a malformed
+    final line that IS newline-terminated in the producer's framing.
+    """
+    _run_torn_tail_recovery_scenario(
+        idem_env,
+        newline=b"\r\n",
+        tail='{"op":"put","seq":9000,"key":"default|crlf-torn',
+        terminate=True,
+        key_a="crlf-malformed-key-a",
+        key_b="crlf-malformed-key-b",
+        phantom_key="crlf-torn",
+    )
+
+
+def test_lf_wal_unterminated_tail_repair_keeps_the_acknowledged_prefix(
+    idem_env,
+):
+    """LF control for the CRLF case: the same crash matrix with the
+    platform-native framing must keep passing (the repair is
+    framing-agnostic, not LF-specific).
+    """
+    _run_torn_tail_recovery_scenario(
+        idem_env,
+        newline=b"\n",
+        tail=_torn_completion_tail("lf-eof-phantom"),
+        terminate=False,
+        key_a="lf-eof-key-a",
+        key_b="lf-eof-key-b",
+        phantom_key="lf-eof-phantom",
+    )
+
+
+def test_lf_wal_terminated_malformed_tail_repair_keeps_the_prefix(idem_env):
+    """LF control for the CRLF torn-tail branch."""
+    _run_torn_tail_recovery_scenario(
+        idem_env,
+        newline=b"\n",
+        tail='{"op":"put","seq":9000,"key":"default|lf-torn',
+        terminate=True,
+        key_a="lf-malformed-key-a",
+        key_b="lf-malformed-key-b",
+        phantom_key="lf-torn",
+    )
+

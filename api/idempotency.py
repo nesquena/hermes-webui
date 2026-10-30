@@ -805,9 +805,33 @@ class IdempotencyStore:
         valid lines is mid-file corruption and fails closed. Any repair
         failure keeps the store unloaded (``IdempotencyStoreUnavailable``)
         and admits zero new turns.
+
+        Both truncation boundaries are byte lengths of the file's
+        ORIGINAL on-disk bytes, so the WAL is read as bytes and decoded
+        without newline translation: a producer on Windows writes CRLF
+        terminators, and a normalizing read would shrink every line by
+        one byte and cut the acknowledged prefix instead of the
+        unacknowledged tail.
         """
         try:
-            raw = path.read_text(encoding="utf-8")
+            data = path.read_bytes()
+            # Decode the ON-DISK bytes verbatim — NO universal-newline
+            # translation. ``_append_wal_locked`` opens the WAL in
+            # ordinary text append mode without explicit newline control,
+            # so its "\n" is CRLF on Windows, and both repair boundaries
+            # below are computed as byte lengths of this string. Reading
+            # through ``Path.read_text`` (or any newline-translating read)
+            # would turn every CRLF into one shorter LF line and hand
+            # ``os.ftruncate`` a boundary INSIDE the acknowledged prefix
+            # (#7782 round 3): the admitted completion lost its
+            # terminator, the next cold load dropped it as an
+            # uncommitted suffix, and a same-key retry answered 409
+            # ``idempotency_outcome_unknown`` instead of replaying the
+            # accepted 200 identity. Keeping the bytes verbatim also
+            # makes the torn-line offset reconstruction below
+            # byte-exact, since a decoded CRLF line still carries its
+            # "\r" and rejoining with "\n" reproduces the original bytes.
+            raw = data.decode("utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             self._loaded = False
             raise IdempotencyStoreUnavailable(
