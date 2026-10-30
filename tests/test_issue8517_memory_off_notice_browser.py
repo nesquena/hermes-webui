@@ -186,3 +186,36 @@ def test_compression_continuation_keeps_the_notice(page):
     page.wait_for_timeout(50)
     after = page.evaluate(_STATE)
     assert after == {"sid": "s2", "hidden": False, "reason": "provider_shared_instance"}, after
+
+
+# Codex r2: a snapshot status belongs to ITS stream. Attaching a different stream must
+# drop it, or a later reattach of the new stream restores the old stream's status.
+_SNAPSHOT_ST1 = """const snapshot={stream_id:'st1',last_seq:20,last_event_id:'st1:20',last_assistant_text:'Working',
+  messages:[],tool_calls:[],memory_status:%s};
+INFLIGHT.s1=_serverLiveSnapshotInflight(snapshot,[]);
+S.busy=true;S.activeStreamId='st2';
+attachLiveStream('s1','st2');"""
+
+
+def test_stale_off_from_an_earlier_stream_does_not_resurrect_after_ok(page):
+    state = page.evaluate("""()=>{
+      %s
+      fixtureStream().emit('memory_status',{type:'memory_status',state:'ok',session_id:'s1',stream_id:'st2'},'st2:1');
+      const afterOk=$('memoryOffNotice').hidden;
+      attachLiveStream('s1','st2',[],{reconnecting:true});
+      return {afterOk,afterReattach:$('memoryOffNotice').hidden,left:'memoryStatus' in (INFLIGHT.s1||{})};
+    }""" % (_SNAPSHOT_ST1 % "{state:'external_off',reason:'provider_shared_instance',scope:'external'}"))
+    assert state == {"afterOk": True, "afterReattach": True, "left": False}, state
+
+
+def test_stale_ok_from_an_earlier_stream_does_not_erase_a_newer_dismissal(page):
+    state = page.evaluate("""()=>{
+      %s
+      fixtureStream().emit('warning',{type:'memory_off',session_id:'s1',stream_id:'st2',reason:'provider_shared_instance',scope:'external',message:'x'},'st2:2');
+      const shown=!$('memoryOffNotice').hidden;
+      dismissMemoryOffNotice();
+      attachLiveStream('s1','st2',[],{reconnecting:true});
+      return {shown,hidden:$('memoryOffNotice').hidden,
+        dismissal:localStorage.getItem('hermes-webui-memory-off-dismissed:s1:provider_shared_instance')};
+    }""" % (_SNAPSHOT_ST1 % "{state:'ok'}"))
+    assert state == {"shown": True, "hidden": True, "dismissal": "1"}, state
