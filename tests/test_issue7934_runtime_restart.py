@@ -19,6 +19,7 @@ import errno
 import os
 import subprocess
 import sys
+import threading
 import time
 import types
 
@@ -1465,6 +1466,45 @@ def test_windows_free_checkout_recovers_under_the_lock(windows_restart_env):
     assert env.destructive_total() == 0
 
 
+@pytest.fixture(autouse=True)
+def _reopen_run_admission_after_a_scheduled_restart():
+    """Reopen run admission after a restart this module scheduled.
+
+    ``_schedule_restart`` closes run admission **synchronously** and reopens
+    it from its daemon thread once the restart delay elapses. Two things
+    make that unreliable here:
+
+    * the thread is a daemon and may not have run yet when the test returns;
+    * ``abandon_restart_pending`` only clears the state for the **newest**
+      epoch, so when several restarts are scheduled the earlier threads'
+      abandon calls are refused and the last one may still be pending.
+
+    Either way admission stays closed, and every later test in the shard is
+    then refused with ``server_draining`` — a cross-test leak, not a product
+    behaviour. The workflow requires the suite to be shard-safe ("no
+    cross-test state leakage"), so the state is restored deterministically
+    here instead of relying on the scheduler's timing.
+    """
+    yield
+    from api import run_drain
+
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        try:
+            if run_drain.admission_status().get("open"):
+                return
+            # Reopen the state the scheduler is holding: abandon the epoch
+            # that is current NOW, so the call cannot be refused as stale.
+            epoch = getattr(run_drain, "_RESTART_PENDING_EPOCH", None)
+            if epoch is not None:
+                run_drain.abandon_restart_pending(epoch)
+        except Exception:  # pragma: no cover - the probe must never fail a test
+            return
+        # ``time.sleep`` may be stubbed by the restart env, so wait on a
+        # primitive this module does not replace.
+        threading.Event().wait(0.01)
+
+
 def test_windows_free_checkout_worker_completes_the_replacement(
     windows_restart_env,
 ):
@@ -1482,3 +1522,21 @@ def test_windows_free_checkout_worker_completes_the_replacement(
     assert env.destructive.exits == [0]
     assert env.destructive.purge, "the pycache purge must precede the replacement"
     assert env.logs.warnings == []
+
+
+def test_a_scheduled_restart_leaves_run_admission_open(
+    windows_restart_env,
+):
+    """Sentinel: a restart scheduled by the test above must not leave run
+    admission closed for the next test in the shard.
+
+    Without the waiting fixture this fails with the next chat start
+    refused as ``server_draining`` — the exact cross-test leak that made
+    this PR's CI shards red.
+    """
+    from api import run_drain
+
+    assert run_drain.admission_status().get("open") is True, (
+        "a scheduled restart left run admission closed: the next test in "
+        "this shard would be refused with server_draining"
+    )
