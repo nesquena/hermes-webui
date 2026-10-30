@@ -71,6 +71,8 @@
 
 ### Fixed
 
+- **The ⋮ conversation menu has finger-sized rows on touch, and the project picker shows keyboard focus on light themes.** On phones and tablets the menu's rows are now 44px tall, the same as the "Move to project" picker it opens; they were 32px. In the project picker, the focused row gets a solid ring in the theme's accent text colour (above 4:1 against the picker in all 21 skins, up from 1.3 to 1.5:1) and a hovered row gets a visible tint on light themes; before, both were nearly invisible on light. The focused sticky "+ New project" row stays opaque over a scrolled list. Thanks @ybai08. (#8135, refs #8044)
+
 - **The model picker takes keyboard focus when it opens.** Opening the composer or Settings model picker now focuses its search box (the list on touch-only devices, so no keyboard pops up), Escape closes only the picker, and focus returns to the chip that opened it. Before, focus stayed on the chip, so typing did nothing and `k` switched the conversation. Thanks @happy5318. (#8445)
 
 - **The workspace file tree works with the keyboard and screen readers.** Its rows are named for screen readers and reachable and operable from the keyboard; before, the Files pane could not be reached by keyboard at all. Thanks @grzezlo, building on @michaldziwisz's #7258. (#8384)
