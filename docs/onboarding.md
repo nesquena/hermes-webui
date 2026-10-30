@@ -135,6 +135,28 @@ the provider has no API key. This label means that an endpoint is saved; it does
 not mean the endpoint is reachable now or that it is the active runtime
 provider. Use **Test connection** to verify reachability.
 
+Existing named custom providers (`custom:<name>`) use their configured endpoint
+for readiness checks too. Keyless endpoints are ready with a base URL and model.
+Credential references in `key_env`, `api_key_env`, or an `api_key: ${VAR}`
+environment reference resolve in the active profile across named `providers:`,
+`model:`, and legacy `custom_providers` records. A nonblank `key_env` takes
+precedence over `api_key_env`; an unresolved credential is not treated as
+keyless, including an `api_key: ${VAR}` or `key_cmd: ${VAR}` whose variable is
+blank or unset in the profile, or a pooled credential that still holds the
+unresolved reference; an unresolved `key_cmd` is never executed. A
+`base_url: ${VAR}` that does not resolve in the profile is not an
+endpoint: the status asks for a base URL and chat reports the missing endpoint
+instead of sending the literal reference.
+Onboarding status reads these references from the requested named profile's
+`.env`; credentials present only in the server process do not make it ready.
+Agent importability is checked before binding the request profile, since Agent
+module initialization may load dotenv into the process environment. The result
+is then reused while composing the profile's status, including import failures.
+Provider credential checks use the same named record as chat routing, including
+legacy `custom_providers` entries.
+Missing, disabled, or ambiguous named records are reported as configuration
+problems; only a selected record without an endpoint gets the base URL prompt.
+
 AIML API uses the existing custom OpenAI-compatible setup path, not a
 first-class built-in Hermes provider id. Configure it under the
 custom-provider flow with Base URL `https://api.aimlapi.com/v1`, then use

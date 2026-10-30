@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 
 from api.auth import is_auth_enabled
 from api.config import (
+    AmbiguousCustomProviderError,
+    CUSTOM_SELECTION_UNOWNED,
     DEFAULT_MODEL,
     DEFAULT_WORKSPACE,
     _FALLBACK_MODELS,
@@ -25,6 +27,7 @@ from api.config import (
     get_config,
     load_settings,
     reload_config,
+    resolve_custom_provider_bundle,
     save_settings,
     verify_hermes_imports,
 )
@@ -724,10 +727,23 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
 
     provider_configured = bool(provider and model)
     provider_ready = False
+    custom_bundle = None
 
     if provider_configured:
         meta = _SUPPORTED_PROVIDER_SETUPS.get(provider, {})
-        if provider in _SUPPORTED_PROVIDER_SETUPS:
+        if provider.startswith("custom:"):
+            # Share the routing resolver: named records can be keyless, but a
+            # declared credential that failed to resolve is still incomplete.
+            try:
+                custom_bundle = resolve_custom_provider_bundle(provider)
+            except AmbiguousCustomProviderError:
+                custom_bundle = None
+            if custom_bundle:
+                base_url = _normalize_base_url(str(custom_bundle.get("base_url") or ""))
+                provider_ready = bool(
+                    base_url and (custom_bundle.get("api_key") or custom_bundle.get("keyless"))
+                )
+        elif provider in _SUPPORTED_PROVIDER_SETUPS:
             # key_optional providers (lmstudio, ollama, custom) are ready as
             # soon as the user has saved a provider+model+base_url; an api_key
             # is allowed but not required.  The agent runtime substitutes a
@@ -783,7 +799,16 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
         note = f"Hermes is minimally configured and ready to chat via {provider_name}."
     elif provider_configured:
         state = "provider_incomplete"
-        if provider == "custom" and not base_url:
+        if provider.startswith("custom:") and (
+            custom_bundle is None or custom_bundle.get("status") in CUSTOM_SELECTION_UNOWNED
+        ):
+            note_key = "onboarding_notice_custom_record_required"
+            note_args = [provider]
+            note = (
+                f"Provider '{provider}' has no unique enabled custom configuration. "
+                "Check its name, enabled state, and duplicate entries in config.yaml."
+            )
+        elif (provider == "custom" or provider.startswith("custom:")) and not base_url:
             note_key = "onboarding_notice_custom_base_url_required"
             note = (
                 "Hermes has a saved provider/model selection, but the custom "
@@ -888,10 +913,13 @@ def _build_setup_catalog(cfg: dict) -> dict:
     }
 
 
-def get_onboarding_status() -> dict:
+def get_onboarding_status(*, import_status: tuple | None = None) -> dict:
+    # Route callers check process-level imports before binding profile state.
+    if import_status is None:
+        import_status = verify_hermes_imports()
     settings = load_settings()
     cfg = get_config()
-    imports_ok, missing, errors = verify_hermes_imports()
+    imports_ok, missing, errors = import_status
     runtime = _status_from_runtime(cfg, imports_ok)
     workspaces = load_workspaces()
     last_workspace = get_last_workspace()

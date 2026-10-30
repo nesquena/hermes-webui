@@ -3537,6 +3537,40 @@ def _custom_record_base_url(record: object) -> str | None:
     return str(record.get("base_url") or "").strip() or None
 
 
+_UNRESOLVED_ENV_REF_RE = re.compile(r"\$\{[^}]+\}")
+
+# Record fields whose RAW text is a credential declaration. They are kept
+# unexpanded when expansion would blank them (see
+# :func:`_expand_keeping_credential_declarations`).
+_CUSTOM_CREDENTIAL_DECLARATION_FIELDS = ("api_key", "key_cmd")
+
+
+def _is_unresolved_env_ref(value: object) -> bool:
+    """True when ``value`` is text still holding a ``${VAR}`` reference."""
+    return isinstance(value, str) and bool(_UNRESOLVED_ENV_REF_RE.search(value))
+
+
+def _custom_record_endpoint(record: object) -> str | None:
+    """A custom record's USABLE endpoint, or None.
+
+    Unlike :func:`_custom_record_base_url` (the declaration, used for record
+    ownership), a ``base_url`` still holding a ``${VAR}`` reference did not
+    resolve in the current scope and is not an endpoint: it must not report
+    ready or reach the Agent as a literal URL.
+    """
+    base_url = _custom_record_base_url(record)
+    if base_url and _UNRESOLVED_ENV_REF_RE.search(base_url):
+        return None
+    return base_url
+
+
+def _custom_record_key_env(record: dict) -> str:
+    """Read either credential hint spelling, with nonblank key_env winning."""
+    key_env = str(record.get("key_env") or "").strip()
+    alias = record.get("api_key_env")
+    return key_env or (alias.strip() if isinstance(alias, str) else "")
+
+
 def _resolve_custom_record_key(
     raw_api_key: object,
     raw_key_env: object,
@@ -3761,7 +3795,7 @@ def _custom_record_owns_connection(record: dict, pid: str) -> bool:
     # authority instead of surfacing the misconfiguration.
     if _custom_record_declares_credential(record, base_url, None):
         return True
-    if _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid):
+    if _resolve_custom_record_key(record.get("api_key"), _custom_record_key_env(record), pid):
         return True
     if _custom_record_api_mode(record):
         return True
@@ -3907,10 +3941,8 @@ def _normalized_raw_provider_record(record: dict, ep_name: str) -> dict:
         if isinstance(value, str) and value.strip():
             normalized["base_url"] = value.strip()
             break
-    if not str(normalized.get("key_env") or "").strip():
-        api_key_env = record.get("api_key_env")
-        if isinstance(api_key_env, str) and api_key_env.strip():
-            normalized["key_env"] = api_key_env.strip()
+    if key_env := _custom_record_key_env(record):
+        normalized["key_env"] = key_env
     if not str(normalized.get("provider_key") or "").strip() and str(ep_name or "").strip():
         # The record's OWN config key is its identity. Stamping it keeps the
         # credential-pool lookup and the ``key_cmd`` token process labelled with
@@ -4122,6 +4154,62 @@ def _select_custom_provider_record(
     return None, "", False, CUSTOM_SELECTION_MISSING
 
 
+def _custom_provider_selection_config() -> dict:
+    """Config for selecting a named ``custom:<slug>`` record, scope-expanded.
+
+    ``get_config()`` returns the process-global ``_cfg_cache``, whose ``${VAR}``
+    references were expanded once against the PROCESS environment and pinned
+    there on purpose (#798). Selection consumes ``api_key``/``base_url`` fields
+    where that pin is wrong: inside a request's profile scope the record must
+    re-resolve ``${VAR}`` against ``_thread_ctx.env`` — and with
+    ``block_process_env_fallback`` set, an unset var must stay a ``${VAR}``
+    literal so ``_resolve_custom_record_key`` reports no credential instead of
+    leaking the process-env value (or shadowing the profile's own ``.env``).
+    When in-memory overrides exist — a rebound ``cfg``, a mutated ``_cfg_cache``,
+    or a monkeypatched ``get_config`` returning a foreign dict — that override
+    stays authoritative instead.
+    """
+    active = get_config()
+    if active is not _cfg_cache or _cfg_has_in_memory_overrides():
+        return active
+    raw = _load_yaml_config_file_raw(_get_config_path(), _copy=False)
+    if not raw:
+        return {}
+    expanded = _expand_keeping_credential_declarations(raw)
+    return expanded if isinstance(expanded, dict) else {}
+
+
+def _expand_keeping_credential_declarations(obj):
+    """:func:`_expand_env_vars` that never expands a credential DECLARATION away.
+
+    ``api_key: ${KEY}`` (or ``key_cmd: ${CMD}``) with the variable blank in the
+    profile expands to whitespace, which
+    :func:`_custom_record_declares_credential` would read as "no credential
+    declared" — turning an unresolved credential into a keyless endpoint and the
+    placeholder key. A nonblank raw declaration that expands to blank keeps its
+    raw form, so the declaration survives; :func:`_resolve_custom_record_key`
+    still resolves ``api_key`` in scope to no key, and
+    :func:`_custom_record_key_cmd_provider` refuses the unresolved ``key_cmd``.
+    """
+    if isinstance(obj, dict):
+        out = {}
+        for key, value in obj.items():
+            expanded = _expand_keeping_credential_declarations(value)
+            if (
+                key in _CUSTOM_CREDENTIAL_DECLARATION_FIELDS
+                and isinstance(value, str)
+                and value.strip()
+                and isinstance(expanded, str)
+                and not expanded.strip()
+            ):
+                expanded = value
+            out[key] = expanded
+        return out
+    if isinstance(obj, list):
+        return [_expand_keeping_credential_declarations(item) for item in obj]
+    return _expand_env_vars(obj)
+
+
 def resolve_custom_provider_connection(
     provider_id: str,
     *,
@@ -4155,8 +4243,12 @@ def resolve_custom_provider_connection(
         return None, None
 
     # Read the live config snapshot to avoid stale module-level cache edge
-    # cases after profile switches or runtime config edits.
-    record, _source, is_exact, _status = _select_custom_provider_record(pid, slug, get_config())
+    # cases after profile switches or runtime config edits. The snapshot must be
+    # scope-expanded: _cfg_cache pins ${VAR} to the process environment, which
+    # would mint (or shadow) credentials outside the request profile's .env.
+    record, _source, is_exact, _status = _select_custom_provider_record(
+        pid, slug, _custom_provider_selection_config()
+    )
     if record is None:
         # Nothing owns this slug. Returning ``(None, None)`` is the whole point:
         # an unknown named route must not inherit an unrelated row's endpoint or
@@ -4165,8 +4257,8 @@ def resolve_custom_provider_connection(
             return None, None, False
         return None, None
 
-    base_url = _custom_record_base_url(record)
-    api_key = _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid)
+    base_url = _custom_record_endpoint(record)
+    api_key = _resolve_custom_record_key(record.get("api_key"), _custom_record_key_env(record), pid)
     if return_provenance:
         return api_key, base_url, is_exact
     return api_key, base_url
@@ -4310,7 +4402,12 @@ def _custom_record_key_cmd_provider(base_url: str | None, record: dict, pid: str
     never be handed :data:`KEYLESS_CUSTOM_API_KEY`.
     """
     key_cmd = str(record.get("key_cmd") or "").strip()
-    if not key_cmd:
+    if not key_cmd or _is_unresolved_env_ref(key_cmd):
+        # A ``${CMD}`` that did not resolve in this scope is a declared source
+        # with no command behind it. The Agent's command source hands the
+        # string to a shell at send time, so the literal must never become a
+        # provider: no provider here, and the declaration keeps the route
+        # unresolved rather than keyless.
         return None
     try:
         from agent.command_token_source import build_command_token_provider
@@ -4345,7 +4442,9 @@ def _custom_record_declares_credential(
     ``credential_pool``, a pool that actually resolved for this endpoint, and a
     host-gated env credential the runtime would accept for it.
     """
-    for field in ("api_key", "key_env", "key_cmd"):
+    if _custom_record_key_env(record):
+        return True
+    for field in ("api_key", "key_cmd"):
         if str(record.get(field) or "").strip():
             return True
     # A configured pool is a declaration even when empty or exhausted: the user
@@ -4481,11 +4580,13 @@ def resolve_custom_provider_bundle(
             "owned": {},
         }
 
-    record, source, is_exact, status = _select_custom_provider_record(pid, slug, get_config())
+    record, source, is_exact, status = _select_custom_provider_record(
+        pid, slug, _custom_provider_selection_config()
+    )
     if record is None:
         return _unowned_custom_provider_bundle(pid, slug, status)
 
-    base_url = _custom_record_base_url(record)
+    base_url = _custom_record_endpoint(record)
     owned: dict = {}
 
     api_mode = _custom_record_api_mode(record)
@@ -4497,13 +4598,25 @@ def resolve_custom_provider_bundle(
     # endpoint's credential AND its pool object come from the same lookup.
     api_key = None
     pool_runtime = _custom_record_pool_runtime(base_url, record)
+    # A pool that answered for this endpoint is a credential DECLARATION whether
+    # or not its answer is usable; remembered before the usability check so a
+    # rejected pool still keeps the route out of ``keyless``.
+    pool_declared = pool_runtime
+    if pool_runtime and _is_unresolved_env_ref(pool_runtime.get("api_key")):
+        # The installed pool builds its entries from the Agent's own config
+        # read, so with the variable unset it can hand ``api_key: ${KEY}`` back
+        # untouched. That literal is not a credential and the pool object that
+        # carries it must not travel with the bundle: drop both and let the
+        # record's own declaration resolve (to nothing) below, so the route
+        # ends unresolved instead of sending ``${KEY}`` as a bearer.
+        pool_runtime = None
     if pool_runtime:
         api_key = pool_runtime.get("api_key") or None
         if pool_runtime.get("credential_pool") is not None:
             owned["credential_pool"] = pool_runtime.get("credential_pool")
 
     if not api_key:
-        api_key = _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid)
+        api_key = _resolve_custom_record_key(record.get("api_key"), _custom_record_key_env(record), pid)
     if not api_key:
         api_key = _host_gated_env_key(base_url)
 
@@ -4532,7 +4645,7 @@ def resolve_custom_provider_bundle(
         # an endpoint only while this is True.
         "endpoint_owned": bool(base_url),
         "keyless": not api_key
-        and not _custom_record_declares_credential(record, base_url, pool_runtime),
+        and not _custom_record_declares_credential(record, base_url, pool_declared),
         "owned": owned,
     }
 
