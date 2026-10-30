@@ -6194,6 +6194,16 @@ function _showBatchProjectPicker(openerEl){
   _focusProjectPickerItem(picker);
 }
 
+// A finger's events all go to the element it first touched. A pen's go to
+// whatever is under it, unless the pointer is captured, as here, until it
+// lifts. `press` is the pen's pointerdown: done when its long press opens the
+// ⋮ menu and not from the press on, or a pen dragged off a button and lifted
+// elsewhere would click the button.
+function _keepPenOnPressedElement(press){
+  if(!press) return;
+  try{press.target.setPointerCapture(press.pointerId);}catch(_){}
+}
+
 function _focusSessionActionMenuRestoreTarget(target){
   if(!target||!target.isConnected||typeof target.focus!=='function') return false;
   try{target.focus({preventScroll:true});}catch(_){target.focus();}
@@ -6293,7 +6303,21 @@ function _sessionActionMenuShouldRepositionOnScroll(target){
 function _positionSessionActionMenu(anchorEl){
   if(!_sessionActionMenu || !anchorEl) return;
   let rect=anchorEl.getBoundingClientRect();
-  if(!rect.width||!rect.height){
+  // A menu opened from `contextmenu` (flagged at open) sits at the pointer the
+  // user invoked it at. The point is the project picker's recorded context
+  // point — the only pointer evidence in this file — and its rowOffsetX/Y keep
+  // the menu glued to the same spot in its row when a sidebar scroll or a
+  // resize repositions it here. The row lookup mirrors _projectPickerAnchorRect,
+  // which stays untouched and keeps owning the zero-sized-anchor fallback.
+  const contextPoint=anchorEl._projectPickerContextPoint;
+  const atPointer=!!(_sessionActionMenu._pointAnchoredFromPointer&&contextPoint&&Number.isFinite(contextPoint.clientX));
+  if(atPointer){
+    const row=anchorEl.closest&&anchorEl.closest('.session-child-session-fork,.session-item');
+    const rowRect=row&&row.isConnected!==false?row.getBoundingClientRect():null;
+    const pointX=rowRect&&Number.isFinite(contextPoint.rowOffsetX)?rowRect.left+contextPoint.rowOffsetX:contextPoint.clientX;
+    const pointY=rowRect&&Number.isFinite(contextPoint.rowOffsetY)?rowRect.top+contextPoint.rowOffsetY:contextPoint.clientY;
+    rect={top:pointY,bottom:pointY+1,left:pointX,right:pointX+1,width:1,height:1,pointAnchored:true};
+  } else if(!rect.width||!rect.height){
     // A zero-sized anchor — coarse-pointer CSS hides `.session-actions`, or a
     // repaint left a stale trigger — borrows the geometry the project picker
     // places from: the recorded context-menu point, else the visible row.
@@ -6422,7 +6446,13 @@ function _mountSessionActionMenu(menu, session, anchorEl){
   _positionSessionActionMenu(anchorEl);
   _playSessionActionMenuEntrance(menu);
   const menuItems=()=>Array.from(menu.querySelectorAll('.session-action-opt:not([disabled])'));
+  // True while a Tab pressed in the menu moves the focus.
+  let leavingByTab=false;
   menu.addEventListener('keydown',e=>{
+    if(e.key==='Tab'){
+      leavingByTab=true;
+      setTimeout(()=>{leavingByTab=false;},0);
+    }
     const items=menuItems();
     if(e.key==='Escape'){
       e.preventDefault();
@@ -6440,6 +6470,27 @@ function _mountSessionActionMenu(menu, session, anchorEl){
     if(nextIndex===null) return;
     e.preventDefault();
     try{items[nextIndex].focus({preventScroll:true});}catch(_){items[nextIndex].focus();}
+    // The focus does not scroll, and a menu taller than the screen scrolls
+    // inside itself: bring the row it landed on into the menu's box.
+    items[nextIndex].scrollIntoView({block:'nearest'});
+  });
+  // The finger that long-pressed the row lifts over something that takes no
+  // focus, and the browser's own mousedown for that touch drops focus on
+  // <body>: the arrow keys, Home and End then go to the page behind. While
+  // this menu is open, focus that lands nowhere comes back to the row it left.
+  // Tab from the last row lands nowhere too, on its way out of the page: that
+  // is the keyboard leaving the menu, and it is let go.
+  menu.addEventListener('focusout',e=>{
+    if(e.relatedTarget||leavingByTab) return;
+    const from=e.target;
+    setTimeout(()=>{
+      if(_sessionActionMenu!==menu||!menu.isConnected) return;
+      const active=document.activeElement;
+      if(active&&active!==document.body&&active!==document.documentElement) return;
+      const row=(from&&menu.contains(from)&&!from.disabled)?from:menuItems()[0];
+      if(!row) return;
+      try{row.focus({preventScroll:true});}catch(_){row.focus();}
+    },0);
   });
   const firstAction=menuItems()[0];
   if(firstAction){
@@ -6852,12 +6903,21 @@ function _openSessionActionMenu(session, anchorEl){
   if(!handoff) return;
   session=handoff.session;
   anchorEl=handoff.anchorEl;
+  // A context-menu point recorded moments ago is fresh evidence of where the
+  // user invoked this menu: _positionSessionActionMenu places it at the
+  // pointer and keeps it glued to that spot in the row. Consuming the flag
+  // anchors the next ⋮-open back on its button.
+  const contextPoint=anchorEl._projectPickerContextPoint;
+  const openAtContextPoint=!!(contextPoint&&contextPoint.freshMenuAnchor);
+  if(contextPoint) delete contextPoint.freshMenuAnchor;
   const isReadOnly = _isReadOnlySession(session);
-  if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl){
+  if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl && !openAtContextPoint){
     closeSessionActionMenu();
     return;
   }
   closeSessionActionMenu();
+  // A long press or a right click sends no click to close an open picker.
+  _dismissOpenProjectPicker();
   const isMessagingSession = _isMessagingSession(session);
   const isCliSession = _isCliSession(session);
   const isExternalSession = isMessagingSession || isCliSession;
@@ -6866,6 +6926,7 @@ function _openSessionActionMenu(session, anchorEl){
   menu.id='sessionActionMenu-'+(++_sessionActionMenuId);
   menu.setAttribute('role','menu');
   menu.setAttribute('aria-label', 'Conversation actions');
+  menu._pointAnchoredFromPointer=openAtContextPoint;
   _appendSessionCopyLinkAction(menu, session);
   if(isReadOnly){
     _appendSessionExportHtmlAction(menu, session);
@@ -7061,7 +7122,12 @@ document.addEventListener('keydown',e=>{
   if(e.key==='Escape' && _sessionActionMenu) closeSessionActionMenu({restoreFocus:true});
 });
 window.addEventListener('resize',()=>{
-  if(_sessionActionMenu && _sessionActionAnchor) _positionSessionActionMenu(_sessionActionAnchor);
+  if(!_sessionActionMenu || !_sessionActionAnchor) return;
+  _positionSessionActionMenu(_sessionActionAnchor);
+  // The new size may cap the menu shorter than its rows, and the cap leaves
+  // it scrolled to the top: bring the row that has focus back into its box.
+  const focused=document.activeElement;
+  if(focused && _sessionActionMenu.contains(focused)) focused.scrollIntoView({block:'nearest'});
 });
 
 // Generation counter to discard stale API responses (issue #1430).
@@ -10937,6 +11003,7 @@ function renderSessionListFromCache(){
         let _gestureState='idle';
         let _swipeTracking=false;
         let _gesturePointerType='';
+        let _penPress=null;  // the pen's pointerdown, for the long press
         let _clearDragTimer=null;
         let _longPressTimer=null;
         let _longPressMenuOpened=false;
@@ -10967,6 +11034,8 @@ function renderSessionListFromCache(){
             if(_gestureState!=='pressing'||_renamingSid||_sessionSelectMode) return;
             _longPressMenuOpened=true;
             rowEl._skipNextChildOpen=true;
+            // As on a conversation's row: the pen's release and click stay here.
+            if(_gesturePointerType==='pen') _keepPenOnPressedElement(_penPress);
             _openSessionActionMenu(childSession, rowEl);
           },SESSION_LONG_PRESS_DELAY_MS);
         };
@@ -11076,10 +11145,14 @@ function renderSessionListFromCache(){
         rowEl.onpointerdown=(e)=>{
           if(e.pointerType==='mouse'||e.button!==0||_isForkActionTarget(e.target)) return;
           _beginForkGesture(e.clientX,e.clientY,e.pointerType||'');
+          if(e.pointerType==='pen') _penPress=e;
           if(e.pointerType==='touch'||e.pointerType==='pen') _scheduleForkLongPressMenu();
         };
         rowEl.onpointermove=(e)=>{
           if(e.pointerType==='mouse'||_gestureState==='idle') return;
+          // As on a conversation's row: once the long press has opened the ⋮
+          // menu, the rest of the gesture drags and swipes nothing.
+          if(_longPressMenuOpened) return;
           _pointerX=e.clientX;
           _pointerY=e.clientY;
           const signedDx=e.clientX-_pointerDownX;
@@ -11108,6 +11181,18 @@ function renderSessionListFromCache(){
           }
           _clearForkPointerState();
         };
+        // As on a conversation's row: the touch that opened the menu must not
+        // also click what is under the finger when it lifts. No click follows
+        // then, so the one-shot guard that would have swallowed it is cleared
+        // here, or it would swallow the next deliberate tap on the fork.
+        rowEl.addEventListener('touchend',(e)=>{
+          // A touch on the ⋮ button begins no gesture here, so the flag can be
+          // left over from an earlier long press: that tap keeps its click.
+          if(_isForkActionTarget(e.target)) return;
+          if(!_longPressMenuOpened||!e.cancelable) return;
+          e.preventDefault();
+          rowEl._skipNextChildOpen=false;
+        },{passive:false});
         rowEl.onpointercancel=()=>_clearForkPointerState();
         rowEl.onpointerleave=()=>{
           if(_gesturePointerType!=='mouse'&&_gestureState!=='idle') _clearForkPointerState();
@@ -11331,6 +11416,7 @@ function renderSessionListFromCache(){
     let _pointerX=0;
     let _pointerY=0;
     let _gesturePointerType='';
+    let _penPress=null;  // the pen's pointerdown, for the long press
     const _clearLongPressTimer=()=>{
       if(_longPressTimer){clearTimeout(_longPressTimer);_longPressTimer=null;}
       if(!_longPressMenuOpened) el.classList.remove('long-pressing');
@@ -11358,6 +11444,11 @@ function renderSessionListFromCache(){
         clearTimeout(_tapTimer);
         _tapTimer=null;
         _lastTapTime=0;
+        // The menu may open under the pen. Its release and its click must
+        // still come to this row, which ends the press and counts the click
+        // as its own; on the menu the click belongs to neither and closes the
+        // menu as one outside it.
+        if(_gesturePointerType==='pen') _keepPenOnPressedElement(_penPress);
         _openSessionActionMenu(s, el);
       },SESSION_LONG_PRESS_DELAY_MS);
     };
@@ -11379,6 +11470,13 @@ function renderSessionListFromCache(){
     };
     const _updateSessionGesture=(clientX,clientY)=>{
       if(_gestureState==='idle') return false;
+      // The long press has opened the ⋮ menu: the rest of this gesture drags
+      // and swipes nothing. A sideways move is still claimed as it was, so
+      // the browser does with the move what it did.
+      if(_longPressMenuOpened){
+        _trackHorizontalSwipe(Math.abs(clientX-_pointerDownX),Math.abs(clientY-_pointerDownY));
+        return _swipeTracking;
+      }
       _pointerX=clientX;
       _pointerY=clientY;
       const signedDx=clientX-_pointerDownX;
@@ -11511,10 +11609,13 @@ function renderSessionListFromCache(){
       _clearLongPressTimer();
       if(_renamingSid){_gestureState='idle';return false;}
       if(_isSessionActionTarget(target)){_gestureState='idle';return false;}
+      // Before anything below can act: lifting after the long press opened
+      // the ⋮ menu ends the gesture and does nothing else, however far the
+      // finger or the pen was dragged in between (a swipe that far archives).
+      if(_longPressMenuOpened){_gestureState='idle';return true;}
       _pointerX=clientX;
       _pointerY=clientY;
       _commitSessionSwipe();
-      if(_longPressMenuOpened){_gestureState='idle';return true;}
       if(_gestureState==='committed') return true;
       // An open action menu takes the tap first, exactly as on master: the tap only closes it (Codex round F,
       // 2026-10-23: a tag tap that skipped this left the menu open, and the open menu holds back the filtered repaint).
@@ -11621,6 +11722,7 @@ function renderSessionListFromCache(){
       if(_isSessionActionTarget(e.target)) return;
       _beginSessionGesture(e.clientX,e.clientY,e.pointerType||'');
       if(e.pointerType==='pen'){
+        _penPress=e;
         _scheduleSessionLongPressMenu();
       }
     };
@@ -11637,6 +11739,11 @@ function renderSessionListFromCache(){
     };
     el.onpointerleave=()=>{
       if(_gesturePointerType==='mouse'&&_gestureState!=='idle') _clearPointerDragState();
+      // A pen that leaves the row sends it nothing more either, not even its
+      // release: its long press would still open the ⋮ menu after it had
+      // lifted somewhere else. (Once that menu is open the pen is captured
+      // and does not leave.)
+      if(_gesturePointerType==='pen'&&_gestureState!=='idle') _clearPointerDragState();
     };
     el.onpointerup=(e)=>{
       if(e.pointerType==='touch') return;
@@ -11700,6 +11807,9 @@ function renderSessionListFromCache(){
     el.addEventListener('touchend',(e)=>{
       const touch=e.changedTouches&&e.changedTouches[0];
       if(!touch) return;
+      // A touch on the ⋮ button begins no gesture on the row, so a long-press flag
+      // left over from an earlier press must not cancel that tap's click (#8135).
+      if(_isSessionActionTarget(e.target)) return;
       // A tap (or long press) on the row itself is fully handled by the
       // gesture machine; cancel the browser's compatibility click so it cannot
       // act on the row a second time. Drags and swipes produce no click, and
@@ -11928,6 +12038,7 @@ async function deleteSession(sid, beforeDelete=null){
       const _tm=$('topbarMeta');if(_tm)_tm.textContent='Start a new conversation';
       $('msgInner').innerHTML='';
       $('emptyState').style.display='';
+      if(typeof a11yTreeReset==='function') a11yTreeReset($('fileTree'), {focusTo: $('workspaceFilesTab')});
       $('fileTree').innerHTML='';
       if(typeof S!=='undefined') S.session=null;
       if(typeof syncAppTitlebar==='function') syncAppTitlebar();
@@ -12584,6 +12695,16 @@ function _showProjectPicker(session, anchorEl){
 // picker is found out by being detached, so no close path has to clear this.
 let _openProjectPicker=null;
 
+// For the ⋮ menu that opens next. A click outside the picker closes it, but a
+// long press has its click cancelled (it would run the menu row under the
+// finger) and a right click sends none. Focus is not handed back: the menu
+// takes it.
+function _dismissOpenProjectPicker(){
+  const open=_openProjectPicker;
+  _openProjectPicker=null;
+  if(open&&open.picker.isConnected) open.dismiss({restoreFocus:false});
+}
+
 function _positionProjectPicker(picker, anchorEl){
   const margin=8;
   const gap=4;
@@ -12669,7 +12790,19 @@ function _positionProjectPicker(picker, anchorEl){
 
 function _recordProjectPickerContextPoint(anchorEl,event){
   if(!anchorEl||!Number.isFinite(event&&event.clientX)||!Number.isFinite(event&&event.clientY)) return;
+  // freshMenuAnchor marks the point as the spot a menu was just invoked from.
+  // _openSessionActionMenu consumes the flag and _positionSessionActionMenu
+  // places a context-menu-opened action menu there (and follows the row).
+  // The point itself is always recorded (the project picker reads it), but only
+  // a pointer right-click on the row is a place to open the menu at. A keyboard
+  // open (Shift+F10 or the ContextMenu key: button -1, fired at the focused
+  // trigger's centre) and a right-click on the trigger itself open on the
+  // button, exactly as a click on it does.
+  const target=event.target;
+  const onTrigger=!!(target&&target.closest&&target.closest('.session-actions-trigger'));
+  const fromKeyboard=event.button<0;
   const point={clientX:event.clientX,clientY:event.clientY};
+  if(!onTrigger&&!fromKeyboard) point.freshMenuAnchor=true;
   const row=anchorEl.closest&&anchorEl.closest('.session-child-session-fork,.session-item');
   if(row&&row.isConnected!==false){
     const rowRect=row.getBoundingClientRect();
@@ -12766,13 +12899,23 @@ function _projectPickerAnchorRect(anchorEl, bounds){
 // Fixed coordinates and getBoundingClientRect use the layout viewport. The
 // visible part can be smaller AND offset (keyboard, browser chrome, zoom).
 function _projectPickerVisibleBounds(){
+  // Validated read (#8531): garbage fold-transition geometry (observed on the
+  // iPhone Duo standalone PWA: height -33554432 = -2^25) must fall back to
+  // window dimensions, not invert the picker's visible bounds. Inlined and
+  // self-contained: this function is extracted into a Node test harness that
+  // does not load boot.js, so it must not reach across files.
   const vv=window.visualViewport;
-  const top=vv?vv.offsetTop:0;
-  const left=vv?vv.offsetLeft:0;
+  const vvOk=vv
+    &&Number.isFinite(Number(vv.height))&&Number(vv.height)>0&&Number(vv.height)<=window.innerHeight*1.5
+    &&Number.isFinite(Number(vv.width))&&Number(vv.width)>0&&Number(vv.width)<=window.innerWidth*1.5
+    ?{height:Number(vv.height),width:Number(vv.width),offsetTop:Math.max(0,Number(vv.offsetTop)||0),offsetLeft:Math.max(0,Number(vv.offsetLeft)||0)}
+    :null;
+  const top=vvOk?vvOk.offsetTop:0;
+  const left=vvOk?vvOk.offsetLeft:0;
   return {
     top,left,
-    bottom:top+(vv?vv.height:window.innerHeight),
-    right:left+(vv?vv.width:window.innerWidth),
+    bottom:top+(vvOk?vvOk.height:window.innerHeight),
+    right:left+(vvOk?vvOk.width:window.innerWidth),
   };
 }
 

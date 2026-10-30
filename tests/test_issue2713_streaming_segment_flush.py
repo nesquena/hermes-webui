@@ -137,7 +137,7 @@ class TestToolHandlerFlush:
     def test_tool_handler_calls_flush(self):
         src = read("static/messages.js")
         fn = _extract_handler(src, "tool")
-        assert "_flushPendingSegmentRender({force:true})" in fn, (
+        assert "_flushPendingSegmentRender({force:true,skipAnchorProcessProse:true})" in fn, (
             "tool handler must force _flushPendingSegmentRender() before "
             "_resetAssistantSegment()"
         )
@@ -145,7 +145,7 @@ class TestToolHandlerFlush:
     def test_tool_handler_flush_before_reset(self):
         src = read("static/messages.js")
         fn = _extract_handler(src, "tool")
-        flush_pos = fn.index("_flushPendingSegmentRender({force:true})")
+        flush_pos = fn.index("_flushPendingSegmentRender({force:true,skipAnchorProcessProse:true})")
         reset_pos = fn.index("_resetAssistantSegment()")
         assert flush_pos < reset_pos, (
             "_flushPendingSegmentRender must be called BEFORE "
