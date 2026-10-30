@@ -1608,7 +1608,12 @@ def _load_session_from_path(path: Path) -> "Session | None":
         session_id = path.stem
     if path.parent == SESSION_DIR:
         data = _apply_session_draft_overlay(data, session_id)
-    return Session(**data)
+    session = Session(**data)
+    if path.parent != SESSION_DIR:
+        # Explicit foreign sources are embedded-only, even if the active store
+        # has a dedicated draft with the same session ID.
+        session._composer_draft_session_id = None
+    return session
 
 
 def _lookup_index_message_count(session_id):
@@ -1994,7 +1999,7 @@ class Session:
         self.source_label = kwargs.get('source_label')
         self.read_only = bool(kwargs.get('read_only', False))
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
-        self._composer_draft_session_id = self.session_id
+        self._composer_draft_session_id: str | None = self.session_id
         self._draft_identity_persisted = False
         self.composer_draft = kwargs.get('_embedded_composer_draft', composer_draft)
         self.anchor_activity_scenes = anchor_activity_scenes if isinstance(anchor_activity_scenes, dict) else {}
@@ -2038,6 +2043,9 @@ class Session:
     def composer_draft(self):
         # Compression snapshot saves temporarily rebind session_id. Only the
         # permanent ownership handoff may change this property's store identity.
+        # A foreign explicit-path load has no active-store overlay identity.
+        if self._composer_draft_session_id is None:
+            return self._composer_draft
         draft = _load_session_draft(self._composer_draft_session_id)
         return draft if isinstance(draft, dict) else self._composer_draft
 
