@@ -27,7 +27,10 @@ from urllib.parse import urlparse
 from api.agent_health import get_active_profile_gateway_running_pid
 from api.gateway_restart import restart_active_profile_gateway
 from api.profiles import get_active_profile_name
-from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
+from api.config import REPO_ROOT
+# Restart safety now reads run state through api.run_drain (#7293); these names
+# stay importable here because existing tests patch ``api.updates.STREAMS``.
+from api.config import STREAMS, STREAMS_LOCK  # noqa: F401
 from api.subprocess_utils import (
     clean_git_env,
     noninteractive_git_env,
@@ -172,27 +175,24 @@ def _apply_fetch_failure_message(fetch_out: str, network_message: str) -> str:
 
 
 def _restart_blocker_snapshot() -> dict:
-    """Return active chat work that should block a self-restart."""
-    with STREAMS_LOCK:
-        stream_ids = [str(k) for k in STREAMS.keys()]
-    run_ids: list[str] = []
-    try:
-        from api import config as _config
-        active_runs = getattr(_config, 'ACTIVE_RUNS', {})
-        active_runs_lock = getattr(_config, 'ACTIVE_RUNS_LOCK', None)
-        if active_runs_lock is not None:
-            with active_runs_lock:
-                run_ids = [str(k) for k in active_runs.keys()]
-        else:
-            run_ids = [str(k) for k in active_runs.keys()]
-    except Exception:
-        run_ids = []
+    """Return the WebUI-owned chat work that should block a self-restart.
+
+    A Gateway run is excluded only once its resumable run identity is saved
+    (#7293): it runs inside the Hermes Gateway, survives a WebUI restart and is
+    reattached afterwards. Legacy Gateway relays and Gateway launches still
+    awaiting that handoff are counted (see run_drain.webui_owned_active_runs).
+    """
+    from api import run_drain
+
+    runs = run_drain.webui_owned_active_runs()
+    stream_ids = [r['stream_id'] for r in runs if r.get('registered_stream')]
+    run_ids = [r['stream_id'] for r in runs]
     return {
         'active_streams': len(stream_ids),
         'active_runs': len(run_ids),
         'blocking_stream_ids': stream_ids[:10],
         'blocking_run_ids': run_ids[:10],
-        'restart_blocked': bool(stream_ids or run_ids),
+        'restart_blocked': bool(run_ids),
     }
 
 
@@ -209,27 +209,27 @@ def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict
     if isinstance(blocker_snapshot, int):
         blocker_snapshot = {
             'active_streams': blocker_snapshot,
-            'active_runs': 0,
+            'active_runs': blocker_snapshot,
             'blocking_stream_ids': [],
             'blocking_run_ids': [],
             'restart_blocked': bool(blocker_snapshot),
         }
     active_streams = int(blocker_snapshot.get('active_streams') or 0)
-    active_runs = int(blocker_snapshot.get('active_runs') or 0)
-    parts = []
-    if active_streams:
-        parts.append(f"{active_streams} active chat stream{'s' if active_streams != 1 else ''}")
-    if active_runs:
-        parts.append(f"{active_runs} active agent run{'s' if active_runs != 1 else ''}")
-    detail = ' and '.join(parts) or 'active chat work'
+    active_runs = int(blocker_snapshot.get('active_runs') or 0) or active_streams
+    detail = f"{active_runs} WebUI agent run{'s are' if active_runs != 1 else ' is'} active"
     return {
         'ok': False,
         'message': (
-            f'Cannot update {target} while {detail} is running. '
-            'Wait for the response to finish, then retry the update.'
+            f'Cannot update {target} while {detail}. '
+            'Wait for the response to finish and retry, or force the update '
+            'to interrupt the active run' + ('s' if active_runs != 1 else '') + '.'
         ),
         'target': target,
         'restart_blocked': True,
+        # #7293: the refusal is the default, not a dead end. The client may
+        # re-send the request with force_active_runs=true after an explicit
+        # confirmation; the forced restart settles the runs as interrupted.
+        'force_available': True,
         'active_streams': active_streams,
         'active_runs': active_runs,
         'blocking_stream_ids': blocker_snapshot.get('blocking_stream_ids') or [],
@@ -237,23 +237,32 @@ def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict
     }
 
 
-def _wait_until_restart_safe(poll_seconds: float = 2.0, max_wait_seconds: float = 300.0) -> dict:
-    """Wait for active work to finish before self-reexec.
+def _wait_until_restart_safe(poll_seconds: float = 2.0, max_wait_seconds: float | None = None) -> dict:
+    """Wait (bounded) for WebUI-owned work to finish before self-reexec.
 
-    Bounded by ``max_wait_seconds`` so a long-running (or stuck/orphaned) agent
-    run can't soft-jam the self-update indefinitely. If the deadline is reached
-    while work is still in flight, the snapshot is returned with
-    ``wait_timed_out=True`` so the caller can proceed with the re-exec anyway
-    (preserving the pre-#3105 "execv preempts in-flight work" fallback) rather
-    than holding ``_apply_lock`` for the run's full lifetime.
+    Run admission is fenced while an update is applied and stays closed until
+    the restart, so normally nothing is active here. A forced restart does not
+    wait at all. Otherwise the wait is bounded by ``max_wait_seconds``
+    (default: the shutdown drain budget, ``HERMES_WEBUI_SHUTDOWN_DRAIN_SECONDS``);
+    on timeout the snapshot carries ``wait_timed_out=True`` and the caller
+    settles the remaining runs as interrupted before re-exec (#7293) instead of
+    letting ``execv`` drop them silently.
     """
+    from api import run_drain
+
     snapshot = _restart_blocker_snapshot()
+    if snapshot.get('restart_blocked') and run_drain.restart_force_requested():
+        snapshot = dict(snapshot)
+        snapshot['forced'] = True
+        return snapshot
+    if max_wait_seconds is None:
+        max_wait_seconds = run_drain.shutdown_drain_budget_seconds()
     deadline = time.monotonic() + max(0.0, max_wait_seconds)
     while snapshot.get('restart_blocked'):
         if time.monotonic() >= deadline:
             logger.warning(
                 "restart-safety wait exceeded %.0fs with work still in flight (%s); "
-                "proceeding with re-exec anyway",
+                "settling it as interrupted before re-exec",
                 max_wait_seconds, snapshot,
             )
             snapshot = dict(snapshot)
@@ -402,7 +411,7 @@ def _inventory_locks(path: Path) -> dict:
     return out
 
 
-def apply_clear_lock(target: str) -> dict:
+def apply_clear_lock(target: str, *, force_active_runs: bool = False) -> dict:
     """Manual-instruction lock recovery for ``target``.
 
     v2.2: NEVER removes a lock file. Strategy:
@@ -421,63 +430,100 @@ def apply_clear_lock(target: str) -> dict:
         (now that the lock is gone) will take the success branch and
         re-run the normal apply.
     """
+    return _run_fenced_update(
+        target, force_active_runs, lambda: _apply_clear_lock_inner(target)
+    )
+
+
+def _apply_clear_lock_inner(target: str) -> dict:
+    """Body of ``apply_clear_lock``; runs under ``_apply_lock`` + the admission fence."""
+    if target == 'webui':
+        path = REPO_ROOT
+    elif target == 'agent':
+        path = _AGENT_DIR
+    else:
+        return {'ok': False, 'message': f'Unknown target: {target}'}
+
+    if path is None or not (path / '.git').exists():
+        return {'ok': False, 'message': 'Not a git repository'}
+
+    inv = _inventory_locks(path)
+    manual_command = f"rm -f {inv['well_known_lock_path']}"
+
+    if not inv['well_known_lock_present']:
+        # Lock is gone. Run the normal non-destructive update flow and
+        # annotate the response with what we found for the user's
+        # records. Pass the configured channel through — otherwise an
+        # experimental-channel WebUI lock-recovery retry silently falls back
+        # to stable (Codex gate: _apply_update_inner defaults to stable).
+        with _cache_lock:
+            _update_cache['checked_at'] = 0
+        retry_result = _apply_update_inner(target, _read_update_channel())
+        retry_result = dict(retry_result)
+        retry_result['lock_recovery'] = {
+            'action': 'no-lock-found',
+            'manual_command': manual_command,
+            'other_locks': inv['other_locks'],
+        }
+        return retry_result
+
+    # Lock is present. The server cannot prove it's safe to delete;
+    # the only safe path is to ask the operator.
+    message = (
+        'A git lock file (.git/index.lock) is present. The server does '
+        'not delete locks automatically -- git uses O_CREAT|O_EXCL '
+        'locking, which cannot be detected with advisory probes. To '
+        'recover: confirm no other git process is running against '
+        f'this checkout, then run: {manual_command}  '
+        'Click "Retry update" once you have removed it.'
+    )
+    return {
+        'ok': False,
+        'message': message,
+        'lock_held': True,
+        'target': target,
+        'manual_command': manual_command,
+        'well_known_lock_path': inv['well_known_lock_path'],
+        'other_locks': inv['other_locks'],
+    }
+
+
+def _run_fenced_update(target: str, force_active_runs: bool, run) -> dict:
+    """Refuse / fence / re-check wrapper shared by every update entry point (#7293).
+
+    1. Refuse by default while WebUI-owned runs are active (``force_available``
+       tells the client an explicit force exists).
+    2. Take ``_apply_lock`` and close run admission for the whole update, so no
+       run can start between the safety check and the re-exec.
+    3. Re-check after fencing: a run admitted just before the fence closed must
+       still refuse an unforced update.
+    4. Release the hold on the way out. A scheduled restart keeps admission
+       closed on its own (``run_drain.mark_restart_pending``) until the process
+       is replaced; a failed update reopens it.
+    """
+    from api import run_drain
+
     blocker_snapshot = _restart_blocker_snapshot()
-    if blocker_snapshot.get('restart_blocked'):
+    if blocker_snapshot.get('restart_blocked') and not force_active_runs:
         return _restart_blocked_response(target, blocker_snapshot)
 
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
-
     try:
-        if target == 'webui':
-            path = REPO_ROOT
-        elif target == 'agent':
-            path = _AGENT_DIR
-        else:
-            return {'ok': False, 'message': f'Unknown target: {target}'}
-
-        if path is None or not (path / '.git').exists():
-            return {'ok': False, 'message': 'Not a git repository'}
-
-        inv = _inventory_locks(path)
-        manual_command = f"rm -f {inv['well_known_lock_path']}"
-
-        if not inv['well_known_lock_present']:
-            # Lock is gone. Run the normal non-destructive update flow and
-            # annotate the response with what we found for the user's
-            # records. Pass the configured channel through — otherwise an
-            # experimental-channel WebUI lock-recovery retry silently falls back
-            # to stable (Codex gate: _apply_update_inner defaults to stable).
-            with _cache_lock:
-                _update_cache['checked_at'] = 0
-            retry_result = _apply_update_inner(target, _read_update_channel())
-            retry_result = dict(retry_result)
-            retry_result['lock_recovery'] = {
-                'action': 'no-lock-found',
-                'manual_command': manual_command,
-                'other_locks': inv['other_locks'],
-            }
-            return retry_result
-
-        # Lock is present. The server cannot prove it's safe to delete;
-        # the only safe path is to ask the operator.
-        message = (
-            'A git lock file (.git/index.lock) is present. The server does '
-            'not delete locks automatically -- git uses O_CREAT|O_EXCL '
-            'locking, which cannot be detected with advisory probes. To '
-            'recover: confirm no other git process is running against '
-            f'this checkout, then run: {manual_command}  '
-            'Click "Retry update" once you have removed it.'
-        )
-        return {
-            'ok': False,
-            'message': message,
-            'lock_held': True,
-            'target': target,
-            'manual_command': manual_command,
-            'well_known_lock_path': inv['well_known_lock_path'],
-            'other_locks': inv['other_locks'],
-        }
+        token = run_drain.hold_run_admission(f'update:{target}', force=bool(force_active_runs))
+        try:
+            blocker_snapshot = _restart_blocker_snapshot()
+            if blocker_snapshot.get('restart_blocked'):
+                if not force_active_runs:
+                    return _restart_blocked_response(target, blocker_snapshot)
+                logger.warning(
+                    "Forced %s update with %s active WebUI run(s); they will be "
+                    "settled as interrupted before the restart",
+                    target, blocker_snapshot.get('active_runs'),
+                )
+            return run()
+        finally:
+            run_drain.release_run_admission_hold(token)
     finally:
         _apply_lock.release()
 
@@ -2073,7 +2119,23 @@ def _schedule_restart(delay: float = 2.0) -> None:
     import os
     import sys
 
+    from api import run_drain
+
+    # #7293: run admission stays closed from now until the process image is
+    # replaced, so no run can start that the restart would drop. If the
+    # restart never replaces the process, the epoch reopens admission below.
+    restart_epoch = run_drain.mark_restart_pending()
+
     def _do():
+        try:
+            _do_restart()
+        finally:
+            # Reaching here means this process was NOT replaced (spawn failure,
+            # an execv that returned under test, an unexpected error). Reopen
+            # admission so the server does not stay closed forever.
+            run_drain.abandon_restart_pending(restart_epoch)
+
+    def _do_restart():
         import time
         time.sleep(delay)
         # Hold _apply_lock through os.execv so no new update can start between
@@ -2086,6 +2148,16 @@ def _schedule_restart(delay: float = 2.0) -> None:
         # released atomically by the kernel.
         with _apply_lock:
             _wait_until_restart_safe()
+            # #7293: whatever is still running here (a forced update, or a
+            # safety wait that timed out) is settled durably as interrupted
+            # BEFORE the image is replaced, instead of being dropped by execv.
+            # A no-op when nothing is active. Gateway runs are never touched.
+            settled = run_drain.settle_webui_owned_runs(run_drain.RESTART_SETTLE_REASON)
+            if settled.get('settled') or settled.get('pending'):
+                logger.warning(
+                    "restart: settled %d WebUI run(s) as interrupted before re-exec (unsettled: %s)",
+                    len(settled.get('settled') or []), settled.get('pending') or [],
+                )
             # Purge bytecode caches so the new process imports from
             # current source.  Without this, Python may serve stale .pyc
             # files whose mtime matches the just-pulled .py files,
@@ -2139,7 +2211,13 @@ def _schedule_restart(delay: float = 2.0) -> None:
                 # Last-resort: let the process supervisor restart us.
                 _windows_restart_exit(0)
 
-    threading.Thread(target=_do, daemon=True).start()
+    try:
+        threading.Thread(target=_do, daemon=True).start()
+    except BaseException:
+        # Only the restart thread reopens admission; one that never started
+        # would leave every chat start refused for the life of the process.
+        run_drain.abandon_restart_pending(restart_epoch)
+        raise
 
 
 def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
@@ -2155,6 +2233,17 @@ def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
     restart_result = restart_active_profile_gateway(profile=target_profile)
     status = str(restart_result.get("status") or "")
     if status in {"completed", "in_progress"}:
+        return True, restart_result
+    if status == "external":
+        # The monitored Gateway is managed outside WebUI (#8391). The Agent
+        # checkout update itself succeeded; the shared helper launched nothing,
+        # and the response reports ``gateway_restart: "external"`` rather than
+        # claiming the external runtime restarted. No retry: retrying cannot
+        # change ownership.
+        logger.info(
+            "Agent updated; gateway restart skipped because the monitored Gateway "
+            "is managed outside WebUI"
+        )
         return True, restart_result
     if status != "failed":
         return False, restart_result
@@ -2245,7 +2334,7 @@ def _discard_local_changes(path: Path, reset_ref: str) -> bool:
     return ok
 
 
-def apply_force_update(target: str, channel=None) -> dict:
+def apply_force_update(target: str, channel=None, *, force_active_runs: bool = False) -> dict:
     """Discard local changes for the requested update target.
 
     Unlike apply_update() which requires a clean working tree and refuses
@@ -2266,132 +2355,127 @@ def apply_force_update(target: str, channel=None) -> dict:
     if channel is None:
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
-    blocker_snapshot = _restart_blocker_snapshot()
-    if blocker_snapshot.get('restart_blocked'):
-        return _restart_blocked_response(target, blocker_snapshot)
+    return _run_fenced_update(
+        target, force_active_runs, lambda: _apply_force_update_inner(target, channel)
+    )
 
-    if not _apply_lock.acquire(blocking=False):
-        return {'ok': False, 'message': 'Update already in progress'}
-    try:
-        if target == 'webui':
-            path = REPO_ROOT
-        elif target == 'agent':
-            path = _AGENT_DIR
-            # Channel is WebUI-only — the Agent always uses the default channel.
-            channel = DEFAULT_UPDATE_CHANNEL
-        else:
-            return {'ok': False, 'message': f'Unknown target: {target}'}
 
-        if path is None or not (path / '.git').exists():
-            return {'ok': False, 'message': 'Not a git repository'}
+def _apply_force_update_inner(target: str, channel) -> dict:
+    """Body of ``apply_force_update``; runs under ``_apply_lock`` + the admission fence."""
+    if target == 'webui':
+        path = REPO_ROOT
+    elif target == 'agent':
+        path = _AGENT_DIR
+        # Channel is WebUI-only — the Agent always uses the default channel.
+        channel = DEFAULT_UPDATE_CHANNEL
+    else:
+        return {'ok': False, 'message': f'Unknown target: {target}'}
 
-        # NOTE: v2 of PR #5688 removed the prior stale-lock cleanup loop from
-        # this entry point. The mtime-based heuristic was empirically proven
-        # unsafe (a live `git add` was shown to hold .git/index.lock past 31 s
-        # with unchanged mtime) and unconditional pre-cleanup clobbered locks
-        # for force-update retries that had nothing to do with a lock error.
-        # Lock cleanup is now ONLY performed by the explicit
-        # /api/updates/clear_lock endpoint, where the user has opted in to
-        # a non-destructive retry.
+    if path is None or not (path / '.git').exists():
+        return {'ok': False, 'message': 'Not a git repository'}
 
-        # --force so a remote re-tag (e.g. squash-merge that re-points an
-        # existing release tag) doesn't jam the apply path with "would clobber
-        # existing tag". See #2756.
-        fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
-        if not fetch_ok:
-            return {
-                'ok': False,
-                'message': _apply_fetch_failure_message(
-                    fetch_out,
-                    'Could not reach the remote repository. Check your connection.',
-                ),
-            }
+    # NOTE: v2 of PR #5688 removed the prior stale-lock cleanup loop from
+    # this entry point. The mtime-based heuristic was empirically proven
+    # unsafe (a live `git add` was shown to hold .git/index.lock past 31 s
+    # with unchanged mtime) and unconditional pre-cleanup clobbered locks
+    # for force-update retries that had nothing to do with a lock error.
+    # Lock cleanup is now ONLY performed by the explicit
+    # /api/updates/clear_lock endpoint, where the user has opted in to
+    # a non-destructive retry.
 
-        compare_ref = _select_apply_compare_ref(path, channel, target)
-        # Stable channel, already up to date on the promoted subset: nothing to
-        # force to. Do NOT fall back to origin/master (firehose). See
-        # _select_apply_compare_ref channel semantics.
-        if compare_ref is None:
-            dirty_state = None
-            if target == 'webui' and channel == 'stable':
-                dirty_state = _probe_dirty(path, timeout=_FORCE_DIRTY_PROBE_TIMEOUT)
-            if dirty_state is True:
-                compare_ref = 'HEAD'
-            else:
-                return {
-                    'ok': True,
-                    'message': f'{target} is already up to date on the {channel} channel.',
-                    'target': target,
-                    'up_to_date': True,
-                    'channel': channel,
-                }
-
-        # Rewind guard (Codex CORE #3): refuse to reset --hard onto a ref that
-        # is an ANCESTOR of HEAD — that would downgrade the checkout. This is the
-        # switch-back-to-stable-while-ahead case. A ref that is a descendant of
-        # HEAD (normal update / opt-in to experimental) fast-forwards fine and is
-        # allowed. Refs on a divergent line (neither ancestor nor descendant) are
-        # the legitimate force-update case (conflict/diverged recovery) and are
-        # also allowed — the guard fires ONLY on a pure-ancestor rewind.
-        if _head_contains_ref(path, compare_ref) and not _can_fast_forward_to(path, compare_ref):
-            return {
-                'ok': False,
-                'message': (
-                    f'{target} is already ahead of the {channel} channel '
-                    f'({compare_ref}); refusing to rewind the checkout. '
-                    'Switching to a slower channel keeps your current version '
-                    'until that channel catches up.'
-                ),
-                'target': target,
-                'channel': channel,
-                'refused_rewind': True,
-            }
-        if not _discard_local_changes(path, compare_ref):
-            return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
-
-        with _cache_lock:
-            _update_cache['checked_at'] = 0
-
-        if target == 'agent':
-            gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
-            if not gateway_ok:
-                return {
-                    'ok': False,
-                    'message': _agent_gateway_restart_failure_message(target, gateway_result),
-                    'target': target,
-                    'gateway_restart': gateway_result.get('status'),
-                }
-
-        _schedule_restart()
-
-        response = {
-            'ok': True,
-            'message': f'{target} force-updated to {compare_ref}',
-            'target': target,
-            'restart_scheduled': True,
+    # --force so a remote re-tag (e.g. squash-merge that re-points an
+    # existing release tag) doesn't jam the apply path with "would clobber
+    # existing tag". See #2756.
+    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
+    if not fetch_ok:
+        return {
+            'ok': False,
+            'message': _apply_fetch_failure_message(
+                fetch_out,
+                'Could not reach the remote repository. Check your connection.',
+            ),
         }
-        if target == 'agent':
-            response['gateway_restart'] = gateway_result.get('status')
-        return response
-    finally:
-        _apply_lock.release()
+
+    compare_ref = _select_apply_compare_ref(path, channel, target)
+    # Stable channel, already up to date on the promoted subset: nothing to
+    # force to. Do NOT fall back to origin/master (firehose). See
+    # _select_apply_compare_ref channel semantics.
+    if compare_ref is None:
+        dirty_state = None
+        if target == 'webui' and channel == 'stable':
+            dirty_state = _probe_dirty(path, timeout=_FORCE_DIRTY_PROBE_TIMEOUT)
+        if dirty_state is True:
+            compare_ref = 'HEAD'
+        else:
+            return {
+                'ok': True,
+                'message': f'{target} is already up to date on the {channel} channel.',
+                'target': target,
+                'up_to_date': True,
+                'channel': channel,
+            }
+
+    # Rewind guard (Codex CORE #3): refuse to reset --hard onto a ref that
+    # is an ANCESTOR of HEAD — that would downgrade the checkout. This is the
+    # switch-back-to-stable-while-ahead case. A ref that is a descendant of
+    # HEAD (normal update / opt-in to experimental) fast-forwards fine and is
+    # allowed. Refs on a divergent line (neither ancestor nor descendant) are
+    # the legitimate force-update case (conflict/diverged recovery) and are
+    # also allowed — the guard fires ONLY on a pure-ancestor rewind.
+    if _head_contains_ref(path, compare_ref) and not _can_fast_forward_to(path, compare_ref):
+        return {
+            'ok': False,
+            'message': (
+                f'{target} is already ahead of the {channel} channel '
+                f'({compare_ref}); refusing to rewind the checkout. '
+                'Switching to a slower channel keeps your current version '
+                'until that channel catches up.'
+            ),
+            'target': target,
+            'channel': channel,
+            'refused_rewind': True,
+        }
+    if not _discard_local_changes(path, compare_ref):
+        return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
+
+    with _cache_lock:
+        _update_cache['checked_at'] = 0
+
+    if target == 'agent':
+        gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
+        if not gateway_ok:
+            return {
+                'ok': False,
+                'message': _agent_gateway_restart_failure_message(target, gateway_result),
+                'target': target,
+                'gateway_restart': gateway_result.get('status'),
+            }
+
+    _schedule_restart()
+
+    response = {
+        'ok': True,
+        'message': f'{target} force-updated to {compare_ref}',
+        'target': target,
+        'restart_scheduled': True,
+    }
+    if target == 'agent':
+        response['gateway_restart'] = gateway_result.get('status')
+    return response
 
 
-def apply_update(target, channel=None):
-    """Stash, pull --ff-only, pop for the given target repo."""
+def apply_update(target, channel=None, *, force_active_runs: bool = False):
+    """Stash, pull --ff-only, pop for the given target repo.
+
+    Refuses while WebUI-owned runs are active unless ``force_active_runs``
+    (#7293); see ``_run_fenced_update``.
+    """
     if channel is None:
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
-    blocker_snapshot = _restart_blocker_snapshot()
-    if blocker_snapshot.get('restart_blocked'):
-        return _restart_blocked_response(target, blocker_snapshot)
-
-    if not _apply_lock.acquire(blocking=False):
-        return {'ok': False, 'message': 'Update already in progress'}
-    try:
-        return _apply_update_inner(target, channel)
-    finally:
-        _apply_lock.release()
+    return _run_fenced_update(
+        target, force_active_runs, lambda: _apply_update_inner(target, channel)
+    )
 
 
 def _restore_stash_after_pull_failure(
