@@ -11,9 +11,12 @@ beyond one turn:
 (c) a shared provider instance another profile already owns: external provider off
     for this profile until the WebUI restarts.
 
-A turn-level scope failure (memory off for this one turn, retried next turn) is NOT
-reported: the user cannot act on it and the next turn normally has memory again.
-Healthy sessions and current Agents get nothing. The payload carries no paths.
+A turn-level scope failure (memory off for this one turn, retried next turn) reports
+the lasting status of the session's cached agent when it has one, and nothing (status
+unknown) otherwise. A turn whose agent is the session's lasting agent with memory on
+reports an explicit healthy ``memory_status`` frame (``state: "ok"``), the only thing
+that clears the notice in the UI. The run journal snapshot carries the latest status
+so a reload that resumes after the warning restores it. The payload carries no paths.
 """
 # ruff: noqa: F811  (pytest fixtures imported from the #8517 modules)
 from __future__ import annotations
@@ -21,11 +24,17 @@ from __future__ import annotations
 import json
 import sys
 import types
+import uuid
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
+import api.config as config_mod
+import api.models as models
 import api.profiles as profiles_api
+import api.routes as routes
+from api.run_journal import RunJournalWriter
 from tests.test_issue8517_profile_scoped_memory import (  # noqa: F401  (fixtures)
     SENTINEL,
     FakeMemoryManager,
@@ -40,6 +49,7 @@ from tests.test_issue8517_profile_scoped_memory import (  # noqa: F401  (fixture
 )
 
 _ALLOWED_KEYS = {"type", "session_id", "stream_id", "reason", "scope", "message"}
+_OK_KEYS = {"type", "state", "session_id", "stream_id"}
 
 
 @pytest.fixture
@@ -101,6 +111,13 @@ def _memory_off_frames(events):
     return [
         data for event, data, *_ in events
         if event == "warning" and isinstance(data, dict) and data.get("type") == "memory_off"
+    ]
+
+
+def _memory_ok_frames(events):
+    return [
+        data for event, data, *_ in events
+        if event == "memory_status" and isinstance(data, dict) and data.get("state") == "ok"
     ]
 
 
@@ -247,7 +264,133 @@ def test_stream_reports_shared_provider_only_to_the_refused_profile(hc, homes, r
     _assert_no_paths(frames[0], homes)
 
 
-def test_stream_reports_nothing_for_a_healthy_session(hc, homes, run_turn, scope):
+def test_stream_reports_explicit_ok_for_a_healthy_session(hc, homes, run_turn, scope):
+    """Codex r1 finding 2: clearing is driven by an explicit healthy status, never by
+    the absence of a warning."""
     provider = SharedInstanceMemoryProvider(homes["default"])
-    _sid, events = run_turn(profile="alpha", agent_cls=make_claiming_agent_cls(lambda: provider))
+    sid, events = run_turn(profile="alpha", agent_cls=make_claiming_agent_cls(lambda: provider))
     assert _memory_off_frames(events) == []
+    ok = _memory_ok_frames(events)
+    assert len(ok) == 1, events
+    assert ok[0] == {"type": "memory_status", "state": "ok", "session_id": sid, "stream_id": f"{sid}-stream"}
+    assert set(ok[0]) <= _OK_KEYS
+
+
+def _with_builtin(cls):
+    class WithBuiltin(cls):
+        def __init__(self, session_id=None, skip_memory=False, **kwargs):
+            super().__init__(session_id=session_id, skip_memory=skip_memory, **kwargs)
+            self._memory_store = object()
+
+    return WithBuiltin
+
+
+def _fixed_session(monkeypatch, tag):
+    monkeypatch.setattr(uuid, "uuid4", lambda: SimpleNamespace(hex=tag))
+
+
+def _break_turn_scope(hc, monkeypatch):
+    monkeypatch.setattr(
+        hc, "set_hermes_home_override",
+        lambda home: (_ for _ in ()).throw(RuntimeError("transient scope failure")),
+    )
+
+
+def test_transient_turn_reports_the_cached_agents_lasting_reason(hc, homes, run_turn, scope, monkeypatch):
+    """Codex r1 finding 2 (backend): off -> transient -> off. The transient turn runs a
+    one-turn memoryless agent while the session's cached agent keeps its lasting
+    reason; it reports that reason (never a healthy status), so the notice stays."""
+    singleton = SharedInstanceMemoryProvider(homes["default"])
+    cls = _with_builtin(make_claiming_agent_cls(lambda: singleton))
+    run_turn(profile="alpha", agent_cls=cls)
+    _fixed_session(monkeypatch, "transient-notice")
+    sid, first = run_turn(profile="beta", agent_cls=cls)
+    cached = _cached_agent(sid)
+    assert [f["reason"] for f in _memory_off_frames(first)] == ["provider_shared_instance"]
+    setter = hc.set_hermes_home_override
+    _break_turn_scope(hc, monkeypatch)
+    _, transient = run_turn(profile="beta", agent_cls=cls)
+    assert _cached_agent(sid) is cached, "the transient turn must not replace the cached agent"
+    frames = _memory_off_frames(transient)
+    assert [f["reason"] for f in frames] == ["provider_shared_instance"], transient
+    assert frames[0]["session_id"] == sid
+    _assert_no_paths(frames[0], homes)
+    assert _memory_ok_frames(transient) == [], "a transient turn is never reported healthy"
+    monkeypatch.setattr(hc, "set_hermes_home_override", setter)
+    _, third = run_turn(profile="beta", agent_cls=cls)
+    assert [f["reason"] for f in _memory_off_frames(third)] == ["provider_shared_instance"]
+    assert _memory_ok_frames(third) == []
+
+
+def test_transient_turn_of_a_healthy_session_reports_nothing(hc, homes, run_turn, scope, monkeypatch):
+    """Status unknown for the turn: neither memory_off nor healthy (the UI keeps
+    whatever it shows)."""
+    provider = SharedInstanceMemoryProvider(homes["default"])
+    cls = _with_builtin(make_claiming_agent_cls(lambda: provider))
+    _fixed_session(monkeypatch, "transient-healthy")
+    sid, first = run_turn(profile="alpha", agent_cls=cls)
+    assert len(_memory_ok_frames(first)) == 1
+    _break_turn_scope(hc, monkeypatch)
+    _, transient = run_turn(profile="alpha", agent_cls=cls)
+    assert _cached_agent(sid) is not None
+    assert _memory_off_frames(transient) == [] and _memory_ok_frames(transient) == [], transient
+
+
+def test_recovered_agent_reports_healthy(hc, homes, run_turn, scope, monkeypatch):
+    """A session whose memory was off gets an explicit healthy status once its agent
+    is rebuilt with memory (here: the WebUI restarted, so no profile owns the shared
+    instance any more and the session's agent cache is empty)."""
+    singleton = SharedInstanceMemoryProvider(homes["default"])
+    cls = _with_builtin(make_claiming_agent_cls(lambda: singleton))
+    run_turn(profile="alpha", agent_cls=cls)
+    _fixed_session(monkeypatch, "recovered-notice")
+    sid, before = run_turn(profile="beta", agent_cls=cls)
+    assert [f["reason"] for f in _memory_off_frames(before)] == ["provider_shared_instance"]
+    assert _memory_ok_frames(before) == []
+    # "Restart": nothing owns the shared instance, nothing is cached.
+    monkeypatch.setattr(scope, "_instance_owners", {})
+    with config_mod.SESSION_AGENT_CACHE_LOCK:
+        config_mod.SESSION_AGENT_CACHE.pop(sid, None)
+    _, after = run_turn(profile="beta", agent_cls=cls)
+    rebuilt = _cached_agent(sid)
+    assert rebuilt is not None and rebuilt._memory_manager is not None
+    assert _memory_off_frames(after) == []
+    assert [f["session_id"] for f in _memory_ok_frames(after)] == [sid]
+
+
+# ── reload / reattach: the run journal snapshot carries the status ────────────
+
+def test_journal_snapshot_carries_the_latest_memory_status(tmp_path, monkeypatch, scope):
+    """Codex r1 finding 1: a reload that resumes the live stream after the warning's
+    seq still learns the status, from the recovery snapshot it already restores."""
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    sid, run_id = "notice-journal-session", "notice-journal-run"
+    writer = RunJournalWriter(sid, run_id)
+    writer.append_sse_event("token", {"text": "Working"})
+    off = {
+        "type": "memory_off", "session_id": sid, "stream_id": run_id,
+        "reason": "provider_shared_instance", "scope": "external", "message": "x",
+    }
+    writer.append_sse_event("warning", off)
+    writer.append_sse_event("warning", {"type": "fallback", "message": "unrelated"})
+    for _ in range(20):
+        writer.append_sse_event("token", {"text": "."})
+    snapshot = routes._run_journal_live_snapshot(run_id)
+    expected = {"state": "external_off", "reason": "provider_shared_instance", "scope": "external"}
+    assert snapshot["memory_status"] == expected
+    assert routes._runtime_journal_snapshot_for_session_payload(snapshot)["memory_status"] == expected
+    assert scope.memory_status_from_journal_events(
+        [{"event": "memory_status", "payload": {"type": "memory_status", "state": "ok"}}]
+    ) == {"state": "ok"}
+
+
+def test_journal_snapshot_memory_status_absent_or_forged(scope):
+    read = scope.memory_status_from_journal_events
+    assert read([]) is None
+    assert read([{"event": "token", "payload": {"text": "x"}}]) is None
+    forged = {"event": "warning", "payload": {"type": "memory_off", "reason": "/etc/passwd"}}
+    assert read([forged]) is None
+    off = {"event": "warning", "payload": {"type": "memory_off", "reason": "agent_outdated"}}
+    ok = {"event": "memory_status", "payload": {"type": "memory_status", "state": "ok"}}
+    assert read([off, ok]) == {"state": "ok"}
+    assert read([ok, off]) == {"state": "off", "reason": "agent_outdated", "scope": "all"}

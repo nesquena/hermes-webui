@@ -69,7 +69,10 @@ for (const step of steps) {
   else if (step.op === 'sync') syncMemoryOffNotice();
   else if (step.op === 'dismiss') dismissMemoryOffNotice();
   else if (step.op === 'switch') { S.session = step.sid ? {session_id: step.sid} : null; syncMemoryOffNotice(); }
-  else if (step.op === 'settle') settleMemoryOffNoticeAfterTurn(step.sid, step.stream);
+  else if (step.op === 'ok') ret = noteMemoryOkStatus(step.data);
+  else if (step.op === 'restore') ret = restoreMemoryStatusFromSnapshot(step.sid, step.status);
+  else if (step.op === 'migrate') ret = migrateMemoryOffNotice(step.from, step.to);
+  else if (step.op === 'forget') store.clear();
   const n = els.memoryOffNotice;
   out.push({op: step.op, ret, hidden: n.hidden, text: els.memoryOffNoticeText.textContent,
     reason: n.dataset.reason || '', announcements, composerFocused: els.msg.focused,
@@ -152,19 +155,85 @@ def test_unknown_reason_and_other_warnings(tmp_path):
     assert other["ret"] is False and missing["ret"] is False, "other warnings keep their old path"
 
 
-def test_turn_without_a_status_clears_it(tmp_path):
-    """The status follows the server: a completed turn of that session that reported
-    no memory_off (memory is back, e.g. after an upgrade + restart) hides it."""
+def _ok(sid="s1", stream="st2"):
+    return {"type": "memory_status", "state": "ok", "session_id": sid, "stream_id": stream}
+
+
+def test_only_an_explicit_healthy_status_clears_it(tmp_path):
+    """Codex r1 finding 2: the notice follows the server's explicit status. A healthy
+    status for the session clears it (and its dismissal, so a later memory-off is news
+    again); anything else (another session's status, a malformed frame) keeps it."""
     states = _drive(tmp_path, [
         {"op": "note", "data": _ev(stream="st1")},
-        {"op": "settle", "sid": "s1", "stream": "st1"},
-        {"op": "settle", "sid": "s1", "stream": "st2"},
+        {"op": "ok", "data": _ok(sid="s9")},
+        {"op": "ok", "data": {"type": "memory_status", "state": "unknown", "session_id": "s1"}},
+        {"op": "ok", "data": None},
+        {"op": "ok", "data": _ok()},
         {"op": "note", "data": _ev(stream="st3")},
     ])
-    kept, cleared, again = states[1], states[2], states[3]
-    assert kept["hidden"] is False
-    assert cleared["hidden"] is True
+    first, other, unknown, missing, cleared, again = states
+    assert first["hidden"] is False
+    assert other["hidden"] is False and other["ret"] is True
+    assert unknown["hidden"] is False and unknown["ret"] is False
+    assert missing["hidden"] is False and missing["ret"] is False
+    assert cleared["hidden"] is True and cleared["ret"] is True
     assert again["hidden"] is False and again["announcements"] == 2
+
+
+def test_healthy_status_forgets_the_dismissal(tmp_path):
+    states = _drive(tmp_path, [
+        {"op": "note", "data": _ev()},
+        {"op": "dismiss"},
+        {"op": "ok", "data": _ok()},
+        {"op": "note", "data": _ev(stream="st3")},
+    ])
+    assert states[1]["hidden"] is True and states[1]["stored"]
+    assert states[2]["stored"] == []
+    assert states[3]["hidden"] is False
+
+
+def test_restore_from_the_journal_snapshot(tmp_path):
+    """Codex r1 finding 1: reload/reattach restores the status the run journal
+    snapshot carries, keyed to the session being loaded, and respects dismissal."""
+    snap = {"state": "external_off", "reason": "provider_shared_instance", "scope": "external"}
+    restored, none, forged = _drive(tmp_path, [
+        {"op": "restore", "sid": "s1", "status": snap},
+        {"op": "restore", "sid": "s1", "status": None},
+        {"op": "restore", "sid": "s1", "status": {"state": "off", "reason": "<img src=x>"}},
+    ])
+    assert restored["ret"] is True and restored["hidden"] is False
+    assert restored["reason"] == "provider_shared_instance"
+    assert none["ret"] is False and none["hidden"] is False, "no status in the snapshot keeps the notice"
+    assert forged["hidden"] is False and forged["reason"] == "provider_shared_instance"
+    states = _drive(tmp_path, [
+        {"op": "note", "data": _ev(reason="provider_shared_instance")},
+        {"op": "dismiss"},
+        {"op": "restore", "sid": "s1", "status": snap},
+    ])
+    assert states[-1]["hidden"] is True, "a dismissed notice stays dismissed after a reload"
+    (healthy,) = _drive(tmp_path, [{"op": "restore", "sid": "s1", "status": {"state": "ok"}}])
+    assert healthy["hidden"] is True
+
+
+def test_migrate_to_the_compression_continuation(tmp_path):
+    """Codex r1 finding 3: s1 -> s2 carries the status and its dismissal."""
+    states = _drive(tmp_path, [
+        {"op": "note", "data": _ev(sid="s1")},
+        {"op": "migrate", "from": "s1", "to": "s2"},
+        {"op": "switch", "sid": "s2"},
+    ])
+    assert states[1]["ret"] is True and states[2]["hidden"] is False
+    assert states[2]["announcements"] == 1, "the same notice is not announced again"
+    states = _drive(tmp_path, [
+        {"op": "note", "data": _ev(sid="s1")},
+        {"op": "dismiss"},
+        {"op": "migrate", "from": "s1", "to": "s2"},
+        {"op": "switch", "sid": "s2"},
+    ])
+    assert states[-1]["hidden"] is True
+    assert any(k.endswith(":s2:agent_outdated") for k in states[-1]["stored"])
+    (nothing,) = _drive(tmp_path, [{"op": "migrate", "from": "s1", "to": "s2"}])
+    assert nothing["ret"] is False
 
 
 def test_no_session_open(tmp_path):
@@ -205,9 +274,25 @@ def test_warning_listener_routes_memory_off_before_the_composer_status():
     assert "String(_memoryOff.session_id||'')===String(activeSid)" in body
 
 
-def test_done_settles_and_session_switch_syncs():
-    start = MESSAGES_JS.find("source.addEventListener('done'")
-    assert "settleMemoryOffNoticeAfterTurn(activeSid" in MESSAGES_JS[start:start + 1500]
+def test_wiring_explicit_status_restore_and_continuation():
+    # No absence-based clearing left anywhere (Codex r1 finding 2).
+    assert "settleMemoryOffNoticeAfterTurn" not in MESSAGES_JS + UI_JS
+    ok = MESSAGES_JS.find("source.addEventListener('memory_status'")
+    assert ok > 0 and "noteMemoryOkStatus(" in MESSAGES_JS[ok:ok + 600]
+    assert "String(_memoryStatus.session_id||'')===String(activeSid)" in MESSAGES_JS[ok:ok + 600]
+    # Journaled frame: advance the replay cursor past it like every other event.
+    cursor = re.search(r"for\(const _runJournalEventName of \[([^\]]*)\]", MESSAGES_JS)
+    assert cursor and "'memory_status'" in cursor.group(1)
+    # Continuation: migrate before the completion repaint (_finishDone).
+    done = MESSAGES_JS.find("source.addEventListener('done'")
+    body = MESSAGES_JS[done:done + 2500]
+    assert 0 < body.find("migrateMemoryOffNotice(activeSid") < body.find("const _finishDone=")
+    # Reattach: the snapshot status is restored on load and on reconnect.
+    sessions_js = (STATIC / "sessions.js").read_text(encoding="utf-8")
+    assert "memoryStatus:" in sessions_js[sessions_js.find("function _serverLiveSnapshotInflight("):]
+    assert "restoreMemoryStatusFromSnapshot(sid" in sessions_js
+    attach = MESSAGES_JS.find("function attachLiveStream(")
+    assert "restoreMemoryStatusFromSnapshot(activeSid" in MESSAGES_JS[attach:attach + 4000]
     sync = UI_JS.find("function syncTopbar(")
     assert "syncMemoryOffNotice()" in UI_JS[sync:sync + 400]
 
