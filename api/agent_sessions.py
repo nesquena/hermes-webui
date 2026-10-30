@@ -10,7 +10,7 @@ from urllib.parse import quote, quote_from_bytes
 
 from api.compression_anchor import (
     _flagged_carrier_has_live_payload_sql,
-    _plaintext_content_sql,
+    _plaintext_content_join_sql,
     is_user_originated_turn,
     user_turn_sql_exclusions,
 )
@@ -1144,10 +1144,18 @@ def read_importable_agent_session_rows(
                 # content references below. Inlined, each copy carries the
                 # GROUP_CONCAT aggregate and the statement blows past SQLite's
                 # aggregate-terms cap ("more than 2000 aggregate terms").
+                #
+                # #7681 re-gate: the JSON expansion runs as a FROM-level
+                # table function (``LEFT JOIN JSON_EACH(...)``) with the
+                # per-message GROUP_CONCAT aggregated over it. The previous
+                # scalar form made the listing's plan report a CORRELATED
+                # SCALAR SUBQUERY — the decode was re-evaluated per candidate
+                # instead of once per message — which broke the pre-aggregated
+                # listing guarantee the readonly review follow-ups assert.
                 join_clause = (
-                    "LEFT JOIN (SELECT mq.*, "
-                    + _plaintext_content_sql("mq.content")
-                    + " AS _plaintext_content FROM messages mq LIMIT -1) m"
+                    "LEFT JOIN ("
+                    + _plaintext_content_join_sql("mq.content")
+                    + " LIMIT -1) m"
                     " ON m.session_id = s.id"
                 )
             else:

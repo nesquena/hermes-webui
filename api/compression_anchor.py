@@ -749,6 +749,47 @@ def _plaintext_content_sql(raw_expr: str) -> str:
     )
 
 
+def _plaintext_content_join_sql(raw_expr: str) -> str:
+    """FROM-level variant of :func:`_plaintext_content_sql`.
+
+    Same decoded plaintext view, but the JSON expansion runs as a table
+    function at the FROM level (``LEFT JOIN JSON_EACH(...)``) with the
+    per-message ``GROUP_CONCAT`` aggregated over it, instead of as a
+    correlated scalar subquery.
+
+    The scalar form makes SQLite report ``CORRELATED SCALAR SUBQUERY`` in the
+    listing's query plan: the JSON_EACH argument references the outer message
+    row, so the decode is re-evaluated per candidate instead of once per
+    message. That breaks the pre-aggregated listing guarantee the readonly
+    review follow-ups assert (``test_missing_index_projection_uses_
+    preaggregated_ordering``). At the FROM level the JSON_EACH argument
+    references the same FROM row, so the plan stays free of correlated
+    subqueries while the decoded value is still computed once per message.
+    """
+    trimmed = f"LTRIM(COALESCE({raw_expr}, ''))"
+    payload = f"CAST(SUBSTR(CAST({trimmed} AS BLOB), 7) AS TEXT)"
+    is_json = (
+        "SUBSTR(CAST(" + trimmed + " AS BLOB), 1, 6) = CAST(CHAR(0) || 'json:' AS BLOB)"
+        " AND JSON_VALID(" + payload + ")"
+    )
+    part = (
+        "COALESCE(NULLIF(TRIM(JSON_EXTRACT(je.value, '$.text')), ''),"
+        " CASE WHEN JSON_TYPE(je.value) = 'text' THEN NULLIF(TRIM(je.value), '')"
+        " WHEN JSON_TYPE(je.value) = 'object'"
+        " AND COALESCE(JSON_EXTRACT(je.value, '$.type'), 'text')"
+        " NOT IN ('text', 'input_text', 'output_text') THEN '▇' END, '')"
+    )
+    return (
+        "SELECT mq.*,"
+        " LOWER(LTRIM(CASE WHEN " + is_json
+        + " THEN COALESCE(GROUP_CONCAT(" + part + ", ''), '')"
+        + " ELSE " + trimmed + " END)) AS _plaintext_content"
+        " FROM messages mq"
+        " LEFT JOIN JSON_EACH(CASE WHEN " + is_json + " THEN " + payload + " ELSE '[]' END) AS je"
+        " GROUP BY mq.rowid"
+    )
+
+
 def _flagged_carrier_has_live_payload_sql(content_expr: str) -> str:
     """SQL predicate: does a flagged summary carrier still embed a live ask?
 
