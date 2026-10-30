@@ -5649,6 +5649,13 @@ async function populateModelDropdown(opts={}){
     if(requestSeq!==_modelDropdownRequestSeq) return;
     window._activeProvider=data.active_provider||null;
     window._defaultModel=data.default_model||null;
+    // #8527 re-gate: the payload above is the ACTIVE profile's own defaults, so
+    // a pending profile-switch model reset is complete — release the one-shot
+    // gate and let newSession() use the refreshed picker again (the switch's
+    // auto-created session already went out model-less while the picker was
+    // still the previous profile's). typeof-guarded for the bare
+    // single-function eval harnesses that lack module scope.
+    if(typeof S!=='undefined'&&S)S._profileSwitchModelReset=false;
     window._configuredModelBadges=data.configured_model_badges||{};
     window._modelEndpointErrors={};
     const _sortModelEntries=(items,providerId)=>{

@@ -489,7 +489,7 @@ const S = Object.assign({
   _pendingSessionToolsets: null,
 }, scenario.S || {});
 
-let _modelSelect = null;
+let _modelSelect = scenario.modelSelect || null;
 
 const ctx = {
   S: S,
@@ -593,13 +593,16 @@ const ctx = {
   Error, TypeError, console, setTimeout, isNaN, parseInt, parseFloat,
 };
 ctx.refreshRan = null;
-// The ordinary post-switch catalog refresh (populateModelDropdown path) clears
-// the stale globals in the real flow; it runs AFTER the auto-created session's
+// The ordinary post-switch catalog refresh (populateModelDropdown path) re-derives
+// BOTH globals from the destination's /api/models payload and releases the
+// one-shot profile-switch model reset; it runs AFTER the auto-created session's
 // POST and records its position so the test can prove the payload was already
 // correct before it ran — the refresh can never retract a sent request.
 ctx._refreshProfileSwitchBackground = () => {
   ctx.refreshRan = calls.length;
   ctx.window._activeProvider = null;
+  ctx.window._defaultModel = null;
+  ctx.S._profileSwitchModelReset = false;
 };
 
 const proxy = new Proxy(ctx, {
@@ -615,13 +618,21 @@ vm.runInContext(extractAsyncFunction(srcSessions, '_switchProfileForSessionLoad'
 const run = scenario.flow === 'loadSwitch'
   ? context._switchProfileForSessionLoad(scenario.switchName)
   : context.switchToProfile(scenario.switchName);
-run.then(() => {
+// Optional: drive the REAL newSession after the switch writer completes — the
+// maintainer's repro chain for the sessions.js writer
+// (_switchProfileForSessionLoad -> newSession), whose caller loads an existing
+// session afterwards instead of auto-creating one.
+const settled = scenario.chainNewSession
+  ? run.then(() => context.newSession(false, {}))
+  : run;
+settled.then(() => {
   process.stdout.write(JSON.stringify({
     ok: true,
     calls: calls,
     bodies: bodies,
     activeProvider: ctx.window._activeProvider,
     defaultModel: ctx.window._defaultModel,
+    profileSwitchModelReset: !!ctx.S._profileSwitchModelReset,
     refreshRan: ctx.refreshRan,
   }));
 }).catch((err) => {
@@ -766,4 +777,221 @@ def test_session_load_switch_adopts_destination_provider():
     assert result["defaultModel"] == _DEST_DEFAULT
     assert result["activeProvider"] == "new-route", (
         f"the destination's configured provider must be adopted; got {result['activeProvider']!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Maintainer re-gate (2026-10-31): a destination WITHOUT a configured model
+# must own the default state.
+#
+# api/profiles.py's per-client switch reads the destination's raw config.yaml
+# and legitimately returns ``default_model:null`` (key present, value null),
+# omits the key entirely, or returns an empty string for a model-less profile
+# (api/profiles.py:1986-1993,2045-2051). Both switch writers used to gate BOTH
+# default assignments behind ``if (data.default_model)``, so in that case the
+# PREVIOUS profile's ``window._defaultModel`` / ``window._activeProvider``
+# survived — and the canonical switch auto-creates a session BEFORE its normal
+# catalog refresh, so the configured-default branch of newSession() explicitly
+# posted the stale pair under the NEW profile:
+#
+#   {"profile":"new-profile","model":"google/gemini-2.5-pro","model_provider":"old-route"}
+#
+# Clearing the pair alone is not enough: with ``window._defaultModel`` null,
+# newSession() would fall through to the still-pre-refresh picker (same model
+# id, old provider) or the persisted pair. The writers now replace-or-clear
+# the pair unconditionally and arm a one-shot reset gate
+# (``S._profileSwitchModelReset``) that blocks those two fallbacks until
+# populateModelDropdown rehydrates the destination's catalog.
+#
+# These tests compose the REAL caller chains — switchToProfile -> newSession
+# (the canonical switch auto-creates the session) and
+# _switchProfileForSessionLoad -> newSession (the maintainer's second repro
+# chain) — seed the old profile's pair, and assert the request that actually
+# went out: caller completion (the POST happened) and request scope (profile
+# field, no stale model/provider).
+# ---------------------------------------------------------------------------
+
+# The three model-absent destination shapes api/profiles.py can return.
+_MODEL_ABSENT_VARIANTS = {
+    "null": {"default_model": None},
+    "absent": {},
+    "empty": {"default_model": ""},
+}
+
+# A stale same-model picker: the dropdown still holds the PREVIOUS profile's
+# selection (same model id) with the previous profile's provider, because the
+# catalog refresh runs AFTER the auto-created session's POST. The option
+# carries a pre-set dataset.provider so the writer's option-tagging path is a
+# no-op (mirrors a hydrated dropdown from the previous profile's catalog).
+_STALE_PICKER = {
+    "value": _DEST_DEFAULT,
+    "options": [
+        {
+            "value": _DEST_DEFAULT,
+            "data-provider": "old-route",
+            "dataset": {"provider": "old-route"},
+        },
+    ],
+}
+
+
+def _assert_model_absent_new_session(result):
+    """The auto-created / chained session must carry NO model or provider."""
+    assert result["ok"], result.get("error")
+    assert "/api/session/new" in result["calls"], (
+        "the switch caller must actually complete the new session it owns; "
+        f"calls={result['calls']!r}"
+    )
+    body = result["bodies"].get("/api/session/new") or {}
+    assert body.get("profile") == _SWITCH_NAME, (
+        f"the request must be scoped to the destination profile; got {body.get('profile')!r}"
+    )
+    assert body.get("model") in (None, ""), (
+        "a destination with no configured model must not inherit the previous "
+        f"profile's model on the new session; got {body.get('model')!r} (#8527 "
+        "profile-switch re-gate)"
+    )
+    assert body.get("model_provider") in (None, ""), (
+        "a destination with no configured model must not pin the previous "
+        f"profile's provider; got {body.get('model_provider')!r} (#8527 "
+        "profile-switch re-gate)"
+    )
+
+
+def _canonical_switch_scenario(switch_data, model_select=None):
+    scenario = _switch_scenario(switch_data)
+    if model_select is not None:
+        scenario["modelSelect"] = model_select
+    return scenario
+
+
+def _load_switch_chain_scenario(switch_data, model_select=None):
+    scenario = _load_switch_scenario(switch_data)
+    scenario["chainNewSession"] = True
+    if model_select is not None:
+        scenario["modelSelect"] = model_select
+    return scenario
+
+
+@pytest.mark.parametrize("variant", sorted(_MODEL_ABSENT_VARIANTS))
+def test_canonical_switch_new_session_drops_stale_pair_when_destination_model_is(variant):
+    """switchToProfile -> newSession: a model-absent destination sends no pair.
+
+    RED on the reviewed head: both writers skip the assignments, so the
+    configured-default branch posts the previous profile's model + provider
+    under the new profile's name.
+    """
+    result = _run_switch_driver(_canonical_switch_scenario({
+        "active": _SWITCH_NAME,
+        "is_default": False,
+        **_MODEL_ABSENT_VARIANTS[variant],
+    }))
+    _assert_model_absent_new_session(result)
+    # Ordinary refresh ordering: the POST precedes the catalog refresh, so the
+    # refresh cannot be the mechanism that fixed the payload.
+    assert result["refreshRan"] is not None, "the post-switch refresh must have run"
+    assert result["calls"].index("/api/session/new") < result["refreshRan"], (
+        "the auto-created session's POST must precede the ordinary catalog refresh"
+    )
+
+
+@pytest.mark.parametrize("variant", sorted(_MODEL_ABSENT_VARIANTS))
+def test_session_load_switch_new_session_drops_stale_pair_when_destination_model_is(variant):
+    """_switchProfileForSessionLoad -> newSession: same contract, other writer.
+
+    RED on the reviewed head: the sessions.js writer leaves the previous
+    profile's pair in place and newSession posts it under the new profile.
+    """
+    result = _run_switch_driver(_load_switch_chain_scenario({
+        "active": _SWITCH_NAME,
+        "is_default": False,
+        **_MODEL_ABSENT_VARIANTS[variant],
+    }))
+    _assert_model_absent_new_session(result)
+    # The writer itself must have cleared the pair — nothing refreshes it in
+    # this flow before the chained newSession.
+    assert result["defaultModel"] in (None, ""), (
+        f"window._defaultModel must be cleared for a model-less destination; "
+        f"retained {result['defaultModel']!r}"
+    )
+    assert result["activeProvider"] in (None, ""), (
+        f"window._activeProvider must be cleared for a model-less destination; "
+        f"retained {result['activeProvider']!r}"
+    )
+
+
+def test_canonical_switch_stale_same_model_picker_is_not_the_fallback():
+    """The stale picker must not become the fallback after the reset.
+
+    The dropdown still holds the previous profile's selection (same model id,
+    old provider) because the catalog refresh runs after the auto-created
+    session's POST. Clearing the globals alone would fall through to it; the
+    one-shot reset gate is what keeps this request model-less.
+    """
+    result = _run_switch_driver(_canonical_switch_scenario(
+        {"active": _SWITCH_NAME, "is_default": False, "default_model": None},
+        model_select=_STALE_PICKER,
+    ))
+    _assert_model_absent_new_session(result)
+
+
+def test_session_load_switch_stale_same_model_picker_is_not_the_fallback():
+    """Same stale-picker contract for the _switchProfileForSessionLoad chain."""
+    result = _run_switch_driver(_load_switch_chain_scenario(
+        {"active": _SWITCH_NAME, "is_default": False, "default_model": None},
+        model_select=_STALE_PICKER,
+    ))
+    _assert_model_absent_new_session(result)
+
+
+def test_profile_switch_with_destination_model_keeps_pair_over_stale_picker():
+    """Control: a destination WITH a configured pair still wins the stale picker.
+
+    The gate must only fire for model-less destinations; a configured
+    destination keeps the present-model/null-provider repair intact and the
+    stale picker (same model id, old provider) is never attached.
+    """
+    result = _run_switch_driver(_canonical_switch_scenario(
+        {
+            "active": _SWITCH_NAME,
+            "is_default": False,
+            "default_model": _DEST_DEFAULT,
+            "default_model_provider": "new-route",
+        },
+        model_select=_STALE_PICKER,
+    ))
+    assert result["ok"], result.get("error")
+    body = result["bodies"].get("/api/session/new") or {}
+    assert body.get("model") == _DEST_DEFAULT
+    assert body.get("model_provider") == "new-route", (
+        "the destination's own provider must travel with its model; the stale "
+        f"picker's provider must never be attached; got {body.get('model_provider')!r}"
+    )
+    assert not result["profileSwitchModelReset"], (
+        "the reset gate must stay disarmed when the destination configures a model"
+    )
+
+
+def test_new_session_without_switch_reset_still_uses_the_picker():
+    """Control: outside a profile switch the picker fallback is untouched.
+
+    No configured default and no reset gate — the ordinary picker fallback
+    (and its provider) must still reach /api/session/new exactly as before.
+    """
+    result = _run_driver({
+        "defaultModel": None,
+        "activeProvider": None,
+        "S": {"session": None},
+        "modelSelect": {
+            "value": "gpt-5.1",
+            "options": [{"value": "gpt-5.1", "data-provider": "openai"}],
+        },
+    })
+    assert result["ok"], result.get("error")
+    body = result["body"]
+    assert body.get("model") == "gpt-5.1", (
+        f"the picker fallback must still win with no configured default; got {body.get('model')!r}"
+    )
+    assert body.get("model_provider") == "openai", (
+        f"the picker's own provider must still travel; got {body.get('model_provider')!r}"
     )

@@ -7622,12 +7622,21 @@ async function switchToProfile(name) {
     _workspaceList = null;
     // The destination profile's defaults are a PAIR: adopting its default model
     // also (re)binds the provider from the SAME switch response — replace or
-    // clear, never keep the previous profile's provider when the destination
-    // has none configured (#8527 profile-switch review).
-    if (data.default_model) {
-      window._defaultModel = data.default_model;
-      window._activeProvider = data.default_model_provider || null;
+    // clear, never keep the previous profile's pair when the destination has
+    // none configured (#8527 profile-switch review). A successful per-client
+    // switch can legitimately return a null/absent/empty default model
+    // (api/profiles.py reads the destination's raw config), and a model-less
+    // destination still OWNS the default state: the previous profile's pair is
+    // cleared outright so the session auto-created below cannot inherit it, and
+    // the one-shot reset gate keeps the still-pre-refresh picker/persisted pair
+    // from becoming newSession()'s fallback until the catalog rehydrates.
+    // (typeof-guarded like the slash-skill cache drop above: bare-eval
+    // harnesses run this writer without a window.)
+    if (typeof window !== 'undefined') {
+      window._defaultModel = data.default_model || null;
+      window._activeProvider = data.default_model ? (data.default_model_provider || null) : null;
     }
+    S._profileSwitchModelReset = !data.default_model;
 
     // ── Apply model ────────────────────────────────────────────────────────
     if (data.default_model) {
