@@ -11483,6 +11483,7 @@ def _limited_webui_messages_for_display_with_sidecar(
     state_db_signature=_DISPLAY_STATE_SIGNATURE_UNSET,
     msg_before=None,
     owner_positions=None,
+    _prefix_fp_out=None,
 ) -> list:
     sidecar_owners = dict(owner_positions or {})
     if sidecar_messages is None:
@@ -11572,6 +11573,11 @@ def _limited_webui_messages_for_display_with_sidecar(
                 if owner_positions is not None:
                     owner_positions.clear()
                     owner_positions.update(entry["owner_positions"])
+                # #7925 re-gate (2026-10-30, cold double-hash): hand the
+                # cached entry's digest to the caller so the response mint can
+                # reuse it instead of hashing the document again.
+                if _prefix_fp_out is not None:
+                    _prefix_fp_out.append(entry.get("prefix_fp"))
                 _display_merge_cache.move_to_end(sid, last=True)
                 return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
     merged = merge_session_messages_append_only(
@@ -11617,6 +11623,18 @@ def _limited_webui_messages_for_display_with_sidecar(
         # a pre-save digest, and invalidated with the entry's key by any
         # sidecar write (scene saves persist through the sidecar).
         prefix_fp_entry = _build_prefix_fingerprint_entry(session, merged)
+        # #7925 re-gate (2026-10-30, cold double-hash): the entry's digest
+        # covers the WHOLE merged document, and the response mint wants the
+        # digest over [0, count) with count = the window's coverage end. Those
+        # are the same value exactly when the window reaches the document end
+        # (the tail window: offset + window length == the document length),
+        # which is the shape every cacheable limited load has — and the mint
+        # re-checks that equality itself before reusing anything. Hand the
+        # entry over so the cold load does not hash the document a second
+        # time (the maintainer measured 2 full-document hashes per cold GET
+        # and 0 on the warm hit; the cold path is now 1).
+        if _prefix_fp_out is not None and prefix_fp_entry is not None:
+            _prefix_fp_out.append(prefix_fp_entry)
         with _display_merge_cache_lock:
             entry = {
                 "key": cache_key,
@@ -16324,6 +16342,11 @@ def _handle_session_get(handler, parsed) -> bool:
                         state_db_signature=_display_state_db_signature,
                         msg_before=msg_before,
                         owner_positions=_display_owner_positions,
+                        # #7925 re-gate (2026-10-30, cold double-hash): hand
+                        # the digest the merge just computed to the response
+                        # mint, so a cold load does not hash the document a
+                        # second time.
+                        _prefix_fp_out=_prefix_fp_out,
                     )
             else:
                 state_db_messages = _suppress_native_image_display_mirrors(

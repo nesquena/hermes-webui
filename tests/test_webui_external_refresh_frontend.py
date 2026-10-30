@@ -460,16 +460,29 @@ def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
     # index (msg_after + anchor fingerprint + transcript_generation) and
     # appends them; the server falls back to the authoritative full document
     # on any freshness doubt.
+    # #7925 re-gate (2026-10-30, CI): the over-ceiling FULL-TRANSCRIPT request
+    # keeps master's bare-GET shape — no `msg_limit`, no `expand_renderable`.
+    # `msg_limit=all` is the same request server-side (`_parse_msg_limit('all')`
+    # returns None; `explicit_all` is never read), but api/routes.py reserves
+    # `all` for the frontend paths that address rows by ABSOLUTE transcript
+    # index, and upstream's own contract test pins the reload's full fetch to
+    # the no-msg_limit shape (tests/test_inflight_tail_loadsession_canonical_indices.py).
     assert "const _reloadWidthExceedsCeiling = !(reloadLimit && reloadLimit <= _msgLimitMax);" in SESSIONS_JS
-    assert "const boundedReloadLimit = _reloadWidthExceedsCeiling ? 'all' : reloadLimit;" in SESSIONS_JS
-    assert "let reloadLimitParam = `&msg_limit=${boundedReloadLimit}`;" in SESSIONS_JS
-    # Over-ceiling reloads switch to the append-only fast path: msg_after +
-    # anchor_fp + transcript_generation, capped msg_limit.
+    assert "const boundedReloadLimit = _reloadWidthExceedsCeiling ? null : reloadLimit;" in SESSIONS_JS
+    assert "let reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';" in SESSIONS_JS
+    # The append-only fast path: msg_after + anchor_fp + transcript_generation,
+    # with its own bounded msg_limit.
     assert "const _appendFastPath =" in SESSIONS_JS
     assert "`&msg_after=${lastRenderedIdx}`" in SESSIONS_JS
     assert "`&anchor_fp=${encodeURIComponent(anchorFp)}`" in SESSIONS_JS
     assert "`&transcript_generation=${Number(S.session.transcript_generation)}`" in SESSIONS_JS
-    # msg_limit is ALWAYS present, on every reload, whichever branch is taken.
+    # The append refusal fallback re-fetches the authoritative full transcript
+    # in master's bare-GET shape too (no msg_limit / no expand_renderable).
+    assert (
+        "`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`,\n"
+        "        {timeoutMs:120000}\n"
+        "      )" in SESSIONS_JS
+    )
     assert "if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);" in SESSIONS_JS
 
     load_start = SESSIONS_JS.index("async function loadSession(sid)")

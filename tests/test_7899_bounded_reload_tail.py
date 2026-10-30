@@ -280,9 +280,12 @@ async function runScenario(sc){
   // [0, held end): the append vouches for the whole prefix, not just the
   // rows on screen. Bare identifiers: the harness shares one script scope
   // with the extracted helpers (globalThis.* would not reach the `let`).
+  // `noPrefixFp` models a client that holds the rows but cannot PROVE them
+  // (no digest from the load that established its view) — the append fast
+  // path is then skipped and the reload takes the authoritative full fetch.
   const _heldEnd=_oldestIdx+(sc.clientRows||[]).length;
-  _sessionPrefixFp=_prefixFpFor(sc.serverRows.slice(0,_heldEnd));
-  _sessionPrefixFpEnd=_heldEnd;
+  _sessionPrefixFp=sc.noPrefixFp ? '' : _prefixFpFor(sc.serverRows.slice(0,_heldEnd));
+  _sessionPrefixFpEnd=sc.noPrefixFp ? -1 : _heldEnd;
   // A non-destructive server-side edit that lands AFTER the client's view
   // was established (settled-reasoning backfill, saved attachments): same
   // generation, anchor row untouched — only the prefix digest catches it.
@@ -643,6 +646,71 @@ class TestAppendOnlyFastPath:
             "the tool-result row after the anchor was dropped"
         )
         assert result["lastContent"] == "after the tool", result
+
+    def test_over_ceiling_without_a_provable_prefix_uses_the_bare_full_fetch(self, tmp_path):
+        # #7925 re-gate (2026-10-30, CI): the authoritative full-transcript
+        # reload must keep master's BARE-GET shape — no `msg_limit`, no
+        # `expand_renderable`. `msg_limit=all` is the SAME request server-side
+        # (`_parse_msg_limit('all')` returns None; `explicit_all` is never
+        # read), but api/routes.py reserves `all` for the frontend paths that
+        # address rows by ABSOLUTE transcript index, and upstream's own
+        # contract test (tests/test_inflight_tail_loadsession_canonical_indices.py)
+        # pins the reload's full fetch to the no-msg_limit shape — the shape
+        # this PR had broken, turning every pytest shard red.
+        #
+        # The client holds a >ceiling transcript but CANNOT prove its prefix
+        # (no digest), so the append fast path is skipped and the reload
+        # takes the authoritative full fetch.
+        rows = make_rows_json(2001)
+        scenario = {
+            "serverRows": rows,
+            "clientRows": rows[:1500],
+            "oldestIdx": 0,
+            "generation": 0,
+            # A width hint that exceeds the 500-row ceiling …
+            "hint": _hint(1500, 2000, True),
+            "sessionMessageCount": 2001,
+            # … and no provable prefix digest, so the fast path cannot run.
+            "noPrefixFp": True,
+        }
+        result = _run_harness(json.dumps(scenario), tmp_path)
+        request = result["requests"][0]
+        assert "msg_after=" not in request, result["requests"]
+        assert "msg_limit=" not in request, (
+            "the over-ceiling full fetch must keep master's bare-GET shape "
+            f"(no msg_limit), got {request}"
+        )
+        assert "expand_renderable" not in request, (
+            "the over-ceiling full fetch must keep master's bare-GET shape "
+            f"(no expand_renderable), got {request}"
+        )
+        # … and it still delivers the authoritative document.
+        assert result["rowsReturned"] == 2001, result
+        assert result["messagesLen"] == 2001, result
+        assert result["oldestIdx"] == 0, result
+
+    def test_append_refusal_fallback_uses_the_bare_full_fetch(self, tmp_path):
+        # The append was refused (the transcript was rewritten), so the client
+        # re-fetches the authoritative full transcript — again in master's
+        # bare-GET shape, not `msg_limit=all`.
+        rows = make_rows_json(2001)
+        scenario = {
+            "serverRows": rows,
+            "clientRows": rows[:500],
+            "oldestIdx": 0,
+            "generation": 1,  # server moved on …
+            "clientGeneration": 0,  # … so the client's anchor is refused
+            "hint": _hint(500, 2000, False),
+            "sessionMessageCount": 2001,
+        }
+        result = _run_harness(json.dumps(scenario), tmp_path)
+        # The refused append falls through to the full fetch, which must not
+        # carry msg_limit either.
+        assert result["rowsReturned"] == 2001, result
+        assert result["messagesLen"] == 2001, result
+        assert all("msg_limit=all" not in req for req in result["requests"]), (
+            f"the full-fetch fallback must not use msg_limit=all: {result['requests']}"
+        )
 
 
 def make_rows_json(n: int) -> list:

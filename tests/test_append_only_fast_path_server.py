@@ -767,6 +767,57 @@ def test_display_cache_hit_reuses_the_minted_prefix_fingerprint(monkeypatch, tmp
     assert second_session.get("prefix_fp") == first_session.get("prefix_fp")
 
 
+def test_cold_display_load_hashes_the_document_exactly_once(monkeypatch, tmp_path):
+    """2026-10-30 re-gate (cold double-hash): a cold windowed GET must hash
+    the whole document ONCE, and the warm hit not at all.
+
+    The maintainer's measurement on the previous head: 2 full-document hashes
+    on the cold GET, 0 on the warm one. The cold path built the digest inside
+    the display-merge cache entry AND then computed the identical digest again
+    in the response mint — the entry was only reachable through the cache-hit
+    probe, so the cold load never saw it.
+
+    The counter is installed BEFORE the first GET (the existing memo test
+    installs it after the cold load, so it cannot catch this) and counts only
+    the calls that cover the whole document.
+
+    RED-before: the cold GET hashes twice (2 != 1).
+    """
+    sidecar = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"p{i}",
+         "timestamp": 1700000000 + i}
+        for i in range(601)
+    ]
+    state_db = sidecar + [_state_db_only_reply()]
+    routes, captured = _warm_cache_append_harness(monkeypatch, tmp_path, sidecar, state_db)
+
+    calls = []
+    orig = routes._display_prefix_fingerprint
+
+    def _counting(messages, count, **kwargs):
+        # A full-document hash covers every row of the merged document.
+        if count == len(messages or []):
+            calls.append(count)
+        return orig(messages, count, **kwargs)
+
+    monkeypatch.setattr(routes, "_display_prefix_fingerprint", _counting)
+
+    _warm_get(routes)  # cold: builds the entry AND mints — exactly one hash
+    first_session = captured["payload"]["session"]
+    assert first_session.get("prefix_fp")
+    assert calls == [602], (
+        f"the cold load must hash the document exactly once, got {calls}"
+    )
+
+    calls.clear()
+    _warm_get(routes)  # warm: the entry's digest is reused, nothing is hashed
+    second_session = captured["payload"]["session"]
+    assert calls == [], (
+        f"the warm hit must not hash the document at all, got {calls}"
+    )
+    assert second_session.get("prefix_fp") == first_session.get("prefix_fp")
+
+
 def test_display_cache_memo_tracks_anchor_scene_saves(monkeypatch, tmp_path):
     """should-fix 1 + finding 2: a scene save (which writes the sidecar and so
     invalidates the merge-cache key) must yield a fresh digest on the next

@@ -4439,9 +4439,19 @@ async function _ensureMessagesLoaded(sid, opts) {
   // the authoritative full document) when the anchor row's fingerprint or
   // the transcript generation changed or the count shrank, so
   // compaction/undo/edits stay exactly as safe as master's full reload.
+  // #7925 re-gate (2026-10-30, CI): the over-ceiling full-transcript
+  // request must keep master's BARE-GET shape (no `msg_limit`, no
+  // `expand_renderable`) — `msg_limit=all` is the SAME request server-side
+  // (`_parse_msg_limit('all')` returns None and `explicit_all` is never
+  // read), but the bare shape is the documented historical full-transcript
+  // contract: api/routes.py `_resolve_effective_msg_limit` reserves `all`
+  // for the frontend paths that address rows by ABSOLUTE transcript index
+  // (outline jump, jump-to-start), and upstream's own contract test
+  // (tests/test_inflight_tail_loadsession_canonical_indices.py) pins the
+  // reload's full fetch to the no-msg_limit shape.
   const _reloadWidthExceedsCeiling = !(reloadLimit && reloadLimit <= _msgLimitMax);
-  const boundedReloadLimit = _reloadWidthExceedsCeiling ? 'all' : reloadLimit;
-  let reloadLimitParam = `&msg_limit=${boundedReloadLimit}`;
+  const boundedReloadLimit = _reloadWidthExceedsCeiling ? null : reloadLimit;
+  let reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';
   // Append-only fast path: the reload needs a width the ceiling cannot
   // express (the client loaded more than one bounded window) AND the client
   // still holds a contiguous transcript it can vouch for. The anchor is the
@@ -4495,7 +4505,11 @@ async function _ensureMessagesLoaded(sid, opts) {
   // Older frontends used expand_renderable=1 to request visible-row expansion.
   // The server now counts msg_limit by visible transcript rows by default; keep
   // the flag for compatibility with mixed-version deployments.
-  const expandParam = '&expand_renderable=1';
+  // #7925 re-gate (2026-10-30, CI): master sends this flag only alongside a
+  // bounded width — the bare full-transcript request carries neither
+  // `msg_limit` nor `expand_renderable`. The append fast path carries its own
+  // bounded `msg_limit`, so it keeps the flag.
+  const expandParam = boundedReloadLimit || appendParam ? '&expand_renderable=1' : '';
   let data;
   try {
     data = await api(
@@ -4647,9 +4661,13 @@ async function _ensureMessagesLoaded(sid, opts) {
     // described: re-fetch the authoritative full transcript and fall through
     // to the normal replace path below, which re-checks ownership and updates
     // every session metadata field — exactly master's cost.
+    // #7925 re-gate (2026-10-30, CI): master's bare full-transcript GET
+    // shape (no msg_limit / no expand_renderable) — `msg_limit=all` is the
+    // same request server-side but not the documented full-transcript
+    // contract shape (see the reloadLimitParam comment above).
     try {
       data = await api(
-        `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=all&expand_renderable=1`,
+        `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`,
         {timeoutMs:120000}
       );
     } finally {
