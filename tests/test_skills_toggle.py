@@ -1,10 +1,66 @@
 """Tests for skill toggle (enable/disable) API and frontend."""
+import contextvars
+import os
+import sys
+import types
 from pathlib import Path
+from typing import Any
 
 
 PANELS_JS = (Path(__file__).resolve().parent.parent / "static" / "panels.js").read_text("utf-8")
 I18N_JS = (Path(__file__).resolve().parent.parent / "static" / "i18n.js").read_text("utf-8")
 STYLE_CSS = (Path(__file__).resolve().parent.parent / "static" / "style.css").read_text("utf-8")
+
+
+def _install_fake_hermes_constants(monkeypatch):
+    """Install a ``hermes_constants`` twin so the plugin-home-binding tests
+    run in agent-less CI.
+
+    ``api/routes.py:_plugin_manager_home_context`` binds the request's active
+    Hermes home by calling ``hermes_constants.set_hermes_home_override`` and
+    restoring it with ``reset_hermes_home_override``; the agent package is
+    NOT installed in CI, so a hard ``import hermes_constants`` fails there and
+    the test errors instead of proving the binding. This twin mirrors the
+    real module's contract exactly (a context-local override that shadows
+    ``HERMES_HOME``, restored via the reset token) so the production code path
+    under test runs unchanged.
+
+    The real module is preferred when it is importable: this helper only
+    fills the gap, it never shadows a working installation.
+    """
+    try:
+        import hermes_constants  # noqa: F401
+        return None
+    except ImportError:
+        pass
+
+    unset = object()
+    override = contextvars.ContextVar("fake_hermes_home_override", default=unset)
+
+    def get_hermes_home_override():
+        value = override.get()
+        return str(value) if value is not unset and value else None
+
+    def get_hermes_home():
+        active = get_hermes_home_override()
+        if active:
+            return Path(os.path.expanduser(os.path.expandvars(active)))
+        raw = os.environ.get("HERMES_HOME", "").strip()
+        return Path(os.path.expanduser(os.path.expandvars(raw))) if raw else Path.home() / ".hermes"
+
+    def set_hermes_home_override(path):
+        return override.set(unset if path is None else str(path))
+
+    def reset_hermes_home_override(token):
+        override.reset(token)
+
+    fake: Any = types.ModuleType("hermes_constants")
+    fake.get_hermes_home = get_hermes_home
+    fake.get_hermes_home_override = get_hermes_home_override
+    fake.set_hermes_home_override = set_hermes_home_override
+    fake.reset_hermes_home_override = reset_hermes_home_override
+    monkeypatch.setitem(sys.modules, "hermes_constants", fake)
+    return fake
 
 
 def test_toggle_endpoint_signature_in_routes():
@@ -395,6 +451,12 @@ def test_toggle_plugin_lookup_binds_request_active_home(tmp_path, monkeypatch):
     keyed by the agent-side home), the write must land in the active
     profile's config, and the ambient home must be restored afterwards."""
     from unittest.mock import MagicMock
+
+    # Install the hermes_constants twin BEFORE importing the production
+    # modules: api/routes.py binds the request home through that module, and
+    # the agent package is absent in CI.
+    _install_fake_hermes_constants(monkeypatch)
+
     from api.routes import _handle_skill_toggle
     from api.config import _load_yaml_config_file
     from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
