@@ -15,6 +15,8 @@
 
 ### Performance
 
+- **Long sessions no longer freeze on open and scroll.** Finding the first visible row measured every virtualized row one layout at a time (18,682 forced layouts, 21.8 s in one measured session); it now binary-searches the rows and skips hidden ones. The session HTML cache now keys on the whole rendered message instead of the message count, so an edit in the middle of a transcript cannot serve stale HTML, and pasted-image base64 is not rehashed on every render. No visible change. Thanks @happy5318, building on @RechildIce's analysis in #7695. (#8228)
+
 - **Streaming no longer rebuilds unchanged live activity rows.** While a turn streams, tool and thinking rows that did not change are reused instead of re-rendered, and the running indicator animates on the compositor only (a round pulsing ring). With reduced motion the ring stays still, and the progress shimmer shows a still full-width rail instead of freezing at 60% and jumping to 100%. Thanks @CharlesMcquade. (#7495)
 
 - **Opening a session reads the model catalog from disk once instead of twice.** The freshness check on a session visit parsed the whole models cache to read its build time, and the loader then parsed the same file again. The visit now parses it once and hands that copy to the loader; an invalidation, an atomic rewrite or a second concurrent reader always gets a fresh parse instead of a stale or shared copy. On a 5,000-model catalog that is one fewer ~675 KB JSON parse per session open. (#8302 by @MuhammadUsamaMX, follow-up to #7932, closes #7723)
