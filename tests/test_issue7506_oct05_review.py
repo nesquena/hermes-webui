@@ -73,11 +73,12 @@ def test_empty_truncated_partial_uses_existing_fallback(
     try:
         result = cfg.get_available_models()
         assert result["groups"], "all-truncated first pass must not empty the picker"
+        assert any(m["id"] == "some-local-model"
+                   for g in result["groups"] for m in g["models"])
         if stale:
-            assert result == disk
-        else:
-            assert any(m["id"] == "some-local-model"
-                       for g in result["groups"] for m in g["models"])
+            # Keep useful current models when the truncated probe leaves a
+            # partial catalog; stale disk data is only a last resort.
+            assert result["active_provider"] == "lmstudio"
         assert cfg._available_models_cache is None
         if not boundary:
             assert "exceeded" not in caplog.text

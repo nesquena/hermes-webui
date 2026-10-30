@@ -14,11 +14,16 @@ Fixes:
   5. static/i18n.js: new i18n keys for config_yaml and not_configured hints
 """
 
+import json
 import re
+import shutil
+import subprocess
 import sys
 import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 
@@ -213,18 +218,47 @@ class TestBuildProviderCardJs:
             "Actionable error messages (e.g. 'refresh token consumed') will not be shown."
         )
 
-    def test_configured_badge_shown_for_config_yaml(self):
+    def test_configured_badge_shown_for_config_yaml(self, tmp_path):
         """The Configured badge must appear when has_key is True regardless of key_source."""
-        fn = self._get_fn()
-        classifier_idx = fn.find("const isConfigured=")
-        assert classifier_idx != -1, "_buildProviderCard has no shared configured classifier"
-        classifier = fn[classifier_idx : classifier_idx + 180]
-        assert "p.has_key" in classifier, "Non-self-hosted configured status no longer follows p.has_key"
-        badge_idx = fn.find("provider-card-badge")
-        assert badge_idx != -1, "provider-card-badge not found in _buildProviderCard"
-        assert "isConfigured?" in fn[badge_idx - 80 : badge_idx + 120], (
-            "Configured badge does not use the shared configured classifier"
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is required to execute the provider-card DOM harness")
+
+        function_path = tmp_path / "provider-card.js"
+        function_path.write_text(self._get_fn(), encoding="utf-8")
+        driver_path = tmp_path / "provider-card-driver.js"
+        driver_path.write_text(
+            r'''const fs = require('fs');
+const fnSource = fs.readFileSync(process.argv[2], 'utf8');
+function element(tag) {
+  return {
+    tagName: tag.toUpperCase(), children: [], dataset: {}, style: {},
+    classList: { toggle() {} },
+    appendChild(child) { this.children.push(child); return child; },
+    addEventListener() {}, setAttribute() {},
+    set innerHTML(value) { this._innerHTML = value; },
+    get innerHTML() { return this._innerHTML || ''; }, textContent: '',
+  };
+}
+globalThis.document = { createElement: element };
+globalThis.t = (key) => ({ providers_status_configured: 'API key configured' }[key] || key);
+globalThis.esc = (value) => String(value ?? '');
+eval(fnSource);
+const card = _buildProviderCard({
+  id: 'openai-codex', display_name: 'OpenAI Codex', models_total: 1,
+  is_oauth: true, has_key: true, key_source: 'config_yaml',
+});
+process.stdout.write(JSON.stringify({header: card.children[0].innerHTML}));
+''',
+            encoding="utf-8",
         )
+        result = subprocess.run(
+            [node, str(driver_path), str(function_path)],
+            capture_output=True, text=True, check=True,
+        )
+        rendered = json.loads(result.stdout)
+        assert 'class="provider-card-badge"' in rendered["header"]
+        assert "API key configured" in rendered["header"]
 
 
 # ---------------------------------------------------------------------------

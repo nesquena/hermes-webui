@@ -54,3 +54,13 @@ def test_provider_specific_opencode_key_still_wins_over_shared(monkeypatch, tmp_
 
     assert providers._get_provider_api_key("opencode-zen") == "zen-specific-key"
     assert providers._get_provider_api_key("opencode-go") == "shared-opencode-key"
+
+
+def test_free_provider_ignores_shared_and_specific_keys(monkeypatch, tmp_path):
+    import api.providers as providers
+
+    monkeypatch.setattr(providers, "_get_hermes_home", lambda: tmp_path)
+    monkeypatch.setenv("OPENCODE_API_KEY", "shared-key")
+    monkeypatch.setenv("OPENCODE_ZEN_API_KEY", "zen-key")
+    assert providers._provider_has_key("opencode-free") is False
+    assert providers._get_provider_api_key("opencode-free") is None

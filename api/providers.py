@@ -35,6 +35,9 @@ except ImportError:  # pragma: no cover - exercised only where fcntl is unavaila
 from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
+    _curated_opencode_free_models,
+    _canonicalise_provider_id,
+    provider_is_keyless,
     _coerce_provider_cost_budget,
     _configured_model_ids,
     _custom_provider_slug_from_name,
@@ -1368,6 +1371,8 @@ def _provider_has_key(provider_id: str) -> bool:
     4. ``config.yaml → providers.<id>.api_key``
     5. ``config.yaml → custom_providers[].api_key`` (for custom providers)
     """
+    if provider_is_keyless(provider_id):
+        return False
     env_var = _provider_env_var_for(provider_id)
     if env_var:
         env_path = _get_hermes_home() / ".env"
@@ -1407,16 +1412,19 @@ def _provider_has_key(provider_id: str) -> bool:
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict) and str(model_cfg.get("api_key") or "").strip():
         active_provider = model_cfg.get("provider")
-        if active_provider and str(active_provider).strip().lower() == provider_id.lower():
+        if active_provider and _canonicalise_provider_id(active_provider) == _canonicalise_provider_id(provider_id):
             if _provider_value_counts_as_api_key(provider_id, model_cfg.get("api_key")):
                 return True
     # Check providers.<id>.api_key
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        provider_cfg = providers_cfg.get(provider_id, {})
-        if isinstance(provider_cfg, dict) and str(provider_cfg.get("api_key") or "").strip():
-            if _provider_value_counts_as_api_key(provider_id, provider_cfg.get("api_key")):
-                return True
+        canonical_id = _canonicalise_provider_id(provider_id)
+        for raw_provider_id, provider_cfg in providers_cfg.items():
+            if _canonicalise_provider_id(raw_provider_id) != canonical_id:
+                continue
+            if isinstance(provider_cfg, dict) and str(provider_cfg.get("api_key") or "").strip():
+                if _provider_value_counts_as_api_key(provider_id, provider_cfg.get("api_key")):
+                    return True
     # Check custom_providers
     custom_providers = cfg.get("custom_providers", [])
     if isinstance(custom_providers, list):
@@ -1430,6 +1438,8 @@ def _provider_has_key(provider_id: str) -> bool:
 
 def _get_provider_api_key(provider_id: str) -> str | None:
     """Return a configured provider API key without exposing it to callers."""
+    if provider_is_keyless(provider_id):
+        return None
     provider_id = (provider_id or "").strip().lower()
     env_var = _provider_env_var_for(provider_id)
     if env_var:
@@ -2653,8 +2663,11 @@ def get_providers() -> dict[str, Any]:
     - ``models``: list of known model IDs for this provider
     """
     # Collect all known provider IDs from multiple sources
-    known_ids = set(_PROVIDER_DISPLAY.keys()) | set(_PROVIDER_MODELS.keys())
-    known_ids.update(plugin_model_provider_ids())
+    known_ids = {
+        _canonicalise_provider_id(pid)
+        for pid in set(_PROVIDER_DISPLAY) | set(_PROVIDER_MODELS)
+    }
+    known_ids.update(_canonicalise_provider_id(pid) for pid in plugin_model_provider_ids())
 
     # Also detect providers from config.yaml providers section
     cfg = get_config()
@@ -2665,16 +2678,22 @@ def get_providers() -> dict[str, Any]:
 
     providers = []
     providers_cfg = cfg.get("providers") or {}
+    provider_cfgs_by_id: dict[str, list[dict[str, Any]]] = {}
     if isinstance(providers_cfg, dict):
-        known_ids.update(providers_cfg.keys())
+        for raw_pid, provider_cfg in providers_cfg.items():
+            canonical_pid = _canonicalise_provider_id(raw_pid)
+            known_ids.add(canonical_pid)
+            if isinstance(provider_cfg, dict):
+                provider_cfgs_by_id.setdefault(canonical_pid, []).append(provider_cfg)
 
     # Add OAuth providers even if not in _PROVIDER_DISPLAY
     known_ids.update(_OAUTH_PROVIDERS)
 
     for pid in sorted(known_ids):
         display_name = effective_provider_display_name(pid, _PROVIDER_DISPLAY)
+        is_keyless = provider_is_keyless(pid)
         is_oauth = _provider_is_oauth(pid)
-        has_key = _provider_has_key(pid)
+        has_key = False if is_keyless else _provider_has_key(pid)
         plugin_auth_status: dict[str, Any] | None = None
         if not has_key and is_plugin_model_provider(pid):
             try:
@@ -2689,9 +2708,11 @@ def get_providers() -> dict[str, Any]:
                 logger.debug("Plugin provider auth check failed for %s", pid, exc_info=True)
 
         # Determine key source
-        key_source = "none"
+        key_source = "keyless" if is_keyless else "none"
         auth_error = None
-        if is_oauth:
+        if is_keyless:
+            pass
+        elif is_oauth:
             key_source = "oauth"
             # Check if actually authenticated via hermes_cli.
             # IMPORTANT: do not unconditionally overwrite has_key from _provider_has_key().
@@ -2867,10 +2888,14 @@ def get_providers() -> dict[str, Any]:
                     pid,
                     exc_info=True,
                 )
+        if is_keyless and pid == "opencode-free":
+            models = _curated_opencode_free_models(models)
+            models_total = len(models)
         # Also include models from config.yaml providers section
-        if isinstance(providers_cfg, dict):
-            provider_cfg = providers_cfg.get(pid, {})
-            if isinstance(provider_cfg, dict) and "models" in provider_cfg:
+        if isinstance(providers_cfg, dict) and pid != "opencode-free":
+            for provider_cfg in provider_cfgs_by_id.get(pid, []):
+                if "models" not in provider_cfg:
+                    continue
                 cfg_models = provider_cfg["models"]
                 if isinstance(cfg_models, dict):
                     models = models + [{"id": k, "label": k} for k in cfg_models.keys()]
@@ -2895,7 +2920,8 @@ def get_providers() -> dict[str, Any]:
             "id": pid,
             "display_name": display_name,
             "has_key": has_key,
-            "configurable": not is_oauth and bool(_provider_env_var_for(pid)),
+            "configurable": False if is_keyless else not is_oauth and bool(_provider_env_var_for(pid)),
+            "is_keyless": is_keyless,
             "is_self_hosted": is_self_hosted,
             "base_url": provider_base_url,
             "is_plugin_provider": _is_plugin,
@@ -3004,6 +3030,12 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
 
     if not provider_id:
         return {"ok": False, "error": "Provider ID is required."}
+
+    if provider_is_keyless(provider_id):
+        return {
+            "ok": False,
+            "error": "This provider does not use API credentials.",
+        }
 
     if _provider_is_oauth(provider_id):
         return {
