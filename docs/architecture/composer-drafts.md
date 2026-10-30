@@ -70,14 +70,17 @@ using last-value semantics for repeated header keys. Merely seeing each field
 once does not authorize a write; malformed/truncated headers fail closed. The
 transcript body beyond that intentional modern boundary is not parsed.
 
-Old/custom layouts with missing fields require one bounded-memory streaming
-scan through EOF per uncached file revision. The reader must establish absent
-provenance, so this first scan is transcript-sized and can be slower than a full
-JSON decode. Warm requests, even without a cached Session object, reuse the
-same revision's facts. Replacement, external edits, cache eviction or restart
-can require another legacy scan; this is not an unconditional first-save-only
-latency guarantee. Normal modern headers remain transcript-size-independent.
-This compatibility path does not recover, self-heal or cache a transcript object.
+Old/custom layouts with missing draft fields require one bounded-memory
+streaming scan through EOF per uncached file revision before draft authority
+can be established. This first draft scan is transcript-sized and can be slower
+than a full JSON decode. Profile-only visibility checks can instead stop at a
+validated header containing `session_id` and `profile`; those partial facts do
+not establish absent provenance or authorize draft writes. Full draft facts
+also answer profile reads without another scan. Warm requests reuse the same
+revision's facts. Replacement, external edits, cache eviction or restart can
+require another legacy scan; this is not an unconditional first-save-only
+latency guarantee. Modern headers remain transcript-size-independent. This
+compatibility path does not recover, self-heal or cache a transcript object.
 
 Subagent preflight retains the state.db source check and persisted
 source_tag/raw_source/session_source precedence. Persisted metadata is checked
