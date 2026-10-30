@@ -219,6 +219,25 @@ function _isTouchKeyboardViewport(){
   try{return matchMedia('(hover:none) and (pointer:coarse)').matches&&!_hasFinePointerCoexisting();}catch(_){return false;}
 }
 
+// Validated visualViewport read (#8531): iOS 27 standalone PWAs on foldables
+// (iPhone Duo) can report garbage geometry after fold/unfold — observed
+// height -33554432 (= -2^25) — with no corrective resize event until the
+// device rotates. Returns null when the reading is implausible so callers
+// fall back to window dimensions instead of poisoning layout math.
+function _plausibleVisualViewport(){
+  const vv=window.visualViewport;
+  if(!vv) return null;
+  const h=Number(vv.height), w=Number(vv.width);
+  const ih=window.innerHeight, iw=window.innerWidth;
+  if(!Number.isFinite(h)||h<=0||h>ih*1.5) return null;
+  if(!Number.isFinite(w)||w<=0||w>iw*1.5) return null;
+  return {
+    width:w, height:h,
+    offsetTop:Math.max(0,Number(vv.offsetTop)||0),
+    offsetLeft:Math.max(0,Number(vv.offsetLeft)||0)
+  };
+}
+
 function _syncKeyboardBottomInset(){
   const root=document.documentElement;
   if(!root) return;
@@ -235,7 +254,16 @@ function _syncKeyboardBottomInset(){
     root.style.removeProperty('--keyboard-bottom-inset');
     return;
   }
-  const inset=Math.max(0,Math.ceil(window.innerHeight-(vv.height+vv.offsetTop)));
+  // Compute from one validated snapshot (#8531): a garbage reading clears the
+  // inset entirely — a cleared inset at worst lets the keyboard overlap the
+  // composer for one frame until the next sane viewport event, while any
+  // bogus-but-capped inset buries the transcript.
+  const vvOk=_plausibleVisualViewport();
+  if(!vvOk){
+    root.style.removeProperty('--keyboard-bottom-inset');
+    return;
+  }
+  const inset=Math.max(0,Math.ceil(window.innerHeight-(vvOk.height+vvOk.offsetTop)));
   if(inset>0){
     root.style.setProperty('--keyboard-bottom-inset',`${inset}px`);
   }else{
@@ -656,7 +684,11 @@ function _isPwaStandalone(){
 }
 
 function _isInteractiveSwipeTarget(target){
-  try{return !!(target&&target.closest&&target.closest('input,textarea,select,button,a,[contenteditable="true"],.topbar-chips,.composer-left,.sidebar,.rightpanel,.img-lightbox'));}
+  // .model-dropdown: the model menu is a floating panel, not part of the page
+  // behind it. Without it a PWA sidebar swipe starting inside the open menu
+  // drags the whole layout, and the printable-key/shortcut guards below treat
+  // keys typed in the menu as page-level shortcuts.
+  try{return !!(target&&target.closest&&target.closest('input,textarea,select,button,a,[contenteditable="true"],.topbar-chips,.composer-left,.sidebar,.rightpanel,.img-lightbox,.model-dropdown'));}
   catch(_){return false;}
 }
 
@@ -3300,6 +3332,10 @@ function applyEmptyStatePanelPref(){
 }
 
 window.addEventListener('resize',()=>{
+  // Resync the keyboard inset on every window resize even when visualViewport
+  // exists (#8531): fold transitions can change window geometry without a
+  // trustworthy visualViewport event, so the inset must be re-validated here.
+  _syncKeyboardBottomInset();
   _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
   // Re-apply the sidebar state on viewport change (e.g. foldable unfold:
@@ -4063,6 +4099,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       : 'compact_worklog';
     window._transparentStream=window._chatActivityDisplayMode==='transparent_stream';
     window._transparentEventTimestamps=s.transparent_stream_event_timestamps!==false;
+    if(typeof setScreenReaderMode==='function') setScreenReaderMode(s.screen_reader_mode);
     window._terminalAutoExpandOnOutput=!!s.terminal_auto_expand_on_output;
     window._worklogDetailsExpandedByDefault=!!(
       Object.prototype.hasOwnProperty.call(s,'worklog_details_expanded_default')
