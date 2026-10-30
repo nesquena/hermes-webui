@@ -66,9 +66,12 @@ session, never on rows), and the session tool calls feed that hydration, so a
 scene save or a `_source` change also moves the digest. It is a fingerprint
 rather than a revision counter because a counter must be bumped by every
 writer that touches an earlier row, and one missed writer means silently
-stale rows. On a display-merge cache hit the whole-document digest is reused
-from the cache entry (guarded by a scene/tool-call digest) so ordinary
-windowed opens do not pay for re-hashing every row.
+stale rows. The whole-document digest is computed once per merge and reused
+by both the cache entry and the response mint: a display-merge cache hit
+reuses the entry's digest (guarded by a scene/tool-call digest), and a cold
+load hands the freshly built digest to the mint instead of computing the
+same value a second time. Ordinary windowed opens therefore pay for one
+whole-document hash, not two.
 
 ## Response fields
 
