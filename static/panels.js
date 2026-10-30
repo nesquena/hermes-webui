@@ -6463,10 +6463,6 @@ function renderWorkspacesPanel(workspaces){
 
     panel.appendChild(row);
   }
-  const hint=document.createElement('div');
-  hint.style.cssText='font-size:11px;color:var(--muted);padding:8px 0';
-  hint.textContent=t('workspace_paths_validated_hint');
-  panel.appendChild(hint);
   // Re-render detail if we have one cached and we're not in a form
   if (_currentWorkspaceDetail && _workspaceMode !== 'create' && _workspaceMode !== 'edit') {
     const refreshed = workspaces.find(w => w.path === _currentWorkspaceDetail.path);
@@ -9193,7 +9189,11 @@ if(typeof window!=='undefined') window._pickChatActivityDisplayMode=_pickChatAct
 function _pickTransparentEventTimestamps(enabled){
   _syncTransparentEventTimestampsControl(enabled,window._chatActivityDisplayMode);
   if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
-  if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+  // Reconcile both preserved live rows and settled history immediately. A full
+  // transcript rebuild can restore a structurally-ahead live turn unchanged.
+  if(typeof _syncTransparentEventTimestampVisibility==='function'){
+    document.querySelectorAll('#msgInner .transparent-event-row').forEach(_syncTransparentEventTimestampVisibility);
+  }
   _scheduleAppearanceAutosave();
 }
 if(typeof window!=='undefined') window._pickTransparentEventTimestamps=_pickTransparentEventTimestamps;
@@ -9385,6 +9385,8 @@ function _preferencesPayloadFromUi(){
   if(showTpsCb) payload.show_tps=showTpsCb.checked;
   const fadeTextCb=$('settingsFadeTextEffect');
   if(fadeTextCb) payload.fade_text_effect=fadeTextCb.checked;
+  const screenReaderModeCb=$('settingsScreenReaderMode');
+  if(screenReaderModeCb) payload.screen_reader_mode=screenReaderModeCb.checked;
   const terminalAutoExpandCb=$('settingsTerminalAutoExpand');
   if(terminalAutoExpandCb) payload.terminal_auto_expand_on_output=terminalAutoExpandCb.checked;
   const workspaceTodosTabCb=$('settingsWorkspaceTodosTab');
@@ -9559,6 +9561,9 @@ function _schedulePreferencesAutosave(){
 async function _autosavePreferencesSettings(payload){
   try{
     const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
+    if(payload&&payload.screen_reader_mode!==undefined){
+      setScreenReaderMode(saved&&saved.screen_reader_mode);
+    }
     if(payload&&payload.terminal_auto_expand_on_output!==undefined){
       window._terminalAutoExpandOnOutput=!!(saved&&saved.terminal_auto_expand_on_output);
     }
@@ -10171,6 +10176,8 @@ async function loadSettingsPanel(){
     }
     const terminalAutoExpandCb=$('settingsTerminalAutoExpand');
     if(terminalAutoExpandCb){terminalAutoExpandCb.checked=!!settings.terminal_auto_expand_on_output;window._terminalAutoExpandOnOutput=terminalAutoExpandCb.checked;terminalAutoExpandCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const screenReaderModeCb=$('settingsScreenReaderMode');
+    if(screenReaderModeCb){screenReaderModeCb.checked=!!settings.screen_reader_mode;setScreenReaderMode(screenReaderModeCb.checked);screenReaderModeCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const workspaceTodosTabCb=$('settingsWorkspaceTodosTab');
     if(workspaceTodosTabCb){
       workspaceTodosTabCb.checked=!!settings.workspace_todos_tab;
@@ -12878,6 +12885,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._simplifiedToolCalling=true;
   _syncChatActivityDisplayModeControl(body.chat_activity_display_mode);
   _syncTransparentEventTimestampsControl(body.transparent_stream_event_timestamps, body.chat_activity_display_mode);
+  setScreenReaderMode(saved&&saved.screen_reader_mode!==undefined?saved.screen_reader_mode:body.screen_reader_mode);
   window._terminalAutoExpandOnOutput=!!body.terminal_auto_expand_on_output;
   window._workspaceTodosTab=!!body.workspace_todos_tab;
   if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
@@ -13619,6 +13627,7 @@ async function saveSettings(andClose){
   body.show_busy_placeholder_hint=showBusyPlaceholderHint===true;
   body.show_tps=showTps;
   body.fade_text_effect=fadeTextEffect;
+  body.screen_reader_mode=!!($('settingsScreenReaderMode')||{}).checked;
   body.terminal_auto_expand_on_output=!!($('settingsTerminalAutoExpand')||{}).checked;
   body.workspace_todos_tab=!!window._workspaceTodosTab;
   body.api_redact_enabled=!!($('settingsApiRedact')||{}).checked;
@@ -14074,9 +14083,9 @@ function toggleMcpServer(name, enabled){
       _refreshMcpToolsetsCatalog();
       showToast(t(enabled?'mcp_enabled_toast':'mcp_disabled_toast',name));
     }
-    else showToast(t('mcp_toggle_failed'),'error');
+    else showToast(t('mcp_toggle_failed'),null,'error');
     loadMcpServers();
-  }).catch(()=>{showToast(t('mcp_toggle_failed'),'error');loadMcpServers();});
+  }).catch(()=>{showToast(t('mcp_toggle_failed'),null,'error');loadMcpServers();});
 }
 function _refreshMcpToolsetsCatalog(payload){
   if(typeof window.invalidateToolsetsCatalog==='function') window.invalidateToolsetsCatalog(payload);

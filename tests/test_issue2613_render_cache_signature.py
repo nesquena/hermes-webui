@@ -173,7 +173,7 @@ console.log(JSON.stringify({
 
 def _run_signature_node() -> dict:
     assert NODE, "node is required for the render-cache signature harness"
-    script = f"const window = {{}};\n{_collect_functions(['_messageRenderCacheSignature', '_addBoundedHash', '_hashObjectInto', 'msgContent', '_messageHasReasoningPayload'])}\n{_SIGNATURE_NODE_BODY}"
+    script = f"const window = {{}};\n{_collect_functions(['_messageRenderCacheSignature', '_addMessageRenderHash', '_addBoundedHash', '_hashObjectInto', 'msgContent', '_messageHasReasoningPayload'])}\n{_SIGNATURE_NODE_BODY}"
     result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
@@ -272,7 +272,7 @@ def _run_insertion_order_node() -> dict:
     assert NODE, "node is required for the render-cache signature harness"
     script = (
         f"const window = {{}};\n"
-        f"{_collect_functions(['_messageRenderCacheSignature', '_addBoundedHash', '_hashObjectInto', 'msgContent', '_messageHasReasoningPayload'])}\n"
+        f"{_collect_functions(['_messageRenderCacheSignature', '_addMessageRenderHash', '_addBoundedHash', '_hashObjectInto', 'msgContent', '_messageHasReasoningPayload'])}\n"
         f"{_INSERTION_ORDER_NODE_BODY}"
     )
     result = subprocess.run([NODE, "-e", script], text=True, capture_output=True, check=False)
