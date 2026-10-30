@@ -5469,9 +5469,9 @@ function _refreshOpenModelDropdown(){
   const sdd=$('settingsModelDropdown');
   if(sdd&&sdd.classList&&sdd.classList.contains('open')&&typeof renderModelDropdown==='function'){
     // Re-rendering the OPEN settings picker (e.g. when a late live-model fetch
-    // resolves) must not re-grab search focus on touch — same coarse-pointer rule
-    // as openSettingsModelDropdown, or the mobile keyboard pops after opening.
-    const _coarsePointer=(typeof window.matchMedia==='function')&&window.matchMedia('(pointer: coarse)').matches;
+    // resolves) must not re-grab search focus. Autofocus is off inside
+    // renderModelDropdown for every caller, so this path inherits the rule and
+    // the old per-call coarse-pointer gate is gone.
     renderModelDropdown({
       dropdownId:'settingsModelDropdown',
       selectId:'settingsModel',
@@ -5479,7 +5479,6 @@ function _refreshOpenModelDropdown(){
       closeDropdown:closeSettingsModelDropdown,
       selectModel:selectSettingsModelFromDropdown,
       scopeNoteText:t('settings_desc_model')||'Used for new conversations. Existing conversations keep their selected model.',
-      autoFocusSearch:!_coarsePointer,
     });
   }
 }
@@ -6456,16 +6455,74 @@ function _mountSearchableModelSelect(opts={}){
   return {searchInput,selectEl,customInput,customButton};
 }
 
+// Which node owns keyboard focus when a model picker opens. ONE rule for both
+// pickers: on a device with a keyboard in play (desktop, or a tablet with a real
+// keyboard) focus the search input so the first character — and IME composition —
+// lands there; on a touch-only device focus the container instead, so no software
+// keyboard covers the list. boot.js owns the device detection (#3076); the typeof
+// guard keeps this file self-contained for the node harness and any load order.
+function _modelPickerPrefersSearchFocus(){
+  try{
+    if(typeof _isTouchOnlyDevice==='function') return !_isTouchOnlyDevice();
+  }catch(_e){}
+  return true;
+}
+function _modelPickerFocusTarget(dd){
+  if(!dd) return null;
+  if(_modelPickerPrefersSearchFocus()){
+    const si=dd.querySelector('.model-search-input');
+    if(si) return si;
+  }
+  return (typeof dd.focus==='function')?dd:null;
+}
+// Focus AFTER the dropdown is open and positioned: the phone path reparents the
+// menu onto <body>, and a reparent detaches the focused node, while a
+// display:none node ignores focus() outright. preventScroll keeps the scroll
+// position the active-row logic just set.
+function _focusModelPicker(dd){
+  const target=_modelPickerFocusTarget(dd);
+  if(!target) return;
+  try{ target.focus({preventScroll:true}); }
+  catch(_e){ try{ target.focus(); }catch(_e2){} }
+}
+
 function renderModelDropdown(){
   const opts=arguments[0]||{};
   const dd=$(opts.dropdownId||'composerModelDropdown');
   const sel=$(opts.selectId||'modelSelect');
   if(!dd||!sel) return;
+  // Focusability + announced name for the focus target. A plain <div> is not
+  // focusable, so focus() would silently do nothing and arrow-key navigation
+  // would be dead — tabindex="-1" makes it programmatically focusable without
+  // adding it to the tab order. `role="group"` + the picker's label give a screen
+  // reader something to announce when the container takes focus (touch-only
+  // devices, see _modelPickerFocusTarget); the search input announces itself.
+  if(!dd.hasAttribute('tabindex')) dd.setAttribute('tabindex','-1');
+  if(!dd.hasAttribute('role')) dd.setAttribute('role','group');
+  const _pickerLabel=opts.label||'Model picker';
+  if(!dd.hasAttribute('aria-label')) dd.setAttribute('aria-label',_pickerLabel);
+  // Capture who held focus BEFORE this render tears the children down
+  // (dd.innerHTML='' below). Without autofocus, a re-render triggered by a late
+  // live-model fetch or a preferences refresh would silently drop a user who is
+  // mid-word in the search box — the input node is replaced, so
+  // document.activeElement is already <body> by the time _filterModels runs.
+  const _focusBeforeRender=(typeof document!=='undefined')?document.activeElement:null;
+  const _searchHadFocusBefore=!!(_focusBeforeRender
+    &&_focusBeforeRender.classList
+    &&_focusBeforeRender.classList.contains('model-search-input')
+    &&typeof dd.contains==='function'&&dd.contains(_focusBeforeRender));
+  const _ddHadFocusBefore=!!(_focusBeforeRender&&_focusBeforeRender===dd);
   if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,sel.value);
-  // Whether the search input should auto-grab focus on (re-)render. Default true
-  // preserves the composer picker's behavior exactly; the settings picker passes
-  // false on coarse-pointer devices so opening it doesn't pop the mobile keyboard.
-  const _autoFocusSearch=opts.autoFocusSearch!==false;
+  // This picker is a CHOOSER, so opening it must never pop the software keyboard
+  // on a touch-only device — the list would sit behind the IME. But a desktop
+  // user (or a tablet with a real keyboard) SHOULD be able to type straight away,
+  // IME included (#8530), so the OPEN paths focus the search box there, after the
+  // dropdown is visible and positioned. That ordering is the fix for #8530: a
+  // display:none node ignores focus(), which is why the old early `_si.focus()`
+  // looked like a no-op. The decision lives in _modelPickerFocusTarget(); the
+  // renderer itself never auto-focuses, it only preserves an existing focus
+  // across re-renders (see _searchHadFocusBefore / _ddHadFocusBefore).
+  const _autoFocusSearch=false;
   const selectFromDropdown=typeof opts.selectModel==='function'
     ? opts.selectModel
     : (value,provider)=>selectModelFromDropdown(value,provider);
@@ -7165,7 +7222,18 @@ function renderModelDropdown(){
       noResult.style.textAlign='center';
       dd.appendChild(noResult);
     }
-    if(_autoFocusSearch||_hadFocus) _si.focus();
+    // Rebuilding replaced every child, so focus must be handed to the nodes that
+    // exist NOW: `_si` is the pre-render input, and focusing a detached node is a
+    // no-op in a browser. Restore the search input for a user who was typing in
+    // it (`_hadFocus`) or whose input a top-level re-render replaced
+    // (`_searchHadFocusBefore`); otherwise hand the container back so arrow-key
+    // navigation survives a background refresh.
+    const _siNow=dd.querySelector('.model-search-input');
+    if(_autoFocusSearch||_hadFocus||_searchHadFocusBefore){
+      if(_siNow){ try{ _siNow.focus(); }catch(_e){} }
+    }else if(_ddHadFocusBefore){
+      try{ dd.focus({preventScroll:true}); }catch(_e){ try{ dd.focus(); }catch(_e2){} }
+    }
   };
   _si.addEventListener('input',()=>_filterModels(_si.value));
   // Keyboard navigation through filtered model rows (#2791).
@@ -7186,8 +7254,36 @@ function renderModelDropdown(){
     if(typeof row.scrollIntoView==='function') row.scrollIntoView({block:'nearest'});
     if(typeof _nudgeModelRowBelowStickyStack==='function') _nudgeModelRowBelowStickyStack(dd,row);
   };
-  _si.addEventListener('keydown',e=>{
-    if(e.key==='Escape'){closeDropdown();return;}
+  // Keyboard contract for the picker, shared so it works whether focus sits on
+  // the search input (desktop open, or a user who tapped it) or on the dropdown
+  // container (touch-only open). Escape closes, arrows move the highlight, Enter
+  // picks it, and a printable character starts a search.
+  const _modelPickerKey=(e)=>{
+    // Innermost layer first: stop the key here so the document-level Escape handler
+    // (boot.js) does not also close the Settings panel, clear the session search or
+    // cancel a message edit behind the picker. A second Escape reaches those.
+    if(e.key==='Escape'){e.preventDefault();e.stopPropagation();closeDropdown();return;}
+    // Printable character while the CONTAINER holds focus (touch-only device with
+    // a hardware keyboard, or a container focused by assistive tech). Hand it to
+    // the search box. Without preventDefault+stopPropagation the key ALSO reaches
+    // the global j/k session switcher in sessions.js and changes the chat behind
+    // the open menu, while the filter stays empty.
+    if(e.target===dd&&typeof e.key==='string'&&e.key.length===1
+       &&!e.ctrlKey&&!e.metaKey&&!e.altKey){
+      e.preventDefault();
+      if(typeof e.stopPropagation==='function') e.stopPropagation();
+      const si=dd.querySelector('.model-search-input');
+      if(si){
+        si.focus();
+        si.value=(typeof si.value==='string'?si.value:'')+e.key;
+        // Programmatic value changes don't fire `input`; dispatch it so the real
+        // filtering listener runs (the minimal-DOM harness feeds the same event
+        // through its listener list). Fall back to the filter directly.
+        try{ si.dispatchEvent(new Event('input',{bubbles:true})); }
+        catch(_e){ try{ _filterModels(si.value); }catch(_e2){} }
+      }
+      return;
+    }
     if(e.key==='ArrowDown'||e.key==='ArrowUp'||e.key==='Enter'){
       const rows=_visibleModelRows();
       if(!rows.length){if(e.key==='Enter') e.preventDefault();return;}
@@ -7200,13 +7296,28 @@ function renderModelDropdown(){
         if(pick) pick.click();
       }
     }
-  });
+  };
+  _si.addEventListener('keydown',e=>{_modelPickerKey(e);});
+  // The container only handles keys when IT holds focus (`e.target!==dd` returns
+  // early), so events bubbling up from the search/custom inputs are never handled
+  // twice. Bind ONCE and dispatch through a slot the current render refreshes:
+  // `dd` survives every re-render (only its children are replaced), so
+  // re-binding would stack duplicate listeners, while a closure captured at first
+  // render would keep pointing at the detached search input.
+  dd._modelPickerKey=_modelPickerKey;
+  if(!dd._modelPickerKeyBound){
+    dd._modelPickerKeyBound=true;
+    dd.addEventListener('keydown',e=>{
+      if(e.target!==dd) return;
+      if(typeof dd._modelPickerKey==='function') dd._modelPickerKey(e);
+    });
+  }
   _si.addEventListener('click',e=>e.stopPropagation());
   _sc.onclick=()=>{ _si.value=''; _filterModels(''); _si.focus(); };
   _sc.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){ _si.value=''; _filterModels(''); _si.focus(); e.preventDefault(); }});
   const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;selectFromDropdown(v,null);_ci.value='';};
   _cb.onclick=_applyCustom;
-  _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){closeDropdown();}});
+  _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){e.preventDefault();e.stopPropagation();closeDropdown();}});
   _ci.addEventListener('click',e=>e.stopPropagation());
   dd.appendChild(_scopeNote);
   dd.appendChild(_searchRow);
@@ -7282,7 +7393,7 @@ async function toggleModelDropdown(){
     if(ready&&typeof ready.catch==='function') ready.catch(()=>{});
   }
   if(dd.classList.contains('open')) return;
-  renderModelDropdown();
+  renderModelDropdown({label:'Conversation model'});
   dd.classList.add('open');
   _positionModelDropdown();
   _syncModelDropdownStickyInsets(dd);
@@ -7290,17 +7401,55 @@ async function toggleModelDropdown(){
   if(activeRow&&typeof activeRow.scrollIntoView==='function') activeRow.scrollIntoView({block:'center'});
   _nudgeModelRowBelowStickyStack(dd,activeRow);
   chip.classList.add('active');
+  chip.setAttribute('aria-expanded','true');
   const mobileAction=$('composerMobileModelAction');
-  if(mobileAction) mobileAction.classList.add('active');
+  if(mobileAction){
+    mobileAction.classList.add('active');
+    mobileAction.setAttribute('aria-expanded','true');
+  }
+  // Hand keyboard focus to the target this device expects: the search box when a
+  // keyboard is in play (type immediately, IME works), the container on a
+  // touch-only device (no software keyboard over the list). Runs AFTER
+  // _positionModelDropdown because the phone path reparents the menu onto <body>
+  // and a reparent detaches the focused node.
+  _focusModelPicker(dd);
+}
+
+// Closing a picker that still holds keyboard focus hands focus back to the button
+// that opened it (the menu-button pattern). Otherwise the focused node is hidden,
+// focus falls to <body>, Tab restarts at the page edge, and the next `k` switches
+// the conversation through the global J/K binding (which ignores keys on buttons).
+// Only when focus is still inside the picker: a close caused by a click elsewhere,
+// or by another panel that already moved focus, keeps that target. Must run before
+// the phone path's reparent in closeModelDropdown, which detaches the focused node.
+function _returnModelPickerFocus(dd, anchors){
+  if(!dd||typeof document==='undefined') return;
+  const active=document.activeElement;
+  if(!active||!(active===dd||(typeof dd.contains==='function'&&dd.contains(active)))) return;
+  for(const el of anchors||[]){
+    if(!el||el.disabled||typeof el.focus!=='function') continue;
+    // A display:none anchor (the desktop chip on a phone, the phone action on a
+    // desktop) has no layout box, and focusing it would be a silent no-op.
+    if(typeof el.getClientRects==='function'&&!el.getClientRects().length) continue;
+    try{el.focus({preventScroll:true});}catch(_){continue;}
+    if(document.activeElement===el) return;
+  }
 }
 
 function closeModelDropdown(){
   const dd=$('composerModelDropdown');
   const chip=$('composerModelChip');
   const mobileAction=$('composerMobileModelAction');
+  if(dd&&dd.classList.contains('open')&&typeof _returnModelPickerFocus==='function') _returnModelPickerFocus(dd,[mobileAction,chip]);
   if(dd) dd.classList.remove('open');
-  if(chip) chip.classList.remove('active');
-  if(mobileAction) mobileAction.classList.remove('active');
+  if(chip){
+    chip.classList.remove('active');
+    chip.setAttribute('aria-expanded','false');
+  }
+  if(mobileAction){
+    mobileAction.classList.remove('active');
+    mobileAction.setAttribute('aria-expanded','false');
+  }
   // If the phone path reparented the menu onto <body>, put it back in the
   // footer and clear the fixed-position inline styles so the DOM returns to its
   // baseline shape and the next desktop open anchors correctly (#6080).
@@ -7310,6 +7459,7 @@ function closeModelDropdown(){
 function closeSettingsModelDropdown(){
   const dd=$('settingsModelDropdown');
   const chip=$('settingsModelChip');
+  if(dd&&dd.classList.contains('open')&&typeof _returnModelPickerFocus==='function') _returnModelPickerFocus(dd,[chip]);
   if(dd) dd.classList.remove('open');
   if(chip){
     chip.classList.remove('active');
@@ -7349,11 +7499,10 @@ function openSettingsModelDropdown(){
   const sel=$('settingsModel');
   const chip=$('settingsModelChip');
   if(!dd||!sel) return;
-  // Auto-focus the search on desktop only. On touch (coarse pointer) grabbing focus
-  // pops the on-screen keyboard the instant the chip is tapped — the composer picker
-  // doesn't do it either, so match that behavior on touch. Computed before render so
-  // renderModelDropdown's own initial focus is suppressed too (not just the outer one).
-  const _coarsePointer=(typeof window.matchMedia==='function')&&window.matchMedia('(pointer: coarse)').matches;
+  // Same single rule as the composer picker (see _modelPickerFocusTarget): a
+  // device with a keyboard focuses the search box after the dropdown is visible,
+  // a touch-only device focuses the container so no IME covers the list. The
+  // setTimeout keeps the async ordering upstream already needed for this panel.
   renderModelDropdown({
     dropdownId:'settingsModelDropdown',
     selectId:'settingsModel',
@@ -7361,19 +7510,14 @@ function openSettingsModelDropdown(){
     closeDropdown:closeSettingsModelDropdown,
     selectModel:selectSettingsModelFromDropdown,
     scopeNoteText:t('settings_desc_model')||'Used for new conversations. Existing conversations keep their selected model.',
-    autoFocusSearch:!_coarsePointer,
+    label:t('settings_label_model')||'Default Model',
   });
   dd.classList.add('open');
   if(chip){
     chip.classList.add('active');
     chip.setAttribute('aria-expanded','true');
   }
-  if(!_coarsePointer){
-    setTimeout(()=>{
-      const input=dd.querySelector('.model-search-input');
-      if(input) input.focus();
-    },0);
-  }
+  setTimeout(()=>{ _focusModelPicker(dd); },0);
 }
 
 function toggleSettingsModelDropdown(){

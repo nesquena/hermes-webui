@@ -67,6 +67,8 @@
 
 ### Fixed
 
+- **The model picker takes keyboard focus when it opens.** Opening the composer or Settings model picker now focuses its search box (the list on touch-only devices, so no keyboard pops up), Escape closes only the picker, and focus returns to the chip that opened it. Before, focus stayed on the chip, so typing did nothing and `k` switched the conversation. Thanks @happy5318. (#8445)
+
 - **The workspace file tree works with the keyboard and screen readers.** Its rows are named for screen readers and reachable and operable from the keyboard; before, the Files pane could not be reached by keyboard at all. Thanks @grzezlo, building on @michaldziwisz's #7258. (#8384)
 
 - **Right-clicking a sidebar conversation opens its menu at the pointer.** The ⋮ button, keyboard and touch still open it at the button. Thanks @solarmaster961. (#8294)
