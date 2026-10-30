@@ -178,7 +178,13 @@ def test_tts_rate_limit_ignores_spoofed_forwarded_for_by_default():
     assert h2.status == 429
 
 
-def test_tts_rate_limit_can_trust_forwarded_for_when_opted_in(monkeypatch):
+def test_tts_rate_limit_requires_listed_proxy_for_forwarded_for(monkeypatch):
+    # #8610: TRUST_FORWARDED_FOR alone no longer selects buckets from a
+    # forwarded header — the peer must ALSO be a listed trusted proxy and the
+    # per-client opt-in must be set, or the socket peer keys the bucket. The
+    # pre-#8610 contract (any peer's forwarded header picked the bucket) is
+    # deliberately retired: a direct client could rotate headers to skip the
+    # 2 s throttle. Same peer, rotating XFF -> throttled.
     monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
 
     h1 = _post(
@@ -187,7 +193,7 @@ def test_tts_rate_limit_can_trust_forwarded_for_when_opted_in(monkeypatch):
         client="10.0.0.5",
     )
     routes._handle_tts(h1, None)
-    assert h1.status == 400
+    assert h1.status == 400  # rejected at allowlist, limiter recorded the peer
 
     h2 = _post(
         {"text": "hello", "voice": "not-a-real-voice"},
@@ -195,4 +201,29 @@ def test_tts_rate_limit_can_trust_forwarded_for_when_opted_in(monkeypatch):
         client="10.0.0.5",
     )
     routes._handle_tts(h2, None)
-    assert h2.status == 400
+    assert h2.status == 429  # forwarded header ignored: same socket-peer bucket
+
+
+def test_tts_rate_limit_listed_proxy_gets_per_client_buckets(monkeypatch):
+    # #8610: with the per-client opt-in AND the peer listed as a trusted
+    # proxy, the forwarded client selects the bucket (proxy-written
+    # X-Forwarded-For only).
+    monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "1")
+    monkeypatch.setenv("HERMES_WEBUI_LOGIN_RATE_LIMIT_PER_CLIENT", "1")
+    monkeypatch.setenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", "10.0.0.5/32")
+
+    h1 = _post(
+        {"text": "hello", "voice": "not-a-real-voice"},
+        headers={"X-Forwarded-For": "203.0.113.12"},
+        client="10.0.0.5",
+    )
+    routes._handle_tts(h1, None)
+    assert h1.status == 400  # rejected at allowlist, limiter recorded client A
+
+    h2 = _post(
+        {"text": "hello", "voice": "not-a-real-voice"},
+        headers={"X-Forwarded-For": "203.0.113.13"},
+        client="10.0.0.5",
+    )
+    routes._handle_tts(h2, None)
+    assert h2.status == 400  # different forwarded client, own bucket
