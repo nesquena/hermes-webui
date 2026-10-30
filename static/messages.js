@@ -6761,6 +6761,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _cancelThrottledSnapshotTimer();
+      // #8517: a finished turn that reported no memory_off clears the notice.
+      try{ if(typeof settleMemoryOffNoticeAfterTurn==='function') settleMemoryOffNoticeAfterTurn(activeSid,streamId); }catch(_){}
       const _doneData=JSON.parse(e.data);
       const _doneEvent=e;
       const _finishDone=()=>{
@@ -7364,6 +7366,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('warning',e=>{
       // Non-fatal warning from server (e.g. fallback activated, retrying)
+      // #8517: memory is off for this session's agent. The status is keyed by
+      // session, so record it even while another session is open; a quiet
+      // notice above the composer shows it (never a transient composer status).
+      try{
+        const _memoryOff=JSON.parse(e.data);
+        if(_memoryOff&&_memoryOff.type==='memory_off'){
+          if(typeof noteMemoryOffStatus==='function'&&String(_memoryOff.session_id||'')===String(activeSid)) noteMemoryOffStatus(_memoryOff);
+          return;
+        }
+      }catch(_){}
       if(!S.session||S.session.session_id!==activeSid) return;
       try{
         const d=JSON.parse(e.data);

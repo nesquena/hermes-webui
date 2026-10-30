@@ -267,16 +267,16 @@ _MEMORY_OFF_SCOPES = {
 # ``message`` as a composer status. The UI proper renders its own i18n copy by code.
 _MEMORY_OFF_MESSAGES = {
     MEMORY_OFF_AGENT_OUTDATED: (
-        "Memory is off: this Hermes Agent version can't keep each profile's memory "
-        "separate. Update Hermes Agent to turn it back on."
+        "Memory is off: this version of Hermes Agent cannot keep memory separate per "
+        "profile. Update Hermes Agent to turn it back on."
     ),
     MEMORY_OFF_AGENT_NO_INSTANCE_CLAIM: (
-        "Memory providers are off: this Hermes Agent version can't keep them separate "
+        "Memory providers are off: this version of Hermes Agent cannot keep them separate "
         "across profiles. Built-in memory still works. Update Hermes Agent to turn them back on."
     ),
     MEMORY_OFF_PROVIDER_SHARED_INSTANCE: (
-        "Your memory provider is off for this profile: another profile is already using it. "
-        "Built-in memory still works. Restart WebUI, or update the provider "
+        "Your memory provider is off for this profile because another profile is already "
+        "using it. Built-in memory still works. Restart WebUI, or update the provider "
         "(for example mnemosyne-hermes 0.7.2 or later)."
     ),
 }

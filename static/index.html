@@ -511,6 +511,11 @@
         <button class="agent-health-dismiss" id="agentHealthDismiss" type="button" onclick="dismissAgentHealthAlert()" aria-label="Dismiss Hermes agent heartbeat alert">Dismiss</button>
       </div>
     </div>
+    <div class="memory-off-notice" id="memoryOffNotice" role="status" aria-live="polite" hidden>
+      <svg class="memory-off-notice-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+      <span class="memory-off-notice-text" id="memoryOffNoticeText"></span>
+      <button type="button" class="memory-off-notice-dismiss" id="memoryOffNoticeDismiss" onclick="dismissMemoryOffNotice()" data-i18n-aria-label="memory_off_notice_dismiss" aria-label="Dismiss memory notice"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+    </div>
     <div class="composer-wrap" id="composerWrap">
       <div class="composer-flyout">
       <!-- Queue flyout: slides up from behind composer, same pattern as approval-card -->

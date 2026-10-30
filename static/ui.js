@@ -13819,6 +13819,83 @@ function dismissReconnect() {
   clearInflight();
 }
 
+// ── #8517 memory-off notice ──
+// The server sends a `warning` SSE frame of type `memory_off` when a session's
+// agent runs with memory off for a reason that outlives the turn (an outdated
+// Hermes Agent, or a memory provider another profile already uses). One quiet,
+// dismissible notice above the composer says why and what to do. Dismissal is
+// remembered per session and reason; a completed turn that reports no status
+// clears it (memory is back). No status (healthy sessions, older servers): the
+// element stays `hidden`, so normal sessions never see a layout change.
+const MEMORY_OFF_NOTICE_KEYS={
+  agent_outdated:'memory_off_agent_outdated',
+  agent_no_instance_claim:'memory_off_agent_no_instance_claim',
+  provider_shared_instance:'memory_off_provider_shared_instance',
+};
+const MEMORY_OFF_DISMISS_PREFIX='hermes-webui-memory-off-dismissed:';
+const _memoryOffStatusBySession=new Map(); // session_id -> {reason, streams:Set}
+const _memoryOffAnnounced=new Set(); // `${sid}:${reason}` announced on this page
+function _memoryOffDismissKey(sid,reason){return MEMORY_OFF_DISMISS_PREFIX+sid+':'+reason;}
+function _memoryOffDismissed(sid,reason){
+  try{return localStorage.getItem(_memoryOffDismissKey(sid,reason))==='1';}catch(_){return false;}
+}
+// Returns true when `d` is a memory_off frame (handled here), false otherwise.
+function noteMemoryOffStatus(d){
+  if(!d||d.type!=='memory_off') return false;
+  const reason=String(d.reason||'');
+  const sid=String(d.session_id||'');
+  if(!sid||!Object.prototype.hasOwnProperty.call(MEMORY_OFF_NOTICE_KEYS,reason)) return true;
+  const prior=_memoryOffStatusBySession.get(sid);
+  const streams=(prior&&prior.reason===reason)?prior.streams:new Set();
+  if(d.stream_id) streams.add(String(d.stream_id));
+  _memoryOffStatusBySession.set(sid,{reason,streams});
+  syncMemoryOffNotice();
+  return true;
+}
+// A finished turn of `sid` that never reported memory_off means memory is on again.
+function settleMemoryOffNoticeAfterTurn(sid,streamId){
+  const status=sid?_memoryOffStatusBySession.get(String(sid)):null;
+  if(!status||!streamId||status.streams.has(String(streamId))) return;
+  _memoryOffStatusBySession.delete(String(sid));
+  _memoryOffAnnounced.delete(String(sid)+':'+status.reason);
+  syncMemoryOffNotice();
+}
+function syncMemoryOffNotice(){
+  const notice=$('memoryOffNotice');
+  const text=$('memoryOffNoticeText');
+  if(!notice||!text) return;
+  const sid=S.session&&S.session.session_id?String(S.session.session_id):'';
+  const status=sid?_memoryOffStatusBySession.get(sid):null;
+  if(!status||_memoryOffDismissed(sid,status.reason)){
+    notice.hidden=true;
+    notice.dataset.reason='';
+    return;
+  }
+  const copy=t(MEMORY_OFF_NOTICE_KEYS[status.reason]);
+  if(text.textContent!==copy) text.textContent=copy;
+  notice.dataset.reason=status.reason;
+  notice.hidden=false;
+  // A live region that was `hidden` is not reliably announced when it appears,
+  // so say it once through the shared polite announcer as well.
+  const announceKey=sid+':'+status.reason;
+  if(!_memoryOffAnnounced.has(announceKey)){
+    _memoryOffAnnounced.add(announceKey);
+    const announcer=$('a11yAnnouncer');
+    if(announcer) announcer.textContent=copy;
+  }
+}
+function dismissMemoryOffNotice(){
+  const notice=$('memoryOffNotice');
+  const sid=S.session&&S.session.session_id?String(S.session.session_id):'';
+  const status=sid?_memoryOffStatusBySession.get(sid):null;
+  if(status){try{localStorage.setItem(_memoryOffDismissKey(sid,status.reason),'1');}catch(_){}}
+  if(notice){notice.hidden=true;notice.dataset.reason='';}
+  // The dismiss button disappears with the notice; keep focus somewhere useful.
+  const composer=$('msg');
+  if(composer&&typeof composer.focus==='function') composer.focus();
+}
+// ── end #8517 memory-off notice ──
+
 // ── Live host resource health panel (#693) ──
 const SYSTEM_HEALTH_INTERVAL_MS=5000;
 let _systemHealthTimer=null;
@@ -15141,6 +15218,7 @@ function _topbarMessageMetaText(){
   return t('n_messages',loadedCount);
 }
 function syncTopbar(){
+  if(typeof syncMemoryOffNotice==='function') syncMemoryOffNotice();
   if(!S.session){
     document.title=assistantDisplayName();
     if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();

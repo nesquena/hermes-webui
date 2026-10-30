@@ -199,6 +199,10 @@ def test_warning_listener_routes_memory_off_before_the_composer_status():
     body = MESSAGES_JS[start:start + 1500]
     note = body.find("noteMemoryOffStatus(")
     assert note > 0 and note < body.find("setComposerStatus("), body
+    # Recorded before the open-session guard (the status is session-keyed), and only
+    # for this stream's own session.
+    assert note < body.find("S.session.session_id!==activeSid"), body
+    assert "String(_memoryOff.session_id||'')===String(activeSid)" in body
 
 
 def test_done_settles_and_session_switch_syncs():
@@ -224,3 +228,13 @@ def test_i18n_keys_in_every_locale_and_copy_is_sentence_case():
     for key in I18N_KEYS:
         value = re.search(rf"\n\s+{key}: '([^']*)'", en).group(1)
         assert value[:1].isupper() and not re.search(r"\b[A-Z][a-z]+ [A-Z][a-z]+ [A-Z]", value.replace("Hermes Agent", "")), value
+
+
+def test_server_fallback_text_matches_the_english_copy():
+    """Older clients show the frame's ``message``; keep it the same words as the UI."""
+    from api.memory_profile_scope import _MEMORY_OFF_MESSAGES  # noqa: PLC0415
+
+    en = _locale_blocks()["en"]
+    for reason, key in REASON_KEYS.items():
+        value = re.search(rf"\n\s+{key}: '([^']*)'", en).group(1)
+        assert _MEMORY_OFF_MESSAGES[reason] == value, reason
