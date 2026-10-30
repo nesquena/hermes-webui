@@ -15,6 +15,7 @@ shell, while every guard that keeps the restart manual stays fail-closed:
 """
 from __future__ import annotations
 
+import errno
 import os
 import subprocess
 import sys
@@ -1018,3 +1019,466 @@ def test_real_unverifiable_checkout_lock_refuses(real_restart_env):
     assert result["agent_update_state"] == "unknown"
     assert result["restart_scheduled"] is False
     assert env.destructive_total() == 0
+
+
+# ── Windows checkout custody: the probe must speak the native protocol ──
+#
+# The installed Agent guards the checkout lock on Windows with ``msvcrt``
+# BYTE-RANGE locks (``hermes_cli/update_lock.py``): the owner holds byte
+# 1<<20, and every descendant that joins the lock — it cannot inherit one
+# on Windows — holds one of the 16 lease bytes at 1048577-1048592, so a
+# completion child the kill-on-close job refused outlives a killed owner
+# and keeps the checkout busy with no marker line naming it.  A probe
+# that locks a different range (byte 0, as an earlier revision did) never
+# contends with either native range: it reports ``free`` while the Agent
+# still holds custody and admits a recovery restart that purges and
+# replaces a live update.
+#
+# The tests below model that protocol on Linux — Windows range locks
+# contend across every handle to the same file, handles in one process
+# included — and drive the three recovery boundaries (admission, the
+# under-lock re-check, the delayed worker) with the real guard, real
+# markers and the real captured worker.
+
+_WINDOWS_OWNER_LOCK_OFFSET = 1 << 20
+_WINDOWS_LEASE_SLOTS = 16
+_WINDOWS_FIRST_LEASE_OFFSET = _WINDOWS_OWNER_LOCK_OFFSET + 1
+_WINDOWS_LAST_LEASE_OFFSET = _WINDOWS_OWNER_LOCK_OFFSET + _WINDOWS_LEASE_SLOTS
+
+
+class _ModeledMsvcrt:
+    """Model of the Windows byte-range lock protocol on the checkout lock.
+
+    ``msvcrt.locking`` locks ``count`` bytes at the fd's current
+    position, and Windows range locks contend across every handle to the
+    same file — handles in the same process included — so an LK_NBLCK
+    fails when any OTHER open file description already holds an
+    overlapping range.  That is the contention the production probe must
+    observe.  A successful lock is held until its LK_UNLCK, which is what
+    lets the release regression prove the probe gives back every range it
+    acquired.
+    """
+
+    LK_UNLCK = 0
+    LK_LOCK = 1
+    LK_NBLCK = 2
+
+    def __init__(self) -> None:
+        self._ranges: dict[tuple[int, int], list[list[int]]] = {}
+        self.calls: list[tuple[int, int, int, int]] = []
+
+    def locking(self, fd: int, mode: int, count: int) -> None:
+        offset = os.lseek(fd, 0, os.SEEK_CUR)
+        info = os.fstat(fd)
+        held = self._ranges.setdefault((info.st_dev, info.st_ino), [])
+        if mode == self.LK_NBLCK:
+            contended = any(
+                other != fd and start < offset + count and offset < start + size
+                for start, size, other in held
+            )
+            self.calls.append((fd, mode, offset, count))
+            if contended:
+                raise OSError(errno.EDEADLOCK, "resource deadlock avoided")
+            held.append([offset, count, fd])
+            return
+        if mode == self.LK_UNLCK:
+            for entry in held:
+                if entry == [offset, count, fd]:
+                    held.remove(entry)
+                    break
+            self.calls.append((fd, mode, offset, count))
+            return
+        raise OSError(errno.EINVAL, "unsupported locking mode")  # pragma: no cover
+
+    def lock_attempts(self) -> set[tuple[int, int]]:
+        """The ``(offset, count)`` ranges an LK_NBLCK was issued for."""
+        return {
+            (offset, count)
+            for _fd, mode, offset, count in self.calls
+            if mode == self.LK_NBLCK
+        }
+
+    def outstanding(self) -> list[tuple[int, int, int]]:
+        """Every acquired-but-unreleased ``(fd, offset, count)`` range."""
+        return sorted(
+            (fd, start, size)
+            for entries in self._ranges.values()
+            for start, size, fd in entries
+        )
+
+
+def _posix_pid_is_alive(pid: int) -> bool | None:
+    """The module's own POSIX liveness answer, for a modeled-Windows run.
+
+    ``ctypes`` cannot load ``kernel32`` on Linux, so the production
+    Windows pid probe would answer ``unknown`` for every marker identity
+    and the marker — not the checkout lock — would decide each verdict.
+    Keeping the POSIX answer preserves the real marker classification so
+    the byte-range custody stays the authority under test.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OverflowError, ValueError):
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return False
+        if exc.errno == errno.EPERM:
+            return True
+        return None
+    return True
+
+
+def _windows_holder_record(pid: int) -> str:
+    """The installed Agent's Windows holder record: pid, start, identity."""
+    return f"{pid}\n{int(time.time())}\nwindows-identity\n"
+
+
+def _dead_owner_record() -> str:
+    """A holder record naming a pid that is already gone."""
+    process = subprocess.Popen([sys.executable, "-c", "pass"])
+    process.wait(timeout=10)
+    return _windows_holder_record(process.pid)
+
+
+class _WindowsCustody:
+    """A modeled Windows custody hold on the checkout lock.
+
+    Mirrors the installed Agent: the owner — or a descendant that joined
+    it — opens the checkout lock file and takes its byte range with
+    ``msvcrt.locking`` (the owner byte at 1<<20, or one lease byte at
+    1048577-1048592 for a joiner).  ``holder_record`` is the native
+    holder record written into the lock file; ``None`` models a survivor
+    that never wrote its name anywhere, leaving the lease byte as the
+    only authority that exists.
+    """
+
+    def __init__(self, msvcrt, checkout, *, offset, holder_record=None):
+        self._msvcrt = msvcrt
+        self.offset = offset
+        lock_path = _checkout_lock_path(checkout)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.touch()
+        if holder_record is not None:
+            lock_path.write_text(holder_record, encoding="utf-8")
+        self.fd: int | None = os.open(lock_path, os.O_RDONLY)
+        os.lseek(self.fd, offset, os.SEEK_SET)
+        msvcrt.locking(self.fd, msvcrt.LK_NBLCK, 1)
+
+    def release(self) -> None:
+        fd, self.fd = self.fd, None
+        if fd is None:
+            return
+        try:
+            os.lseek(fd, self.offset, os.SEEK_SET)
+            self._msvcrt.locking(fd, self._msvcrt.LK_UNLCK, 1)
+        finally:
+            os.close(fd)
+
+
+@pytest.fixture
+def windows_restart_env(real_restart_env):
+    """``real_restart_env`` on a modeled Windows checkout lock.
+
+    The production probe branches on ``sys.platform``, so this fixture
+    runs that branch against :class:`_ModeledMsvcrt` and keeps the
+    module's own POSIX pid-liveness answer (see
+    :func:`_posix_pid_is_alive`).  Everything else stays as shipped: the
+    real guard, the real markers, the real lock and the real worker.
+    """
+    from api import agent_runtime
+
+    env = real_restart_env
+    msvcrt = _ModeledMsvcrt()
+    env.monkeypatch.setattr(sys, "platform", "win32")
+    env.monkeypatch.setitem(sys.modules, "msvcrt", msvcrt)
+    env.monkeypatch.setattr(agent_runtime, "_pid_is_alive", _posix_pid_is_alive)
+    # The intercepted Windows spawn builds its creationflags from these
+    # subprocess constants, which are Windows-only.
+    for name, value in (
+        ("DETACHED_PROCESS", 1),
+        ("CREATE_NEW_PROCESS_GROUP", 2),
+        ("CREATE_NO_WINDOW", 4),
+    ):
+        env.monkeypatch.setattr(subprocess, name, value, raising=False)
+    env.msvcrt = msvcrt
+
+    def hold_custody(checkout, *, offset, holder_record=None):
+        return _WindowsCustody(
+            msvcrt, checkout, offset=offset, holder_record=holder_record,
+        )
+
+    env.hold_custody = hold_custody
+    return env
+
+
+def _probe_checkout_state(env) -> str:
+    return env.agent_runtime._agent_checkout_lock_state()
+
+
+@pytest.mark.parametrize("lock_file", ["missing", "present-unlocked"])
+def test_windows_probe_reports_free_without_native_custody(
+    windows_restart_env, lock_file,
+):
+    """A checkout nobody holds reads ``free`` — with no lock file at all
+    and with an unlocked one — so the probe never over-refuses."""
+    env = windows_restart_env
+    lock_path = _checkout_lock_path(env.checkout)
+    if lock_file == "present-unlocked":
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.touch()
+    assert _probe_checkout_state(env) == "free"
+
+
+@pytest.mark.parametrize(
+    "offset",
+    [
+        _WINDOWS_OWNER_LOCK_OFFSET,
+        _WINDOWS_FIRST_LEASE_OFFSET,
+        _WINDOWS_LAST_LEASE_OFFSET,
+    ],
+    ids=["owner-byte", "first-lease-slot", "last-lease-slot"],
+)
+def test_windows_probe_reports_held_for_every_native_range(
+    windows_restart_env, offset,
+):
+    """The owner byte and BOTH ends of the lease range are custody: an
+    Agent old enough to predate leases holds only the owner byte, and a
+    joined descendant holds any one lease slot — including the last, which
+    a probe that stopped one byte early would miss."""
+    env = windows_restart_env
+    custody = env.hold_custody(env.checkout, offset=offset)
+    try:
+        assert _probe_checkout_state(env) == "held"
+    finally:
+        custody.release()
+
+
+def test_windows_probe_reports_unknown_when_the_lock_cannot_be_probed(
+    windows_restart_env,
+):
+    """A lock path that exists but cannot be probed fails closed."""
+    env = windows_restart_env
+    _checkout_lock_path(env.checkout).mkdir(parents=True)
+    assert _probe_checkout_state(env) == "unknown"
+
+
+def test_windows_probe_acquires_and_releases_the_native_ranges(
+    windows_restart_env,
+):
+    """A free probe must take the owner byte AND the complete lease range
+    — never byte 0, which contends with neither native range — and give
+    every acquired range back, so the diagnostic itself never shuts out
+    the updater waiting behind it."""
+    env = windows_restart_env
+    lock_path = _checkout_lock_path(env.checkout)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.touch()
+
+    assert _probe_checkout_state(env) == "free"
+
+    attempts = env.msvcrt.lock_attempts()
+    assert (_WINDOWS_OWNER_LOCK_OFFSET, 1) in attempts
+    assert (_WINDOWS_FIRST_LEASE_OFFSET, _WINDOWS_LEASE_SLOTS) in attempts
+    assert (0, 1) not in attempts, (
+        "byte 0 does not contend with either native range"
+    )
+    assert env.msvcrt.outstanding() == [], (
+        "every acquired range must be released on every exit"
+    )
+    # The checkout is acquirable again behind the diagnostic: a waiting
+    # updater can still take the owner byte and a lease byte of its own.
+    owner = env.hold_custody(env.checkout, offset=_WINDOWS_OWNER_LOCK_OFFSET)
+    lease = env.hold_custody(env.checkout, offset=_WINDOWS_LAST_LEASE_OFFSET)
+    owner.release()
+    lease.release()
+
+
+def test_windows_probe_never_writes_or_reclaims_the_lock_file(
+    windows_restart_env,
+):
+    """The probe is a diagnostic, not a custody claim: it must not write,
+    truncate, unlink or recreate the lock file — not while contending
+    with live custody and not on the free pass either."""
+    env = windows_restart_env
+    lock_path = _checkout_lock_path(env.checkout)
+    custody = env.hold_custody(
+        env.checkout,
+        offset=_WINDOWS_OWNER_LOCK_OFFSET,
+        holder_record=_dead_owner_record(),
+    )
+    before = (lock_path.read_bytes(), os.stat(lock_path).st_ino)
+    try:
+        assert _probe_checkout_state(env) == "held"
+    finally:
+        custody.release()
+    assert _probe_checkout_state(env) == "free"
+
+    assert (lock_path.read_bytes(), os.stat(lock_path).st_ino) == before
+    assert lock_path.is_file(), "the probe must not unlink or reclaim the lock"
+
+
+def test_windows_probe_answers_bounded_while_custody_is_held(
+    windows_restart_env,
+):
+    """A non-blocking range probe: contention answers ``held`` at once and
+    never parks the recovery request on the Agent's lock."""
+    env = windows_restart_env
+    custody = env.hold_custody(
+        env.checkout, offset=_WINDOWS_FIRST_LEASE_OFFSET,
+        holder_record=_dead_owner_record(),
+    )
+    try:
+        started = time.monotonic()
+        assert _probe_checkout_state(env) == "held"
+        assert time.monotonic() - started < 1.0
+    finally:
+        custody.release()
+
+
+# Each native custody shape, driven through every recovery boundary.  The
+# marker column is what a crashed update leaves behind: a dead owner with
+# no delegate, or nothing at all when the survivor never wrote a name.
+_WINDOWS_CUSTODY_CASES = [
+    # An owner (an Agent old enough to predate leases holds ONLY the owner
+    # byte) whose marker owner is dead: the byte range is the only proof.
+    ("owner-byte", _WINDOWS_OWNER_LOCK_OFFSET, _publish_dead_owner_marker, True),
+    # A dead owner's descendant joined the lock and holds a lease byte —
+    # the first slot ...
+    ("first-lease-slot", _WINDOWS_FIRST_LEASE_OFFSET, _publish_dead_owner_marker, True),
+    # ... and the last slot, one byte short of where a partial probe stops.
+    ("last-lease-slot", _WINDOWS_LAST_LEASE_OFFSET, _publish_dead_owner_marker, True),
+    # An unnamed survivor: no marker anywhere and an empty lock file, so
+    # the lease byte is the sole authority that exists.
+    ("unnamed-descendant", _WINDOWS_FIRST_LEASE_OFFSET, None, False),
+]
+
+
+@pytest.mark.parametrize("boundary", ["admission", "under-lock", "delayed-worker"])
+@pytest.mark.parametrize(
+    ("custody_id", "offset", "publish_marker", "named"),
+    _WINDOWS_CUSTODY_CASES,
+    ids=[case[0] for case in _WINDOWS_CUSTODY_CASES],
+)
+def test_windows_custody_refuses_every_recovery_boundary(
+    windows_restart_env, custody_id, offset, publish_marker, named, boundary,
+):
+    """Every native custody shape must refuse the recovery restart at all
+    three boundaries — admission, the under-lock re-check and the delayed
+    worker's last-moment barrier — with the ``held`` diagnostic and before
+    any purge/exec/spawn/exit.  This is the regression the byte-0 probe
+    failed: it reported ``free`` for all four shapes and let the
+    replacement through."""
+    env = windows_restart_env
+    checkout = env.checkout
+    if publish_marker is not None:
+        publish_marker(checkout)
+    record = _dead_owner_record() if named else None
+
+    if boundary == "admission":
+        custody = env.hold_custody(
+            checkout, offset=offset, holder_record=record,
+        )
+        try:
+            result = env.updates.restart_stale_runtime()
+        finally:
+            custody.release()
+        assert result.get("ok") is not True
+        assert result["type"] == "agent_runtime_stale"
+        assert result["agent_update_state"] == "held"
+        assert result["restart_scheduled"] is False
+        assert checkout.workers == [], (
+            "Windows custody must not schedule any recovery worker"
+        )
+        assert env.destructive_total() == 0
+        return
+
+    if boundary == "under-lock":
+        taken = []
+
+        def take_custody():
+            taken.append(
+                env.hold_custody(checkout, offset=offset, holder_record=record)
+            )
+
+        try:
+            env.hook.on_acquire = take_custody
+            result = env.updates.restart_stale_runtime()
+        finally:
+            env.hook.on_acquire = None
+            for custody in taken:
+                custody.release()
+        assert result.get("ok") is not True
+        assert result["type"] == "agent_runtime_stale"
+        assert result["agent_update_state"] == "held"
+        assert result["restart_scheduled"] is False
+        assert checkout.workers == []
+        assert env.lock.locked() is False
+        assert env.destructive_total() == 0
+        return
+
+    result = env.updates.restart_stale_runtime()
+    assert result["ok"] is True
+    assert result["restart_scheduled"] is True
+    assert len(checkout.workers) == 1
+    custody = env.hold_custody(checkout, offset=offset, holder_record=record)
+    try:
+        checkout.workers[0]()
+    finally:
+        custody.release()
+    assert env.destructive_total() == 0, (
+        "Windows custody must abort the replacement before any destructive call"
+    )
+    assert any("aborted" in w for w in env.logs.warnings)
+
+
+def test_windows_free_checkout_recovers_at_admission(windows_restart_env):
+    """Control: with no native range held the probe must not over-refuse —
+    a crashed update's leftover marker stays recoverable, which is the
+    whole point of the custody guards."""
+    env = windows_restart_env
+    _publish_dead_owner_marker(env.checkout)
+    result = env.updates.restart_stale_runtime()
+    assert result["ok"] is True
+    assert result["restart_scheduled"] is True
+    assert len(env.checkout.workers) == 1
+    assert env.destructive_total() == 0
+
+
+def test_windows_free_checkout_recovers_under_the_lock(windows_restart_env):
+    """Control: the under-lock re-check re-probes the same free checkout
+    and still admits the recovery restart."""
+    env = windows_restart_env
+    _publish_dead_owner_marker(env.checkout)
+    try:
+        env.hook.on_acquire = lambda: None
+        result = env.updates.restart_stale_runtime()
+    finally:
+        env.hook.on_acquire = None
+    assert result["ok"] is True
+    assert result["restart_scheduled"] is True
+    assert len(env.checkout.workers) == 1
+    assert env.destructive_total() == 0
+
+
+def test_windows_free_checkout_worker_completes_the_replacement(
+    windows_restart_env,
+):
+    """Control: across the worker's idle wait the checkout stays free, so
+    the delayed barrier lets the replacement run to the (intercepted)
+    Windows spawn and exit — proving the abort cases above are the
+    custody guard's doing, not a broken worker."""
+    env = windows_restart_env
+    _publish_dead_owner_marker(env.checkout)
+    result = env.updates.restart_stale_runtime()
+    assert result["ok"] is True
+    assert len(env.checkout.workers) == 1
+    env.checkout.workers[0]()
+    assert len(env.destructive.spawn) == 1
+    assert env.destructive.exits == [0]
+    assert env.destructive.purge, "the pycache purge must precede the replacement"
+    assert env.logs.warnings == []

@@ -462,6 +462,19 @@ def _base_marker_home() -> Path:
 _AGENT_CHECKOUT_LOCK_NAME = ".hermes-update.lock"
 _AGENT_GIT_CHECKOUT_LOCK_NAME = "hermes-update.lock"
 
+# The installed Agent's Windows custody protocol
+# (``hermes_cli/update_lock.py``): the checkout lock's OWNER byte sits at
+# 1<<20, and 16 LEASE bytes follow it at 1048577-1048592.  A descendant
+# that joins its ancestor's lock cannot inherit one on Windows, so it
+# takes one of those lease bytes: a completion child the kill-on-close
+# job refused outlives a killed owner and keeps the checkout busy with
+# no marker line naming it.  A probe must therefore contend with BOTH
+# native ranges — locking any other byte (byte 0 in an earlier revision)
+# intersects neither range and would report ``free`` while the Agent
+# still holds custody.
+_AGENT_WINDOWS_OWNER_LOCK_OFFSET = 1 << 20
+_AGENT_WINDOWS_LEASE_SLOTS = 16
+
 
 def _agent_checkout_lock_path() -> Path | None:
     """Return the installed Agent's checkout kernel lock path, or ``None``.
@@ -506,6 +519,14 @@ def _agent_checkout_lock_state() -> str:
     probed (not a regular file, unreadable, unsupported primitives) is
     ``unknown`` and fails closed.  Never writes, truncates, or reclaims the
     lock: this is a diagnostic, not a custody claim.
+
+    On Windows the probe speaks the Agent's actual byte-range protocol:
+    it takes the owner byte at 1<<20 and the complete 16-byte lease range
+    at 1048577-1048592 (``_try_lock`` in the Agent does the same), so it
+    contends with the owner and with a joined descendant's lease — the
+    survivor that keeps the checkout busy after its owner died.  Every
+    range it acquires is released on every exit, and the O_RDWR handle
+    never writes: only the byte-range probe touches the fd.
     """
     path = _agent_checkout_lock_path()
     if path is None:
@@ -532,13 +553,34 @@ def _agent_checkout_lock_state() -> str:
         if not stat.S_ISREG(st.st_mode):
             return "unknown"
         if sys.platform == "win32":
-            import msvcrt
-
             try:
-                os.lseek(fd, 0, os.SEEK_SET)
+                import msvcrt
+            except ImportError:  # pragma: no cover - win32 ships msvcrt
+                return "unknown"
+            # The Agent's Windows custody ranges: the owner byte, then
+            # every lease byte a surviving descendant can hold.  Both are
+            # probed in one bounded, non-blocking pass, and every range
+            # acquired is unlocked before any verdict is returned.
+            acquired: list[tuple[int, int]] = []
+            try:
+                os.lseek(fd, _AGENT_WINDOWS_OWNER_LOCK_OFFSET, os.SEEK_SET)
                 msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                acquired.append((_AGENT_WINDOWS_OWNER_LOCK_OFFSET, 1))
+                lease_offset = _AGENT_WINDOWS_OWNER_LOCK_OFFSET + 1
+                os.lseek(fd, lease_offset, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, _AGENT_WINDOWS_LEASE_SLOTS)
+                acquired.append((lease_offset, _AGENT_WINDOWS_LEASE_SLOTS))
             except OSError:
+                # Some byte in either native range is held (or the range
+                # lock cannot be completed): fail closed.
                 return "held"
+            finally:
+                for offset, count in reversed(acquired):
+                    try:
+                        os.lseek(fd, offset, os.SEEK_SET)
+                        msvcrt.locking(fd, msvcrt.LK_UNLCK, count)
+                    except OSError:
+                        pass
             return "free"
         try:
             import fcntl
