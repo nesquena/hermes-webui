@@ -104,18 +104,22 @@ detail-view Review button, the bulk select and a drag onto the Review column
 send. The `review` branch (`api/kanban_bridge.py:472`) then:
 
 1. raises `review requires a newer Hermes Agent` when the installed Agent
-   exposes no `request_review` — HTTP 409, with **no** mutation, so an Agent
-   that cannot hand off to review never falls back to a direct status write;
+   exposes no `request_review` — HTTP 409. The status handoff itself performs
+   no write on that failure path, so an Agent that cannot hand off to review
+   never falls back to a direct status write. Other fields carried by the same
+   PATCH (for example `title`) may already have been applied and evented before
+   the capability check;
 2. delegates to `kb.request_review(conn, task_id, summary=..., metadata=...,
    reviewer=..., force=True)`, the Agent's own handoff verb. It accepts
    `running` / `ready` → `review`, records the implementer before reassigning
    the reviewer, emits `review_requested`, and clears a live claim because a
    dashboard action is an explicit human override. Any other source status is
    refused with HTTP 400 `cannot request review from status: <status>`;
-3. when the same PATCH carries `assignee`, the assignee write is deferred
-   until after `request_review` so the event keeps the original implementer
-   (the Agent dashboard plugin orders the two the same way). An explicit empty
-   assignee clears the reviewer after the handoff is recorded.
+3. when the same PATCH carries the `assignee` key, the assignee write is
+   deferred until after `request_review` so the event keeps the original
+   implementer (the Agent dashboard plugin orders the two the same way). An
+   explicit `null` or `""` assignee clears the reviewer after the handoff is
+   recorded; an omitted key leaves the card's assignee unchanged.
 
 The task editor modal keeps its triage/todo/ready status list: entering Review
 is implementer scope, not an edit-field concern.
