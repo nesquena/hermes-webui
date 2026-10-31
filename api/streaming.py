@@ -18732,6 +18732,33 @@ def _run_agent_streaming(
                         stream_id,
                         getattr(s, 'active_stream_id', None),
                     )
+                    # hwc: turn-terminal-event — this stream still needs a
+                    # terminal frame. Skipping the transcript writeback is
+                    # correct when a newer turn owns it. Clear pending flags
+                    # only when active_stream_id is already None.
+                    _error_payload['session_id'] = getattr(s, 'session_id', session_id)
+                    _error_payload['old_session_id'] = session_id
+                    _error_payload['stale_writeback_skipped'] = True
+                    put('apperror', _error_payload)
+                    if getattr(s, 'active_stream_id', None) is None:
+                        try:
+                            if hasattr(s, 'pending_user_message'):
+                                s.pending_user_message = None
+                            if hasattr(s, 'pending_attachments'):
+                                s.pending_attachments = []
+                            if hasattr(s, 'pending_started_at'):
+                                s.pending_started_at = None
+                            if hasattr(s, 'pending_user_source'):
+                                s.pending_user_source = None
+                            try:
+                                s.save(touch_updated_at=False)
+                            except TypeError:
+                                s.save()
+                        except Exception:
+                            logger.debug(
+                                "Failed to clear stale pending flags",
+                                exc_info=True,
+                            )
                     return
 
                 if _turn_pending_source in ('process_wakeup', 'delegation_wakeup'):
