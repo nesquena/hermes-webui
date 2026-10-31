@@ -9261,6 +9261,27 @@ function _sessionStateTooltip({isStreaming=false,hasUnread=false}={}){
   return '';
 }
 
+function _delegatedChildRuntimeBadge(child){
+  if(!child||child.session_source==='fork') return null;
+  const source=String(child.source_tag||child.raw_source||child.session_source||'').toLowerCase();
+  if(child.relationship_type!=='child_session'||source!=='subagent') return null;
+  const state=String(child.runtime_state||'unknown');
+  const labels={
+    running:t('delegated_child_runtime_running'),
+    completed:t('delegated_child_runtime_completed'),
+    failed:t('delegated_child_runtime_failed'),
+    cancelled:t('delegated_child_runtime_cancelled'),
+    unknown:t('delegated_child_runtime_unknown'),
+  };
+  if(state==='unknown'||!labels[state]) return null;
+  const badge=document.createElement('span');
+  badge.className=`session-child-runtime session-child-runtime-${labels[state]?state:'unknown'}`;
+  badge.textContent=labels[state]||labels.unknown;
+  badge.title=t('delegated_child_runtime_tooltip', badge.textContent);
+  badge.setAttribute('aria-label',badge.title);
+  return badge;
+}
+
 function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawReferenceSessions, payloadRowsById){
   const referenceSessions=Array.isArray(rawReferenceSessions)?rawReferenceSessions:(rawSessions||[]);
   let searchActive=false;
@@ -11312,7 +11333,12 @@ function renderSessionListFromCache(){
         const row=document.createElement('button');
         row.type='button';
         row.className='session-child-session'+(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'');
-        row.textContent=childLabelFor(child);
+        const label=document.createElement('span');
+        label.className='session-child-session-label';
+        label.textContent=childLabelFor(child);
+        row.appendChild(label);
+        const runtimeBadge=_delegatedChildRuntimeBadge(child);
+        if(runtimeBadge) row.appendChild(runtimeBadge);
         row.title='Open child session';
         row.onclick=async(e)=>{
           e.stopPropagation();

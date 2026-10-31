@@ -71,6 +71,7 @@ from api.session_events import (
     subscribe_session_events,
     unsubscribe_session_events,
 )
+from api.delegated_child_runtime import child_runtime, forget_runtime_owner
 from api.gateway_restart import restart_active_profile_gateway
 from api.shares import create_or_refresh_share, load_share, revoke_share
 
@@ -13341,8 +13342,6 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = (
     _route_session_list_cache._SIDEBAR_SESSION_RESPONSE_FIELDS
 )
 
-
-
 def _sidebar_session_response_item(session: dict, *, redact_enabled: bool | None = None) -> dict:
     """Return the bounded /api/sessions row shape used by the sidebar.
 
@@ -13357,6 +13356,14 @@ def _sidebar_session_response_item(session: dict, *, redact_enabled: bool | None
         for key, value in dict(session).items()
         if key in _SIDEBAR_SESSION_RESPONSE_FIELDS
     }
+    source = str(
+        item.get("source_tag") or item.get("raw_source") or item.get("session_source") or ""
+    ).strip().lower()
+    if item.get("relationship_type") == "child_session" and source == "subagent":
+        runtime = child_runtime(item.get("profile"), item.get("session_id"))
+        item["runtime_state"] = runtime["runtime_state"]
+    else:
+        item.pop("runtime_state", None)
     if isinstance(item.get("title"), str):
         item["title"] = _redact_text(item["title"], _enabled=redact_enabled)
     _redact_sidebar_title_fields(item, redact_enabled)
@@ -19898,6 +19905,10 @@ def handle_post(handler, parsed) -> bool:
             logger.debug("Failed to delete run journal for deleted session %s", sid)
         # The weak lock registry releases this entry automatically after all
         # holders and waiters drop their strong references.
+        try:
+            forget_runtime_owner(sid, profile=event_profile)
+        except Exception:
+            logger.debug("Failed to prune delegated child runtime for deleted session %s", sid, exc_info=True)
         _publish_session_list_changed("session_delete", profile=event_profile)
         response = {
             "state_db_cleanup_failed": state_db_cleanup_failed,
