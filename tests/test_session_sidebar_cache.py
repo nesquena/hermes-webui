@@ -211,8 +211,12 @@ def test_session_list_cache_source_changed_owner_rebuilds_while_follower_reuses_
     routes._session_list_cache_set(key, _session_cache_payload("stale"))
     with routes._SESSIONS_CACHE_LOCK:
         ts, stamp, payload = routes._SESSIONS_CACHE[key]
+        # Age the entry PAST the rebuild-rate floor, not just past the TTL: inside
+        # `_SESSIONS_CACHE_MIN_REFRESH_SECONDS` a changed source stamp is held by
+        # design (see test_session_list_cache_rate_floor_holds_rebuilds), so an
+        # entry aged only past the TTL would be served as-is and never rebuild.
         routes._SESSIONS_CACHE[key] = (
-            ts - routes._SESSIONS_CACHE_TTL_SECONDS - 1.0,
+            ts - routes._SESSIONS_CACHE_MIN_REFRESH_SECONDS - 1.0,
             stamp,
             payload,
         )
@@ -269,6 +273,67 @@ def test_session_list_cache_source_changed_owner_rebuilds_while_follower_reuses_
     assert follower_result["payload"] == _session_cache_payload("stale")
     assert "session_list_cache_rebuild_owner" in owner_diag.stages
     assert "session_list_cache_wait_stale_fallback" in follower_diag.stages
+
+
+def test_session_list_cache_rate_floor_holds_rebuilds(monkeypatch):
+    """The 10 s floor must cap REBUILDS through the real consumer, not just cost.
+
+    `_session_list_cache_get` reports a floor-held payload as "not fresh", and the
+    consumer used to treat every non-fresh hit whose reason was not "source" as
+    "return stale, start a background rebuild". Singleflight caps CONCURRENT
+    rebuilds only, so with a writer touching state.db on every poll the floor
+    still allowed one full all_sessions() per poll. This pins the consumer
+    contract: no builder inside the floor, a real refresh once it expires, and no
+    delay after an explicit rename/delete invalidation.
+    """
+    key = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    routes._session_list_cache_set(key, _session_cache_payload("initial"))
+    # A live session writes to state.db right after the entry was stored: the
+    # stamp then differs on every poll while the entry is milliseconds old.
+    monkeypatch.setattr(
+        routes, "_session_list_cache_source_stamp", lambda _key: ("changing",)
+    )
+
+    built = []
+
+    def builder():
+        built.append(1)
+        return _session_cache_payload(f"fresh-{len(built)}")
+
+    diag = _StageRecorder()
+    for _ in range(3):
+        payload = routes._get_cached_session_list_payload(key=key, builder=builder, diag=diag)
+        assert payload == _session_cache_payload("initial")
+
+    assert built == [], "no rebuild may start inside the rebuild-rate floor"
+    assert "session_list_cache_rate_floor_hold" in diag.stages
+    assert "session_list_cache_stale_background_rebuild" not in diag.stages
+
+    # Past the floor the same hit becomes an ordinary revalidation.
+    with routes._SESSIONS_CACHE_LOCK:
+        ts, stamp, cached_payload = routes._SESSIONS_CACHE[key]
+        routes._SESSIONS_CACHE[key] = (
+            ts - routes._SESSIONS_CACHE_MIN_REFRESH_SECONDS - 1.0,
+            stamp,
+            cached_payload,
+        )
+    refreshed = routes._get_cached_session_list_payload(key=key, builder=builder)
+    assert refreshed == _session_cache_payload("fresh-1")
+    assert len(built) == 1
+
+    # An explicit rename/delete invalidation clears the entry, so the next request
+    # rebuilds immediately even though the floor would otherwise hold it.
+    session_events.publish_session_list_changed("session_rename", profile="default")
+    assert routes._session_list_cache_get(key, allow_stale=True)[0] is None
+    renamed = routes._get_cached_session_list_payload(key=key, builder=builder)
+    assert renamed == _session_cache_payload("fresh-2")
+    assert len(built) == 2
 
 
 def test_session_list_cache_owner_returns_stale_and_rebuilds_in_background(monkeypatch):

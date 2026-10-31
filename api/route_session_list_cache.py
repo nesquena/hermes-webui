@@ -47,6 +47,15 @@ _SESSIONS_CACHE_STREAMING_TTL_SECONDS = 45.0
 # counts, membership) can be this stale; a settings write or a structural change
 # still invalidates through the separate invalidation stamp.
 _SESSIONS_CACHE_MIN_REFRESH_SECONDS = 10.0
+# Consumer-facing statuses for `_session_list_cache_probe`. `held` is the explicit
+# "inside the rebuild-rate floor, serve this and do NOT start a rebuild" contract:
+# callers that treat every non-fresh hit as a rebuild trigger defeat the floor,
+# because singleflight only caps CONCURRENT rebuilds, never consecutive ones.
+_SESSION_LIST_CACHE_MISSING = "missing"
+_SESSION_LIST_CACHE_FRESH = "fresh"
+_SESSION_LIST_CACHE_HELD = "held"
+_SESSION_LIST_CACHE_STALE_SOURCE = "source"
+_SESSION_LIST_CACHE_STALE_AGE = "age"
 _SESSIONS_CACHE_MAX_ENTRIES = 64
 _SESSIONS_CACHE_WAIT_SECONDS = 0.25
 _SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
@@ -388,67 +397,76 @@ def _session_list_cache_key(
     )
 
 
-def _session_list_cache_get(
+def _session_list_cache_probe(
     key: tuple,
     allow_stale: bool = False,
-) -> tuple[dict | None, bool]:
+) -> tuple[dict | None, str]:
+    """Look the entry up and report WHY its payload is (not) directly usable.
+
+    Statuses:
+      ``missing`` — nothing cached (or the entry was dropped as unusable)
+      ``fresh``   — usable as-is, no rebuild needed
+      ``held``    — the rebuild-rate floor holds the entry: the caller serves the
+                    payload and returns WITHOUT claiming or starting a rebuild.
+                    ``_get_cached_session_list_payload`` needs this distinction —
+                    without it a held hit falls through to the generic
+                    stale-background branch, which claims an owner and starts the
+                    builder, so singleflight caps concurrent rebuilds while
+                    consecutive ones still run on every poll.
+      ``source``  — the source stamp moved past the floor
+      ``age``     — stale by TTL only
+    """
     now = time.monotonic()
     current_stamp = _session_list_cache_resolved_source_stamp(key)
     with _SESSIONS_CACHE_LOCK:
         entry = _SESSIONS_CACHE.get(key)
         if not entry:
-            return None, False
+            return None, _SESSION_LIST_CACHE_MISSING
         ts, stamp, payload = entry
         if stamp != current_stamp:
             # Rebuild-rate floor: while a writer keeps touching state.db/index the
             # stamp differs on almost every poll. Inside the floor, serve what we
-            # have (reported as not-fresh) instead of paying another full rebuild.
+            # have instead of paying another full rebuild.
             if (now - ts) < _SESSIONS_CACHE_MIN_REFRESH_SECONDS:
                 _SESSIONS_CACHE.move_to_end(key)
-                return _session_list_cache_copy_payload(payload), False
+                return _session_list_cache_copy_payload(payload), _SESSION_LIST_CACHE_HELD
             if allow_stale:
                 _SESSIONS_CACHE.move_to_end(key)
-                return _session_list_cache_copy_payload(payload), False
+                return _session_list_cache_copy_payload(payload), _SESSION_LIST_CACHE_STALE_SOURCE
             _SESSIONS_CACHE.pop(key, None)
-            return None, False
+            return None, _SESSION_LIST_CACHE_MISSING
         # #4808: widen the freshness window while a turn is streaming so the fixed
         # streaming poll cadence doesn't force a full rebuild on every poll.
         ttl = _SESSIONS_CACHE_TTL_SECONDS
         if _session_list_cache_streaming_freeze_marker() is not None:
             ttl = _SESSIONS_CACHE_STREAMING_TTL_SECONDS
-        fresh = (now - ts) < ttl
-        if fresh:
+        if (now - ts) < ttl:
             _SESSIONS_CACHE.move_to_end(key)
-            return _session_list_cache_copy_payload(payload), True
+            return _session_list_cache_copy_payload(payload), _SESSION_LIST_CACHE_FRESH
         if allow_stale:
             _SESSIONS_CACHE.move_to_end(key)
-            return _session_list_cache_copy_payload(payload), False
+            return _session_list_cache_copy_payload(payload), _SESSION_LIST_CACHE_STALE_AGE
         _SESSIONS_CACHE.pop(key, None)
-        return None, False
+        return None, _SESSION_LIST_CACHE_MISSING
+
+
+def _session_list_cache_get(
+    key: tuple,
+    allow_stale: bool = False,
+) -> tuple[dict | None, bool]:
+    payload, status = _session_list_cache_probe(key, allow_stale=allow_stale)
+    return payload, status == _SESSION_LIST_CACHE_FRESH
 
 
 def _session_list_cache_stale_reason(key: tuple) -> str | None:
-    """Return why an existing cache entry is stale, if it is stale."""
-    now = time.monotonic()
-    current_stamp = _session_list_cache_resolved_source_stamp(key)
-    with _SESSIONS_CACHE_LOCK:
-        entry = _SESSIONS_CACHE.get(key)
-        if not entry:
-            return None
-        ts, stamp, _payload = entry
-        if stamp != current_stamp:
-            # Same rebuild-rate floor as _session_list_cache_get: reporting "source"
-            # inside the floor would send the caller into a rebuild this floor exists
-            # to prevent.
-            if (now - ts) < _SESSIONS_CACHE_MIN_REFRESH_SECONDS:
-                return None
-            return "source"
-        ttl = _SESSIONS_CACHE_TTL_SECONDS
-        if _session_list_cache_streaming_freeze_marker() is not None:
-            ttl = _SESSIONS_CACHE_STREAMING_TTL_SECONDS
-        if (now - ts) >= ttl:
-            return "age"
+    """Return why an existing cache entry is stale, if a rebuild is warranted."""
+    payload, status = _session_list_cache_probe(key, allow_stale=True)
+    if payload is None or status in (
+        _SESSION_LIST_CACHE_FRESH,
+        _SESSION_LIST_CACHE_HELD,
+    ):
         return None
+    return status
 
 
 def _session_list_cache_set(
