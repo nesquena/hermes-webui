@@ -75,7 +75,7 @@ def session_new_env(monkeypatch):
         routes, "_worktree_default_from_config", lambda profile=None: False
     )
     monkeypatch.setattr(
-        routes, "_session_model_state_from_request", lambda m, p: ("model-x", None)
+        routes, "_session_model_state_from_request", lambda m, p, *_a, **_k: ("model-x", None)
     )
     monkeypatch.setattr(routes, "_validate_session_toolsets_shape", lambda v: None)
 
