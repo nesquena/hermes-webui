@@ -2720,6 +2720,330 @@ def _split_picker_overflow_models(
     return visible, extras
 
 
+# ── Per-provider picker exclude list (#7507) ────────────────────────────────
+#
+# Display-only filter applied to ALL three catalog producers
+# (network-free /api/models fallback, normal catalog builder, and
+# /api/models/live incremental response). The user's existing
+# ``providers.<id>.models`` allowlist is the stronger override — it picks
+# the candidate universe first; this list subtracts from that universe.
+# New upstream models still appear automatically unless explicitly
+# excluded.
+#
+# Exact-ID match, case-preserving. The exclusion is evaluated on the
+# RAW UNPREFIXED model id (``gpt-5.6-luna``, not
+# ``@openrouter:gpt-5.6-luna``) so the user lists the bare id once and
+# it covers both the active-provider and cross-provider renderings.
+
+
+def get_picker_excludes(provider_id: str | None = None) -> set[str]:
+    """Return the per-provider picker exclude set for *provider_id*.
+
+    Reads from the WebUI-owned settings store (``settings.json``) under
+    ``picker_excludes`` — a map of canonical provider id to a list of
+    exact case-preserving model ids. Tolerant parsing: missing keys,
+    non-dict values, non-list per-provider values, and non-string
+    entries are all ignored so a partial / malformed save never blocks
+    the picker.
+
+    With ``provider_id=None`` returns the union across every provider
+    (used by tests asserting global absence).
+    """
+    try:
+        raw = load_settings().get("picker_excludes")
+    except Exception:
+        return set()
+    if not isinstance(raw, dict):
+        return set()
+
+    def _clean_ids(value: object) -> set[str]:
+        if not isinstance(value, list):
+            return set()
+        out: set[str] = set()
+        for entry in value:
+            if not isinstance(entry, str):
+                continue
+            stripped = entry.strip()
+            if stripped:
+                out.add(stripped)
+        return out
+
+    if provider_id is None:
+        result: set[str] = set()
+        for _ids in raw.values():
+            result |= _clean_ids(_ids)
+        return result
+
+    pid = str(provider_id or "").strip()
+    if not pid:
+        return set()
+    # Resolve alias → canonical (e.g. ``z.ai`` → ``zai``). Settings
+    # stored under either key still apply; the canonical form is what
+    # the picker uses.
+    canonical = pid
+    try:
+        canonical = _resolve_provider_alias(pid) or pid
+    except Exception:
+        pass
+    # UNION across every stored key that resolves to the requested
+    # canonical, rather than returning the first match. A user who
+    # imported a settings.json (or edited it by hand) can easily end
+    # up with BOTH ``zai`` and ``z.ai`` keys present, each carrying a
+    # different slice of hides. Returning on the first hit silently
+    # ignored the other list and resurrected the models it named —
+    # the exact resurrection path this policy exists to close.
+    # The direct keys (canonical, then the caller's input form which
+    # may itself be an alias) are included in the union rather than
+    # short-circuiting it.
+    keys_to_union: list[object] = []
+    seen: set[str] = set()
+    for key in (canonical, pid):
+        if key in raw and key not in seen:
+            seen.add(key)
+            keys_to_union.append(key)
+    for stored_key in raw:
+        if not isinstance(stored_key, str):
+            continue
+        if stored_key in seen:
+            continue
+        try:
+            if _resolve_provider_alias(stored_key) == canonical:
+                seen.add(stored_key)
+                keys_to_union.append(stored_key)
+        except Exception:
+            continue
+    if not keys_to_union:
+        return set()
+    result_ids: set[str] = set()
+    for key in keys_to_union:
+        result_ids |= _clean_ids(raw.get(key))
+    return result_ids
+
+
+def _picker_excludes_payload() -> dict:
+    """Return the ``picker_excludes`` map for API payloads, keyed canonically.
+
+    Unlike ``get_picker_excludes()`` (which resolves a single provider's set,
+    unioning alias-equivalent keys), this returns the *stored* model-id lists
+    so the browser can apply the exact same policy locally when it would
+    otherwise re-inject an option the server-side filter removed.
+
+    #7777 P1 ("Alias exclusions reach browser unmatched"): the keys are
+    NORMALISED to their canonical provider slug before publishing. The raw
+    stored key can be an alias (``glm`` → ``zai``, ``z.ai`` → ``zai``); the
+    browser's ``_pickerExcludesForProvider`` only knows how to match
+    punctuation and case variants of the provider it was handed, not the
+    agent's semantic alias table. Sending the raw key therefore made the
+    exclusion invisible exactly where the browser needed it — the saved
+    default or previous selection the server had already filtered out would
+    be re-injected. Lists stored under several keys that resolve to the same
+    canonical provider are unioned, mirroring ``get_picker_excludes``.
+
+    Returns ``{}`` on any read failure so the field is always a JSON object
+    for the client.
+    """
+    try:
+        raw = load_settings().get("picker_excludes")
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+
+    def _clean_ids(value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        seen: set[str] = set()
+        out: list[str] = []
+        for entry in value:
+            if not isinstance(entry, str):
+                continue
+            stripped = entry.strip()
+            if stripped and stripped not in seen:
+                seen.add(stripped)
+                out.append(stripped)
+        return out
+
+    out: dict[str, list[str]] = {}
+    for pid, ids in raw.items():
+        if not isinstance(pid, str) or not pid.strip():
+            continue
+        cleaned = _clean_ids(ids)
+        if not cleaned:
+            continue
+        key = pid.strip()
+        try:
+            canonical = _resolve_provider_alias(key) or key
+        except Exception:
+            canonical = key
+        key = str(canonical).strip() or key
+        # Union rather than overwrite: a settings.json can carry both ``glm``
+        # and ``zai`` with a different slice of hides each.
+        merged = out.setdefault(key, [])
+        known = set(merged)
+        for entry in cleaned:
+            if entry not in known:
+                known.add(entry)
+                merged.append(entry)
+    return out
+
+
+def _strip_provider_prefix_from_model_id(model_id: object) -> str:
+    """Return *model_id* with a complete ``@provider:`` prefix stripped.
+
+    Provider ids themselves can contain colons — a named custom provider is
+    ``custom:<slug>`` — so the prefix boundary is NOT the first colon after
+    the ``@``. Walk the colon boundaries from the LONGEST candidate prefix
+    inward and accept the first one that names a real provider (a known
+    static provider, a plugin provider, a ``custom:``-style named slug, or
+    an alias of any of those):
+
+    * ``@custom:alpha:chat-a`` → ``chat-a`` (prefix ``custom:alpha``)
+    * ``@openrouter:gpt-5.6-luna`` → ``gpt-5.6-luna`` (``openrouter``)
+    * ``@opencode-zen:vendor/model:1`` → ``vendor/model:1`` when the model
+      id itself contains a colon and the full prefix is a known provider
+
+    When no boundary names a real provider (unknown slug, no registry
+    entry) the generic ``@<first segment>:`` form is stripped as a last
+    resort, preserving the historical behaviour for plain
+    ``@provider:model`` values. Values that do not start with ``@`` or
+    carry no colon at all are returned unchanged.
+    """
+    raw = str(model_id or "").strip()
+    if not raw.startswith("@") or ":" not in raw:
+        return raw
+    body = raw[1:]
+    boundaries = [i for i, ch in enumerate(body) if ch == ":"]
+    for index in reversed(boundaries):  # longest (most specific) prefix first
+        candidate = body[:index].strip()
+        if not candidate:
+            continue
+        if _is_known_model_provider(candidate):
+            return body[index + 1 :].strip()
+        try:
+            resolved = _resolve_provider_alias(candidate)
+        except Exception:
+            resolved = ""
+        if resolved and resolved != candidate and _is_known_model_provider(resolved):
+            return body[index + 1 :].strip()
+    # Unknown provider id: fall back to stripping the FIRST colon-delimited
+    # segment only (historical behaviour for plain ``@provider:model``).
+    return body.split(":", 1)[1].strip()
+
+
+def _is_model_id_excluded(model_id: object, exclude_set: set[str]) -> bool:
+    """True when *model_id* matches any entry in *exclude_set*.
+
+    Matches both the bare form (``gpt-5.6-luna``) and the
+    ``@provider:``-prefixed form (``@openrouter:gpt-5.6-luna``), so the
+    same exclude entry filters the model out regardless of whether it
+    is rendered as the active-provider option or a cross-provider
+    option. Case-preserving.
+
+    The prefix strip is **provider-id aware**: ``@custom:alpha:chat-a``
+    is split at the complete ``@custom:alpha:`` boundary, not at the
+    first colon, so an exclusion for the bare ``chat-a`` id still
+    matches a named-custom-provider rendering.
+
+    #7507: the ``provider/model`` slash form is also matched — that is
+    the shape Hermes config's ``model.default`` uses
+    (``custom:alpha/chat-a``), and the default-model re-injection guard
+    compares this value directly. Stripping only a KNOWN provider
+    prefix keeps ids whose model half legitimately contains slashes
+    intact (e.g. ``openrouter/anthropic/claude`` is only stripped when
+    ``openrouter`` is a known provider and the remainder still matches
+    an exclude entry).
+    """
+    if not exclude_set or not model_id:
+        return False
+    raw = str(model_id or "").strip()
+    if not raw:
+        return False
+    if raw in exclude_set:
+        return True
+    if raw.startswith("@") and ":" in raw:
+        bare = _strip_provider_prefix_from_model_id(raw)
+        if bare and bare in exclude_set:
+            return True
+    # ``provider/model`` slash form (config ``model.default`` shape): the
+    # slash is a provider separator ONLY when its prefix names a provider
+    # WebUI can render. Comparing the tail unconditionally hid the distinct
+    # valid model ``vendor/bar`` from a bare-``bar`` exclusion — the same
+    # over-filter the browser matcher had (#7777 P1). When the prefix is
+    # not a known provider, exact-ID matching stands.
+    if "/" in raw:
+        head, _, tail = raw.partition("/")
+        if head and tail:
+            try:
+                if _is_known_model_provider(head.strip()) and tail.strip() in exclude_set:
+                    return True
+            except Exception:
+                pass
+    return False
+
+
+def _filter_picker_excludes(
+    models: object,
+    provider_id: str | None,
+) -> list[dict]:
+    """Return *models* with any exact-id picker excludes removed.
+
+    Shared exclusion step called by all three catalog producers
+    (static /api/models fallback, normal catalog builder, and
+    /api/models/live). Invoked BEFORE ``_apply_provider_prefix`` and
+    BEFORE every visible/overflow slice so an excluded model is
+    removed from the universe the picker is built from, not just
+    from the visible slice. A missing or empty exclude list returns
+    the input list unchanged.
+    """
+    if not models:
+        return []
+    # Coerce to a list; tolerate a non-iterable input (None/str) so a
+    # malformed upstream payload does not raise inside the catalog build.
+    try:
+        models_list = list(models)  # type: ignore[arg-type]
+    except TypeError:
+        return []
+    excludes = get_picker_excludes(provider_id)
+    if not excludes:
+        return [m for m in models_list if isinstance(m, dict)]
+    return [
+        m for m in models_list
+        if isinstance(m, dict)
+        and not _is_model_id_excluded(m.get("id", ""), excludes)
+    ]
+
+
+def _unfiltered_catalog_for_cache(payload: dict) -> dict:
+    """Return *payload* as the catalog that may be published to the models cache.
+
+    #7777 re-gate finding 3: the picker projection filters excluded ids out of
+    ``groups``, but the catalog stored in ``_available_models_cache`` (and on
+    disk) is the routing-authoritative universe — it feeds
+    ``_endpoint_advertised_model_ids()`` on the per-turn send hot path. If the
+    picker policy leaked into it, excluding a model would change which backend
+    an existing session's turn is routed to.
+
+    So the builder ships its unfiltered groups under a private key; this helper
+    swaps them into ``groups`` and drops the private key. A payload without the
+    key (static/minimal catalogs, older callers) is returned as a shallow copy
+    with the key removed.
+    """
+    cache_payload = dict(payload)
+    cache_payload.pop("_unfiltered_groups", None)
+    unfiltered = payload.get("_unfiltered_groups")
+    if unfiltered is not None:
+        cache_payload["groups"] = unfiltered
+    return cache_payload
+
+
+def _strip_internal_catalog_keys(payload: dict) -> dict:
+    """Return *payload* without the private keys used only between the builder
+    and the cache-publication path (never part of the API/picker contract)."""
+    if not isinstance(payload, dict):
+        return payload
+    return {k: v for k, v in payload.items() if not k.startswith("_unfiltered_")}
+
+
 def _apply_provider_prefix(
     raw_models: list[dict],
     provider_id: str,
@@ -7104,6 +7428,16 @@ _SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 3600.0
 _available_models_cache_lock = threading.RLock()  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
 _cache_build_in_progress = False  # True while a cold path is actively building
+# Monotonic invalidation generation. ``invalidate_models_cache()`` bumps this
+# under the cache lock; a builder captures the value when it starts and re-checks
+# it immediately before publishing. #7777 P1 ("Stale builds repopulate caches"):
+# a rebuild that began before a settings save (e.g. a picker_excludes change)
+# used to publish its result unconditionally, so the catalog built with the OLD
+# exclusions replaced the cache the invalidation had just cleared — and the
+# excluded models stayed selectable until the next invalidation or TTL expiry.
+# Clearing the cache is not enough; an in-flight builder needs a generation to
+# check against, otherwise it is a write that lands after the clear.
+_models_cache_generation = 0
 
 # ── Catalog publication ordering ─────────────────────────────────────────────
 # Every cold rebuild takes the next sequence number, and the published catalog
@@ -7678,24 +8012,49 @@ def _minimal_static_models_catalog() -> dict:
                 pass
         groups: list[dict] = []
         if default_model:
-            try:
-                label = _get_label_for_model(default_model, [])
-            except Exception:
-                label = default_model
-            groups.append(
-                {
-                    "provider": "Default",
-                    "provider_id": active_provider or "default",
-                    "models": [{"id": default_model, "label": label}],
-                }
-            )
-        return _annotate_fast_tier_model_groups({
+            # #7507: honour the per-provider picker exclude list even on
+            # this emergency fallback path. Without the check, every
+            # "no groups detected" / rebuild-timeout response re-inserts
+            # the default model the user explicitly hid — the fallback
+            # resurrects the excluded id on every cold /api/models call.
+            if not _is_model_id_excluded(
+                default_model, get_picker_excludes(active_provider)
+            ):
+                try:
+                    label = _get_label_for_model(default_model, [])
+                except Exception:
+                    label = default_model
+                groups.append(
+                    {
+                        "provider": "Default",
+                        "provider_id": active_provider or "default",
+                        "models": [{"id": default_model, "label": label}],
+                    }
+                )
+        payload = {
             "active_provider": active_provider,
             "default_model": default_model,
             "configured_model_badges": {},
             "groups": groups,
             "aliases": {},
-        })
+            # #7507: ship the raw policy map so the browser's re-injection
+            # paths honour the same excludes as the server-side filter.
+            "picker_excludes": _picker_excludes_payload(),
+        }
+        # #7507: when the ONLY candidate (the default model) is excluded,
+        # surface an explicit no-eligible-model state so the browser can
+        # render "no models" instead of silently snapping to a phantom
+        # row. ``no_eligible_models`` is additive — clients that don't
+        # know the flag ignore it, and the empty ``groups`` already
+        # renders an empty picker.
+        if default_model and not groups:
+            payload["no_eligible_models"] = True
+            logger.debug(
+                "minimal static catalog: default model %r is excluded by the "
+                "per-provider picker policy (#7507); returning an empty group set",
+                default_model,
+            )
+        return _annotate_fast_tier_model_groups(payload) or payload
     except Exception:
         logger.debug("minimal static models catalog build failed", exc_info=True)
         return _annotate_fast_tier_model_groups({
@@ -7898,7 +8257,14 @@ def _static_models_catalog_without_live_probes() -> dict:
         for pid in sorted(detected_providers):
             if pid.startswith("custom:"):
                 custom_group = named_custom_groups.get(pid, {})
-                group_models = copy.deepcopy(custom_group.get("models", []))
+                # #7507: per-provider picker excludes are subtracted from the
+                # candidate universe BEFORE _apply_provider_prefix, so the
+                # bare ``gpt-5.6-luna`` exclude entry removes both the
+                # active-provider rendering and the cross-provider rendering.
+                group_models = _filter_picker_excludes(
+                    copy.deepcopy(custom_group.get("models", [])),
+                    pid,
+                )
                 if group_models or pid == active_provider:
                     groups.append(
                         {
@@ -7914,7 +8280,12 @@ def _static_models_catalog_without_live_probes() -> dict:
                 continue
 
             if pid == "custom":
-                group_models = copy.deepcopy(custom_group_models)
+                # #7507: same per-provider exclude step as above, applied
+                # before prefixing so the bare id in the user's settings
+                # covers both renderings.
+                group_models = _filter_picker_excludes(
+                    copy.deepcopy(custom_group_models), pid,
+                )
                 for model_id in configured_model_ids.get(pid, []):
                     if not any(m.get("id") == model_id for m in group_models):
                         group_models.append(
@@ -7966,6 +8337,12 @@ def _static_models_catalog_without_live_probes() -> dict:
                     raw_models.append(
                         {"id": model_id, "label": _get_label_for_model(model_id, groups)}
                     )
+            # #7507: subtract per-provider picker excludes BEFORE
+            # _apply_provider_prefix. The configured-model-id append above
+            # is also gated by the same filter so a configured id the user
+            # has explicitly excluded does not reappear via the
+            # configured_model_ids path.
+            raw_models = _filter_picker_excludes(raw_models, pid)
             # Plugin-only providers (e.g. 9router) must enter `groups` even
             # when `raw_models` is empty so the post-loop filter sees them.
             # Without this, the earlier plugin-fallback pass only seeds
@@ -7981,27 +8358,61 @@ def _static_models_catalog_without_live_probes() -> dict:
                 )
 
         if default_model:
-            all_model_ids = {
-                str(model.get("id") or "")
-                for group in groups
-                for model in group.get("models", [])
-            }
-            if default_model not in all_model_ids and f"@{active_provider}:{default_model}" not in all_model_ids:
-                label = _get_label_for_model(default_model, groups)
-                target_group = next(
-                    (group for group in groups if group.get("provider_id") == active_provider),
-                    None,
-                )
-                if target_group is not None:
-                    target_group.setdefault("models", []).insert(0, {"id": default_model, "label": label})
-                elif groups:
-                    groups.append(
-                        {
-                            "provider": "Default",
-                            "provider_id": active_provider or "default",
-                            "models": [{"id": default_model, "label": label}],
-                        }
+            # #7507: re-injection guard. The user has explicitly excluded
+            # this model from the picker; do not silently re-add it via
+            # the default-model injection path. Treats the exclusion as
+            # the source of truth and lets the picker fall back to
+            # whatever is in the active group rather than contradicting
+            # the user's policy.
+            _active_excludes = get_picker_excludes(active_provider)
+            if _is_model_id_excluded(default_model, _active_excludes):
+                pass  # honor the exclusion; do not re-inject.
+            else:
+                all_model_ids = {
+                    str(model.get("id") or "")
+                    for group in groups
+                    for model in group.get("models", [])
+                }
+                if default_model not in all_model_ids and f"@{active_provider}:{default_model}" not in all_model_ids:
+                    label = _get_label_for_model(default_model, groups)
+                    target_group = next(
+                        (group for group in groups if group.get("provider_id") == active_provider),
+                        None,
                     )
+                    if target_group is not None:
+                        target_group.setdefault("models", []).insert(0, {"id": default_model, "label": label})
+                    elif groups:
+                        groups.append(
+                            {
+                                "provider": "Default",
+                                "provider_id": active_provider or "default",
+                                "models": [{"id": default_model, "label": label}],
+                            }
+                        )
+
+        # #7507: defensive final-pass scan. The re-injection block above is
+        # the primary guard, but a provider whose excludes are set AFTER
+        # the active provider (e.g. excludes=``{"other": [...]}`` while
+        # default_model points at an "other" model) could still slip
+        # through. Walk both ``models`` and ``extra_models`` and drop any
+        # id that belongs to the per-provider exclude set, preserving the
+        # remainder of each group untouched.
+        if groups:
+            for _g in groups:
+                _pid = _g.get("provider_id")
+                if not _pid:
+                    continue
+                _g_excludes = get_picker_excludes(_pid)
+                if not _g_excludes:
+                    continue
+                for _bucket in ("models", "extra_models"):
+                    _rows = _g.get(_bucket)
+                    if not _rows:
+                        continue
+                    _g[_bucket] = [
+                        m for m in _rows
+                        if not _is_model_id_excluded(m.get("id", ""), _g_excludes)
+                    ]
 
         _deduplicate_model_ids(groups)
         groups = [
@@ -8078,6 +8489,9 @@ def _static_models_catalog_without_live_probes() -> dict:
             ),
             "groups": groups,
             "aliases": model_aliases,
+            # #7507: ship the raw policy map so the browser's re-injection
+            # paths honour the same excludes as the server-side filter.
+            "picker_excludes": _picker_excludes_payload(),
         })
     except Exception:
         logger.debug("static models catalog build failed", exc_info=True)
@@ -8668,6 +9082,13 @@ def _models_cache_source_fingerprint() -> dict:
     one of those rewrites (RCA t_16551f61). config.yaml keeps the cheap
     mtime/size fingerprint because it is only rewritten on deliberate user
     edits (which can change anything) and does not churn on a timer.
+
+    The ``picker_excludes`` axis (#7507) closes the last resurrection
+    path: the policy lives in the WebUI settings store, whose mtime is
+    NOT tracked by any other axis here. A catalog cached before a
+    ``picker_excludes`` save (24h TTL) would otherwise keep serving an
+    excluded model long after the save, because ``load_settings()`` was
+    never part of the cache identity.
     """
     home = _active_profile_home()
     return {
@@ -8676,6 +9097,7 @@ def _models_cache_source_fingerprint() -> dict:
         "env": _models_cache_env_fingerprint(home / ".env"),
         "plugins": _models_cache_plugin_fingerprint(home),
         "catalog": _models_cache_catalog_fingerprint(),
+        "picker_excludes": _picker_excludes_payload(),
     }
 
 
@@ -8973,6 +9395,21 @@ def _load_models_cache_from_disk() -> dict | None:
                 cache["aliases"]
                 if isinstance(cache.get("aliases"), dict)
                 else _model_aliases_from_config()
+            ),
+            # #7777 round-3 MUST-FIX 1: the disk cache used to persist and
+            # rebuild only the older payload fields, so a cache hit returned
+            # no ``picker_excludes``. The browser's ``populateModelDropdown``
+            # reads that field to install its own copy of the policy, and an
+            # absent one resets ``window._pickerExcludes`` to ``{}`` — after
+            # a restart a hidden model was re-injected and selected. The
+            # fingerprint already covers the policy, so this file is
+            # guaranteed congruent with current settings; restore the stored
+            # map (or rebuild it from the same source) so a disk-cache boot
+            # behaves exactly like a live build.
+            "picker_excludes": (
+                cache["picker_excludes"]
+                if isinstance(cache.get("picker_excludes"), dict)
+                else _picker_excludes_payload()
             ),
         })
     except Exception:
@@ -9384,6 +9821,16 @@ def _load_stale_models_cache_from_disk() -> dict | None:
             "configured_model_badges": cache["configured_model_badges"],
             "groups": cache["groups"],
             "aliases": aliases,
+            # #7777 round-3 MUST-FIX 1 (same as the strict loader above): the
+            # timeout fallback must not be the one path that forgets the
+            # policy. A stale cache file written by a pre-fix release has no
+            # stored map, so rebuild it from the same settings source the
+            # live builders use.
+            "picker_excludes": (
+                cache["picker_excludes"]
+                if isinstance(cache.get("picker_excludes"), dict)
+                else _picker_excludes_payload()
+            ),
         })
     except Exception:
         return None
@@ -9407,17 +9854,13 @@ def _save_models_cache_to_disk(
     so this is safe — at worst we write one cache file that gets rejected
     once on the next boot.
 
-    The commit is fenced (#7481 review). Two overlapping publishers used to
-    pick the SAME ``.<pid>.tmp`` path, so the newer writer's rename could be
-    undone by the older writer's still-open descriptor, leaving stale-but-valid
-    JSON as the durable catalog; and there was no re-check between the in-memory
-    generation decision and the rename. So the temp file is unique per build, and
-    the rename is taken under ``_models_cache_disk_commit_lock`` after
-    re-validating that this build is still the newest allocated generation and is
-    still publishing for the sources it read. A superseded or re-sourced commit
-    discards its temp file and leaves the durable catalog to the build that won.
-    ``_source_fingerprint`` records the fingerprint the build READ, so the file
-    can never claim provenance it did not have.
+    #7777 round-3 MUST-FIX 1: ``picker_excludes`` is persisted alongside the
+    other payload fields. Without it a disk-cache hit returned a catalog the
+    browser accepted as complete but with no policy attached, so
+    ``populateModelDropdown`` reset ``window._pickerExcludes`` to ``{}`` and
+    re-injected a model the live build had filtered out — the resurrection
+    only became visible after a restart, which is why the in-memory path
+    never showed it.
     """
     global _models_disk_committed_seq
     tmp = None
@@ -9436,6 +9879,11 @@ def _save_models_cache_to_disk(
             "default_model": cache["default_model"],
             "configured_model_badges": cache["configured_model_badges"],
             "groups": cache["groups"],
+            "picker_excludes": (
+                cache["picker_excludes"]
+                if isinstance(cache.get("picker_excludes"), dict)
+                else _picker_excludes_payload()
+            ),
         }
         runtime_version = _current_webui_version()
         if runtime_version is not None:
@@ -11091,6 +11539,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         except Exception:
             logger.debug("Failed to inspect MoA presets for model picker", exc_info=True)
 
+        # #7777 re-gate finding 3: the UNFILTERED counterpart of the picker
+        # groups. ``_append_picker_group`` fills both — the filtered projection
+        # for the picker response, and this one for the catalog that gets
+        # published to ``_available_models_cache`` (routing provenance must
+        # never see the picker policy). Declared before the branch so the
+        # payload below can read it unconditionally.
+        _unfiltered_groups: list[dict] = []
+
         # 5. Build model groups
         if detected_providers:
             _picker_selected_model_id = (
@@ -11098,7 +11554,6 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 or default_model
                 or None
             )
-
             def _append_picker_group(
                 provider_label: str,
                 provider_id: str,
@@ -11109,7 +11564,33 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 decorate_overflow_label: bool = False,
                 allow_empty: bool = False,
             ) -> None:
+                # #7777 re-gate finding 3: routing must use UNFILTERED
+                # identities. The picker projection filters; the catalog that
+                # gets published to ``_available_models_cache`` (and therefore
+                # to the provenance snapshot ``_endpoint_advertised_model_ids``
+                # reads on the per-turn send hot path) must NOT. So record the
+                # unfiltered group first, then build the filtered projection.
+                _unfiltered_models = copy.deepcopy(raw_models or [])
+                if apply_prefix:
+                    _unfiltered_models = _apply_provider_prefix(
+                        _unfiltered_models, provider_id, active_provider
+                    )
+                _unfiltered_groups.append(
+                    {
+                        "provider": provider_label,
+                        "provider_id": provider_id,
+                        "models": _unfiltered_models,
+                    }
+                )
                 picker_models = copy.deepcopy(raw_models or [])
+                # #7507: subtract per-provider picker excludes BEFORE the
+                # fast-tier annotation, BEFORE ``_apply_provider_prefix``,
+                # and BEFORE the visible/overflow split. The bare id the
+                # user lists in settings covers both the active-provider
+                # rendering and the cross-provider ``@provider:``-prefixed
+                # rendering because the matcher strips the prefix before
+                # comparison.
+                picker_models = _filter_picker_excludes(picker_models, provider_id)
                 if _is_openai_family_provider(provider_id):
                     for _model in picker_models:
                         if not isinstance(_model, dict):
@@ -11632,10 +12113,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         )
         else:
             if default_model:
-                label = _get_label_for_model(default_model, groups)
-                groups.append(
-                    {"provider": "Default", "provider_id": "default", "models": [{"id": default_model, "label": label}]}
-                )
+                # #7507: re-injection guard. The user has explicitly
+                # excluded this model from the picker; do not silently
+                # create a phantom "Default" group for it.
+                if not _is_model_id_excluded(default_model, get_picker_excludes(active_provider)):
+                    label = _get_label_for_model(default_model, groups)
+                    groups.append(
+                        {"provider": "Default", "provider_id": "default", "models": [{"id": default_model, "label": label}]}
+                    )
 
         if default_model:
             # Guard against provider-id values mistakenly stored in
@@ -11650,11 +12135,27 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 str(default_model).strip().lower().replace("_", "-") in _PROVIDER_DISPLAY
                 or _canonicalise_provider_id(default_model) in _PROVIDER_DISPLAY
             )
+            # #7507: also skip injection when the model id is on the
+            # per-provider picker exclude list. The exclusion is the
+            # source of truth; the picker must not contradict it.
+            _excluded_by_policy = _is_model_id_excluded(
+                default_model, get_picker_excludes(active_provider),
+            )
             if _looks_like_provider_id:
                 logger.warning(
                     "Suspicious model.default value %r — looks like a provider id, "
                     "not a model id. Skipping picker injection. Check `model.default` "
                     "in config.yaml.",
+                    default_model,
+                )
+            elif _excluded_by_policy:
+                # Honor the user's picker-exclude policy. Log at debug
+                # rather than warning because the policy is intentional
+                # and the user already saw the same exclusion on
+                # /api/models.
+                logger.debug(
+                    "model.default %r is in the per-provider picker exclude "
+                    "list; skipping picker re-injection (#7507).",
                     default_model,
                 )
             else:
@@ -11691,6 +12192,29 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                                 "models": [{"id": default_model, "label": label}],
                             }
                         )
+
+        # #7507: defensive final-pass scan. Mirrors the static catalog
+        # builder: walk both ``models`` and ``extra_models`` for every
+        # group and drop any id that belongs to the per-provider exclude
+        # set. Catches the case where the user has excluded ids under a
+        # non-active provider that surface via the normal builder's
+        # union/merge logic.
+        if groups:
+            for _g in groups:
+                _pid = _g.get("provider_id")
+                if not _pid:
+                    continue
+                _g_excludes = get_picker_excludes(_pid)
+                if not _g_excludes:
+                    continue
+                for _bucket in ("models", "extra_models"):
+                    _rows = _g.get(_bucket)
+                    if not _rows:
+                        continue
+                    _g[_bucket] = [
+                        m for m in _rows
+                        if not _is_model_id_excluded(m.get("id", ""), _g_excludes)
+                    ]
 
         # Post-process: ensure model IDs are globally unique across groups.
         # When multiple providers expose the same bare model ID, prefix
@@ -11753,13 +12277,41 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # 12. Include model aliases so the WebUI frontend can resolve them.
         model_aliases = _model_aliases_from_config()
 
-        return _annotate_fast_tier_model_groups({
+        _normal_payload = {
             "active_provider": active_provider,
             "default_model": default_model,
             "configured_model_badges": _build_configured_model_badges(),
             "groups": groups,
             "aliases": model_aliases,
-        })
+            # #7507: ship the raw policy map so the browser can apply the
+            # same excludes when it would otherwise re-inject an option
+            # (boot default, previous pick, synthesized fallback rows)
+            # server-side filtering never sees.
+            "picker_excludes": _picker_excludes_payload(),
+            # #7777 re-gate finding 3: the unfiltered counterpart of ``groups``.
+            # Consumed by the cache-publication path below (routing provenance
+            # must not see the picker policy) and stripped before the payload
+            # is handed to a picker/API caller.
+            "_unfiltered_groups": _unfiltered_groups if detected_providers else groups,
+        }
+        # #7777 round-3 SHOULD-FIX 2: only the minimal/static builder used to
+        # set ``no_eligible_models``. With one configured model fully
+        # excluded, the normal builder returns ``groups: []`` with no flag,
+        # so the browser's empty-groups handling fell through and KEPT the
+        # previous (now-excluded) option selected — the next send then used
+        # it. Set the same explicit flag here so the browser renders an
+        # empty picker and reconciles the active session instead. Gated on a
+        # policy that actually removed something, so an install with no
+        # providers at all is not mislabelled as an exclusion outcome.
+        _active_excludes_here = get_picker_excludes(active_provider)
+        if not groups and _active_excludes_here:
+            _normal_payload["no_eligible_models"] = True
+            logger.debug(
+                "normal models catalog: every candidate is excluded by the "
+                "per-provider picker policy (#7507/#7777); flagging "
+                "no_eligible_models",
+            )
+        return _annotate_fast_tier_model_groups(_normal_payload) or _normal_payload
 
     # ── FAST PATH ─────────────────────────────────────────────────────────────
     # Mark that a build may be in progress BEFORE acquiring the lock.
@@ -11992,6 +12544,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
         # Legacy synchronous (unbounded) rebuild — opt-in via budget<=0.
         if _LIVE_REBUILD_BUDGET_SECONDS <= 0:
+            # Capture the picker-excludes policy identity BEFORE the build so
+            # the straddle guard below can discard a result whose policy
+            # changed mid-build (#7507 finding 5 — same guard as the bounded
+            # path, which captures its own before the worker runs).
+            _build_policy_identity = _models_cache_source_fingerprint()
             try:
                 # Foreground thread already carries the request-profile TLS;
                 # apply the mirrored profile env (no-op for default) for the
@@ -12011,6 +12568,18 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 # ownership rule as the success path, one implementation.
                 _clear_build_in_progress(rebuild_seq)
                 raise
+            # #7507: same straddle guard as the bounded path below — a result
+            # built before a picker-excludes change must not be published with
+            # a fingerprint that claims it is current.
+            if _models_cache_source_fingerprint() != _build_policy_identity:
+                logger.debug(
+                    "discarding legacy models rebuild result: picker_excludes "
+                    "changed while the build was running (#7507)",
+                )
+                with _cache_build_cv:
+                    _cache_build_in_progress = False
+                    _cache_build_cv.notify_all()
+                return copy.deepcopy(_minimal_static_models_catalog())
             with _cache_build_cv:
                 _superseded = _models_rebuild_superseded(rebuild_seq)
                 _identity_current = _models_build_identity_current(
@@ -12018,7 +12587,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 )
                 if not _superseded and _identity_current:
                     published_at = time.monotonic()
-                    _available_models_cache = result
+                    # #7777 re-gate finding 3: publish the UNFILTERED groups so
+                    # the routing-provenance snapshot (and every disk/memory
+                    # reader) sees the real universe. The picker response the
+                    # caller gets keeps the filtered projection.
+                    _available_models_cache = _unfiltered_catalog_for_cache(result)
                     _available_models_cache_ts = published_at
                     _available_models_live_rebuild_ts = published_at
                     _available_models_cache_source_fingerprint = rebuild_source_fingerprint
@@ -12032,7 +12605,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     rebuild_seq,
                     _models_rebuild_seq,
                 )
-                return copy.deepcopy(result)
+                return copy.deepcopy(_strip_internal_catalog_keys(result))
             if not _identity_current:
                 # The config/auth/catalog this build read changed while it ran, so
                 # it describes sources that no longer exist. Publishing it would
@@ -12044,7 +12617,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     rebuild_seq,
                 )
                 _clear_build_in_progress(rebuild_seq)
-                return copy.deepcopy(result)
+                return copy.deepcopy(_strip_internal_catalog_keys(result))
             # Foreground durable commit, queued rather than performed here: the
             # caller still holds the catalog lock, and taking the commit mutex in
             # that state is the lock-order cycle the #7481 review reproduced. The
@@ -12052,8 +12625,18 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # _commit_models_cache_to_disk_after_lock), so ownership still spans
             # it.
             deferred_disk_commits.append(
-                (result, rebuild_seq, rebuild_source_fingerprint, rebuild_profile)
+                (
+                    _unfiltered_catalog_for_cache(result),
+                    rebuild_seq,
+                    rebuild_source_fingerprint,
+                    rebuild_profile,
+                )
             )
+            # The picker/API caller gets the FILTERED projection (the policy is
+            # still honoured) PLUS the unfiltered identities under a private
+            # key, which the browser uses to resolve an explicit `/model`
+            # against the real universe (#7777 re-gate finding 5). The key is
+            # never part of the picker rendering.
             return copy.deepcopy(result)
 
         # ── Bounded rebuild (defense-in-depth) ───────────────────────────────
@@ -12097,6 +12680,13 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             global _available_models_cache_ts, _available_models_live_rebuild_ts
             global _available_models_cache_source_fingerprint
             deferred = False
+            # #7777 round-3 (rebase onto master #7481): the discard branches
+            # return False so the caller can serve the policy-honouring
+            # fallback instead of the stale result it built. Before the rebase
+            # the bounded path discarded via a bare ``return`` and the caller
+            # still returned the stale catalog — the very resurrection the
+            # discard exists to prevent, just moved from the cache to the
+            # response body.
             try:
                 with _cache_build_cv:
                     if _models_rebuild_superseded(rebuild_seq):
@@ -12134,7 +12724,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             "sources (rebuild #%d)",
                             rebuild_seq,
                         )
-                        return
+                        return False
                     published_at = time.monotonic()
                     _available_models_cache = result
                     _available_models_cache_ts = published_at
@@ -12151,10 +12741,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         (result, rebuild_seq, build_fingerprint, build_profile)
                     )
                     deferred = True
-                    return
+                    return True
                 try:
                     _save_models_cache_to_disk(
-                        result,
+                        _unfiltered_catalog_for_cache(result),
                         rebuild_seq=rebuild_seq,
                         build_fingerprint=build_fingerprint,
                         build_profile=build_profile,
@@ -12173,6 +12763,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 # commit and then the release, in that order.
                 if not deferred:
                     _clear_build_in_progress(rebuild_seq)
+            return True
 
         def _claim_publish() -> bool:
             """Return True iff the caller won the right to publish."""
@@ -12273,16 +12864,26 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             if "error" in box:
                 _clear_build_in_progress(rebuild_seq)
                 raise box["error"]
+            published = False
             if _claim_publish():
-                _publish_models_result(
+                published = _publish_models_result(
                     box["result"],
                     rebuild_seq=rebuild_seq,
                     build_fingerprint=rebuild_source_fingerprint,
                     build_profile=rebuild_profile,
                     # Foreground publisher: queue the durable commit for the
-                    # post-catalog-lock flush (#7481 review).
+                    # post-lock flush (#7481 review).
                     defer_durable=True,
                 )
+            if not published:
+                # #7777 round-3: the build was discarded (a picker-excludes
+                # save changed the policy mid-build, or the sources moved), so
+                # the result it produced is stale by construction. Serving it
+                # would hand the caller the excluded model behind a
+                # fresh-looking fingerprint — the resurrection the discard
+                # exists to prevent, just relocated from the cache to the
+                # response body. Serve the policy-honouring fallback instead.
+                return copy.deepcopy(_minimal_static_models_catalog())
             return copy.deepcopy(box["result"])
 
         # Budget elapsed. Mark it so the worker knows it owns out-of-band
@@ -12300,15 +12901,19 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 # An all-truncated pass has no picker options. Use the same
                 # stale/static fallback as a still-running first pass below.
             elif "result" in box and _claim_publish():
-                _publish_models_result(
+                _boundary_published = _publish_models_result(
                     box["result"],
                     rebuild_seq=rebuild_seq,
                     build_fingerprint=rebuild_source_fingerprint,
                     build_profile=rebuild_profile,
                     # Budget-boundary foreground winner: same deferred durable
-                    # commit as the within-budget path above (#7481 review).
+                    # commit as the within-budget path above.
                     defer_durable=True,
                 )
+                if not _boundary_published and "partial" not in box:
+                    # Same discard contract as the within-budget path: a
+                    # discarded build's result is stale, so serve the fallback.
+                    return copy.deepcopy(_minimal_static_models_catalog())
             if "partial" not in box:
                 return copy.deepcopy(box["result"])
 
@@ -13798,6 +14403,14 @@ _SETTINGS_DEFAULTS = {
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
     "auth_disabled_acknowledged": False,  # user acknowledged unauthenticated risk
     "provider_cost_budget": None,
+    # #7507: per-provider picker exclude list. Map of canonical
+    # provider id → list of exact case-preserving model ids to hide
+    # from the model picker dropdown. Display-only policy; the
+    # catalog still contains the ids so non-picker paths (slash
+    # commands, server-side resolution) can reference them. Read
+    # tolerantly by ``api.config.get_picker_excludes`` so a malformed
+    # value never breaks the picker.
+    "picker_excludes": {},
 }
 _SETTINGS_SPEECH_KEYS = {
     "tts_enabled",
@@ -14029,6 +14642,33 @@ def load_settings() -> dict:
     # values (including a legacy English pick written before this change)
     # win via the merge above and are never touched here.
     settings.setdefault("language", None)
+    # #7507: tolerant parser for the per-provider picker exclude list.
+    # Mirrors the language pattern: tolerate any malformed payload so a
+    # partial save never breaks the picker. We require the stored value
+    # to be a dict-of-lists; non-dict / non-list / non-string entries
+    # are silently dropped. Always emit at least an empty dict so the
+    # client sees a stable shape.
+    _raw_picker_excludes = stored.get("picker_excludes") if isinstance(stored, dict) else None
+    if isinstance(_raw_picker_excludes, dict):
+        _clean: dict = {}
+        for _pid, _ids in _raw_picker_excludes.items():
+            if not isinstance(_pid, str):
+                continue
+            _pid_clean = _pid.strip()
+            if not _pid_clean or not isinstance(_ids, list):
+                continue
+            _clean_ids: list[str] = []
+            for _entry in _ids:
+                if not isinstance(_entry, str):
+                    continue
+                _entry_clean = _entry.strip()
+                if _entry_clean and _entry_clean not in _clean_ids:
+                    _clean_ids.append(_entry_clean)
+            if _clean_ids:
+                _clean[_pid_clean] = _clean_ids
+        settings["picker_excludes"] = _clean
+    else:
+        settings.setdefault("picker_excludes", {})
     return settings
 
 
@@ -14045,6 +14685,11 @@ _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {
     # so we add it back to the explicit allow-list here.  The
     # existing BCP-47 validation at save-time still applies.
     "language",
+    # #7507: per-provider picker exclude list. The key lives outside
+    # the simple-key defaults because it's a per-provider map (not a
+    # scalar) and we want a dedicated tolerant parser rather than
+    # letting the generic scalar pass-through silently mangle it.
+    "picker_excludes",
 }
 _SETTINGS_ENUM_VALUES = {
     "send_key": {"enter", "ctrl+enter", "shift+enter"},
