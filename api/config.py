@@ -3261,6 +3261,47 @@ def _custom_provider_slug_key(value: object) -> str:
     return produced.split(":", 1)[1] if produced.startswith("custom:") else produced
 
 
+def _raw_custom_provider_url(raw_cfg: dict, exp_cfg: dict, match: dict, url: str) -> str:
+    """Return the raw config text behind a selected custom provider's URL (#8032).
+
+    ``match`` comes from ``_custom_provider_entries(exp_cfg)``, the env-expanded
+    view, and ``url`` is its resolved base URL. A legacy entry is that very dict
+    from ``exp_cfg["custom_providers"]``, so its raw twin sits at the same index
+    in ``raw_cfg`` (expansion keeps list positions). A native entry is a
+    normalized copy; its raw text is one of the ``api``/``url``/``base_url``
+    fields of the native records under the same identity. The first raw
+    candidate whose expansion is ``url`` wins, so a ``${VAR}`` endpoint stays a
+    reference on disk. When none matches (a shape this lookup does not know),
+    return ``url`` itself, which is what master writes. Pure and lock-safe.
+    """
+    want = _normalize_base_url_for_compare(url)
+    candidates: list = []
+    exp_list = exp_cfg.get("custom_providers") if isinstance(exp_cfg, dict) else None
+    raw_list = raw_cfg.get("custom_providers") if isinstance(raw_cfg, dict) else None
+    if isinstance(exp_list, list) and isinstance(raw_list, list) and len(exp_list) == len(raw_list):
+        for index, entry in enumerate(exp_list):
+            if entry is match:
+                if isinstance(raw_list[index], dict):
+                    candidates.append(raw_list[index].get("base_url"))
+                break
+    if not candidates:
+        identity = _custom_provider_slug_key(match.get("name"))
+        raw_native = raw_cfg.get("providers") if isinstance(raw_cfg, dict) else None
+        if identity and isinstance(raw_native, dict):
+            for key, record in raw_native.items():
+                if not (_is_native_custom_provider_key(key) and isinstance(record, dict)):
+                    continue
+                if _custom_provider_slug_key(key) != identity:
+                    continue
+                candidates.extend(record.get(field) for field in ("api", "url", "base_url"))
+    for raw in candidates:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        if _normalize_base_url_for_compare(_expand_env_vars(raw)) == want:
+            return raw.strip()
+    return url
+
+
 def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> dict | None:
     """Return the single named ``custom_providers`` entry matching ``slug_key``.
 
@@ -7354,39 +7395,23 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                     # closed on a collision (raises AmbiguousCustomProviderError)
                     # exactly like every other path — otherwise the ambiguity
                     # would be swallowed and the wrong endpoint persisted.
-                    # config_data is RAW (#8032): match on env-RESOLVED names
-                    # (the UI's slug comes from an expanded read) using copies,
-                    # so a ``name: ${VAR}`` entry is still found while the list
-                    # we save keeps its raw references. base_url is not
-                    # resolved in the copies, so a ${VAR} endpoint stays a
-                    # reference in the slot too.
-                    # Master (#8448) routes native custom providers through the
-                    # legacy-shaped view; match on it with expanded names and keep
-                    # each entry's raw base_url (release-manager merge resolution).
-                    _raw_cp = _custom_provider_entries(config_data)
-                    _resolved_cp = (
-                        [
-                            {**e, "name": _expand_env_vars(e.get("name"))}
-                            if isinstance(e, dict)
-                            else e
-                            for e in _raw_cp
-                        ]
-                        if isinstance(_raw_cp, list)
-                        else _raw_cp
-                    )
+                    # config_data is RAW (#8032). Select on an env-EXPANDED
+                    # snapshot, exactly as master selected on its expanded read:
+                    # legacy-over-native precedence (#8448), enabled state,
+                    # uniqueness and the native api/url/base_url alias order all
+                    # depend on resolved values. Then write the raw text behind
+                    # the winning URL, so a ${VAR} endpoint stays a reference.
+                    _exp_cfg = _expand_env_vars(config_data)
                     _cp_match = _unique_custom_provider_entry(
-                        _resolved_cp,
+                        _custom_provider_entries(_exp_cfg),
                         _custom_provider_slug_key(provider),
                     )
                     if _cp_match is not None:
-                        # Judge emptiness on the EXPANDED value (as master did on
-                        # its expanded read) but write the RAW text, so a
-                        # ``${VAR}`` that expands to "" doesn't replace the
-                        # slot's working URL with an empty reference.
-                        _raw_url = str(_cp_match.get("base_url") or "").strip()
-                        resolved_base_url = (
-                            _raw_url if str(_expand_env_vars(_raw_url) or "").strip() else None
-                        )
+                        _url = str(_cp_match.get("base_url") or "").strip()
+                        if _url:
+                            resolved_base_url = _raw_custom_provider_url(
+                                config_data, _exp_cfg, _cp_match, _url,
+                            )
                 if not resolved_base_url:
                     # Best-effort fallback for the unnamed `custom` case (no own
                     # entry). Keep it non-fatal for unexpected errors, but let a
