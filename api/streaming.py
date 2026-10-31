@@ -12508,6 +12508,127 @@ def _tool_result_snippet(raw, limit: int = _TOOL_RESULT_SNIPPET_MAX) -> str:
     return text[:limit]
 
 
+# Terminal statuses that mean the tool did not do what it was asked to do. Kept
+# aligned with the Gateway translator in api/gateway_chat.py so the direct and
+# gateway paths classify the same result identically (issue #7358).
+_TOOL_FAILED_STATUSES = frozenset({'error', 'failed', 'failure'})
+
+# Marker Agent core writes into a result payload when its harness refuses a
+# redundant call. Agent calls that a refusal, NOT a failed call (the executor
+# hands it to the loop guardrail as a refusal), so a refused card must not be
+# relabelled Failed. Mirrors agent.tool_result_classification.GUARDRAIL_REFUSAL_KEY.
+_GUARDRAIL_REFUSAL_KEY = 'guardrail_refusal'
+
+
+def _agent_detect_tool_failure():
+    """Return the Agent core failure classifier, or None when unavailable.
+
+    Agent's ``display._detect_tool_failure`` is the canonical bit the CLI shows
+    and the one ``tool_progress_callback`` already forwards, so the WebUI reuses
+    it instead of growing a second heuristic that can drift (#7358). It is a
+    private module symbol, hence the guarded lookup and the ``None`` contract.
+    """
+    try:
+        from agent.display import _detect_tool_failure
+        return _detect_tool_failure
+    except Exception:
+        return None
+
+
+def _structured_tool_failure(name, data) -> bool:
+    """Structured-field classifier layered on top of Agent core's canonical bit.
+
+    Only explicit structured fields count: ``success``/``ok`` set to False, an
+    explicit failed status, a non-empty ``error``, or a non-zero terminal exit
+    code. A result is never failed merely because its text mentions "error".
+    The failed-status field is the Gateway translator's vocabulary
+    (api/gateway_chat.py), honoured here so the direct and gateway paths agree.
+    """
+    if not isinstance(data, dict):
+        return False
+    if data.get('success') is False or data.get('ok') is False:
+        return True
+    if str(data.get('status') or '').strip().lower() in _TOOL_FAILED_STATUSES:
+        return True
+    if data.get('error'):
+        return True
+    if name == 'terminal':
+        exit_code = data.get('exit_code')
+        if exit_code is not None and exit_code != 0:
+            return True
+    return False
+
+
+def _agent_tool_result_is_exempt(name, function_result) -> bool:
+    """True for Agent core's deliberate non-failure cases.
+
+    A harness REFUSAL of a redundant call and a file mutation whose write
+    landed are both ``False`` for the canonical classifier on purpose, so the
+    structured rules must never relabel them as failures.
+
+    Checked BEFORE the canonical classifier: on Agent builds that predate the
+    refusal branch the canonical classifier reports a refusal as a failure, and
+    a late veto could not undo it. The refusal marker is read from the result
+    payload itself — a data contract the Agent writes into the result — so this
+    stays stable across Agent versions instead of depending on an internal
+    module staying importable.
+    """
+    data = _tool_result_structured_payload(function_result)
+    if isinstance(data, dict) and data.get(_GUARDRAIL_REFUSAL_KEY) is True:
+        return True
+    try:
+        from agent.tool_result_classification import file_mutation_result_landed
+        return bool(file_mutation_result_landed(str(name or ''), function_result))
+    except Exception:
+        return False
+
+
+def _tool_result_structured_payload(function_result):
+    """Parse a structured tool result for classification, tolerating junk."""
+    if isinstance(function_result, dict):
+        return function_result
+    if isinstance(function_result, str):
+        try:
+            data = json.loads(function_result)
+        except Exception:
+            return None
+        return data if isinstance(data, dict) else None
+    return None
+
+
+def _tool_result_is_error(name, function_result) -> bool:
+    """Classify a structured tool result as failed for the SSE contract.
+
+    Agent core's ``display._detect_tool_failure`` is authoritative — it is the
+    canonical bit the CLI shows and the one ``tool_progress_callback`` already
+    forwards — so the structured ``tool_complete_callback`` projection reuses it
+    instead of growing a second heuristic that can drift (#7358). The
+    structured-field rules above are layered on top so an explicit ``success:
+    false`` or failed status is still honoured when the canonical classifier has
+    no branch for it, and both stay skipped for the canonical exemptions.
+
+    Never raises: a classification failure must not break tool delivery.
+    """
+    try:
+        name_str = str(name or '')
+        # Exemptions first: a refusal or a landed write is not a failure even
+        # when the Agent build in use has no branch for it, so they must be able
+        # to veto the canonical bit as well as the structured rules.
+        if _agent_tool_result_is_exempt(name_str, function_result):
+            return False
+        detect = _agent_detect_tool_failure()
+        if detect is not None:
+            try:
+                if bool(detect(name_str, function_result)[0]):
+                    return True
+            except Exception:
+                logger.debug('Agent tool failure classifier failed; using fallback', exc_info=True)
+        return _structured_tool_failure(name_str, _tool_result_structured_payload(function_result))
+    except Exception:
+        logger.debug('Failed to classify tool result failure state', exc_info=True)
+        return False
+
+
 def _truncate_tool_args(args, limit: int = 6) -> dict:
     """Truncate tool args for compact session persistence.
 
@@ -12585,6 +12706,9 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
                         'tid': tid,
                         'assistant_msg_idx': pending_asst_idx.get(tid, -1),
                         'args': _truncate_tool_args(pending_args.get(tid, {})),
+                        # #7358: replayed/reloaded cards must render the same
+                        # Failed status the live stream showed.
+                        'is_error': _tool_result_is_error(name, raw),
                     })
                     seq['resolved'] = True
             tool_msg_sequence.append(seq)
@@ -12603,6 +12727,10 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
                 'tid': live_tc.get('tid', '') or '',
                 'assistant_msg_idx': _nearest_assistant_msg_idx(messages, seq.get('msg_idx', -1)),
                 'args': _truncate_tool_args(live_tc.get('args', {}), limit=4),
+                # Prefer the bit the live callback already classified (#7358);
+                # re-derive only when the mirror never carried one.
+                'is_error': bool(live_tc.get('is_error')) or _tool_result_is_error(
+                    live_tc.get('name', 'tool'), seq.get('raw', '')),
             })
 
     return tool_calls
@@ -15564,12 +15692,17 @@ def _run_agent_streaming(
                     if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
                         _live_tool_event_complete_ids.add(tool_call_id)
                         result_snippet = _tool_result_snippet(function_result)
+                        # #7358: the structured callback receives the result but no
+                        # error bit, so classify it here instead of streaming a
+                        # literal is_error: False that renders a failure as Completed.
+                        completed_is_error = _tool_result_is_error(name, function_result)
                         for live_tc in reversed(_live_tool_calls):
                             if live_tc.get('done'):
                                 continue
                             if live_tc.get('tid') == tool_call_id or (not live_tc.get('tid') and live_tc.get('name') == name):
                                 live_tc['done'] = True
                                 live_tc['snippet'] = result_snippet
+                                live_tc['is_error'] = completed_is_error
                                 break
                         if stream_id in STREAM_LIVE_TOOL_CALLS:
                             for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
@@ -15578,6 +15711,7 @@ def _run_agent_streaming(
                                 if shared_tc.get('tid') == tool_call_id or (not shared_tc.get('tid') and shared_tc.get('name') == name):
                                     shared_tc['done'] = True
                                     shared_tc['snippet'] = result_snippet
+                                    shared_tc['is_error'] = completed_is_error
                                     break
                         _checkpoint_activity[0] += 1
                         put('tool_complete', {
@@ -15586,7 +15720,7 @@ def _run_agent_streaming(
                             'preview': result_snippet,
                             'args': _tool_args_snapshot(args),
                             'tid': tool_call_id,
-                            'is_error': False,
+                            'is_error': completed_is_error,
                         })
                         # Mirror the todo tool's in-memory state into
                         # a dedicated SSE event so the Todos panel can
