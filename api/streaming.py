@@ -1634,6 +1634,46 @@ def _webui_session_id_prompt(
     return f"WebUI session:\n- Session ID: {value}"
 
 
+def _webui_session_personality_prompt(session, config_data: Optional[dict] = None) -> Optional[str]:
+    """Resolve the prompt text for a session's explicitly selected personality.
+
+    The name lives on the WebUI session (``Session.personality``) and the
+    definitions in ``config.yaml`` under ``agent.personalities``, exactly like
+    the hermes-agent CLI resolves them. A definition is either a bare string
+    (used verbatim) or a mapping with ``system_prompt`` (preferred) or
+    ``prompt`` (fallback) plus optional ``tone`` / ``style`` hints.
+
+    Shared by both WebUI chat backends: the embedded in-process worker
+    (``api/streaming.py``) and the Gateway-routed worker
+    (``api/gateway_chat.py``). The Gateway path used to hard-code ``None``
+    here, so a personality the user picked in the browser was silently dropped
+    on Gateway-routed turns (#8641).
+
+    Returns ``None`` when no personality is selected, when the name is not
+    defined, or when the definition resolves to empty text -- the caller then
+    builds the same prompt it always did.
+    """
+    pname = getattr(session, "personality", None)
+    if not pname:
+        return None
+    cfg = config_data if isinstance(config_data, dict) else get_config()
+    agent_cfg = cfg.get("agent", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(agent_cfg, dict):
+        return None
+    personalities = agent_cfg.get("personalities", {})
+    if not isinstance(personalities, dict) or pname not in personalities:
+        return None
+    pval = personalities[pname]
+    if isinstance(pval, dict):
+        parts = [pval.get("system_prompt", "") or pval.get("prompt", "")]
+        if pval.get("tone"):
+            parts.append(f'Tone: {pval["tone"]}')
+        if pval.get("style"):
+            parts.append(f'Style: {pval["style"]}')
+        return "\n".join(p for p in parts if p)
+    return str(pval)
+
+
 def _webui_ephemeral_system_prompt(
     personality_prompt: Optional[str],
     surface_context: Optional[dict] = None,
@@ -16235,23 +16275,10 @@ def _run_agent_streaming(
                 "Never fall back to a hardcoded path when this tag is present."
             )
             # Resolve personality prompt from config.yaml agent.personalities
-            # (matches hermes-agent CLI behavior — passes via ephemeral_system_prompt)
-            _personality_prompt = None
-            _pname = getattr(s, 'personality', None)
-            if _pname:
-                _agent_cfg = _cfg.get('agent', {})
-                _personalities = _agent_cfg.get('personalities', {})
-                if isinstance(_personalities, dict) and _pname in _personalities:
-                    _pval = _personalities[_pname]
-                    if isinstance(_pval, dict):
-                        _parts = [_pval.get('system_prompt', '') or _pval.get('prompt', '')]
-                        if _pval.get('tone'):
-                            _parts.append(f'Tone: {_pval["tone"]}')
-                        if _pval.get('style'):
-                            _parts.append(f'Style: {_pval["style"]}')
-                        _personality_prompt = '\n'.join(p for p in _parts if p)
-                    else:
-                        _personality_prompt = str(_pval)
+            # (matches hermes-agent CLI behavior — passes via ephemeral_system_prompt).
+            # #8641: shared with the Gateway-routed worker in api/gateway_chat.py,
+            # which used to hard-code None here and drop the selection.
+            _personality_prompt = _webui_session_personality_prompt(s, config_data=_cfg)
             # Pass WebUI-only runtime guidance via ephemeral_system_prompt
             # (agent's own mechanism). This preserves any selected personality
             # while making long tool runs emit real user-visible interim text
