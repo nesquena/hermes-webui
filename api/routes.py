@@ -3703,6 +3703,7 @@ from api.helpers import (
     _redact_text,
     _CLIENT_DISCONNECT_ERRORS,
     split_media_token_ref,
+    _PUBLIC_MESSAGE_INTERNAL_FIELDS,
 )
 from api.agent_health import (
     GATEWAY_EXTERNALLY_MANAGED_MESSAGE,
@@ -10981,6 +10982,35 @@ def _tool_calls_for_message_window(tool_calls, start_idx: int, message_count: in
     return filtered
 
 
+def _prefix_owned_tool_calls(tool_calls, total: int) -> list:
+    """Return the session-level tool cards the covered prefix ``[0, total)``
+    owns (#7925 re-gate, 2026-10-31 finding 1).
+
+    ``_tool_calls_for_message_window(tool_calls, 0, total)`` is the selector the
+    response path itself uses, so reusing it keeps the digest and the delivered
+    window in agreement about WHICH cards belong to the covered rows — and, just
+    as importantly, a card owned by a row at or after ``total`` (a card belonging
+    to the appended rows) stays OUT, or every turn that runs a tool would refuse
+    its own append.
+
+    A card whose ``assistant_msg_idx`` is not an integer cannot be attributed to
+    any row, so the window selector drops it; the response path still delivers
+    such a card on a full load (``S.toolCalls`` is rebuilt from the session list
+    when no message carries tool metadata), so it is covered unconditionally
+    rather than dropped — otherwise editing it would be invisible to the digest.
+    """
+    owned = _tool_calls_for_message_window(tool_calls, 0, total)
+    if not isinstance(tool_calls, list):
+        return owned
+    for card in tool_calls:
+        if not isinstance(card, dict):
+            continue
+        assistant_idx = card.get("assistant_msg_idx")
+        if isinstance(assistant_idx, bool) or not isinstance(assistant_idx, int):
+            owned.append(card)
+    return owned
+
+
 def _message_counts_as_renderable_for_window(message) -> bool:
     """Return true when a paginated window should include this transcript row.
 
@@ -11038,7 +11068,7 @@ def _tool_result_matches_call_ids(message, call_ids) -> bool:
     return bool(tid) and str(tid) in call_ids
 
 
-def _message_window_for_display(messages, msg_limit=None, msg_before=None, expand_renderable=False) -> tuple[list, int]:
+def _message_window_for_display(messages, msg_limit=None, msg_before=None, msg_after=None, expand_renderable=False) -> tuple[list, int]:
     """Return a paginated message window plus its offset in ``messages``.
 
     ``msg_limit`` is a visible transcript limit, not a raw storage-row cap.
@@ -11047,11 +11077,89 @@ def _message_window_for_display(messages, msg_limit=None, msg_before=None, expan
     suffix containing the last ``msg_limit`` renderable user/assistant rows, plus
     any intervening tool rows needed for card snippets.
 
+    ``msg_after`` selects the append-only fast-path window (#7925 re-gate):
+    the client holds rows ``[0, msg_after]`` (its last rendered absolute index
+    is ``msg_after``) and wants only the rows strictly after it. The window is
+    the CONTIGUOUS suffix starting at ``msg_after + 1``: renderable rows decide
+    how many rows fit the ``msg_limit`` budget, but they no longer decide where
+    the window begins. The earlier shape scanned forward for the first
+    renderable row and started there, which dropped any tool-result row that
+    landed after the anchor was captured (a tab loading mid-turn, an external
+    or CLI run, a hidden tab) — the client then never received that output and
+    its next anchor check failed off-by-one into a full fetch. Trailing
+    tool-result rows whose tool_call_id matches a call already inside the
+    window are kept, mirroring the tail-window rule.
+
     ``expand_renderable`` is accepted for compatibility with older frontend
     callers. Visible-row expansion is now the default for every limited window.
     """
     _ = expand_renderable
     messages = list(messages or [])
+    if msg_after is not None and msg_before is None:
+        # Append-only fast path: window starts strictly after the anchor row.
+        try:
+            after_idx = int(msg_after)
+        except (TypeError, ValueError):
+            after_idx = -1
+        if after_idx < 0 or after_idx >= len(messages):
+            return [], 0
+        source = messages[after_idx + 1:]
+        if not source:
+            return [], len(messages)
+        if not msg_limit:
+            return source, after_idx + 1
+        limit = max(1, int(msg_limit))
+        first_renderable_idx = 0
+        renderable_count = 0
+        last_renderable_idx = None
+        # The window starts at the anchor's NEXT row and is contiguous from
+        # there (#7925 re-gate, 2026-10-19): the previous shape scanned forward
+        # for the first renderable row and started there, on the theory that
+        # everything between the anchor and that row was the anchor's own
+        # trailing tool output. That is wrong when the client captured the
+        # anchor before its results were saved — a tab that loads mid-turn (an
+        # external or CLI run, or a hidden tab) then never receives the tool
+        # row, and the next reload's anchor check fails off-by-one and falls
+        # back to a full fetch. Skipping rows can also hide the output
+        # permanently when the count happens to match afterwards.
+        # Renderable rows still decide how many rows fit the budget; they no
+        # longer decide where the window begins.
+        for idx in range(len(source)):
+            if _message_counts_as_renderable_for_window(source[idx]):
+                renderable_count += 1
+                last_renderable_idx = idx
+                if renderable_count >= limit:
+                    break
+        if last_renderable_idx is None:
+            # No renderable row in the suffix: the rows are all tool/support
+            # rows. Return them anyway when they match a call the anchor
+            # already made (the client needs the output), else nothing.
+            window_tool_call_ids = _tool_call_ids_in_messages(
+                messages[max(0, after_idx - 64) : after_idx + 1]
+            )
+            end_idx = 0
+            while end_idx < len(source) and not _message_counts_as_renderable_for_window(
+                source[end_idx]
+            ):
+                if _tool_result_matches_call_ids(source[end_idx], window_tool_call_ids):
+                    end_idx += 1
+                else:
+                    break
+            return source[:end_idx], after_idx + 1
+        # Keep trailing tool-result rows whose tool_call_id matches a
+        # tool-call on a renderable row already in the window (mirror of the
+        # tail-window rule below; #4070 ship-review).
+        end_idx = last_renderable_idx + 1
+        window_tool_call_ids = _tool_call_ids_in_messages(source[: last_renderable_idx + 1])
+        while end_idx < len(source) and not _message_counts_as_renderable_for_window(
+            source[end_idx]
+        ):
+            if _tool_result_matches_call_ids(source[end_idx], window_tool_call_ids):
+                end_idx += 1
+            else:
+                break
+        window = source[first_renderable_idx:end_idx]
+        return window, after_idx + 1 + first_renderable_idx
     if msg_before is not None:
         before_idx = max(0, min(int(msg_before), len(messages)))
     else:
@@ -11150,6 +11258,521 @@ def _resolve_effective_msg_limit(raw_limit):
     explicit_all = str(raw_limit or "").strip().lower() == "all"
     limit = _parse_msg_limit(raw_limit)
     return limit, explicit_all
+
+
+# ── Append-only fast path (#7925 re-gate) ────────────────────────────────────
+# The client holds a contiguous prefix [0, N] of a >500-row transcript and a
+# refresh needs the full width again. Instead of re-downloading everything,
+# it asks for only the rows strictly after its last rendered index N, proving
+# the prefix is unchanged by sending:
+#   - transcript_generation: bumped ONLY on destructive rewrites
+#     (truncate/retry/undo via _stamp_intentional_shrink_generation), so an
+#     append leaves it unchanged while compaction/undo/edits change it;
+#   - anchor_fp: an FNV-1a digest of the client's last rendered row, so a
+#     rewrite that touched the seam row (or a redaction/internal-field change
+#     that altered its public projection) is detected; and
+#   - prefix_fp (2026-10-27 finding 4): the server-computed digest over rows
+#     [0, N+1) the load response carried, so a NON-destructive edit of an
+#     earlier row (settled reasoning backfill, saved attachments) that bumps
+#     no generation is detected too. Complete by construction; a missing
+#     digest fails closed.
+# Any check that fails falls back to the authoritative full fetch — exactly
+# what master does today — so the fast path can never serve stale rows.
+_BASE36_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+_BASE36_WIDTH = 26  # ceil(log36(2**32)) — fixed width, zero padded
+
+
+def _base36_fixed_width(value: int, width: int = _BASE36_WIDTH) -> str:
+    """Render *value* as lowercase base-36, zero padded to *width*.
+
+    Matches JavaScript's ``Number.prototype.toString(36)`` digit alphabet and
+    zero padding exactly, so a digest minted here and one re-derived in the
+    browser compare byte-for-byte (#7925 append-only anchor check).
+    """
+    value = int(value) & 0xFFFFFFFF
+    chars = []
+    for _ in range(width):
+        chars.append(_BASE36_DIGITS[value % 36])
+        value //= 36
+    return "".join(reversed(chars))
+
+
+def _canonical_proof_scalar(value) -> str:
+    """Render a scalar the way the browser's ``String()`` renders the JSON.
+
+    The anchor digest is minted here from the row we are about to serialize
+    and re-derived in the browser from the JSON it received, so the two
+    renderings must agree. JSON round-tripping turns a Python ``102.0`` into a
+    JS ``102``, which stringifies back as ``"102"`` — not ``"102.0"``.
+    Collapse integral floats to their integer form and keep shortest-round-trip
+    for the rest, which is what both runtimes do; any other scalar falls back
+    to ``str()``.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return str(value)
+        if value.is_integer():
+            return str(int(value))
+        return repr(value)
+    return str(value)
+
+
+def _append_row_payload(row) -> "str | None":
+    """Build the exact byte-string one row contributes to the anchor digest.
+
+    Returns None when the row is not a dict (the caller's fail-closed shape).
+    Mirrors static/sessions.js:_appendAnchorRowFingerprint field for field:
+    role / visible text / canonical timestamp / sorted tool-call ids.
+    """
+    if not isinstance(row, dict):
+        return None
+    role = str(row.get("role") or "")
+    content = row.get("content")
+    if isinstance(content, list):
+        text = "".join(
+            str(part.get("text") or "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    elif isinstance(content, str):
+        text = content
+    elif content is None:
+        text = ""
+    else:
+        text = str(content)
+    timestamp = row.get("timestamp")
+    if timestamp is None:
+        timestamp = row.get("_ts")
+    tool_ids = []
+    for call in row.get("tool_calls") or []:
+        if isinstance(call, dict):
+            identifier = call.get("id") or call.get("tool_call_id")
+            if identifier:
+                tool_ids.append(str(identifier))
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "tool_use":
+                identifier = part.get("id") or part.get("tool_use_id")
+                if identifier:
+                    tool_ids.append(str(identifier))
+    timestamp_text = _canonical_proof_scalar(timestamp)
+    return "\x00".join([role, text.strip(), timestamp_text, ",".join(sorted(tool_ids))])
+
+
+def _append_anchor_fingerprint(row) -> str:
+    """One-row FNV-1a digest of *row*, rendered as fixed-width base-36.
+
+    The browser re-derives this digest with ``String.prototype.charCodeAt``
+    (UTF-16 CODE UNITS) and ``Math.imul``; the loop below iterates the same
+    UTF-16 LE units with the same FNV-1a constants, so the two agree for any
+    row the JSON round-trip preserves. Divergence (exotic floats, a BOM,
+    integers above 2^53, ``\\x1f``, surrogate escapes) FAILS CLOSED: the fast
+    path is refused and the authoritative full fetch runs, exactly master's
+    behaviour, so none of those shapes is a correctness risk.
+
+    Returns ``""`` when the row cannot be described.
+    """
+    payload = _append_row_payload(row)
+    if payload is None:
+        return ""
+    hash_value = 0x811C9DC5
+    encoded = payload.encode("utf-16-le", errors="surrogatepass")
+    for offset in range(0, len(encoded), 2):
+        hash_value ^= encoded[offset] | (encoded[offset + 1] << 8)
+        hash_value = (hash_value * 0x01000193) & 0xFFFFFFFF
+    return _base36_fixed_width(hash_value)
+
+
+# Fields the prefix fingerprint must NOT cover (#7925 re-gate, 2026-10-29
+# review, finding 2). The 10-27 whitelist (_PREFIX_FP_FIELDS: role, content,
+# reasoning, attachments, tool_calls) was incomplete by construction: it
+# missed every rendered field added later (_source stamps, hydrated
+# anchor-activity scenes), and a scene save changed no row at all, so the
+# digest was blind to a rendered worklog. The list is now INVERTED: each row
+# is hashed as the browser receives it (the projected display row), minus this
+# explicit exclusion set. The set is _PUBLIC_MESSAGE_INTERNAL_FIELDS — the
+# fields scrub_internal_replay_fields / _public_message_projection strip
+# before delivery — so anything else on a row reaches the browser and is
+# covered by default: a new rendered field cannot be missed again.
+# tests/test_append_only_fast_path_server.py enumerates the set and pins the
+# default-coverage property.
+#
+# The one exception (2026-10-31 re-gate, finding 3): ``_active_turn_token``
+# is stripped before delivery like the rest of the set, but it is an INPUT to
+# the delivery rather than dead weight — ``redact_session_data`` marks a
+# covered user row ``_active_turn_user: true`` when the row's own token equals
+# the session's active-turn token. Excluding it let a stamp that changes the
+# delivered row keep its proof, so an empty append was accepted. It therefore
+# stays INSIDE the digest (``_active_turn_user``, the derived delivery flag,
+# remains excluded).
+_PREFIX_FP_EXCLUDED_FIELDS = frozenset(
+    _PUBLIC_MESSAGE_INTERNAL_FIELDS - {"_active_turn_token"}
+)
+
+
+def _display_aux_fingerprint(value) -> "str | None":
+    """Deterministic digest of a small session-level value (anchor scene
+    records or session tool calls) that can change rendered rows without
+    touching the merged document. Used to guard the memoized prefix
+    fingerprint; None means \"cannot fingerprint, do not reuse\"."""
+    try:
+        return hashlib.sha256(
+            json.dumps(
+                value,
+                sort_keys=True,
+                ensure_ascii=False,
+                default=str,
+                separators=(",", ":"),
+            ).encode("utf-8", "surrogatepass")
+        ).hexdigest()
+    except Exception:
+        return None
+
+
+def _effective_redact_enabled() -> bool:
+    """The credential-redaction setting as the GET path applies it.
+
+    Local import on purpose: ``api.config.load_settings`` is patched by the
+    tests (and re-read per request), while ``routes`` also holds a module-scope
+    binding that a patch of ``api.config`` cannot reach.
+    """
+    from api.config import load_settings
+
+    return bool(load_settings().get("api_redact_enabled", True))
+
+
+def _session_active_turn_token(session):
+    """The eager-row token ``redact_session_data`` derives for this session.
+
+    ``build_active_turn_token(active_stream_id, pending_started_at)`` decides
+    which user row is delivered with ``_active_turn_user: true`` — a rendered
+    difference produced by session state AFTER the prefix digest is minted.
+    """
+    from api.process_event_utils import build_active_turn_token
+
+    return build_active_turn_token(
+        getattr(session, "active_stream_id", None),
+        getattr(session, "pending_started_at", None),
+    )
+
+
+class _DisplayPrefixFpInputs:
+    """The out-of-row inputs a display response's rows and digest share.
+
+    Read ONCE per request and then threaded through the whole response
+    (#7925 re-gate, 2026-10-31 finding 1). A save that lands mid-request used
+    to move these inputs BETWEEN the projection of the response rows and the
+    digest minted over them: the response carried the old rows under a proof
+    of the new inputs, so every later reload accepted an empty append and the
+    stale content stayed indefinitely. One snapshot now feeds the projection,
+    the digest and the display-cache entry's validation, so the proof always
+    describes exactly the rows this response delivers; a save that lands after
+    the read moves the NEXT request's digest and its append is refused.
+    """
+
+    __slots__ = ("scenes", "tool_calls", "redact_enabled", "active_turn_token", "meta")
+
+    def __init__(self, scenes, tool_calls, redact_enabled, active_turn_token):
+        self.scenes = scenes
+        self.tool_calls = tool_calls
+        self.redact_enabled = bool(redact_enabled)
+        self.active_turn_token = active_turn_token
+        # The memo guard: cheap fingerprints of the two collection inputs
+        # (computed once here instead of once per consumer) plus the two
+        # scalar ones. This is the single definition of the guard tuple shape,
+        # so the entry builder and the response mint can never drift.
+        self.meta = (
+            _display_aux_fingerprint(scenes) if scenes else None,
+            _display_aux_fingerprint(tool_calls) if tool_calls else None,
+            self.redact_enabled,
+            active_turn_token,
+        )
+
+
+def _display_prefix_fp_inputs(session) -> "_DisplayPrefixFpInputs":
+    """Read the display digest's out-of-row inputs once (#7925 re-gate,
+    2026-10-31 finding 1).
+
+    ``anchor_activity_scenes`` and ``tool_calls`` are session state a writer
+    can replace in process (an anchor-scene save, a tool-card edit), and the
+    redaction setting / active-turn token are applied AFTER the projection.
+    Reading them once — before the response rows are projected — is what keeps
+    the minted digest and the delivered rows from drifting apart.
+    """
+    return _DisplayPrefixFpInputs(
+        getattr(session, "anchor_activity_scenes", None) or None,
+        getattr(session, "tool_calls", None) or None,
+        _effective_redact_enabled(),
+        _session_active_turn_token(session),
+    )
+
+
+def _display_prefix_fingerprint(
+    messages,
+    count,
+    *,
+    scenes=None,
+    tool_calls=None,
+    redact_enabled=None,
+    active_turn_token=None,
+    inputs=None,
+) -> str:
+    """Server-computed digest over rows ``[0, count)`` of a display document.
+
+    Returned as ``prefix_fp`` on every full or limited load; an append-only
+    fast-path request echoes the digest it holds and the server recomputes
+    over ``[0, msg_after + 1)``, refusing the append on any mismatch
+    (alongside the ``transcript_generation`` check).
+
+    Coverage is complete by construction (2026-10-29 review, finding 2), and
+    "by construction" is taken to mean the whole delivered projection of a
+    covered row, not just the row's own fields (2026-10-31 re-gate): each row
+    is hashed as the browser receives it — the whole projected row minus
+    ``_PREFIX_FP_EXCLUDED_FIELDS``, which is exactly the field set stripped
+    before delivery — AND the inputs that live outside the row but change that
+    projection are mixed in before the rows:
+
+    * ``scenes`` — rows carrying a saved anchor-activity scene are hydrated
+      first, so a scene save moves the digest even though it never modifies a
+      row;
+    * ``tool_calls`` — the session-level cards the covered prefix OWNS are
+      hashed through ``_prefix_owned_tool_calls`` (the response path's own
+      window selector), so a card summary edit on an already-held row moves
+      the digest on a scene-free session too. Cards owned by rows at or after
+      ``count`` belong to the appended rows and stay out, or every turn that
+      runs a tool would refuse its own append;
+    * ``redact_enabled`` — the effective ``api_redact_enabled`` value.
+      ``redact_session_data`` applies it AFTER this digest is minted, so
+      without the seed a settings flip would re-project every covered row
+      (masking / unmasking credentials) while the fingerprint stood still;
+    * ``active_turn_token`` — the eager-row token derived from the session's
+      ``active_stream_id`` / ``pending_started_at``, also applied after the
+      mint, which decides whether a covered user row is delivered with
+      ``_active_turn_user: true``.
+
+    Why a fingerprint rather than a revision counter: it is complete by
+    construction. A counter must be bumped by every writer that touches an
+    earlier row (settled reasoning, saved attachments, scene saves, tool card
+    edits, anything added later), and one missed writer means silently stale
+    rows. Hashing the prefix costs milliseconds — far less than resending the
+    rows it protects.
+
+    Both minting and verification happen server-side over the same merged
+    document (scenes/tool_calls/settings read off the same session object), so
+    no browser-side re-derivation (and no JS/Python byte-parity constraint,
+    unlike the single-row anchor digest) is required.
+
+    ``inputs`` (#7925 re-gate, 2026-10-31 finding 1): a request-scoped
+    ``_DisplayPrefixFpInputs`` snapshot. When given, its four fields REPLACE the
+    individual arguments, so every consumer of one request hashes the very
+    inputs the response rows were projected from.
+    """
+    if inputs is not None:
+        scenes = inputs.scenes
+        tool_calls = inputs.tool_calls
+        redact_enabled = inputs.redact_enabled
+        active_turn_token = inputs.active_turn_token
+    try:
+        total = int(count)
+    except (TypeError, ValueError):
+        return ""
+    if redact_enabled is None:
+        redact_enabled = _effective_redact_enabled()
+    digest = hashlib.blake2b(digest_size=20)
+    rows = list(messages or [])
+    if total < 0:
+        total = 0
+    # ── Out-of-row inputs, seeded BEFORE the rows (2026-10-31 re-gate) ──
+    # Domain-separation tag: the digest format changed when these seeds were
+    # added, so a digest minted by an older build can never compare equal.
+    digest.update(b"prefix_fp/2\x1f")
+    digest.update(b"redact=" + (b"1" if redact_enabled else b"0") + b"\x1f")
+    digest.update(
+        b"active_turn="
+        + str(active_turn_token or "").encode("utf-8", "surrogatepass")
+        + b"\x1f"
+    )
+    digest.update(
+        b"owned_tool_calls="
+        + str(
+            _display_aux_fingerprint(_prefix_owned_tool_calls(tool_calls, total))
+        ).encode("ascii")
+        + b"\x1f"
+    )
+    if scenes:
+        rows = _hydrate_anchor_activity_scenes(
+            rows,
+            scenes,
+            message_offset=0,
+            tool_calls=tool_calls,
+        )
+    for row in rows[:total]:
+        if not isinstance(row, dict):
+            # Deterministic stand-in: a non-dict row still occupies a slot.
+            digest.update(b"\x00<non-dict-row>\x00")
+            continue
+        digest.update(
+            json.dumps(
+                {
+                    key: value
+                    for key, value in row.items()
+                    if key not in _PREFIX_FP_EXCLUDED_FIELDS
+                },
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            # surrogatepass: a crashed stream can persist a lone surrogate
+            # (half a pair split mid-token); strict utf-8 refuses to encode it
+            # and the digest must stay total over any persisted content.
+            ).encode("utf-8", "surrogatepass")
+        )
+        digest.update(b"\x1f")
+    return digest.hexdigest()
+
+
+def _build_prefix_fingerprint_entry(session, messages, *, inputs=None):
+    """Digest value stored on a display-merge cache entry, with the inputs
+    that can change rendered rows without touching the merged document
+    (anchor scene records, session tool calls, the redaction setting, the
+    active-turn token) as a reuse guard.
+
+    The mint reuses it on a cache hit while ``meta`` matches, so ordinary
+    windowed opens do not pay for re-hashing the whole document (2026-10-29
+    review, should-fix 1). The guard keeps a hit from handing out a pre-edit
+    digest when a scene or a card changed in-process without a sidecar write,
+    or when a post-mint input (the redaction setting, the active-turn token)
+    moved; a persisted change invalidates the entry's key via the sidecar
+    stat signature anyway.
+
+    ``inputs`` (2026-10-31 finding 1): the request's single snapshot. The
+    caller (the GET handler) reads it once, before it projects the response
+    rows, and hands the SAME object here and to the mint — otherwise a save
+    landing between the merge and the mint would publish a digest of inputs
+    the delivered rows were never projected from.
+    """
+    if not messages:
+        return None
+    if inputs is None:
+        inputs = _display_prefix_fp_inputs(session)
+    digest = _display_prefix_fingerprint(messages, len(messages), inputs=inputs)
+    if not digest:
+        return None
+    return {
+        "meta": inputs.meta,
+        "digest": digest,
+    }
+
+
+def _mint_display_prefix_fingerprint(session, messages, count, cached, *, inputs=None):
+    """Mint the response's ``prefix_fp``, reusing the display-merge cache
+    entry's digest when the document and every out-of-row input that shapes a
+    covered row's delivered projection are unchanged (#7925 re-gate,
+    2026-10-29 should-fix 1; 2026-10-31 findings 1+2).
+
+    ``cached`` is the out-param list filled by ``_display_merge_cached_messages``
+    / ``_limited_webui_messages_for_display_with_sidecar`` (the usable entry's
+    ``prefix_fp`` dict, or None). The reuse is only valid
+    for full coverage (``count == len(messages)``), which is exactly the shape
+    of every display-cache-hit response: the merge cache is never probed for
+    append requests (whose coverage can end mid-document) or msg_before
+    paging.
+
+    ``inputs`` (2026-10-31 finding 1): the request's single out-of-row input
+    snapshot. Without it this function re-read the scene records, the session
+    tool cards, the redaction setting and the active-turn token AFTER the
+    response rows had already been projected, so a save landing in between
+    published a digest of the new inputs over the old rows — and every later
+    reload accepted an empty append. The GET handler now reads the snapshot
+    once (before the projection) and passes it here.
+    """
+    if inputs is None:
+        inputs = _display_prefix_fp_inputs(session)
+    if cached and count == len(messages):
+        entry = cached[0] if isinstance(cached, list) and cached else None
+        if isinstance(entry, dict) and entry.get("meta") == inputs.meta:
+            digest = entry.get("digest")
+            if isinstance(digest, str) and digest:
+                return digest
+    return _display_prefix_fingerprint(messages, count, inputs=inputs)
+
+
+def _append_fast_path_anchor(s, all_messages, msg_after_raw, anchor_fp_raw, generation_raw, prefix_fp_raw=None, *, inputs=None) -> "int | None":
+    """Validate an append-only fast-path request.
+
+    Returns the validated anchor index (the client's last rendered absolute
+    row index, so the window starts strictly after it) when every precondition
+    holds, else ``None`` — the caller then returns the authoritative full
+    transcript, which is exactly what master does today.
+
+    Preconditions (all must hold):
+    1. ``msg_after`` parses to a non-negative index and the anchor row exists.
+    2. The client's ``transcript_generation`` equals the session's current one
+       (no truncate/retry/undo rewrite since the client's view).
+    3. ``anchor_fp`` matches an FNV-1a digest of the anchor row's public
+       projection — the exact bytes the client rendered (internal fields
+       stripped, content redacted), so a rewrite of the seam row or a change
+       in what the client would render is detected.
+    4. ``prefix_fp`` matches a fresh digest over rows ``[0, after_idx + 1)``
+       of the merged display document (#7925 re-gate, 2026-10-27 finding 4;
+       2026-10-29 finding 2; 2026-10-31 findings 1+2). The generation bump
+       only reports DESTRUCTIVE rewrites; this digest also catches a
+       non-destructive edit of an earlier row (settled reasoning backfill,
+       saved attachments) that no writer reports, plus rendered data that
+       changes no row at all (a saved anchor-activity scene, a ``_source``
+       stamp, a session-level tool card on a scene-free session) and inputs
+       applied after the mint (the credential-redaction setting, the
+       active-turn token) — the digest covers each row as the browser
+       receives it, hydrated scenes included. A missing digest fails closed —
+       an older client loses only the fast path.
+
+    ``inputs`` (2026-10-31 finding 1): the GET handler's single out-of-row
+    input snapshot, so this verification and the response's mint hash the very
+    same inputs the delivered rows were projected from.
+    """
+    try:
+        after_idx = int(msg_after_raw)
+    except (TypeError, ValueError):
+        return None
+    if after_idx < 0 or not isinstance(all_messages, list) or after_idx >= len(all_messages):
+        return None
+    anchor_row = all_messages[after_idx]
+    if not isinstance(anchor_row, dict):
+        return None
+    current_generation = max(0, int(getattr(s, "transcript_generation", 0) or 0))
+    try:
+        sent_generation = int(generation_raw) if generation_raw not in (None, "") else -1
+    except (TypeError, ValueError):
+        sent_generation = -1
+    if sent_generation != current_generation:
+        return None
+    if not anchor_fp_raw:
+        return None
+    if not prefix_fp_raw:
+        return None
+    from api.helpers import _public_message_projection
+    if inputs is None:
+        inputs = _display_prefix_fp_inputs(s)
+    _redact_enabled = inputs.redact_enabled
+    projected = _public_message_projection(anchor_row, _enabled=_redact_enabled)
+    if _append_anchor_fingerprint(projected) != str(anchor_fp_raw):
+        return None
+    if _display_prefix_fingerprint(
+        all_messages,
+        after_idx + 1,
+        # The same out-of-row inputs the mint seeds with (2026-10-31 re-gate),
+        # read off the same session object, so a settings flip or a turn
+        # boundary between the client's view and this request refuses.
+        inputs=inputs,
+    ) != str(prefix_fp_raw):
+        return None
+    return after_idx
 
 
 # If a sidecar JSON file exceeds this threshold, the display-path tail
@@ -11309,7 +11932,7 @@ def _display_rebased_tool_calls(tool_calls, owner_positions):
     return projected
 
 
-def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None, owner_positions=None):
+def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None, owner_positions=None, _prefix_fp_out=None):
     """Return the memoized merged transcript, or None when it can't be reused.
 
     Lets GET /api/session skip loading the state.db rows entirely on a hit. That
@@ -11321,6 +11944,12 @@ def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None
     Fail-closed by construction: returns None whenever the session is active,
     the key cannot be built, or the cached entry does not match, and the caller
     then performs the normal full load + merge.
+
+    ``_prefix_fp_out`` (optional): when provided, a list the usable entry's
+    memoized ``prefix_fp`` value (``_build_prefix_fingerprint_entry`` shape, or
+    None when the entry predates the memo) is appended to on a hit, so the
+    response mint can skip re-hashing the whole document (#7925 re-gate,
+    2026-10-29 should-fix 1).
     """
     if msg_before is not None or _display_merge_session_is_active(session):
         return None
@@ -11354,6 +11983,8 @@ def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None
                 return None
             owner_positions.clear()
             owner_positions.update(entry["owner_positions"])
+        if _prefix_fp_out is not None:
+            _prefix_fp_out.append(entry.get("prefix_fp"))
         _display_merge_cache.move_to_end(sid, last=True)
         return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
 
@@ -11369,6 +12000,8 @@ def _limited_webui_messages_for_display_with_sidecar(
     state_db_signature=_DISPLAY_STATE_SIGNATURE_UNSET,
     msg_before=None,
     owner_positions=None,
+    _prefix_fp_out=None,
+    inputs=None,
 ) -> list:
     sidecar_owners = dict(owner_positions or {})
     if sidecar_messages is None:
@@ -11385,6 +12018,14 @@ def _limited_webui_messages_for_display_with_sidecar(
         if owner_positions is not None:
             owner_positions.clear()
             owner_positions.update(sidecar_owners)
+        # #7925 re-gate (2026-10-31, round 2): this early return is the
+        # sidecar-only shape, which never reaches the display-merge cache
+        # below and therefore never owns a memoized digest. It deliberately
+        # owns NO memo of its own either: the digest must be minted from the
+        # rows THIS response delivers, so a retained read whose sidecar was
+        # rewritten mid-request cannot publish a proof minted from a later
+        # document (the accepted bounded alternative to the removed
+        # sidecar-only memo — every windowed GET re-hashes the document).
         return sidecar_messages
     state_db_messages = _suppress_native_image_display_mirrors(
         session,
@@ -11401,6 +12042,8 @@ def _limited_webui_messages_for_display_with_sidecar(
         if owner_positions is not None:
             owner_positions.clear()
             owner_positions.update(sidecar_owners)
+        # Sidecar-only shape (see the note on the first early return above):
+        # no digest memo here — the response mints from the rows it returns.
         return sidecar_messages
 
     # NOTE: do not short-circuit to the sidecar when state.db has no strictly
@@ -11458,6 +12101,11 @@ def _limited_webui_messages_for_display_with_sidecar(
                 if owner_positions is not None:
                     owner_positions.clear()
                     owner_positions.update(entry["owner_positions"])
+                # #7925 re-gate (2026-10-30, cold double-hash): hand the
+                # cached entry's digest to the caller so the response mint can
+                # reuse it instead of hashing the document again.
+                if _prefix_fp_out is not None:
+                    _prefix_fp_out.append(entry.get("prefix_fp"))
                 _display_merge_cache.move_to_end(sid, last=True)
                 return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
     merged = merge_session_messages_append_only(
@@ -11496,13 +12144,35 @@ def _limited_webui_messages_for_display_with_sidecar(
             cache_key = None
     if cache_key is not None:
         sid = str(getattr(session, "session_id", "") or "")
+        # #7925 re-gate (2026-10-29 should-fix 1): memoise the whole-document
+        # prefix digest on the entry so a cache hit does not re-hash every row
+        # (550 ms on the 32 MiB shape). Computed outside the lock; guarded by
+        # the scene/tool-call meta so an in-process scene change cannot reuse
+        # a pre-save digest, and invalidated with the entry's key by any
+        # sidecar write (scene saves persist through the sidecar).
+        prefix_fp_entry = _build_prefix_fingerprint_entry(session, merged, inputs=inputs)
+        # #7925 re-gate (2026-10-30, cold double-hash): the entry's digest
+        # covers the WHOLE merged document, and the response mint wants the
+        # digest over [0, count) with count = the window's coverage end. Those
+        # are the same value exactly when the window reaches the document end
+        # (the tail window: offset + window length == the document length),
+        # which is the shape every cacheable limited load has — and the mint
+        # re-checks that equality itself before reusing anything. Hand the
+        # entry over so the cold load does not hash the document a second
+        # time (the maintainer measured 2 full-document hashes per cold GET
+        # and 0 on the warm hit; the cold path is now 1).
+        if _prefix_fp_out is not None and prefix_fp_entry is not None:
+            _prefix_fp_out.append(prefix_fp_entry)
         with _display_merge_cache_lock:
-            _display_merge_cache[sid] = {
+            entry = {
                 "key": cache_key,
                 "messages": merged,
                 "owner_positions": projected_owners,
                 "stored_at": time.monotonic(),
             }
+            if prefix_fp_entry is not None:
+                entry["prefix_fp"] = prefix_fp_entry
+            _display_merge_cache[sid] = entry
             _display_merge_cache.move_to_end(sid, last=True)
             while len(_display_merge_cache) > _DISPLAY_MERGE_CACHE_MAX:
                 _display_merge_cache.popitem(last=False)
@@ -16006,9 +16676,38 @@ def _handle_session_get(handler, parsed) -> bool:
         msg_before = int(_msg_before) if _msg_before else None
     except (ValueError, TypeError):
         msg_before = None
+    # ?msg_after=N (+ anchor_fp / transcript_generation) — the append-only
+    # fast path (#7925 re-gate): the client holds rows [0, N] and asks for
+    # only the rows strictly after N, proving its prefix is unchanged via the
+    # anchor fingerprint and the transcript generation. When any check fails
+    # the response is the authoritative full transcript (master's behaviour).
+    # Mutually exclusive with msg_before (paging wins).
+    _msg_after = query.get("msg_after", [None])[0]
+    _anchor_fp = query.get("anchor_fp", [None])[0]
+    _transcript_generation = query.get("transcript_generation", [None])[0]
+    # #7925 re-gate (2026-10-27 finding 4): the digest the client holds over
+    # rows [0, msg_after+1) of the merged display document, minted by the
+    # load that established its view. The server recomputes it over the
+    # current document and refuses the append on mismatch, so a
+    # non-destructive edit of an earlier row (settled reasoning, saved
+    # attachments) cannot survive as a stale prefix.
+    _prefix_fp = query.get("prefix_fp", [None])[0]
     msg_limit, _msg_limit_explicit_all = _resolve_effective_msg_limit(
         _raw_msg_limit,
     )
+    # #7925 re-gate (2026-10-27 review, CORE): an append-only fast-path
+    # request carries msg_limit ONLY to bound the returned window; its anchor
+    # validation runs against the FULL display document. The state.db loader
+    # and the display-merge cache above still keyed on
+    # ``msg_limit is not None``, so an append (msg_limit=500) took the
+    # limited-display branch: on a cache hit the loader emptied
+    # ``state_db_messages`` and the full merge branch merged the sidecar with
+    # nothing — a 601-sidecar + 602-state.db session answered a focus reload
+    # with 601 rows and dropped a reply already on screen. One predicate now
+    # separates "the caller accepts a windowed document" from "the caller
+    # needs the full document"; appends run like master's bare GET.
+    _append_request = _msg_after is not None and msg_before is None
+    _limited_display_request = msg_limit is not None and not _append_request
     # ?expand_renderable=1 is retained for compatibility with older
     # frontends. msg_limit now counts visible transcript rows by default, so
     # the flag no longer changes the server-side pagination semantics.
@@ -16050,14 +16749,28 @@ def _handle_session_get(handler, parsed) -> bool:
         # reused without loading the state.db rows; must exist for every
         # branch below, including the ones that never probe the cache.
         _display_cache_hit = None
+        # #7925 re-gate (2026-10-29 should-fix 1): out-param the memoized
+        # whole-document prefix digest out of the cache probe; the mint reuses
+        # it on a hit instead of re-hashing every row.
+        _prefix_fp_out = []
         _display_state_db_signature = None
         _display_owner_positions = ({} if load_messages and _cancelled_journal_turn_owner(
             getattr(s, "messages", None) or [], include_live_partial=True
         ) else None)
+        # #7925 re-gate (2026-10-31, finding 1): read the out-of-row inputs
+        # that shape the delivered rows ONCE, before anything is projected, and
+        # thread this single snapshot through the merge (its memoized digest),
+        # the scene hydration, the session card list, the append-anchor
+        # verification and the response mint. Reading them per consumer let a
+        # save that landed mid-request (an anchor-scene save, a tool-card edit)
+        # move the inputs between the projection and the digest, so the
+        # response carried the old rows under a proof of the new inputs and
+        # every later reload accepted an empty append.
+        _display_fp_inputs = _display_prefix_fp_inputs(s) if load_messages else None
         if is_messaging_session:
             cli_messages = get_cli_session_messages(sid)
         elif load_messages:
-            if msg_limit is not None:
+            if _limited_display_request:
                 (
                     state_db_since_timestamp,
                     limited_sidecar_messages,
@@ -16095,7 +16808,7 @@ def _handle_session_get(handler, parsed) -> bool:
             # work that would have produced an identical merged result.
             _display_cache_hit = None
             if (
-                msg_limit is not None
+                _limited_display_request
                 and not getattr(s, "active_stream_id", None)
                 and not getattr(s, "pending_user_message", None)
             ):
@@ -16104,12 +16817,13 @@ def _handle_session_get(handler, parsed) -> bool:
                     limited_sidecar_messages,
                     msg_before=msg_before,
                     owner_positions=_display_owner_positions,
+                    _prefix_fp_out=_prefix_fp_out,
                 )
             if _display_cache_hit is not None:
                 state_db_messages = []
             else:
                 if (
-                    msg_limit is not None
+                    _limited_display_request
                     and not getattr(s, "active_stream_id", None)
                     and not getattr(s, "pending_user_message", None)
                 ):
@@ -16157,7 +16871,26 @@ def _handle_session_get(handler, parsed) -> bool:
                 # different slices of the same stitched conversation, merge
                 # them chronologically and dedupe exact repeats.
                 _all_msgs = _merged_session_messages_for_display(s, cli_messages)
-            elif msg_limit is not None:
+            elif _limited_display_request:
+                # The limited-display path is for bounded windows whose caller
+                # accepts a windowed document. One predicate
+                # (`_limited_display_request = msg_limit is not None and not
+                # append_request`) now gates this branch exactly like the
+                # since_timestamp loader, the display-merge cache probe, and
+                # the exact owner-position resolution above (#7925 re-gate,
+                # 2026-10-29 should-fix 2): the old two-condition form
+                # (`msg_limit is not None and _msg_after is None`) disagreed
+                # with it on requests carrying both msg_after and msg_before.
+                # An append-only fast-path request (#7925) carries msg_limit
+                # to bound the RETURNED window, but its anchor validation runs
+                # against the full display document: the limited path skips
+                # the lineage merge, so a continuation session's _all_msgs
+                # holds only the child's rows and every append anchor (an
+                # absolute index into the merged transcript) reads as
+                # out-of-range. The refusal then answers with the limited
+                # document instead of the authoritative full one and the
+                # client collapses to the child's rows. Route append requests
+                # down the full path; the window below stays bounded.
                 if _display_cache_hit is not None:
                     _all_msgs = _display_cache_hit
                 else:
@@ -16168,6 +16901,15 @@ def _handle_session_get(handler, parsed) -> bool:
                         state_db_signature=_display_state_db_signature,
                         msg_before=msg_before,
                         owner_positions=_display_owner_positions,
+                        # #7925 re-gate (2026-10-30, cold double-hash): hand
+                        # the digest the merge just computed to the response
+                        # mint, so a cold load does not hash the document a
+                        # second time. #7925 re-gate (2026-10-31, finding 1):
+                        # the entry is built from the SAME input snapshot the
+                        # response mint will use, so a save landing between the
+                        # merge and the mint cannot desynchronize them.
+                        _prefix_fp_out=_prefix_fp_out,
+                        inputs=_display_fp_inputs,
                     )
             else:
                 state_db_messages = _suppress_native_image_display_mirrors(
@@ -16244,31 +16986,72 @@ def _handle_session_get(handler, parsed) -> bool:
         else:
             _summary_message_count = None
             _summary_last_message_at = None
-        _display_tool_calls = getattr(s, "tool_calls", []) if load_messages else []
+        _display_tool_calls = (
+            (_display_fp_inputs.tool_calls or []) if load_messages else []
+        )
         if _display_owner_positions is not None:
-            if msg_limit is None:
+            # #7925 re-gate (2026-10-27 review): an append request needs the
+            # exact owner positions computed from the full merged document,
+            # exactly like master's bare GET (msg_limit=all); only a genuine
+            # limited-display request takes the rebased positions from its
+            # windowed merge helper.
+            if not _limited_display_request:
                 _display_owner_positions.update(_display_exact_owner_positions(s, _all_msgs))
             _display_tool_calls = _display_rebased_tool_calls(
                 _display_tool_calls, _display_owner_positions
             )
         if load_messages:
+            # Append-only fast path: validate the client's anchor (last
+            # rendered index) + prefix-freshness proof. `_window_limit` is the
+            # limit the window below is extracted with: the append window (or
+            # `all` → full transcript when the fast path is refused, which is
+            # exactly master's behaviour). `_append_mode_anchor` non-None means
+            # the response carries only the rows after that index and the
+            # client appends them instead of replacing.
+            _append_mode_anchor = None
+            _window_limit = msg_limit
+            if _msg_after is not None and msg_before is None:
+                _append_mode_anchor = _append_fast_path_anchor(
+                    s,
+                    _all_msgs,
+                    _msg_after,
+                    _anchor_fp,
+                    _transcript_generation,
+                    _prefix_fp,
+                    # 2026-10-31 finding 1: the request's single input
+                    # snapshot — the same one the mint below hashes with, so
+                    # the verification and the published proof cannot
+                    # disagree about which inputs shaped the delivered rows.
+                    inputs=_display_fp_inputs,
+                )
+                if _append_mode_anchor is not None:
+                    _window_limit = msg_limit if msg_limit is not None else _MAX_MSG_LIMIT
+                else:
+                    _window_limit = None
             _truncated_msgs, _messages_offset = _message_window_for_display(
                 _all_msgs,
-                msg_limit=msg_limit,
-                msg_before=msg_before,
+                msg_limit=_window_limit,
+                msg_before=(None if _append_mode_anchor is not None else msg_before),
+                msg_after=_append_mode_anchor,
                 expand_renderable=expand_renderable,
             )
-            if msg_limit is not None:
+            if _window_limit is not None:
                 _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
             _truncated_msgs = _hydrate_anchor_activity_scenes(
                 _truncated_msgs,
-                getattr(s, "anchor_activity_scenes", None),
+                # 2026-10-31 finding 1: hydrate from the request's single input
+                # snapshot, never a fresh read — the digest minted below hashes
+                # these very inputs, so the proof always describes the rows
+                # this response delivers.
+                _display_fp_inputs.scenes if _display_fp_inputs else None,
                 message_offset=_messages_offset,
                 tool_calls=_display_tool_calls,
             )
         else:
             _truncated_msgs = []
             _messages_offset = 0
+            _window_limit = None
+            _append_mode_anchor = None
         # Index of the first returned message in the full message array.
         # Frontend uses this as cursor for scroll-to-top paging.
         # Session-level tool_calls windowing keys off whether the returned
@@ -16450,10 +17233,52 @@ def _handle_session_get(handler, parsed) -> bool:
         # Signal to the frontend that older messages were omitted. The
         # message window cursor already reflects visible-row pagination and
         # avoids false positives when raw hidden tool rows exceed msg_limit.
-        _truncated = load_messages and msg_limit is not None and _messages_offset > 0
+        # In append-only mode the flag instead means "more rows exist beyond
+        # the returned append window" (the capped window could not cover every
+        # new row), which the client answers with the authoritative full fetch.
+        _truncated = load_messages and _window_limit is not None and _messages_offset > 0
+        if _append_mode_anchor is not None:
+            _truncated = load_messages and (_messages_offset + len(_truncated_msgs)) < len(_all_msgs)
+            # #7925 re-gate (2026-10-21, finding 5): the bounded-payload
+            # clipper trims over-long hidden tool-result rows inside the
+            # append window, so a large tool diff can arrive as a preview
+            # carrying ``_content_truncated``. Fold that into the truncation
+            # signal: the client answers it with the authoritative full
+            # fetch (``msg_limit=all`` skips the clipper), instead of keeping
+            # a permanently clipped diff with no marker that content is
+            # missing.
+            if not _truncated and any(
+                isinstance(m, dict) and m.get("_content_truncated")
+                for m in _truncated_msgs
+            ):
+                _truncated = True
         raw["_messages_truncated"] = _truncated
         raw["_messages_offset"] = _messages_offset
         raw["_msg_limit_max"] = _MAX_MSG_LIMIT
+        if _append_mode_anchor is not None:
+            raw["_append_only"] = True
+        # #7925 re-gate (2026-10-27 review, finding 4; 2026-10-29 finding 2 +
+        # should-fix 1): mint the prefix fingerprint over rows [0, K) of the
+        # merged display document, where K is the absolute index just past
+        # this response's coverage (a full load covers [0, len); a windowed or
+        # append load covers [0, offset+len)). Each row is hashed as the
+        # browser receives it (whole projected row minus the explicit
+        # exclusion set, hydrated anchor scenes included), so a scene save or
+        # a _source change moves the digest. On a display-cache hit the
+        # digest rides on the cache entry and is reused instead of re-hashing
+        # the whole document. Contract: docs/CONTRACTS.md.
+        if load_messages and _all_msgs:
+            raw["prefix_fp"] = _mint_display_prefix_fingerprint(
+                s,
+                _all_msgs,
+                _messages_offset + len(_truncated_msgs),
+                _prefix_fp_out,
+                # 2026-10-31 finding 1: mint from the SAME out-of-row input
+                # snapshot the rows above were projected with, so the published
+                # proof can never describe inputs the delivered rows do not
+                # carry.
+                inputs=_display_fp_inputs,
+            )
         _t4 = _time.monotonic()
         if _diag: _diag.stage("t4_after_compact_and_merge")
         if effective_model:

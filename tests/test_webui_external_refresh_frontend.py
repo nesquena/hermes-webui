@@ -439,12 +439,50 @@ def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
     assert "const reloadLimit = _messageReloadLimitForSession(sid);" in SESSIONS_JS
     # The width hint is applied only when it stays within the server msg_limit
     # ceiling; an over-ceiling hint would be clamped by the backend and could
-    # silently shrink an already-loaded transcript, so it falls back to the bare
-    # full-transcript path (#6152/#6154 ceiling; Codex gate silent row-loss fix).
+    # silently shrink an already-loaded transcript, so it used to fall back to
+    # the bare full-transcript path (#6152/#6154 ceiling; Codex gate silent
+    # row-loss fix).
     # #6177: the ceiling is now read from /api/session metadata into _msgLimitMax
     # (module-scope let, default _MSG_LIMIT_MAX) instead of the mirrored const.
-    assert "const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;" in SESSIONS_JS
-    assert "const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';" in SESSIONS_JS
+    # #7899: an over-ceiling reload no longer falls back to a bare
+    # full-transcript GET (that turned every focus/SSE reconciliation on a
+    # >500-row session into a multi-MB re-download).
+    # #7925 (finding 2): clamping the over-ceiling width to _msgLimitMax was
+    # ALSO wrong, just more quietly — a 601-row fully-loaded session reloaded
+    # by an idle poll then requested msg_limit=500 and rendered the server's
+    # window from row 101, silently dropping the 101 rows the client had
+    # already loaded.
+    # #7925 (re-gate, blocking): resolving the over-ceiling width to
+    # `msg_limit=all` was not a fix either — `all` and master's bare GET are
+    # the same request server-side, so the paged-session refresh in #7899
+    # still re-downloaded the whole transcript. The append-only fast path now
+    # replaces that: the reload asks for only the rows after the last rendered
+    # index (msg_after + anchor fingerprint + transcript_generation) and
+    # appends them; the server falls back to the authoritative full document
+    # on any freshness doubt.
+    # #7925 re-gate (2026-10-30, CI): the over-ceiling FULL-TRANSCRIPT request
+    # keeps master's bare-GET shape — no `msg_limit`, no `expand_renderable`.
+    # `msg_limit=all` is the same request server-side (`_parse_msg_limit('all')`
+    # returns None; `explicit_all` is never read), but api/routes.py reserves
+    # `all` for the frontend paths that address rows by ABSOLUTE transcript
+    # index, and upstream's own contract test pins the reload's full fetch to
+    # the no-msg_limit shape (tests/test_inflight_tail_loadsession_canonical_indices.py).
+    assert "const _reloadWidthExceedsCeiling = !(reloadLimit && reloadLimit <= _msgLimitMax);" in SESSIONS_JS
+    assert "const boundedReloadLimit = _reloadWidthExceedsCeiling ? null : reloadLimit;" in SESSIONS_JS
+    assert "let reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';" in SESSIONS_JS
+    # The append-only fast path: msg_after + anchor_fp + transcript_generation,
+    # with its own bounded msg_limit.
+    assert "const _appendFastPath =" in SESSIONS_JS
+    assert "`&msg_after=${lastRenderedIdx}`" in SESSIONS_JS
+    assert "`&anchor_fp=${encodeURIComponent(anchorFp)}`" in SESSIONS_JS
+    assert "`&transcript_generation=${Number(S.session.transcript_generation)}`" in SESSIONS_JS
+    # The append refusal fallback re-fetches the authoritative full transcript
+    # in master's bare-GET shape too (no msg_limit / no expand_renderable).
+    assert (
+        "`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`,\n"
+        "        {timeoutMs:120000}\n"
+        "      )" in SESSIONS_JS
+    )
     assert "if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);" in SESSIONS_JS
 
     load_start = SESSIONS_JS.index("async function loadSession(sid)")
