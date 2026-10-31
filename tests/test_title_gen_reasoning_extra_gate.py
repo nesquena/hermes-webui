@@ -261,7 +261,16 @@ class TestAuxReasoningExtraRouteContract:
             ), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
                 generate_title_raw_via_aux('question', 'answer')
             request = captured[-1]
-            assert (request['provider'], request['model'], request['base_url']) == expected_route
+            if provider in ('auto', 'local', '') and not base_url and not model.startswith('@'):
+                # The compatibility gate sees the resolved main route, but the
+                # Agent request remains auto to retain HTTP-failure fallbacks.
+                assert (request['provider'], request['model'], request['base_url']) == (
+                    'auto', model or None, None,
+                )
+                assert request['main_runtime']['provider'] == default_provider
+                assert request['main_runtime']['model'] == default_model
+            else:
+                assert (request['provider'], request['model'], request['base_url']) == expected_route
             assert request['extra_body'] == expected_extra
 
     def test_explicit_blank_model_uses_its_own_default_not_the_main_route(self):
@@ -526,8 +535,9 @@ class TestAuxReasoningExtraRouteContract:
         assert seen['runtime']['provider'] == 'opencode-zen'
         assert seen['runtime']['model'] == 'deepseek-v4-flash-free'
         assert (request['provider'], request['model'], request['base_url']) == (
-            'opencode-zen', 'gemini-3-flash', None,
+            'auto', None, None,
         )
+        assert request['main_runtime']['model'] == 'deepseek-v4-flash-free'
 
     def test_blank_provider_minimax_global_endpoint_preserves_route_and_extras(self):
         """The canonical global MiniMax endpoint must not inherit the main route."""
@@ -735,9 +745,13 @@ class TestResolvedAutoTitleTransportAndFallback:
             title, status = generate_title_raw_via_aux("question", "answer")
 
         assert (title, status) == ("Working title", "llm_aux")
-        assert captured[-1]["api_mode"] == expected_mode
-        assert captured[-1]["model"] == (title_model or "main-model")
-        assert captured[-1]["base_url"] == "https://anthropic-wire.example/v1"
+        # The Agent owns transport selection for this auto request. Its task
+        # config (including an explicit task api_mode) remains authoritative.
+        assert captured[-1]["provider"] == "auto"
+        assert captured[-1]["api_mode"] is None
+        assert captured[-1]["main_runtime"]["api_mode"] == "anthropic_messages"
+        assert captured[-1]["model"] == (title_model or None)
+        assert captured[-1]["base_url"] is None
 
     def test_auto_title_selects_working_fallback_instead_of_unavailable_main(self):
         captured = []
@@ -866,6 +880,145 @@ class TestResolvedAutoTitleTransportAndFallback:
         assert captured[-1]["base_url"] == "https://relay.example/fallback/v1"
         assert captured[-1]["api_key"] == "fallback-dummy"
         assert captured[-1]["api_mode"] is None
+
+    def test_named_profile_main_route_does_not_use_root_config(self):
+        """Background title preflight and the Agent runtime share the named home."""
+        profile_cfg = {
+            "model": {
+                "provider": "custom", "default": "profile-model",
+                "base_url": "https://relay.example/profile/v1",
+                "api_key": "profile-key",
+            }
+        }
+        root_cfg = {
+            "model": {
+                "provider": "custom", "default": "root-model",
+                "base_url": "https://relay.example/root/v1",
+                "api_key": "root-key",
+            }
+        }
+        homes = []
+        requests = []
+
+        def get_profile_config(home):
+            homes.append(str(home))
+            return profile_cfg
+
+        def auto_route(main_runtime, task):
+            return (
+                SimpleNamespace(
+                    base_url=main_runtime["base_url"], api_key=main_runtime["api_key"],
+                ),
+                main_runtime["model"], main_runtime["provider"],
+            )
+
+        def call_llm(**kwargs):
+            requests.append(kwargs)
+            return {"choices": [{"message": {"content": "Profile title"}, "finish_reason": "stop"}]}
+
+        with patch.dict(sys.modules, {
+            "hermes_constants": SimpleNamespace(get_hermes_home=lambda: "/named/home"),
+        }), patch("api.config.get_config_for_profile_home", side_effect=get_profile_config), patch(
+            "api.config.cfg", root_cfg,
+        ), patch("api.streaming._get_aux_title_config", return_value={
+            "provider": "auto", "model": "", "base_url": "",
+        }), patch(
+            "agent.auxiliary_client._main_route_target",
+            side_effect=lambda runtime, task: (
+                runtime["provider"], runtime["model"], runtime["base_url"],
+                runtime["api_key"], "",
+            ),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._resolve_auto_route", side_effect=auto_route, create=True,
+        ), patch(
+            "agent.auxiliary_client._effective_provider_for_client",
+            side_effect=lambda client, provider: provider, create=True,
+        ), patch(
+            "agent.auxiliary_client.call_llm", side_effect=call_llm, create=True,
+        ):
+            assert generate_title_raw_via_aux("question", "answer") == (
+                "Profile title", "llm_aux",
+            )
+
+        assert homes == ["/named/home"]
+        request = requests[0]
+        assert request["provider"] == "auto"
+        assert request["base_url"] is None
+        assert request["api_key"] is None
+        assert request["main_runtime"]["base_url"] == "https://relay.example/profile/v1"
+        assert request["main_runtime"]["api_key"] == "profile-key"
+        assert "root-key" not in repr(request)
+
+    def test_named_picker_lets_agent_resolve_the_active_profile(self):
+        """Do not look up a named custom provider in WebUI's root cfg."""
+        requests = []
+
+        def call_llm(**kwargs):
+            requests.append(kwargs)
+            return {"choices": [{"message": {"content": "Picker title"}, "finish_reason": "stop"}]}
+
+        with patch("api.streaming._get_aux_title_config", return_value={
+            "provider": "auto", "model": "@custom:relay:title-model", "base_url": "",
+        }), patch(
+            "api.streaming.resolve_model_provider",
+            side_effect=AssertionError("ambient model catalog must not resolve a picker"),
+        ), patch("agent.auxiliary_client.call_llm", side_effect=call_llm, create=True):
+            assert generate_title_raw_via_aux("question", "answer") == (
+                "Picker title", "llm_aux",
+            )
+
+        assert requests[0]["provider"] == "custom:relay"
+        assert requests[0]["model"] == "title-model"
+        assert requests[0]["base_url"] is None
+        assert requests[0]["api_key"] is None
+
+    def test_http_auth_failure_keeps_agent_auto_fallback(self):
+        """A preflight-healthy primary can fail with 401 at request time."""
+        requests = []
+
+        def call_llm(**kwargs):
+            requests.append(kwargs)
+            if kwargs["provider"] != "auto" or not kwargs["main_runtime"]:
+                raise RuntimeError("401: explicit provider bypassed Agent auto fallback")
+            # Stand in for the Agent's own primary-401 -> configured fallback.
+            return {"choices": [{"message": {"content": "Fallback title"}, "finish_reason": "stop"}]}
+
+        with patch("api.streaming._get_aux_title_config", return_value={
+            "provider": "auto", "model": "", "base_url": "",
+        }), patch("api.config.cfg", {
+            "model": {"provider": "custom", "default": "primary-model",
+                      "base_url": "https://primary.example/v1", "api_key": "primary-key"},
+        }), patch(
+            "agent.auxiliary_client._main_route_target",
+            side_effect=lambda runtime, task: (
+                runtime["provider"], runtime["model"], runtime["base_url"],
+                runtime["api_key"], "",
+            ),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._resolve_auto_route",
+            side_effect=lambda main_runtime, task: (
+                SimpleNamespace(
+                    base_url=main_runtime["base_url"], api_key=main_runtime["api_key"],
+                ), main_runtime["model"], main_runtime["provider"],
+            ),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._effective_provider_for_client",
+            side_effect=lambda client, provider: provider, create=True,
+        ), patch("agent.auxiliary_client.call_llm", side_effect=call_llm, create=True):
+            assert generate_title_raw_via_aux("question", "answer") == (
+                "Fallback title", "llm_aux",
+            )
+
+        assert len(requests) == 1
+        request = requests[0]
+        assert request["provider"] == "auto"
+        assert request["model"] is None
+        assert request["base_url"] is None
+        assert request["api_key"] is None
+        assert request["main_runtime"]["provider"] == "custom"
 
     def test_minimax_chat_is_a_verified_minimax_endpoint(self):
         from api.streaming import _is_minimax_route
