@@ -11344,6 +11344,9 @@ function renderSessionListFromCache(){
           }
           row.oncontextmenu=(e)=>{
             if(readOnlyChild) return;
+            // Same rename-input exemption as the main row handler below:
+            // never swallow the text toolbar inside an editable title.
+            if(e.target&&e.target.closest&&e.target.closest('.session-title-input')) return;
             e.preventDefault();
             if(e.pointerType==='touch'||e.pointerType==='pen') return;
             e.stopPropagation();
@@ -11431,6 +11434,9 @@ function renderSessionListFromCache(){
     }
     el.oncontextmenu=(e)=>{
       if(readOnly) return;
+      // Rename input keeps its default action: a long-press inside the
+      // editable title must still raise the Android cut/copy/paste toolbar.
+      if(e.target&&e.target.closest&&e.target.closest('.session-title-input')) return;
       e.preventDefault();
       if(e.pointerType==='touch'||e.pointerType==='pen') return;
       e.stopPropagation();
