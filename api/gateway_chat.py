@@ -616,6 +616,10 @@ def _gateway_reasoning_delta(payload: dict) -> str:
     return ""
 
 
+# Shell tools whose runs-API preview is a display summary; shown as display_command, never as args.
+_GATEWAY_SHELL_PREVIEW_TOOLS = frozenset({"terminal", "execute_code"})
+
+
 def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
     """Translate Hermes Gateway tool-progress SSE payloads to WebUI events."""
     if not isinstance(payload, dict):
@@ -639,15 +643,25 @@ def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
     status = str(payload.get("status") or "running").strip().lower()
     tid = payload.get("toolCallId") or payload.get("tool_call_id") or payload.get("id")
     is_complete = event_type == "tool.completed" or status in {"completed", "complete", "success", "error", "failed"}
+    preview = payload.get("label") or payload.get("preview")
+    raw_args = payload.get("args")
+    args = bound_run_journal_snapshot_args(raw_args) if isinstance(raw_args, dict) and raw_args else None
     event_payload = {
         "event_type": "tool.completed" if is_complete else "tool.started",
         "name": name,
-        "preview": payload.get("label") or payload.get("preview"),
-        "args": bound_run_journal_snapshot_args(payload.get("args"))
-        if isinstance(payload.get("args"), dict)
-        else {},
+        "preview": preview,
         "is_error": bool(payload.get("error")) or status in {"error", "failed"},
     }
+    if args is not None or not is_complete:  # completion omits args so the start-time value survives
+        event_payload["args"] = args or {}
+    if not is_complete and args is None and name in _GATEWAY_SHELL_PREVIEW_TOOLS and isinstance(preview, str) and preview.strip():
+        # Runs API tool.started carries only {tool, preview}: show it as a preview, never as the command.
+        event_payload["display_command"] = bound_run_journal_snapshot_args({"c": preview})["c"]
+    if is_complete:
+        from api.streaming import _tool_result_snippet
+        snippet = _tool_result_snippet(payload["result"] if payload.get("result") is not None else (preview or ""))
+        if snippet:
+            event_payload["snippet"] = snippet
     if tid:
         event_payload["tid"] = str(tid)
     return ("tool_complete" if is_complete else "tool"), event_payload
@@ -854,6 +868,7 @@ def _note_live_gateway_event(stream_id: str, event_name: str, event_payload: dic
             STREAM_LIVE_TOOL_CALLS[stream_id].append({
                 "name": event_payload.get("name"),
                 "args": event_payload.get("args") or {},
+                **({"display_command": event_payload["display_command"]} if event_payload.get("display_command") else {}),
                 "done": False,
                 **({"tid": event_payload.get("tid")} if event_payload.get("tid") else {}),
             })
@@ -866,7 +881,37 @@ def _note_live_gateway_event(stream_id: str, event_name: str, event_payload: dic
                 ) or shared_tc.get("name") == event_payload.get("name"):
                     shared_tc["done"] = True
                     shared_tc["is_error"] = bool(event_payload.get("is_error"))
+                    if event_payload.get("snippet"):
+                        shared_tc["snippet"] = event_payload["snippet"]
                     break
+
+
+def _persist_gateway_turn_tool_calls(session, assistant_msg, live_tool_calls) -> None:
+    """Persist this turn's display-only tool rows with the settled answer (Gateway transcripts carry no tool rows)."""
+    live = [tc for tc in (live_tool_calls or []) if isinstance(tc, dict) and tc.get("name")]
+    if not live:
+        return
+    messages = getattr(session, "messages", None) or []
+    # The display merge may copy rows, so match the settled answer by value, newest first.
+    idx = next((i for i in range(len(messages) - 1, -1, -1)
+                if isinstance(messages[i], dict) and messages[i].get("role") == "assistant"
+                and messages[i].get("timestamp") == assistant_msg.get("timestamp")
+                and messages[i].get("content") == assistant_msg.get("content")), -1)
+    if idx < 0:
+        return
+    from api.streaming import _truncate_tool_args
+
+    kept = [tc for tc in (getattr(session, "tool_calls", None) or []) if tc.get("assistant_msg_idx") != idx]
+    for tc in live:
+        record = {
+            "name": tc.get("name"), "args": _truncate_tool_args(tc.get("args") or {}, limit=4),
+            "snippet": tc.get("snippet") or "", "tid": tc.get("tid") or "",
+            "assistant_msg_idx": idx, "done": True, "is_error": bool(tc.get("is_error")),
+        }
+        if tc.get("display_command"):
+            record["display_command"] = tc["display_command"]
+        kept.append(record)
+    session.tool_calls = kept
 
 
 def _open_gateway_run_events(base_url, headers, run_id, last_seq: int = -1, read_timeout_secs: float | None = None):
@@ -3356,28 +3401,7 @@ def _run_gateway_chat_streaming(
                         translated = _gateway_tool_progress_event(payload)
                         if translated:
                             event_name, event_payload = translated
-                            if event_name == "reasoning":
-                                reason_delta = event_payload.get("text")
-                                if reason_delta and stream_id in STREAM_REASONING_TEXT:
-                                    STREAM_REASONING_TEXT[stream_id] += reason_delta
-                            elif stream_id in STREAM_LIVE_TOOL_CALLS:
-                                if event_name == "tool":
-                                    STREAM_LIVE_TOOL_CALLS[stream_id].append({
-                                        "name": event_payload.get("name"),
-                                        "args": event_payload.get("args") or {},
-                                        "done": False,
-                                        **({"tid": event_payload.get("tid")} if event_payload.get("tid") else {}),
-                                    })
-                                else:
-                                    for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
-                                        if shared_tc.get("done"):
-                                            continue
-                                        if (
-                                            event_payload.get("tid") and shared_tc.get("tid") == event_payload.get("tid")
-                                        ) or shared_tc.get("name") == event_payload.get("name"):
-                                            shared_tc["done"] = True
-                                            shared_tc["is_error"] = bool(event_payload.get("is_error"))
-                                            break
+                            _note_live_gateway_event(stream_id, event_name, event_payload)
                             put_gateway_event(event_name, event_payload)
                             if event_name != "reasoning":
                                 update_active_run(stream_id, phase="gateway-tool", latest_tool=event_payload.get("name"))
@@ -3545,6 +3569,8 @@ def _run_gateway_chat_streaming(
                 ]
                 if len(current_display_rows) == 1:
                     current_display_rows[0]["timestamp"] = user_msg["timestamp"]
+            previous_tool_calls = list(getattr(s, "tool_calls", None) or [])
+            _persist_gateway_turn_tool_calls(s, assistant_msg, STREAM_LIVE_TOOL_CALLS.get(stream_id))
             s.active_stream_id = None
             s.gateway_run = None
             s.pending_user_message = None
@@ -3560,6 +3586,7 @@ def _run_gateway_chat_streaming(
             )
 
             def _restore_cancelled_success_writeback():
+                s.tool_calls = previous_tool_calls
                 if pending_source in ("process_wakeup", "delegation_wakeup"):
                     s.context_messages = previous_context
                     s.messages = previous_messages
