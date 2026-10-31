@@ -9268,9 +9268,29 @@ def _deduplicate_context_messages(messages, protected_rows=None):
             prior_exact_idx = user_exact_index.get(user_exact_key)
             if msg.get('_active_turn_token'):
                 if prior_exact_idx is not None:
-                    deduped[prior_exact_idx] = msg
-                    _register_seen_stable_id(key, msg, seen_stable_by_key)
-                    continue
+                    # #8574 gate certification RED, finding 1 (nesquena-hermes
+                    # 2026-10-31): a token-bearing user row may be an
+                    # INDEPENDENTLY OWNED turn that repeats an earlier turn's
+                    # prompt verbatim inside one timestamp bucket (identical
+                    # content/timestamp/source/attachments, ``_ts`` absent).
+                    # Replacing the earlier exact-key match here deleted that
+                    # earlier owner outright from the persisted model context
+                    # and moved the later owner ahead of the first answer,
+                    # while the display transcript kept both rows. Preserve
+                    # distinct durable ownership BEFORE any token-preferred
+                    # replacement, using exactly the judgement the adjacent
+                    # tokenless branch already applies: BOTH rows must carry
+                    # valid DISTINCT non-negative integer ids. Every other
+                    # shape — an id-less row, a matching id, or an invalid id —
+                    # keeps the historical replacement unchanged, so the
+                    # token holder still supersedes a mere replay of itself.
+                    # The independently owned pair falls through to the
+                    # stable-id ownership path below, which admits the row and
+                    # registers its id in the same per-key registry.
+                    if not _independently_owned_user_pair(deduped[prior_exact_idx], msg):
+                        deduped[prior_exact_idx] = msg
+                        _register_seen_stable_id(key, msg, seen_stable_by_key)
+                        continue
                 if key in seen:
                     deduped.append(msg)
                     _register_seen_stable_id(key, msg, seen_stable_by_key)

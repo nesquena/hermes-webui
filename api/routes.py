@@ -30637,6 +30637,36 @@ def _handle_chat_sync(handler, body):
             # duplication.
             _next_context_messages = list(_previous_context_messages)
             _proven_rows = None
+        # #8574 gate certification RED, finding 2 (nesquena-hermes
+        # 2026-10-31): settle the boundary BEFORE the identity dedup shrinks
+        # the list, then again after it — the same order the streaming settle
+        # (``_settle_result_messages``) has always applied. This route used to
+        # settle only once, after the shrink, so the authority's
+        # ``current_turn_user_idx`` (an index into the PRE-shrink list)
+        # addressed the wrong slot: when the fail-closed projection returned
+        # the raw previous context and the dedup then collapsed a replayed
+        # same-id pair, the current turn was materialized at the FRONT of the
+        # reduced history ([Q2, Q1, A1]) instead of at its tail, and the
+        # historical first row was pushed behind the new prompt. Settling on
+        # the unshrunk list first lets the prefix/checkpoint proofs resolve
+        # against the indices they were computed for; the post-dedup settle
+        # below then only has to re-stamp the row the first settle placed.
+        #
+        # The gate is the SAME predicate as the post-dedup settle below: this
+        # route has only ever settled token-authoritative turns, and a
+        # tokenless turn is never index-placed here, so it cannot be
+        # mis-placed by the shrink either. Widening the gate to every turn
+        # would also change the long-standing tokenless fail-closed contract
+        # pinned by tests/test_7237_round_n2_findings.py, which is outside
+        # this repair's scope.
+        if _active_turn_identity.get("token"):
+            _next_context_messages = _settle_current_turn_boundary(
+                _previous_context_messages,
+                _next_context_messages,
+                _active_turn_identity,
+                msg,
+                getattr(s, "pending_user_source", None) or "webui",
+            )
         # #6310 residual (nesquena-hermes 2026-10-27): the identity dedup is
         # the FINAL persistence step here, exactly like the streaming settle
         # (``api/streaming.py``) applies it. This block used to compute the

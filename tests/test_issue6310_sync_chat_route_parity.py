@@ -442,3 +442,328 @@ def test_current_image_row_owns_turn_after_dedup(tmp_path, monkeypatch, polluted
         f"id; display={display_current[0].get('id')} "
         f"context={current.get('id')}"
     )
+
+
+# ── #8574 gate certification RED, finding 1 ────────────────────────────
+#
+# Two committed turns that repeat the SAME prompt verbatim inside one
+# timestamp bucket, each with its own durable id and its own active-turn
+# token, and identical source/attachments (``_ts`` absent). The gate
+# reproduced over real ``POST /api/chat`` + cold ``Session.load()``:
+#
+#   candidate cold model context starts with IDs 3, 2, 4, 5
+#       — owner 1 is deleted and owner 3 moves before the first answer;
+#   master (no persisted dedup) preserves 1, 2, 3, 4;
+#   the display transcript retains BOTH owners on both trees.
+#
+# The token-bearing-user branch of ``_deduplicate_context_messages``
+# replaced the earlier exact-key match BEFORE any distinct-durable-id check,
+# so the second turn's row overwrote the first turn's row in place.
+_DISTINCT_OWNER_HISTORY = [
+    {
+        "role": "user",
+        "content": "higher",
+        "timestamp": 100.0,
+        "id": 1,
+        "_source": "webui",
+        "_active_turn_token": "s1:100",
+    },
+    {"role": "assistant", "content": "guess 50", "timestamp": 101.0, "id": 2},
+    {
+        "role": "user",
+        "content": "higher",
+        "timestamp": 100.0,
+        "id": 3,
+        "_source": "webui",
+        "_active_turn_token": "s2:100",
+    },
+    {"role": "assistant", "content": "guess 75", "timestamp": 103.0, "id": 4},
+]
+
+
+def test_sync_chat_preserves_distinct_durable_user_owners(tmp_path, monkeypatch):
+    """#8574 gate finding 1: distinct durable owners survive the persisted dedup.
+
+    The synchronous settle now persists
+    ``_deduplicate_context_messages``' reduced list. Its token-bearing-user
+    branch replaced an earlier exact-key match (identical content, timestamp,
+    source and attachments) before checking distinct ids or turn tokens, so
+    the second committed turn's row overwrote the first turn's row: the
+    model-facing context lost owner 1 and reordered owner 3 ahead of the
+    first answer, while the visible transcript still showed both.
+
+    Master keeps the raw list (1, 2, 3, 4), so the repair must restore that
+    ownership without re-introducing the duplicate-pair collapse this PR
+    fixes elsewhere.
+    """
+    reloaded = _sync_http_send(
+        tmp_path,
+        monkeypatch,
+        "i8574-owner-sync",
+        copy.deepcopy(_DISTINCT_OWNER_HISTORY),
+        "lower",
+        "guess 90",
+    )
+    assert reloaded is not None
+    context = reloaded.context_messages
+    display = reloaded.messages
+
+    context_user_ids = [
+        r.get("id") for r in context if isinstance(r, dict) and r.get("role") == "user"
+    ]
+    assert context_user_ids == [1, 3, 5], (
+        "both independently owned historical user rows must survive the "
+        "synchronous identity dedup with their durable ids, followed by the "
+        f"new turn; got ids={context_user_ids} contents={_contents(context)}"
+    )
+    assert _contents(context) == [
+        "higher",
+        "guess 50",
+        "higher",
+        "guess 75",
+        "lower",
+        "guess 90",
+    ], (
+        "the model context must keep the historical order (owner 1 before its "
+        f"answer, owner 3 before its answer); got {_contents(context)}"
+    )
+    # The display transcript is the ownership oracle: it retains both owners.
+    assert _contents(display).count("higher") == 2, (
+        "the display must retain both independently owned user rows; got "
+        f"{_contents(display)}"
+    )
+    assert _contents(context).count("higher") == 2, (
+        "the model context must agree with the display on how many 'higher' "
+        f"turns it carries; got {_contents(context)}"
+    )
+    kept_tokens = [
+        r.get("_active_turn_token")
+        for r in context
+        if isinstance(r, dict) and r.get("role") == "user" and r.get("content") == "higher"
+    ]
+    assert kept_tokens == ["s1:100", "s2:100"], (
+        "each retained owner must keep its own active-turn token; got "
+        f"{kept_tokens}"
+    )
+
+
+# ── #8574 gate certification RED, finding 2 ────────────────────────────
+#
+# Polluted same-id history, an Agent result that rewrites the first
+# historical answer and returns a multimodal current user row. The
+# fail-closed projection keeps the raw previous context; the persisted
+# shrinking dedup then ran BEFORE boundary settlement, so the settle placed
+# the current row from a stale ``current_turn_user_idx``:
+#
+#   candidate cold context = [Q2, Q1, A1]  (historical first row lost);
+#   master retains          [Q1, A1, Q1, A1, Q2].
+_POLLUTED_SAME_ID_HISTORY = [
+    {"role": "user", "content": "Q1", "timestamp": 1.0, "id": 1},
+    {"role": "assistant", "content": "A1", "timestamp": 2.0, "id": 2},
+    {"role": "user", "content": "Q1", "timestamp": 1.0, "id": 1},
+    {"role": "assistant", "content": "A1", "timestamp": 2.0, "id": 2},
+]
+
+
+def _install_rewriting_multimodal_agent(monkeypatch, sid, answer="A2"):
+    """Agent that rewrites the first historical answer and returns an image row.
+
+    Rewriting the first historical answer makes the returned conversation
+    diverge from the projection this process sent, so
+    ``_dedupe_replayed_context_messages`` fails closed and returns the raw
+    previous context — the shape the #8574 gate used for its settlement
+    ordering finding. The current user row stays multimodal so the sync image
+    path mints a turn token, exactly as the gate probe did.
+    """
+    original_setitem = monkeypatch.setitem
+
+    def setitem(mapping, key, value):
+        if mapping is sys.modules and key == "run_agent":
+            parent = _agent_class(sid, answer)
+
+            class RewritingMultimodalAgent(parent):
+                def run_conversation(self, **kwargs):
+                    result = super().run_conversation(**kwargs)
+                    msgs = result["messages"]
+                    msgs[1]["content"] = "A1-rewritten"
+                    msgs[-2]["content"] = [
+                        {"type": "text", "text": kwargs["persist_user_message"]},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                    ]
+                    return result
+
+            value = SimpleNamespace(AIAgent=RewritingMultimodalAgent)
+        return original_setitem(mapping, key, value)
+
+    monkeypatch.setattr(monkeypatch, "setitem", setitem)
+
+
+def test_sync_chat_settles_boundary_before_shrinking_dedup(tmp_path, monkeypatch):
+    """#8574 gate finding 2: settle before AND after the shrinking dedup.
+
+    The streaming settle (``_settle_result_messages``) runs
+    ``_settle_current_turn_boundary`` on the replayed context BEFORE the
+    identity dedup shrinks it and again AFTER. The synchronous route settled
+    only once, after the shrink, so the authority's
+    ``current_turn_user_idx`` (an index into the pre-shrink list) addressed
+    the wrong slot and the current turn was materialized at the FRONT of the
+    reduced history: the model context began with the new prompt and the
+    historical first row was pushed behind it.
+
+    Master (no persisted dedup) keeps [Q1, A1, Q1, A1, Q2]; the repaired
+    candidate must keep the historical first row at the front too.
+    """
+    _install_rewriting_multimodal_agent(monkeypatch, "i8574-settle-sync")
+    reloaded = _sync_http_send(
+        tmp_path,
+        monkeypatch,
+        "i8574-settle-sync",
+        copy.deepcopy(_POLLUTED_SAME_ID_HISTORY),
+        "Q2",
+        "A2",
+    )
+    assert reloaded is not None
+    context = reloaded.context_messages
+    contents = _contents(context)
+
+    first = context[0]
+    assert isinstance(first, dict) and first.get("role") == "user", (
+        f"the first model-context row must be a historical user row; got {contents}"
+    )
+    assert first.get("content") == "Q1", (
+        "the historical first row must survive at the front of the model "
+        f"context after a fail-closed projection; got {contents}"
+    )
+    assert contents.count("Q2") == 1, (
+        "the current prompt must be retained exactly once; got "
+        f"{contents}"
+    )
+    assert context[-1] is not None and context[-1].get("content") == "Q2", (
+        "the current turn must be settled at the tail of the retained "
+        f"history, not spliced in front of it; got {contents}"
+    )
+    current = context[-1]
+    assert current.get("_active_turn_token"), (
+        "the settled current row must keep the active-turn token minted for "
+        f"the image row; got {current}"
+    )
+    assert contents.count("Q1") == 1, (
+        "the replayed same-id duplicate pair must still be collapsed out of "
+        f"the model context; got {contents}"
+    )
+
+
+def test_streaming_worker_preserves_distinct_durable_user_owners(tmp_path, monkeypatch):
+    """The shared helper fix must hold on the streaming settle too.
+
+    ``_deduplicate_context_messages`` is one helper used by both paths; the
+    gate noted the weakness already existed in streaming. Drive the REAL
+    streaming worker with the same distinct-owner history and cold-reload.
+    """
+    stream_reloaded = _worker_send(
+        tmp_path,
+        monkeypatch,
+        "i8574-owner-stream",
+        copy.deepcopy(_DISTINCT_OWNER_HISTORY),
+        "lower",
+        "guess 90",
+    )
+    assert stream_reloaded is not None
+    stream_user_ids = [
+        r.get("id")
+        for r in stream_reloaded.context_messages
+        if isinstance(r, dict) and r.get("role") == "user"
+    ]
+    assert stream_user_ids == [1, 3, 5], (
+        "the streaming settle must retain both independently owned user rows "
+        f"with their durable ids; got ids={stream_user_ids} "
+        f"contents={_contents(stream_reloaded.context_messages)}"
+    )
+
+
+# ── unit pins for the token-branch replacement semantics ───────────────
+#
+# The repair must not over-correct: a token-bearing row that is a mere
+# replay of an already-retained row (same durable id, or a prior row with no
+# durable id at all) must STILL supersede it. These shapes are what the
+# token branch existed for.
+
+
+def test_dedup_token_branch_keeps_distinct_durable_owners():
+    """Unit pin for gate finding 1 at the helper boundary."""
+    from api.streaming import _deduplicate_context_messages
+
+    out = _deduplicate_context_messages(copy.deepcopy(_DISTINCT_OWNER_HISTORY))
+    assert _contents(out) == ["higher", "guess 50", "higher", "guess 75"], (
+        "two token-bearing user rows with distinct durable ids are "
+        f"independently owned turns and must both survive; got {_contents(out)}"
+    )
+    assert [r.get("id") for r in out if r.get("role") == "user"] == [1, 3], (
+        "each independently owned user row must keep its own durable id; got "
+        f"{[r.get('id') for r in out if r.get('role') == 'user']}"
+    )
+
+
+def test_dedup_token_branch_still_replaces_a_matching_id_replay():
+    """The token holder still supersedes a replay that shares its durable id."""
+    from api.streaming import _deduplicate_context_messages
+
+    rows = [
+        {
+            "role": "user",
+            "content": "same prompt",
+            "timestamp": 5.0,
+            "id": 7,
+            "_source": "webui",
+            "_active_turn_token": "s1:5",
+        },
+        {"role": "assistant", "content": "first answer", "timestamp": 6.0, "id": 8},
+        {
+            "role": "user",
+            "content": "same prompt",
+            "timestamp": 5.0,
+            "id": 7,
+            "_source": "webui",
+            "_active_turn_token": "s2:5",
+        },
+    ]
+    out = _deduplicate_context_messages(rows)
+    assert _contents(out) == ["same prompt", "first answer"], (
+        "a token-bearing replay of the SAME durable id must still replace the "
+        f"earlier row rather than duplicate it; got {_contents(out)}"
+    )
+    assert out[0].get("_active_turn_token") == "s2:5", (
+        "the replacement row must be the token holder; got "
+        f"{out[0].get('_active_turn_token')}"
+    )
+
+
+def test_dedup_token_branch_still_replaces_an_id_less_prior_row():
+    """An id-less prior row keeps the legacy collapse (no ownership proof)."""
+    from api.streaming import _deduplicate_context_messages
+
+    rows = [
+        {
+            "role": "user",
+            "content": "same prompt",
+            "timestamp": 5.0,
+            "_source": "webui",
+            "_active_turn_token": "s1:5",
+        },
+        {
+            "role": "user",
+            "content": "same prompt",
+            "timestamp": 5.0,
+            "id": 9,
+            "_source": "webui",
+            "_active_turn_token": "s2:5",
+        },
+    ]
+    out = _deduplicate_context_messages(rows)
+    assert _contents(out) == ["same prompt"], (
+        "a prior row without a durable id grants no independent ownership, so "
+        f"the token holder must still replace it; got {_contents(out)}"
+    )
+    assert out[0].get("id") == 9 and out[0].get("_active_turn_token") == "s2:5", (
+        f"the retained row must be the token holder; got {out[0]}"
+    )
