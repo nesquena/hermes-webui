@@ -680,16 +680,25 @@ def _evict_from(hc, home, sid, agent):
     return closed
 
 
-def test_unresolvable_owner_eviction_runs_nothing(hc, homes, lifecycle, caplog):
-    """RED on 8c4020c2c (it soft-released the provider). No recorded owner, no session
-    record: no commit, no session end and no provider teardown; logged as not run."""
+def test_unresolvable_owner_eviction_runs_no_session_end(hc, homes, lifecycle, caplog):
+    """#8613 replaced #8640's blanket "run nothing" with the last-holder proof. The
+    session end still never runs for an owner that cannot be resolved — it is a
+    commit, and an unknown owner never commits — but the provider teardown inside
+    it does, through the manager's own soft release, in the provider's bound
+    profile. The shutdown is logged as not run, exactly as before."""
     caplog.set_level(logging.WARNING, logger="api.memory_profile_scope")
     log: list = []
     sid = "i8613-unowned"
     agent = EvictedAgent(_manager(homes["alpha"], log), log)
     assert scope.session_owner_profile_home(sid) == ""
     assert _evict_from(hc, homes["beta"], sid, agent) is True
-    assert log == [], log
+    # No commit and no session end: an unknown owner never writes.
+    assert ("commit_memory_session", str(homes["alpha"])) not in log
+    assert ("on_session_end", str(homes["alpha"])) not in log
+    assert ("shutdown_memory_provider", str(homes["alpha"])) not in log
+    # The provider teardown ran as the manager's own soft release, in the profile
+    # the provider is bound to (never the evicting turn's ambient home).
+    assert ("release_soft", str(homes["alpha"])) in log, log
     assert [r for r in caplog.records if sid in r.getMessage() and "not run" in r.getMessage()]
 
 
@@ -789,12 +798,21 @@ def test_owner_known_but_provider_bound_elsewhere_runs_nothing(hc, homes, lifecy
     assert log == [], log
 
 
-def test_no_unowned_provider_release_fallback():
-    """RED on 8c4020c2c. Deferred until WebUI can prove a provider instance is used by
-    the evicted agent alone."""
+def test_the_unowned_release_exists_and_is_last_holder_gated():
+    """The #8640 RED asserted WebUI has NO unowned provider release at all. #8613
+    replaced that blanket refusal with the last-holder proof: the release exists,
+    is wired into the eviction path behind the owner-scoped shutdown, and the gate
+    it runs behind (``agent_is_last_provider_holder``) is what keeps a shared
+    instance up for the agents still holding it — proven by the surviving-agent
+    save in ``test_unowned_eviction_keeps_a_shared_provider_working_for_the_survivor``
+    above."""
     src = (REPO_ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
-    assert "release_unowned_memory_provider" not in src
-    assert not hasattr(scope, "release_unowned_memory_provider")
+    assert "release_unowned_memory_provider(" in src
+    assert callable(scope.release_unowned_memory_provider)
+    gate = (REPO_ROOT / "api" / "memory_profile_scope.py").read_text(encoding="utf-8")
+    assert "def agent_is_last_provider_holder(" in gate
+    # The release runs only when the owner-scoped shutdown was refused.
+    assert src.index("if not call_as_session_owner(") < src.index("release_unowned_memory_provider(")
 
 
 # ── 3. docs: the implemented warnings are documented, verbatim ─────────────────
