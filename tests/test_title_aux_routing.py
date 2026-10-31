@@ -509,9 +509,9 @@ class TestReasoningModelTitleGeneration(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertEqual(status, 'llm_empty_reasoning_aux')
-        # One call per prompt at the base budget — no retry on prompt 0, no
-        # second-prompt attempt either (short-circuited).
-        self.assertEqual(call_count[0], 1)
+        # Schema and compatibility each get one call at the base budget;
+        # compatibility reasoning-only output stops further attempts.
+        self.assertEqual(call_count[0], 2)
 
     def test_aux_still_retries_finish_length_without_reasoning(self):
         """Length-truncated responses WITHOUT reasoning tokens still get the
@@ -521,7 +521,7 @@ class TestReasoningModelTitleGeneration(unittest.TestCase):
 
         responses = [
             {'choices': [{'message': {'content': ''}, 'finish_reason': 'length'}]},
-            {'choices': [{'message': {'content': 'Useful Session Title'}, 'finish_reason': 'stop'}]},
+            {'choices': [{'message': {'content': '{"title": "Useful Session Title"}'}, 'finish_reason': 'stop'}]},
         ]
         captured_budgets = []
 
@@ -604,8 +604,8 @@ class TestReasoningModelTitleGeneration(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertEqual(status, 'llm_empty_reasoning')
-        # One call per prompt at base budget — no retry, no second-prompt attempt.
-        self.assertEqual(call_count[0], 1)
+        # Schema then compatibility at the base budget; no larger-budget retry.
+        self.assertEqual(call_count[0], 2)
         self.assertIsNone(agent.reasoning_config)
 
     def test_agent_route_still_retries_finish_length_without_reasoning(self):
@@ -614,7 +614,7 @@ class TestReasoningModelTitleGeneration(unittest.TestCase):
 
         responses = [
             {'choices': [{'message': {'content': ''}, 'finish_reason': 'length'}]},
-            {'choices': [{'message': {'content': 'Agent Session Title'}, 'finish_reason': 'stop'}]},
+            {'choices': [{'message': {'content': '{"title": "Agent Session Title"}'}, 'finish_reason': 'stop'}]},
         ]
         captured_budgets = []
 
