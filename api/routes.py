@@ -8371,6 +8371,231 @@ def _catalog_group_owns_exact_model(group: dict, model: str) -> bool:
     return False
 
 
+def _records_naming_provider(
+    profile_config: dict | None,
+    stored_provider: str,
+    canonical_provider: str,
+) -> list[tuple[str, dict]]:
+    """Return ``(config_key, record)`` for every raw ``providers:`` row that names this identity.
+
+    A native ``providers:`` record claims its provider the way the installed
+    Agent's resolver reads it — by its OWN config key OR by its display ``name``
+    — so both identities are consulted through the config-owned matcher
+    (``_custom_record_names_identity`` / ``_custom_provider_alias_set``) rather
+    than a private spelling rule here. Two consequences the inline key comparison
+    missed (#8179 P2): the endpoint may be spelled ``api``/``url``/``base_url``
+    (handled by the caller's normalisation) and a record keyed under a handle
+    (``providers.actual`` naming ``glm``) still owns the ``glm`` lane.
+
+    Identity-OWNED, never "the only row around": a record that names some other
+    provider is not returned, so a generic ``providers['custom']`` entry cannot
+    become the authority for an unrelated lane. Both the raw and the canonical id
+    are tested, matching the dual-lookup the rest of this path keeps for
+    canonically-equivalent spellings (``my_local`` / ``my-local``, ``glm`` /
+    ``zai``). Purely structural: reads the profile dict only, and the caller
+    decides enabled/ambiguity semantics from the same ``api.config`` helpers.
+    """
+    if not isinstance(profile_config, dict) or not stored_provider:
+        return []
+    from api.config import (
+        _canonicalise_provider_id,
+        _custom_provider_slug_key,
+        _custom_record_names_identity,
+    )
+
+    providers_cfg = profile_config.get("providers")
+    if not isinstance(providers_cfg, dict):
+        return []
+    identities = []
+    for pid in (str(stored_provider or "").strip().lower(), canonical_provider):
+        if pid and pid not in identities:
+            identities.append(pid)
+    matched: list[tuple[str, dict]] = []
+    seen: set[str] = set()
+    for pid in identities:
+        slug = _custom_provider_slug_key(pid)
+        for config_key, record in providers_cfg.items():
+            key = str(config_key or "").strip()
+            if not key or not isinstance(record, dict) or not record or key in seen:
+                continue
+            # The record's OWN name claims the identity; an unnamed record is
+            # claimed by its config key alone (canonical, so ``my_local``
+            # declares the lane a session stores as ``my-local``).
+            names = _custom_record_names_identity(record.get("name") or key, key, pid, slug)
+            if not names and _canonicalise_provider_id(key) != canonical_provider:
+                continue
+            seen.add(key)
+            matched.append((key, record))
+    return matched
+
+
+def _stored_provider_can_legitimately_own_model(
+    stored_provider: str, profile_config: dict | None = None
+) -> bool:
+    """Return True when a catalog absence is not evidence against ownership.
+
+    Self-hosted, local-server, plugin, and custom-endpoint providers serve
+    arbitrary local/external models that never appear in any catalog (vLLM,
+    llama.cpp, TabbyAPI, or llama-server behind a named ``custom_providers``
+    entry need no API key), so a missing model there does not prove the
+    stored provider is stale (#7585 review; #5731 fail-safe). A profile that
+    configures ``providers.<id>.base_url`` likewise declares that the OpenAI-
+    compatible endpoint owns its models regardless of catalog/key presence
+    (PR #7594 review, CORE). Every lookup keeps an ``except: return True``
+    fail-safe so an unexpected config shape never clears a lane.
+    """
+    try:
+        from api.config import _canonicalise_provider_id
+
+        raw = str(stored_provider or "").strip().lower()
+        provider = _canonicalise_provider_id(stored_provider)
+    except Exception:
+        return True
+    if provider in _SELF_HOSTED_PROVIDER_IDS:
+        return True
+    if provider == "custom" or provider.startswith("custom:"):
+        return True
+    try:
+        from api.config import _is_local_server_provider
+
+        if _is_local_server_provider(provider):
+            return True
+    except Exception:
+        return True
+    if provider and isinstance(profile_config, dict):
+        try:
+            from api.config import (
+                _normalized_raw_provider_record,
+                _raw_provider_record_enabled,
+                _custom_record_base_url,
+            )
+
+            # Identity, endpoint spelling, enabled/ambiguity semantics all come
+            # from ``api.config`` — ONE definition shared with the resolver that
+            # actually routes the send, not a second copy here (#8179 P2). The
+            # projection stays a PURE STRUCTURAL ownership check: no ``key_cmd``
+            # subprocess, no socket probe, no credential-pool lookup.
+            for config_key, record in _records_naming_provider(
+                profile_config, stored_provider, provider
+            ):
+                if not _raw_provider_record_enabled(record):
+                    continue
+                normalized = _normalized_raw_provider_record(record, config_key)
+                if _custom_record_base_url(normalized):
+                    return True
+        except Exception:
+            return True
+        # PR #7594 review P1 follow-up: a profile may declare the local endpoint at
+        # the TOP level (FAQ-documented shape ``model: {provider: ..., base_url:
+        # http://127.0.0.1:...}``) rather than nested under ``providers.<id>``. The
+        # top-level URL is ownership evidence ONLY for its configured
+        # ``model.provider``: a loopback/private URL configured for provider X must
+        # not protect an unrelated stored provider Y from the stale repair (Greptile
+        # P1). A missing ``model.provider`` therefore evidences nobody; public
+        # relay-style URLs stay non-evidence (boundary guard).
+        try:
+            from api.config import _base_url_points_at_local_server, _canonicalise_provider_id
+
+            model_cfg = profile_config.get("model")
+            if isinstance(model_cfg, dict):
+                configured_provider = _canonicalise_provider_id(model_cfg.get("provider"))
+                top_base_url = str(model_cfg.get("base_url") or "").strip()
+                if (
+                    configured_provider == provider
+                    and top_base_url
+                    and _base_url_points_at_local_server(top_base_url)
+                ):
+                    return True
+        except Exception:
+            return True
+    try:
+        from api.config import _named_custom_provider_slug_for_provider
+
+        # Both identities: the slug table registers underscore names raw, and
+        # ``_canonicalise_provider_id`` rewrites them (#7594 gate5 regression).
+        # Both lookups are scoped to the session's OWN profile config: the
+        # process-global ``cfg`` may belong to a different profile mid-request,
+        # and a named custom provider declared only there must not decide that
+        # this lane is legitimate (#7594 re-gate CORE). When no profile dict is
+        # available the helper keeps its global fallback.
+        if _named_custom_provider_slug_for_provider(raw, profile_config):
+            return True
+        if provider != raw and _named_custom_provider_slug_for_provider(provider, profile_config):
+            return True
+    except Exception:
+        return True
+    try:
+        if is_plugin_model_provider(raw):
+            return True
+        return bool(provider != raw and is_plugin_model_provider(provider))
+    except Exception:
+        return True
+
+
+def _catalog_evidence_is_incomplete(catalog: dict, groups: list[dict]) -> bool:
+    """Return True when the catalog cannot prove anything about ownership.
+
+    A cold/emergency minimal catalog lists only the active provider's
+    default model, and an errored group never discovered anything —
+    neither may clear a stale provider (#7585 and its review).
+    """
+    if catalog.get("catalog_minimal"):
+        return True
+    for group in groups:
+        if group.get("models_endpoint_error"):
+            return True
+    return False
+
+
+def _stored_provider_has_live_credential(
+    stored_provider: str, profile_config: dict | None = None
+) -> bool:
+    """Return True when the stored provider still has a usable credential.
+
+    The session's OWN profile config is checked first: the generic helper reads
+    the process-global config, which on a multi-profile instance can belong to a
+    different profile and can be rebound by a concurrent profile reload while it
+    reads (Greptile P1 on #8179) — a key that exists only in this profile would
+    then look absent and the repair would swap out a working lane and persist it.
+    Env-var and credential-pool keys stay covered by the generic helper, and any
+    exception preserves the lane. Profile values are validated with
+    ``_provider_value_counts_as_api_key`` so a Codex OAuth JWT parked in an
+    ``api_key`` slot is never mistaken for a usable OpenAI credential.
+    """
+    try:
+        if isinstance(profile_config, dict) and stored_provider:
+            from api.config import _canonicalise_provider_id
+
+            stored_canon = _canonicalise_provider_id(stored_provider)
+            providers_cfg = profile_config.get("providers")
+            if isinstance(providers_cfg, dict) and stored_canon:
+                for key, entry in providers_cfg.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    if _canonicalise_provider_id(key) != stored_canon:
+                        continue
+                    if _provider_value_counts_as_api_key(
+                        stored_provider, entry.get("api_key")
+                    ):
+                        return True
+            model_cfg = profile_config.get("model")
+            if (
+                isinstance(model_cfg, dict)
+                and stored_canon
+                and _canonicalise_provider_id(model_cfg.get("provider")) == stored_canon
+                and _provider_value_counts_as_api_key(
+                    stored_provider, model_cfg.get("api_key")
+                )
+            ):
+                return True
+    except Exception:
+        return True
+    try:
+        return bool(provider_has_usable_credential(stored_provider))
+    except Exception:
+        return True
+
+
 def _repair_foreign_session_model_provider(
     session,
     *,
@@ -8380,6 +8605,7 @@ def _repair_foreign_session_model_provider(
     resolved_provider: str | None,
     explicit_model_pick: bool,
     profile_provider: str | None,
+    profile_config: dict | None = None,
 ) -> str | None:
     """Repair a stale provider only when the cached catalog names one owner."""
     stored_model = str(getattr(session, "model", "") or "").strip()
@@ -8387,6 +8613,48 @@ def _repair_foreign_session_model_provider(
     requested_provider = _clean_session_model_provider(requested_provider)
     resolved_provider = _clean_session_model_provider(resolved_provider)
     profile_provider = _clean_session_model_provider(profile_provider)
+    # A stored provider that IS a valid identity must route exactly as on
+    # master: only a provider that genuinely has no credentials may be
+    # repaired (#7585 gate, maintainer review of #8179). Two such identities
+    # are checked BEFORE any canonicalisation can mistake them for a
+    # credential-less lane:
+    #   1. an opaque model-alias lane — its digest is not a provider id, so
+    #      generic resolution would misread it, switch the endpoint and
+    #      persist ``custom:ambient``;
+    #   2. a registered NAMED custom provider whose name happens to
+    #      canonicalise to a catalog group — canonicalising would fabricate a
+    #      stored-group match and skip the custom-provider/credential guards
+    #      inside ``if not stored_groups``.
+    # Both fail safe to ``resolved_provider`` (the pre-repair lane) if their
+    # lookup raises, matching every other lookup on this path.
+    try:
+        from api.config import is_model_alias_route_provider
+
+        if is_model_alias_route_provider(stored_provider):
+            return resolved_provider
+    except Exception:
+        return resolved_provider
+    try:
+        from api.config import _named_custom_provider_slug_for_provider
+
+        if _named_custom_provider_slug_for_provider(stored_provider, profile_config):
+            return resolved_provider
+    except Exception:
+        return resolved_provider
+    # Canonically-equivalent ids (``my_local``/``my-local``, ``z-ai``/``zai``)
+    # are ONE provider: every provider comparison below uses the catalog-side
+    # normalisation so a lane is never "foreign" only because of spelling
+    # (#7594 gate, CORE). If canonicalisation itself raises, preserve the lane
+    # — the same fail-safe every lookup in this path already keeps.
+    try:
+        from api.config import _canonicalise_provider_id
+
+        stored_canon = _canonicalise_provider_id(stored_provider)
+        requested_canon = _canonicalise_provider_id(requested_provider)
+        resolved_canon = _canonicalise_provider_id(resolved_provider)
+        profile_canon = _canonicalise_provider_id(profile_provider)
+    except Exception:
+        return resolved_provider
     _, qualified_provider = _split_provider_qualified_model(requested_model)
     if (
         explicit_model_pick
@@ -8397,14 +8665,14 @@ def _repair_foreign_session_model_provider(
             str(requested_model or "").strip() != stored_model
             and not _catalog_model_id_matches(str(requested_model or "").strip(), stored_model)
         )
-        or requested_provider != stored_provider
+        or requested_canon != stored_canon
         or (
             resolved_model != stored_model
             and not _catalog_model_id_matches(resolved_model, stored_model)
         )
-        or resolved_provider != stored_provider
+        or resolved_canon != stored_canon
         or not profile_provider
-        or profile_provider == stored_provider
+        or profile_canon == stored_canon
     ):
         return resolved_provider
 
@@ -8413,21 +8681,46 @@ def _repair_foreign_session_model_provider(
     except Exception:
         return resolved_provider
     groups = [group for group in catalog.get("groups") or [] if isinstance(group, dict)]
-    stored_groups = [
-        group
-        for group in groups
-        if str(group.get("provider_id") or "").strip().lower() == stored_provider
-    ]
+    try:
+        group_canons = [
+            (group, _canonicalise_provider_id(str(group.get("provider_id") or "")))
+            for group in groups
+        ]
+    except Exception:
+        return resolved_provider
+    stored_groups = [group for group, canon in group_canons if canon == stored_canon]
     if (
-        not stored_groups
-        or any(group.get("models_endpoint_error") for group in stored_groups)
+        any(group.get("models_endpoint_error") for group in stored_groups)
         or any(_catalog_group_owns_exact_model(group, stored_model) for group in stored_groups)
     ):
         return resolved_provider
+    # A canonical group match is not proof the RAW stored id is valid: a
+    # session stored as ``glm``/``z-ai`` canonicalises to the ``zai`` group,
+    # and group presence alone must not skip the proof chain below, which
+    # master's raw-id group comparison gave for free (#8179 re-gate).
+    if not any(
+        str(group.get("provider_id") or "").strip().lower() == stored_provider
+        for group in groups
+    ):
+        # A missing stored group used to preserve the lane unconditionally,
+        # which let a stale catalog-backed provider (e.g. "openrouter" left on
+        # a session after moving to another provider without an OpenRouter
+        # key) survive into every agent construction and re-trigger paid
+        # fallback probes (#7585). A catalog-backed provider is expected to
+        # have a group even with zero credentials, so its absence plus
+        # complete catalog evidence proves non-ownership. Self-hosted/plugin
+        # providers may legitimately own unlisted models, and an incomplete
+        # or credential-live stored lane stays fail-safe preserved (#5731).
+        if _stored_provider_can_legitimately_own_model(stored_provider, profile_config):
+            return resolved_provider
+        if _catalog_evidence_is_incomplete(catalog, groups):
+            return resolved_provider
+        if _stored_provider_has_live_credential(stored_provider, profile_config):
+            return resolved_provider
     owners = [
         group
-        for group in groups
-        if str(group.get("provider_id") or "").strip().lower() != stored_provider
+        for group, canon in group_canons
+        if canon != stored_canon
         and _catalog_group_owns_exact_model(group, stored_model)
     ]
     if len(owners) != 1:
@@ -13275,10 +13568,14 @@ from api.run_journal import (
 )
 from api.todo_state import attach_todo_state
 from api.providers import (
+    _SELF_HOSTED_PROVIDER_IDS,
+    _provider_value_counts_as_api_key,
     get_providers,
     get_provider_quota,
     get_provider_cost_history,
+    is_plugin_model_provider,
     provider_has_process_wakeup_recovery_credential,
+    provider_has_usable_credential,
     set_provider_key,
     remove_provider_key,
 )
@@ -30438,6 +30735,7 @@ def _handle_chat_start(handler, body, diag=None):
             resolved_provider=model_provider,
             explicit_model_pick=explicit_model_pick,
             profile_provider=catalog_profile_provider,
+            profile_config=_pp_cfg,
         )
         if model_provider == "moa" and gateway_chat_enabled:
             from api.config import get_effective_default_model
