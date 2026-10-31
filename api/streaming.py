@@ -23,6 +23,7 @@ import traceback
 import unicodedata
 import copy
 import inspect
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Optional
 
@@ -228,6 +229,70 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
     except Exception:
         raw.pop('regeneration_revision', None)
     return raw
+
+
+def _successful_skill_view_name(tool_name, function_result) -> str | None:
+    """Return the canonical name from a successful structured skill_view."""
+    if tool_name != "skill_view":
+        return None
+    result = function_result
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(result, Mapping) or result.get("success") is not True:
+        return None
+    if result.get("error"):
+        return None
+    name = result.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    return name
+
+
+def _record_streaming_skill_usage(
+    session_id,
+    tool_name,
+    function_result,
+    *,
+    stream_id,
+    skill_provenance_generation,
+    ephemeral=False,
+) -> bool:
+    """Persist a successful skill_view result for the live session owner."""
+    if ephemeral or not stream_id or skill_provenance_generation is None:
+        return False
+    name = _successful_skill_view_name(tool_name, function_result)
+    if name is None:
+        return False
+    sid = str(session_id or "").strip()
+    if not sid:
+        return False
+    with _get_session_agent_lock(sid):
+        try:
+            current_session = get_session(sid)
+        except Exception:
+            return False
+        if current_session is None or str(getattr(current_session, "session_id", "")) != sid:
+            return False
+        if stream_id and not _stream_writeback_is_current(current_session, stream_id):
+            return False
+        if (
+            getattr(current_session, "skill_provenance_generation", 0)
+            != skill_provenance_generation
+        ):
+            return False
+        if getattr(current_session, "read_only", False):
+            return False
+        try:
+            if not current_session.record_skill_usage(name):
+                return False
+            current_session.save(touch_updated_at=False, skip_index=True)
+        except Exception:
+            logger.debug("Failed to persist streaming skill usage for %s", sid, exc_info=True)
+            return False
+    return True
 
 
 def _compact_for_echo_compare(value: str) -> str:
@@ -14065,6 +14130,7 @@ def _run_agent_streaming(
     # once. Sentinel: None=not computed, 0=not applicable/failed, >0=real cap.
     _real_ctx_cache = [None]
     _live_usage_session_cache = [None]
+    _stream_clear_generation = None
 
     def _current_live_usage_session():
         return _live_usage_session_snapshot(
@@ -14639,6 +14705,9 @@ def _run_agent_streaming(
         # session lock before dispatch, so a mismatch here means a newer picker
         # write won the race and must not be clobbered by the worker thread.
         with _agent_lock:
+            _skill_provenance_generation = getattr(
+                s, "skill_provenance_generation", 0,
+            )
             _last_persisted_model = getattr(s, "model", None)
             _last_persisted_provider = getattr(s, "model_provider", None)
             if _last_persisted_provider is not None:
@@ -15539,6 +15608,17 @@ def _run_agent_streaming(
                     put('metering', _tool_stats)
                 except Exception:
                     logger.debug('Failed to update live prompt estimate on tool completion', exc_info=True)
+                try:
+                    _record_streaming_skill_usage(
+                        getattr(s, "session_id", None) or session_id,
+                        name,
+                        function_result,
+                        stream_id=stream_id,
+                        skill_provenance_generation=_skill_provenance_generation,
+                        ephemeral=ephemeral,
+                    )
+                except Exception:
+                    logger.debug('Failed to persist streaming skill usage', exc_info=True)
 
             _AIAgent = _get_ai_agent()
             if _AIAgent is None:
@@ -17013,7 +17093,12 @@ def _run_agent_streaming(
                                 _heal_projected_history = _agent_replay_settle_projection(
                                     _heal_kwargs.get("conversation_history") or []
                                 )
-                                _heal_result = agent.run_conversation(**_heal_kwargs)
+                                # Skill completion callbacks persist through this same lock.
+                                _agent_lock.release()
+                                try:
+                                    _heal_result = agent.run_conversation(**_heal_kwargs)
+                                finally:
+                                    _agent_lock.acquire()
                                 _remember_pending_steer_result(_heal_result)
                                 _active_turn_identity = _resolve_active_turn_authority(
                                     _active_turn_identity,
@@ -17038,11 +17123,11 @@ def _run_agent_streaming(
                                 )
                                 _heal_ok = False
                             if cancel_event.is_set():
-                                # This retry runs under _agent_lock, so a Stop or a
-                                # server settle (#7293) could only publish its cancel
-                                # and interrupt it; the turn's terminal state is
-                                # written here. Finalize it as cancelled, keeping the
-                                # streamed partial, never as an auth failure.
+                                # A Stop or a server settle (#7293) during the retry
+                                # publishes its cancel and interrupts it; the turn's
+                                # terminal state is written here. Finalize it as
+                                # cancelled, keeping the streamed partial, never as
+                                # an auth failure.
                                 _finalize_cancelled_turn(
                                     s, ephemeral=ephemeral, stream_id=stream_id,
                                     preserve_partials=True,
@@ -17061,6 +17146,13 @@ def _run_agent_streaming(
                                     except Exception:
                                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                                 put('cancel', _worker_cancel_event_payload(stream_id))
+                                return
+                            if not _stream_writeback_is_current(s, stream_id):
+                                logger.info(
+                                    "Skipping stale credential self-heal result for session %s stream %s",
+                                    getattr(s, 'session_id', session_id),
+                                    stream_id,
+                                )
                                 return
                             if _heal_ok and _heal_result is not None:
                                 # Retry succeeded — replace result and skip error
