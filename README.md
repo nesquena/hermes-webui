@@ -307,6 +307,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Control Center always opens on the Conversation tab; resets on close
 - Unsaved changes guard -- discard/save prompt when closing with unpersisted changes
 - Cron completion alerts -- toast notifications and unread badges scoped to the active profile on the Tasks tab and session sidebar
+- Custom environment keys -- a profile's `.env` can hold your own keys alongside the ones the settings pages own. The API for them is `GET/PUT/DELETE /api/env/keys`, documented in [ARCHITECTURE.md](ARCHITECTURE.md#413-custom-environment-keys-apienvkeys): a listing returns the key names with each value masked to the same length (never the value itself), a write replaces one key, and a delete removes one. These endpoints act on the profile the request is already authenticated for -- the `?profile=` selector is not an authorization mechanism -- and they read and write the file through Hermes's own `.env` reader/writer, scoped to that profile's home.
 - Background agent error alerts -- banner when a non-active session encounters an error
 - Approval and clarification browser alerts notify once per pending owner when its session is not actively viewed. Local approval dismissal hides attention without resolving the prompt; resolution, replacement, and cancellation retire that owner's alert state. Denied or failed notification delivery can retry while the prompt remains pending.
 

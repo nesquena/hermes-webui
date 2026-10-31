@@ -862,6 +862,84 @@ Where the bindings take effect:
 
 ---
 
+### 4.13 Custom Environment Keys (`/api/env/keys`)
+
+A profile's `.env` can hold custom keys alongside the ones the richer
+settings pages own. These endpoints list, write, and remove those custom
+keys for the **active profile**, and they are the only way the dashboard's
+Custom Keys section talks to the file.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/env/keys` | List the profile's keys, redacted |
+| `PUT` | `/api/env/keys` | Add or replace one key |
+| `DELETE` | `/api/env/keys/<name>` | Remove one key |
+
+**`GET /api/env/keys`** returns `{"keys": [...]}` with one entry per key in
+the active profile's `.env`, sorted by name:
+
+```json
+{
+  "keys": [
+    {
+      "name": "MY_API_KEY",
+      "is_set": true,
+      "redacted_value": "********************",
+      "managed_elsewhere": false
+    }
+  ]
+}
+```
+
+The response never carries a value — only `is_set` and a mask of the same
+length (every character replaced by `*`). The length survives on purpose: it
+is what lets a user recognise "that's the long one", while no character of
+the secret does. An earlier preview that showed the first and last two
+characters leaked two plaintext characters of every credential, which is
+enough to narrow a token family down. `managed_elsewhere` is `true` for a
+key a richer settings page owns (Providers, Channels, Hermes' own config: the
+`HERMES_*` namespace plus `PATH`, `HOME`, `USER`, `SHELL`, `LANG`, `TERM`).
+The tag is **advisory only** — nothing is hidden, because a hidden entry
+cannot be reconciled against the page that owns it.
+
+**`PUT /api/env/keys`** takes `{"name": "<NAME>", "value": "<secret>"}` and
+writes one key. The name must match `[A-Za-z_][A-Za-z0-9_]*`; the value must
+be a non-empty string with no control characters (NUL, CR and LF are written
+verbatim into the file and break the reload that follows, so they are
+rejected before the writer sees them). A managed key is refused with `409`:
+edit it on the page that owns it. The response carries the same redacted
+shape a `GET` would, so a newly written secret is never echoed back.
+
+**`DELETE /api/env/keys/<name>`** removes one key. An unknown name is a
+no-op success — the user's intent (this key must not exist) already holds,
+and a `404` would only race a second click. A managed key is refused with
+`409` here too.
+
+**Profile behavior.** The profile these endpoints act on is the one WebUI
+auth already established for the request: the `hermes_profile` cookie
+resolved to a thread-local, an isolated-profile deployment's own name, or
+the process-level default. The caller-supplied `?profile=` selector is
+deliberately **not** accepted. Resolving a valid profile is not the same as
+being authorized to act on it: with the query parameter, a request bound to
+profile A could read profile B's key names, value lengths and previews, and
+could write or delete B's credentials. The dashboard's profile switcher is a
+UI affordance for an already-authenticated session; it is not an HTTP
+authorization mechanism. When the active profile cannot be resolved the
+endpoints fail closed with `503` rather than guessing a home.
+
+The read and the write both go through the **agent's own** `.env`
+reader/writer, scoped to the target home with the task-local
+`HERMES_HOME` override (`set_hermes_home_override` /
+`reset_hermes_home_override`) — never the process-global profile switch, which
+is one-way and would leave every later unscoped read in the server unable to
+resolve a secret. `PUT` and `DELETE` take the same lock the provider-key
+writer takes, so a concurrent custom-key write cannot interleave with
+another one's read-modify-write and drop a key. A write is verified by
+reading the value back: the agent's writer reports a managed `.env` by
+*returning* without raising, so a stored key can still hold its previous
+value, and answering `ok:true` there would report a secret as written when it
+was not.
+
 ## 5. Frontend Architecture: Current State
 
 ### 5.1 Structure
