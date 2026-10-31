@@ -5463,6 +5463,13 @@ const SESSION_ARCHIVED_PAGE_SIZE = 100;
 const SESSION_ARCHIVED_MAX_LOADED_LIMIT = 2000;
 let _allSessions = [];  // cached for search filter
 let _sidebarReferenceSessions = [];  // hidden archived ancestor rows used only for nesting/suppression
+// #6027: session ids that are IN SCOPE for the sidebar render currently being
+// built, recomputed by _partitionSidebarSessionRows before its visibility pass.
+// _sidebarRowHasVisibleMessages needs to know whether a zero-message child/fork's
+// parent is a row this render will actually show; its two-argument signature is
+// pinned by tests/test_sidebar_session_partition.py, so the scope travels here
+// instead of as a third parameter. null = not set for this render.
+let _sidebarRenderScopeSessionIds = null;
 let _allSessionsScope = null;  // {profile, allProfiles} the cache was loaded under (#4167)
 let _sessionAttentionSoundPrimed = false;
 const _sessionAttentionSoundState = new Map();
@@ -8791,6 +8798,15 @@ function _sessionSortTimestampMs(session) {
 }
 
 function _sessionRunningSortRank(session) {
+  // #6027: a delegate/subagent child row is not a conversation the user is
+  // working in — its activity is meant to surface through the child-streaming
+  // indicator on its parent row, not through its own position. Boosting it to
+  // rank 1 pinned an orphaned subagent row to the very top of the sidebar for as
+  // long as it streamed, then dropped it on completion, so a child's activity
+  // changed the row ORDER (and reflowed everything below it) instead of just its
+  // indicator. The active session stays exempt: that is the row the user is
+  // actually sitting in, and it is already ranked by _isSessionLocallyStreaming.
+  if(_isChildSession(session)&&!(S&&S.session&&S.session.session_id===session.session_id)) return 0;
   if(_isSessionEffectivelyStreaming(session)) return 1;
   return session && session.active_stream_id && session.has_pending_user_message ? 1 : 0;
 }
@@ -9895,6 +9911,19 @@ function _sessionAttentionState(s){
   return {kind,count,severity:String(attention.severity||''),label,title};
 }
 
+// #6027: true when `s` is a delegate child (or a fork) whose parent session is a
+// row the current sidebar render will actually display. Such a row must survive
+// a transient message_count===0 so its parent's child list — and therefore the
+// parent row's height — stays stable between /api/sessions polls. Scoped to the
+// render so a child of an out-of-scope session is still hidden, and to child/fork
+// relations only so ordinary empty conversations stay hidden.
+function _sidebarRenderScopeHasVisibleParent(s){
+  if(!s||!s.parent_session_id) return false;
+  if(typeof _sidebarRenderScopeSessionIds==='undefined'||!_sidebarRenderScopeSessionIds) return false;
+  if(!_sidebarRenderScopeSessionIds.has(s.parent_session_id)) return false;
+  return _isChildSession(s)||_isForkWithResolvableParent(s,_sidebarRenderScopeSessionIds);
+}
+
 function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
   return (s.message_count||0)>0 ||
     _sessionAttentionState(s) ||
@@ -9912,6 +9941,17 @@ function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
     // Scoped to children of the ACTIVE parent, mirroring the active-session
     // exception above, so unrelated truly-empty sessions are still hidden.
     (activeSidForSidebar&&s.parent_session_id===activeSidForSidebar&&_isChildSession(s)) ||
+    // #6027: generalize #5306 from the ACTIVE parent to ANY parent this render
+    // will actually show. A delegate child or fork that transiently reports
+    // message_count===0 between /api/sessions polls was dropped HERE, before
+    // _attachChildSessionsToSidebarRows ever saw it, so the parent's
+    // _child_sessions / _child_session_count badge blinked off and back on; the
+    // parent row's height changed and every row beneath it reflowed. The parent
+    // must be in the render's scope, so a child of an out-of-scope (or unrelated)
+    // session is still hidden rather than resurrected. Uses the same
+    // `typeof` guard idiom as the _sidebarReferenceSessions reads above, since
+    // this predicate is also extracted standalone by tests.
+    (typeof _sidebarRenderScopeHasVisibleParent==='function'&&_sidebarRenderScopeHasVisibleParent(s)) ||
     (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0);
 }
 
@@ -9987,6 +10027,36 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   const cliSessionsRaw=[];
   let webuiArchivedCount=0;
   let cliArchivedCount=0;
+  // #6027: publish the render's session-id scope BEFORE the visibility pass so
+  // _sidebarRowHasVisibleMessages can tell a transiently-empty delegate child of
+  // a parent this render shows (keep it attached) from one whose parent is out
+  // of scope (keep it hidden). Mirrors the project-scope check below exactly, and
+  // is restored afterwards so a later standalone call cannot read a stale scope.
+  const previousRenderScopeIds=(typeof _sidebarRenderScopeSessionIds==='undefined')?null:_sidebarRenderScopeSessionIds;
+  // Mirrors the per-row admission test in the loop below EXACTLY — including the
+  // project resolver (a delegated subagent with no project_id inherits its
+  // parent's, so a raw s.project_id check here would disagree with what the loop
+  // actually renders) and the raw s.project_id in the default_hidden exception,
+  // which is what the loop compares. Keep these in step: if the loop's scoping
+  // changes, this must change with it, or the scope set stops describing the
+  // render. Loop lines: the default_hidden `continue` and the project filter.
+  const inRenderScope=(s)=>{
+    if(!s) return false;
+    if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)) return false;
+    const projectId=projectIdFor(s);
+    if(_activeProject===NO_PROJECT_FILTER) return !projectId;
+    if(_activeProject) return projectId===_activeProject;
+    return true;
+  };
+  // Guarded on both sides: the binding is a top-level `let` in sessions.js, but
+  // this function is also extracted standalone by tests (test_5306), where the
+  // declaration is absent. Skipping the write there keeps those harnesses working
+  // and simply leaves the fix inert rather than throwing ReferenceError.
+  if(typeof _sidebarRenderScopeSessionIds!=='undefined'){
+    _sidebarRenderScopeSessionIds=new Set((allMatched||[])
+      .filter(s=>s&&s.session_id&&inRenderScope(s))
+      .map(s=>s.session_id));
+  }
   for(const s of allMatched){
     if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
     const isCli=_isCliSession(s);
@@ -10010,6 +10080,10 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     if(!_showArchived&&s.archived) continue;
     sessionsRaw.push(s);
   }
+  // #6027: scope was only needed for the visibility pass above; drop it so a
+  // later standalone _sidebarRowHasVisibleMessages call cannot read a stale set.
+  // Guarded to match the guarded write above (see the typeof note there).
+  if(typeof _sidebarRenderScopeSessionIds!=='undefined') _sidebarRenderScopeSessionIds=previousRenderScopeIds;
   if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
     _sessionSourceFilter='webui';
   }
