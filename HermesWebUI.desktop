@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Hermes WebUI
+Comment=Autonomous AI Agent Web Interface & Workspace
+Exec=bash -c 'cd "$(dirname "$1")" && ./install.sh' _ %k
+Icon=utilities-terminal
+Terminal=true
+Categories=Development;Network;
+StartupNotify=true
