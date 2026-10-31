@@ -41,10 +41,14 @@ def _free_port() -> int:
 
 class _HealthHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
+        body = b'{"status": "ok"}'
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
+        # Delimit the response without relying on TLS EOF: HTTPServer closes
+        # without close_notify, which strict curl TLS backends reject.
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(b'{"status": "ok"}')
+        self.wfile.write(body)
 
     def log_message(self, *args):  # suppress server log noise during tests
         pass

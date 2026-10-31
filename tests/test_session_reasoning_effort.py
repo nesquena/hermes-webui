@@ -587,11 +587,10 @@ def test_gateway_worker_resolves_reasoning_from_session_profile(
     assert payload["reasoning_effort"] == expected
     if http_error:
         error = next(data for event, data, *_ in emitted if event == "apperror")
-        if runs_api:
-            assert error["type"] == "auth_mismatch"
-        else:
-            assert error["type"] == "gateway_auth_error"
-            assert error["hint"].startswith("Check that" if work_key else "Set ")
+        # Both transports keep the Gateway's authentication error and use the
+        # owning profile's key when suggesting what to check.
+        assert error["type"] == "gateway_auth_error"
+        assert error["hint"].startswith("Check that" if work_key else "Set ")
 
 
 @pytest.fixture

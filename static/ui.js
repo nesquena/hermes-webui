@@ -11458,6 +11458,9 @@ function _getExplicitBusyCommandAction(text){
 }
 
 function getComposerPrimaryAction(){
+  if(S.session&&S.session.chat_read_only_reason){
+    return S.busy&&S.activeStreamId?'stop':'disabled';
+  }
   const msg=$('msg');
   const hasContent=_composerHasContent();
   const locked=!!(msg&&msg.disabled);
@@ -11487,6 +11490,15 @@ function getComposerPrimaryAction(){
 function _applyBusyComposerPlaceholder(){
   const input=$('msg');
   if(!input) return;
+  if(S.session&&S.session.chat_read_only_reason){
+    input.placeholder=typeof t==='function' ? t('composer_placeholder_read_only') : 'Read-only in WebUI';
+    input.dataset.readOnlyPlaceholder='true';
+    return;
+  }
+  if(input.dataset.readOnlyPlaceholder){
+    input.placeholder='Message '+assistantDisplayName()+'\u2026';
+    delete input.dataset.readOnlyPlaceholder;
+  }
   if(_compressionPlaceholderSaved!==null) return;
   if(input.disabled) return;
   if(_composerHasContent()) return;
@@ -11527,6 +11539,28 @@ function _setComposerPrimaryButtonIcon(btn,action){
 }
 
 function updateSendBtn(){
+  const chatReadOnlyReason=(S.session&&S.session.chat_read_only_reason)||'';
+  const chatReadOnlyNoticeText=chatReadOnlyReason.replace(/^Read-only in WebUI\.\s*/, '');
+  const showChatReadOnlyHelp=!!(chatReadOnlyReason&&S.session.chat_read_only_can_connect);
+  const chatReadOnlyNotice=$('composerChatReadOnlyNotice');
+  const chatReadOnlyText=$('composerChatReadOnlyReason');
+  const chatReadOnlyHelp=$('composerChatReadOnlyHelp');
+  if(chatReadOnlyText&&chatReadOnlyText.textContent!==chatReadOnlyNoticeText){
+    chatReadOnlyText.textContent=chatReadOnlyNoticeText;
+  }
+  if(chatReadOnlyHelp) chatReadOnlyHelp.hidden=!showChatReadOnlyHelp;
+  if(chatReadOnlyNotice){
+    chatReadOnlyNotice.hidden=!(chatReadOnlyNoticeText||showChatReadOnlyHelp);
+  }
+  const chatInput=$('msg');
+  if(chatInput){
+    chatInput.readOnly=!!chatReadOnlyReason;
+    const descriptionIds=new Set((chatInput.getAttribute('aria-describedby')||'').split(/\s+/).filter(Boolean));
+    if(chatReadOnlyNoticeText) descriptionIds.add('composerChatReadOnlyReason');
+    else descriptionIds.delete('composerChatReadOnlyReason');
+    if(descriptionIds.size) chatInput.setAttribute('aria-describedby',[...descriptionIds].join(' '));
+    else chatInput.removeAttribute('aria-describedby');
+  }
   const btn=$('btnSend');
   if(!btn){
     if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
@@ -11542,7 +11576,8 @@ function updateSendBtn(){
   let _btnTitle;
   if(action==='disabled'){
     const _dmsg=$('msg');
-    if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
+    if(chatReadOnlyReason) _btnTitle=chatReadOnlyReason;
+    else if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
     else _btnTitle=_tt('composer_disabled_empty','Type a message to send');
   }else if(action==='queue'&&typeof isCompressionUiRunning==='function'&&isCompressionUiRunning()){
     _btnTitle=_tt('composer_compression_will_queue','Type a message — it will queue and send after compression');
@@ -15425,7 +15460,7 @@ function syncTopbar(){
     if(sourceLabel){
       const badge=document.createElement('span');
       badge.className='topbar-source-badge';
-      badge.textContent=sourceLabel+(S.session.read_only?' · read-only':'');
+      badge.textContent=sourceLabel+((S.session.read_only||S.session.chat_read_only_reason)?' · read-only':'');
       _topbarMeta.appendChild(document.createTextNode(' '));
       _topbarMeta.appendChild(badge);
     }
