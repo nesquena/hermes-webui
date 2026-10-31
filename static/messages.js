@@ -7362,8 +7362,25 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       });
     });
 
+    source.addEventListener('memory_status',e=>{
+      // #8517: memory is on for the agent now serving this stream's session.
+      try{
+        const _memoryStatus=JSON.parse(e.data);
+        if(_memoryStatus&&_memoryStatus.state==='ok'&&typeof noteSessionMemoryStatus==='function') noteSessionMemoryStatus(_memoryStatus.session_id,{state:'ok'});
+      }catch(_){}
+    });
+
     source.addEventListener('warning',e=>{
       // Non-fatal warning from server (e.g. fallback activated, retrying)
+      // #8517: memory is off for the agent serving this stream's session. It updates
+      // the session on screen only (its quiet notice, never a composer status).
+      try{
+        const _memoryOff=JSON.parse(e.data);
+        if(_memoryOff&&_memoryOff.type==='memory_off'){
+          if(typeof noteSessionMemoryStatus==='function') noteSessionMemoryStatus(_memoryOff.session_id,{state:'off',reason:String(_memoryOff.reason||''),scope:String(_memoryOff.scope||'')});
+          return;
+        }
+      }catch(_){}
       if(!S.session||S.session.session_id!==activeSid) return;
       try{
         const d=JSON.parse(e.data);
@@ -7613,7 +7630,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       })();
     });
 
-    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
+    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','memory_status','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
     }
   }
@@ -8665,7 +8682,9 @@ function _syncApprovalTranscriptSpace(card, opts) {
   opts = opts || {};
   const messages = $("messages");
   if (!messages) return;
-  const wasNearBottom = _approvalMessagesNearBottom(messages);
+  // Never yank a reader who scrolled away (sticky-unpin model): a viewport change as the card
+  // opens (e.g. the memory-off notice collapsing) can bring them under the near-bottom threshold.
+  const wasNearBottom = !(typeof _messageUserUnpinned !== 'undefined' && _messageUserUnpinned) && _approvalMessagesNearBottom(messages);
   if (!card || !card.classList.contains("visible")) {
     messages.classList.remove("approval-open");
     messages.classList.remove("approval-collapsed");
@@ -9791,7 +9810,9 @@ function _syncClarifyTranscriptSpace(card, opts) {
   opts = opts || {};
   const messages = $("messages");
   if (!messages) return;
-  const wasNearBottom = _clarifyMessagesNearBottom(messages);
+  // Never yank a reader who scrolled away (sticky-unpin model): a viewport change as the card
+  // opens (e.g. the memory-off notice collapsing) can bring them under the near-bottom threshold.
+  const wasNearBottom = !(typeof _messageUserUnpinned !== 'undefined' && _messageUserUnpinned) && _clarifyMessagesNearBottom(messages);
   if (!card || !card.classList.contains("visible")) {
     messages.classList.remove("clarify-open");
     messages.classList.remove("clarify-collapsed");

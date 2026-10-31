@@ -46,6 +46,7 @@ from api.memory_profile_scope import (
     construct_memoryless_helper_agent,
     construct_profile_scoped_agent,
     profile_home_turn_scope,
+    session_memory_status,
     session_profile_home_or_empty,
 )
 from api.agent_sessions import (
@@ -16318,6 +16319,16 @@ def _handle_session_get(handler, parsed) -> bool:
         ):
             raw["is_cli_session"] = False
             raw["read_only"] = True
+        if not raw.get("read_only"):
+            # #8517 notice: the memory status of the agent serving this session, so an
+            # idle or mid-turn reload shows it at once. Omitted when unknown; codes only.
+            try:
+                _memory_status = session_memory_status(sid, session=s)
+            except Exception:
+                _memory_status = None
+                logger.debug("[webui] #8517: memory status unavailable for session %s", sid, exc_info=True)
+            if _memory_status:
+                raw["memory_status"] = _memory_status
         imported_turn_marker = any(
             isinstance(row, dict) and row.get("_active_turn_token")
             for row in _all_msgs
