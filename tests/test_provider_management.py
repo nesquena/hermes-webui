@@ -4,6 +4,7 @@ Closes #586 — allow provider key update from the WebUI.
 Part of #604 — multi-provider model picker support.
 """
 
+import contextlib
 import json
 import sys
 import types
@@ -179,6 +180,8 @@ class TestGetProviders:
         providers_invalidated = []
         monkeypatch.setattr(config, "invalidate_credential_pool_cache", invalidated_credentials.append)
         monkeypatch.setattr(prov, "invalidate_providers_cache", lambda: providers_invalidated.append(True))
+        # No Agent in this test run; persistence needs its auth.json lock.
+        monkeypatch.setattr(oauth, "_agent_auth_store_lock", lambda _path: contextlib.nullcontext())
 
         oauth._persist_codex_credentials(
             tmp_path,
