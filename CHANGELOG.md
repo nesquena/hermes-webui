@@ -73,6 +73,8 @@
 
 ### Fixed
 
+- **Internal (test reliability): the gateway routing footer test runs its node harness from a file.** It passed its whole script (about 128 KB, mostly the real `renderMessages()`) to node as one command-line argument, only about 2.5 KB under Linux's 128 KiB per-argument limit, so a routine change to `renderMessages()` would have made the file fail with "Argument list too long" instead of testing anything. The script now goes through a temporary file; the same code runs and no assertion changed. Thanks @happy5318. (#8659)
+
 - **Custom providers configured in the Agent's native `providers:` mapping show up in WebUI.** WebUI only read the legacy `custom_providers:` list, so a native-only setup had no provider cards, no model group and no live fallback. Native entries now appear in Settings > Providers and the model picker under their own route ID (renaming the label no longer changes it), and two routes that share one gateway URL keep their own key and context instead of borrowing each other's. Thanks @Jmars321. (#8448, closes #8428)
 
 - **The Agent update check finds the real latest stable release after the release series rename.** Stable tags were ordered by name, so the legacy `v2026.9.x` series outranked `v0.21.x`, the check resolved to an ancestor of the install, and it fell back to a branch comparison that reported hundreds of updates on an up-to-date install. Stable tags are now ordered by release series (the current series above the legacy one) and by version number, and canary or other prerelease tags (`+canary...`, `-rc...`) no longer count as stable releases or as the installed version. Thanks @webtecnica. (#8147)
