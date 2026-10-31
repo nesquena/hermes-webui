@@ -502,20 +502,10 @@ def test_workspace_routes_profile_isolation(monkeypatch, tmp_path):
     monkeypatch.setattr(profiles, "_resolve_base_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(workspace, "_home_path", lambda: tmp_path)
 
-    # Ambient get_config() follows the per-request TLS profile exactly as
-    # production does (server.py sets the cookie context; the config loader
-    # resolves the active home). With the restored upstream authority rules,
-    # an ambient-target lookup delegates here — so each simulated request
-    # must see ITS OWN profile's terminal block.
-    def _ambient_cfg():
-        name = profiles.get_active_profile_name()
-        if name == "bob":
-            return {"terminal": {"backend": "ssh", "cwd": "/srv/remote-bob"}}
-        if name == "alice":
-            return {"terminal": {"backend": "ssh", "cwd": "/srv/remote-alice"}}
-        return {"terminal": {"backend": "local", "cwd": str(tmp_path)}}
-
-    monkeypatch.setattr(api_config, "get_config", _ambient_cfg)
+    # Real TLS-scoped snapshot reads must use the Alice/Bob files above. Remove
+    # conftest's operator config override instead of substituting get_config();
+    # that override would deliberately select the test server's default file.
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
 
     class MockHandler:
         def __init__(self):
