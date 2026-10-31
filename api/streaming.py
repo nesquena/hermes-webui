@@ -4349,6 +4349,20 @@ def _aux_default_model_for_provider(provider: str) -> str:
         return ''
 
 
+def _aux_title_main_model_config() -> dict:
+    """Read the main route from the worker's Agent profile, never the root profile."""
+    try:
+        from hermes_constants import get_hermes_home
+        from api.config import get_config_for_profile_home
+    except ImportError:
+        # WebUI-only test/install environments have no Agent home resolver.
+        config = get_config()
+    else:
+        config = get_config_for_profile_home(get_hermes_home())
+    model_config = config.get('model', {}) if isinstance(config, dict) else {}
+    return model_config if isinstance(model_config, dict) else {}
+
+
 def _effective_aux_title_route(provider: str, model: str, base_url: str, *, resolved_credentials: Optional[dict] = None) -> tuple[str, str, str]:
     """Resolve the one auxiliary title route used for requests and compatibility.
 
@@ -4363,6 +4377,16 @@ def _effective_aux_title_route(provider: str, model: str, base_url: str, *, reso
     provider_lower = supplied_provider.lower()
     implicit_route = provider_lower in {'', 'auto', 'local'}
     picker_route = supplied_model.startswith('@')
+
+    if picker_route:
+        # Picker IDs carry an explicit provider hint. Parse the shared grammar
+        # but leave endpoint/key resolution to the Agent in the active profile;
+        # resolve_model_provider() reads WebUI's ambient cfg (often root).
+        from api.config import _parse_provider_qualified_model_id
+        parsed = _parse_provider_qualified_model_id(supplied_model)
+        if parsed is not None:
+            picked_model, picked_provider = parsed
+            return picked_provider, picked_model, supplied_base_url
 
     if supplied_base_url and not picker_route:
         # A base URL is an explicit Agent-custom endpoint contract even when
@@ -4406,7 +4430,7 @@ def _effective_aux_title_route(provider: str, model: str, base_url: str, *, reso
     # Picker models and explicit URLs remain independent request contracts.
     if implicit_route and not supplied_base_url and not picker_route:
         try:
-            model_cfg = get_config().get('model', {})
+            model_cfg = _aux_title_main_model_config()
             if isinstance(model_cfg, dict):
                 runtime = {
                     'provider': str(model_cfg.get('provider') or '').strip(),
@@ -4468,6 +4492,12 @@ def _effective_aux_title_route(provider: str, model: str, base_url: str, *, reso
                             )
                             if resolved_credentials is not None:
                                 resolved_credentials['fallback_selected'] = not is_main_route
+                                if is_main_route:
+                                    # Keep the Agent's HTTP failure recovery
+                                    # instead of pinning preflight's main route.
+                                    resolved_credentials['automatic_main'] = True
+                                    resolved_credentials['main_runtime'] = runtime
+                                    resolved_credentials['title_model_override'] = supplied_model
                                 resolved_credentials['api_key'] = (
                                     (_resolved_api_key if is_main_route
                                      else getattr(auto_client, 'api_key', '')) or ''
@@ -4506,7 +4536,7 @@ def _effective_aux_title_route(provider: str, model: str, base_url: str, *, reso
     effective_model = supplied_model
     if not effective_model:
         try:
-            model_cfg = get_config().get('model', {})
+            model_cfg = _aux_title_main_model_config()
             if isinstance(model_cfg, dict):
                 effective_model = str(model_cfg.get('default') or model_cfg.get('name') or '').strip()
         except Exception:
@@ -4727,6 +4757,7 @@ def generate_title_raw_via_aux(
         provider, model, base_url, resolved_credentials=route_credentials,
     )
     fallback_selected = bool(route_credentials.get('fallback_selected'))
+    automatic_main = bool(route_credentials.get('automatic_main'))
     if fallback_selected:
         # Primary title-task credentials/transport must not override those of
         # the actual fallback selected by the Agent.
@@ -4760,11 +4791,15 @@ def generate_title_raw_via_aux(
                 for budget_idx, max_tokens in enumerate(budgets):
                     resp = call_llm(
                         task='title_generation',
-                        provider=provider or None,
-                        model=model or None,
-                        base_url=base_url or None,
-                        api_key=api_key or None,
-                        api_mode=api_mode or None,
+                        provider='auto' if automatic_main else (provider or None),
+                        model=(
+                            route_credentials.get('title_model_override') or None
+                            if automatic_main else (model or None)
+                        ),
+                        base_url=None if automatic_main else (base_url or None),
+                        api_key=None if automatic_main else (api_key or None),
+                        api_mode=None if automatic_main else (api_mode or None),
+                        main_runtime=route_credentials.get('main_runtime') if automatic_main else None,
                         messages=messages,
                         max_tokens=max_tokens,
                         temperature=0.2,
