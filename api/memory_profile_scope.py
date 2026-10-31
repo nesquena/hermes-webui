@@ -40,6 +40,7 @@ refused BEFORE ``initialize`` runs and builds without that provider.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import functools
 import importlib
 import inspect
@@ -501,7 +502,8 @@ def profile_home_turn_scope(profile_home: str):
 
 # ── #8517 P3: session-boundary commits run as the session's owner ─────────────
 
-# Logger the Agent's caller-scope check refuses on (agent/memory_caller_scope._refuse).
+# The Agent's caller-scope module and the logger it refuses on (its ``_refuse``).
+_CALLER_SCOPE_MODULE = "agent.memory_caller_scope"
 _CALLER_SCOPE_LOGGER = "agent.memory_caller_scope"
 
 
@@ -523,15 +525,24 @@ def session_owner_profile_home(session_id: str) -> str:
 
 
 class _HookRefusalCapture(logging.Handler):
-    """Notices the Agent refusing ``hook`` on THIS thread. The Agent's lifecycle
-    hooks return nothing when its caller-scope check refuses them; the only
-    signal is its WARNING (agent/memory_caller_scope._refuse)."""
+    """Notices the Agent refusing ``hook`` during one ``call_as_session_owner``. The
+    Agent's lifecycle hooks return nothing when its caller-scope check refuses them;
+    the only signal is its refusal, ``agent/memory_caller_scope._refuse``.
+
+    With that function present the capture is told by ``_install_refusal_hook``'s
+    wrapper (``note_refusal``), whatever the deployer's logging configuration
+    (#8613). Without it (an Agent with no caller-scope check, which never refuses)
+    the capture is the pre-#8613 handler on the refusal logger, for this thread."""
 
     def __init__(self, hook: str):
         super().__init__(logging.WARNING)
         self._needle = f"hook {hook}"
         self._thread = threading.get_ident()
         self.refused = False
+
+    def note_refusal(self, label: Any) -> None:
+        if isinstance(label, str) and self._needle in label:
+            self.refused = True
 
     def emit(self, record: logging.LogRecord) -> None:
         if record.thread != self._thread:
@@ -542,6 +553,67 @@ class _HookRefusalCapture(logging.Handler):
             return
         if "refused" in message and self._needle in message:
             self.refused = True
+
+
+# The captures open in THIS context (thread / task), innermost last. A tuple, replaced
+# and reset, never mutated: a concurrent call on another thread has its own value.
+_refusal_captures: contextvars.ContextVar[tuple[_HookRefusalCapture, ...]] = contextvars.ContextVar(
+    "webui_memory_hook_refusal_captures", default=())
+_refuse_wrap_lock = threading.Lock()
+# Set on the wrapper to the registry it notes into: a reload of this module (a new
+# registry) wraps again; the previous wrapper then notes into nothing and delegates.
+_REFUSE_WRAPPER_MARK = "_webui_8613_refusal_captures"
+
+
+def _wrap_refuse(original: Callable[..., Any], captures: contextvars.ContextVar) -> Callable[..., Any]:
+    def _refuse(*args: Any, **kwargs: Any) -> Any:
+        try:
+            active = captures.get()
+            if active:
+                label = args[0] if args else kwargs.get("label")
+                for capture in active:
+                    capture.note_refusal(label)
+        except Exception:  # noting must never change what the Agent's refusal does
+            pass
+        return original(*args, **kwargs)
+
+    functools.update_wrapper(_refuse, original, updated=())
+    setattr(_refuse, _REFUSE_WRAPPER_MARK, captures)
+    return _refuse
+
+
+def _install_refusal_hook() -> bool:
+    """Wrap the Agent's ``agent.memory_caller_scope._refuse`` once (#8613), so a
+    refused hook is noted before the Agent logs it: no logger level, ``disabled``
+    flag, filter or handler is touched, and what the deployer's handlers receive is
+    unchanged. The wrapper delegates every call unchanged (arguments, return value,
+    exceptions). The Agent's ``caller_scope`` resolves ``_refuse`` from its module
+    globals at each call, so replacing the module attribute reaches every refusal.
+
+    Idempotent and thread-safe; a reload of the Agent module (a fresh ``_refuse``)
+    is wrapped again on the next call. False when the Agent has no ``_refuse``: the
+    caller then uses the pre-#8613 log capture."""
+    mod = sys.modules.get(_CALLER_SCOPE_MODULE)
+    if mod is None:
+        try:
+            mod = importlib.import_module(_CALLER_SCOPE_MODULE)
+        except Exception:
+            return False
+    captures = _refusal_captures
+    current = getattr(mod, "_refuse", None)
+    if getattr(current, _REFUSE_WRAPPER_MARK, None) is captures:
+        return True
+    with _refuse_wrap_lock:
+        current = getattr(mod, "_refuse", None)
+        if not callable(current):
+            return False
+        if getattr(current, _REFUSE_WRAPPER_MARK, None) is not captures:
+            try:
+                setattr(mod, "_refuse", _wrap_refuse(current, captures))  # noqa: B010 (a module attribute set at runtime)
+            except Exception:
+                logger.debug("[webui] #8613: cannot wrap the Agent's memory refusal", exc_info=True)
+                return False
+    return True
 
 
 def _enter_session_owner_scope(agent: Any, session_id: str, owner_home: str) -> tuple[Callable[[], None], Optional[str]]:
@@ -596,12 +668,21 @@ def call_as_session_owner(
         )
         return False
     capture = _HookRefusalCapture(hook)
-    scope_logger = logging.getLogger(_CALLER_SCOPE_LOGGER)
-    scope_logger.addHandler(capture)
+    log_capture: Optional[logging.Logger] = None
+    token: Optional[contextvars.Token] = None
     try:
+        if not _install_refusal_hook():
+            # No ``_refuse`` to wrap: the pre-#8613 capture, which only sees the
+            # refusal when the deployer's logging creates the record.
+            log_capture = logging.getLogger(_CALLER_SCOPE_LOGGER)
+            log_capture.addHandler(capture)
+        token = _refusal_captures.set(_refusal_captures.get() + (capture,))
         fn()
     finally:
-        scope_logger.removeHandler(capture)
+        if token is not None:
+            _refusal_captures.reset(token)
+        if log_capture is not None:
+            log_capture.removeHandler(capture)
         restore()
     if capture.refused:
         logger.warning(
