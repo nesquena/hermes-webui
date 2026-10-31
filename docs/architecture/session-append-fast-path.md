@@ -78,14 +78,15 @@ point: `_display_prefix_fingerprint` read session-level `tool_calls` only
 through `_hydrate_anchor_activity_scenes`, which it called only when the
 session had a saved anchor scene — so a scene-free session's cards never
 reached the digest — and `redact_session_data` runs *after* the mint, so
-neither the digest nor either memo `meta` tuple carried
+neither the digest nor the display-merge memo's `meta` tuple carried
 `api_redact_enabled`. Both changed what the browser renders for rows the
 client already holds, without touching a row.
 
 Everything on the GET path between the merge and `j(...)` that can do that is
 therefore enumerated here. **Bound** inputs are mixed into the digest (or, for
-the memo, into the `meta` tuple that guards digest reuse) and each has a test
-that changes it on a held prefix and asserts the append is refused.
+the display-merge memo, into the `meta` tuple that guards digest reuse) and
+each has a test that changes it on a held prefix and asserts the append is
+refused.
 
 | # | Input | Where it acts on the GET path | Why it changes a held row's projection | How it is bound | Test |
 |---|---|---|---|---|---|
@@ -134,11 +135,11 @@ Deliberately **not** bound, because they are not a held row's projection:
   and is covered by (1) and (5), and the turn boundaries that change the
   pending state also move the active-turn token (5).
 
-Sidecar-only sessions (no state.db rows for the session) are covered by a
-separate, rows-free memo: they return from
+Sidecar-only sessions (no state.db rows for the session) are **not** covered
+by any digest memo: they return from
 `_limited_webui_messages_for_display_with_sidecar` before the display-merge
-cache, so without it every windowed GET re-hashed the whole document. See
-"Server-side invariants".
+cache, so every windowed GET mints the digest from the rows it actually
+returns. See "Server-side invariants" for why that gap is retained.
 
 ## Response fields
 
@@ -172,21 +173,31 @@ cache, so without it every windowed GET re-hashed the whole document. See
   append, the digest binds the covered prefix's own cards (#3 above), so such
   an edit refuses the append and the authoritative full fetch re-delivers the
   card.
-- **Sidecar-only sessions memoize the digest separately.** A session with no
-  state.db rows returns from `_limited_webui_messages_for_display_with_sidecar`
-  *before* the display-merge cache, so it never owns a merge entry and used to
-  re-hash the whole document on every windowed GET (1/1/1 hashes over three
-  `msg_limit=30` GETs where the state.db-backed shape gives 1/0/0; 400–470 ms
-  against master's 171–209 ms on the 32 MiB shape). `_display_prefix_fp_memo`
-  now carries just the digest for that shape. It stores no rows, so it cannot
-  serve a stale transcript: the key is the sidecar stat signature plus every
-  lineage parent signature, the row count and the last timestamp (the same
-  components `_display_merge_cache_key` uses for the sidecar half) plus the
-  state.db session signature when one is readable, and reuse is guarded by the
-  same `meta` tuple (scenes, session cards, redaction setting, active-turn
-  token). Any doubt — an active session, a `msg_before` paging request, an
-  unresolvable key — leaves the out-param empty and the caller pays for the
-  hash.
+- **Sidecar-only sessions carry no digest memo — the gap is retained.** A
+  session with no state.db rows returns from
+  `_limited_webui_messages_for_display_with_sidecar` *before* the
+  display-merge cache, so it never owns a merge entry and every windowed GET
+  re-hashes the whole document (1/1/1 hashes over three `msg_limit=30` GETs
+  where the state.db-backed shape gives 1/0/0; 400–470 ms against master's
+  171–209 ms on the 32 MiB shape). A memo keyed on the sidecar stat signature
+  was tried here and **removed** (2026-10-31 round-2 review): the rows are
+  materialized before the key is sampled, so a GET that snapshotted the
+  document before a durable earlier-row rewrite could sample the *post-save*
+  stat and reuse a digest a later GET published under it — the append that
+  echoed that proof was accepted against the rewritten document while the
+  response still delivered the pre-rewrite rows, leaving the stale row on
+  screen. Sound reuse requires carrying and validating the **read-generation
+  of the actual sidecar/lineage snapshot** (which the stat signature is not:
+  a content-only rewrite keeps count, last timestamp and every other key
+  component), and upstream has no such generation today; writer-side eviction
+  alone does not close it either, because in-flight readers can still borrow
+  or publish a wrong-generation proof. Until that exists, this path mints
+  from the actual response rows and pays the hash. Regression:
+  `test_sidecar_only_retained_read_cannot_borrow_a_later_digest` (and the
+  miss/publication interleaving
+  `test_sidecar_only_memo_miss_mints_from_the_returned_rows`); the retained
+  gap itself is pinned by
+  `test_sidecar_only_windowed_get_rehashes_the_document_on_every_get`.
 
 ## Client-side invariants
 

@@ -11786,14 +11786,14 @@ def _limited_webui_messages_for_display_with_sidecar(
         if owner_positions is not None:
             owner_positions.clear()
             owner_positions.update(sidecar_owners)
-        # #7925 re-gate (2026-10-31, should-fix): this early return is the
+        # #7925 re-gate (2026-10-31, round 2): this early return is the
         # sidecar-only shape, which never reaches the display-merge cache
-        # below and therefore never owns a memoized digest. Hand one over (or
-        # build and publish it) so a windowed GET does not re-hash the whole
-        # document on every poll.
-        _display_prefix_fp_memo_lookup(
-            session, sidecar_messages, msg_before, _prefix_fp_out
-        )
+        # below and therefore never owns a memoized digest. It deliberately
+        # owns NO memo of its own either: the digest must be minted from the
+        # rows THIS response delivers, so a retained read whose sidecar was
+        # rewritten mid-request cannot publish a proof minted from a later
+        # document (the accepted bounded alternative to the removed
+        # sidecar-only memo — every windowed GET re-hashes the document).
         return sidecar_messages
     state_db_messages = _suppress_native_image_display_mirrors(
         session,
@@ -11810,9 +11810,8 @@ def _limited_webui_messages_for_display_with_sidecar(
         if owner_positions is not None:
             owner_positions.clear()
             owner_positions.update(sidecar_owners)
-        _display_prefix_fp_memo_lookup(
-            session, sidecar_messages, msg_before, _prefix_fp_out
-        )
+        # Sidecar-only shape (see the note on the first early return above):
+        # no digest memo here — the response mints from the rows it returns.
         return sidecar_messages
 
     # NOTE: do not short-circuit to the sidecar when state.db has no strictly
@@ -11960,133 +11959,6 @@ _DISPLAY_MERGE_CACHE_MAX = 16
 _DISPLAY_MERGE_STREAMING_TTL_SECONDS = 5.0
 _display_merge_cache: "OrderedDict[str, dict]" = OrderedDict()
 _display_merge_cache_lock = threading.Lock()
-
-
-# #7925 re-gate (2026-10-31, should-fix): a sidecar-only session returns from
-# _limited_webui_messages_for_display_with_sidecar BEFORE the display-merge
-# cache, so it never owns a merge entry and the response mint re-hashed the
-# whole document on every windowed GET (the maintainer measured 1/1/1 hashes
-# over three `msg_limit=30` GETs where the state.db-backed shape gives 1/0/0,
-# and 400-470 ms against master's 171-209 ms on the 32 MiB shape). This memo
-# carries just the whole-document digest for that shape. It stores no rows, so
-# it cannot serve a stale transcript: the key is the sidecar stat signature
-# (plus every lineage parent signature, the row count and the last timestamp —
-# the same components _display_merge_cache_key uses for the sidecar half, plus
-# the state.db signature when one can be read), and reuse is additionally
-# guarded by the same ``meta`` tuple the merge entry uses (scenes, session tool
-# cards, the redaction setting, the active-turn token).
-_DISPLAY_PREFIX_FP_MEMO_MAX = 16
-_display_prefix_fp_memo: "OrderedDict[str, dict]" = OrderedDict()
-_display_prefix_fp_memo_lock = threading.Lock()
-
-
-def _display_prefix_fp_memo_key(session, sidecar_messages):
-    """Return a fail-closed validity key for the sidecar-only prefix-digest
-    memo, or None when any component cannot be resolved exactly.
-
-    Mirrors the sidecar/lineage half of ``_display_merge_cache_key`` (same
-    stat signatures, same fail-closed rules) and adds the state.db session
-    signature when one is readable. The state.db component is deliberately
-    OPTIONAL here: on this path ``state_db_messages`` is empty, so the document
-    that gets delivered IS the sidecar, and a state.db row appearing later
-    takes the request off this early return entirely (it is then loaded and
-    merged) instead of being served from here.
-    """
-    from api.models import _sidecar_stat_signature
-
-    sid = str(getattr(session, "session_id", "") or "")
-    if not sid or not is_safe_session_id(sid):
-        return None
-    self_sig = _sidecar_stat_signature(SESSION_DIR / f"{sid}.json")
-    if self_sig is None:
-        return None
-    parent_sigs = ()
-    with _lineage_display_cache_lock:
-        lineage_entry = _lineage_display_cache.get(sid)
-    if lineage_entry is not None:
-        if (
-            lineage_entry.get("provenance_complete") is not True
-            or lineage_entry.get("self_sig") != self_sig
-        ):
-            _evict_lineage_display_cache_entry(sid, lineage_entry)
-            return None
-        parent_sigs = tuple(
-            (str(path), tuple(sig) if isinstance(sig, (list, tuple)) else sig)
-            for path, sig in (lineage_entry.get("parent_sigs") or [])
-        )
-        for parent_path, parent_sig in parent_sigs:
-            if _sidecar_stat_signature(Path(parent_path)) != parent_sig:
-                _evict_lineage_display_cache_entry(sid, lineage_entry)
-                return None
-        with _lineage_display_cache_lock:
-            if _lineage_display_cache.get(sid) is not lineage_entry:
-                return None
-    if not parent_sigs and _display_merge_requires_lineage_provenance(session):
-        return None
-    last_ts = None
-    if sidecar_messages:
-        last = sidecar_messages[-1]
-        if isinstance(last, dict):
-            last_ts = last.get("timestamp")
-    return (
-        self_sig,
-        parent_sigs,
-        len(sidecar_messages),
-        last_ts,
-        _state_db_session_signature(sid, getattr(session, "profile", None) or None),
-        getattr(session, "truncation_watermark", None),
-        getattr(session, "truncation_boundary", None),
-    )
-
-
-def _display_prefix_fp_memo_lookup(session, sidecar_messages, msg_before, prefix_fp_out):
-    """Reuse (or store) the whole-document prefix digest for a sidecar-only
-    display document (#7925 re-gate, 2026-10-31 should-fix).
-
-    Appends a ``_build_prefix_fingerprint_entry``-shaped value to
-    ``prefix_fp_out`` exactly like the display-merge cache paths do, so the
-    response mint can reuse it instead of re-hashing every row. Any doubt (an
-    active session, a paging request, an unresolvable key, a moved ``meta``)
-    leaves the out-param empty and the caller pays for the hash — the memo is
-    a pure optimisation and can never make a digest wrong.
-    """
-    if prefix_fp_out is None or msg_before is not None:
-        return
-    if _display_merge_session_is_active(session):
-        return
-    key = _display_prefix_fp_memo_key(session, sidecar_messages)
-    if key is None:
-        return
-    sid = str(getattr(session, "session_id", "") or "")
-    meta = _display_prefix_fp_meta(session)
-    with _display_prefix_fp_memo_lock:
-        entry = _display_prefix_fp_memo.get(sid)
-        if (
-            isinstance(entry, dict)
-            and entry.get("key") == key
-            and entry.get("meta") == meta
-            and isinstance(entry.get("digest"), str)
-            and entry["digest"]
-        ):
-            _display_prefix_fp_memo.move_to_end(sid, last=True)
-            prefix_fp_out.append({"meta": entry["meta"], "digest": entry["digest"]})
-            return
-    # Miss: compute outside the lock, then publish. The freshly built entry
-    # doubles as the value handed to the mint, so a cold sidecar-only GET still
-    # hashes the document exactly once.
-    built = _build_prefix_fingerprint_entry(session, sidecar_messages)
-    if not built:
-        return
-    with _display_prefix_fp_memo_lock:
-        _display_prefix_fp_memo[sid] = {
-            "key": key,
-            "meta": built["meta"],
-            "digest": built["digest"],
-        }
-        _display_prefix_fp_memo.move_to_end(sid, last=True)
-        while len(_display_prefix_fp_memo) > _DISPLAY_PREFIX_FP_MEMO_MAX:
-            _display_prefix_fp_memo.popitem(last=False)
-    prefix_fp_out.append(built)
 
 
 def _display_merge_cache_entry_usable(entry, cache_key) -> bool:

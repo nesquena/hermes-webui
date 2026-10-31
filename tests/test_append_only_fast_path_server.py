@@ -882,7 +882,7 @@ def test_display_cache_memo_tracks_anchor_scene_saves(monkeypatch, tmp_path):
 # focus refresh shows the new one.
 #
 # Finding 2 (SILENT, privacy): `redact_session_data` runs AFTER the mint, and
-# neither the digest nor either memo ``meta`` tuple carried
+# neither the digest nor the display-merge memo's ``meta`` tuple carried
 # ``api_redact_enabled`` — the maintainer's repro (turn redaction on, append a
 # row, trigger the real focus-refresh handler) left earlier rows UNMASKED in
 # the open tab where master masks them.
@@ -1184,20 +1184,30 @@ def test_prefix_fingerprint_entry_meta_carries_every_out_of_row_input():
     assert retokened["digest"] != entry["digest"]
 
 
-# ── 2026-10-31 re-gate, should-fix: sidecar-only sessions ──────────────────
+# ── 2026-10-31 re-gate: sidecar-only sessions ──────────────────────────────
 # A sidecar-only session returns from
 # `_limited_webui_messages_for_display_with_sidecar` BEFORE the display-merge
-# cache, so it never owns a merge entry and the mint re-hashed the whole
-# document on every windowed GET (the maintainer measured 1/1/1 hashes over
-# three `msg_limit=30` GETs where the state.db-backed shape gives 1/0/0).
+# cache, so it never owns a merge entry: every windowed GET mints the
+# whole-document digest from the rows it actually returns. The maintainer
+# measured 1/1/1 hashes over three `msg_limit=30` GETs where the
+# state.db-backed shape gives 1/0/0 — that gap is RETAINED on purpose
+# (round-2 review: removing the sidecar-only digest memo is the accepted
+# bounded alternative, see the retained-read regression below).
 
 
-def test_sidecar_only_windowed_get_memoizes_the_prefix_digest(monkeypatch, tmp_path):
-    """should-fix: a sidecar-only 601-row session must hash the document once
-    across three windowed GETs, not once per GET.
+def test_sidecar_only_windowed_get_rehashes_the_document_on_every_get(monkeypatch, tmp_path):
+    """The retained performance gap on the sidecar-only shape: with no memo on
+    this path, every windowed GET hashes the document exactly once.
 
-    RED-before: the early return never memoizes, so every GET mints and the
-    counter records three whole-document hashes.
+    Correctness first — a digest borrowed under a LATER sidecar stat let an
+    append be accepted against a document the response never delivered
+    (round-2 P2, regression below). Until a read-generation of the actual
+    sidecar/lineage snapshot exists upstream, this path stays unmemoized and
+    pays one hash per GET; the state.db-backed shape still gives 1/0/0 (see
+    `test_cold_display_load_hashes_the_document_exactly_once`).
+
+    This test pins the gap so it can neither silently widen nor silently
+    close without the soundness property that would justify it.
     """
     sidecar = [
         {"role": "user" if i % 2 == 0 else "assistant", "content": f"p{i}",
@@ -1218,27 +1228,21 @@ def test_sidecar_only_windowed_get_memoizes_the_prefix_digest(monkeypatch, tmp_p
 
     monkeypatch.setattr(routes, "_display_prefix_fingerprint", _counting)
 
-    _warm_get(routes)
-    first = captured["payload"]["session"]
-    assert first.get("prefix_fp")
-    assert calls == [601], (
-        f"the cold sidecar-only GET must hash the document exactly once, got {calls}"
+    digests = []
+    for _ in range(3):
+        _warm_get(routes)
+        digests.append(captured["payload"]["session"]["prefix_fp"])
+    assert calls == [601, 601, 601], (
+        "a sidecar-only windowed GET must mint its digest from the rows it "
+        f"returns on every request, got {calls}"
     )
-
-    calls.clear()
-    _warm_get(routes)
-    _warm_get(routes)
-    second = captured["payload"]["session"]
-    assert calls == [], (
-        f"warm sidecar-only GETs must not hash the document at all, got {calls}"
-    )
-    assert second.get("prefix_fp") == first.get("prefix_fp")
+    assert digests[0] and digests[1] == digests[0] == digests[2], digests
 
 
-def test_sidecar_only_prefix_digest_memo_tracks_a_tool_card_edit(monkeypatch, tmp_path):
-    """should-fix + finding 1: the sidecar-only memo is guarded by the same
-    meta tuple, so an in-process card edit (no sidecar write, so the stat
-    signature is unchanged) cannot be served from the memo.
+def test_sidecar_only_prefix_digest_tracks_a_tool_card_edit(monkeypatch, tmp_path):
+    """should-fix + finding 1 on the sidecar-only shape: this path carries no
+    digest memo, so an in-process card edit (no sidecar write, so the stat
+    signature is unchanged) must still move the next GET's digest.
     """
     sidecar = [
         {"role": "user" if i % 2 == 0 else "assistant", "content": f"p{i}",
@@ -1255,8 +1259,7 @@ def test_sidecar_only_prefix_digest_memo_tracks_a_tool_card_edit(monkeypatch, tm
 
     s = models.get_session("cont-child")
     # In-process edit only: NO save(), so the sidecar stat signature — and with
-    # it every cache key — is unchanged. Only the meta guard can keep the memo
-    # honest here.
+    # it every cache key — is unchanged.
     s.tool_calls = [
         {"assistant_msg_idx": 151, "id": "t1", "tool_name": "Bash", "result": "edited"}
     ]
@@ -1264,14 +1267,14 @@ def test_sidecar_only_prefix_digest_memo_tracks_a_tool_card_edit(monkeypatch, tm
     _warm_get(routes)
     after = captured["payload"]["session"]["prefix_fp"]
     assert after != before, (
-        "a session-level card changed on a sidecar-only session but the memo "
-        "handed out the pre-edit digest"
+        "a session-level card changed on a sidecar-only session but the next "
+        "GET delivered the pre-edit digest"
     )
 
 
-def test_sidecar_only_prefix_digest_memo_tracks_the_redaction_setting(monkeypatch, tmp_path):
-    """should-fix + finding 2: flipping the redaction setting in process (no
-    sidecar write) must not be served from the sidecar-only memo."""
+def test_sidecar_only_prefix_digest_tracks_the_redaction_setting(monkeypatch, tmp_path):
+    """should-fix + finding 2 on the sidecar-only shape: flipping the redaction
+    setting in process (no sidecar write) must move the next GET's digest."""
     import api.config
 
     sidecar = [
@@ -1292,6 +1295,182 @@ def test_sidecar_only_prefix_digest_memo_tracks_the_redaction_setting(monkeypatc
         "the redaction setting flipped but the sidecar-only memo handed out "
         "the digest minted under the old setting"
     )
+
+
+# ── 2026-10-31 re-gate round 2 (P2): a retained read must not borrow a
+# digest minted from a LATER document ──
+# The sidecar-only memo added for the should-fix above sampled the CURRENT
+# sidecar stat AFTER the caller had already materialized `sidecar_messages`,
+# and reused a matching current-stat entry without proving the passed rows
+# belonged to that generation. The maintainer's replay: a windowed GET
+# snapshots the 601-row sidecar-only document and pauses before the memo
+# lookup; a writer rewrites row 590 and persists it (count, last timestamp,
+# generation, anchor row and meta all unchanged, so every key still matches);
+# a fresh GET reads the edited document and publishes its digest under the new
+# stat; the paused GET resumes, samples that stat, borrows the fresh digest
+# and still returns its own pre-edit rows; the append that echoes the proof is
+# then ACCEPTED with zero returned rows and the stale row stays on screen.
+#
+# The memo is gone (accepted bounded alternative): the digest is minted from
+# the rows the response actually delivers, so the same schedule ends in a
+# REFUSAL that re-delivers the full document. Sound reuse would need the
+# read-generation of the actual sidecar/lineage snapshot, which upstream does
+# not provide yet.
+
+
+def _replay_retained_read_schedule(monkeypatch, tmp_path, writer):
+    """Run the round-2 interleaving; return (routes, captured, sidecar, paused).
+
+    ``writer(session)`` performs the durable change while the first windowed
+    GET is paused between snapshotting the sidecar document and minting its
+    digest. The hook only controls ordering: the snapshot, the save, the
+    response mint and the append verifier are production code.
+    """
+    import api.models as models
+
+    sidecar = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"p{i}",
+         "timestamp": 1700000000 + i}
+        for i in range(601)
+    ]
+    # No state.db rows: the display document IS the sidecar.
+    routes, captured = _warm_cache_append_harness(monkeypatch, tmp_path, sidecar, [])
+    session = models.get_session("cont-child")
+
+    orig_lineage = routes._webui_sidecar_lineage_messages_for_display
+    paused = {"done": False, "fresh": None}
+
+    def _retained_read(sess, **kwargs):
+        # The snapshot this GET will deliver, taken BEFORE the write.
+        rows = orig_lineage(sess, **kwargs)
+        if paused["done"]:
+            return rows
+        paused["done"] = True
+        writer(session)
+        # A fresh GET reads the edited document and publishes its digest under
+        # the post-save stat (while the memo existed).
+        _warm_get(routes)
+        paused["fresh"] = captured["payload"]["session"]
+        # The paused GET resumes with its retained pre-write rows.
+        return rows
+
+    monkeypatch.setattr(
+        routes, "_webui_sidecar_lineage_messages_for_display", _retained_read
+    )
+    # msg_limit=500 puts row 590 inside the returned 500-row tail, exactly
+    # like the maintainer's replay.
+    routes._handle_session_get(
+        None,
+        types.SimpleNamespace(
+            path="/api/session",
+            query="session_id=cont-child&messages=1&resolve_model=0&msg_limit=500&expand_renderable=1",
+        ),
+    )
+    return routes, captured, sidecar, paused
+
+
+def _writer_rewrites_row_590(session):
+    """Replace row 590's content and persist it — nothing else moves."""
+    row = dict(session.messages[590])
+    row["content"] = "p590-rewritten-on-disk"
+    session.messages[590] = row
+    session.save(touch_updated_at=False, skip_index=True)
+
+
+def test_sidecar_only_retained_read_cannot_borrow_a_later_digest(monkeypatch, tmp_path):
+    """Round-2 P2 end to end: retained-read → durable earlier-row save → fresh
+    memo publication → resumed old response → append-refusal.
+
+    RED-before (sidecar-only memo present): the paused response carries the
+    fresh GET's digest, the append is ACCEPTED with zero returned rows, and
+    the open tab keeps the stale row 590. The digest must be minted from the
+    rows the response delivers, so the append is refused and the authoritative
+    full document — carrying the rewrite — arrives instead.
+    """
+    routes, captured, sidecar, paused = _replay_retained_read_schedule(
+        monkeypatch, tmp_path, _writer_rewrites_row_590
+    )
+
+    fresh = paused["fresh"]
+    # Premise: the fresh GET really read the rewritten document.
+    assert any(
+        m.get("content") == "p590-rewritten-on-disk"
+        for m in (fresh.get("messages") or [])
+    ), fresh.get("messages")
+
+    # The paused GET's own 500-row tail still carries the OLD row 590 ...
+    held = captured["payload"]["session"]
+    held_rows = held.get("messages") or []
+    assert len(held_rows) == 500, held_rows[:2]
+    assert any(m.get("content") == "p590" for m in held_rows), held_rows[485:495]
+
+    # ... so the proof it hands the client must describe THAT document. The
+    # client's held view ends at row 600, which the rewrite left untouched.
+    session_after = _append_get(
+        routes,
+        msg_after=600,
+        anchor_row=sidecar[600],
+        prefix_fp=held["prefix_fp"],
+    )
+    assert session_after.get("_append_only") is not True, (
+        "a windowed GET that snapshotted the document BEFORE a durable "
+        "earlier-row rewrite published a digest minted from the LATER "
+        f"document: the append was accepted with "
+        f"{len(session_after.get('messages') or [])} returned rows and the "
+        "open tab keeps the stale row 590 (maintainer's round-2 P2 replay)"
+    )
+    # The refusal answers with the authoritative full document, rewrite
+    # included — exactly master's focus refresh.
+    assert session_after.get("message_count") == 601
+    delivered = session_after.get("messages") or []
+    assert len(delivered) == 601, delivered[:3]
+    assert delivered[590]["content"] == "p590-rewritten-on-disk", delivered[590]
+
+
+def _writer_appends_a_row(session):
+    """Append one row and persist it — the covered prefix is unchanged, but
+    the row count and the last timestamp move, so any stat-derived key must
+    miss."""
+    session.messages.append(
+        {"role": "assistant", "content": "p601-appended", "timestamp": 1700000601}
+    )
+    session.save(touch_updated_at=False, skip_index=True)
+
+
+def test_sidecar_only_memo_miss_mints_from_the_returned_rows(monkeypatch, tmp_path):
+    """Miss/publication interleaving: the same retained read, but the durable
+    change moves the key (an appended row), so the resumed GET must MISS and
+    mint its digest from the rows it returns.
+
+    Borrowing the fresh GET's digest here would cover 602 rows and refuse a
+    legitimate append (the covered prefix is unchanged), so this pins the miss
+    path: the append is accepted and exactly the new row travels.
+    """
+    routes, captured, sidecar, paused = _replay_retained_read_schedule(
+        monkeypatch, tmp_path, _writer_appends_a_row
+    )
+
+    fresh = paused["fresh"]
+    assert (fresh.get("message_count") or 0) == 602, fresh.get("message_count")
+
+    held = captured["payload"]["session"]
+    held_rows = held.get("messages") or []
+    assert len(held_rows) == 500, held_rows[:2]
+
+    session_after = _append_get(
+        routes,
+        msg_after=600,
+        anchor_row=sidecar[600],
+        prefix_fp=held["prefix_fp"],
+    )
+    assert session_after.get("_append_only") is True, (
+        "a memo MISS after a retained read refused a legitimate append — the "
+        "digest was not minted from the rows the response returned"
+    )
+    messages = session_after.get("messages") or []
+    assert [m.get("content") for m in messages] == ["p601-appended"], messages
+    assert session_after.get("message_count") == 602
+    assert session_after.get("_messages_offset") == 601
 
 
 # ── 2026-10-31 re-gate: the maintainer's two repros through the real handler ─
