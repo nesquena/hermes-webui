@@ -3339,6 +3339,12 @@
     .app-titlebar-inner{flex:1 1 auto;}
     .app-titlebar-title{max-width:72vw;}
     .app-titlebar-sub{font-size:9px;padding:1px 5px;}
+    /* Give the conversation title its own row when a source badge is present. */
+    .app-titlebar-inner:has(.topbar-source-badge){display:grid;grid-template-columns:16px minmax(0,1fr);gap:0 6px;}
+    .app-titlebar-inner:has(.topbar-source-badge) .app-titlebar-title{max-width:100%;}
+    .app-titlebar-inner:has(.topbar-source-badge) .app-titlebar-sub{grid-column:1 / -1;justify-self:center;display:flex;align-items:center;gap:4px;min-width:0;max-width:100%;box-sizing:border-box;}
+    .app-titlebar-sub .topbar-source-badge{display:block;flex:0 1 auto;min-width:0;margin-left:0;box-sizing:border-box;overflow:hidden;text-overflow:ellipsis;}
+    .app-titlebar:has(.topbar-source-badge) .app-titlebar-spacer{display:none;}
     .app-titlebar-title.long-pressing{opacity:.6;transition:opacity .1s;}
     .system-health-panel.insights-card{gap:10px;padding:12px;}
     .system-health-head{align-items:flex-start;}

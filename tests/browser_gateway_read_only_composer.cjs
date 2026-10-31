@@ -33,7 +33,7 @@ function extract(source, name) {
         '_setComposerPrimaryButtonIcon', 'updateSendBtn', 'syncTopbar'].map(name => extract(ui, name)).join('\n')
         + '\n' + extract(read('static/messages.js', ref), 'send')
         + '\n' + extract(read('static/panels.js', ref), 'syncAppTitlebar');
-      for (const width of [1440, 900, 390]) {
+      for (const width of [1440, 900, 430, 390, 375, 320]) {
         for (const theme of ['light', 'dark']) {
         for (const scenario of [
           {name:'desktop',source:'Desktop',locale:'en',destination:'Desktop',help:true},
@@ -42,13 +42,14 @@ function extract(source, name) {
           {name:'subagent',source:'Subagent',locale:'en',destination:'',help:false},
           {name:'original-client',source:'Other client',locale:'en',destination:'the original client',help:true},
         ]) {
-          const page = await browser.newPage({viewport:{width, height:700}, isMobile:width===390, hasTouch:width===390});
+          const page = await browser.newPage({viewport:{width, height:700}, isMobile:width<=640, hasTouch:width<=640});
           await page.route('**/*', route => route.abort());
           await page.setContent('<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body></body></html>');
           await page.evaluate(({html, theme}) => {
             const parsed = new DOMParser().parseFromString(html, 'text/html');
             document.documentElement.classList.toggle('dark', theme==='dark');
-            document.body.innerHTML = '<main style="width:calc(100% - 32px);max-width:780px;margin:80px auto"><h2 id="appTitlebarTitle"></h2><p id="appTitlebarSub"></p><div hidden><span id="topbarTitle"></span><span id="topbarMeta"></span></div><p>Example conversation for a layout check.</p>'
+            document.body.innerHTML = parsed.querySelector('.app-titlebar').outerHTML
+              + '<main style="width:calc(100% - 32px);max-width:780px;margin:80px auto"><div hidden><span id="topbarTitle"></span><span id="topbarMeta"></span></div><p>Example conversation for a layout check.</p>'
               + parsed.getElementById('composerBox').outerHTML + '</main>';
           }, {html:read('static/index.html', ref), theme});
           await page.addStyleTag({content:read('static/style.css', ref)});
@@ -75,6 +76,7 @@ function extract(source, name) {
             updateSendBtn();syncTopbar();
           }, scenario);
           await page.locator('main').screenshot({path:path.join(output, `${label}-${scenario.name}-${width}-${theme}.png`)});
+          await page.locator('.app-titlebar').screenshot({path:path.join(output, `${label}-${scenario.name}-${width}-${theme}-header.png`)});
           const metrics = await page.evaluate(() => {
             const notice=$('composerChatReadOnlyNotice')||$('composerChatReadOnlyReason');
             const rect=notice.getBoundingClientRect();
@@ -85,7 +87,8 @@ function extract(source, name) {
               helpLabel:$('composerChatReadOnlyHelp').textContent,
               text:$('composerChatReadOnlyReason').textContent,
               titleBadge:document.querySelector('#appTitlebarSub .topbar-source-badge').textContent,
-              headerBadge:document.querySelector('#topbarMeta .topbar-source-badge').textContent};
+              headerBadge:document.querySelector('#topbarMeta .topbar-source-badge').textContent,
+              titleWidth:$('appTitlebarTitle').getBoundingClientRect().width};
           });
           assert.ok(metrics.fits);
           assert.ok(metrics.readOnly && metrics.sendDisabled);
@@ -95,6 +98,7 @@ function extract(source, name) {
             assert.equal(metrics.text, scenario.destination ? `Continue in ${scenario.destination}.` : '');
             assert.equal(metrics.titleBadge, scenario.source+' · read-only');
             assert.equal(metrics.headerBadge, scenario.source+' · read-only');
+            assert.ok(metrics.titleWidth>=72, JSON.stringify({width,theme,...metrics}));
             assert.equal(await page.locator('#composerChatReadOnlyNotice').isHidden(), !scenario.destination);
             assert.equal(await page.locator('#btnSend').getAttribute('title'),
               'Read-only in WebUI.'+(scenario.destination ? ` Continue in ${scenario.destination}.` : ''));

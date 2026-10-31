@@ -307,7 +307,8 @@ conversations. The message box says "Read-only in WebUI" and keeps any draft
 when you switch conversations. The notice below it adds only where to continue,
 such as "Continue in Desktop.", followed by a "How to connect" documentation link.
 The source badge also marks the conversation read-only, and a send attempt does
-not add a duplicate popup. Unsupported sources, such as scheduled jobs and
+not add a duplicate popup. On phones, the badge sits below the conversation title
+so both remain visible. Unsupported sources, such as scheduled jobs and
 subagents, keep the read-only placeholder without an extra notice or connection link.
 HTTP refusals also retain bounded, credential-redacted details,
 including structured error codes, in the browser and saved error message.
