@@ -14612,10 +14612,26 @@ def _session_message_occurrence_for_key(msg: dict) -> str:
     A missing/empty timestamp yields ``""`` and an unparseable one yields its
     own string, so rows without usable clock data still key stably against
     each other (they never become permanently unmatchable) and never raise.
+
+    When the clock is missing entirely the discriminator falls back to the
+    private identities the row carries (``id`` / ``message_id`` /
+    ``_state_db_row_id``).  That direction is deliberate: it fails **closed**,
+    preserving two rows that are provably different rather than suppressing
+    one of them -- over-dedup deletes real user turns, whereas under-dedup at
+    worst shows a duplicate row.  Only a row with neither a usable clock nor
+    any identity at all stays indistinguishable, and those key together
+    because the information to tell them apart simply is not there.
     """
     if not isinstance(msg, dict):
         return ""
-    return _normalized_message_timestamp_for_key(msg.get("timestamp"))
+    stamp = _normalized_message_timestamp_for_key(msg.get("timestamp"))
+    if stamp:
+        return stamp
+    for field in ("id", "message_id", "_state_db_row_id"):
+        identity = msg.get(field)
+        if identity not in (None, ""):
+            return f"id:{field}:{identity}"
+    return ""
 
 
 def _session_message_content_key(
