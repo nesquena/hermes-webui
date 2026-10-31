@@ -603,13 +603,16 @@ def test_gateway_worker_config_is_the_session_profile(tmp_path, monkeypatch):
     """Review 5443897300 Low: runs-API/reasoning/service-tier settings come from the session profile."""
     import api.gateway_chat as gateway_chat
     from api import profiles
+    from api.config import get_config
 
     root = tmp_path / "hermes"
     (root / "profiles" / "work").mkdir(parents=True)
     (root / "profiles" / "work" / "config.yaml").write_text("agent:\n  reasoning_effort: high\n")
     monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root)
-    assert gateway_chat._gateway_config_for_profile("default") is None
-    assert gateway_chat._gateway_config_for_profile("") is None
+    # #8152: the root profile is resolved like any other (here it is the process profile, so its
+    # config is the ambient one); there is no None that a caller falls back from.
+    assert gateway_chat._gateway_config_for_profile("default") == get_config()
+    assert gateway_chat._gateway_config_for_profile("") == get_config()
     assert gateway_chat._gateway_config_for_profile("work")["agent"]["reasoning_effort"] == "high"
 
 

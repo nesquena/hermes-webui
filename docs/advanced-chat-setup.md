@@ -346,6 +346,17 @@ A turn uses the gateway URL and key of the **session's own profile**, not those 
 - A `${VAR}` in a profile's `webui_gateway_base_url` is expanded from that profile's `.env`, read fresh from the file on every turn, plus any launcher export that did not come from another profile's `.env`. If the variable is not set anywhere, the turn ends with an error naming the unresolved variable and no request is sent.
 - **When the WebUI process itself runs on a named profile** (the profile it starts on, from the sticky `active_profile` or an isolated profile, is not the default one), the process environment and ambient config carry that profile's own `.env` and `config.yaml`, so the "shared" URL may really be that profile's Gateway. A profile that sets a key but no URL is then never paired with that URL: it uses the process profile's own URL and key together, exactly as earlier releases sent every turn. The documented shared-URL behaviour above applies only when the URL is provably the launcher's: an exported `HERMES_WEBUI_GATEWAY_BASE_URL` that no profile `.env` supplied (not mirrored from the active profile, and not the value a launcher such as `ctl.sh` sourced from a named `HERMES_HOME`), or an operator `HERMES_CONFIG_PATH` file outside every profile home whose URL does not take a `${VAR}` from a profile's `.env`. To give such a profile its own Gateway, set its own `HERMES_WEBUI_GATEWAY_BASE_URL` (#8432).
 
+The rest of a Gateway-routed chat's settings come from the session's own
+profile too: its reasoning effort, runs-API switch, prefill and prompt
+settings. A relative `prefill_messages_file` is looked up in that profile's
+home (for the profile the WebUI process itself runs as, beside its
+`config.yaml`, as before). A `${VAR}` in a profile's `config.yaml` is filled
+from that profile's own environment, and so are settings a profile's `.env`
+provides, such as `HERMES_PREFILL_MESSAGES_FILE`; a prefill script a profile
+names runs with that profile's environment. A profile does not inherit another
+profile's `config.yaml` or `.env`, nor the values another profile's running
+chat or background task holds in the process environment.
+
 The bridge is best used by operators who already run Hermes Gateway/API Server
 locally and want browser-originated chat to use the same runtime/tool path as
 messaging surfaces. Attachments, cancellation, approvals, and clarify prompts

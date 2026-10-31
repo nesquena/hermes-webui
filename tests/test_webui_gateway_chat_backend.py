@@ -511,7 +511,7 @@ def test_gateway_chat_worker_uses_session_profile_endpoint_not_process_profile(t
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "process-profile-key")
     resolved_for = []
 
-    def fake_endpoint_for_profile(profile_name):
+    def fake_endpoint_for_profile(profile_name, home=None):
         resolved_for.append(profile_name)
         return "http://gateway.local/p/coder", "coder-key"
 
@@ -1884,7 +1884,7 @@ def test_gateway_chat_401_hint_reports_the_session_profile_key_not_the_process_k
     monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)     # the suite may set one; tests that need it set it themselves
     monkeypatch.setattr(
         gateway_chat, "_gateway_endpoint_for_profile",
-        lambda profile_name: ("http://gateway.local/p/coder", "coder-key"),
+        lambda profile_name, home=None: ("http://gateway.local/p/coder", "coder-key"),
     )
     monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
     monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
@@ -2394,6 +2394,36 @@ def test_8432_the_process_profiles_own_config_url_without_a_config_path_is_not_s
     monkeypatch.setattr(config, "get_config", lambda: {"webui_gateway_base_url": "http://gw.local/alpha-own-cfg"})
 
     assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local/alpha-own-cfg", "alpha-alias")
+
+
+def test_8432_the_guard_reads_the_shared_url_without_a_live_workers_mirror(tmp_path, monkeypatch):
+    """#8152 x #8432: the shared pair is read without the values a live worker of another profile mirrored into
+    os.environ, so the guard has to judge that same URL. A local worker of gamma holding its own Gateway URL in
+    os.environ must not make the named process profile's config URL look like the launcher's, and so let beta's
+    key reach it."""
+    import os
+
+    import api.config as config
+    import api.profiles as profiles
+
+    envs = {"default": {}, "alpha": {}, "beta": {"API_SERVER_KEY": "beta-key"}}
+    homes = _profile_homes(tmp_path, monkeypatch, envs, config_url=None)
+    _mirror_named_process_profile(monkeypatch, homes, envs)
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    monkeypatch.setattr(config, "get_config", lambda: {"webui_gateway_base_url": "http://gw.local/alpha-own-cfg"})
+    expected = ("http://gw.local/alpha-own-cfg", "")
+    assert gateway_chat._gateway_endpoint_for_profile("beta") == expected
+
+    name = "HERMES_WEBUI_GATEWAY_BASE_URL"
+    monkeypatch.setenv(name, "placeholder")  # monkeypatch restores the unset state whatever happens below
+    monkeypatch.delenv(name)
+    profiles.note_env_mirror({name: None})
+    os.environ[name] = "http://gw.local/gamma"  # what gamma's local worker mirrors while it runs
+    try:
+        assert gateway_chat._gateway_endpoint_for_profile("beta") == expected
+    finally:
+        profiles.forget_env_mirror([name])
+    assert name not in os.environ
 
 
 def test_8432_an_operator_config_under_some_other_profiles_dir_is_shared(tmp_path, monkeypatch):
