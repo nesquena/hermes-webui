@@ -25308,6 +25308,82 @@ def _normalize_media_request_path(raw_path: str) -> str:
     if _is_windows_server() and _WINDOWS_DRIVE_URI_LEAD_RE.match(raw_path):
         return raw_path[1:]
     return raw_path
+# ── #8303: generated-image mode containment ─────────────────────────────────
+# The markdown renderer turns model-emitted bare local image paths into
+# /api/media requests. The client's own "contains cache/images" check cannot be
+# the gate: it has no idea where this server's profile home is, and the plain
+# mode's roots are far broader (the OS temp dir, the active workspace and
+# MEDIA_ALLOWED_ROOTS are all roots). So a sibling
+# /tmp/.../cache/images/a.png, or a symlink inside the cache pointing at
+# HERMES_HOME/private.png, both loaded and rendered automatically from model
+# text.
+#
+# `?generated=1` is the narrow mode those requests use. It is enforced HERE, on
+# the server, against the profile homes this process actually serves:
+#   * the path is resolved first, so a symlink inside the cache that points
+#     outside it is judged by its TARGET, not by its location;
+#   * the resolved target must sit canonically inside an owning profile's own
+#     <home>/cache/images root — nothing else grants access;
+#   * a session MEDIA:/file: token grant does NOT unlock this mode;
+#   * the bytes are read through an anchored open rooted at that cache dir, so a
+#     component swapped after the check cannot redirect the read.
+# Every other /api/media caller keeps the plain mode and its existing
+# session-token semantics.
+_GENERATED_IMAGE_MODES = {"1", "true", "yes", "on"}
+
+# The image extensions the generated-image mode may serve. Mirrors the
+# client-side _IMAGE_EXTS in static/ui.js: the renderer only ever asks for
+# generated=1 on a bare local path with one of these extensions, so the
+# server enforces the same set instead of trusting the request.
+_GENERATED_IMAGE_EXTS = frozenset(
+    {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".avif"}
+)
+
+
+def _generated_image_cache_roots() -> list[Path]:
+    """Image-cache roots the generated-image mode may serve from.
+
+    The same profile homes this process serves, each narrowed to its own
+    ``cache/images`` subtree. Deduped so an overridden profile home does not
+    yield the same root twice.
+    """
+    roots: list[Path] = []
+
+    def _add(home: Path) -> None:
+        try:
+            root = (home / "cache" / "images").resolve()
+        except Exception:
+            return
+        if root not in roots:
+            roots.append(root)
+
+    # The active (owning) profile home, then the process-wide HERMES_HOME, then
+    # the base ~/.hermes — all three can legitimately own the image cache.
+    try:
+        from api.profiles import get_active_hermes_home
+
+        _add(get_active_hermes_home())
+    except Exception:
+        pass
+    _add(Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser())
+    _add(Path.home() / ".hermes")
+    return roots
+
+
+def _generated_image_cache_root_for(target: Path) -> Path | None:
+    """Return the owning image-cache root containing ``target``, else None.
+
+    ``target`` is expected to be already resolved; containment is therefore a
+    check on the canonical location, so symlinks cannot borrow a root they do
+    not live under.
+    """
+    for root in _generated_image_cache_roots():
+        if not root.is_dir():
+            continue
+        # Require the file itself, not the root directory itself.
+        if target != root and _path_is_within_root(target, root):
+            return root
+    return None
 
 
 def _handle_media(handler, parsed):
@@ -25321,6 +25397,9 @@ def _handle_media(handler, parsed):
     - No path traversal: resolved path must stay within an allowed root
     - Additional roots can be added via MEDIA_ALLOWED_ROOTS env var
       (os.pathsep-separated list of absolute paths; ":" on POSIX, ";" on Windows)
+    - ``?generated=1`` narrows further: only a resolved path canonically inside
+      an owning profile's own cache/images root, read through an anchored open
+      (see _generated_image_cache_root_for)
     """
     import os as _os
     from api.auth import is_auth_enabled, parse_cookie, verify_session
@@ -25440,7 +25519,36 @@ def _handle_media(handler, parsed):
         return bad(handler, "Path not in allowed location", 403)
     # ── end #3234 deny ───────────────────────────────────────────────────────
 
+    # ── #8303: generated-image mode ─────────────────────────────────────────
+    # Requested by the markdown renderer for model-emitted bare local image
+    # paths. This is the SERVER-side gate the gate review asked for: the
+    # resolved target must be canonically inside an owning profile's own
+    # image-cache root.
+    #
+    # Generated mode is PLAIN MODE PLUS the cache-root containment below — it
+    # is never a way around the ordinary authorization. The allowlist roots
+    # include the OS temp dir and the active workspace, and the cache root is
+    # resolved through symlinks, so a cache/images directory symlinked
+    # elsewhere would otherwise be served by generated mode while plain mode
+    # refuses the very same file.
+    generated_image_mode = (
+        qs.get("generated", [""])[0].strip().lower() in _GENERATED_IMAGE_MODES
+    )
+    generated_image_root = None
+    if generated_image_mode:
+        generated_image_root = _generated_image_cache_root_for(target)
+        if generated_image_root is None:
+            return bad(handler, "Path not in allowed location", 403)
+
+    # The ordinary authorization applies in BOTH modes.
     if not within_allowed and not session_media_allowed:
+        return bad(handler, "Path not in allowed location", 403)
+
+    # Generated mode serves generated IMAGES only: the client-side image
+    # extension check is advisory, so the server enforces it too. Without
+    # this, any file inside the image cache (notes.txt, a stray archive) was
+    # served under this mode.
+    if generated_image_mode and target.suffix.lower() not in _GENERATED_IMAGE_EXTS:
         return bad(handler, "Path not in allowed location", 403)
 
     # Determine MIME type from the requested path's extension. Computed BEFORE
@@ -25529,7 +25637,22 @@ def _handle_media(handler, parsed):
         cache_control = "no-store"
     else:
         cache_control = "private, no-cache"
-    return _serve_file_bytes(handler, target, mime, disposition, cache_control, csp=csp)
+    # #8303: in generated-image mode the read is ANCHORED at the owning
+    # image-cache root. The containment check above ran against the resolved
+    # path, but a directory component inside the cache could be replaced by a
+    # symlink between that check and this open; anchoring re-walks the cache
+    # dir with no-follow semantics, so the bytes can only come from the root we
+    # verified. Plain mode is unchanged (it keeps the existing behaviour,
+    # including the MEDIA: token grants it relies on).
+    return _serve_file_bytes(
+        handler,
+        target,
+        mime,
+        disposition,
+        cache_control,
+        csp=csp,
+        anchor_root=generated_image_root,
+    )
 
 
 def _file_raw_target(session, sid: str, rel: str) -> tuple[Path, Path] | None:
