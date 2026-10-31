@@ -1568,5 +1568,80 @@ def test_review_raises_when_agent_lacks_request_review(monkeypatch):
     assert task.status == "ready", "a missing Agent verb must not mutate the card"
 
 
+def test_review_assignee_key_presence_preserves_implementer(monkeypatch):
+    """Explicit null/"" assignee must not clear the implementer before request_review.
+
+    Regression: the deferral tested ``body.get("assignee") is not None``, so a
+    ``{"status": "review", "assignee": null}`` PATCH assigned null first and the
+    durable ``review_requested`` event recorded ``implementer: null``. Key
+    presence decides deferral; the value only decides the post-handoff result.
+    """
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+
+    # body -> (final assignee, reviewer recorded in the event)
+    cases = {
+        "t_review_omitted": ({"status": "review"}, "alice", None),
+        "t_review_null": ({"status": "review", "assignee": None}, None, None),
+        "t_review_empty": ({"status": "review", "assignee": ""}, None, None),
+        "t_review_bob": ({"status": "review", "assignee": "bob"}, "bob", "bob"),
+    }
+    for task_id in cases:
+        fake_kanban.tasks.append(FakeTask(task_id, "Awaiting review", "ready", "alice"))
+
+    seen_assignees = []
+    orig_request_review = fake_kanban.request_review
+
+    def _tracking_request_review(conn, task_id, **kwargs):
+        seen_assignees.append((task_id, fake_kanban.get_task(conn, task_id).assignee))
+        return orig_request_review(conn, task_id, **kwargs)
+
+    monkeypatch.setattr(fake_kanban, "request_review", _tracking_request_review)
+
+    for task_id, (body, _final, _reviewer) in cases.items():
+        with bridge._conn() as conn:
+            bridge._patch_task(conn, task_id, body)
+
+    assert seen_assignees == [(task_id, "alice") for task_id in cases], (
+        "request_review must see the original implementer for omitted, null, empty and named assignees"
+    )
+    for task_id, (_body, final_assignee, reviewer) in cases.items():
+        task = next(t for t in fake_kanban.tasks if t.id == task_id)
+        assert task.status == "review"
+        assert task.assignee == final_assignee
+        event = next(
+            e for e in fake_kanban.events
+            if e.task_id == task_id and e.kind == "review_requested"
+        )
+        assert event.payload["implementer"] == "alice"
+        assert event.payload["reviewer"] == reviewer
 
 
+def test_bulk_review_carries_assignee_through_request_review(monkeypatch):
+    """Bulk review must record the reviewer in the durable event, not assign afterwards.
+
+    Regression: bulk patched ``{"status": "review"}`` and then assigned the
+    reviewer, so ``review_requested`` recorded ``reviewer: null`` while the card
+    showed Bob. The bulk path must share the single-PATCH transition logic.
+    """
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    task = FakeTask("t_bulk_review", "Ready for review", "ready", "alice")
+    fake_kanban.tasks.append(task)
+
+    result = bridge._bulk_tasks_payload(
+        {"ids": ["t_bulk_review"], "status": "review", "assignee": "bob"}
+    )
+
+    assert result["results"] == [{"id": "t_bulk_review", "ok": True}]
+    assert task.status == "review"
+    assert task.assignee == "bob"
+    event = next(
+        e for e in fake_kanban.events
+        if e.task_id == "t_bulk_review" and e.kind == "review_requested"
+    )
+    assert event.payload["implementer"] == "alice"
+    assert event.payload["reviewer"] == "bob"
+    assert [e.kind for e in fake_kanban.events if e.task_id == "t_bulk_review"] == [
+        "review_requested"
+    ], "the bulk path must not re-assign the reviewer after the handoff"
