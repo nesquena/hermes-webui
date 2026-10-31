@@ -38,6 +38,8 @@ _SESSIONS_HELPERS = (
     "_currentTurnInsertIndex",
     "_markRecoveredPromptRow",
     "_existingRecoveredPromptIndex",
+    "_recoveredPromptIdentityMatch",
+    "_isRecoveredPromptTwin",
     "_mergePendingSessionMessage",
 )
 _UI_PRODUCER = (
@@ -184,6 +186,46 @@ process.stdout.write(JSON.stringify({merged,earlierFirst:messages[0]===earlier,r
         ("earlier answer", False),
         ("pending wording", True),
         ("canonical wording", False),
+        ("progress", False),
+        ("partial", False),
+    ]
+
+
+def test_an_earlier_turns_display_only_copy_with_the_same_text_is_not_reused():
+    """Gate finding on aee04e4a9: reuse by text alone moved an EARLIER turn's display-only prompt (kept by an empty
+    terminal snapshot) into the new turn, with its old timestamp and attachments, and showed no prompt for the new
+    turn. Reuse needs turn identity; the earlier row stays where it is, and the new turn gets its own prompt."""
+    result = _run(
+        """
+const session={session_id:'s1',active_stream_id:'stream-2',pending_started_at:100,
+  pending_user_message:'repeat',pending_attachments:[{path:'b.png'}]};
+S.session=session;
+const earlier=_markRecoveredPromptRow({role:'user',content:'repeat',_ts:50,attachments:[{path:'a.png'}]});
+const messages=[
+  earlier,
+  {role:'assistant',content:'earlier answer',_ts:51},
+  {role:'user',content:'repeat [bundle command]',_ts:100},
+  {role:'assistant',content:'progress',_ts:101},
+  {role:'assistant',content:'partial',_live:true},
+];
+const merged=[];
+for(let pass=0;pass<3;pass++) merged.push(_mergePendingSessionMessage(session,messages));
+const current=messages.filter(m=>m!==earlier&&m.role==='user'&&m.content==='repeat');
+process.stdout.write(JSON.stringify({merged,earlierIdx:messages.indexOf(earlier),earlierTs:earlier._ts,
+  earlierAttachments:earlier.attachments,currentCount:current.length,currentTs:current[0]&&current[0]._ts,
+  currentAttachments:current[0]&&current[0].attachments,rows:view(messages)}));
+"""
+    )
+    assert result["merged"] == [True, False, False], result
+    assert result["earlierIdx"] == 0 and result["earlierTs"] == 50
+    assert result["earlierAttachments"] == [{"path": "a.png"}]
+    assert result["currentCount"] == 1, "exactly one prompt for the new turn, across repeated passes"
+    assert result["currentTs"] == 100 and result["currentAttachments"] == [{"path": "b.png"}]
+    assert [(r["content"], r["displayOnly"]) for r in result["rows"]] == [
+        ("repeat", True),
+        ("earlier answer", False),
+        ("repeat", True),
+        ("repeat [bundle command]", False),
         ("progress", False),
         ("partial", False),
     ]

@@ -4751,13 +4751,17 @@ function _mergePendingSessionMessage(session,messages){
     const misplacedIdx=liveAssistantIdx>=0?messages.findIndex((m,idx)=>
       idx>liveAssistantIdx&&m&&m.role==='user'&&_sameTranscriptMessage(m,pendingMsg)
     ):-1;
-    // A display-only copy an earlier pass already placed (repeated recovery:
-    // a failed message fetch re-merges over the same array) is reused exactly
-    // as the windowed branch reuses it. When the persisted turn row's text
-    // differs from pending_user_message, the tail-duplicate check above cannot
-    // see that copy, so without this every pass stacked another prompt (#8696).
-    const existingIdx=misplacedIdx<0&&typeof _existingRecoveredPromptIndex==='function'
-      ?_existingRecoveredPromptIndex(messages,pendingMsg)
+    // A display-only copy an earlier pass already placed for THIS turn
+    // (repeated recovery: a failed message fetch re-merges over the same
+    // array) is reused instead of stacking another one. When the persisted
+    // turn row's text differs from pending_user_message, the tail-duplicate
+    // check above cannot see that copy, so without this every pass stacked
+    // another prompt (#8696). Reuse needs turn identity, not text alone
+    // (_isRecoveredPromptTwin: the turn-start timestamp or server token): an
+    // earlier turn's display-only row that repeats the text keeps its own
+    // turn, timestamp and attachments.
+    const existingIdx=misplacedIdx<0&&typeof _isRecoveredPromptTwin==='function'
+      ?messages.findIndex(m=>m&&m._displayOnlyRow&&_isRecoveredPromptTwin(m,pendingMsg))
       :-1;
     const skipIdx=misplacedIdx>=0?misplacedIdx:existingIdx;
     const withoutSkipped=skipIdx>=0?messages.filter((_m,idx)=>idx!==skipIdx):messages;
