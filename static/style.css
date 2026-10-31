@@ -2933,6 +2933,9 @@
   .composer-mobile-context-action.ctx-high .composer-mobile-config-value{color:var(--error);}
   .composer-mobile-context-action.ctx-high .composer-mobile-context-compress{border-color:var(--error);color:var(--error);}
   .composer-right{display:flex;gap:8px;align-items:center;flex-shrink:0;}
+  .composer-chat-read-only{font-size:12px;line-height:1.5;color:var(--muted);padding:0 16px 8px;overflow-wrap:anywhere;}
+  .composer-chat-read-only[hidden]{display:none;}
+  .composer-chat-read-only a{color:var(--accent-text);text-decoration:underline;}
   .composer-status{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px;}
   /* Context usage indicator */
   .ctx-indicator-wrap{position:relative;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;}
@@ -3336,6 +3339,15 @@
     .app-titlebar-inner{flex:1 1 auto;}
     .app-titlebar-title{max-width:72vw;}
     .app-titlebar-sub{font-size:9px;padding:1px 5px;}
+    /* Give the conversation title its own row when a source badge is present. */
+    .app-titlebar-inner:has(.topbar-source-badge){display:grid;grid-template-columns:16px minmax(0,1fr);gap:0 6px;}
+    .app-titlebar-inner:has(.topbar-source-badge) .app-titlebar-title{max-width:100%;}
+    .app-titlebar-inner:has(.topbar-source-badge) .app-titlebar-sub{grid-column:1 / -1;justify-self:center;display:flex;align-items:center;gap:4px;min-width:0;max-width:100%;box-sizing:border-box;}
+    .app-titlebar-sub .topbar-source-badge{display:block;flex:0 1 auto;min-width:0;margin-left:0;box-sizing:border-box;overflow:hidden;text-overflow:ellipsis;}
+    .app-titlebar:has(.topbar-source-badge) .app-titlebar-spacer{display:none;}
+    /* Keep the optional profile control from crowding the conversation title. */
+    .app-titlebar:has(.topbar-source-badge) .app-titlebar-profile{width:44px;height:44px;padding:0;justify-content:center;}
+    .app-titlebar:has(.topbar-source-badge) .app-titlebar-profile-label{display:none;}
     .app-titlebar-title.long-pressing{opacity:.6;transition:opacity .1s;}
     .system-health-panel.insights-card{gap:10px;padding:12px;}
     .system-health-head{align-items:flex-start;}

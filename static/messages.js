@@ -1521,6 +1521,9 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
 }
 
 async function send(){
+  if(S.session&&S.session.chat_read_only_reason){
+    return;
+  }
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
   // _defaultMessageMode
@@ -1700,7 +1703,7 @@ async function send(){
     }
     return;
   }
-  if(S.session&&(S.session.read_only||S.session.is_read_only)){
+  if(S.session&&(S.session.read_only||S.session.is_read_only)&&!S.session.chat_via_gateway_session){
     if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000);
     return;
   }
