@@ -2445,13 +2445,14 @@ async function newSession(flash, options={}){
       newModelState=explicitModelOverride;
       consumedExplicitModelOverride=true;
     }else if(window._defaultModel){
-      // Configured default wins over stale picker/persisted state even with no
-      // loaded session (deleting the last session left S.session null + stale picker) (#4728).
+      // Configured default wins over stale picker/persisted state (#4728).
       newModelState={model:window._defaultModel,model_provider:null};
+      // #8527: the configured default must travel with its own provider.
+      newModelState.model_provider=window._activeProvider||null;
       usingConfiguredDefault=true;
-    }else if(modelSelForNew&&modelSelForNew.value&&typeof _modelStateForSelect==='function'){
+    }else if(!S._profileSwitchModelReset&&modelSelForNew&&modelSelForNew.value&&typeof _modelStateForSelect==='function'){
       newModelState=_modelStateForSelect(modelSelForNew,modelSelForNew.value);
-    }else if(typeof _readPersistedModelState==='function'){
+    }else if(!S._profileSwitchModelReset&&typeof _readPersistedModelState==='function'){
       newModelState=_readPersistedModelState();
     }
     if(newModelState&&newModelState.model){
@@ -2703,8 +2704,22 @@ async function _switchProfileForSessionLoad(profile){
     if(typeof window!=='undefined'&&typeof window.invalidateSlashSkillCaches==='function') window.invalidateSlashSkillCaches();
     if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
     else localStorage.removeItem('hermes-webui-model');
-    if(data.default_model) window._defaultModel=data.default_model;
-    if(data.default_model_provider) window._activeProvider=data.default_model_provider;
+    // The destination profile's defaults are a PAIR: adopting its default model
+    // also (re)binds the provider from the SAME switch response — replace or
+    // clear, never keep the previous profile's pair when the destination has
+    // none configured (#8527 profile-switch review). A successful per-client
+    // switch can legitimately return a null/absent/empty default model
+    // (api/profiles.py reads the destination's raw config), and a model-less
+    // destination still OWNS the default state: the previous profile's pair is
+    // cleared outright, and the one-shot reset gate keeps the still-pre-refresh
+    // picker/persisted pair from becoming newSession()'s fallback until the
+    // catalog rehydrates. (typeof-guarded like the slash-skill cache drop
+    // above: bare-eval harnesses run this writer without a window.)
+    if(typeof window!=='undefined'){
+      window._defaultModel=data.default_model||null;
+      window._activeProvider=data.default_model?(data.default_model_provider||null):null;
+    }
+    S._profileSwitchModelReset=!data.default_model;
     if(typeof refreshProfileTransitionReasoningChip==='function'){
       refreshProfileTransitionReasoningChip(data.default_model,data.default_model_provider);
     }
