@@ -4561,6 +4561,13 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
 
     # ── Check image_input_mode before embedding anything ──
     if cfg is not None and _resolve_image_input_mode(cfg, active_provider, active_model, requested_provider=requested_provider) == "text":
+        # Text mode: still TELL the agent about the attachments (path + mime) so
+        # it can inspect them with file tools / vision_analyze. Dropping them
+        # silently made the model answer "no image" for non-vision models —
+        # the user believes the attachment failed when it was routed to text mode.
+        lines = [f"- {att.get('path')} ({att.get('mime') or 'file'})" for att in attachments if isinstance(att, dict) and att.get('path')]
+        if lines:
+            return workspace_ctx + msg_text + "\n\n[attached files]\n" + "\n".join(lines)
         return workspace_ctx + msg_text
 
     parts = [{'type': 'text', 'text': workspace_ctx + msg_text}]
