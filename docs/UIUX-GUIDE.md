@@ -169,6 +169,46 @@ When adding a control, consider where users will find it on both wide desktop an
 mobile. If a setting or quota/control surface does not fit in the composer, route
 it through the appropriate Control Center panel instead of squeezing the footer.
 
+The Reasoning chip's effort list is a union of the levels the WebUI has always
+accepted and whatever the installed Hermes Agent adds on top: the server ranks
+the canonical levels first, then appends extras from the agent's
+`hermes_constants.VALID_REASONING_EFFORTS` (the same tuple the terminal
+`hermes model` picker reads), so a stored level never dies when an older agent
+lacks it and a thinking level released into the agent (e.g. `ultra` above
+`max`) appears without a WebUI change. Above-`max` levels are only offered and
+accepted when the installed Agent ships the clamping route rule
+(`agent.reasoning_effort.route_supported_efforts`, landed 2026-09-19 in
+`39726f8bb7f2`, `api_mode`-aware since 2026-10-02 in `3f4aedb37e5d`);
+older Agents that list such a level but forward it verbatim keep the six-level
+ladder and coerce a stored value down instead. The decision uses the runtime
+the turn actually resolved — the chat path's runtime bundle (falling back to
+the session profile when the runtime resolver failed), the reasoning status
+path's session-profile config, and the Gateway worker's session-profile config
+— not the process-ambient profile, so a named profile that opts into (or out
+of) the Codex app-server runtime answers for its own sessions. The dropdown
+renders a row for every level the active route reports as supported, including
+levels with no row shipped in the page markup. Above-`max` levels appear in
+`supported_efforts` only when the Agent's route rule accepts them with the
+session's runtime; switching to another route hides them and switching back
+restores them. Documented provider ceilings still win. A stored selection is
+not rewritten when a route cannot send it: it steps down to the highest level
+the route accepts (`max` on ordinary routes, `xhigh` on legacy Codex ids, and
+`max` before model ceilings on pre-clamp Agents).
+
+Desktop chips and mobile reasoning tiles show the short effective level
+(`Ultra` on a supporting route, `Max` when a saved `ultra` is coerced), matching
+the dropdown's selected row. Dropdown rows keep their fuller names (`Ultra
+High`, like `Extra High` for the `XHigh` chip). Chip width is bounded and longer
+future labels ellipsize rather than expanding the composer footer. The full
+value, including `<stored> (sends <effective> on this route)` when needed, stays
+in the desktop and mobile `title`/accessible name, selection toast and
+`/reasoning` status. That explanation is cached alongside the effort for
+routine no-fetch refreshes and clears on context resets. `/reasoning`
+autocomplete uses the same current-context supported list as the dropdown,
+including future Agent levels, without an extra request per keystroke; while
+capabilities are loading it offers only the base vocabulary. Explicit command
+picks still defer to the server's validation and coercion.
+
 ### Composer sizing
 
 The composer grows with its content up to a 200px cap. Where the browser supports

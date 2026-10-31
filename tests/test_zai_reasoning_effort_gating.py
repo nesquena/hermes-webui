@@ -270,8 +270,26 @@ def test_non_glm_model_on_zai_provider_unaffected():
     # by the GLM-specific branch — the gate keys on "glm" in the bare id, so
     # non-GLM models fall through unchanged. (The OpenAI-family ceiling does NOT
     # fire here because that branch is keyed on provider, not model family.)
+    # The expected ladder is DERIVED, not hardcoded: which levels exist is
+    # owned by the installed Agent + models.dev data, so an exact literal set
+    # (e.g. naming 'ultra') would pin THIS host's ladder onto every host.
+    # The invariant is that the GLM gate never shrinks a non-GLM id: zai's
+    # answer must match the same resolver an ungated provider gets, minus no
+    # level the WebUI knows.
     efforts = cfg.resolve_model_reasoning_efforts("gpt-5", provider_id="zai")
-    assert set(efforts) == {"minimal", "low", "medium", "high", "xhigh", "max"}
+    ungated_meta = cfg._models_dev_reasoning_efforts("gpt-5", "zai")
+    ungated = (
+        ungated_meta
+        if ungated_meta is not None
+        else cfg._heuristic_reasoning_efforts("gpt-5", "zai")
+    )
+    assert set(efforts) == set(ungated), (
+        f"the GLM gate must leave non-GLM ids untouched; got {efforts!r} "
+        f"vs ungated {ungated!r}"
+    )
+    assert "ultra" in efforts or "ultra" not in set(cfg.VALID_REASONING_EFFORTS), (
+        "on a host whose ladder reaches 'ultra', non-GLM zai models must see it"
+    )
 
 
 # ── Coercion agrees with advertising (UI/coercion invariant) ─────────────────────
