@@ -97,6 +97,20 @@ reported as the conflict above. A bind address that cannot be used at all
 (`--host` naming another machine, for example) stays a hard error, so a
 bootstrap that started nothing never claims to be running.
 
+## OAuth completion and cancellation
+
+OAuth workers recheck the live flow and its deadline immediately before the first local
+credential or environment write. Cancellation or expiry that completes before that point
+prevents publication. Once local publication starts, its writes and successful terminal status
+share the flow lock; a concurrent Cancel returns that completed outcome rather than claiming
+withdrawal while a writer can still publish. Provider network waits do not hold this lock.
+Terminal outcomes cannot be overwritten by a delayed worker. This is an in-process ordering
+guarantee, not a crash-atomic transaction across multiple files.
+
+Auth-store temporary files are exclusively created with mode `0600` before credential bytes
+are written, then flushed and atomically renamed. POSIX mode protection does not replace
+appropriate directory permissions or Windows ACLs.
+
 ## What the wizard checks
 
 The first screen reports the runtime state WebUI can see:
