@@ -1,6 +1,8 @@
 """Server-side append-only fast path unit checks (#7925 re-gate)."""
 from __future__ import annotations
 
+import json
+
 from api.helpers import _public_message_projection
 from api.routes import (
     _append_anchor_fingerprint,
@@ -18,8 +20,20 @@ def _make_rows(n: int) -> list:
 
 
 class _FakeSession:
-    def __init__(self, generation: int = 0):
+    def __init__(
+        self,
+        generation: int = 0,
+        *,
+        tool_calls=None,
+        anchor_activity_scenes=None,
+        active_stream_id=None,
+        pending_started_at=None,
+    ):
         self.transcript_generation = generation
+        self.tool_calls = tool_calls
+        self.anchor_activity_scenes = anchor_activity_scenes
+        self.active_stream_id = active_stream_id
+        self.pending_started_at = pending_started_at
 
 
 def test_msg_after_window_returns_rows_strictly_after_anchor():
@@ -850,4 +864,531 @@ def test_display_cache_memo_tracks_anchor_scene_saves(monkeypatch, tmp_path):
     assert after != before, (
         "a scene save rendered a new worklog but the next load minted the "
         "same digest — the memo (or the digest) ignored the scene records"
+    )
+
+
+# ── 2026-10-31 re-gate: close the CLASS of out-of-row inputs ───────────────
+# The docstring claims coverage is "complete by construction" because every
+# row is hashed as delivered. Two inputs disproved that: they live OUTSIDE the
+# rows (on the session, or in a setting applied after the mint) yet change what
+# the browser receives for a row it already holds.
+#
+# Finding 1 (SILENT): `_display_prefix_fingerprint` read session-level
+# ``tool_calls`` only through `_hydrate_anchor_activity_scenes`, which it
+# called ONLY when the session had a saved anchor scene. A scene-free
+# session's cards therefore never reached the digest — the maintainer's repro
+# (602 scene-free rows, edit an older card's summary, append one row, focus
+# refresh) was ACCEPTED and the open tab kept the stale snippet where master's
+# focus refresh shows the new one.
+#
+# Finding 2 (SILENT, privacy): `redact_session_data` runs AFTER the mint, and
+# neither the digest nor either memo ``meta`` tuple carried
+# ``api_redact_enabled`` — the maintainer's repro (turn redaction on, append a
+# row, trigger the real focus-refresh handler) left earlier rows UNMASKED in
+# the open tab where master masks them.
+#
+# Both tests below are RED-before: each fails on the unmodified digest, which
+# had no input channel for the input at all.
+
+def _credential_row():
+    """A row whose delivered projection depends on the redaction setting."""
+    return "Authorization: Bearer sk-ant-api03-AAAABBBBCCCCDDDD1234567890"
+
+
+def test_prefix_fingerprint_covers_scene_free_session_tool_cards():
+    """2026-10-31 re-gate, finding 1 (mint side): the digest must hash the
+    calls the covered prefix owns, independently of anchor scenes.
+
+    RED-before: the unmodified digest has no ``tool_calls`` channel unless
+    ``scenes`` is truthy, so the scene-free digest is identical with and
+    without the card and the first assertion fails.
+    """
+    rows = _make_rows(2001)
+    held_fp = _display_prefix_fingerprint(rows, 2000)
+    cards = [
+        {
+            "assistant_msg_idx": 1501,
+            "id": "t1",
+            "tool_name": "Bash",
+            "result": "old summary",
+        }
+    ]
+    fresh_fp = _display_prefix_fingerprint(rows, 2000, scenes=None, tool_calls=cards)
+    assert fresh_fp != held_fp, (
+        "a session-level tool card on a scene-free session never reached the "
+        "digest — editing an older card's summary and appending a row was "
+        "accepted, so the open tab kept the stale snippet (maintainer's "
+        "finding 1 repro)"
+    )
+    # A later edit of the same card must move it again.
+    edited = [
+        {
+            "assistant_msg_idx": 1501,
+            "id": "t1",
+            "tool_name": "Bash",
+            "result": "new summary",
+        }
+    ]
+    assert (
+        _display_prefix_fingerprint(rows, 2000, scenes=None, tool_calls=edited)
+        != fresh_fp
+    )
+
+
+def test_append_verify_refuses_a_scene_free_tool_card_edit():
+    """2026-10-31 re-gate, finding 1 (verify side): the client's view was
+    established scene-free; an older card's summary then changed with no
+    generation bump and no row edit. The append must be refused.
+
+    RED-before: the unmodified verifier passes ``tool_calls`` only into the
+    scene hydration, which never runs without ``scenes`` — so the append is
+    accepted (returns the anchor index).
+    """
+    rows = _make_rows(2001)
+    # The client's held digest comes from the load that established its view:
+    # a scene-free session with no session-level cards at all.
+    held_fp = _display_prefix_fingerprint(rows, 2000)
+    s = _FakeSession(generation=0)
+    s.tool_calls = [
+        {
+            "assistant_msg_idx": 1501,
+            "id": "t1",
+            "tool_name": "Bash",
+            "result": "rewritten summary",
+        }
+    ]
+    anchor_fp = _append_anchor_fingerprint(
+        _public_message_projection(rows[1999], _enabled=True)
+    )
+    assert _append_fast_path_anchor(s, rows, "1999", anchor_fp, "0", held_fp) is None, (
+        "an older card's summary changed on a scene-free session and the "
+        "append was still accepted — the client keeps a tool snippet the "
+        "server no longer has (maintainer's finding 1 repro)"
+    )
+    # Control: the card set the digest was actually minted under still accepts.
+    unchanged = _FakeSession(generation=0)
+    assert _append_fast_path_anchor(unchanged, rows, "1999", anchor_fp, "0", held_fp) == 1999
+
+
+def test_append_verify_refuses_a_card_edit_with_no_new_rows():
+    """2026-10-31 re-gate, the tail of the "Low, not blocking" note: a
+    session-level card change on an owner row the client ALREADY holds was not
+    delivered even on an accepted append, because
+    ``_tool_calls_for_message_window`` limits cards to the returned rows. The
+    finding-1 binding refuses the append whatever the tail looks like — here
+    there are no new rows at all, so the old behaviour would have answered with
+    an empty append window and kept the stale snippet forever.
+
+    RED-before: the unmodified verifier accepts (returns the anchor index).
+    """
+    rows = _make_rows(602)
+    # The client holds the whole 602-row document; its digest covers [0, 602).
+    held_fp = _display_prefix_fingerprint(rows, 602)
+    s = _FakeSession(generation=0)
+    s.tool_calls = [
+        {
+            "assistant_msg_idx": 151,
+            "id": "t1",
+            "tool_name": "Bash",
+            "result": "rewritten summary",
+        }
+    ]
+    anchor_fp = _append_anchor_fingerprint(
+        _public_message_projection(rows[601], _enabled=True)
+    )
+    assert _append_fast_path_anchor(s, rows, "601", anchor_fp, "0", held_fp) is None, (
+        "an owned row's card summary changed with no new rows and the append "
+        "was accepted — the window carries no cards, so the client keeps the "
+        "stale snippet with no way to ever refresh it"
+    )
+    # Control: the card set the digest was minted under still accepts (and the
+    # window is legitimately empty — the server has nothing new).
+    unchanged = _FakeSession(generation=0)
+    assert _append_fast_path_anchor(unchanged, rows, "601", anchor_fp, "0", held_fp) == 601
+
+
+def test_prefix_fingerprint_excludes_cards_owned_by_appended_rows():
+    """The other half of finding 1: calls owned by the APPENDED rows must stay
+    out of the covered prefix's digest, or every turn that runs a tool would
+    refuse its own append.
+
+    This one is green before and after: it pins the boundary so the fix cannot
+    over-refuse.
+    """
+    rows = _make_rows(2001)
+    held_fp = _display_prefix_fingerprint(rows, 2000)
+    appended_cards = [
+        {
+            "assistant_msg_idx": 2000,
+            "id": "t9",
+            "tool_name": "Bash",
+            "result": "the new turn's card",
+        }
+    ]
+    assert (
+        _display_prefix_fingerprint(rows, 2000, tool_calls=appended_cards) == held_fp
+    ), (
+        "a card owned by a row at/after the covered end moved the digest — "
+        "every turn that runs a tool would refuse its own append"
+    )
+    s = _FakeSession(generation=0)
+    s.tool_calls = appended_cards
+    anchor_fp = _append_anchor_fingerprint(
+        _public_message_projection(rows[1999], _enabled=True)
+    )
+    assert _append_fast_path_anchor(s, rows, "1999", anchor_fp, "0", held_fp) == 1999
+
+
+def test_prefix_fingerprint_tracks_the_redaction_setting(monkeypatch):
+    """2026-10-31 re-gate, finding 2 (mint side): the digest must be seeded
+    with the effective ``api_redact_enabled`` value, because
+    ``redact_session_data`` applies it AFTER the mint.
+
+    RED-before: the unmodified digest never reads the setting, so the two
+    digests are identical and the assertion fails.
+    """
+    import api.config
+
+    rows = _make_rows(2001)
+    rows[500]["content"] = _credential_row()
+    monkeypatch.setattr(api.config, "load_settings", lambda: {"api_redact_enabled": True})
+    on_fp = _display_prefix_fingerprint(rows, 2000)
+    monkeypatch.setattr(api.config, "load_settings", lambda: {"api_redact_enabled": False})
+    off_fp = _display_prefix_fingerprint(rows, 2000)
+    assert on_fp != off_fp, (
+        "the credential-redaction setting is applied after the mint and was "
+        "not seeded into the digest — flipping it changed what the browser "
+        "receives for every covered row without moving the fingerprint "
+        "(maintainer's finding 2 repro)"
+    )
+    # Same setting, same digest: the seed must not churn.
+    monkeypatch.setattr(api.config, "load_settings", lambda: {"api_redact_enabled": True})
+    assert _display_prefix_fingerprint(rows, 2000) == on_fp
+
+
+def test_append_verify_refuses_after_the_redaction_setting_flips(monkeypatch):
+    """2026-10-31 re-gate, finding 2 (verify side): the client's view was
+    established with redaction ON; the setting is then turned OFF (or on) and
+    the append must be refused so the authoritative full fetch re-delivers
+    every covered row in its new projection.
+
+    RED-before: the unmodified verifier ignores the setting and accepts.
+    """
+    import api.config
+
+    rows = _make_rows(2001)
+    rows[500]["content"] = _credential_row()
+    monkeypatch.setattr(api.config, "load_settings", lambda: {"api_redact_enabled": True})
+    held_fp = _display_prefix_fingerprint(rows, 2000)
+    # The anchor row carries no credential-shaped text, so its own digest is
+    # stable across the flip: the prefix digest is the only check that can
+    # refuse here.
+    anchor_fp = _append_anchor_fingerprint(
+        _public_message_projection(rows[1999], _enabled=True)
+    )
+    s = _FakeSession(generation=0)
+    monkeypatch.setattr(api.config, "load_settings", lambda: {"api_redact_enabled": False})
+    assert _append_fast_path_anchor(s, rows, "1999", anchor_fp, "0", held_fp) is None, (
+        "the redaction setting flipped and the append was still accepted — "
+        "earlier rows stay unmasked in the open tab where master masks them "
+        "(maintainer's finding 2 repro)"
+    )
+    # Control: the setting the digest was minted under still accepts.
+    monkeypatch.setattr(api.config, "load_settings", lambda: {"api_redact_enabled": True})
+    assert _append_fast_path_anchor(s, rows, "1999", anchor_fp, "0", held_fp) == 1999
+
+
+def test_prefix_fingerprint_tracks_the_active_turn_token():
+    """2026-10-31 re-gate, the third member of the class: the active-turn
+    token (``active_stream_id`` + ``pending_started_at``) is session-level
+    state that ``redact_session_data`` applies after the mint — it decides
+    whether a covered user row is delivered with ``_active_turn_user: true``
+    (ui.js:15016 / sessions.js:4969 read that flag).
+
+    RED-before: the unmodified digest has no token channel, so the first
+    assertion fails.
+    """
+    from api.process_event_utils import build_active_turn_token
+
+    rows = _make_rows(2001)
+    token = build_active_turn_token("stream-1", 1700000000.0)
+    assert token
+    held_fp = _display_prefix_fingerprint(rows, 2000, active_turn_token=token)
+    assert _display_prefix_fingerprint(rows, 2000) != held_fp, (
+        "the active-turn token is session state applied after the mint and "
+        "was not seeded into the digest — a turn ending (or a new one "
+        "starting) changes the delivered user row without moving the digest"
+    )
+    # A different token must move it too.
+    other = build_active_turn_token("stream-2", 1700000900.0)
+    assert _display_prefix_fingerprint(rows, 2000, active_turn_token=other) != held_fp
+    # The same token must not churn it.
+    assert _display_prefix_fingerprint(rows, 2000, active_turn_token=token) == held_fp
+
+
+def test_append_verify_refuses_when_the_active_turn_token_changes():
+    """2026-10-31 re-gate, the active-turn token on the verify side."""
+    from api.process_event_utils import build_active_turn_token
+
+    rows = _make_rows(2001)
+    token = build_active_turn_token("stream-1", 1700000000.0)
+    held_fp = _display_prefix_fingerprint(rows, 2000, active_turn_token=token)
+    s = _FakeSession(
+        generation=0,
+        active_stream_id="stream-1",
+        pending_started_at=1700000000.0,
+    )
+    anchor_fp = _append_anchor_fingerprint(
+        _public_message_projection(rows[1999], _enabled=True)
+    )
+    assert _append_fast_path_anchor(s, rows, "1999", anchor_fp, "0", held_fp) == 1999
+    # The turn ended: the covered user row is no longer delivered with
+    # ``_active_turn_user``, so the held digest must refuse.
+    s.active_stream_id = None
+    assert _append_fast_path_anchor(s, rows, "1999", anchor_fp, "0", held_fp) is None
+
+
+def test_prefix_fingerprint_entry_meta_carries_every_out_of_row_input():
+    """The memo's reuse guard must carry the same out-of-row inputs the digest
+    is seeded with, or a display-cache hit can hand out a digest minted under
+    different session state / settings.
+    """
+    from api.process_event_utils import build_active_turn_token
+    from api.routes import _build_prefix_fingerprint_entry
+
+    rows = _make_rows(10)
+    s = _FakeSession(generation=0)
+    s.tool_calls = [{"assistant_msg_idx": 3, "id": "t1", "result": "one"}]
+    s.anchor_activity_scenes = {"index:3": _scene_record(3, "m3")}
+    s.active_stream_id = "stream-1"
+    s.pending_started_at = 1700000000.0
+    entry = _build_prefix_fingerprint_entry(s, rows)
+    assert entry and entry.get("digest")
+    scenes_fp, cards_fp, redact_flag, token = entry["meta"]
+    assert scenes_fp and cards_fp
+    assert isinstance(redact_flag, bool)
+    assert token == build_active_turn_token("stream-1", 1700000000.0)
+
+    # A card edit must change the meta (and therefore the digest reuse guard).
+    s.tool_calls = [{"assistant_msg_idx": 3, "id": "t1", "result": "two"}]
+    edited = _build_prefix_fingerprint_entry(s, rows)
+    assert edited["meta"] != entry["meta"]
+    assert edited["digest"] != entry["digest"]
+
+    # A different active-turn token must change the meta as well.
+    s.tool_calls = [{"assistant_msg_idx": 3, "id": "t1", "result": "one"}]
+    s.active_stream_id = "stream-2"
+    s.pending_started_at = 1700000900.0
+    retokened = _build_prefix_fingerprint_entry(s, rows)
+    assert retokened["meta"] != entry["meta"]
+    assert retokened["digest"] != entry["digest"]
+
+
+# ── 2026-10-31 re-gate, should-fix: sidecar-only sessions ──────────────────
+# A sidecar-only session returns from
+# `_limited_webui_messages_for_display_with_sidecar` BEFORE the display-merge
+# cache, so it never owns a merge entry and the mint re-hashed the whole
+# document on every windowed GET (the maintainer measured 1/1/1 hashes over
+# three `msg_limit=30` GETs where the state.db-backed shape gives 1/0/0).
+
+
+def test_sidecar_only_windowed_get_memoizes_the_prefix_digest(monkeypatch, tmp_path):
+    """should-fix: a sidecar-only 601-row session must hash the document once
+    across three windowed GETs, not once per GET.
+
+    RED-before: the early return never memoizes, so every GET mints and the
+    counter records three whole-document hashes.
+    """
+    sidecar = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"p{i}",
+         "timestamp": 1700000000 + i}
+        for i in range(601)
+    ]
+    # No state.db rows: the display document IS the sidecar.
+    routes, captured = _warm_cache_append_harness(monkeypatch, tmp_path, sidecar, [])
+    assert routes._display_merge_cache == {}
+
+    calls = []
+    orig = routes._display_prefix_fingerprint
+
+    def _counting(messages, count, **kwargs):
+        if count == len(messages or []):
+            calls.append(count)
+        return orig(messages, count, **kwargs)
+
+    monkeypatch.setattr(routes, "_display_prefix_fingerprint", _counting)
+
+    _warm_get(routes)
+    first = captured["payload"]["session"]
+    assert first.get("prefix_fp")
+    assert calls == [601], (
+        f"the cold sidecar-only GET must hash the document exactly once, got {calls}"
+    )
+
+    calls.clear()
+    _warm_get(routes)
+    _warm_get(routes)
+    second = captured["payload"]["session"]
+    assert calls == [], (
+        f"warm sidecar-only GETs must not hash the document at all, got {calls}"
+    )
+    assert second.get("prefix_fp") == first.get("prefix_fp")
+
+
+def test_sidecar_only_prefix_digest_memo_tracks_a_tool_card_edit(monkeypatch, tmp_path):
+    """should-fix + finding 1: the sidecar-only memo is guarded by the same
+    meta tuple, so an in-process card edit (no sidecar write, so the stat
+    signature is unchanged) cannot be served from the memo.
+    """
+    sidecar = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"p{i}",
+         "timestamp": 1700000000 + i}
+        for i in range(601)
+    ]
+    routes, captured = _warm_cache_append_harness(monkeypatch, tmp_path, sidecar, [])
+
+    _warm_get(routes)
+    before = captured["payload"]["session"]["prefix_fp"]
+    assert before
+
+    import api.models as models
+
+    s = models.get_session("cont-child")
+    # In-process edit only: NO save(), so the sidecar stat signature — and with
+    # it every cache key — is unchanged. Only the meta guard can keep the memo
+    # honest here.
+    s.tool_calls = [
+        {"assistant_msg_idx": 151, "id": "t1", "tool_name": "Bash", "result": "edited"}
+    ]
+
+    _warm_get(routes)
+    after = captured["payload"]["session"]["prefix_fp"]
+    assert after != before, (
+        "a session-level card changed on a sidecar-only session but the memo "
+        "handed out the pre-edit digest"
+    )
+
+
+def test_sidecar_only_prefix_digest_memo_tracks_the_redaction_setting(monkeypatch, tmp_path):
+    """should-fix + finding 2: flipping the redaction setting in process (no
+    sidecar write) must not be served from the sidecar-only memo."""
+    import api.config
+
+    sidecar = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"p{i}",
+         "timestamp": 1700000000 + i}
+        for i in range(601)
+    ]
+    routes, captured = _warm_cache_append_harness(monkeypatch, tmp_path, sidecar, [])
+
+    _warm_get(routes)
+    before = captured["payload"]["session"]["prefix_fp"]
+    assert before
+
+    monkeypatch.setattr(api.config, "load_settings", lambda: {"api_redact_enabled": True})
+    _warm_get(routes)
+    after = captured["payload"]["session"]["prefix_fp"]
+    assert after != before, (
+        "the redaction setting flipped but the sidecar-only memo handed out "
+        "the digest minted under the old setting"
+    )
+
+
+# ── 2026-10-31 re-gate: the maintainer's two repros through the real handler ─
+# "602 scene-free rows, update an older card's summary, append one row, focus
+# refresh" and "turn redaction on, append a row, then trigger the real
+# focus-refresh handler". Both must answer with the authoritative full
+# transcript (no ``_append_only``), which is what master's focus refresh does.
+
+
+def test_handler_focus_refresh_refuses_after_a_scene_free_card_edit(monkeypatch, tmp_path):
+    """Finding 1 end to end: the append is refused and the full document
+    (carrying the rewritten card) is delivered instead of the stale snippet.
+
+    RED-before: the append is accepted (``_append_only`` true) and the client
+    keeps the old summary.
+    """
+    sidecar = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"p{i}",
+         "timestamp": 1700000000 + i}
+        for i in range(601)
+    ]
+    state_db = sidecar + [_state_db_only_reply()]
+    routes, captured = _warm_cache_append_harness(monkeypatch, tmp_path, sidecar, state_db)
+    _warm_display_cache(routes)
+    # The client's held digest comes from the load that established its view.
+    held_fp = captured["payload"]["session"]["prefix_fp"]
+    assert held_fp
+
+    import api.models as models
+
+    s = models.get_session("cont-child")
+    assert not getattr(s, "anchor_activity_scenes", None)  # scene-free session
+    # An older card's summary is rewritten in process: no row changes, no
+    # generation bump, no sidecar write.
+    s.tool_calls = [
+        {"assistant_msg_idx": 151, "id": "t1", "tool_name": "Bash", "result": "rewritten"}
+    ]
+
+    session = _append_get(
+        routes,
+        msg_after=601,
+        anchor_row=_state_db_only_reply(),
+        prefix_fp=held_fp,
+    )
+    assert session.get("_append_only") is not True, (
+        "the focus-refresh append was accepted after an older card's summary "
+        "changed — the open tab keeps the stale snippet (maintainer's "
+        "finding 1 repro)"
+    )
+    # The refusal answers with the authoritative full document, which carries
+    # the rewritten card — exactly master's focus refresh.
+    assert session.get("message_count") == 602
+    assert len(session.get("messages") or []) == 602
+    cards = session.get("tool_calls") or []
+    assert [c.get("result") for c in cards] == ["rewritten"], cards
+
+
+def test_handler_focus_refresh_refuses_after_the_redaction_setting_flips(monkeypatch, tmp_path):
+    """Finding 2 end to end: with redaction turned on after the client's view
+    was established, the append is refused and the full document arrives
+    masked — instead of leaving earlier rows unmasked in the open tab.
+
+    RED-before: the append is accepted and the delivered rows are unmasked.
+    """
+    import api.config
+
+    sidecar = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"p{i}",
+         "timestamp": 1700000000 + i}
+        for i in range(601)
+    ]
+    sidecar[500]["content"] = _credential_row()
+    state_db = sidecar + [_state_db_only_reply()]
+    routes, captured = _warm_cache_append_harness(monkeypatch, tmp_path, sidecar, state_db)
+    # The harness establishes the view with redaction OFF.
+    _warm_display_cache(routes)
+    held_fp = captured["payload"]["session"]["prefix_fp"]
+    assert held_fp
+
+    # The setting is turned ON (through the settings API's own code path:
+    # redact_session_data reads it per request).
+    monkeypatch.setattr(api.config, "load_settings", lambda: {"api_redact_enabled": True})
+    session = _append_get(
+        routes,
+        msg_after=601,
+        anchor_row=_state_db_only_reply(),
+        prefix_fp=held_fp,
+    )
+    assert session.get("_append_only") is not True, (
+        "the focus-refresh append was accepted after redaction was turned on "
+        "— earlier rows stay unmasked in the open tab (maintainer's finding 2 "
+        "repro)"
+    )
+    assert session.get("message_count") == 602
+    delivered = session.get("messages") or []
+    assert len(delivered) == 602
+    assert _credential_row() not in json.dumps(delivered), (
+        "the authoritative full fetch delivered an unmasked credential with "
+        "api_redact_enabled=True"
     )

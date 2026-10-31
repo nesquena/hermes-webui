@@ -35,7 +35,7 @@ already-loaded session reach this path; other external-refresh reasons clear
 | `msg_after=N` | The client's last rendered absolute row index; the response must start strictly after it. Mutually exclusive with `msg_before` (paging wins). |
 | `anchor_fp` | FNV-1a digest of the anchor row's **public projection** (internal fields stripped, content redacted) — the exact bytes the client rendered. Minted browser-side; the server re-derives it. |
 | `transcript_generation` | The generation the client's view was built under. Bumped only on destructive rewrites (truncate/retry/undo). |
-| `prefix_fp` | The server-computed digest over rows `[0, N+1)` of the merged display document, echoed back from the load that established the client's view. Server-minted and server-verified; the browser only stores and returns it. Coverage is the whole projected row minus the explicit exclusion set (`_PREFIX_FP_EXCLUDED_FIELDS`), hydrated anchor scenes included; on a display-merge cache hit it is reused from the cache entry instead of re-minted. |
+| `prefix_fp` | The server-computed digest over rows `[0, N+1)` of the merged display document, echoed back from the load that established the client's view. Server-minted and server-verified; the browser only stores and returns it. Coverage is the whole projected row minus the explicit exclusion set (`_PREFIX_FP_EXCLUDED_FIELDS`), hydrated anchor scenes included, seeded with the out-of-row inputs that change a covered row's delivered projection (the prefix's own session-level tool cards, the effective `api_redact_enabled`, the active-turn token — see the input inventory below); on a display-merge cache hit it is reused from the cache entry instead of re-minted. |
 | `msg_limit` | Bounds the **returned window** only. It never selects the limited-display document: an append request's anchor validation and merge run against the full display document, exactly like master's bare GET. |
 
 `anchor_fp` and `prefix_fp` are deliberately different mechanisms:
@@ -60,10 +60,7 @@ construction (2026-10-29 finding 2): each covered row is hashed as the
 browser receives it — the whole projected row minus an explicit exclusion set
 (`_PREFIX_FP_EXCLUDED_FIELDS` = `_PUBLIC_MESSAGE_INTERNAL_FIELDS`, exactly the
 fields stripped before delivery) — so any *new* rendered field is covered by
-default instead of being missed by a whitelist. Rows carrying a saved
-anchor-activity scene are hydrated first (scene records are stored on the
-session, never on rows), and the session tool calls feed that hydration, so a
-scene save or a `_source` change also moves the digest. It is a fingerprint
+default instead of being missed by a whitelist. It is a fingerprint
 rather than a revision counter because a counter must be bumped by every
 writer that touches an earlier row, and one missed writer means silently
 stale rows. The whole-document digest is computed once per merge and reused
@@ -72,6 +69,76 @@ reuses the entry's digest (guarded by a scene/tool-call digest), and a cold
 load hands the freshly built digest to the mint instead of computing the
 same value a second time. Ordinary windowed opens therefore pay for one
 whole-document hash, not two.
+
+### The full input inventory (2026-10-31 re-gate)
+
+"Complete by construction" has to mean the whole *delivered projection* of a
+covered row, not just the row's own fields. Two silent findings proved the
+point: `_display_prefix_fingerprint` read session-level `tool_calls` only
+through `_hydrate_anchor_activity_scenes`, which it called only when the
+session had a saved anchor scene — so a scene-free session's cards never
+reached the digest — and `redact_session_data` runs *after* the mint, so
+neither the digest nor either memo `meta` tuple carried
+`api_redact_enabled`. Both changed what the browser renders for rows the
+client already holds, without touching a row.
+
+Everything on the GET path between the merge and `j(...)` that can do that is
+therefore enumerated here. **Bound** inputs are mixed into the digest (or, for
+the memo, into the `meta` tuple that guards digest reuse) and each has a test
+that changes it on a held prefix and asserts the append is refused.
+
+| # | Input | Where it acts on the GET path | Why it changes a held row's projection | How it is bound | Test |
+|---|---|---|---|---|---|
+| 1 | The merged rows themselves (`_all_msgs`) | the merge | the row's own fields | hashed as the whole projected row minus `_PREFIX_FP_EXCLUDED_FIELDS` | `test_prefix_fingerprint_refuses_a_nondestructive_earlier_row_edit`, `test_prefix_fingerprint_exclusion_set_is_explicit_and_rendered_fields_covered` |
+| 2 | `session.anchor_activity_scenes` | `_hydrate_anchor_activity_scenes` before the mint | attaches `_anchor_activity_scene` / `_anchor_stream_id` to an assistant row without ever modifying a row | rows hydrated before hashing | `test_prefix_fingerprint_mint_tracks_anchor_scene_saves`, `test_append_verify_refuses_after_anchor_scene_save` |
+| 3 | `session.tool_calls` (session-level cards) | the response's `tool_calls` field, and the scene hydration | a card's summary/result renders on its owner row, and the client keeps its copy of the list across an accepted append | `_prefix_owned_tool_calls(tool_calls, total)` (the response path's own window selector) mixed into the digest; the whole card list in `meta[1]` | `test_prefix_fingerprint_covers_scene_free_session_tool_cards`, `test_append_verify_refuses_a_scene_free_tool_card_edit`, `test_append_verify_refuses_a_card_edit_with_no_new_rows`, `test_handler_focus_refresh_refuses_after_a_scene_free_card_edit` |
+| 4 | `api_redact_enabled` | `redact_session_data`, **after** the mint | masks/unmasks credentials in `messages` and in `tool_calls` | digest seed `redact=`, plus `meta[2]` | `test_prefix_fingerprint_tracks_the_redaction_setting`, `test_append_verify_refuses_after_the_redaction_setting_flips`, `test_handler_focus_refresh_refuses_after_the_redaction_setting_flips` |
+| 5 | The active-turn token (`active_stream_id` + `pending_started_at`) | `redact_session_data`, **after** the mint | decides whether a covered user row is delivered with `_active_turn_user: true` (`ui.js:15016`, `sessions.js:4969` read it) | digest seed `active_turn=`, plus `meta[3]` | `test_prefix_fingerprint_tracks_the_active_turn_token`, `test_append_verify_refuses_when_the_active_turn_token_changes` |
+
+Input 3 has a deliberate boundary, pinned by
+`test_prefix_fingerprint_excludes_cards_owned_by_appended_rows`: a card owned
+by a row at or after the coverage end belongs to the appended rows and stays
+OUT of the covered prefix's digest, or every turn that runs a tool would
+refuse its own append. A card whose `assistant_msg_idx` is not an integer
+cannot be attributed to any row, so the window selector drops it — but the
+response path still delivers such a card on a full load, so it is covered
+unconditionally rather than dropped.
+
+Covered **by construction** (a pure function of the hashed rows, so no
+separate binding is needed — and none is possible without duplicating the
+merge):
+
+- `_display_owner_positions` / `_display_rebased_tool_calls` — derived from
+  the merged rows and the card list, both of which are bound (1, 3).
+- `_stamp_pending_source_for_display`, `_suppress_native_image_display_mirrors`
+  — applied to the state.db rows **before** the merge, so their effect is
+  inside the hashed rows.
+- `_project_native_image_payload_conflicts_for_display` — applied to the
+  merged rows before the digest.
+- `_merged_message_count`, `visible_message_count`, `last_message_at` /
+  `updated_at`, `attach_todo_state` — derived from the merged rows.
+- The window (`_messages_offset`, `msg_limit`, `expand_renderable`) —
+  request-derived; mint and verify derive the coverage end from the same rule.
+
+Deliberately **not** bound, because they are not a held row's projection:
+
+- `title` — redacted like a row, but a header field, not a transcript row.
+- `todo_state`, `runtime_journal`, `runtime_journal_snapshot` — panels, and
+  derived from the merged rows.
+- `model` / `model_provider`, `context_length`, `threshold_tokens`,
+  `last_prompt_tokens`, `regeneration_revision`, `read_only`,
+  `is_cli_session`, `continuation_session_id`, `_messages_truncated`,
+  `_msg_limit_max` — session metadata and response flags.
+- `pending_user_message` / `pending_attachments` / `pending_user_source` — the
+  optimistic bubble, not a transcript row; the materialized user row *is* a row
+  and is covered by (1) and (5), and the turn boundaries that change the
+  pending state also move the active-turn token (5).
+
+Sidecar-only sessions (no state.db rows for the session) are covered by a
+separate, rows-free memo: they return from
+`_limited_webui_messages_for_display_with_sidecar` before the display-merge
+cache, so without it every windowed GET re-hashed the whole document. See
+"Server-side invariants".
 
 ## Response fields
 
@@ -100,7 +167,26 @@ whole-document hash, not two.
   decide where the window begins, so a tool-result row that landed after the
   anchor was captured still travels with the window.
 - **The append response carries only the window's session-level tool cards**,
-  rebased into window coordinates. Older cards are the client's to keep.
+  rebased into window coordinates. Older cards are the client's to keep — and
+  because a card edit on an already-held owner row is invisible to an accepted
+  append, the digest binds the covered prefix's own cards (#3 above), so such
+  an edit refuses the append and the authoritative full fetch re-delivers the
+  card.
+- **Sidecar-only sessions memoize the digest separately.** A session with no
+  state.db rows returns from `_limited_webui_messages_for_display_with_sidecar`
+  *before* the display-merge cache, so it never owns a merge entry and used to
+  re-hash the whole document on every windowed GET (1/1/1 hashes over three
+  `msg_limit=30` GETs where the state.db-backed shape gives 1/0/0; 400–470 ms
+  against master's 171–209 ms on the 32 MiB shape). `_display_prefix_fp_memo`
+  now carries just the digest for that shape. It stores no rows, so it cannot
+  serve a stale transcript: the key is the sidecar stat signature plus every
+  lineage parent signature, the row count and the last timestamp (the same
+  components `_display_merge_cache_key` uses for the sidecar half) plus the
+  state.db session signature when one is readable, and reuse is guarded by the
+  same `meta` tuple (scenes, session cards, redaction setting, active-turn
+  token). Any doubt — an active session, a `msg_before` paging request, an
+  unresolvable key — leaves the out-param empty and the caller pays for the
+  hash.
 
 ## Client-side invariants
 
