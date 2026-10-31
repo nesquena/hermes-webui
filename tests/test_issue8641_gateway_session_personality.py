@@ -455,3 +455,30 @@ def test_embedded_turn_without_personality_is_unchanged():
     assert "Lead with the evidence." not in prompt
     assert "WebUI progress guidance" in prompt
     assert "Final visible assistant replies" in prompt
+
+
+def test_gateway_personality_is_not_duplicated_into_saved_history(tmp_path, monkeypatch):
+    """The personality rides in the ephemeral system prompt, once, and only there.
+
+    #8641 asks for the prompt to be removed when the selection is cleared
+    "without duplicating it in saved history" -- so the persisted transcript
+    must never carry the personality text.
+    """
+    cfg = _cfg(dict(PERSONALITIES))
+    _pin_config(monkeypatch, cfg)
+    spy = []
+
+    system_prompt, session = _gateway_turn(tmp_path, monkeypatch, cfg, "terse", spy=spy)
+
+    # Exactly once in the ephemeral system prompt the worker assembled.
+    assert system_prompt.count("Answer in one short sentence.") == 1
+
+    # ... and nowhere in the persisted transcript.
+    persisted = " ".join(str(m) for m in (getattr(session, "messages", None) or []))
+    assert "Answer in one short sentence." not in persisted
+
+    saved = " ".join(
+        p.read_text(encoding="utf-8", errors="replace")
+        for p in sorted((tmp_path / "sessions").glob("*.json"))
+    )
+    assert "Answer in one short sentence." not in saved
