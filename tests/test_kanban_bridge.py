@@ -28,6 +28,7 @@ class FakeTask:
     tenant: str | None = None
     priority: int = 0
     body: str | None = None
+    claim_lock: str | None = None
 
 
 @dataclass
@@ -181,6 +182,13 @@ class FakeKanbanDB:
         task = self.get_task(conn, task_id)
         if not task:
             return False
+        if task.status == "running" and task.claim_lock is not None:
+            # Native kanban_db refuses reassignment while a live claim holds
+            # the card. Reproduce the fence so ordering regressions surface.
+            raise RuntimeError(
+                f"cannot reassign {task_id}: currently running (claimed). "
+                "Wait for completion or reclaim the stale lock first."
+            )
         task.assignee = assignee
         self._event(task_id, "assigned", {"assignee": assignee})
         return True
@@ -1645,3 +1653,68 @@ def test_bulk_review_carries_assignee_through_request_review(monkeypatch):
     assert [e.kind for e in fake_kanban.events if e.task_id == "t_bulk_review"] == [
         "review_requested"
     ], "the bulk path must not re-assign the reviewer after the handoff"
+
+
+def test_bulk_non_review_status_releases_claim_before_assignee(monkeypatch):
+    """Bulk non-review must keep status-first ordering so a claimed card is released.
+
+    Regression: round 2 carried the assignee into ``_patch_task`` for every
+    status, so the assignee write ran before the status transition. A claimed
+    Running card (Alice) plus bulk ``{status: ready, assignee: bob}`` then hit
+    the native claim fence and stayed Running/Alice instead of moving to
+    Ready/Bob.
+    """
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    task = FakeTask(
+        "t_claimed_running", "Worker holding the card", "running", "alice",
+        claim_lock="worker-1",
+    )
+    fake_kanban.tasks.append(task)
+
+    def _release_to_ready(conn, task_id, new_status):
+        # Mirror the bridge's claim-aware direct write: leaving 'running'
+        # clears claim_lock before anything else may touch the card.
+        current = fake_kanban.get_task(conn, task_id)
+        if not current:
+            return False
+        current.status = new_status
+        current.claim_lock = None
+        fake_kanban._event(task_id, "status", {"status": new_status, "source": "webui"})
+        return True
+
+    monkeypatch.setattr(bridge, "_set_status_direct", _release_to_ready)
+
+    result = bridge._bulk_tasks_payload(
+        {"ids": ["t_claimed_running"], "status": "ready", "assignee": "bob"}
+    )
+
+    assert result["results"] == [{"id": "t_claimed_running", "ok": True}]
+    assert task.status == "ready"
+    assert task.assignee == "bob"
+    assert task.claim_lock is None, "leaving running must release the claim before reassignment"
+
+
+def test_bulk_invalid_status_does_not_assign_or_emit_event(monkeypatch):
+    """A rejected bulk status must not durably assign the target or append an assigned event.
+
+    Regression: carrying the assignee into ``_patch_task`` wrote it before
+    status validation, so ``{status: bogus, assignee: bob}`` reassigned the
+    card and appended ``assigned`` before the rejection.
+    """
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    task = FakeTask("t_bulk_invalid", "Ready card", "ready", "alice")
+    fake_kanban.tasks.append(task)
+
+    result = bridge._bulk_tasks_payload(
+        {"ids": ["t_bulk_invalid"], "status": "bogus-status", "assignee": "bob"}
+    )
+
+    assert result["results"][0]["id"] == "t_bulk_invalid"
+    assert result["results"][0]["ok"] is False
+    assert task.status == "ready"
+    assert [e.kind for e in fake_kanban.events if e.task_id == "t_bulk_invalid"] == [], (
+        "a rejected status must not append an assigned event"
+    )
+    assert task.assignee == "alice", "a rejected status must leave the prior assignee intact"
