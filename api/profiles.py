@@ -236,6 +236,11 @@ def _unwrap_profile_home_to_base(home: Path) -> Path:
 # escape isolation (#4589).
 _PROTECTED_ENV_KEYS = frozenset({
     'HERMES_WEBUI_ISOLATED_PROFILE',
+    # Where the Agent reads the executing tree's install stamp (its pm/paths.py
+    # install_root()). docker_init decides at boot whether a mounted Agent would
+    # relaunch from that stamp (#8593); a profile .env moving it would change the
+    # answer for the next in-app update restart, which skips docker_init (#8594).
+    'HERMES_INSTALL_ROOT',
     # Server-wide sidebar window; a profile .env must not widen the per-request query.
     'HERMES_WEBUI_VISIBLE_SESSION_LIMIT',
     # #7656 round-3: HERMES_WEBUI_MAX_SESSION_RESOLVE is a process-wide resource
