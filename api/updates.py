@@ -587,10 +587,16 @@ def _resolve_git_executable():
 
 def _dirty_suffix(path: Path, timeout=1) -> str:
     """Return a best-effort ``-dirty`` suffix without blocking version display."""
-    out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
+    # ``git diff --quiet HEAD --`` — NOT ``git diff-index --quiet HEAD --``.
+    # diff-index keys off the index stat cache, so a tracked file whose
+    # mtime moved but whose content is identical (fresh clone, rsync,
+    # branch checkout) reads as dirty and badges a clean install
+    # ``-dirty``. ``git diff`` compares blob content, so only real edits
+    # are reported.
+    out, ok = _run_git(['diff', '--quiet', 'HEAD', '--'], path, timeout=timeout)
     if ok:
         return ""
-    # Only diff-index status 1 means dirty. Keep version display consistent
+    # Only diff status 1 means dirty. Keep version display consistent
     # with the strict action-time probe; all other failures suppress the suffix.
     if out != 'git exited with status 1':
         return ""
@@ -1268,6 +1274,26 @@ def _head_is_past_latest_tag(path, current_tag, channel=DEFAULT_UPDATE_CHANNEL):
     return bool(ok and full_desc and full_desc != current_tag)
 
 
+def _ancestry_verdict(output, ok):
+    """Classify a ``git merge-base --is-ancestor`` probe.
+
+    ``_run_git`` reports every non-zero exit as the same (message, False)
+    pair, so the exit code is only visible in the message: exit 1 is the
+    legitimate "not an ancestor" answer, and any other message means the
+    probe ITSELF failed, so the ancestry is UNKNOWN.
+
+    Returns True (ancestor), False (not an ancestor) or None (unknown).
+    An empty message is the legacy shape older consumers used for the same
+    "no" answer (see ``_probe_dirty``'s ``legacy_empty_is_dirty``), so it
+    means False here too.
+    """
+    if ok:
+        return True
+    if output == '' or output == 'git exited with status 1':
+        return False
+    return None
+
+
 def _head_contains_ref(path, ref):
     """Return True when ``ref`` is an ancestor of HEAD.
 
@@ -1275,19 +1301,50 @@ def _head_contains_ref(path, ref):
     be on a commit that already contains the newest published tag. In that case
     a positive tag gap is not an available update; applying the tag would move
     backwards or fail fast-forward. Use the commit graph to detect that state.
+
+    Returns None when the probe itself failed: the ancestry is then UNKNOWN,
+    not "unrelated history", and the force path must fail closed instead of
+    reading a git failure as a licence to discard local work.
     """
     if not ref:
         return False
-    _, ok = _run_git(['merge-base', '--is-ancestor', ref, 'HEAD'], path)
-    return bool(ok)
+    output, ok = _run_git(['merge-base', '--is-ancestor', ref, 'HEAD'], path)
+    return _ancestry_verdict(output, ok)
 
 
 def _can_fast_forward_to(path, ref):
-    """Return True when ``ref`` is a descendant of HEAD (``git pull --ff-only`` can reach it)."""
+    """Return True when ``ref`` is a descendant of HEAD (``git pull --ff-only`` can reach it).
+
+    Returns None when the probe itself failed (unknown ancestry).
+    """
     if not ref:
         return False
-    _, ok = _run_git(['merge-base', '--is-ancestor', 'HEAD', ref], path)
-    return bool(ok)
+    output, ok = _run_git(['merge-base', '--is-ancestor', 'HEAD', ref], path)
+    return _ancestry_verdict(output, ok)
+
+
+def _is_release_tag_ref(path, ref, channel=DEFAULT_UPDATE_CHANNEL):
+    """Return True when *ref* names one of the channel's release tags.
+
+    The rewind guard must distinguish two very different "HEAD is ahead of the
+    selected ref" states:
+
+      * the selected ref is a RELEASE TAG of the channel and HEAD sits past it
+        (an ex-experimental install switching back to stable, or a checkout
+        that already moved past the newest stable release). Resetting onto
+        that tag would DOWNGRADE the code — the guard must refuse.
+      * the selected ref is the channel's UPSTREAM BRANCH and HEAD sits ahead
+        of it because the user made local commits on top of it. That is a
+        valid dirty-at-or-past-latest install: the force-clean affordance is
+        offered for it, and the cleanup must discard the tracked local edits
+        WITHOUT dropping those commits (Greptile P1, 10-14).
+
+    Tag identity is decided by the channel's own tag list, so a branch name
+    that merely looks like a tag is not mistaken for one.
+    """
+    if not ref:
+        return False
+    return ref in _release_tags(path, channel)
 
 
 def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None):
@@ -1795,7 +1852,17 @@ def _probe_dirty(
     path: Path, timeout: int = 1, *, legacy_empty_is_dirty: bool = False,
 ) -> bool | None:
     """Return dirty, clean, or unknown for a working-tree probe."""
-    out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
+    # ``git diff --quiet HEAD --`` — deliberately NOT ``git diff-index
+    # --quiet HEAD --``. diff-index consults the index stat cache, so a
+    # tracked file whose mtime moved without a content change reports
+    # "dirty" (verified: `touch` an unchanged file → diff-index exits 1,
+    # `git diff --quiet` exits 0). A stat-only false positive here told
+    # the Settings panel to offer force-clean, and force update then ran
+    # ``git clean -fd`` (:1920) and deleted unrelated untracked work for
+    # a user who had changed nothing. ``git diff`` compares blob content,
+    # so only real edits read as dirty. The force-update gate therefore
+    # keys on the same content-truth as the text diff.
+    out, ok = _run_git(['diff', '--quiet', 'HEAD', '--'], path, timeout=timeout)
     if ok:
         return False
     if out == 'git exited with status 1' or (legacy_empty_is_dirty and (not out or out.startswith('git exited with status '))):
@@ -1810,13 +1877,18 @@ def _probe_dirty(
 def _is_dirty(path: Path, timeout: int = 1) -> bool:
     """Return True when the working tree has uncommitted changes vs HEAD.
 
-    Same primitive as ``_dirty_suffix`` (issue #4085): ``git diff-index
-    --quiet HEAD --`` exits 0 on a clean tree and 1 on a dirty tree (not an
+    Same primitive as ``_dirty_suffix`` (issue #4085): ``git diff --quiet
+    HEAD --`` exits 0 on a clean tree and 1 on a dirty tree (not an
     error). Real errors (timeout, missing git, fatal) are conservatively
     reported as clean so a transient probe failure never produces a false-
     positive "local changes" alert.
+
+    Content-based on purpose: ``git diff-index`` is stat-cache sensitive,
+    so an mtime-only change to an unchanged tracked file would otherwise
+    report dirty, surface the destructive force-clean affordance, and let
+    ``git clean -fd`` remove untracked work for a user with no edits.
     """
-    # Older checker consumers model diff-index status 1 as ('', False). Keep
+    # Older checker consumers model diff status 1 as ('', False). Keep
     # that boolean contract here; force updates use the strict tri-state form.
     return _probe_dirty(
         path, timeout=timeout, legacy_empty_is_dirty=True,
@@ -2512,9 +2584,6 @@ def _apply_force_update_inner(target: str, channel) -> dict:
     # /api/updates/clear_lock endpoint, where the user has opted in to
     # a non-destructive retry.
 
-    # --force so a remote re-tag (e.g. squash-merge that re-points an
-    # existing release tag) doesn't jam the apply path with "would clobber
-    # existing tag". See #2756.
     fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
     if not fetch_ok:
         return {
@@ -2526,10 +2595,21 @@ def _apply_force_update_inner(target: str, channel) -> dict:
         }
 
     compare_ref = _select_apply_compare_ref(path, channel, target)
-    # Stable channel, already up to date on the promoted subset: nothing to
-    # force to. Do NOT fall back to origin/master (firehose). See
-    # _select_apply_compare_ref channel semantics.
-    if compare_ref is None:
+    # ── Ancestry is TRISTATE, and it is decided by the SAME two seams
+    # the check side uses ──────────────────────────────────────────────
+    # ``git merge-base --is-ancestor`` exits 1 for a legitimate "no"
+    # and only fails for a broken probe. The legacy boolean helpers
+    # collapsed both into False, so a FAILED probe read as "this ref is
+    # unrelated to HEAD" — which skipped the dirty-only gate and let
+    # ``git clean -fd`` run without confirming that tracked edits still
+    # justified the cleanup (Greptile P1, 10-06). Unknown ancestry now
+    # fails CLOSED: without a proven relationship to HEAD we cannot tell
+    # a same-commit cleanup from a rewind, so nothing is discarded.
+    from_no_ref = compare_ref is None
+    if from_no_ref:
+        # Stable channel, already up to date on the promoted subset:
+        # nothing to force to. Only the WebUI stable checkout can fall
+        # back to a literal reset of its own HEAD (no forward move).
         dirty_state = None
         if target == 'webui' and channel == 'stable':
             dirty_state = _probe_dirty(path, timeout=_FORCE_DIRTY_PROBE_TIMEOUT)
@@ -2543,27 +2623,100 @@ def _apply_force_update_inner(target: str, channel) -> dict:
                 'up_to_date': True,
                 'channel': channel,
             }
+        # The dirty probe above IS the gate for this path: the ref is the
+        # checkout's own HEAD, so the reset can only discard the tracked
+        # edits that armed the affordance. No second probe, no rewind.
 
-    # Rewind guard (Codex CORE #3): refuse to reset --hard onto a ref that
-    # is an ANCESTOR of HEAD — that would downgrade the checkout. This is the
-    # switch-back-to-stable-while-ahead case. A ref that is a descendant of
-    # HEAD (normal update / opt-in to experimental) fast-forwards fine and is
-    # allowed. Refs on a divergent line (neither ancestor nor descendant) are
-    # the legitimate force-update case (conflict/diverged recovery) and are
-    # also allowed — the guard fires ONLY on a pure-ancestor rewind.
-    if _head_contains_ref(path, compare_ref) and not _can_fast_forward_to(path, compare_ref):
+    # ``_head_contains_ref`` is True when compare_ref is an ancestor of
+    # HEAD; ``_can_fast_forward_to`` is True when compare_ref is a
+    # descendant of HEAD. Both answer None when the probe itself failed.
+    contains_ref = _head_contains_ref(path, compare_ref)
+    if contains_ref is None:
         return {
             'ok': False,
             'message': (
-                f'{target} is already ahead of the {channel} channel '
-                f'({compare_ref}); refusing to rewind the checkout. '
-                'Switching to a slower channel keeps your current version '
-                'until that channel catches up.'
+                f'Could not determine the update state of the {target} checkout; '
+                'refusing to discard local changes.'
             ),
             'target': target,
             'channel': channel,
-            'refused_rewind': True,
         }
+    if contains_ref:
+        fast_forward = _can_fast_forward_to(path, compare_ref)
+        if fast_forward is None:
+            return {
+                'ok': False,
+                'message': (
+                    f'Could not determine the update state of the {target} checkout; '
+                    'refusing to discard local changes.'
+                ),
+                'target': target,
+                'channel': channel,
+            }
+        if fast_forward:
+            # SAME COMMIT: compare_ref IS HEAD (origin/HEAD ref == HEAD),
+            # including Agent and experimental. The reset is a dirty-only
+            # cleanup, not a forward/divergent recovery. Revalidate that a
+            # dirty signal is still present immediately before discard,
+            # under the apply lock. A lapsed signal (the tracked edit
+            # resolved, only untracked files added since) must FAIL
+            # CLOSED rather than let ``git clean -fd`` delete untracked
+            # work that was never part of the dirty probe; unknown (None)
+            # and clean both refuse without disabling genuine
+            # forward/divergent recovery (handled by the branch below).
+            if not from_no_ref and _probe_dirty(
+                path, timeout=_FORCE_DIRTY_PROBE_TIMEOUT,
+            ) is not True:
+                return {
+                    'ok': True,
+                    'message': f'{target} is already up to date on the {channel} channel.',
+                    'target': target,
+                    'up_to_date': True,
+                    'channel': channel,
+                }
+        elif not from_no_ref:
+            # HEAD is AHEAD of compare_ref (compare_ref is a strict
+            # ancestor of HEAD). Two very different states:
+            #
+            #  * compare_ref is one of the channel's RELEASE TAGS and HEAD
+            #    sits past it — an ex-experimental install switching back
+            #    to stable, or a checkout already past the newest stable
+            #    release. Resetting onto that tag would DOWNGRADE the
+            #    code, so refuse (Codex CORE #3).
+            #  * compare_ref is the channel's UPSTREAM BRANCH and HEAD
+            #    sits ahead of it because the user made local commits on
+            #    top of it. That is a valid dirty-at-or-past-latest
+            #    install: the force-clean affordance IS offered for it, so
+            #    the cleanup must succeed. Discard the tracked local
+            #    edits and the untracked files but KEEP the user's own
+            #    commits by cleaning against HEAD (Greptile P1, 10-14).
+            if _is_release_tag_ref(path, compare_ref, channel):
+                return {
+                    'ok': False,
+                    'message': (
+                        f'{target} is already ahead of the {channel} channel '
+                        f'({compare_ref}); refusing to rewind the checkout. '
+                        'Switching to a slower channel keeps your current version '
+                        'until that channel catches up.'
+                    ),
+                    'target': target,
+                    'channel': channel,
+                    'refused_rewind': True,
+                }
+            if _probe_dirty(path, timeout=_FORCE_DIRTY_PROBE_TIMEOUT) is not True:
+                return {
+                    'ok': True,
+                    'message': f'{target} is already up to date on the {channel} channel.',
+                    'target': target,
+                    'up_to_date': True,
+                    'channel': channel,
+                }
+            compare_ref = 'HEAD'
+    # compare_ref is NOT an ancestor of HEAD: a forward move (fast-forward
+    # to a newer ref) or a divergent/conflict recovery. Both are the
+    # legitimate destructive force cases and are allowed WITHOUT a dirty
+    # signal, so the finding-3 gate never disables them.
+
     if not _discard_local_changes(path, compare_ref):
         return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
 
