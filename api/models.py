@@ -12130,6 +12130,110 @@ def _decode_state_db_content(value):
     return decoded
 
 
+def _state_db_steer_stored_text(msg):
+    """The stored text ``_unwrap_steer_row_oob_marker`` may rewrite for this row.
+
+    Returns the ``content`` string, the single text part of a list-shaped row,
+    or ``None`` for any other shape (which the helper never rewrites).
+    """
+    content = msg.get('content')
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list) and len(content) == 1 and isinstance(content[0], dict):
+        part = content[0]
+        if part.get('type') == 'text' and isinstance(part.get('text'), str):
+            return part['text']
+    return None
+
+
+def _unwrap_state_db_steer_row(msg, display_kind=None):
+    """#7600: strip one validated steer frame from a state.db-sourced message.
+
+    The gateway wraps a consumed mid-turn steer in a transport-only
+    ``[OUT-OF-BAND USER MESSAGE]`` frame and tags the row ``display_kind =
+    "steer"`` so it can be unwrapped at display time.  ``state.db`` keeps that
+    marker; the settle scrub only heals the WebUI sidecar, so a transcript
+    state.db owns (a CLI/gateway session, or any session past the bounded-read
+    floor) re-surfaced the raw wrapper in chat.  Only typed steer rows are
+    touched, and anything that is not exactly one complete frame is preserved
+    byte-for-byte — matching ``api.streaming._unwrap_steer_row_oob_marker``.
+
+    The frame is a **trust boundary marker**: the Agent's own system note
+    (``STEER_CHANNEL_NOTE``) tells the model to trust only that exact shape, so
+    the raw bytes must survive for model-facing callers.  This therefore uses
+    the same display/provider split the sidecar path uses (#7600's own test file
+    asserts ``session.context_messages`` is marker-free): the unwrapped text
+    lands in ``content`` for rendering, and the original framed bytes are moved
+    into the durable provider-facing sidecar ``api_content`` — which the Agent
+    substitutes back over ``content`` at API-build time
+    (``turn_context.substitute_api_content``) exactly when no provider value was
+    already recorded.  The sidecar is only written when this row owns the raw
+    frame; a row that already carries provider bytes is never overwritten.
+
+    Mutates ``msg`` in place; returns True when the row was a steer row.
+    """
+    if not isinstance(msg, dict):
+        return False
+    kind = display_kind if display_kind is not None else msg.get('display_kind')
+    if str(kind or '') != 'steer':
+        return False
+    try:
+        from api.streaming import _unwrap_steer_row_oob_marker
+    except Exception:
+        return False
+    msg.setdefault('display_kind', 'steer')
+    raw_content = msg.get('content')
+    raw_text = _state_db_steer_stored_text(msg)
+    _unwrap_steer_row_oob_marker(msg)
+    # #7600 (greptile P1): the unwrap helper rewrites a list row's text part
+    # **in place**, so ``content`` keeps its original object identity and an
+    # identity-only test is false on the list path.  ``api_content`` was then
+    # never written and every model-facing reader received the bare instruction
+    # with the trust-boundary frame already stripped — recurring on every read,
+    # because a state.db row is read-only in list order.  Decide on the *stored
+    # text* having changed, not on object replacement.
+    rewrote_stored_text = (
+        msg.get('content') is not raw_content
+        or _state_db_steer_stored_text(msg) != raw_text
+    )
+    if rewrote_stored_text:
+        existing_api_content = msg.get('api_content')
+        if not (isinstance(existing_api_content, str) and existing_api_content):
+            # ``api_content`` is a str-only sidecar (helpers._scrub_message_record,
+            # streaming._agent_durable_content, _session_message_api_content_key),
+            # so a list row preserves the framed **text**, not the list object.
+            framed = raw_content if isinstance(raw_content, str) else raw_text
+            if isinstance(framed, str) and framed:
+                msg['api_content'] = framed
+    return True
+
+
+def _adopt_state_db_steer_split(local_messages, state_messages):
+    """#7600: sidecars saved before the state.db split keep the framed steer. Rewrite such a
+    row to the projected split only when exactly one typed state.db steer row proves it."""
+    proofs = {}
+    for row in state_messages or []:
+        if not (isinstance(row, dict) and row.get('role') == 'user' and row.get('display_kind') == 'steer'):
+            continue
+        raw = row.get('api_content')
+        if isinstance(raw, str) and raw:
+            ts = _compression_anchor_timestamp_as_float(row.get('timestamp'))
+            proofs.setdefault((raw, ts), []).append(row)
+    if not proofs:
+        return local_messages
+    out = list(local_messages or [])
+    for i, msg in enumerate(out):
+        if not isinstance(msg, dict) or msg.get('role') != 'user' or msg.get('api_content'):
+            continue
+        text = _state_db_steer_stored_text(msg)
+        ts = _compression_anchor_timestamp_as_float(msg.get('timestamp') or msg.get('_ts'))
+        hits = proofs.get((text, ts)) if text else None
+        if hits and len(hits) == 1:
+            out[i] = {**msg, 'content': copy.deepcopy(hits[0]['content']),
+                      'api_content': text, 'display_kind': 'steer'}
+    return out
+
+
 def _project_state_db_message(row, available, id_col, optional, *, include_row_identity=False):
     """Authoritative state.db row → WebUI message projection (#6826 r4).
 
@@ -12153,6 +12257,18 @@ def _project_state_db_message(row, available, id_col, optional, *, include_row_i
         if col in {'tool_calls', 'reasoning_details', 'codex_reasoning_items', 'codex_message_items'}:
             value = _json_loads_if_string(value)
         msg[col] = value
+    # #7600: keep the Agent's display type on the projection and unwrap a
+    # typed steer row here, so a state.db-owned transcript renders exactly like
+    # the settle-scrubbed sidecar one instead of re-surfacing the transport
+    # frame.  Untyped rows are never touched (byte-for-byte preservation).
+    display_kind = (
+        row['display_kind']
+        if ('display_kind' in available and 'display_kind' in row.keys())
+        else None
+    )
+    if display_kind not in (None, ''):
+        msg['display_kind'] = display_kind
+    _unwrap_state_db_steer_row(msg, display_kind)
     native_image_projection = (
         msg.get('role') == 'user'
         and isinstance(msg.get('content'), str)
@@ -12303,6 +12419,9 @@ def get_state_db_session_messages(
                 + ['role', 'content', 'timestamp']
                 + revision_cols
                 + [c for c in optional if c in available]
+                # #7600: the steer type rides the projection so a typed steer
+                # row can be unwrapped (and later re-identified) on read-back.
+                + (['display_kind'] if 'display_kind' in available else [])
             )
 
             session_chain = [str(sid)]
@@ -12567,34 +12686,48 @@ def get_state_db_session_message_keys_before_timestamp(
             if not {'id', 'session_id', 'role', 'content', 'timestamp', 'tool_calls'}.issubset(available):
                 return None
             api_content_select = ", api_content" if "api_content" in available else ""
+            display_kind_select = ", display_kind" if "display_kind" in available else ""
             cur.execute(
                 f"""
                 SELECT
                     COALESCE(role, '') AS role,
                     COALESCE(content, '') AS content,
-                    tool_calls{api_content_select}
+                    tool_calls{api_content_select}{display_kind_select}
                 FROM messages
                 WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ?
                 ORDER BY timestamp ASC, id ASC
                 """,
                 (str(sid), before_ts),
             )
-            return [
-                _session_message_visible_key(
-                    {
-                        "role": row["role"],
-                        # Same guarded decode as the projected tail: prefix and
-                        # tail keys must share one representation or the
-                        # prefix/tail collision proof can miss a genuine
-                        # repeated recovered turn.
-                        "content": _decode_state_db_content(row["content"]),
-                        "tool_calls": _json_loads_if_string(row["tool_calls"]),
-                        "api_content": row["api_content"] if "api_content" in available else None,
-                    },
-                    normalize_workspace_prefix=True,
+            prefix_keys = []
+            for row in cur.fetchall():
+                # #7600: the same steer projection the canonical reader applies
+                # (``_unwrap_state_db_steer_row``), so the prefix identity is
+                # taken from the unwrapped ``content`` plus the raw frame's
+                # ``api_content`` sidecar, exactly like the projected tail.
+                # Without this, a settled steer below the floor keys on its
+                # transport frame and every optimized read falls back.
+                key_msg = {
+                    "role": row["role"],
+                    # Same guarded decode as the projected tail: prefix and
+                    # tail keys must share one representation or the
+                    # prefix/tail collision proof can miss a genuine
+                    # repeated recovered turn.
+                    "content": _decode_state_db_content(row["content"]),
+                    "tool_calls": _json_loads_if_string(row["tool_calls"]),
+                    "api_content": row["api_content"] if "api_content" in available else None,
+                }
+                _unwrap_state_db_steer_row(
+                    key_msg,
+                    row["display_kind"] if "display_kind" in available else None,
                 )
-                for row in cur.fetchall()
-            ]
+                prefix_keys.append(
+                    _session_message_visible_key(
+                        key_msg,
+                        normalize_workspace_prefix=True,
+                    )
+                )
+            return prefix_keys
     except Exception:
         return None
 
@@ -12682,6 +12815,11 @@ def get_state_db_regeneration_tail_snapshot(
                 prefix_key_cols += ", tool_calls"
             if 'api_content' in available:
                 prefix_key_cols += ", api_content"
+            # #7600: the visible key must be taken from the same projection the
+            # display uses, or a typed steer row below the floor keys on its
+            # transport frame and the bounded path refuses the session forever.
+            if 'display_kind' in available:
+                prefix_key_cols += ", display_kind"
             prefix_key_sql = (
                 f"SELECT {prefix_key_cols} FROM messages "
                 "WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ? "
@@ -12692,15 +12830,20 @@ def get_state_db_regeneration_tail_snapshot(
             except Exception:
                 cur.execute("ROLLBACK")
                 return None
-            prefix_keys = [
-                _session_message_visible_key({
+            prefix_keys = []
+            for r in cur.fetchall():
+                key_msg = {
                     "role": r["role"],
                     "content": _decode_state_db_content(r["content"]),
                     "tool_calls": _json_loads_if_string(r["tool_calls"]) if "tool_calls" in r.keys() and r["tool_calls"] is not None else None,
                     "api_content": r["api_content"] if "api_content" in r.keys() else None,
-                }, normalize_workspace_prefix=True)
-                for r in cur.fetchall()
-            ]
+                }
+                _unwrap_state_db_steer_row(
+                    key_msg, r["display_kind"] if "display_kind" in r.keys() else None
+                )
+                prefix_keys.append(
+                    _session_message_visible_key(key_msg, normalize_workspace_prefix=True)
+                )
             # 3) bounded tail (rows >= floor) with the canonical projection
             optional = [
                 'tool_call_id', 'tool_calls', 'tool_name', 'reasoning',
@@ -12711,6 +12854,8 @@ def get_state_db_regeneration_tail_snapshot(
             for col in optional + (['active'] if 'active' in available else []):
                 if col in available and col not in tail_select:
                     tail_select.append(col)
+            if 'display_kind' in available and 'display_kind' not in tail_select:
+                tail_select.append('display_kind')
             tail_sql = (
                 f"SELECT {', '.join(tail_select)} FROM messages "
                 f"WHERE session_id = ? AND (timestamp IS NULL OR timestamp >= ?) {active_clause} "
@@ -15098,7 +15243,10 @@ def _state_db_anchor_index(state_messages: list, anchor_key) -> int | None:
         # apply text comparison only when the anchor actually captured text.
         message_text = _normalized_compression_anchor_text(_message_content_text(message))
         if anchor_text and message_text != anchor_text:
-            continue
+            # #7600: anchors saved before the state.db steer split hold the framed text.
+            raw = message.get("api_content") if isinstance(message, dict) and message.get("display_kind") == "steer" else None
+            if not (isinstance(raw, str) and _normalized_compression_anchor_text(raw) == anchor_text):
+                continue
 
         message_ts = _compression_anchor_timestamp_as_float(
             message.get("timestamp") if isinstance(message, dict) else None
@@ -16381,9 +16529,12 @@ def reconciled_state_db_messages_for_session(
                         )
                     state_messages = list(state_messages or [])[anchor_index + 1 :]
                     cancelled_journal_prefix_start_verified = True
+        local_messages = _adopt_state_db_steer_split(local_messages, state_messages)
         if not (_sidecar_has_terminal_partial_error(getattr(session, 'messages', None) or [])
                 or _cancelled_journal_turn_owner(getattr(session, 'messages', None) or [], include_live_partial=True)):
             state_messages = state_db_delta_after_context(local_messages, state_messages)
+    if not prefer_context:
+        local_messages = _adopt_state_db_steer_split(local_messages, state_messages)
     reconciled_messages = merge_session_messages_append_only(
         local_messages,
         state_messages,
