@@ -2225,7 +2225,28 @@ def _purge_agent_pycache(repo_dir: Path) -> None:
         pass
 
 
-def _schedule_restart(delay: float = 2.0) -> None:
+def _agent_update_refusal_state(exc=None) -> str | None:
+    """Return the unsafe Agent-update state a guard must refuse, else ``None``.
+
+    ``exc`` is the exception raised by an ``ensure_agent_runtime_current``
+    check; its ``agent_update_state`` diagnostic is the freshest read, and the
+    transaction is resampled when the exception carries none. A state of
+    ``active`` / ``stale_live`` / ``incomplete`` / ``unknown`` means an update
+    is in flight or unverifiable, so the caller must fail closed instead of
+    restarting.
+    """
+    from api.agent_runtime import (
+        _AGENT_UPDATE_UNSAFE_STATES,
+        _agent_update_transaction_state,
+    )
+
+    state = getattr(exc, 'agent_update_state', None)
+    if state is None:
+        state = _agent_update_transaction_state()
+    return state if state in _AGENT_UPDATE_UNSAFE_STATES else None
+
+
+def _schedule_restart(delay: float = 2.0, *, transaction_guard: bool = False) -> None:
     """Re-exec this process after *delay* seconds.
 
     Called after a successful update so that the freshly-pulled code is
@@ -2244,6 +2265,16 @@ def _schedule_restart(delay: float = 2.0) -> None:
     stream and leaving the second repo in an unknown partial state.
     Blocking on ``_apply_lock`` before ``os.execv`` means a pending
     second update always completes before the restart happens.
+
+    ``transaction_guard`` re-checks the Agent update transaction immediately
+    before the replacement, for callers that restart to *recover* from a
+    stale runtime rather than because an update just succeeded. Such a
+    route's admission checks ran before this delay, and an Agent updater
+    runs in its own process (``_apply_lock`` is process-local, not atomic
+    exclusion of an external update), so an update can begin while the
+    restart is pending; replacing the process image then would boot a
+    mid-update checkout. Successful-update callers keep the unguarded
+    semantics: their own update holds the transaction.
     """
     import os
     import sys
@@ -2277,10 +2308,43 @@ def _schedule_restart(delay: float = 2.0) -> None:
         # released atomically by the kernel.
         with _apply_lock:
             _wait_until_restart_safe()
+            if transaction_guard:
+                # Last-moment barrier for the recovery route: an Agent
+                # update that started after admission aborts the pending
+                # replacement, and a runtime that became current again has
+                # nothing left to recover. Other callers (successful
+                # updates) keep their restart semantics untouched.
+                from api.agent_runtime import (
+                    AgentRuntimeChangedError,
+                    ensure_agent_runtime_current,
+                )
+
+                try:
+                    ensure_agent_runtime_current()
+                except AgentRuntimeChangedError as exc:
+                    unsafe_state = _agent_update_refusal_state(exc)
+                    if unsafe_state is not None:
+                        logger.warning(
+                            'Recovery restart aborted: an Agent update is '
+                            'in flight (agent_update_state: %s).',
+                            unsafe_state,
+                        )
+                        return
+                else:
+                    logger.info(
+                        'Recovery restart skipped: the Agent runtime is '
+                        'current again; nothing to recover.'
+                    )
+                    return
             # #7293: whatever is still running here (a forced update, or a
             # safety wait that timed out) is settled durably as interrupted
             # BEFORE the image is replaced, instead of being dropped by execv.
             # A no-op when nothing is active. Gateway runs are never touched.
+            #
+            # This runs AFTER the transaction guard above: the guard can
+            # return without replacing the process, and settling runs as
+            # interrupted when no replacement happens would mark live work
+            # as lost.
             settled = run_drain.settle_webui_owned_runs(run_drain.RESTART_SETTLE_REASON)
             if settled.get('settled') or settled.get('pending'):
                 logger.warning(
@@ -2605,6 +2669,109 @@ def apply_update(target, channel=None, *, force_active_runs: bool = False):
     return _run_fenced_update(
         target, force_active_runs, lambda: _apply_update_inner(target, channel)
     )
+
+
+def restart_stale_runtime() -> dict:
+    """Operator-initiated recovery for the stale-Agent-runtime 409 (#7934).
+
+    After ``hermes update`` replaces the Agent checkout,
+    ``ensure_agent_runtime_current()`` answers every local Agent action with
+    ``409 agent_runtime_stale``. The documented recovery is a manual restart
+    from a shell, which is unreachable for native-client users (e.g. Hermex)
+    without SSH. This route performs that same manual step on request — and
+    nothing more:
+
+    * a current runtime is refused, so this is never a general restart button;
+    * an Agent update that is active, long-lived (a live owner past the
+      v1 ceiling or a surviving delegate), incomplete, or unreadable is
+      refused (an unverifiable marker fails closed with the in-flight
+      update); a crashed update's leftover (dead owner, no delegate)
+      stays recoverable so it cannot block the operator forever — but
+      only while the loaded checkout is provably free: an updater's
+      child that still holds the checkout kernel lock keeps the update
+      in flight even after its marker owner died (``held``), and an
+      unverifiable checkout refuses too;
+    * active chat work returns the shared restart-blocked response, exactly
+      like ``/api/updates/apply``;
+    * the stale check is repeated under ``_apply_lock`` so a runtime that
+      became current between admission and scheduling is never restarted;
+    * an Agent update that begins after admission is refused under the
+      lock and again by the delayed worker — ``_apply_lock`` is
+      process-local while an Agent updater runs in its own process, so the
+      lock alone is not atomic exclusion of an external update.
+    """
+    from api.agent_runtime import (
+        _AGENT_UPDATE_UNSAFE_STATES,
+        AgentRuntimeChangedError,
+        _agent_update_transaction_state,
+        agent_runtime_stale_payload,
+        ensure_agent_runtime_current,
+    )
+
+    try:
+        ensure_agent_runtime_current()
+    except AgentRuntimeChangedError as exc:
+        stale_payload = agent_runtime_stale_payload(exc)
+    else:
+        return {
+            'ok': False,
+            'type': 'agent_runtime_current',
+            'message': (
+                'The Agent runtime is current; no restart is needed. '
+                'This route only recovers a stale runtime.'
+            ),
+        }
+
+    update_state = _agent_update_transaction_state()
+    if update_state in _AGENT_UPDATE_UNSAFE_STATES:
+        refused = dict(stale_payload)
+        refused['message'] = (
+            'An Agent update is still running or did not finish '
+            f'(agent_update_state: {update_state}). '
+            'Wait for it to complete, then retry the restart.'
+        )
+        return refused
+
+    blocker_snapshot = _restart_blocker_snapshot()
+    if blocker_snapshot.get('restart_blocked'):
+        return _restart_blocked_response('WebUI', blocker_snapshot)
+
+    if not _apply_lock.acquire(blocking=False):
+        return {'ok': False, 'message': 'Update already in progress'}
+    try:
+        # Re-check under the lock: the runtime may have become current, or an
+        # update may have started, between the admission check above and here.
+        try:
+            ensure_agent_runtime_current()
+        except AgentRuntimeChangedError as exc:
+            # The admission check sampled the transaction before the lock,
+            # and a separate Agent updater does not take this process-local
+            # _apply_lock — so an update may have begun since. Fail closed
+            # with the freshest diagnostic instead of discarding the
+            # exception and restarting mid-change.
+            unsafe_state = _agent_update_refusal_state(exc)
+            if unsafe_state is not None:
+                refused = dict(stale_payload)
+                refused['agent_update_state'] = unsafe_state
+                refused['message'] = (
+                    'An Agent update is still running or did not finish '
+                    f'(agent_update_state: {unsafe_state}). '
+                    'Wait for it to complete, then retry the restart.'
+                )
+                return refused
+        else:
+            return {
+                'ok': False,
+                'type': 'agent_runtime_current',
+                'message': (
+                    'The Agent runtime became current while scheduling; '
+                    'no restart was performed.'
+                ),
+            }
+        _schedule_restart(transaction_guard=True)
+        return {'ok': True, 'restart_scheduled': True}
+    finally:
+        _apply_lock.release()
 
 
 def _restore_stash_after_pull_failure(

@@ -85,7 +85,7 @@ def changed_agent_checkout(monkeypatch, tmp_path):
         ("interrupted-exit", "unverified"),
         ("active", "active"),
         ("dead", "stale"),
-        ("over-age", "stale"),
+        ("over-age", "stale_live"),
         ("malformed", "unknown"),
         ("invalid-encoding", "unknown"),
         ("future", "unknown"),
@@ -364,21 +364,52 @@ def test_read_live_agent_update_does_not_follow_symlink_marker(tmp_path: Path):
 
 def test_read_live_agent_update_still_classifies_valid_markers(tmp_path: Path):
     """The hardening must not regress the happy path: a small regular marker
-    with a live PID still reads as ``active`` and a stale one as ``stale``."""
+    with a live PID still reads as ``active``, an over-age live owner as
+    ``stale_live`` (still in flight) and a dead owner as ``stale``."""
     from api import agent_runtime
 
     active = tmp_path / "active-marker"
     active.write_text(f"{os.getpid()}\n{time.time()}\n", encoding="utf-8")
     assert agent_runtime._read_live_agent_update(active) == "active"
 
-    stale = tmp_path / "stale-marker"
-    stale.write_text(
+    over_age_live = tmp_path / "over-age-live-marker"
+    over_age_live.write_text(
         f"{os.getpid()}\n{time.time() - agent_runtime._AGENT_UPDATE_MAX_AGE_SECONDS - 60}\n",
         encoding="utf-8",
     )
+    assert agent_runtime._read_live_agent_update(over_age_live) == "stale_live"
+
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait(timeout=10)
+    stale = tmp_path / "stale-marker"
+    stale.write_text(f"{dead.pid}\n{time.time()}\n", encoding="utf-8")
     assert agent_runtime._read_live_agent_update(stale) == "stale"
 
     assert agent_runtime._read_live_agent_update(tmp_path / "absent") == "absent"
+
+
+def test_read_live_agent_update_delegate_keeps_update_in_flight(tmp_path: Path):
+    """A dead owner with a live ``delegate:`` line is still an update in
+    flight (marker v2 surviving delegates); a dead owner with no delegate —
+    or a dead delegate — is a leftover that reads ``stale``."""
+    from api import agent_runtime
+
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait(timeout=10)
+
+    live_delegate = tmp_path / "live-delegate-marker"
+    live_delegate.write_text(
+        f"{dead.pid}\n{time.time()}\ndelegate:{os.getpid()} ct:{time.time():.3f}\n",
+        encoding="utf-8",
+    )
+    assert agent_runtime._read_live_agent_update(live_delegate) == "active"
+
+    dead_delegate = tmp_path / "dead-delegate-marker"
+    dead_delegate.write_text(
+        f"{dead.pid}\n{time.time()}\ndelegate:{dead.pid} ct:{time.time():.3f}\n",
+        encoding="utf-8",
+    )
+    assert agent_runtime._read_live_agent_update(dead_delegate) == "stale"
 
 
 def test_read_live_agent_update_windows_fallback_never_opens_marker(
@@ -555,8 +586,9 @@ def test_live_agent_update_marker_reports_active(monkeypatch, tmp_path):
     assert agent_runtime._agent_update_transaction_state() == "active"
 
 
-def test_dead_or_over_age_agent_update_marker_is_stale(monkeypatch, tmp_path):
-    """A dead or over-age owner does not prove update completion."""
+def test_dead_or_over_age_agent_update_marker_liveness_split(monkeypatch, tmp_path):
+    """A dead owner is a leftover (``stale``, restart may proceed); a live
+    owner past the v1 ceiling is still in flight (``stale_live``, refuse)."""
     from api import agent_runtime
 
     hermes_home = tmp_path / "hermes-home"
@@ -577,7 +609,52 @@ def test_dead_or_over_age_agent_update_marker_is_stale(monkeypatch, tmp_path):
         encoding="utf-8",
     )
     monkeypatch.setattr(agent_runtime, "_pid_is_alive", lambda _pid: True)
-    assert agent_runtime._agent_update_transaction_state() == "stale"
+    assert agent_runtime._agent_update_transaction_state() == "stale_live"
+
+
+def test_marker_at_profile_tree_root_is_read_under_profile_launch(
+    monkeypatch, tmp_path,
+):
+    """A profile launch re-homes ``HERMES_HOME`` to ``<root>/profiles/<p>``
+    while the Agent writes the marker at the profile-tree root; the
+    transaction state must fold the root marker in (unknown > active >
+    stale_live > stale > absent), and a marker only at the profile home
+    still counts as the legacy second candidate."""
+    from api import agent_runtime
+
+    root = tmp_path / "hermes-home"
+    profile_home = root / "profiles" / "webui"
+    profile_home.mkdir(parents=True)
+    agent_root = tmp_path / "hermes-agent"
+    agent_root.mkdir()
+    monkeypatch.setattr(agent_runtime, "_HERMES_HOME", profile_home)
+    monkeypatch.setattr(agent_runtime, "_AGENT_SOURCE_DIR", agent_root)
+    monkeypatch.setattr(agent_runtime, "_AGENT_PYTHON", None)
+
+    # Root marker wins over an absent profile-home marker.
+    (root / ".hermes-update-in-progress").write_text(
+        f"{os.getpid()}\n{time.time()}\n", encoding="utf-8"
+    )
+    assert agent_runtime._agent_update_transaction_state() == "active"
+
+    # Precedence: a live root marker outranks a dead profile-home marker.
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait(timeout=10)
+    (profile_home / ".hermes-update-in-progress").write_text(
+        f"{dead.pid}\n{time.time()}\n", encoding="utf-8"
+    )
+    assert agent_runtime._agent_update_transaction_state() == "active"
+
+    # Legacy fallback: only the profile home carries a marker.
+    (root / ".hermes-update-in-progress").unlink()
+    (profile_home / ".hermes-update-in-progress").write_text(
+        f"{os.getpid()}\n{time.time()}\n", encoding="utf-8"
+    )
+    assert agent_runtime._agent_update_transaction_state() == "active"
+
+    # Nothing anywhere: unverified, as before.
+    (profile_home / ".hermes-update-in-progress").unlink()
+    assert agent_runtime._agent_update_transaction_state() == "unverified"
 
 
 @pytest.mark.parametrize(
@@ -719,6 +796,7 @@ def test_runner_flag_does_not_bypass_webui_owned_hidden_turns(monkeypatch):
         "type": "agent_runtime_stale",
         "retryable": True,
         "restart_scheduled": False,
+        "restart_available": True,
     }
 
 
@@ -753,6 +831,7 @@ def test_chat_start_rejects_stale_runtime_before_session_materialization(monkeyp
             "type": "agent_runtime_stale",
             "retryable": True,
             "restart_scheduled": False,
+            "restart_available": True,
         },
     }
 
@@ -952,6 +1031,7 @@ def test_git_commit_message_stale_runtime_returns_typed_409(
             "type": "agent_runtime_stale",
             "retryable": True,
             "restart_scheduled": False,
+            "restart_available": True,
         },
     }
 
@@ -1058,6 +1138,7 @@ def test_server_side_turn_rejects_stale_runtime_before_session_acceptance(monkey
             "type": "agent_runtime_stale",
             "retryable": True,
             "restart_scheduled": False,
+            "restart_available": True,
         },
     )
     monkeypatch.setattr(
@@ -1075,5 +1156,6 @@ def test_server_side_turn_rejects_stale_runtime_before_session_acceptance(monkey
         "type": "agent_runtime_stale",
         "retryable": True,
         "restart_scheduled": False,
-        "_status": 409,
+
+        "restart_available": True,        "_status": 409,
     }
