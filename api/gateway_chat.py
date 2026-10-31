@@ -2899,6 +2899,57 @@ def _cleanup_gateway_pending_mirror(session_id: str) -> None:
         logger.debug("Failed to reconcile gateway pending mirror during teardown", exc_info=True)
 
 
+def settle_gateway_stream_approvals(session_id: str, stream_id: str, *, reason: str) -> None:
+    """Fail-close every approval card of the Gateway run ``stream_id`` maps to.
+
+    Shared by the stream worker's teardown and ``cancel_stream`` (user Stop and
+    the #7293 server settle). Stop must retire the run's cards itself: the
+    worker can stay blocked on the Gateway socket long after the turn was saved
+    as interrupted, and until its teardown a click on the card was still relayed
+    and resumed a run WebUI had already recorded as stopped.
+
+    Deliberately lock-free beyond the approval registry's own ``_lock``: Stop and
+    the server settle must never wait on an approval relay (whose POST is bounded
+    only by the runner client's timeout). Once this returns, a click finds the
+    card gone and gets 409 without reaching the Gateway. A relay that had
+    already validated its card before this ran still sends its one POST; that is
+    a click that effectively happened just before Stop.
+    """
+    from api.route_approvals import settle_gateway_pending_run
+
+    run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip() if stream_id else ""
+    if not session_id or not run_id:
+        return
+    settle_gateway_pending_run(session_id, run_id, reason=reason)
+
+
+def _submit_stream_approval_mirror(session_id: str, approval_data: dict, cancel_event) -> tuple[dict | None, int]:
+    """Publish a default-stream approval card unless its stream is being stopped.
+
+    Stop sets the cancel flag and then retires the run's cards under the approval
+    registry lock. The insertion re-checks the flag under that same lock
+    (``submit_gateway_pending_mirror(..., cancel_event=...)``), so either the
+    card is inserted before Stop's retirement (which then removes it) or the
+    insertion sees the flag and publishes nothing. No card can appear after
+    Stop has returned, not even before the recheck below. The recheck after
+    publishing stays as a second line of defence. (A click that validated the
+    card in the instant before it was retired still relays once; that is a
+    click that happened before Stop, not after it.)
+    """
+    from api.route_approvals import settle_gateway_pending_run, submit_gateway_pending_mirror
+
+    if cancel_event.is_set():
+        return None, 0
+    head, total = submit_gateway_pending_mirror(session_id, approval_data, cancel_event=cancel_event)
+    run_id = str(approval_data.get("run_id") or "").strip()
+    if run_id and cancel_event.is_set():
+        settle_gateway_pending_run(
+            session_id, run_id, reason="Gateway run was cancelled before approval resolution",
+        )
+        return None, 0
+    return head, total
+
+
 def _run_gateway_chat_streaming(
     session_id,
     msg_text,
@@ -3260,8 +3311,7 @@ def _run_gateway_chat_streaming(
                             if _approval_run_id:
                                 _STREAM_RUN_IDS[stream_id] = _approval_run_id
                             try:
-                                from api.route_approvals import submit_gateway_pending_mirror
-                                head, total = submit_gateway_pending_mirror(session_id, approval_data)
+                                head, total = _submit_stream_approval_mirror(session_id, approval_data, cancel_event)
                                 approval_data = {**(head or approval_data), "pending_count": total}
                             except Exception:
                                 logger.debug("submit_gateway_pending_mirror failed", exc_info=True)
@@ -3604,17 +3654,14 @@ def _run_gateway_chat_streaming(
             "hint": "Check HERMES_WEBUI_GATEWAY_BASE_URL and Gateway API server health.",
         })
     finally:
-        mapped_run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip()
-        if mapped_run_id:
-            try:
-                from api.route_approvals import settle_gateway_pending_run
-                settle_gateway_pending_run(
-                    session_id,
-                    mapped_run_id,
-                    reason="Gateway run ended during teardown before approval resolution",
-                )
-            except Exception:
-                logger.debug("Failed to settle gateway pending approvals during teardown", exc_info=True)
+        try:
+            settle_gateway_stream_approvals(
+                session_id,
+                stream_id,
+                reason="Gateway run ended during teardown before approval resolution",
+            )
+        except Exception:
+            logger.debug("Failed to settle gateway pending approvals during teardown", exc_info=True)
         if s is not None:
             try:
                 with _get_session_agent_lock(session_id):
