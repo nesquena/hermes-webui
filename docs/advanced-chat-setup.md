@@ -340,6 +340,14 @@ browser UI.
 
 A turn uses the gateway URL and key of the **session's own profile**, not those of whichever profile the WebUI process loaded.
 
+For the process owner's own sessions on the shared endpoint, an explicit
+`HERMES_WEBUI_GATEWAY_API_KEY` in the owner's `.env` takes precedence over the
+launcher's canonical key, including after rotation. The launcher's explicit
+canonical key still outranks an owner-only `API_SERVER_KEY` alias. If no
+canonical key was exported by the launcher, the owner's freshly read alias
+outranks a cached canonical value derived from an older alias. Live sends and
+restart recovery preserve this distinction.
+
 - **A profile that sets nothing of its own** (no `HERMES_WEBUI_GATEWAY_BASE_URL`, `HERMES_WEBUI_GATEWAY_API_KEY` or `API_SERVER_KEY` in its own `.env`, no `webui_gateway_base_url` in its `config.yaml`) uses the shared endpoint the WebUI process was given, URL and key together. That includes values exported by the launcher and values the default profile's `~/.hermes/.env` put into the process environment. This is what a single-profile setup sends, so named profiles on a shared Gateway keep working unchanged.
 - **A profile can override the URL and the key independently.** The half it does not set comes from the shared pair above. A profile's own URL is `HERMES_WEBUI_GATEWAY_BASE_URL` in its `.env`, or `webui_gateway_base_url` in its `config.yaml` (an exported `HERMES_WEBUI_GATEWAY_BASE_URL` takes precedence over `config.yaml`); a profile with no URL of its own keeps the shared URL. A profile's own key is `HERMES_WEBUI_GATEWAY_API_KEY` or `API_SERVER_KEY` in its `.env`.
 - **The shared key is only ever sent to the shared Gateway.** On a URL that is not the shared one, a profile sends its own key or none, never the launcher's or the shared key. On the shared URL a profile sends its own `HERMES_WEBUI_GATEWAY_API_KEY` if it set one, otherwise the shared key (the `HERMES_WEBUI_GATEWAY_API_KEY` or `API_SERVER_KEY` the WebUI process was given, exactly what a single-profile setup sends). A profile's `API_SERVER_KEY` is the key of its **own** Gateway route: the Agent's API server picks the profile from the URL (its default listener, or `/p/<profile>` under `gateway.multiplex_profiles`) and accepts only that profile's key, so on the shared URL it is used only when the WebUI was given no shared key at all. To send a profile's turns to its own route, set its `HERMES_WEBUI_GATEWAY_BASE_URL` (for a multiplexing Gateway, `http://<gateway>/p/<profile>`). A global `HERMES_WEBUI_GATEWAY_API_KEY` combined with per-profile `HERMES_WEBUI_GATEWAY_API_KEY` values still works: each profile with its own alias sends that alias.

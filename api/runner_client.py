@@ -86,7 +86,12 @@ class HttpRunnerClient:
         return cls(base_url=base_url, api_key=str(source.get(_RUNNER_API_KEY_ENV) or ""))
 
     def start_run(self, request) -> dict[str, Any]:
-        return self._post("/v1/runs", {
+        # ``/v1/runs`` is an Agent-facing boundary. Current Hermes Agent reads
+        # reasoning only from model_options; retain the top-level scalar for
+        # compatibility with older supervised runners.
+        from api.gateway_chat import _gateway_run_model_options
+
+        payload = {
             "session_id": request.session_id,
             "message": request.message,
             "attachments": list(request.attachments or []),
@@ -94,10 +99,46 @@ class HttpRunnerClient:
             "profile": request.profile,
             "provider": request.provider,
             "model": request.model,
+            "reasoning_effort": request.reasoning_effort,
             "toolsets": list(request.toolsets or []),
             "source": request.source,
             "metadata": dict(request.metadata or {}),
-        })
+        }
+        receiver_efforts = None
+        if str(request.reasoning_effort or "").strip().lower() in ("max", "ultra"):
+            receiver_efforts = self._receiver_reasoning_efforts()
+        model_options = _gateway_run_model_options(
+            request.reasoning_effort,
+            base_url=self.base_url,
+            api_key=self.api_key,
+            receiver_supported_efforts=receiver_efforts,
+        )
+        if model_options:
+            payload["model_options"] = model_options
+        return self._post("/v1/runs", payload)
+
+    def _receiver_reasoning_efforts(self) -> list[str] | None:
+        """Probe the runner ladder through the same no-redirect transport."""
+        try:
+            payload = self._get("/v1/capabilities")
+        except RunnerClientError:
+            return None
+        features = payload.get("features") if isinstance(payload, dict) else None
+        if not isinstance(features, dict):
+            return None
+        raw = features.get("reasoning_efforts")
+        if not isinstance(raw, (list, tuple)):
+            if features.get("reasoning_streaming"):
+                return [
+                    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+                ]
+            return None
+        efforts = [
+            str(level).strip().lower()
+            for level in raw
+            if isinstance(level, str) and str(level).strip()
+        ]
+        return efforts or None
 
     def observe_run(self, run_id: str, *, cursor: str | None = None) -> dict[str, Any]:
         query = ""

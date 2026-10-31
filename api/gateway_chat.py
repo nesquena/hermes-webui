@@ -269,6 +269,363 @@ _WEBUI_CHAT_BACKEND_ENV = "HERMES_WEBUI_CHAT_BACKEND"
 _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
 _WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
 _WEBUI_GATEWAY_USE_RUNS_API_ENV = "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
+# Built-in Gateway URL the request path falls back to when neither the
+# environment nor the config sets one (``_gateway_base_url``). The
+# shared-vs-dedicated endpoint comparison uses the same default, so an unset
+# deployment URL still identifies the default receiver.
+_GATEWAY_DEFAULT_BASE_URL = "http://127.0.0.1:8642"
+_GATEWAY_DEPLOYMENT_ENV_KEYS = (
+    _WEBUI_GATEWAY_BASE_URL_ENV,
+    _WEBUI_GATEWAY_API_KEY_ENV,
+    _WEBUI_GATEWAY_USE_RUNS_API_ENV,
+    "API_SERVER_KEY",
+)
+# Preserve launcher-owned Gateway settings before profile scopes begin. Named
+# profiles are sparse overlays: omitting one of these values must not silently
+# replace an operator-configured Gateway with localhost/legacy mode. Keeping a
+# dedicated snapshot also avoids reading a different profile's temporary
+# process-env mirror from a concurrent detached worker.
+def _capture_gateway_deployment_env() -> dict[str, str]:
+    """Capture the launcher-owned Gateway settings from the process env."""
+    return {
+        key: value
+        for key in _GATEWAY_DEPLOYMENT_ENV_KEYS
+        if (value := os.environ.get(key)) is not None
+    }
+
+
+_GATEWAY_DEPLOYMENT_ENV = _capture_gateway_deployment_env()
+
+
+def refresh_gateway_deployment_env(environ: dict[str, str] | None = None) -> None:
+    """Re-capture the deployment snapshot after a permanent dotenv reload.
+
+    ``api.profiles._reload_dotenv()`` permanently re-applies the process
+    profile's dotenv to ``os.environ`` (startup, process-wide profile switch,
+    onboarding apply). Without this refresh the import-time snapshot goes
+    stale: the default profile reads the new endpoint/key/runs flag live,
+    while every sparse named profile keeps serving the pre-reload values.
+
+    The replacement is a single rebind, so a concurrent reader always sees
+    one complete snapshot — the old values or the new ones, never a
+    half-updated dict. Only the permanent reload path refreshes; temporary
+    worker-environment mirrors overlay the snapshot per request
+    (``_gateway_request_environ``) and never rewrite it.
+    """
+    global _GATEWAY_DEPLOYMENT_ENV
+    source = os.environ if environ is None else environ
+    _GATEWAY_DEPLOYMENT_ENV = {
+        key: value
+        for key in _GATEWAY_DEPLOYMENT_ENV_KEYS
+        if (value := source.get(key)) is not None
+    }
+
+
+def _gateway_endpoint_identity(raw_url: str) -> tuple[str, str, int | None, str]:
+    """Return the normalized network endpoint and path for a Gateway URL."""
+    value = str(raw_url or "").strip()
+    try:
+        parsed = urllib.parse.urlsplit(value)
+    except ValueError:
+        # An unparseable spelling (malformed IPv6 brackets) stays distinct
+        # without turning profile resolution into a new failure point; the
+        # eventual request path reports the bad URL.
+        return value.rstrip("/"), "", None, ""
+    scheme = parsed.scheme.lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        # Keep malformed ports distinct without turning profile resolution into
+        # a new failure point; the eventual request path reports the bad URL.
+        return scheme, (parsed.hostname or "").lower(), None, value.rstrip("/")
+    if port is None:
+        port = {"http": 80, "https": 443}.get(scheme)
+    return (
+        scheme,
+        (parsed.hostname or "").lower(),
+        port,
+        (parsed.path or "").rstrip("/"),
+    )
+
+
+def _gateway_deployment_owner_config() -> dict:
+    """Read the process owner's config for deployment-level Gateway values.
+
+    The deployment's receiver belongs to the process owner, not to whichever
+    named profile is serving this request: a config-set deployment URL lives in
+    the owner's file, and reading the session's either treated the deployment
+    as the localhost default (dropping the key on a receiver the owner shares)
+    or borrowed the named profile's own endpoint as if it were the shared
+    receiver (leaking the deployment key to a different receiver). The reader
+    resolves the owner's own config path and expands against the owner's
+    environment, never the requesting profile's scope.
+    """
+    owner_config = None
+    try:
+        from api.config import get_config_for_process_owner
+        from api.profiles import get_process_profile_home
+
+        owner_config = get_config_for_process_owner(get_process_profile_home())
+    except Exception:
+        owner_config = None
+    return owner_config if isinstance(owner_config, dict) else {}
+
+
+def _gateway_deployment_owner_base_url(
+    deployment: dict[str, str], owner_config: dict
+) -> str:
+    """Resolve the deployment owner's effective Gateway URL.
+
+    Resolve the owner's URL the way the owner's own requests resolve it
+    (``_gateway_base_url``): the launcher environment, then the process-owner
+    profile's ``config.yaml``, then the built-in default. The session's
+    named-profile config must never stand in for the owner's.
+    """
+    return _gateway_base_url(owner_config, environ=deployment)
+
+
+def _process_profile_is_root() -> bool:
+    """Whether the stable process owner is the root/default profile."""
+    from api import profiles as _profiles
+    from api.workspace import _safe_resolve
+
+    try:
+        return _safe_resolve(Path(_profiles.get_process_profile_home()).expanduser()) == _safe_resolve(
+            Path(_profiles.get_hermes_home_for_profile("")).expanduser()
+        )
+    except Exception:
+        return False
+
+
+def _same_profile_home(a, b) -> bool:
+    from api.workspace import _safe_resolve
+
+    return _safe_resolve(Path(a).expanduser()) == _safe_resolve(Path(b).expanduser())
+
+
+def _env_value_is_profile_sourced(profiles_mod, key, value) -> bool:
+    """Whether a deployment-snapshot value came from a profile dotenv (#8432)."""
+    value = str(value or "").strip()
+    if not value:
+        return False
+    if key in (getattr(profiles_mod, "_loaded_profile_env_keys", ()) or ()):
+        return True
+    launch_env = getattr(profiles_mod, "_INITIAL_HERMES_HOME_DOTENV", None) or {}
+    if str(launch_env.get(key) or "").strip() != value:
+        return False
+    launch_home = str(getattr(profiles_mod, "_INITIAL_HERMES_HOME", "") or "").strip()
+    try:
+        return not _same_profile_home(launch_home, profiles_mod.get_hermes_home_for_profile(""))
+    except Exception:
+        return True
+
+
+def _config_url_may_belong_to_a_profile(
+    profiles_mod,
+    process_home,
+    *,
+    owner_environ=None,
+) -> bool:
+    """Fail closed unless the owner URL is from an operator config outside every profile."""
+    import re as _re
+
+    from api.config import _load_yaml_config_file_raw
+    from api.workspace import _safe_resolve
+
+    owner_environ = (
+        profiles_mod.get_process_owner_environ()
+        if owner_environ is None
+        else owner_environ
+    )
+    override = str(owner_environ.get("HERMES_CONFIG_PATH") or "").strip()
+    if not override or _env_value_is_profile_sourced(profiles_mod, "HERMES_CONFIG_PATH", override):
+        return True
+    cfg_dir = _safe_resolve(Path(override).expanduser()).parent
+    try:
+        own_home = _safe_resolve(Path(process_home).expanduser())
+        if cfg_dir == own_home or own_home in cfg_dir.parents:
+            return True
+    except Exception:
+        return True
+    try:
+        roots = [_safe_resolve(Path(profiles_mod.get_hermes_home_for_profile("")).expanduser() / "profiles")]
+        canonical = getattr(profiles_mod, "_profiles_root", None)
+        if callable(canonical):
+            roots.append(_safe_resolve(Path(canonical())))
+    except Exception:
+        return True
+    if any(root in cfg_dir.parents for root in roots):
+        return True
+    raw = _load_yaml_config_file_raw(Path(override).expanduser(), _copy=False)
+    raw_url = str(raw.get("webui_gateway_base_url") or "") if isinstance(raw, dict) else ""
+    for ref in _re.findall(r"\$\{([^}]+)\}", raw_url):
+        name = ref.split(":-", 1)[0].strip()
+        value = owner_environ.get(name)
+        if value is not None and _env_value_is_profile_sourced(profiles_mod, name, value):
+            return True
+    return False
+
+
+def _shared_url_may_belong_to_process_profile(
+    session_home,
+    *,
+    deployment=None,
+    owner_config=None,
+    owner_environ=None,
+) -> bool:
+    """Whether the stable deployment URL may actually be the named owner's URL (#8432)."""
+    from api import profiles as _profiles
+
+    if _process_profile_is_root():
+        return False
+    try:
+        process_home = _profiles.get_process_profile_home()
+        if _same_profile_home(session_home, process_home):
+            return False
+    except Exception:
+        process_home = None
+    deployment = _GATEWAY_DEPLOYMENT_ENV if deployment is None else deployment
+    raw_env_url = str(deployment.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+    try:
+        if raw_env_url:
+            return _env_value_is_profile_sourced(_profiles, _WEBUI_GATEWAY_BASE_URL_ENV, raw_env_url)
+        owner_config = (
+            _gateway_deployment_owner_config()
+            if owner_config is None
+            else owner_config
+        )
+        if not str(owner_config.get("webui_gateway_base_url") or "").strip():
+            return False
+        if process_home is None:
+            return True
+        return _config_url_may_belong_to_a_profile(
+            _profiles,
+            process_home,
+            owner_environ=owner_environ,
+        )
+    except Exception:
+        return True
+
+
+def _gateway_request_environ(
+    profile_environ: dict[str, str] | None,
+    config_data=None,
+    *,
+    profile_home=None,
+):
+    """Return deployment Gateway settings overlaid by one named profile."""
+    from api import profiles as _profiles
+
+    if profile_environ is None:
+        return None
+    deployment = _GATEWAY_DEPLOYMENT_ENV
+    merged = dict(deployment)
+    merged.update(profile_environ)
+    # The canonical and legacy Gateway key names are one precedence group. A
+    # profile that explicitly selects its own Gateway URL owns that URL's
+    # credential group: its canonical/alias choice resolves before any
+    # deployment fallback. On the shared/inherited URL the launcher's explicit
+    # canonical key outranks a profile's alias (docs/advanced-chat-setup.md):
+    # exact-key overlay alone let a profile's API_SERVER_KEY — the Agent clones
+    # the root .env, whose alias is its own key, into every new profile —
+    # replace the launcher credential, and the shared receiver answered 401.
+    # Resolve the group in that order, then normalize both spellings so either
+    # downstream reader sees the same choice.
+    profile_canonical = str(profile_environ.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
+    launcher_canonical = str(deployment.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
+    profile_alias = str(profile_environ.get("API_SERVER_KEY") or "").strip()
+    shared_alias = str(deployment.get("API_SERVER_KEY") or "").strip()
+    # The deployment's receiver is resolved from the owner's own sources —
+    # never the session's named-profile config (see the owner helper). The
+    # endpoint this request will actually select — environment overlay, then
+    # the session's config, then the built-in default, the same resolution
+    # the request path runs (``_gateway_base_url``) — is compared against it
+    # before any key inheritance. A profile that spells the owner's receiver
+    # is shared and keeps the deployment credential; any other selected
+    # receiver never inherits it. Comparing the raw empty value made the
+    # default receiver look dedicated and the shared Gateway lost its key;
+    # comparing only the environment value sent a config-set remote
+    # deployment's key to a profile-selected localhost receiver; resolving
+    # the deployment from the session's config borrowed the named profile's
+    # endpoint as if it were the shared receiver.
+    owner_config = _gateway_deployment_owner_config()
+    effective_deployment_url = _gateway_deployment_owner_base_url(
+        deployment, owner_config
+    )
+    session_config = config_data if isinstance(config_data, dict) else {}
+    # Config-only deployment values. The owner's ``config.yaml`` is the
+    # deployment authority whenever the launcher environment and the profile
+    # both omit the setting. Insert it into the request environment before the
+    # comparison and the dispatch: a sparse named profile otherwise falls back
+    # to the built-in localhost default, drops the deployment credential and
+    # loses the runs API while the owner's own requests keep both. An explicit
+    # profile value — environment or the session's own YAML, including
+    # ``false`` — still wins.
+    if (
+        not str(merged.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+        and not str(session_config.get("webui_gateway_base_url") or "").strip()
+    ):
+        merged[_WEBUI_GATEWAY_BASE_URL_ENV] = effective_deployment_url
+    if (
+        "webui_gateway_use_runs_api" not in session_config
+        and not str(merged.get(_WEBUI_GATEWAY_USE_RUNS_API_ENV) or "").strip()
+        and _gateway_use_runs_api_enabled(owner_config, environ={})
+    ):
+        merged[_WEBUI_GATEWAY_USE_RUNS_API_ENV] = "1"
+    selected_url = _gateway_base_url(session_config, environ=merged)
+    dedicated_url = (
+        _gateway_endpoint_identity(selected_url)
+        != _gateway_endpoint_identity(effective_deployment_url)
+    )
+    key_only_profile_on_named_owner_url = bool(
+        profile_home is not None
+        and not str(profile_environ.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+        and not str(session_config.get("webui_gateway_base_url") or "").strip()
+        and (profile_canonical or profile_alias)
+        and _shared_url_may_belong_to_process_profile(profile_home)
+    )
+    if key_only_profile_on_named_owner_url:
+        # The deployment snapshot is one stable URL/key pair. Never combine a
+        # different profile's key with a URL that may belong to the named
+        # process owner (#8432).
+        resolved_key = _gateway_api_key(deployment)
+    elif dedicated_url:
+        # A profile-selected endpoint must never inherit the deployment
+        # receiver's secret. It gets a profile-owned key or no Authorization
+        # header at all.
+        resolved_key = profile_canonical or profile_alias
+    elif profile_home is not None and _session_is_process_profile(profile_home):
+        # A permanent owner dotenv reload refreshes ``profile_alias`` on every
+        # request.  Startup normalization may also have copied the old alias
+        # into the cached canonical slot; that derived value must not freeze
+        # later key rotations.  Only a canonical key that the launcher really
+        # exported keeps precedence over a fresh owner alias. An explicit
+        # owner canonical key still wins, matching permanent dotenv reload
+        # and restart recovery, including canonical-key rotations.
+        launcher_exported_canonical = str(
+            _profiles._INITIAL_GATEWAY_DEPLOYMENT_ENV.get(
+                _WEBUI_GATEWAY_API_KEY_ENV
+            )
+            or ""
+        ).strip()
+        resolved_key = (
+            profile_canonical
+            or launcher_exported_canonical
+            or profile_alias
+            or launcher_canonical
+            or shared_alias
+        )
+    else:
+        resolved_key = profile_canonical or launcher_canonical or shared_alias or profile_alias
+    if resolved_key:
+        merged[_WEBUI_GATEWAY_API_KEY_ENV] = resolved_key
+        merged["API_SERVER_KEY"] = resolved_key
+    elif dedicated_url:
+        merged.pop(_WEBUI_GATEWAY_API_KEY_ENV, None)
+        merged.pop("API_SERVER_KEY", None)
+    return merged
+
+
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
 # Backend tag of the in-process WebUI runtime. Local workers register their
 # active run with it; cache-only Steer only enqueues on this explicit value.
@@ -405,9 +762,9 @@ def _gateway_base_url(config_data=None, environ: dict[str, str] | None = None) -
     raw = str(
         source.get(_WEBUI_GATEWAY_BASE_URL_ENV)
         or cfg.get("webui_gateway_base_url")
-        or "http://127.0.0.1:8642"
+        or _GATEWAY_DEFAULT_BASE_URL
     ).strip()
-    return raw.rstrip("/") or "http://127.0.0.1:8642"
+    return raw.rstrip("/") or _GATEWAY_DEFAULT_BASE_URL
 
 
 def _gateway_api_key(environ: dict[str, str] | None = None) -> str:
@@ -435,17 +792,137 @@ def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=Non
     """Read and coerce user-configured reasoning effort for a gateway request."""
     try:
         cfg_data = cfg if isinstance(cfg, dict) else {}
+        config_data = cfg if isinstance(cfg, dict) else None
         effort_cfg = cfg_data.get("agent", {}) if isinstance(cfg_data, dict) else {}
         effort_raw = effort_cfg.get("reasoning_effort") if isinstance(effort_cfg, dict) else None
+        if isinstance(effort_cfg, dict):
+            from api.config import resolve_per_model_reasoning_effort
+
+            model_name = str(model or "").strip()
+            parsed_hint = _parse_provider_qualified_model_id(model_name)
+            if parsed_hint is not None:
+                model_name, hinted_provider = parsed_hint
+                model_provider = model_provider or hinted_provider
+            # Resolve with the bare model name — the same key the Agent's own
+            # resolver uses. Prefixing model_provider here would let a
+            # provider-qualified override key beat the bare spelling whenever
+            # both are configured, flipping the Agent's precedence; the
+            # provider is only needed for the capability coercion below.
+            override = resolve_per_model_reasoning_effort(
+                model_name,
+                effort_cfg.get("reasoning_overrides"),
+            )
+            if override is not None:
+                effort_raw = "none" if override.get("enabled") is False else override.get("effort")
+        raw_normalized = str(effort_raw or "").strip().lower()
+        # A newer Agent/CLI can write ``ultra`` before this WebUI exposes it in
+        # its user-facing ladder. Use the existing ``max`` coercion as the
+        # selected model's ceiling: preserve ``ultra`` only when that model can
+        # already accept the top WebUI-visible level, otherwise return the
+        # model-safe downgrade before receiver negotiation. Both coercion
+        # calls read the captured snapshot, never the shared cache.
+        if raw_normalized == "ultra":
+            model_ceiling = coerce_reasoning_effort_for_model(
+                "max",
+                model,
+                provider_id=model_provider,
+                config_data=config_data,
+            )
+            if not model_ceiling:
+                return None
+            return "ultra" if model_ceiling == "max" else str(model_ceiling)
         coerced = coerce_reasoning_effort_for_model(
             effort_raw,
             model,
             provider_id=model_provider,
+            config_data=config_data,
         )
         # Preserve explicit "none" while still omitting absent or invalid effort.
         return None if not coerced else str(coerced)
     except Exception:
         return None
+
+
+def _gateway_request_settings_for_session(
+    session,
+    *,
+    model=None,
+    model_provider=None,
+    reattach_endpoint=None,
+):
+    """Resolve Agent-facing request settings in the session's profile scope."""
+    from api.config import _main_model_request_overrides, get_config_snapshot
+
+    def _resolve(environ, profile_home):
+        # get_config_snapshot() copies under the cache lock. get_config()
+        # returns the one process-global mutable _cfg_cache, which a
+        # concurrent cross-profile read clears and refills in place — a bare
+        # deepcopy here could capture the other profile's settings (endpoint,
+        # runs-API flag, effort) or die mid-iteration ("dictionary changed
+        # size during iteration").
+        from api.config import _thread_ctx
+
+        previous_config_path = getattr(_thread_ctx, "config_snapshot_path", None)
+        _thread_ctx.config_snapshot_path = _profile_config_path(profile_home)
+        try:
+            # Keep the established zero-argument call shape: strict test and
+            # integration stand-ins implement that public shape, while the
+            # thread-local path pins the real reader without cross-thread state.
+            cfg = get_config_snapshot()
+        finally:
+            if previous_config_path is None:
+                try:
+                    del _thread_ctx.config_snapshot_path
+                except AttributeError:
+                    pass
+            else:
+                _thread_ctx.config_snapshot_path = previous_config_path
+        environ, resolved_base_url, resolved_api_key = _gateway_profile_endpoint(
+            environ,
+            config_data=cfg,
+            profile_home=profile_home,
+            profile_name=getattr(session, "profile", ""),
+        )
+        reasoning_effort = _gateway_reasoning_effort_for_request(
+            cfg,
+            model=model,
+            model_provider=model_provider,
+        )
+        base_url, api_key = reattach_endpoint or (
+            resolved_base_url,
+            resolved_api_key,
+        )
+        try:
+            overrides = _main_model_request_overrides(
+                cfg,
+                effective_model=model,
+                effective_provider=model_provider,
+            )
+        except Exception:
+            overrides = {}
+        return (
+            cfg,
+            reasoning_effort,
+            base_url,
+            api_key,
+            overrides,
+            _gateway_use_runs_api_enabled(cfg, environ=environ),
+        )
+
+    # Read-only profile scope: the endpoint/key lookups must take the
+    # profile-owned env yielded here, never a mirror another request thread
+    # pushed into os.environ (see profile_scope_for_request_read).
+    from api.profiles import profile_scope_for_request_read
+    from api.profiles import get_hermes_home_for_profile
+
+    profile_name = str(getattr(session, "profile", "") or "").strip()
+    profile_home = get_hermes_home_for_profile(profile_name)
+    with profile_scope_for_request_read(
+        profile_name,
+        "gateway chat request settings",
+        logger_override=logger,
+    ) as environ:
+        return _resolve(environ, profile_home)
 
 
 def _gateway_session_yolo_enabled(session_id: str) -> bool:
@@ -523,6 +1000,120 @@ def _auto_approve_gateway_run(
         "once",
         **({"execution_generation": execution_generation} if execution_generation is not None else {}),
     )
+
+
+# Effort ladder every runs-API gateway can carry inside ``model_options``.
+# A level outside this six-level set is DROPPED by *older* receivers and parsed
+# as a bare ``{"enabled": True}`` — losing the configured choice.
+_GATEWAY_LEGACY_MODEL_OPTIONS_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
+
+# Supra-legacy levels that only NEWER receivers accept.
+# Two receiver generations are in the wild and NEITHER advertises its ladder:
+#
+#   * older: ``_REASONING_EFFORTS`` = the six legacy levels — 'max'/'ultra' are
+#     dropped by ``_request_reasoning_config()`` and the request degenerates to
+#     a bare ``{"enabled": True}``, losing the explicit choice;
+#   * current: ``_REASONING_EFFORTS`` also contains 'max' and 'ultra', which
+#     ``_request_reasoning_config()`` preserves verbatim.
+#
+# A reachable-but-silent ``/v1/capabilities`` is therefore genuinely ambiguous:
+# it does NOT identify which generation is answering. Guessing "current"
+# would fail open — on an older receiver we would send a level it silently
+# discards, which is strictly worse than sending a slightly lower level it
+# honours. So the ambiguous case fails closed onto the legacy ladder.
+#
+# The ambiguity is resolved on the receiver side, not by heuristics here:
+# hermes-agent#92839 makes the API server advertise its accepted ladder as
+# ``features.reasoning_efforts``. Once a receiver advertises, this function
+# preserves exactly what it declares — including 'max'/'ultra'.
+_GATEWAY_SUPRA_LEGACY_MODEL_OPTIONS_EFFORTS = ("max", "ultra")
+_GATEWAY_MODEL_OPTIONS_EFFORT_ORDER = (
+    *_GATEWAY_LEGACY_MODEL_OPTIONS_EFFORTS,
+    *_GATEWAY_SUPRA_LEGACY_MODEL_OPTIONS_EFFORTS,
+)
+_GATEWAY_PROBE_RECEIVER_EFFORTS = object()
+
+
+def _gateway_receiver_supported_efforts(base_url="", api_key=""):
+    """Return the effort ladder the receiving gateway is KNOWN to carry.
+
+    ``features.reasoning_efforts`` from ``/v1/capabilities`` is the only
+    authority: it is an explicit, machine-readable declaration of what the
+    receiver's parser accepts, so it is trusted verbatim.
+
+    Anything else — no advertisement, an unreachable probe, a malformed
+    response — means we cannot establish the receiver's parser surface, and we
+    fall back to the legacy ladder every runs-API receiver can carry.
+    """
+    legacy = list(_GATEWAY_LEGACY_MODEL_OPTIONS_EFFORTS)
+    try:
+        from api.config import get_gateway_caps
+
+        caps = get_gateway_caps(base_url, api_key)
+    except Exception:
+        return legacy
+    if not isinstance(caps, dict):
+        return legacy
+    advertised = caps.get("reasoning_efforts")
+    if not advertised:
+        return legacy
+    levels = [str(level).strip().lower() for level in advertised if str(level).strip()]
+    return levels or legacy
+
+
+def _gateway_run_model_options(
+    effort,
+    base_url="",
+    api_key="",
+    *,
+    receiver_supported_efforts=_GATEWAY_PROBE_RECEIVER_EFFORTS,
+):
+    """Serialize the effective reasoning effort under the receiver's model_options contract.
+
+    The installed Hermes Agent API server constructs ``AIAgent.reasoning_config``
+    exclusively from ``body.model_options`` (``_request_agent_overrides`` →
+    ``_request_reasoning_config``); a top-level ``reasoning_effort`` field is
+    ignored on ``/v1/runs``. Returns the ``model_options`` dict to send, or
+    None when no explicit reasoning should be requested (gateway resolves its
+    own profile/per-model default).
+
+    Capability handling for supra-legacy levels ('max'/'ultra'): send them
+    verbatim whenever the live receiver can carry them (see
+    ``_gateway_receiver_supported_efforts``); only degrade down the WebUI
+    ladder for a receiver that genuinely cannot. Never escalate, and never let
+    the receiver silently fall back to the profile default.
+    """
+    effort = str(effort or "").strip().lower()
+    if not effort:
+        return None
+    if effort == "none":
+        return {"reasoning": {"enabled": False}, "reasoning_effort": "none"}
+    wire_effort = effort
+    if effort not in _GATEWAY_LEGACY_MODEL_OPTIONS_EFFORTS:
+        if receiver_supported_efforts is _GATEWAY_PROBE_RECEIVER_EFFORTS:
+            supported = _gateway_receiver_supported_efforts(base_url, api_key)
+        else:
+            advertised = receiver_supported_efforts or ()
+            supported = [
+                str(level).strip().lower()
+                for level in advertised
+                if str(level).strip()
+            ] or list(_GATEWAY_LEGACY_MODEL_OPTIONS_EFFORTS)
+        if effort not in supported:
+            ladder = list(_GATEWAY_MODEL_OPTIONS_EFFORT_ORDER)
+            wire_effort = None
+            if effort in ladder:
+                idx = ladder.index(effort)
+                for level in reversed(ladder[:idx]):  # strictly lower, highest first
+                    if level in supported:
+                        wire_effort = level
+                        break
+    if not wire_effort:
+        # No representable lower level: request reasoning-on and let the
+        # receiver pick its default effort — still better than dropping the
+        # override entirely (which could resolve to reasoning-off).
+        return {"reasoning": {"enabled": True}}
+    return {"reasoning": {"enabled": True, "effort": wire_effort}, "reasoning_effort": wire_effort}
 
 
 def gateway_chat_config_status(config_data=None, environ: dict[str, str] | None = None) -> dict:
@@ -1976,147 +2567,78 @@ def _sidecars_with_active_stream(session_dir) -> list[str]:
 
 
 def _profile_config_path(home):
-    """config.yaml of a profile home. For the ACTIVE profile that is the authoritative ambient config file
-    (HERMES_CONFIG_PATH may point outside the profile home), the same rule get_config_for_profile_home() uses;
-    any other profile reads its own home, so a divergent profile never inherits the active custom config."""
+    """Return the config file owned by ``home``.
+
+    A launcher ``HERMES_CONFIG_PATH`` belongs to the stable process owner (or
+    to a profile whose home contains the override), not whichever browser
+    profile is request-active.
+    """
     from api import profiles as _profiles
-    from api.config import _get_config_path
     from api.workspace import _safe_resolve
 
     target = _safe_resolve(Path(home).expanduser())
+    owner_environ = _profiles.get_process_owner_environ()
+    owner_override = str(owner_environ.get("HERMES_CONFIG_PATH") or "").strip()
+    owner_config = (
+        _safe_resolve(Path(owner_override).expanduser())
+        if owner_override
+        else None
+    )
     try:
-        if _safe_resolve(Path(_profiles.get_active_hermes_home()).expanduser()) == target:
-            return _get_config_path()
+        if _safe_resolve(Path(_profiles.get_process_profile_home()).expanduser()) == target:
+            return owner_config or target / "config.yaml"
     except Exception:
         pass
-    try:
-        ambient = _get_config_path()
-        if _safe_resolve(ambient.parent) == target:
-            return ambient
-    except Exception:
-        pass
-    return Path(home) / "config.yaml"
+    if owner_config is not None:
+        try:
+            if owner_config.parent == target or target in owner_config.parents:
+                return owner_config
+        except Exception:
+            pass
+    return target / "config.yaml"
 
 
-def _process_profile_is_root() -> bool:
-    """True when the .env the process mirrored into os.environ is the default profile's (~/.hermes/.env)."""
-    from api import profiles as _profiles
-    from api.workspace import _safe_resolve
+def _gateway_profile_endpoint(
+    profile_environ,
+    *,
+    config_data=None,
+    profile_home=None,
+    profile_name=None,
+):
+    """Resolve one profile's effective request environment, URL and key.
 
-    try:
-        return (_safe_resolve(Path(_profiles.get_process_profile_home()).expanduser())
-                == _safe_resolve(Path(_profiles.get_hermes_home_for_profile("")).expanduser()))
-    except Exception:
-        return False  # fail closed: treat the mirrored alias as per-profile
-
-
-def _env_value_is_profile_sourced(profiles_mod, key, value) -> bool:
-    """True when os.environ's *value* for *key* came from a profile's .env rather than the launcher (#8432).
-
-    Two sources put a profile's values into the process environment: the profile loader's mirror (recorded in
-    ``_loaded_profile_env_keys``) and a shell launcher that sourced a NAMED launch home's ``.env`` before Python
-    started (ctl.sh does this for ``$HERMES_HOME/.env``), recorded by the startup snapshot. A value equal to what the
-    named launch home's .env set at startup is that profile's, even if the launcher exported it too (fail closed).
-    The root home's .env is shared by definition, so its values are not profile-sourced.
-    """
-    value = str(value or "").strip()
-    if not value:
-        return False  # an empty value configures nothing
-    if key in (getattr(profiles_mod, "_loaded_profile_env_keys", ()) or ()):
-        return True
-    launch_env = getattr(profiles_mod, "_INITIAL_HERMES_HOME_DOTENV", None) or {}
-    if str(launch_env.get(key) or "").strip() != value:
-        return False
-    launch_home = str(getattr(profiles_mod, "_INITIAL_HERMES_HOME", "") or "").strip()
-    try:
-        return not _same_profile_home(launch_home, profiles_mod.get_hermes_home_for_profile(""))
-    except Exception:
-        return True  # fail closed
-
-
-def _config_url_may_belong_to_a_profile(profiles_mod, process_home) -> bool:
-    """True unless the ambient config's Gateway URL comes from an operator config file outside every profile (#8432).
-
-    Without ``HERMES_CONFIG_PATH`` (or with one a profile .env chose) the ambient config is the process profile's own
-    config.yaml. A launcher-provided file outside every profile home is operator configuration, shared, unless its
-    URL is a ``${VAR}`` template filled from a profile's .env.
-    """
-    import re as _re
-
-    from api.config import _load_yaml_config_file_raw
-    from api.workspace import _safe_resolve
-
-    override = str(os.environ.get("HERMES_CONFIG_PATH") or "").strip()
-    if not override or _env_value_is_profile_sourced(profiles_mod, "HERMES_CONFIG_PATH", override):
-        return True
-    cfg_dir = _safe_resolve(Path(override).expanduser()).parent
-    try:
-        own_home = _safe_resolve(Path(process_home).expanduser())
-        if cfg_dir == own_home or own_home in cfg_dir.parents:
-            return True  # inside the process profile's own home (any layout, isolated included)
-    except Exception:
-        return True  # fail closed
-    try:
-        roots = [_safe_resolve(Path(profiles_mod.get_hermes_home_for_profile("")).expanduser() / "profiles")]
-        canonical = getattr(profiles_mod, "_profiles_root", None)
-        if callable(canonical):
-            roots.append(_safe_resolve(Path(canonical())))
-    except Exception:
-        return True  # fail closed
-    if any(root in cfg_dir.parents for root in roots):
-        return True  # strictly below the profiles root: inside a named profile's directory
-    raw = _load_yaml_config_file_raw(Path(override).expanduser(), _copy=False)
-    raw_url = str(raw.get("webui_gateway_base_url") or "") if isinstance(raw, dict) else ""
-    for ref in _re.findall(r"\$\{([^}]+)\}", raw_url):
-        name = ref.split(":-", 1)[0].strip()
-        value = os.environ.get(name)
-        if value is not None and _env_value_is_profile_sourced(profiles_mod, name, value):
-            return True
-    return False
-
-
-def _shared_url_may_belong_to_process_profile(session_home) -> bool:
-    """True unless the shared Gateway URL is provably the launcher's, under a NAMED process profile (#8432).
-
-    With the root profile as the process profile, os.environ and the ambient config are the shared settings: False.
-    The process profile's own sessions are never affected: False. Nothing configured anywhere (the default URL)
-    belongs to no profile: False. Otherwise the URL may be a profile's (True) when it comes from:
-
-    - os.environ, and the value is profile-sourced (mirrored by the loader, or preloaded from a named launch home);
-    - the ambient config, and that file is the process profile's own config.yaml, a file inside a profile home,
-      a file a profile .env chose, or an operator file whose ``${VAR}`` URL is filled from a profile's .env;
-    - anything undeterminable (an exception): fail closed.
+    New turns and restart recovery must cross the same endpoint-identity and
+    credential boundary.  Keeping the overlay here prevents recovery from
+    falling back to the former raw URL-string comparison.
     """
     from api import profiles as _profiles
+    from api.config import _expand_env_vars_from_mapping
 
-    if _process_profile_is_root():
-        return False
-    try:
-        process_home = _profiles.get_process_profile_home()
-        if _same_profile_home(session_home, process_home):
-            return False
-    except Exception:
-        process_home = None
-    raw_env_url = str(os.environ.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
-    try:
-        if raw_env_url:
-            return _env_value_is_profile_sourced(_profiles, _WEBUI_GATEWAY_BASE_URL_ENV, raw_env_url)
-        from api.config import get_config
-
-        cfg = get_config()
-        if not (isinstance(cfg, dict) and str(cfg.get("webui_gateway_base_url") or "").strip()):
-            return False
-        if process_home is None:
-            return True
-        return _config_url_may_belong_to_a_profile(_profiles, process_home)
-    except Exception:
-        return True
-
-
-def _same_profile_home(a, b) -> bool:
-    from api.workspace import _safe_resolve
-
-    return _safe_resolve(Path(a).expanduser()) == _safe_resolve(Path(b).expanduser())
+    config_data = dict(config_data) if isinstance(config_data, dict) else {}
+    raw_url = config_data.get("webui_gateway_base_url")
+    if isinstance(raw_url, str) and "${" in raw_url:
+        expansion_env = dict(_profiles._INITIAL_PROCESS_ENV)
+        expansion_env.update(profile_environ or {})
+        config_data["webui_gateway_base_url"] = _expand_env_vars_from_mapping(
+            raw_url, expansion_env
+        )
+    environ = _gateway_request_environ(
+        profile_environ,
+        config_data=config_data,
+        profile_home=profile_home,
+    )
+    resolved_url = _gateway_base_url(config_data, environ=environ)
+    if "${" in resolved_url:
+        display_name = str(profile_name or "default").strip() or "default"
+        raise RuntimeError(
+            f"gateway URL for profile {display_name!r} still contains an unresolved variable "
+            f"({resolved_url}); set it in that profile's .env"
+        )
+    return (
+        environ,
+        resolved_url,
+        _gateway_api_key(environ=environ),
+    )
 
 
 def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
@@ -2145,7 +2667,9 @@ def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
     from api import profiles as _profiles
     from api.config import _expand_env_vars, _load_yaml_config_file_raw, _thread_ctx, get_config
 
-    shared_url, shared_key = _gateway_base_url(get_config(), os.environ), _gateway_api_key(os.environ)
+    shared_config = get_config()
+    shared_url = _gateway_base_url(shared_config, os.environ)
+    shared_key = _gateway_api_key(os.environ)
 
     home = Path(_profiles.get_hermes_home_for_profile(str(profile_name or "").strip()))
     own_env = _profiles.filter_runtime_env_for_gateway_parity(_profiles.get_profile_runtime_env(home))
@@ -2154,11 +2678,6 @@ def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
     own_url_env = str(own_env.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
     own_alias = str(own_env.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
     own_key = own_alias or str(own_env.get("API_SERVER_KEY") or "").strip()
-    # The launcher's explicit WebUI alias (an export, not a value mirrored from a profile's .env) is the key
-    # for the shared URL: there it keeps outranking a profile's API_SERVER_KEY, which is the key of that
-    # profile's OWN Gateway (docs: HERMES_WEBUI_GATEWAY_API_KEY first, API_SERVER_KEY as the fallback).
-    # An alias the profile loader mirrored from a NAMED active profile's .env is that profile's, not shared; one
-    # mirrored from the root profile's ~/.hermes/.env is the shared alias.
     shared_alias = str(os.environ.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
     if _WEBUI_GATEWAY_API_KEY_ENV in _profiles._loaded_profile_env_keys and not _process_profile_is_root():
         shared_alias = ""
@@ -2179,21 +2698,29 @@ def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
         finally:
             _thread_ctx.env = previous_env
             _thread_ctx.block_process_env_fallback = previous_block
-        # a launcher-exported URL still outranks config.yaml, as everywhere else
         url_env = own_url_env or str(environ.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
-        url = _gateway_base_url({"webui_gateway_base_url": expanded_url} if expanded_url else {},
-                                {_WEBUI_GATEWAY_BASE_URL_ENV: url_env} if url_env else {})
+        url = _gateway_base_url(
+            {"webui_gateway_base_url": expanded_url} if expanded_url else {},
+            {_WEBUI_GATEWAY_BASE_URL_ENV: url_env} if url_env else {},
+        )
         if "${" in url:
             raise RuntimeError(
                 f"gateway URL for profile {profile_name or 'default'!r} still contains an unresolved variable "
                 f"({url}); set it in that profile's .env"
             )
-    if url != shared_url:
-        return url, own_key  # the profile's own Gateway: its own key or none, never the shared one
-    if not own_url_env and not own_url_cfg and own_key and _shared_url_may_belong_to_process_profile(home):
-        # #8432: this profile set a key but no URL, and the "shared" URL may be the NAMED process profile's own
-        # (mirrored from its .env or read from its config). Never send this profile's key there; use the process
-        # pair, URL and key from one source, exactly what v0.52.492 sends for every fresh turn.
+    if _gateway_endpoint_identity(url) != _gateway_endpoint_identity(shared_url):
+        return url, own_key
+    if (
+        not own_url_env
+        and not own_url_cfg
+        and own_key
+        and _shared_url_may_belong_to_process_profile(
+            home,
+            deployment=os.environ,
+            owner_config=shared_config,
+            owner_environ=os.environ,
+        )
+    ):
         return shared_url, shared_key
     if _session_is_process_profile(home):
         # The process profile's own sessions: the shared key IS this profile's key, read fresh from its .env.
@@ -3088,31 +3615,21 @@ def _run_gateway_chat_streaming(
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
     try:
         s = get_session(session_id)
-        from api.config import get_config  # imported lazily to avoid config-cycle churn
-
-        # Profile-bound like the endpoint below: the worker thread has no request profile TLS.
-        cfg = _gateway_config_for_profile(getattr(s, "profile", None)) or get_config()
-        reasoning_effort = _gateway_reasoning_effort_for_request(
+        (
             cfg,
+            reasoning_effort,
+            base_url,
+            api_key,
+            _gw_overrides,
+            _runs_api_enabled,
+        ) = _gateway_request_settings_for_session(
+            s,
             model=model,
             model_provider=model_provider,
+            reattach_endpoint=reattach_endpoint,
         )
-        # The session's own profile, not the process-active one: this worker thread has no
-        # thread-local profile, so get_config()/os.environ describe whichever profile the
-        # process loaded. Same resolver the restart-reattach path already uses.
-        base_url, api_key = reattach_endpoint or _gateway_endpoint_for_profile(getattr(s, "profile", None))
         with _STREAM_RUN_STARTING_CONDITION:
             _STREAM_ENDPOINTS[stream_id] = (base_url, api_key)
-        try:
-            from api.config import _main_model_request_overrides
-            _gw_overrides = _main_model_request_overrides(
-                cfg,
-                effective_model=model,
-                effective_provider=model_provider,
-            )
-        except Exception:
-            _gw_overrides = {}
-        _runs_api_enabled = _gateway_use_runs_api_enabled(cfg)
         _use_runs_api = bool(reattach_run) or (_runs_api_enabled and gateway_supports_approval(base_url, api_key))
         if not _use_runs_api and runs_api_pending_marked:
             _finish_gateway_run_starting(stream_id, result="fallback")
@@ -3160,9 +3677,23 @@ def _run_gateway_chat_streaming(
             if model_provider:
                 body_extras["provider"] = model_provider
             if reasoning_effort is not None:
+                # Kept for forward/older-gateway compatibility, but the
+                # installed runs handler ignores top-level reasoning_effort...
                 body_extras["reasoning_effort"] = reasoning_effort
+            # ...so the effective value MUST also ride in body.model_options,
+            # the only field the installed Agent API authority reads when
+            # constructing AIAgent.reasoning_config (nesquena re-gate
+            # 2026-08-13). Same contract for service_tier:
+            # _request_service_tier() reads model_options, not the top level.
+            _run_model_options = _gateway_run_model_options(
+                reasoning_effort, base_url=base_url, api_key=api_key
+            )
             if _gw_overrides.get("service_tier"):
                 body_extras["service_tier"] = _gw_overrides["service_tier"]
+                _run_model_options = dict(_run_model_options or {})
+                _run_model_options["service_tier"] = _gw_overrides["service_tier"]
+            if _run_model_options:
+                body_extras["model_options"] = _run_model_options
             def record_run(run_id, request=None):
                 _record_gateway_run(
                     session_id, stream_id, run_id, request=request,
@@ -3265,8 +3796,20 @@ def _run_gateway_chat_streaming(
                 body["provider"] = model_provider
             if reasoning_effort is not None:
                 body["reasoning_effort"] = reasoning_effort
+            # Current Agent chat and runs handlers both construct request
+            # overrides from body.model_options. Keep the top-level scalars
+            # for older OpenAI-compatible receivers, but send the
+            # authoritative effort through the same negotiated mapping as
+            # /v1/runs.
+            _legacy_model_options = _gateway_run_model_options(
+                reasoning_effort, base_url=base_url, api_key=api_key
+            )
             if _gw_overrides.get("service_tier"):
                 body["service_tier"] = _gw_overrides["service_tier"]
+                _legacy_model_options = dict(_legacy_model_options or {})
+                _legacy_model_options["service_tier"] = _gw_overrides["service_tier"]
+            if _legacy_model_options:
+                body["model_options"] = _legacy_model_options
             req = urllib.request.Request(
                 url,
                 data=json.dumps(body).encode("utf-8"),

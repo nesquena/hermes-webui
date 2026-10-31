@@ -1,0 +1,3166 @@
+"""Gateway-runs handler-boundary coverage for the effective reasoning effort.
+
+The installed Hermes Agent API server (``gateway/platforms/api_server.py``)
+reads reasoning for ``POST /v1/runs`` exclusively from ``body.model_options``:
+``_handle_runs`` → ``_request_agent_overrides`` → ``_create_agent`` →
+``_request_reasoning_config`` → ``AIAgent(reasoning_config=...)``. A top-level
+``reasoning_effort`` field is ignored on that endpoint, so an effort override
+serialized only at the top level displays one value while gateway-runs executes
+the profile/per-model default (nesquena re-gate 2026-08-13).
+
+These tests exercise the real WebUI serialization path (actual
+``_run_gateway_chat_streaming`` worker with only the network faked) and then
+compose the captured wire body with the INSTALLED handler's parsing chain in a
+subprocess, asserting the Agent reasoning config the receiver constructs.
+"""
+
+import copy
+import json
+import os
+import re
+import subprocess
+import threading
+import time
+from contextlib import ExitStack, contextmanager
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from api.gateway_chat import (
+    _GATEWAY_LEGACY_MODEL_OPTIONS_EFFORTS,
+    _gateway_run_model_options,
+)
+
+
+# ── Locating the installed Hermes Agent (read-only) ─────────────────────────
+
+def _installed_agent_dir():
+    """Return the installed hermes-agent tree, mirroring api/startup.py discovery."""
+    candidates = []
+    env_dir = os.environ.get("HERMES_WEBUI_AGENT_DIR", "").strip()
+    if env_dir:
+        candidates.append(Path(env_dir))
+    candidates.append(Path.home() / ".hermes" / "hermes-agent")
+    candidates.append(Path("/usr/local/lib/hermes-agent"))
+    for candidate in candidates:
+        if (candidate / "gateway" / "platforms" / "api_server.py").is_file():
+            return candidate
+    return None
+
+
+def _installed_agent_python(agent_dir):
+    for candidate in (
+        agent_dir / "venv" / "bin" / "python",
+        agent_dir / "venv" / "Scripts" / "python.exe",
+    ):
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+_COMPOSE_SCRIPT = """
+import json, sys
+agent_dir = sys.argv[1]
+sys.path.insert(0, agent_dir)
+from gateway.platforms.api_server import _request_agent_overrides, _request_reasoning_config
+
+vectors = json.loads(sys.stdin.read())
+out = []
+for vector in vectors:
+    if vector.get("kind") in {"run_body", "legacy_chat_body"}:
+        # The exact composition _handle_runs performs before _create_agent.
+        overrides = _request_agent_overrides(vector["body"], virtual_model="hermes-agent")
+        out.append(_request_reasoning_config(overrides.get("model_options")))
+    else:
+        out.append(_request_reasoning_config(vector.get("model_options")))
+print(json.dumps(out))
+"""
+
+
+def _compose_with_installed_handler(vectors):
+    """Feed request vectors through the installed API server's parsing chain.
+
+    The receiver is cross-repository authority, so this must never degrade into
+    a silent ``skip``: a broken discovered receiver would make the whole contract
+    claim disappear exactly when it stops holding. Two topologies:
+
+    * A fully absent Agent tree falls back to the vendored parser contract unless
+      ``HERMES_WEBUI_REQUIRE_AGENT_RECEIVER=1`` requires an install.
+    * Once an Agent tree is discovered, a missing venv or nonzero
+      import/subprocess result is always a hard FAILURE. A broken install must
+      never silently look green. ``test_receiver_contract_matches_installed_agent``
+      independently proves that the fallback fixture matches the real receiver
+      whenever one is present, so the contract cannot drift unnoticed.
+    """
+    required = os.environ.get("HERMES_WEBUI_REQUIRE_AGENT_RECEIVER", "").strip() in ("1", "true", "yes")
+    agent_dir = _installed_agent_dir()
+    if agent_dir is None:
+        if required:
+            pytest.fail(
+                "HERMES_WEBUI_REQUIRE_AGENT_RECEIVER is set but no hermes-agent install "
+                "was found; the receiver contract cannot be verified."
+            )
+        return _compose_with_contract(vectors)
+    python = _installed_agent_python(agent_dir)
+    if python is None:
+        pytest.fail(f"hermes-agent venv python not found under {agent_dir}")
+    proc = subprocess.run(
+        [python, "-c", _COMPOSE_SCRIPT, str(agent_dir)],
+        input=json.dumps(vectors),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        pytest.fail(f"installed api_server import failed: {proc.stderr.strip()[:400]}")
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+# The WIDEST receiver ladder currently in existence — the upstream
+# gateway/platforms/api_server.py ``_REASONING_EFFORTS``. Two generations are
+# deployed in the wild: an older six-level parser and the current eight-level
+# one that also carries 'max'/'ultra'. Neither advertises itself, which is why
+# WebUI fails closed onto the six safe levels until a receiver declares its
+# ladder (hermes-agent #92839).
+#
+# This tuple is only the FALLBACK used when no Agent install is present; when
+# one is, the real parser is authority.
+_RECEIVER_CONTRACT = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+
+
+def _installed_receiver_efforts():
+    """Return the installed receiver's accepted ladder, or None if absent."""
+    agent_dir = _installed_agent_dir()
+    if agent_dir is None:
+        return None
+    source = (agent_dir / "gateway" / "platforms" / "api_server.py").read_text(encoding="utf-8")
+    match = re.search(r"_REASONING_EFFORTS\s*=\s*frozenset\(\s*\{(.*?)\}\s*\)", source, re.S)
+    assert match, "could not locate _REASONING_EFFORTS in the installed receiver"
+    return {
+        level.strip().strip("\"'")
+        for level in match.group(1).split(",")
+        if level.strip().strip("\"'")
+    }
+
+
+def _effective_receiver_efforts():
+    """The ladder the vectors in this module are actually parsed against."""
+    installed = _installed_receiver_efforts()
+    return installed if installed is not None else set(_RECEIVER_CONTRACT)
+
+
+def _contract_reasoning_config(model_options):
+    """Local mirror of the receiver's ``_request_reasoning_config`` contract."""
+    if not isinstance(model_options, dict):
+        return None
+    reasoning = model_options.get("reasoning")
+    enabled = None
+    effort = model_options.get("reasoning_effort")
+    if isinstance(reasoning, dict):
+        enabled = reasoning.get("enabled")
+        effort = reasoning.get("effort", effort)
+    effort_norm = str(effort).strip().lower() if effort is not None else ""
+    if enabled is False or effort_norm == "none":
+        return {"enabled": False}
+    if effort_norm in _RECEIVER_CONTRACT and effort_norm != "none":
+        return {"enabled": True, "effort": effort_norm}
+    if enabled is True:
+        return {"enabled": True}
+    return None
+
+
+def _compose_with_contract(vectors):
+    out = []
+    for vector in vectors:
+        if vector.get("kind") in {"run_body", "legacy_chat_body"}:
+            out.append(_contract_reasoning_config(vector["body"].get("model_options")))
+        else:
+            out.append(_contract_reasoning_config(vector.get("model_options")))
+    return out
+
+
+def test_receiver_contract_matches_installed_agent():
+    """Pin the relationship between WebUI's policy and the real receiver.
+
+    Two receiver generations exist and neither advertises its ladder, so this
+    asserts the invariants that must hold for ANY of them rather than a single
+    equality that would break on the other generation:
+
+    * every level WebUI degrades onto must be accepted by the installed parser
+      (otherwise the "safe" fallback is itself unsafe);
+    * the installed ladder must not exceed the widest known contract (a new
+      level upstream means this policy needs revisiting).
+    """
+    agent_dir = _installed_agent_dir()
+    required = os.environ.get("HERMES_WEBUI_REQUIRE_AGENT_RECEIVER", "").strip() in ("1", "true", "yes")
+    if agent_dir is None:
+        if required:
+            pytest.fail("HERMES_WEBUI_REQUIRE_AGENT_RECEIVER is set but no hermes-agent install was found")
+        pytest.skip("no hermes-agent install to compare against (fallback contract still exercised elsewhere)")
+    installed = _installed_receiver_efforts()
+
+    unsafe = sorted(set(_GATEWAY_LEGACY_MODEL_OPTIONS_EFFORTS) - installed)
+    assert not unsafe, (
+        "WebUI degrades onto levels the installed receiver does not accept: "
+        f"{unsafe}. The fail-closed ladder must be a subset of every receiver."
+    )
+    unknown = sorted(installed - set(_RECEIVER_CONTRACT))
+    assert not unknown, (
+        "The installed receiver accepts levels this contract does not know "
+        f"about ({unknown}); update _RECEIVER_CONTRACT and the WebUI "
+        "degradation policy together."
+    )
+
+
+# ── model_options serialization (WebUI side) ────────────────────────────────
+
+def test_gateway_run_model_options_serializes_effective_effort():
+    assert _gateway_run_model_options(None) is None
+    assert _gateway_run_model_options("") is None
+    assert _gateway_run_model_options("none") == {
+        "reasoning": {"enabled": False},
+        "reasoning_effort": "none",
+    }
+    for effort in ("minimal", "low", "medium", "high", "xhigh"):
+        assert _gateway_run_model_options(effort) == {
+            "reasoning": {"enabled": True, "effort": effort},
+            "reasoning_effort": effort,
+        }
+
+
+def test_gateway_run_model_options_degrades_supra_levels_without_an_advertised_ladder(monkeypatch):
+    """No advertisement means no proof, so 'max' rides as xhigh.
+
+    Both an unreachable probe and a reachable-but-silent one are ambiguous:
+    neither identifies the receiver generation. Failing closed costs one rung
+    of effort; failing open costs the effort entirely on an older receiver.
+    """
+    import api.config as config
+
+    ambiguous_probes = (
+        {"reasoning_efforts": None, "capabilities_reachable": False, "probe_error": "URLError: refused"},
+        {"reasoning_efforts": None, "capabilities_reachable": True, "probe_error": None},
+        {},
+    )
+    for caps in ambiguous_probes:
+        monkeypatch.setattr(config, "get_gateway_caps", lambda *a, _c=caps, **k: _c)
+        for effort in ("max", "ultra"):
+            assert _gateway_run_model_options(effort, base_url="http://gw:8642") == {
+                "reasoning": {"enabled": True, "effort": "xhigh"},
+                "reasoning_effort": "xhigh",
+            }, f"caps={caps} should fail closed from {effort} to xhigh"
+
+
+def test_gateway_request_effort_applies_model_limit_before_ultra_negotiation(monkeypatch):
+    """An Agent-written ultra value must respect the selected model's ceiling."""
+    import api.config as config
+    from api.gateway_chat import _gateway_reasoning_effort_for_request
+
+    monkeypatch.setattr(config, "resolve_model_reasoning_efforts", lambda *_a, **_k: [])
+    assert _gateway_reasoning_effort_for_request(
+        {"agent": {"reasoning_effort": "ultra"}},
+        model="gpt-5.6",
+        model_provider="openai",
+    ) == "ultra"
+    assert _gateway_reasoning_effort_for_request(
+        {"agent": {"reasoning_effort": "ultra"}},
+        model="o3-mini",
+        model_provider="openai",
+    ) == "high"
+
+
+@pytest.mark.parametrize(
+    ("global_effort", "override", "expected"),
+    [("none", "high", "high"), ("high", "low", "low"), ("high", False, "none")],
+)
+def test_gateway_request_effort_prefers_agent_per_model_override(
+    global_effort, override, expected
+):
+    from api.gateway_chat import _gateway_reasoning_effort_for_request
+
+    cfg = {
+        "agent": {
+            "reasoning_effort": global_effort,
+            "reasoning_overrides": {"openai/o3-mini": override},
+        }
+    }
+    assert _gateway_reasoning_effort_for_request(
+        cfg,
+        model="o3-mini",
+        model_provider="openai",
+    ) == expected
+
+
+def test_gateway_request_effort_matches_agent_override_spelling_variants():
+    from api.gateway_chat import _gateway_reasoning_effort_for_request
+
+    cfg = {
+        "agent": {
+            "reasoning_effort": "none",
+            "reasoning_overrides": {"custom-relay/qwen3.6:27b": {"effort": "high"}},
+        }
+    }
+    assert _gateway_reasoning_effort_for_request(
+        cfg,
+        model="qwen3-6:27b",
+        model_provider="custom-relay",
+    ) == "high"
+
+
+def test_gateway_request_effort_prefers_the_bare_model_override_key():
+    """Both spellings configured: the bare key must win, as the Agent does.
+
+    With ``{o3-mini: high, openai/o3-mini: low}`` master and the Agent resolve
+    ``o3-mini`` to ``high``; resolving the override on a provider-prefixed
+    name flipped this PR to ``low`` (re-gate finding).
+    """
+    from api.gateway_chat import _gateway_reasoning_effort_for_request
+
+    cfg = {
+        "agent": {
+            "reasoning_effort": "none",
+            "reasoning_overrides": {"o3-mini": "high", "openai/o3-mini": "low"},
+        }
+    }
+    assert _gateway_reasoning_effort_for_request(
+        cfg,
+        model="o3-mini",
+        model_provider="openai",
+    ) == "high"
+
+
+def test_installed_receiver_import_failure_does_not_fall_back_green(tmp_path, monkeypatch):
+    """A discovered but unusable receiver is a failed boundary proof, not a fallback."""
+    agent_dir = tmp_path / "agent"
+    server = agent_dir / "gateway" / "platforms" / "api_server.py"
+    server.parent.mkdir(parents=True)
+    server.write_text("_REASONING_EFFORTS = frozenset({'low'})\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "tests.test_gateway_runs_model_options_boundary._installed_agent_dir",
+        lambda: agent_dir,
+    )
+    monkeypatch.setattr(
+        "tests.test_gateway_runs_model_options_boundary._installed_agent_python",
+        lambda _agent_dir: None,
+    )
+
+    with pytest.raises(pytest.fail.Exception, match="venv python"):
+        _compose_with_installed_handler([{"kind": "model_options", "model_options": {}}])
+
+
+def test_gateway_run_model_options_preserves_supra_levels_when_receiver_advertises(monkeypatch):
+    """An explicit advertisement is authority: max/ultra ride verbatim.
+
+    This is the path hermes-agent #92839 opens. Once the receiver declares
+    ``features.reasoning_efforts``, WebUI stops degrading and sends the
+    configured level verbatim.
+    """
+    import api.config as config
+
+    monkeypatch.setattr(
+        config,
+        "get_gateway_caps",
+        lambda *a, **k: {
+            "reasoning_efforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+            "capabilities_reachable": True,
+            "probe_error": None,
+        },
+    )
+    for effort in ("max", "ultra"):
+        assert _gateway_run_model_options(effort, base_url="http://gw:8642") == {
+            "reasoning": {"enabled": True, "effort": effort},
+            "reasoning_effort": effort,
+        }
+
+
+def test_gateway_run_model_options_sends_advertised_levels_verbatim(monkeypatch):
+    """A gateway advertising the wider ladder via /v1/capabilities gets it verbatim."""
+    import api.config as config
+
+    wide = list(_GATEWAY_LEGACY_MODEL_OPTIONS_EFFORTS) + ["max", "ultra"]
+    monkeypatch.setattr(config, "get_gateway_caps", lambda *a, **k: {"reasoning_efforts": wide})
+    assert _gateway_run_model_options("ultra", base_url="http://gw:8642") == {
+        "reasoning": {"enabled": True, "effort": "ultra"},
+        "reasoning_effort": "ultra",
+    }
+    assert _gateway_run_model_options("max", "http://gw:8642") == {
+        "reasoning": {"enabled": True, "effort": "max"},
+        "reasoning_effort": "max",
+    }
+
+
+def test_gateway_run_model_options_degrades_to_advertised_intermediate(monkeypatch):
+    """Degrade lands on the highest advertised level BELOW the requested one."""
+    import api.config as config
+
+    monkeypatch.setattr(
+        config,
+        "get_gateway_caps",
+        lambda *a, **k: {"reasoning_efforts": ["low", "medium", "high"]},
+    )
+    assert _gateway_run_model_options("max", base_url="http://gw:8642") == {
+        "reasoning": {"enabled": True, "effort": "high"},
+        "reasoning_effort": "high",
+    }
+
+
+# ── Wire capture: real WebUI worker, faked network ──────────────────────────
+
+class _JsonResponse:
+    def __init__(self, payload):
+        self._payload = json.dumps(payload).encode("utf-8")
+
+    def read(self, _limit=None):
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
+
+
+class _SseResponse:
+    def __init__(self, lines):
+        self._lines = lines
+
+    def __iter__(self):
+        return iter(self._lines)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
+
+
+def _capture_gateway_wire_body(
+    effort,
+    *,
+    use_runs_api=True,
+    expect_path=None,
+    service_tier=None,
+    session_profile=None,
+    profile_effort=None,
+    real_profile_scope=False,
+    gateway_env=None,
+    real_config=False,
+    captured=None,
+):
+    """Run the real gateway worker and return its Agent-facing request body.
+
+    ``real_profile_scope`` keeps ``api.profiles.profile_scope_for_request_read``
+    in the loop, so the request's Gateway credential comes from the profile
+    directory the worker resolves instead of the process environment.
+    ``use_runs_api=None`` leaves ``HERMES_WEBUI_GATEWAY_USE_RUNS_API`` unset, so
+    the owner's config-only value is the only source for the lane; pass
+    ``expect_path`` to assert which lane the worker picked.
+    ``real_config`` leaves ``api.config.get_config_snapshot`` unpatched so the
+    session's snapshot comes from the real producer reading the on-disk
+    profile ``config.yaml`` (pair it with ``_pin_scoped_config_read``); the
+    default keeps the fake root/profile split for the effort fixtures.
+    ``captured`` receives the POSTed request's headers and body for callers that
+    assert on the credential the receiver would authenticate.
+    """
+    import api.config as config
+    from api.config import STREAMS, STREAMS_LOCK
+    from api.gateway_chat import _run_gateway_chat_streaming
+    from api import profiles as profiles_module
+
+    stream_id = "sid-model-options-wire"
+    q = MagicMock()
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = q
+
+    real_scope = profiles_module.profile_scope_for_request_read
+
+    requests = []
+
+    def fake_urlopen(req, *, timeout=None):
+        requests.append(req)
+        if req.full_url.endswith("/v1/runs"):
+            return _JsonResponse({"run_id": "run-model-options"})
+        if req.full_url.endswith("/v1/chat/completions"):
+            return _SseResponse([
+                b'data: {"choices":[{"delta":{"content":"Hello"}}]}\n',
+                b"\n",
+                b"data: [DONE]\n",
+                b"\n",
+            ])
+        return _SseResponse([
+            b'data: {"event":"message.delta","delta":"Hello"}\n',
+            b"\n",
+            b'data: {"event":"run.completed","output":"Hello","usage":{"input_tokens":3,"output_tokens":1}}\n',
+            b"\n",
+        ])
+
+    mock_session = MagicMock()
+    mock_session.active_stream_id = stream_id
+    mock_session.workspace = "/tmp"
+    mock_session.model = "test-model"
+    mock_session.model_provider = None
+    mock_session.profile = session_profile
+    mock_session.context_messages = []
+    mock_session.messages = []
+    mock_session.pending_user_message = None
+    mock_session.pending_attachments = None
+    mock_session.pending_started_at = None
+
+    cfg = {"agent": {"reasoning_effort": effort}}
+    active_profile = {"name": None}
+    entered_profiles = []
+
+    @contextmanager
+    def fake_profile_scope(profile_name, purpose="detached worker", logger_override=None):
+        entered_profiles.append(profile_name)
+        previous = active_profile["name"]
+        active_profile["name"] = profile_name
+        try:
+            if not real_profile_scope:
+                yield
+                return
+            with real_scope(
+                profile_name, purpose, logger_override=logger_override
+            ) as profile_environ:
+                yield profile_environ
+        finally:
+            active_profile["name"] = previous
+
+    def fake_get_config():
+        if session_profile and active_profile["name"] == session_profile:
+            return {"agent": {"reasoning_effort": profile_effort}}
+        return cfg
+
+    def fake_get_config_snapshot():
+        return copy.deepcopy(fake_get_config())
+
+    gateway_environ = {
+        "HERMES_WEBUI_CHAT_BACKEND": "gateway",
+        "HERMES_WEBUI_GATEWAY_BASE_URL": "http://gw:8642",
+        "HERMES_WEBUI_GATEWAY_API_KEY": "secret",
+    }
+    if use_runs_api is not None:
+        gateway_environ["HERMES_WEBUI_GATEWAY_USE_RUNS_API"] = (
+            "1" if use_runs_api else "0"
+        )
+    if gateway_env:
+        gateway_environ.update(gateway_env)
+
+    try:
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict("os.environ", gateway_environ))
+            stack.enter_context(
+                patch("api.gateway_chat.gateway_supports_approval", lambda *_a, **_k: True)
+            )
+            stack.enter_context(
+                patch(
+                    "api.gateway_chat.gateway_approval_unavailable_reason",
+                    lambda *_a, **_k: None,
+                )
+            )
+            stack.enter_context(patch("api.config.get_config", fake_get_config))
+            if not real_config:
+                stack.enter_context(
+                    patch("api.config.get_config_snapshot", fake_get_config_snapshot)
+                )
+            stack.enter_context(
+                patch("api.profiles.profile_scope_for_request_read", fake_profile_scope)
+            )
+            stack.enter_context(
+                patch(
+                    "api.config.get_gateway_caps",
+                    lambda *_a, **_k: {"reasoning_efforts": None},
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "api.config._main_model_request_overrides",
+                    lambda *_a, **_k: ({"service_tier": service_tier} if service_tier else {}),
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    config,
+                    "resolve_model_reasoning_efforts",
+                    lambda *a, **k: list(config.VALID_REASONING_EFFORTS),
+                )
+            )
+            stack.enter_context(patch("urllib.request.urlopen", side_effect=fake_urlopen))
+            stack.enter_context(
+                patch("api.gateway_chat.get_session", return_value=mock_session)
+            )
+            stack.enter_context(
+                patch("api.gateway_chat._stream_writeback_is_current", return_value=True)
+            )
+            stack.enter_context(
+                patch(
+                    "api.gateway_chat.merge_session_messages_append_only",
+                    return_value=[],
+                )
+            )
+            _run_gateway_chat_streaming(
+                session_id="sess-model-options",
+                msg_text="hi",
+                model="test-model",
+                workspace="/tmp",
+                stream_id=stream_id,
+            )
+    finally:
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+
+    target = expect_path or ("/v1/runs" if use_runs_api else "/v1/chat/completions")
+    agent_requests = [req for req in requests if req.full_url.endswith(target)]
+    assert agent_requests, f"worker never POSTed {target}"
+    if captured is not None:
+        captured["url"] = agent_requests[0].full_url
+        captured["headers"] = dict(agent_requests[0].header_items())
+        captured["body"] = agent_requests[0].data.decode("utf-8")
+    return json.loads(agent_requests[0].data.decode("utf-8")), entered_profiles
+
+
+def _capture_runs_wire_body(effort):
+    body, _entered = _capture_gateway_wire_body(
+        effort,
+        use_runs_api=True,
+    )
+    return body
+
+
+def _capture_legacy_chat_wire_body(
+    effort,
+    *,
+    service_tier=None,
+):
+    body, _entered = _capture_gateway_wire_body(
+        effort,
+        use_runs_api=False,
+        service_tier=service_tier,
+    )
+    return body
+
+
+def test_gateway_worker_resolves_effort_inside_session_profile_scope():
+    body, entered = _capture_gateway_wire_body(
+        "none",
+        use_runs_api=True,
+        session_profile="named-profile",
+        profile_effort="high",
+    )
+
+    assert entered == ["named-profile"]
+    assert body["model_options"]["reasoning_effort"] == "high"
+
+
+def test_runner_request_resolves_effort_inside_session_profile_scope(monkeypatch):
+    from api import gateway_chat, routes
+
+    active_profile = {"name": None}
+    entered = []
+
+    @contextmanager
+    def fake_scope(profile_name, purpose="detached worker", logger_override=None):
+        entered.append(profile_name)
+        previous = active_profile["name"]
+        active_profile["name"] = profile_name
+        try:
+            yield
+        finally:
+            active_profile["name"] = previous
+
+    monkeypatch.setattr(routes, "profile_scope_for_request_read", fake_scope)
+    monkeypatch.setattr(
+        routes,
+        "get_config",
+        lambda: {"agent": {"reasoning_effort": "high" if active_profile["name"] else "none"}},
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_config_snapshot",
+        lambda: {"agent": {"reasoning_effort": "high" if active_profile["name"] else "none"}},
+    )
+    monkeypatch.setattr(
+        gateway_chat,
+        "_gateway_reasoning_effort_for_request",
+        lambda cfg, **_kwargs: cfg["agent"]["reasoning_effort"],
+    )
+
+    effort = routes._runner_reasoning_effort_for_session(
+        SimpleNamespace(profile="named-profile"),
+        model="test-model",
+        model_provider="test-provider",
+    )
+
+    assert entered == ["named-profile"]
+    assert effort == "high"
+
+
+def test_profile_request_settings_use_deep_config_snapshots(monkeypatch):
+    """Both lanes must capture request config via get_config_snapshot().
+
+    The capture has to be the lock-protected copy, never the live cache: a
+    concurrent default-profile read clears and refills the shared cache in
+    place, which the earlier bare ``deepcopy(get_config())`` could pick up
+    (wrong effort / endpoint) or crash on mid-iteration (re-gate round 3).
+    """
+    from api import config, gateway_chat, routes
+    import api.profiles as profiles
+
+    snapshot = {"agent": {"reasoning_effort": "high"}}
+
+    @contextmanager
+    def fake_scope(*_args, **_kwargs):
+        yield
+
+    def live_cache_must_not_be_read():
+        raise AssertionError("request settings must use get_config_snapshot()")
+
+    monkeypatch.setattr(profiles, "profile_scope_for_request_read", fake_scope)
+    monkeypatch.setattr(routes, "profile_scope_for_request_read", fake_scope)
+    monkeypatch.setattr(config, "get_config", live_cache_must_not_be_read)
+    monkeypatch.setattr(routes, "get_config", live_cache_must_not_be_read)
+    monkeypatch.setattr(config, "get_config_snapshot", lambda: copy.deepcopy(snapshot))
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: copy.deepcopy(snapshot))
+    monkeypatch.setattr(
+        config, "resolve_model_reasoning_efforts", lambda *a, **k: list(config.VALID_REASONING_EFFORTS)
+    )
+
+    settings = gateway_chat._gateway_request_settings_for_session(
+        SimpleNamespace(profile="analyst"), model="test-model"
+    )
+    assert settings[1] == "high"
+
+    effort = routes._runner_reasoning_effort_for_session(
+        SimpleNamespace(profile="analyst"), model="test-model"
+    )
+    assert effort == "high"
+
+
+def test_profile_settings_survive_a_concurrent_default_profile_read(monkeypatch):
+    """Two threads: an analyst send and a default-profile reader.
+
+    The reader keeps clearing and refilling the one shared cache dict the way
+    ``_refresh_config_cache`` does on every cross-profile read. Pre-fix both
+    lanes deep-copied that dict outside the cache lock: the copy could catch
+    the default profile's "none" or die mid-iteration ("dictionary changed
+    size during iteration"). The lock-protected snapshot must hold up.
+    """
+    from api import config, gateway_chat, routes
+    import api.profiles as profiles
+
+    analyst_cfg = {"agent": {"reasoning_effort": "high"}}
+    default_cfg = {"agent": {"reasoning_effort": "none"}}
+    shared = copy.deepcopy(analyst_cfg)
+    cache_lock = threading.Lock()
+    active_profile = {"name": None}
+
+    @contextmanager
+    def fake_scope(profile_name, purpose="detached worker", logger_override=None):
+        previous = active_profile["name"]
+        active_profile["name"] = profile_name
+        try:
+            yield
+        finally:
+            active_profile["name"] = previous
+
+    def fake_get_config():
+        return shared
+
+    def fake_get_config_snapshot():
+        # get_config_snapshot() copies under the cache lock for the scoped
+        # path, so the analyst scope keeps the analyst content.
+        with cache_lock:
+            source = analyst_cfg if active_profile["name"] == "analyst" else shared
+            return copy.deepcopy(source)
+
+    def default_profile_read():
+        # _refresh_config_cache(): in-place clear + refill under the lock.
+        with cache_lock:
+            shared.clear()
+            shared.update(copy.deepcopy(default_cfg))
+            time.sleep(0.0005)
+            shared.clear()
+            shared.update(copy.deepcopy(analyst_cfg))
+        # Yield outside the lock too: a reader that re-acquires cache_lock
+        # immediately after release (while still holding the GIL) can starve
+        # the request thread indefinitely on slow CI runners — this test hit
+        # pytest-timeout's >60s kill in CI shards 2 of 3.11/3.12. Sleeping
+        # here hands the lock back so the request thread always makes
+        # progress between reads.
+        time.sleep(0.0005)
+
+    monkeypatch.setattr(profiles, "profile_scope_for_request_read", fake_scope)
+    monkeypatch.setattr(routes, "profile_scope_for_request_read", fake_scope)
+    monkeypatch.setattr(config, "get_config", fake_get_config)
+    monkeypatch.setattr(routes, "get_config", fake_get_config)
+    monkeypatch.setattr(config, "get_config_snapshot", fake_get_config_snapshot)
+    monkeypatch.setattr(routes, "get_config_snapshot", fake_get_config_snapshot)
+    monkeypatch.setattr(
+        config, "resolve_model_reasoning_efforts", lambda *a, **k: list(config.VALID_REASONING_EFFORTS)
+    )
+
+    stop = threading.Event()
+
+    def reader():
+        while not stop.is_set():
+            default_profile_read()
+
+    reader_thread = threading.Thread(target=reader, daemon=True)
+    reader_thread.start()
+    failures = []
+    try:
+        for _ in range(200):
+            try:
+                settings = gateway_chat._gateway_request_settings_for_session(
+                    SimpleNamespace(profile="analyst"), model="test-model"
+                )
+                effort = routes._runner_reasoning_effort_for_session(
+                    SimpleNamespace(profile="analyst"), model="test-model"
+                )
+            except Exception as exc:
+                failures.append(f"raised {exc!r}")
+                break
+            if settings[1] != "high":
+                failures.append(f"gateway resolved {settings[1]!r}")
+                break
+            if effort != "high":
+                failures.append(f"runner resolved {effort!r}")
+                break
+    finally:
+        stop.set()
+        reader_thread.join(timeout=5)
+
+    assert not failures, failures[0]
+
+
+def test_reasoning_coercion_uses_the_captured_snapshot(monkeypatch):
+    """Coercion resolves the ladder from the snapshot, not the shared cache.
+
+    A concurrent default-profile reload replaces the process-global cache with
+    a narrower ladder for the same model; consulting it degraded "high" to
+    "low" even after the settings copy (re-gate probe, api/config.py:5838).
+    """
+    from api import config
+    from api.gateway_chat import _gateway_reasoning_effort_for_request
+
+    snapshot = {
+        "agent": {"reasoning_effort": "high"},
+        "providers": {
+            "test-provider": {
+                "models": {"test-model": {"reasoning_efforts": ["none", "low", "high"]}}
+            }
+        },
+    }
+    # The raced global cache: the default profile's narrower ladder.
+    monkeypatch.setattr(
+        config,
+        "cfg",
+        {
+            "providers": {
+                "test-provider": {
+                    "models": {"test-model": {"reasoning_efforts": ["none", "low"]}}
+                }
+            }
+        },
+    )
+
+    assert _gateway_reasoning_effort_for_request(
+        snapshot,
+        model="test-model",
+        model_provider="test-provider",
+    ) == "high"
+
+
+@pytest.mark.parametrize("analyst_lane", ["gateway", "runner"])
+def test_named_profile_request_leaves_the_process_env_alone(monkeypatch, tmp_path, analyst_lane):
+    """A named-profile request must not re-route a default-profile one.
+
+    ``profile_scope_for_detached_worker`` mirrors the profile env into the
+    process-wide ``os.environ`` for detached agent bodies. Running it on a
+    request thread let a default-profile request that resolved
+    ``_gateway_base_url()`` / ``_gateway_api_key()`` in between use the named
+    profile's Gateway endpoint and key (re-gate round 7). The read-only profile
+    scope must keep both lanes on their own ``.env``, and must not touch
+    ``os.environ`` while a named-profile request is being resolved.
+    """
+    from api import config, gateway_chat, routes
+    import api.profiles as profiles
+
+    analyst_home = tmp_path / "profiles" / "analyst"
+    analyst_home.mkdir(parents=True)
+    (analyst_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://analyst-gw.test\n"
+        "HERMES_WEBUI_GATEWAY_API_KEY=analyst-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://root-gw.test")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "root-key")
+    # The default-profile lane resolves from the launcher snapshot bound for
+    # the request, not from live os.environ.
+    monkeypatch.setitem(
+        profiles._INITIAL_PROCESS_ENV,
+        "HERMES_WEBUI_GATEWAY_BASE_URL",
+        "http://root-gw.test",
+    )
+    monkeypatch.setitem(
+        profiles._INITIAL_PROCESS_ENV,
+        "HERMES_WEBUI_GATEWAY_API_KEY",
+        "root-key",
+    )
+    monkeypatch.setattr(
+        config,
+        "resolve_model_reasoning_efforts",
+        lambda *a, **k: list(config.VALID_REASONING_EFFORTS),
+    )
+
+    analyst_thread = threading.current_thread()
+    analyst_in_scope = threading.Event()
+    default_resolved = threading.Event()
+    resolved = {}
+
+    def gated_snapshot():
+        snapshot = {"agent": {"reasoning_effort": "high"}}
+        if threading.current_thread() is analyst_thread:
+            # This call is made from inside the profile scope: hold the analyst
+            # lane there until the default-profile lane has resolved.
+            analyst_in_scope.set()
+            assert default_resolved.wait(timeout=5), "default-profile lane never resolved"
+        return snapshot
+
+    monkeypatch.setattr(config, "get_config_snapshot", gated_snapshot)
+    monkeypatch.setattr(routes, "get_config_snapshot", gated_snapshot)
+
+    def default_profile_lane():
+        assert analyst_in_scope.wait(timeout=5), "named-profile lane never entered its scope"
+        settings = gateway_chat._gateway_request_settings_for_session(
+            SimpleNamespace(profile="default"),
+            model="test-model",
+            model_provider="openai",
+        )
+        resolved["default"] = (settings[2], settings[3])
+        resolved["default_environ"] = os.environ.get("HERMES_WEBUI_GATEWAY_BASE_URL")
+        default_resolved.set()
+
+    reader = threading.Thread(target=default_profile_lane)
+    reader.start()
+    try:
+        if analyst_lane == "gateway":
+            settings = gateway_chat._gateway_request_settings_for_session(
+                SimpleNamespace(profile="analyst"),
+                model="test-model",
+                model_provider="openai",
+            )
+            resolved["analyst"] = (settings[2], settings[3])
+        else:
+            routes._runner_reasoning_effort_for_session(
+                SimpleNamespace(profile="analyst"),
+                model="test-model",
+                model_provider="openai",
+            )
+    finally:
+        default_resolved.set()
+        reader.join(timeout=5)
+
+    assert not reader.is_alive()
+    assert resolved["default_environ"] == "http://root-gw.test"
+    assert resolved["default"] == ("http://root-gw.test", "root-key")
+    if analyst_lane == "gateway":
+        assert resolved["analyst"] == ("http://analyst-gw.test", "analyst-key")
+    assert os.environ["HERMES_WEBUI_GATEWAY_BASE_URL"] == "http://root-gw.test"
+
+
+@pytest.mark.parametrize("analyst_lane", ["gateway", "runner"])
+def test_named_profile_lane_keeps_lmstudio_env_key_on_its_own_snapshot(
+    monkeypatch, tmp_path, analyst_lane
+):
+    """An LM Studio key that only the profile's ``.env`` holds must still be sent.
+
+    The read-only scope binds the profile env per thread instead of mirroring it
+    into ``os.environ``, so the probe key has to come from that binding
+    (``_thread_local_env_value``). Otherwise the process env's key — the wrong
+    profile's credential — would be forwarded to this profile's endpoint.
+    """
+    from api import config, gateway_chat, routes
+    import api.profiles as profiles
+
+    analyst_home = tmp_path / "profiles" / "analyst"
+    analyst_home.mkdir(parents=True)
+    (analyst_home / ".env").write_text("LM_API_KEY=analyst-env-key\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setenv("LM_API_KEY", "process-env-key")
+
+    analyst_cfg = {
+        "agent": {"reasoning_effort": "high"},
+        "model": {"provider": "lmstudio", "base_url": "http://analyst-lm.test/v1"},
+    }
+    monkeypatch.setattr(config, "cfg", copy.deepcopy(analyst_cfg))
+    monkeypatch.setattr(config, "get_config_snapshot", lambda: copy.deepcopy(analyst_cfg))
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: copy.deepcopy(analyst_cfg))
+
+    probes = []
+
+    def fake_probe(_model, base_url, *, api_key=None, timeout=5.0):
+        probes.append((base_url, api_key))
+        return ["off", "low", "high"]
+
+    monkeypatch.setattr(config, "_lmstudio_model_reasoning_options", fake_probe)
+
+    if analyst_lane == "gateway":
+        settings = gateway_chat._gateway_request_settings_for_session(
+            SimpleNamespace(profile="analyst"),
+            model="test-model",
+            model_provider="lmstudio",
+        )
+        assert settings[1] == "high"
+    else:
+        assert routes._runner_reasoning_effort_for_session(
+            SimpleNamespace(profile="analyst"),
+            model="test-model",
+            model_provider="lmstudio",
+        ) == "high"
+
+    assert probes == [("http://analyst-lm.test/v1", "analyst-env-key")]
+
+
+@pytest.mark.parametrize(
+    ("profile_key_env", "deployment_key_env", "expected_key"),
+    (
+        (
+            "HERMES_WEBUI_GATEWAY_API_KEY=profile-canonical\n"
+            "API_SERVER_KEY=profile-alias\n",
+            {
+                "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-canonical",
+                "API_SERVER_KEY": "deployment-alias",
+            },
+            "profile-canonical",
+        ),
+        (
+            "API_SERVER_KEY=profile-alias\n",
+            {
+                "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-canonical",
+                "API_SERVER_KEY": "deployment-alias",
+            },
+            "deployment-canonical",
+        ),
+        (
+            "",
+            {
+                "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-canonical",
+                "API_SERVER_KEY": "deployment-alias",
+            },
+            "deployment-canonical",
+        ),
+        (
+            "",
+            {"API_SERVER_KEY": "deployment-alias"},
+            "deployment-alias",
+        ),
+    ),
+)
+def test_named_profile_gateway_settings_inherit_operator_defaults(
+    monkeypatch, tmp_path, profile_key_env, deployment_key_env, expected_key
+):
+    """A sparse profile overrides deployment Gateway settings only when explicit.
+
+    The canonical launcher key outranks a profile's ``API_SERVER_KEY`` alias on
+    the shared Gateway URL: a profile that only carries the alias spelling (the
+    Agent clones the root ``.env`` into new profiles) is not an explicit choice
+    for this deployment's Gateway, so the launcher credential still wins.
+    """
+    from api import config, gateway_chat
+    import api.profiles as profiles
+
+    analyst_home = tmp_path / "profiles" / "analyst"
+    analyst_home.mkdir(parents=True)
+    (analyst_home / ".env").write_text(
+        profile_key_env,
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(
+        gateway_chat,
+        "_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://deployment-gw.test",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+            **deployment_key_env,
+        },
+    )
+    monkeypatch.setattr(config, "get_config_snapshot", lambda: {})
+
+    settings = gateway_chat._gateway_request_settings_for_session(
+        SimpleNamespace(profile="analyst")
+    )
+
+    assert settings[2] == "http://deployment-gw.test"
+    assert settings[3] == expected_key
+    assert settings[5] is True
+
+
+def test_named_profile_gateway_settings_use_one_deployment_snapshot(monkeypatch):
+    """A reload cannot mix the old deployment URL with the new credential."""
+    from api import gateway_chat
+
+    old_deployment = {
+        "HERMES_WEBUI_GATEWAY_BASE_URL": "http://old-gw.test",
+        "HERMES_WEBUI_GATEWAY_API_KEY": "old-key",
+    }
+    new_deployment = {
+        "HERMES_WEBUI_GATEWAY_BASE_URL": "http://new-gw.test",
+        "HERMES_WEBUI_GATEWAY_API_KEY": "new-key",
+    }
+
+    class ReloadDuringCopy:
+        def keys(self):
+            return old_deployment.keys()
+
+        def __getitem__(self, key):
+            value = old_deployment[key]
+            if key == "HERMES_WEBUI_GATEWAY_API_KEY":
+                gateway_chat._GATEWAY_DEPLOYMENT_ENV = new_deployment
+            return value
+
+        def get(self, key, default=None):
+            return old_deployment.get(key, default)
+
+    monkeypatch.setattr(
+        gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", ReloadDuringCopy()
+    )
+
+    request_env = gateway_chat._gateway_request_environ({})
+
+    assert gateway_chat._GATEWAY_DEPLOYMENT_ENV is new_deployment
+    assert request_env["HERMES_WEBUI_GATEWAY_BASE_URL"] == "http://old-gw.test"
+    assert request_env["HERMES_WEBUI_GATEWAY_API_KEY"] == "old-key"
+
+
+def test_runtime_dotenv_reload_refreshes_the_deployment_snapshot(monkeypatch, tmp_path):
+    """A runtime _reload_dotenv() must refresh the deployment Gateway snapshot.
+
+    Onboarding apply writes the new endpoint, key and runs flag and reloads the
+    process profile's dotenv. The default profile reads them live, but a sparse
+    named profile used to keep the import-time snapshot values and authenticate
+    with the stale credential (re-gate: the local receiver accepted the updated
+    key and rejected the old one). A second reload must also drop keys the new
+    dotenv no longer defines. The whole environment preimage is restored around
+    the mutation window, so the synthetic values cannot leak into later tests.
+    """
+    from api import config, gateway_chat
+    import api.profiles as profiles
+
+    reload_keys = (
+        "HERMES_WEBUI_GATEWAY_BASE_URL",
+        "HERMES_WEBUI_GATEWAY_API_KEY",
+        "HERMES_WEBUI_GATEWAY_USE_RUNS_API",
+    )
+    analyst_home = tmp_path / "profiles" / "analyst"
+    analyst_home.mkdir(parents=True)
+    (analyst_home / ".env").write_text("", encoding="utf-8")
+
+    # The import-time snapshot holds the pre-reload deployment values.
+    monkeypatch.setattr(
+        gateway_chat,
+        "_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://old-gw.test",
+            "HERMES_WEBUI_GATEWAY_API_KEY": "old-key",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        },
+    )
+    monkeypatch.setattr(config, "get_config_snapshot", lambda: {})
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(profiles, "_INITIAL_GATEWAY_DEPLOYMENT_ENV", {})
+
+    # Restore the full environment preimage, not just the three reload keys:
+    # _reload_dotenv() also writes and clears the alias spelling and can drop
+    # other previously tracked keys, so a partial restore leaks into later tests.
+    pre_loaded_keys = set(profiles._loaded_profile_env_keys)
+    with _restored_process_env():
+        try:
+            for key in reload_keys:
+                os.environ.pop(key, None)
+
+            # Runtime reload: the process profile's .env now defines the new
+            # endpoint, key and runs flag.
+            (tmp_path / ".env").write_text(
+                "HERMES_WEBUI_GATEWAY_BASE_URL=http://new-gw.test\n"
+                "HERMES_WEBUI_GATEWAY_API_KEY=new-key\n"
+                "HERMES_WEBUI_GATEWAY_USE_RUNS_API=1\n",
+                encoding="utf-8",
+            )
+            profiles._reload_dotenv(tmp_path)
+
+            settings = gateway_chat._gateway_request_settings_for_session(
+                SimpleNamespace(profile="analyst")
+            )
+            assert settings[2] == "http://new-gw.test"
+            assert settings[3] == "new-key"
+            assert settings[5] is True
+
+            # A second reload must drop keys the new dotenv no longer defines.
+            (tmp_path / ".env").write_text(
+                "HERMES_WEBUI_GATEWAY_BASE_URL=http://newer-gw.test\n",
+                encoding="utf-8",
+            )
+            profiles._reload_dotenv(tmp_path)
+
+            refreshed = gateway_chat._GATEWAY_DEPLOYMENT_ENV
+            assert refreshed.get("HERMES_WEBUI_GATEWAY_BASE_URL") == "http://newer-gw.test"
+            assert "HERMES_WEBUI_GATEWAY_API_KEY" not in refreshed
+            assert "HERMES_WEBUI_GATEWAY_USE_RUNS_API" not in refreshed
+        finally:
+            profiles._loaded_profile_env_keys = pre_loaded_keys
+
+
+def test_worker_mirrors_never_rewrite_the_deployment_snapshot(monkeypatch, tmp_path):
+    """Temporary worker mirrors must not leak into the deployment snapshot.
+
+    ``profile_env_for_background_worker`` mirrors a named profile's env into
+    ``os.environ`` for the worker body only. The snapshot exists so request
+    lanes never read such a mirror; only the permanent ``_reload_dotenv`` path
+    may rewrite it, so the mirror body and its exit leave it untouched.
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    analyst_home = tmp_path / "profiles" / "analyst"
+    analyst_home.mkdir(parents=True)
+    (analyst_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://analyst-mirror.test\n"
+        "HERMES_WEBUI_GATEWAY_API_KEY=analyst-mirror-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    deployment = {
+        "HERMES_WEBUI_GATEWAY_BASE_URL": "http://deployment-gw.test",
+        "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+    }
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", dict(deployment))
+
+    with profiles.profile_env_for_background_worker("analyst", "test mirror"):
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV == deployment
+
+    assert gateway_chat._GATEWAY_DEPLOYMENT_ENV == deployment
+
+
+@contextmanager
+def _restored_process_env():
+    """Keep os.environ intact: _reload_dotenv writes it directly."""
+    saved = dict(os.environ)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def _write_gateway_config(home, url: str) -> None:
+    """Compose a real ``config.yaml`` selecting a Gateway URL for one home."""
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.yaml").write_text(
+        f"webui_gateway_base_url: {url}\n", encoding="utf-8"
+    )
+
+
+def _pin_scoped_config_read(monkeypatch) -> None:
+    """Make scoped config reads resolve the on-disk profile YAML.
+
+    The suite's global ``HERMES_CONFIG_PATH`` would pin every read to the
+    shared test config, so a scoped read would never see the profile's own
+    ``config.yaml``. The owner-config reader resolves from the launcher
+    snapshot, so drop the key there as well. Pin the cache globals empty so no
+    other profile's cached structure leaks into the scoped read.
+    """
+    import api.config as config
+    import api.profiles as profiles
+
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    monkeypatch.delitem(
+        profiles._INITIAL_PROCESS_ENV, "HERMES_CONFIG_PATH", raising=False
+    )
+    cache = {}
+    monkeypatch.setattr(config, "_cfg_cache", cache)
+    monkeypatch.setattr(config, "cfg", cache)
+    monkeypatch.setattr(config, "_cfg_path", None)
+    monkeypatch.setattr(config, "_cfg_mtime", 0.0)
+    monkeypatch.setattr(config, "_cfg_fingerprint", None)
+
+
+def test_owner_dotenv_removal_restores_launcher_gateway_fallback(monkeypatch, tmp_path):
+    """Removing an owner override reveals the stable launcher value again."""
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {"HERMES_WEBUI_GATEWAY_API_KEY": "launcher-key"},
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    (tmp_path / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_API_KEY=dotenv-key\n", encoding="utf-8"
+    )
+
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV[
+            "HERMES_WEBUI_GATEWAY_API_KEY"
+        ] == "dotenv-key"
+
+        (tmp_path / ".env").write_text("", encoding="utf-8")
+        profiles._reload_dotenv(tmp_path)
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV[
+            "HERMES_WEBUI_GATEWAY_API_KEY"
+        ] == "launcher-key"
+        assert os.environ["HERMES_WEBUI_GATEWAY_API_KEY"] == "launcher-key"
+
+
+def test_owner_alias_only_gateway_key_keeps_the_launcher_canonical(monkeypatch, tmp_path):
+    """A dotenv alias must not demote an explicit launcher Gateway key.
+
+    The launcher exports ``HERMES_WEBUI_GATEWAY_API_KEY`` while the root
+    ``~/.hermes/.env`` holds the Agent's own ``API_SERVER_KEY`` (the normal
+    install). Mirroring that alias onto the canonical name made every reader
+    prefer the dotenv key — the default profile and sparse named profiles sent
+    it to the shared Gateway and were rejected with 401. The launcher's
+    explicit canonical key keeps the canonical spelling; the dotenv keeps only
+    the alias spelling it actually set.
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {"HERMES_WEBUI_GATEWAY_API_KEY": "launcher-old-key"},
+    )
+    # The launcher exports the canonical key at process start; the reload layer
+    # only restores keys it removed, so the fixture has to seed it.
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "launcher-old-key")
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    (tmp_path / ".env").write_text(
+        "API_SERVER_KEY=alias-only-key\n", encoding="utf-8"
+    )
+
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV[
+            "HERMES_WEBUI_GATEWAY_API_KEY"
+        ] == "launcher-old-key"
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV["API_SERVER_KEY"] == "alias-only-key"
+        assert os.environ["HERMES_WEBUI_GATEWAY_API_KEY"] == "launcher-old-key"
+        assert os.environ["API_SERVER_KEY"] == "alias-only-key"
+        assert gateway_chat._gateway_api_key() == "launcher-old-key"
+
+
+def test_owner_alias_only_gateway_key_owns_the_group_without_a_launcher_canonical(
+    monkeypatch, tmp_path
+):
+    """Without a launcher canonical key the alias-only dotenv still owns the group.
+
+    Readers prefer the canonical spelling, so an alias-only dotenv has to mirror
+    onto both names in that case; otherwise the credential the operator just set
+    would be invisible to ``_gateway_api_key()``.
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(profiles, "_INITIAL_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    (tmp_path / ".env").write_text(
+        "API_SERVER_KEY=alias-only-key\n", encoding="utf-8"
+    )
+
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV[
+            "HERMES_WEBUI_GATEWAY_API_KEY"
+        ] == "alias-only-key"
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV["API_SERVER_KEY"] == "alias-only-key"
+        assert os.environ["HERMES_WEBUI_GATEWAY_API_KEY"] == "alias-only-key"
+        assert os.environ["API_SERVER_KEY"] == "alias-only-key"
+        assert gateway_chat._gateway_api_key() == "alias-only-key"
+
+        # Switching back to the canonical spelling keeps the same group owner.
+        (tmp_path / ".env").write_text(
+            "HERMES_WEBUI_GATEWAY_API_KEY=canonical-now\n", encoding="utf-8"
+        )
+        profiles._reload_dotenv(tmp_path)
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV["API_SERVER_KEY"] == "canonical-now"
+
+
+@pytest.mark.parametrize(
+    ("profile_name", "profile_env_body", "deployment_url"),
+    (
+        (None, None, "http://shared-gw.test"),
+        ("sparse", "", "http://shared-gw.test"),
+        ("cloned", "API_SERVER_KEY=root-copied-key\n", "http://shared-gw.test"),
+        (
+            "cloned-slash",
+            "HERMES_WEBUI_GATEWAY_BASE_URL=http://shared-gw.test/\n"
+            "API_SERVER_KEY=root-copied-key\n",
+            "http://shared-gw.test",
+        ),
+        (
+            "cloned-host-case",
+            "HERMES_WEBUI_GATEWAY_BASE_URL=http://SHARED-GW.TEST:8642\n"
+            "API_SERVER_KEY=root-copied-key\n",
+            "http://shared-gw.test:8642",
+        ),
+        (
+            "cloned-default-port",
+            "HERMES_WEBUI_GATEWAY_BASE_URL=http://SHARED-GW.TEST:80/\n"
+            "API_SERVER_KEY=root-copied-key\n",
+            "http://shared-gw.test",
+        ),
+    ),
+)
+def test_launcher_gateway_key_wins_on_the_shared_url(
+    monkeypatch, tmp_path, profile_name, profile_env_body, deployment_url
+):
+    """The launcher credential survives an owner alias and a cloned profile .env.
+
+    Startup state: the launcher exports the shared Gateway URL and
+    ``HERMES_WEBUI_GATEWAY_API_KEY``, and the root ``~/.hermes/.env`` carries
+    the Agent's own ``API_SERVER_KEY``. The Agent clones that root ``.env`` into
+    every new profile, so a cloned profile's copied alias must not replace the
+    launcher credential on the profile's shared URL (the receiver answers 401
+    for the copied key). Asserted on the Authorization header the real worker
+    puts on the wire, for the default profile, a sparse named profile and a
+    cloned named profile.
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    (tmp_path / ".env").write_text(
+        "API_SERVER_KEY=root-copied-key\n", encoding="utf-8"
+    )
+    if profile_env_body is not None:
+        (tmp_path / "profiles" / profile_name).mkdir(parents=True)
+        (tmp_path / "profiles" / profile_name / ".env").write_text(
+            profile_env_body, encoding="utf-8"
+        )
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": deployment_url,
+            "HERMES_WEBUI_GATEWAY_API_KEY": "launcher-key",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        },
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+
+    captured = {}
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV[
+            "HERMES_WEBUI_GATEWAY_API_KEY"
+        ] == "launcher-key"
+        _capture_gateway_wire_body(
+            None,
+            session_profile=profile_name,
+            real_profile_scope=True,
+            gateway_env={
+                "HERMES_WEBUI_GATEWAY_BASE_URL": deployment_url,
+                "HERMES_WEBUI_GATEWAY_API_KEY": "launcher-key",
+            },
+            captured=captured,
+        )
+
+    assert captured["headers"]["Authorization"] == "Bearer launcher-key"
+
+
+def test_dedicated_profile_url_keeps_the_profile_alias_credential(monkeypatch, tmp_path):
+    """A profile's own Gateway URL keeps that URL's credential group.
+
+    The shared-URL precedence (launcher canonical over a profile alias) must
+    not leak into a dedicated profile URL: the deployment canonical key was
+    sent to the profile's own receiver while the profile's explicit alias key
+    was ignored. The destination and the Authorization value must both follow
+    the profile's explicit URL and key choice; a shared URL keeps the
+    launcher-first order.
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    analyst_home = tmp_path / "profiles" / "analyst"
+    analyst_home.mkdir(parents=True)
+    (analyst_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://analyst-gw.test\n"
+        "API_SERVER_KEY=analyst-key\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://deployment-gw.test",
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        },
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+
+    captured = {}
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV[
+            "HERMES_WEBUI_GATEWAY_API_KEY"
+        ] == "deployment-key"
+        _capture_gateway_wire_body(
+            None,
+            session_profile="analyst",
+            real_profile_scope=True,
+            gateway_env={
+                "HERMES_WEBUI_GATEWAY_BASE_URL": "http://deployment-gw.test",
+                "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+            },
+            captured=captured,
+        )
+
+    assert captured["url"] == "http://analyst-gw.test/v1/runs"
+    assert captured["headers"]["Authorization"] == "Bearer analyst-key"
+
+
+def test_dedicated_profile_url_without_profile_key_sends_no_credential(
+    monkeypatch, tmp_path
+):
+    """A dedicated receiver must not receive the deployment Gateway secret."""
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    analyst_home = tmp_path / "profiles" / "analyst"
+    analyst_home.mkdir(parents=True)
+    (analyst_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://deployment-gw.test/analyst\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://deployment-gw.test",
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        },
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+
+    captured = {}
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        _capture_gateway_wire_body(
+            None,
+            session_profile="analyst",
+            real_profile_scope=True,
+            gateway_env={
+                "HERMES_WEBUI_GATEWAY_BASE_URL": "http://deployment-gw.test",
+                "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+            },
+            captured=captured,
+        )
+
+    assert captured["url"] == "http://deployment-gw.test/analyst/v1/runs"
+    assert "Authorization" not in captured["headers"]
+
+
+def test_shared_default_url_without_a_deployment_url_keeps_the_launcher_key(
+    monkeypatch, tmp_path
+):
+    """An unset deployment URL still means the built-in default receiver.
+
+    The launcher may supply only the Gateway key and leave the URL to the
+    request path's default (``http://127.0.0.1:8642``). A named profile that
+    spells that same default URL without a key of its own is on the shared
+    receiver and must keep the launcher credential — treating the missing
+    deployment URL as a different receiver removed both key names and the
+    shared Gateway lost its key (re-gate on ``f7bb9a652``).
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    profile_home = tmp_path / "profiles" / "default-url"
+    profile_home.mkdir(parents=True)
+    (profile_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://127.0.0.1:8642\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_API_KEY": "launcher-key",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        },
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+
+    captured = {}
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        assert "HERMES_WEBUI_GATEWAY_BASE_URL" not in gateway_chat._GATEWAY_DEPLOYMENT_ENV
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV[
+            "HERMES_WEBUI_GATEWAY_API_KEY"
+        ] == "launcher-key"
+        _capture_gateway_wire_body(
+            None,
+            session_profile="default-url",
+            real_profile_scope=True,
+            gateway_env={
+                "HERMES_WEBUI_GATEWAY_API_KEY": "launcher-key",
+            },
+            captured=captured,
+        )
+
+    assert captured["url"] == "http://127.0.0.1:8642/v1/runs"
+    assert captured["headers"]["Authorization"] == "Bearer launcher-key"
+
+
+def test_configured_deployment_url_keeps_its_key_off_the_default_receiver(
+    monkeypatch, tmp_path
+):
+    """A config-set deployment URL must not leak its key to the default receiver.
+
+    The deployment sets ``webui_gateway_base_url`` in the process-owner config
+    while supplying only its key through the environment. The owner's
+    effective URL is then the configured remote Gateway — not the request
+    path's built-in default. A named profile that selects
+    ``http://127.0.0.1:8642`` without a key of its own reaches a different
+    receiver and must not carry the deployment credential (security finding
+    on ``2e1f8a1e3``).
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    _write_gateway_config(tmp_path, "http://remote-gw.test")
+    profile_home = tmp_path / "profiles" / "localhost-split"
+    profile_home.mkdir(parents=True)
+    (profile_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://127.0.0.1:8642\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        },
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+    _pin_scoped_config_read(monkeypatch)
+
+    captured = {}
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        assert "HERMES_WEBUI_GATEWAY_BASE_URL" not in gateway_chat._GATEWAY_DEPLOYMENT_ENV
+        _capture_gateway_wire_body(
+            None,
+            session_profile="localhost-split",
+            real_profile_scope=True,
+            real_config=True,
+            gateway_env={"HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key"},
+            captured=captured,
+        )
+
+    assert captured["url"] == "http://127.0.0.1:8642/v1/runs"
+    assert "Authorization" not in captured["headers"]
+
+
+@pytest.mark.parametrize(
+    "profile_config_url",
+    ("http://remote-gw.test", None),
+    ids=("config-and-env", "env-only"),
+)
+def test_configured_deployment_url_is_shared_when_the_profile_selects_it(
+    monkeypatch, tmp_path, profile_config_url
+):
+    """Selecting the owner's configured URL is still the shared receiver.
+
+    With ``webui_gateway_base_url`` set in the process-owner config, a named
+    profile that selects that same URL keeps the deployment credential; only
+    a genuinely different endpoint is dedicated. The env-only case has no URL
+    in the profile's YAML at all — the read must still resolve the deployment
+    from the owner's config rather than treating it as the localhost default.
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    _write_gateway_config(tmp_path, "http://remote-gw.test")
+    profile_home = tmp_path / "profiles" / "config-url-shared"
+    profile_home.mkdir(parents=True)
+    if profile_config_url:
+        _write_gateway_config(profile_home, profile_config_url)
+    (profile_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://remote-gw.test\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        },
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+    _pin_scoped_config_read(monkeypatch)
+
+    captured = {}
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        _capture_gateway_wire_body(
+            None,
+            session_profile="config-url-shared",
+            real_profile_scope=True,
+            real_config=True,
+            gateway_env={"HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key"},
+            captured=captured,
+        )
+
+    assert captured["url"] == "http://remote-gw.test/v1/runs"
+    assert captured["headers"]["Authorization"] == "Bearer deployment-key"
+
+
+@pytest.mark.parametrize(
+    "profile_env_url",
+    ("http://analyst-gw.test", None),
+    ids=("config-and-env", "config-only"),
+)
+def test_config_owner_url_stays_off_a_different_named_profile_receiver(
+    monkeypatch, tmp_path, profile_env_url
+):
+    """A config-set owner URL never extends its key to another receiver.
+
+    Deployment ENV carries only the key; the process-owner ``config.yaml``
+    selects the remote deployment Gateway. The named profile selects its own
+    endpoint in its config (and, in the first case, also .env) without a key
+    of its own: it reaches a different receiver than the deployment owner and
+    must not carry the deployment credential (source-confirmed authority
+    mismatch on ``22fd0f8c``).
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    _write_gateway_config(tmp_path, "http://remote-gw.test")
+    profile_home = tmp_path / "profiles" / "config-owner-split"
+    _write_gateway_config(profile_home, "http://analyst-gw.test")
+    (profile_home / ".env").write_text(
+        f"HERMES_WEBUI_GATEWAY_BASE_URL={profile_env_url}\n" if profile_env_url else "",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        },
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+    _pin_scoped_config_read(monkeypatch)
+
+    captured = {}
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        _capture_gateway_wire_body(
+            None,
+            session_profile="config-owner-split",
+            real_profile_scope=True,
+            real_config=True,
+            gateway_env={"HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key"},
+            captured=captured,
+        )
+
+    assert captured["url"] == "http://analyst-gw.test/v1/runs"
+    assert "Authorization" not in captured["headers"]
+
+
+def test_config_only_owner_url_routes_a_sparse_named_profile(monkeypatch, tmp_path):
+    """A config-only deployment URL must route a sparse named profile's request.
+
+    Deployment ENV carries only the key; the process-owner ``config.yaml``
+    names the Gateway. The named profile supplies neither an environment URL
+    nor a profile config, so the owner's URL is the deployment authority: the
+    request has to reach that receiver with the deployment credential rather
+    than the built-in localhost default without one (re-gate round 12, item 1).
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    _write_gateway_config(tmp_path, "http://remote-gw.test")
+    profile_home = tmp_path / "profiles" / "config-only-sparse"
+    profile_home.mkdir(parents=True)
+    (profile_home / ".env").write_text("", encoding="utf-8")
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        },
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+    _pin_scoped_config_read(monkeypatch)
+
+    captured = {}
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        assert (
+            "HERMES_WEBUI_GATEWAY_BASE_URL"
+            not in gateway_chat._GATEWAY_DEPLOYMENT_ENV
+        )
+        _capture_gateway_wire_body(
+            None,
+            session_profile="config-only-sparse",
+            real_profile_scope=True,
+            real_config=True,
+            gateway_env={"HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key"},
+            captured=captured,
+        )
+
+    assert captured["url"] == "http://remote-gw.test/v1/runs"
+    assert captured["headers"]["Authorization"] == "Bearer deployment-key"
+
+
+@pytest.mark.parametrize(
+    "owner_flag, profile_flag, expected_path",
+    (
+        ("true", None, "/v1/runs"),
+        ("true", "false", "/v1/chat/completions"),
+        ("false", None, "/v1/chat/completions"),
+    ),
+    ids=("profile-omits", "profile-false", "owner-false"),
+)
+def test_config_only_runs_flag_reaches_a_sparse_named_profile(
+    monkeypatch, tmp_path, owner_flag, profile_flag, expected_path
+):
+    """The owner's config-only runs-API flag governs a sparse named profile.
+
+    No environment value exists, so the root ``config.yaml`` is the only
+    source. A sparse named profile that omits the flag inherits the owner's
+    choice — otherwise durable-run recovery silently turns off — while an
+    explicit profile ``false`` and an owner ``false`` both stay on the legacy
+    transport (re-gate round 12, item 3).
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    (tmp_path / "config.yaml").write_text(
+        f"webui_gateway_use_runs_api: {owner_flag}\n", encoding="utf-8"
+    )
+    profile_home = tmp_path / "profiles" / "runs-flag-inherit"
+    profile_home.mkdir(parents=True)
+    if profile_flag:
+        (profile_home / "config.yaml").write_text(
+            f"webui_gateway_use_runs_api: {profile_flag}\n", encoding="utf-8"
+        )
+    (profile_home / ".env").write_text("", encoding="utf-8")
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {"HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key"},
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+    _pin_scoped_config_read(monkeypatch)
+
+    captured = {}
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        assert (
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
+            not in gateway_chat._GATEWAY_DEPLOYMENT_ENV
+        )
+        _capture_gateway_wire_body(
+            None,
+            session_profile="runs-flag-inherit",
+            use_runs_api=None,
+            expect_path=expected_path,
+            real_profile_scope=True,
+            real_config=True,
+            gateway_env={"HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key"},
+            captured=captured,
+        )
+
+    assert captured["url"].endswith(expected_path)
+
+
+def test_owner_config_placeholders_do_not_expand_from_named_profile_env(
+    monkeypatch, tmp_path
+):
+    """Owner URL identity must be resolved with the owner's environment.
+
+    Both configs deliberately use the same placeholder name.  Expanding the
+    owner's YAML while the named-profile request scope is active makes the two
+    distinct receivers appear identical and forwards the deployment key to the
+    profile-owned receiver.
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    _write_gateway_config(tmp_path, "${GATEWAY_URL}")
+    profile_home = tmp_path / "profiles" / "placeholder-split"
+    _write_gateway_config(profile_home, "${GATEWAY_URL}")
+    (tmp_path / ".env").write_text(
+        "GATEWAY_URL=http://owner-gw.test\n", encoding="utf-8"
+    )
+    (profile_home / ".env").write_text(
+        "GATEWAY_URL=http://analyst-gw.test\n", encoding="utf-8"
+    )
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        },
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+    _pin_scoped_config_read(monkeypatch)
+
+    captured = {}
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        _capture_gateway_wire_body(
+            None,
+            session_profile="placeholder-split",
+            real_profile_scope=True,
+            real_config=True,
+            gateway_env={"HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key"},
+            captured=captured,
+        )
+
+    assert captured["url"] == "http://analyst-gw.test/v1/runs"
+    assert "Authorization" not in captured["headers"]
+
+
+def test_owner_gateway_identity_honors_external_config_path(monkeypatch, tmp_path):
+    """An operator-pinned config path is authoritative for owner identity."""
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    # The home-local file intentionally names the profile receiver.  Ignoring
+    # HERMES_CONFIG_PATH would therefore misclassify it as shared and leak the
+    # deployment credential.
+    _write_gateway_config(tmp_path, "http://analyst-gw.test")
+    external_config = tmp_path / "operator" / "deployment.yaml"
+    _write_gateway_config(external_config.parent, "http://owner-gw.test")
+    (external_config.parent / "config.yaml").replace(external_config)
+    profile_home = tmp_path / "profiles" / "external-config-split"
+    profile_home.mkdir(parents=True)
+    (profile_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://analyst-gw.test\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        },
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+    _pin_scoped_config_read(monkeypatch)
+
+    captured = {}
+    with _restored_process_env():
+        monkeypatch.setenv("HERMES_CONFIG_PATH", str(external_config))
+        # The operator pin reaches owner-config expansion through the launcher
+        # snapshot, not live os.environ.
+        monkeypatch.setitem(
+            profiles._INITIAL_PROCESS_ENV,
+            "HERMES_CONFIG_PATH",
+            str(external_config),
+        )
+        profiles._reload_dotenv(tmp_path)
+        _capture_gateway_wire_body(
+            None,
+            session_profile="external-config-split",
+            real_profile_scope=True,
+            real_config=True,
+            gateway_env={"HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key"},
+            captured=captured,
+        )
+
+    assert captured["url"] == "http://analyst-gw.test/v1/runs"
+    assert "Authorization" not in captured["headers"]
+
+
+def test_named_session_uses_its_own_config_not_the_launchers_external_config(
+    monkeypatch, tmp_path
+):
+    """A launcher config override belongs to the process owner, not every profile."""
+    from api import config, gateway_chat
+    import api.profiles as profiles
+
+    beta_home = tmp_path / "profiles" / "beta"
+    beta_home.mkdir(parents=True)
+    (beta_home / ".env").write_text("API_SERVER_KEY=beta-key\n", encoding="utf-8")
+    _write_gateway_config(beta_home, "http://beta-gw.test")
+    launcher_config = tmp_path / "launcher.yaml"
+    launcher_config.write_text(
+        "webui_gateway_base_url: http://launcher-gw.test\n", encoding="utf-8"
+    )
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(profiles, "_PROCESS_OWNER_DOTENV", {})
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda name: beta_home if name == "beta" else tmp_path,
+    )
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(launcher_config))
+    monkeypatch.setitem(
+        profiles._INITIAL_PROCESS_ENV, "HERMES_CONFIG_PATH", str(launcher_config)
+    )
+    monkeypatch.setattr(
+        gateway_chat,
+        "_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "API_SERVER_KEY": "deployment-key",
+        },
+    )
+    cache = {}
+    monkeypatch.setattr(config, "_cfg_cache", cache)
+    monkeypatch.setattr(config, "cfg", cache)
+    monkeypatch.setattr(config, "_cfg_path", None)
+    monkeypatch.setattr(config, "_cfg_mtime", 0.0)
+    monkeypatch.setattr(config, "_cfg_fingerprint", None)
+
+    settings = gateway_chat._gateway_request_settings_for_session(
+        SimpleNamespace(profile="beta")
+    )
+
+    assert settings[2:4] == ("http://beta-gw.test", "beta-key")
+
+
+def test_profile_config_path_ignores_a_parked_workers_live_override(
+    monkeypatch, tmp_path
+):
+    """A temporary worker mirror cannot redirect the process owner's config."""
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    owner_config = tmp_path / "owner.yaml"
+    owner_config.write_text("webui_gateway_base_url: http://owner-gw.test\n", encoding="utf-8")
+    worker_config = tmp_path / "profiles" / "worker" / "config.yaml"
+    worker_config.parent.mkdir(parents=True)
+    worker_config.write_text("webui_gateway_base_url: http://worker-gw.test\n", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles, "_INITIAL_PROCESS_ENV", {"HERMES_CONFIG_PATH": str(owner_config)}
+    )
+    monkeypatch.setattr(profiles, "_PROCESS_OWNER_DOTENV", {})
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(worker_config))
+
+    assert gateway_chat._profile_config_path(tmp_path) == owner_config
+
+
+def test_launcher_gateway_url_outranks_a_named_profiles_yaml(monkeypatch, tmp_path):
+    """The exported deployment URL stays authoritative over profile YAML."""
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    beta_home = tmp_path / "profiles" / "beta"
+    beta_home.mkdir(parents=True)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://launcher-gw.test",
+            "HERMES_WEBUI_GATEWAY_API_KEY": "launcher-key",
+        },
+    )
+    monkeypatch.setattr(
+        gateway_chat,
+        "_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://launcher-gw.test",
+            "HERMES_WEBUI_GATEWAY_API_KEY": "launcher-key",
+        },
+    )
+
+    merged = gateway_chat._gateway_request_environ(
+        {"API_SERVER_KEY": "beta-key"},
+        config_data={"webui_gateway_base_url": "http://beta-gw.test"},
+        profile_home=beta_home,
+    )
+
+    assert gateway_chat._gateway_base_url({}, environ=merged) == "http://launcher-gw.test"
+    assert gateway_chat._gateway_api_key(environ=merged) == "launcher-key"
+
+
+@pytest.mark.parametrize(
+    ("initial_deployment", "expected_key"),
+    [
+        ({"API_SERVER_KEY": "old-key"}, "new-key"),
+        ({"HERMES_WEBUI_GATEWAY_API_KEY": "launcher-key"}, "launcher-key"),
+    ],
+)
+def test_process_owner_key_rotation_preserves_only_an_explicit_launcher_canonical_key(
+    monkeypatch, tmp_path, initial_deployment, expected_key
+):
+    """Fresh owner dotenv aliases beat cached aliases, not launcher canonicals."""
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(profiles, "_INITIAL_GATEWAY_DEPLOYMENT_ENV", initial_deployment)
+    monkeypatch.setattr(
+        gateway_chat,
+        "_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_API_KEY": (
+                initial_deployment.get("HERMES_WEBUI_GATEWAY_API_KEY") or "old-key"
+            ),
+            "API_SERVER_KEY": "old-key",
+        },
+    )
+
+    merged = gateway_chat._gateway_request_environ(
+        {"API_SERVER_KEY": "new-key"}, config_data={}, profile_home=tmp_path
+    )
+
+    assert gateway_chat._gateway_api_key(environ=merged) == expected_key
+
+
+def test_shared_gateway_deployment_alias_outranks_another_profiles_alias(
+    monkeypatch,
+):
+    """Another profile cannot replace a shared receiver's deployment alias."""
+    from api import gateway_chat
+
+    monkeypatch.setattr(
+        gateway_chat,
+        "_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://shared-gw.test",
+            "API_SERVER_KEY": "deployment-key",
+        },
+    )
+
+    merged = gateway_chat._gateway_request_environ(
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://shared-gw.test",
+            "API_SERVER_KEY": "beta-key",
+        },
+        config_data={},
+    )
+
+    assert gateway_chat._gateway_api_key(environ=merged) == "deployment-key"
+
+
+def test_profile_gateway_url_placeholder_uses_launcher_then_profile_env(
+    monkeypatch,
+):
+    """Launcher variables remain stable inputs to a named profile's URL template."""
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    monkeypatch.setitem(
+        profiles._INITIAL_PROCESS_ENV,
+        "OWNER_GATEWAY_URL",
+        "http://launcher-placeholder-gw.test",
+    )
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+
+    _, url, _ = gateway_chat._gateway_profile_endpoint(
+        {},
+        config_data={"webui_gateway_base_url": "${OWNER_GATEWAY_URL}"},
+    )
+
+    assert url == "http://launcher-placeholder-gw.test"
+
+
+def test_profile_gateway_url_reports_an_unresolved_placeholder(monkeypatch):
+    """A broken profile URL names the profile dotenv remediation."""
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    monkeypatch.delitem(profiles._INITIAL_PROCESS_ENV, "MISSING_GATEWAY_URL", raising=False)
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"gateway URL for profile 'beta'.*set it in that profile's \.env",
+    ):
+        gateway_chat._gateway_profile_endpoint(
+            {},
+            config_data={"webui_gateway_base_url": "${MISSING_GATEWAY_URL}"},
+            profile_name="beta",
+        )
+
+
+def test_unparseable_gateway_url_does_not_break_request_settings(monkeypatch):
+    """A spelling ``urlsplit`` rejects must not raise out of the overlay.
+
+    ``_gateway_endpoint_identity`` parses both URLs to pick shared vs
+    dedicated. An unparseable spelling (malformed IPv6 brackets) used to raise
+    from ``urlsplit`` and fail the whole request settings resolution before
+    the request path could report the bad URL — and a malformed deployment URL
+    broke even a named profile whose own dedicated URL was valid.
+    """
+    from api import gateway_chat
+
+    # A valid dedicated profile URL still resolves with its own credential
+    # group even when the deployment URL cannot be parsed.
+    monkeypatch.setattr(
+        gateway_chat,
+        "_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://[::1",
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+        },
+    )
+    merged = gateway_chat._gateway_request_environ(
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://analyst-gw.test",
+            "API_SERVER_KEY": "analyst-key",
+        }
+    )
+    assert merged["HERMES_WEBUI_GATEWAY_BASE_URL"] == "http://analyst-gw.test"
+    assert merged["HERMES_WEBUI_GATEWAY_API_KEY"] == "analyst-key"
+    assert merged["API_SERVER_KEY"] == "analyst-key"
+
+    # The same unparseable spelling on both sides keeps the historical
+    # stripped-string equality: the shared branch still resolves a key.
+    merged = gateway_chat._gateway_request_environ(
+        {"HERMES_WEBUI_GATEWAY_BASE_URL": "http://[::1"}
+    )
+    assert merged["HERMES_WEBUI_GATEWAY_API_KEY"] == "deployment-key"
+
+    # An unparseable profile spelling stays distinct from a parseable
+    # deployment URL: the deployment credential is not forwarded.
+    monkeypatch.setattr(
+        gateway_chat,
+        "_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://deployment-gw.test",
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+        },
+    )
+    merged = gateway_chat._gateway_request_environ(
+        {"HERMES_WEBUI_GATEWAY_BASE_URL": "http://[::1"}
+    )
+    assert "HERMES_WEBUI_GATEWAY_API_KEY" not in merged
+    assert "API_SERVER_KEY" not in merged
+
+
+@pytest.mark.parametrize(
+    ("apply_name", "body"),
+    (
+        (
+            "apply_onboarding_setup",
+            {
+                "provider": "lmstudio",
+                "model": "local-model",
+                "base_url": "http://127.0.0.1:1234/v1",
+                "api_key": "lm-key",
+            },
+        ),
+        (
+            "apply_self_hosted_provider_setup",
+            {
+                "provider": "lmstudio",
+                "model": "local-model",
+                "base_url": "http://127.0.0.1:1234/v1",
+                "api_key": "lm-key",
+            },
+        ),
+    ),
+)
+def test_named_profile_onboarding_cannot_replace_deployment_gateway(
+    monkeypatch, tmp_path, apply_name, body
+):
+    """Request-owned onboarding reloads must not publish deployment defaults."""
+    from api import gateway_chat, onboarding
+    import api.profiles as profiles
+
+    analyst_home = tmp_path / "profiles" / "analyst"
+    analyst_home.mkdir(parents=True)
+    (analyst_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://analyst-gw.test\n"
+        "API_SERVER_KEY=analyst-gateway-key\n"
+        "HERMES_WEBUI_GATEWAY_USE_RUNS_API=false\n",
+        encoding="utf-8",
+    )
+    deployment = {
+        "HERMES_WEBUI_GATEWAY_BASE_URL": "http://deployment-gw.test",
+        "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+        "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "true",
+    }
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(profiles, "_INITIAL_GATEWAY_DEPLOYMENT_ENV", dict(deployment))
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", dict(deployment))
+    monkeypatch.setattr(onboarding, "_get_active_hermes_home", lambda: analyst_home)
+    monkeypatch.setattr(onboarding, "_get_config_path", lambda: analyst_home / "config.yaml")
+    monkeypatch.setattr(onboarding, "reload_config", lambda: None)
+    monkeypatch.setattr(onboarding, "invalidate_models_cache", lambda: None)
+    monkeypatch.setattr(onboarding, "get_onboarding_status", lambda: {"ok": True})
+
+    with _restored_process_env():
+        getattr(onboarding, apply_name)(body)
+
+    assert gateway_chat._GATEWAY_DEPLOYMENT_ENV == deployment
+
+
+def test_owner_reload_during_worker_mirror_excludes_temporary_gateway_key(
+    monkeypatch, tmp_path
+):
+    """Owner reloads rebuild from stable sources, not a worker's process mirror."""
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    analyst_home = tmp_path / "profiles" / "analyst"
+    analyst_home.mkdir(parents=True)
+    (analyst_home / ".env").write_text(
+        "API_SERVER_KEY=temporary-worker-key\n", encoding="utf-8"
+    )
+    (tmp_path / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://owner-gw.test\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(profiles, "_INITIAL_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+
+    with _restored_process_env():
+        with profiles.profile_env_for_background_worker("analyst", "test mirror"):
+            assert os.environ.get("API_SERVER_KEY") == "temporary-worker-key"
+            profiles._reload_dotenv(tmp_path)
+            assert "API_SERVER_KEY" not in gateway_chat._GATEWAY_DEPLOYMENT_ENV
+
+        assert "API_SERVER_KEY" not in gateway_chat._GATEWAY_DEPLOYMENT_ENV
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV == {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://owner-gw.test"
+        }
+
+
+def test_named_profile_snapshot_expands_key_from_profile_env(monkeypatch, tmp_path):
+    """Raw config references expand inside the read-only profile scope."""
+    from api import config
+    import api.profiles as profiles
+
+    analyst_home = tmp_path / "profiles" / "analyst"
+    analyst_home.mkdir(parents=True)
+    (analyst_home / ".env").write_text("LM_API_KEY=analyst-key\n", encoding="utf-8")
+    (analyst_home / "config.yaml").write_text(
+        "model:\n  provider: lmstudio\n  api_key: ${LM_API_KEY}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setenv("LM_API_KEY", "process-key")
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    cache = {}
+    monkeypatch.setattr(config, "_cfg_cache", cache)
+    monkeypatch.setattr(config, "cfg", cache)
+    monkeypatch.setattr(config, "_cfg_path", None)
+    monkeypatch.setattr(config, "_cfg_fingerprint", None)
+
+    with profiles.profile_scope_for_request_read("analyst"):
+        snapshot = config.get_config_snapshot()
+
+    assert snapshot["model"]["api_key"] == "analyst-key"
+
+
+def test_scoped_snapshot_refreshes_the_shared_cache_for_inferred_providers(monkeypatch, tmp_path):
+    """A scoped read must refresh the shared cache before it returns.
+
+    ``_main_model_request_overrides`` infers a missing model provider through
+    ``resolve_model_provider``, which reads the module-level ``cfg``. The
+    scoped early return used to skip the cache refresh, so the inference ran
+    against another profile's cache and dropped ``service_tier: priority``
+    (re-gate item 2, api/config.py:480). Refresh-first keeps the inference on
+    the request's own profile.
+    """
+    from api import config
+    import api.profiles as profiles
+
+    analyst_home = tmp_path / "profiles" / "analyst"
+    analyst_home.mkdir(parents=True)
+    (analyst_home / "config.yaml").write_text(
+        "model:\n"
+        "  default: gpt-5.5\n"
+        "  service_tier: priority\n"
+        "providers:\n"
+        "  openai:\n"
+        "    models:\n"
+        "      gpt-5.2-flash: {}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    # The shared cache currently holds another profile's config; its providers
+    # table cannot infer this model's provider, so a skipped refresh would
+    # resolve the wrong provider and drop the tier.
+    cache = {"model": {"provider": "openrouter", "default": "meta-llama/llama-3.1"}}
+    monkeypatch.setattr(config, "_cfg_cache", cache)
+    monkeypatch.setattr(config, "cfg", cache)
+    monkeypatch.setattr(config, "_cfg_path", None)
+    monkeypatch.setattr(config, "_cfg_mtime", 0.0)
+    monkeypatch.setattr(config, "_cfg_fingerprint", None)
+    # Pin the fast-mode leaf to the compatibility fallback so the assertion
+    # does not depend on whether the agent package (hermes_cli) is importable
+    # in this environment.
+    monkeypatch.setattr(
+        config,
+        "_resolve_main_model_fast_mode_overrides",
+        config._legacy_openai_service_tier_overrides,
+    )
+
+    with profiles.profile_scope_for_request_read("analyst"):
+        snapshot = config.get_config_snapshot()
+        _, inferred_provider, _ = config.resolve_model_provider("gpt-5.2-flash")
+        overrides = config._main_model_request_overrides(
+            snapshot, effective_model="gpt-5.2-flash"
+        )
+
+    assert inferred_provider == "openai"
+    assert overrides == {"service_tier": "priority"}
+
+
+def test_service_tier_inference_uses_snapshot_after_another_profile_refresh(monkeypatch):
+    """A raced shared cache cannot change omitted-provider tier inference."""
+    from api import config, gateway_chat
+
+    snapshot = {
+        "model": {"default": "gpt-5.5", "service_tier": "priority"},
+        "providers": {"openai": {"models": {"gpt-5.2-flash": {}}}},
+    }
+    raced = {
+        "model": {
+            "provider": "openrouter",
+            "default": "meta-llama/llama-3.1",
+        }
+    }
+    def capture_then_race():
+        captured = copy.deepcopy(snapshot)
+        config.cfg = raced
+        return captured
+
+    monkeypatch.setattr(config, "cfg", snapshot)
+    monkeypatch.setattr(config, "get_config_snapshot", capture_then_race)
+    monkeypatch.setattr(
+        config,
+        "_resolve_main_model_fast_mode_overrides",
+        config._legacy_openai_service_tier_overrides,
+    )
+    monkeypatch.setattr(
+        gateway_chat, "_gateway_reasoning_effort_for_request", lambda *_a, **_k: None
+    )
+
+    settings = gateway_chat._gateway_request_settings_for_session(
+        SimpleNamespace(profile=""), model="gpt-5.2-flash"
+    )
+
+    assert config.cfg is raced
+    assert settings[4] == {"service_tier": "priority"}
+
+
+def _snapshot_and_raced_cache():
+    """An analyst snapshot whose provider differs from the raced global cache."""
+    snapshot = {
+        "agent": {"reasoning_effort": "high"},
+        "model": {"provider": "openai"},
+        "providers": {
+            "openai": {
+                "models": {"test-model": {"reasoning_efforts": ["none", "low", "high"]}}
+            },
+            "anthropic": {
+                "models": {"test-model": {"reasoning_efforts": ["none", "low"]}}
+            },
+        },
+    }
+    raced = {
+        "agent": {"reasoning_effort": "high"},
+        "model": {"provider": "anthropic"},
+        "providers": {
+            "anthropic": {
+                "models": {"test-model": {"reasoning_efforts": ["none", "low"]}}
+            }
+        },
+    }
+    return snapshot, raced
+
+
+def test_omitted_provider_coercion_resolves_from_the_captured_snapshot(monkeypatch):
+    """Provider omitted: coercion must resolve it from the snapshot, not the cache.
+
+    A concurrent default-profile reload swaps the process-global cache to a
+    different provider whose ladder is narrower; the omitted-provider path
+    called the global resolver and degraded "high" to "low" on both lanes
+    (re-gate replay). The captured snapshot's provider must win.
+    """
+    from api import config, routes
+    from api.gateway_chat import _gateway_reasoning_effort_for_request
+    import api.profiles as profiles
+
+    snapshot, raced = _snapshot_and_raced_cache()
+    monkeypatch.setattr(config, "cfg", raced)
+
+    assert _gateway_reasoning_effort_for_request(snapshot, model="test-model") == "high"
+
+    @contextmanager
+    def fake_scope(*_args, **_kwargs):
+        yield
+
+    monkeypatch.setattr(profiles, "profile_scope_for_request_read", fake_scope)
+    monkeypatch.setattr(routes, "profile_scope_for_request_read", fake_scope)
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: copy.deepcopy(snapshot))
+    assert routes._runner_reasoning_effort_for_session(
+        SimpleNamespace(profile="analyst"), model="test-model"
+    ) == "high"
+
+
+def test_explicit_provider_coercion_resolves_from_the_captured_snapshot(monkeypatch):
+    """Provider explicit: the snapshot's ladder wins on both lanes (control).
+
+    Same raced cache as the omitted case; the explicit provider never needed
+    the global resolver, so this pins the behaviour the repair must keep.
+    """
+    from api import config, routes
+    from api.gateway_chat import _gateway_reasoning_effort_for_request
+    import api.profiles as profiles
+
+    snapshot, raced = _snapshot_and_raced_cache()
+    monkeypatch.setattr(config, "cfg", raced)
+
+    assert _gateway_reasoning_effort_for_request(
+        snapshot, model="test-model", model_provider="openai"
+    ) == "high"
+
+    @contextmanager
+    def fake_scope(*_args, **_kwargs):
+        yield
+
+    monkeypatch.setattr(profiles, "profile_scope_for_request_read", fake_scope)
+    monkeypatch.setattr(routes, "profile_scope_for_request_read", fake_scope)
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: copy.deepcopy(snapshot))
+    assert routes._runner_reasoning_effort_for_session(
+        SimpleNamespace(profile="analyst"), model="test-model", model_provider="openai"
+    ) == "high"
+
+
+def _lmstudio_lanes_under_default_profile_reload(
+    monkeypatch,
+    *,
+    analyst_cfg,
+    default_cfg,
+    model_provider,
+):
+    """Run both request lanes while another profile reloads the global cache.
+
+    Both lanes capture ``analyst_cfg``; each request pauses after provider
+    resolution while a second thread replaces the process-global cache with
+    ``default_cfg``, the way ``_refresh_config_cache`` does on a cross-profile
+    read. Every LM Studio probe must stay on the analyst endpoint/key and keep
+    the analyst ladder. Returns ``(gateway_settings, runner_effort, probes)``.
+    """
+    from api import config, gateway_chat, routes
+    import api.profiles as profiles
+
+    analyst_endpoint = analyst_cfg["model"]["base_url"]
+    analyst_key = analyst_cfg["model"]["api_key"]
+
+    @contextmanager
+    def fake_scope(*_args, **_kwargs):
+        yield
+
+    monkeypatch.setattr(profiles, "profile_scope_for_request_read", fake_scope)
+    monkeypatch.setattr(routes, "profile_scope_for_request_read", fake_scope)
+    monkeypatch.setattr(config, "get_config_snapshot", lambda: copy.deepcopy(analyst_cfg))
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: copy.deepcopy(analyst_cfg))
+
+    original_alias = config._resolve_provider_alias
+    probes = []
+    entered = threading.Event()
+    reloaded = threading.Event()
+    pause_once = {"armed": False}
+
+    def gated_alias(provider):
+        resolved = original_alias(provider)
+        if resolved == "lmstudio" and pause_once["armed"]:
+            pause_once["armed"] = False
+            entered.set()
+            assert reloaded.wait(timeout=5), "default-profile reload did not run"
+        return resolved
+
+    def fake_probe(_model, base_url, *, api_key=None, timeout=5.0):
+        probes.append((base_url, api_key))
+        if base_url == analyst_endpoint and api_key == analyst_key:
+            return ["off", "low", "high"]
+        return ["off", "low"]
+
+    monkeypatch.setattr(config, "_resolve_provider_alias", gated_alias)
+    monkeypatch.setattr(config, "_lmstudio_model_reasoning_options", fake_probe)
+
+    def run_with_concurrent_reload(call):
+        entered.clear()
+        reloaded.clear()
+        pause_once["armed"] = True
+        monkeypatch.setattr(config, "cfg", copy.deepcopy(analyst_cfg))
+
+        def reload_default_profile():
+            assert entered.wait(timeout=5), "request never reached provider resolution"
+            config.cfg = copy.deepcopy(default_cfg)
+            reloaded.set()
+
+        reader = threading.Thread(target=reload_default_profile)
+        reader.start()
+        try:
+            return call()
+        finally:
+            reader.join(timeout=5)
+            assert not reader.is_alive()
+
+    gateway_settings = run_with_concurrent_reload(
+        lambda: gateway_chat._gateway_request_settings_for_session(
+            SimpleNamespace(profile="analyst"),
+            model="test-model",
+            model_provider=model_provider,
+        )
+    )
+    runner_effort = run_with_concurrent_reload(
+        lambda: routes._runner_reasoning_effort_for_session(
+            SimpleNamespace(profile="analyst"),
+            model="test-model",
+            model_provider=model_provider,
+        )
+    )
+    return gateway_settings, runner_effort, probes
+
+
+def _lmstudio_profile_pair(*, analyst_base_url, analyst_key, default_base_url, default_key):
+    """Analyst/default profile configs that differ only in LM Studio identity."""
+    analyst_cfg = {
+        "agent": {"reasoning_effort": "high"},
+        "model": {
+            "provider": "lmstudio",
+            "base_url": analyst_base_url,
+            "api_key": analyst_key,
+        },
+    }
+    default_cfg = {
+        "agent": {"reasoning_effort": "low"},
+        "model": {
+            "provider": "lmstudio",
+            "base_url": default_base_url,
+            "api_key": default_key,
+        },
+    }
+    return analyst_cfg, default_cfg
+
+
+def test_lmstudio_probe_uses_profile_snapshot_during_concurrent_reload(monkeypatch):
+    """LM Studio endpoint and key must come from the captured profile snapshot.
+
+    The request pauses after selecting the explicit LM Studio provider while a
+    second thread swaps the process-global cache to the default profile. Both
+    Gateway and runner lanes must still probe only the analyst endpoint/key and
+    preserve its ``high`` ladder instead of degrading to the default's ``low``.
+    """
+    analyst_cfg, default_cfg = _lmstudio_profile_pair(
+        analyst_base_url="http://analyst-lm.test/v1",
+        analyst_key="analyst-key",
+        default_base_url="http://default-lm.test/v1",
+        default_key="default-key",
+    )
+
+    gateway_settings, runner_effort, probes = _lmstudio_lanes_under_default_profile_reload(
+        monkeypatch,
+        analyst_cfg=analyst_cfg,
+        default_cfg=default_cfg,
+        model_provider="lmstudio",
+    )
+
+    assert gateway_settings[1] == "high"
+    assert runner_effort == "high"
+    assert probes == [
+        ("http://analyst-lm.test/v1", "analyst-key"),
+        ("http://analyst-lm.test/v1", "analyst-key"),
+    ]
+
+
+def test_lmstudio_probe_uses_snapshot_when_provider_is_omitted(monkeypatch):
+    """Omitted provider: the snapshot still supplies both endpoint and key.
+
+    The callers leave ``model_provider`` unset and let config routing pick LM
+    Studio. Pre-fix the probe kept the analyst endpoint but dropped its key,
+    because the configured endpoint it compares against came from the raced
+    global cache; the ladder then degraded to the default profile's ``low``.
+    """
+    analyst_cfg, default_cfg = _lmstudio_profile_pair(
+        analyst_base_url="http://analyst-lm.test/v1",
+        analyst_key="analyst-key",
+        default_base_url="http://default-lm.test/v1",
+        default_key="default-key",
+    )
+
+    gateway_settings, runner_effort, probes = _lmstudio_lanes_under_default_profile_reload(
+        monkeypatch,
+        analyst_cfg=analyst_cfg,
+        default_cfg=default_cfg,
+        model_provider=None,
+    )
+
+    assert gateway_settings[1] == "high"
+    assert runner_effort == "high"
+    assert probes == [
+        ("http://analyst-lm.test/v1", "analyst-key"),
+        ("http://analyst-lm.test/v1", "analyst-key"),
+    ]
+
+
+def test_lmstudio_probe_key_follows_snapshot_on_a_shared_endpoint(monkeypatch):
+    """Same endpoint, different key: the snapshot's credential must win.
+
+    Both profiles point at one LM Studio server but hold different keys, so a
+    key read from the raced cache still matches the endpoint and is forwarded.
+    The probe must send the analyst key and keep ``high``.
+    """
+    analyst_cfg, default_cfg = _lmstudio_profile_pair(
+        analyst_base_url="http://shared-lm.test/v1",
+        analyst_key="analyst-key",
+        default_base_url="http://shared-lm.test/v1",
+        default_key="default-key",
+    )
+
+    gateway_settings, runner_effort, probes = _lmstudio_lanes_under_default_profile_reload(
+        monkeypatch,
+        analyst_cfg=analyst_cfg,
+        default_cfg=default_cfg,
+        model_provider="lmstudio",
+    )
+
+    assert gateway_settings[1] == "high"
+    assert runner_effort == "high"
+    assert probes == [
+        ("http://shared-lm.test/v1", "analyst-key"),
+        ("http://shared-lm.test/v1", "analyst-key"),
+    ]
+
+
+def test_lmstudio_probe_refuses_key_for_an_unowned_endpoint_with_snapshot(monkeypatch):
+    """Control: an endpoint the snapshot does not own still gets no key.
+
+    ``/api/reasoning`` accepts a caller-supplied ``base_url``, so the
+    snapshot-aware probe must keep withholding the captured credential from any
+    endpoint the snapshot does not own (#3837) — and must not fall back to the
+    raced global cache for one either.
+    """
+    from api import config
+
+    snapshot = {
+        "agent": {"reasoning_effort": "high"},
+        "model": {
+            "provider": "lmstudio",
+            "base_url": "http://analyst-lm.test/v1",
+            "api_key": "analyst-key",
+        },
+    }
+    monkeypatch.setattr(
+        config,
+        "cfg",
+        {
+            "model": {
+                "provider": "lmstudio",
+                "base_url": "http://default-lm.test/v1",
+                "api_key": "default-key",
+            }
+        },
+    )
+    probes = []
+
+    def fake_probe(_model, base_url, *, api_key=None, timeout=5.0):
+        probes.append((base_url, api_key))
+        return ["off", "low", "high"]
+
+    monkeypatch.setattr(config, "_lmstudio_model_reasoning_options", fake_probe)
+
+    efforts = config._resolve_model_reasoning_efforts_impl(
+        "test-model",
+        "lmstudio",
+        "http://unowned-lm.test/v1",
+        config_data=snapshot,
+    )
+
+    assert probes == [("http://unowned-lm.test/v1", None)]
+    assert efforts == ["low", "high"]
+
+
+def test_runs_wire_body_nests_effective_effort_under_model_options():
+    """The actual /v1/runs POST must carry the effective value in model_options."""
+    run_body = _capture_runs_wire_body("low")
+
+    assert run_body["model_options"]["reasoning"] == {"enabled": True, "effort": "low"}
+    assert run_body["model_options"]["reasoning_effort"] == "low"
+    # Top-level scalar kept for older/newer gateways that read it there.
+    assert run_body["reasoning_effort"] == "low"
+
+
+def test_runs_wire_body_carries_disabled_reasoning():
+    run_body = _capture_runs_wire_body("none")
+
+    assert run_body["model_options"]["reasoning"] == {"enabled": False}
+    assert run_body["model_options"]["reasoning_effort"] == "none"
+
+
+def test_legacy_chat_body_composes_with_installed_agent_overrides():
+    """Legacy chat must use the same nested receiver contract as Gateway Runs."""
+    disabled_body = _capture_legacy_chat_wire_body("none")
+    low_body = _capture_legacy_chat_wire_body(
+        "low",
+        service_tier="priority",
+    )
+    degraded_body = _capture_legacy_chat_wire_body("max")
+
+    assert disabled_body["reasoning_effort"] == "none"
+    assert disabled_body["model_options"] == {
+        "reasoning": {"enabled": False},
+        "reasoning_effort": "none",
+    }
+    assert low_body["reasoning_effort"] == "low"
+    assert low_body["service_tier"] == "priority"
+    assert low_body["model_options"] == {
+        "reasoning": {"enabled": True, "effort": "low"},
+        "reasoning_effort": "low",
+        "service_tier": "priority",
+    }
+    assert degraded_body["reasoning_effort"] == "max"
+    assert degraded_body["model_options"]["reasoning_effort"] == "xhigh"
+
+    results = _compose_with_installed_handler([
+        {"kind": "legacy_chat_body", "body": disabled_body},
+        {"kind": "legacy_chat_body", "body": low_body},
+        {"kind": "legacy_chat_body", "body": degraded_body},
+    ])
+    assert results == [
+        {"enabled": False},
+        {"enabled": True, "effort": "low"},
+        {"enabled": True, "effort": "xhigh"},
+    ]
+
+
+# ── Composition with the INSTALLED handler (the actual receiver) ────────────
+
+def test_installed_handler_builds_agent_reasoning_config_from_webui_run_body():
+    """Compose the real WebUI wire body with the installed /v1/runs handler.
+
+    ``_handle_runs`` builds ``AIAgent.reasoning_config`` from
+    ``_request_reasoning_config(_request_agent_overrides(body)["model_options"])``
+    whenever the request carries one (request wins over the gateway's own
+    ``GatewayRunner._load_reasoning_config`` default). The constructed config
+    must equal the effective effort — this is the exact lane the
+    2026-08-13 re-gate found dropping the override.
+    """
+    run_body = _capture_runs_wire_body("low")
+    disabled_body = _capture_runs_wire_body("none")
+
+    results = _compose_with_installed_handler([
+        {"kind": "run_body", "body": run_body},
+        {"kind": "run_body", "body": disabled_body},
+    ])
+
+    # Not-None ⇒ the handler takes the request branch; the profile/per-model
+    # default (_load_reasoning_config) is never consulted for this run.
+    assert results[0] == {"enabled": True, "effort": "low"}
+    assert results[1] == {"enabled": False}
+
+
+def test_installed_handler_behaviour_on_supra_legacy_levels_justifies_failing_closed():
+    """Prove WHY WebUI fails closed, against whichever receiver is installed.
+
+    Exactly one of two things must be true of a raw 'max'/'ultra' request:
+
+    * the receiver is an older generation and DROPS the effort, yielding a bare
+      ``{"enabled": True}`` — the silent downgrade the degradation prevents; or
+    * the receiver is current and preserves it verbatim.
+
+    Both are acceptable receiver behaviour; what is NOT acceptable is WebUI
+    guessing which one is on the other end when nothing advertises it.
+    """
+    accepted = _effective_receiver_efforts()
+    results = _compose_with_installed_handler([
+        {"kind": "model_options", "model_options": {"reasoning": {"enabled": True, "effort": "max"}}},
+        {"kind": "model_options", "model_options": {"reasoning": {"enabled": True, "effort": "ultra"}}},
+    ])
+
+    for level, result in zip(("max", "ultra"), results, strict=True):
+        if level in accepted:
+            assert result == {"enabled": True, "effort": level}
+        else:
+            # The effort is silently dropped — the exact failure mode that
+            # makes sending an unadvertised supra-legacy level unsafe.
+            assert result == {"enabled": True}
+
+
+def test_installed_handler_receives_explicit_effort_after_legacy_degradation(monkeypatch):
+    """When the receiver IS legacy, the degraded value must still be explicit.
+
+    An unreachable probe forces the legacy ladder. The degraded wire value has
+    to reach the parser as a level it can carry, otherwise the request resolves
+    to the profile default instead of the configured choice.
+    """
+    import api.config as config
+
+    monkeypatch.setattr(
+        config,
+        "get_gateway_caps",
+        lambda *a, **k: {
+            "reasoning_efforts": None,
+            "capabilities_reachable": False,
+            "probe_error": "URLError: connection refused",
+        },
+    )
+    degraded = _gateway_run_model_options("max", base_url="http://gw:8642")
+    assert degraded["reasoning_effort"] == "xhigh"
+
+    results = _compose_with_installed_handler([
+        {"kind": "model_options", "model_options": degraded},
+    ])
+
+    assert results[0] == {"enabled": True, "effort": "xhigh"}
+
+
+def test_installed_handler_boundary_covers_the_full_request_ladder():
+    """Exercise /v1/runs construction across the whole ladder, incl. none/low/high/max.
+
+    The WebUI serializer fails closed, so a configured 'max' reaches an
+    unadvertised receiver as 'xhigh' — an explicit effort it is guaranteed to
+    honour, never a bare enabled flag.
+    """
+    run_bodies = [
+        {"kind": "run_body", "body": _capture_runs_wire_body(level)}
+        for level in ("none", "low", "high", "max")
+    ]
+    results = _compose_with_installed_handler(run_bodies)
+
+    assert results[0] == {"enabled": False}
+    assert results[1] == {"enabled": True, "effort": "low"}
+    assert results[2] == {"enabled": True, "effort": "high"}
+    assert results[3] == {"enabled": True, "effort": "xhigh"}
+
+
+def test_root_request_ignores_a_parked_worker_env_mirror(monkeypatch, tmp_path):
+    """A named-profile worker's mirror must not redirect a root request.
+
+    ``profile_env_for_background_worker`` writes the named profile's ``.env``
+    into ``os.environ`` for the worker's whole body. A concurrent root session
+    used to resolve its Gateway endpoint and key from that live env, sending
+    its chats to another profile's receiver; it must read the launcher snapshot
+    plus the root ``.env`` instead (re-gate round 12, item 1).
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    (tmp_path / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://owner-gw.test\n"
+        "HERMES_WEBUI_GATEWAY_API_KEY=owner-key\n",
+        encoding="utf-8",
+    )
+    mirror_home = tmp_path / "profiles" / "mirror"
+    mirror_home.mkdir(parents=True)
+    (mirror_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://mirror-gw.test\n"
+        "HERMES_WEBUI_GATEWAY_API_KEY=mirror-key\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def worker_body():
+        with profiles.profile_env_for_background_worker("mirror"):
+            entered.set()
+            assert release.wait(timeout=5)
+
+    worker = threading.Thread(target=worker_body)
+    worker.start()
+    resolved = {}
+    try:
+        assert entered.wait(timeout=5), "worker never entered its mirror scope"
+        with profiles.profile_scope_for_request_read(None, "root request") as environ:
+            merged = gateway_chat._gateway_request_environ(environ, config_data={})
+            resolved["base_url"] = gateway_chat._gateway_base_url({}, environ=merged)
+            resolved["api_key"] = gateway_chat._gateway_api_key(environ=merged)
+        resolved["mirrored_url"] = os.environ.get("HERMES_WEBUI_GATEWAY_BASE_URL")
+    finally:
+        release.set()
+        worker.join(timeout=5)
+
+    assert resolved["mirrored_url"] == "http://mirror-gw.test"
+    assert resolved["base_url"] == "http://owner-gw.test"
+    assert resolved["api_key"] == "owner-key"
+
+
+def test_owner_config_placeholder_ignores_a_parked_worker_env_mirror(
+    monkeypatch, tmp_path
+):
+    """Owner ``${VAR}`` expansion reads the launcher snapshot, not a mirror.
+
+    While a named-profile worker holds its env mirror, the owner's
+    ``config.yaml`` placeholder used to expand to the worker's value and could
+    send the deployment credential to the wrong receiver (re-gate round 12,
+    item 2).
+    """
+    from api import config
+    import api.profiles as profiles
+
+    _write_gateway_config(tmp_path, "${OWNER_GATEWAY_URL}")
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+    mirror_home = tmp_path / "profiles" / "mirror"
+    mirror_home.mkdir(parents=True)
+    (mirror_home / ".env").write_text(
+        "OWNER_GATEWAY_URL=http://mirror-gw.test\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+    monkeypatch.setattr(profiles, "_PROCESS_OWNER_DOTENV", {}, raising=False)
+    monkeypatch.setitem(
+        profiles._INITIAL_PROCESS_ENV, "OWNER_GATEWAY_URL", "http://owner-gw.test"
+    )
+    _pin_scoped_config_read(monkeypatch)
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def worker_body():
+        with profiles.profile_env_for_background_worker("mirror"):
+            entered.set()
+            assert release.wait(timeout=5)
+
+    worker = threading.Thread(target=worker_body)
+    worker.start()
+    owner_config = {}
+    try:
+        assert entered.wait(timeout=5), "worker never entered its mirror scope"
+        owner_config = config.get_config_for_process_owner(
+            profiles.get_process_profile_home()
+        )
+    finally:
+        release.set()
+        worker.join(timeout=5)
+
+    assert owner_config["webui_gateway_base_url"] == "http://owner-gw.test"
+
+
+def test_permanent_reload_keeps_a_parked_worker_env_mirror(monkeypatch, tmp_path):
+    """A permanent reload restores only the keys it actually removed.
+
+    ``_reload_dotenv`` used to write every launcher Gateway key back into
+    ``os.environ``, which replaced a concurrent named-profile worker's live
+    mirror with the deployment credential (re-gate round 12, item 3).
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://owner-gw.test",
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+        },
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+
+    with _restored_process_env():
+        os.environ["HERMES_WEBUI_GATEWAY_BASE_URL"] = "http://127.0.0.1:2"
+        os.environ["HERMES_WEBUI_GATEWAY_API_KEY"] = "mirror-key"
+        profiles._reload_dotenv(tmp_path)
+        assert os.environ["HERMES_WEBUI_GATEWAY_BASE_URL"] == "http://127.0.0.1:2"
+        assert os.environ["HERMES_WEBUI_GATEWAY_API_KEY"] == "mirror-key"
