@@ -2700,6 +2700,7 @@ async function _switchProfileForSessionLoad(profile){
     const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
     S.activeProfile=data.active||name;
     S.activeProfileIsDefault=!!data.is_default;
+    if(typeof resetSkillsForProfileTransition==='function') resetSkillsForProfileTransition();
     if(typeof _resetCronUnreadForProfileSwitch==='function'){
       _resetCronUnreadForProfileSwitch();
     }
@@ -2733,6 +2734,10 @@ async function _switchProfileForSessionLoad(profile){
   }finally{
     if(reasoningSwitchHeld) _endReasoningProfileSwitch();
   }
+  // The accepted switch emptied a visible Skills panel; load the new profile's
+  // list as the canonical switch does (_profileSwitchPanelLoad in panels.js).
+  // Outside the try: a load failure is not a failed switch.
+  if(typeof loadSkills==='function'&&typeof _currentPanel!=='undefined'&&_currentPanel==='skills') await loadSkills();
 }
 
 async function loadSession(sid){

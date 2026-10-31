@@ -859,6 +859,67 @@ Where the bindings take effect:
   own profile; the root/default project claims default-profile (and unprofiled
   legacy) rows. `_profiles_match` handles the renamed-root alias for the bind.
 
+### 4.13 External Skill-Directory Profile Boundary
+
+The WebUI resolves a profile's local skills root itself. The Agent's
+`agent.skill_utils.get_external_skills_dirs()` resolves `skills.external_dirs` through
+the Hermes home (the context-local home override when the Agent provides one, else
+`os.environ['HERMES_HOME']`) and expands variables from the process environment. Used
+directly, a named profile could list another profile's external roots, and — mid-turn —
+the root profile could follow a streaming turn's mirrored `HERMES_HOME` (the same
+mirror described in §4.10). The WebUI therefore does not call that helper.
+
+- `_active_skill_search_dirs_scoped()` in `api/routes.py` calls
+  `api.skill_runtime.profile_external_skill_dirs(get_active_hermes_home())` for the
+  request profile (root included). No Agent home override is bound and no Agent
+  routing state is consulted, so Agent versions without a home override or a
+  routed-profile predicate list the same roots.
+- `profile_external_skill_dirs()` reads that profile's `config.yaml` directly.
+  It expands `$VAR` / `${VAR}` from that profile's runtime environment. The root
+  home also inherits the immutable `api.paths.STARTUP_ENV` captured before config
+  and profile initialization, with profile `.env` values taking precedence.
+  Named homes use only their own runtime environment, even when pinned as the
+  process profile; the root is identified by its resolved home, not a display name
+  or the process anchor. The resolver forces
+  `HERMES_HOME` to the profile home, and anchors relative paths there. `~` and `$HOME`
+  use the WebUI's stable shell home.
+  `~user` expands to that account's home, as the Agent's `expanduser` does.
+  Expansion is a single pass, like the Agent's `os.path.expandvars`: an unknown
+  variable, or a `$` inside a replacement value, stays literal text. An entry that
+  does not resolve to a readable directory is skipped, and the other entries are
+  kept, as the Agent skips it. A bare `skills:` key lists none. Where a correctly read entry points is
+  the user's choice: a profile may name another profile's skills tree, which the
+  Agent supports for sharing skills between profiles;
+  the live process environment and the Agent's expansion cache are never consulted. No cache
+  is retained, so config and `.env` edits are observed on the next lookup.
+  YAML parsing uses `api.yaml_compat`, including managed ruamel-only runtimes.
+  Like the Agent's config reader, an unparseable config, a non-mapping `skills`, or a
+  non-list `external_dirs` lists no external roots, and each entry is read with `str()`.
+  An entry naming the profile's own `skills/` dir is dropped, as the Agent drops it.
+- `/api/skills` reports `runtime_scope`: `profile` (external roots resolved from the
+  request profile) or `unavailable` (`config.yaml` exists but could not be read, for
+  example a permission error; external roots withheld and retried on the next lookup). The dirs-only `_active_skill_search_dirs()` used by skill content,
+  linked-file and toggle lookups uses the same directory set.
+- Skills, cron pickers, and both slash-command skill loaders use partial local results
+  when scope is `unavailable`, but retry on the next lookup rather than treating them
+  as a reusable complete list.
+- The Skills panel and cron picker share `_skillListsGeneration` in `panels.js`.
+  Both profile-switch paths and save/delete/toggle invalidations retire pending reads.
+  Each loader also owns a monotonically increasing request counter; only its newest
+  request in the current generation/profile may publish cache state or UI errors.
+  Toggle retains its updated local working set while invalidating older reads.
+- Accepted profile transitions synchronously reset the Skills list, selected detail,
+  edit/create form, header actions, search, and collapsed categories. Detail/file reads
+  and save/delete continuations own the profile, detail generation, and newest detail
+  request (deletion also owns its newest confirmation/write request); navigating
+  or entering/cancelling a form retires older continuations.
+  Toggle responses own the profile generation and newest request for that skill name.
+  Stale success/error responses and queued markdown/code enhancements cannot mutate
+  the new profile's cache, DOM, status, or toast. Deletion confirmation is revalidated
+  before sending the write; save/delete reloads are revalidated before reopening or
+  acknowledging the result. Skills panel requests disable transport retries so a
+  retry cannot use a later profile cookie, and suppress generic timeout toasts in
+  favor of ownership-checked error handling.
 
 ---
 
