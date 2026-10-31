@@ -57,9 +57,15 @@ Each line is an immutable event. Recovery can scan by `turn_id` and choose the l
   "attachments": [],
   "workspace": "/workspace",
   "model": "openai/gpt-5",
-  "model_provider": "openai"
+  "model_provider": "openai",
+  "source": "webui",
+  "profile": "default"
 }
 ```
+
+`source` records which surface submitted the turn (`webui`, `feishu`, …) and
+`profile` records the Hermes profile the turn belongs to. Both are additive:
+readers MUST tolerate their absence on events written by older builds.
 
 Later events for the same `turn_id`:
 
