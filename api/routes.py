@@ -5231,6 +5231,285 @@ def _anchor_scene_records(session) -> dict:
     return records if isinstance(records, dict) else {}
 
 
+_ANCHOR_SCENE_TERMINAL_STATE_ALIASES = {
+    "completed": "completed",
+    "complete": "completed",
+    "done": "completed",
+    "interrupted": "interrupted",
+    "interrupted_by_user": "interrupted",
+    "interrupted_by_crash": "interrupted",
+    "cancelled": "cancelled",
+    "canceled": "cancelled",
+    "cancel": "cancelled",
+    "tool_limit_reached": "tool_limit_reached",
+    "max_iterations": "tool_limit_reached",
+    "connection_lost": "connection_lost",
+    "lost_worker_bookkeeping": "connection_lost",
+    "error": "error",
+    "errored": "error",
+    "failed": "error",
+    "apperror": "error",
+}
+
+
+def _anchor_scene_canonical_terminal_state(value) -> str:
+    """Map a run-journal terminal_state onto the frontend's canonical vocabulary.
+
+    The journal writes values like ``interrupted-by-user`` or
+    ``lost-worker-bookkeeping`` that consumers only understand after
+    normalization + aliasing; collapsing them here keeps persisted records
+    truthful for readers of ``terminal_state`` / ``lifecycle.terminal_state``.
+    """
+    key = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if not key:
+        return ""
+    return _ANCHOR_SCENE_TERMINAL_STATE_ALIASES.get(key, key)
+
+
+def _anchor_scene_records_cover(session, message_ref, message_index) -> bool:
+    """True when a persisted anchor-scene record already owns this message."""
+    if message_index is None and not message_ref:
+        return False
+    for record in _anchor_scene_records(session).values():
+        if not isinstance(record, dict):
+            continue
+        if message_ref and str(record.get("message_ref") or "") == message_ref:
+            return True
+        try:
+            record_index = int(record.get("message_index"))
+        except (TypeError, ValueError):
+            record_index = None
+        if message_index is not None and record_index == int(message_index):
+            return True
+    return False
+
+
+def _settled_anchor_terminal_row(
+    *, terminal_state, source_event_type, run_id, stream_id, order_index=0
+) -> dict:
+    """Terminal status row matching the browser's settle projection."""
+    row_id = f"terminal:{run_id or stream_id or 'run'}:{terminal_state or 'completed'}"
+    return {
+        "row_id": row_id,
+        "order_index": order_index,
+        "seq": order_index,
+        "kind": "terminal_status",
+        "role": "terminal",
+        "display_hint": "terminal_status_row",
+        "display_hints": {
+            "compact_worklog": "terminal_status_row",
+            "transparent_stream": "chronological_activity",
+        },
+        "source_event_type": source_event_type,
+        "event_id": None,
+        "local_id": row_id,
+        "run_id": run_id or None,
+        "stream_id": stream_id or None,
+        "status": terminal_state,
+        "created_at": None,
+        "identity": {
+            "event_id": None,
+            "local_id": row_id,
+            "run_id": run_id or None,
+            "stream_id": stream_id or None,
+            "seq": None,
+        },
+        "group": {"group_key": f"terminal:{order_index}"},
+        "text": "",
+        "thinking": None,
+        "tool_call_id": "",
+        "tool": None,
+        "payload": {"status": terminal_state},
+    }
+
+
+def _finalize_settled_anchor_scene_from_journal(
+    session, stream_id, *, summary=None, message_index=None, handler=None
+):
+    """Server-owned settle for a finished turn's anchor scene (#8105).
+
+    Rebuilds the worklog scene from the durable run journal, settles terminal
+    truth (terminal lifecycle + terminal row + final-answer separation) and
+    persists the ``anchor_activity_scenes`` record so hydration reproduces the
+    same fold after a hard reload — even when the browser that streamed the turn
+    was attached to another session and never POSTed its scene.
+
+    Conservative by design:
+
+    * only terminal runs are finalized (active streams stay on the existing
+      live-reattach path),
+    * an existing record for the settled message is never overwritten — the
+      browser POST stays authoritative when it landed,
+    * every failure is swallowed so session load/save never breaks on repair.
+    """
+    try:
+        stream_id = str(stream_id or "").strip()
+        if not stream_id or session is None:
+            return None
+        if getattr(session, "read_only", False):
+            return None
+        messages = list(getattr(session, "messages", None) or [])
+        if not messages:
+            return None
+        if summary is None:
+            summary = find_run_summary(stream_id)
+        if not isinstance(summary, dict) or not summary.get("terminal"):
+            return None
+        if message_index is None:
+            message_index = next(
+                (
+                    idx
+                    for idx in range(len(messages) - 1, -1, -1)
+                    if isinstance(messages[idx], dict)
+                    and messages[idx].get("role") == "assistant"
+                ),
+                None,
+            )
+        if message_index is None:
+            return None
+        message_index = int(message_index)
+        if message_index < 0 or message_index >= len(messages):
+            return None
+        message = messages[message_index]
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            return None
+        sid = str(getattr(session, "session_id", "") or "")
+        ref = _assistant_anchor_scene_message_ref(message)
+        if _anchor_scene_records_cover(session, ref, message_index):
+            return None
+        snapshot = _run_journal_live_snapshot(stream_id, handler=handler)
+        if not isinstance(snapshot, dict):
+            return None
+        scene = snapshot.get("anchor_activity_scene")
+        if not isinstance(scene, dict) or not scene.get("activity_rows"):
+            return None
+        settled = _complete_hydrated_anchor_scene(
+            messages, scene, message_index, stream_id=stream_id
+        )
+        if not isinstance(settled, dict):
+            return None
+        terminal_state = (
+            _anchor_scene_canonical_terminal_state(summary.get("terminal_state"))
+            or "completed"
+        )
+        source_event_type = str(summary.get("last_event") or "").strip()
+        if source_event_type not in ("done", "cancel", "error", "apperror"):
+            source_event_type = "done" if terminal_state == "completed" else "error"
+        settled["terminal_state"] = terminal_state
+        lifecycle = dict(settled.get("lifecycle") or {})
+        lifecycle["status"] = "terminal"
+        lifecycle["terminal_state"] = terminal_state
+        settled["lifecycle"] = lifecycle
+        rows = list(settled.get("activity_rows") or [])
+        if not any(
+            isinstance(row, dict) and row.get("role") == "terminal" for row in rows
+        ):
+            rows.append(
+                _settled_anchor_terminal_row(
+                    terminal_state=terminal_state,
+                    source_event_type=source_event_type,
+                    run_id=stream_id,
+                    stream_id=stream_id,
+                    order_index=len(rows),
+                )
+            )
+        settled["activity_rows"] = rows
+        record = {
+            "version": "anchor_activity_scene_record_v1",
+            "message_index": message_index,
+            "message_ref": ref,
+            "stream_id": stream_id,
+            "scene": settled,
+            "updated_at": time.time(),
+        }
+        with _get_session_agent_lock(sid):
+            # Re-check under the lock: the browser POST may have landed while
+            # the scene was being rebuilt from the journal.
+            if _anchor_scene_records_cover(session, ref, message_index):
+                return None
+            records = dict(_anchor_scene_records(session))
+            records[ref or f"index:{message_index}"] = record
+            if len(records) > 256:
+                ordered = sorted(
+                    records.items(),
+                    key=lambda item: float((item[1] or {}).get("updated_at") or 0),
+                )
+                records = dict(ordered[-256:])
+            session.anchor_activity_scenes = records
+            session.save(touch_updated_at=False, skip_index=True)
+        return record
+    except Exception:
+        logger.debug(
+            "Settled anchor scene finalization failed for stream %s",
+            stream_id,
+            exc_info=True,
+        )
+        return None
+
+
+def _repair_settled_anchor_scene_on_load(session, *, handler=None) -> dict | None:
+    """Conservative cold-load repair (#8105).
+
+    When the session's most recent assistant turn has no persisted anchor-scene
+    record but its turn journal names a stream that is already terminal,
+    rebuild and persist the settled scene so this load hydrates the worklog
+    fold instead of plain prose. Turns that finished while another session was
+    open were never POSTed by the browser — this is the server-owned catch-up.
+    """
+    try:
+        if session is None or getattr(session, "read_only", False):
+            return None
+        messages = list(getattr(session, "messages", None) or [])
+        if not messages:
+            return None
+        last_assistant = next(
+            (
+                idx
+                for idx in range(len(messages) - 1, -1, -1)
+                if isinstance(messages[idx], dict)
+                and messages[idx].get("role") == "assistant"
+            ),
+            None,
+        )
+        if last_assistant is None:
+            return None
+        sid = str(getattr(session, "session_id", "") or "")
+        if not sid:
+            return None
+        ref = _assistant_anchor_scene_message_ref(messages[last_assistant])
+        if _anchor_scene_records_cover(session, ref, last_assistant):
+            return None
+        from api.turn_journal import read_turn_journal
+
+        journal = read_turn_journal(sid)
+        stream_id = ""
+        for event in reversed(journal.get("events") or []):
+            if not isinstance(event, dict):
+                continue
+            try:
+                event_index = int(event.get("assistant_message_index"))
+            except (TypeError, ValueError):
+                continue
+            if event_index != last_assistant:
+                continue
+            candidate = str(event.get("stream_id") or "").strip()
+            if candidate:
+                stream_id = candidate
+                break
+        if not stream_id:
+            return None
+        return _finalize_settled_anchor_scene_from_journal(
+            session, stream_id, message_index=last_assistant, handler=handler
+        )
+    except Exception:
+        logger.debug(
+            "Settled anchor scene load repair failed for session %s",
+            getattr(session, "session_id", ""),
+            exc_info=True,
+        )
+        return None
+
+
 def _anchor_scene_message_text(message) -> str:
     if not isinstance(message, dict):
         return ""
@@ -16200,6 +16479,14 @@ def _handle_session_get(handler, parsed) -> bool:
                 _display_tool_calls, _display_owner_positions
             )
         if load_messages:
+            # #8105: a turn that finished while the browser was attached to
+            # another session never POSTed its settled worklog scene. Repair
+            # it from the durable journals BEFORE hydration so this load
+            # folds the activity view instead of plain prose. Conservative:
+            # terminal runs only, never over an existing record, and it
+            # degrades to a no-op on any failure. Session visibility was
+            # already verified above, so no handler-scoped recheck here.
+            _repair_settled_anchor_scene_on_load(s)
             _truncated_msgs, _messages_offset = _message_window_for_display(
                 _all_msgs,
                 msg_limit=msg_limit,
