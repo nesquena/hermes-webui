@@ -93,3 +93,50 @@ def test_self_heal_registration_obeys_retained_stop(worker_scene, monkeypatch, f
         assert finalized
     assert "run" not in config.AGENT_INSTANCES
     assert "run" not in config.ACTIVE_RUNS
+
+
+def test_a_stop_during_the_heal_retry_is_a_cancel_not_a_saved_answer(
+    worker_scene, monkeypatch,
+):
+    """A Stop that lands while the retry runs must not be saved as its answer.
+
+    The constructor fence above covers a Stop before the replacement Agent runs.
+    Nothing looked at the flag after ``run_conversation`` returned, so the
+    healed answer was persisted as a completed turn while ``put`` dropped the
+    ``done`` frame — the client got no terminal event and the user's Stop was
+    lost.
+    """
+    scene = worker_scene
+    stop = threading.Event()
+    config.CANCEL_FLAGS["run"] = stop
+    built = []
+
+    def on_init():
+        built.append(scene.agent)
+
+    def on_run():
+        if len(built) == 1:
+            raise RuntimeError("401 unauthorized")
+        stop.set()
+        scene.result = {
+            "messages": [
+                {"role": "user", "content": "Do the task."},
+                {"role": "assistant", "content": "Healed answer."},
+            ],
+        }
+
+    scene.on_init, scene.on_run = on_init, on_run
+    monkeypatch.setattr(streaming, "_attempt_credential_self_heal", lambda *args, **kwargs: {
+        "provider": "openai", "api_key": "synthetic-self-heal-fixture",
+        "base_url": "http://127.0.0.1:1/v1",
+    })
+
+    scene.run()
+
+    assert scene.calls.count("run") == 2, "the heal retry must have run"
+    emitted = [event for event, _payload in list(scene.events.queue)]
+    assert "cancel" in emitted, "a stopped heal retry must settle as a cancel"
+    assert "done" not in emitted
+    assert "Healed answer." not in "\n".join(
+        str(row.get("content") or "") for row in scene.session.messages
+    ), "the cancelled turn must not persist the retry's answer"
