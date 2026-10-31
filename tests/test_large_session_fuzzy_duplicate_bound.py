@@ -45,7 +45,53 @@ def test_threshold_sized_visible_set_preserves_fuzzy_recovery():
     "workspace_prefix",
     ("[Workspace::v1: /tmp/project]", "[Workspace: /tmp/project]"),
 )
-def test_large_merge_dedupes_workspace_prefixed_middle_replay(workspace_prefix):
+def test_large_merge_dedupes_same_clock_workspace_prefixed_middle_replay(workspace_prefix):
+    """A TRUE replay (same clock) is still deduped on a large visible set."""
+    import api.models as models
+
+    sidecar = [
+        {
+            "role": "user" if idx % 2 == 0 else "assistant",
+            "content": f"message {idx}",
+            "timestamp": float(idx),
+        }
+        for idx in range(1000)
+    ]
+    sidecar.insert(
+        500,
+        {"role": "user", "content": "canonical prompt", "timestamp": 499.5},
+    )
+    sidecar.append(
+        {"role": "assistant", "content": "final assistant", "timestamp": 1001.0}
+    )
+    # Same clock as the sidecar row it mirrors -> one durable record replayed.
+    state_replay = [
+        {
+            "role": "user",
+            "content": f"{workspace_prefix}\ncanonical prompt",
+            "timestamp": 499.5,
+        }
+    ]
+
+    merged = models.merge_session_messages_append_only(sidecar, state_replay)
+
+    assert len(merged) == len(sidecar)
+    assert merged[-1]["role"] == "assistant"
+    assert merged[-1]["content"] == "final assistant"
+
+
+@pytest.mark.parametrize(
+    "workspace_prefix",
+    ("[Workspace::v1: /tmp/project]", "[Workspace: /tmp/project]"),
+)
+def test_large_merge_preserves_restamped_occurrence_of_repeated_prompt(workspace_prefix):
+    """#7587: a later state.db occurrence of a repeated prompt is a distinct turn.
+
+    Before #7587 the visible key was content-only, so this state.db row
+    collapsed onto the older same-content sidecar row and was dropped from the
+    projection -- the exact data loss the issue reports.  Occurrence identity
+    now separates them; under-dedup (a repeated row) is the accepted trade.
+    """
     import api.models as models
 
     sidecar = [
@@ -73,9 +119,13 @@ def test_large_merge_dedupes_workspace_prefixed_middle_replay(workspace_prefix):
 
     merged = models.merge_session_messages_append_only(sidecar, state_replay)
 
-    assert len(merged) == len(sidecar)
-    assert merged[-1]["role"] == "assistant"
-    assert merged[-1]["content"] == "final assistant"
+    assert len(merged) == len(sidecar) + 1
+    assert merged[-1] is state_replay[0]
+    assert sum(
+        1
+        for m in merged
+        if m.get("role") == "user" and "canonical prompt" in str(m.get("content"))
+    ) == 2
 
 
 def test_large_merge_preserves_literal_workspace_prefix_as_distinct_turn():
