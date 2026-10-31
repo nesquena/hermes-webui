@@ -1,6 +1,5 @@
 """Tests for issue #492 — workspace drag-to-reorder."""
-import json, pytest
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 from api.routes import _handle_workspace_reorder
 
 
@@ -155,4 +154,4 @@ class TestWorkspaceReorderFrontend:
         assert "workspace_paths_validated_hint" not in list_src
         start = js.index("function _renderWorkspaceForm(")
         form_src = js[start:js.index("\nfunction ", start + 1)]
-        assert ": `<div class=\"detail-form-hint\">${esc(t('workspace_paths_validated_hint'))}</div>`" in form_src
+        assert ": `<div class=\"detail-form-hint\" id=\"workspaceFormPathHint\">${esc(t('workspace_paths_validated_hint'))}</div>`" in form_src
