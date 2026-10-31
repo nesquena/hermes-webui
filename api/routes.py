@@ -8511,7 +8511,7 @@ def _custom_provider_api_key_for_context(entry: dict, provider: str) -> str:
         api_key_text = str(raw_api_key).strip()
         if api_key_text.startswith("${") and api_key_text.endswith("}") and len(api_key_text) > 3:
             env_name = api_key_text[2:-1]
-            resolved = os.getenv(env_name, "").strip()
+            resolved = api_config._thread_local_env_value(env_name).strip()
             if resolved:
                 return resolved
             logger.debug(
@@ -8524,7 +8524,7 @@ def _custom_provider_api_key_for_context(entry: dict, provider: str) -> str:
 
     key_env = str(entry.get("key_env") or "").strip()
     if key_env:
-        resolved = os.getenv(key_env, "").strip()
+        resolved = api_config._thread_local_env_value(key_env).strip()
         if resolved:
             return resolved
 
@@ -8544,6 +8544,19 @@ def _context_length_config_api_key_for_provider(
     cfg = cfg if isinstance(cfg, dict) else {}
     provider = _canonical_context_provider(provider)
 
+    if provider.startswith("custom:"):
+        from api.config import (
+            _custom_provider_entries, _custom_provider_slug_key,
+            _select_custom_provider_record, _unique_custom_provider_entry,
+        )
+
+        entry, _source, _exact, _status = _select_custom_provider_record(
+            provider, _custom_provider_slug_key(provider), cfg,
+        )
+        if entry is None:
+            entry = _unique_custom_provider_entry(_custom_provider_entries(cfg), _custom_provider_slug_key(provider))
+        return _custom_provider_api_key_for_context(entry, provider) if entry is not None else ""
+
     def _resolve_key(raw_api_key, raw_key_env=None) -> str:
         api_key_text = str(raw_api_key or "").strip()
         if (
@@ -8551,14 +8564,14 @@ def _context_length_config_api_key_for_provider(
             and api_key_text.endswith("}")
             and len(api_key_text) > 3
         ):
-            resolved = os.getenv(api_key_text[2:-1], "").strip()
+            resolved = api_config._thread_local_env_value(api_key_text[2:-1]).strip()
             if resolved:
                 return resolved
         elif api_key_text:
             return api_key_text
         key_env = str(raw_key_env or "").strip()
         if key_env:
-            resolved = os.getenv(key_env, "").strip()
+            resolved = api_config._thread_local_env_value(key_env).strip()
             if resolved:
                 return resolved
         return ""
@@ -8651,13 +8664,16 @@ def _context_length_lookup_inputs_for_model(
             ):
                 effective_base_url = str(model_cfg.get("base_url") or "").strip()
 
-    custom_providers = cfg.get("custom_providers") if isinstance(cfg, dict) else None
-    if not isinstance(custom_providers, list):
-        custom_providers = None
+    from api.config import (
+        _custom_provider_entries, _custom_provider_slug_key,
+        _select_custom_provider_record, _unique_custom_provider_entry,
+    )
+
+    custom_providers = _custom_provider_entries(cfg)
 
     provider_context_length = None
     providers_cfg = (cfg.get("providers") or {}) if isinstance(cfg, dict) else {}
-    if isinstance(providers_cfg, dict):
+    if isinstance(providers_cfg, dict) and not str(effective_provider or "").startswith("custom:"):
         for provider_key, provider_cfg in providers_cfg.items():
             if not isinstance(provider_cfg, dict):
                 continue
@@ -8673,39 +8689,51 @@ def _context_length_lookup_inputs_for_model(
 
     custom_context_length = None
     effective_api_key = str(api_key or "").strip()
-    if custom_providers:
+    entry = None
+    if effective_provider and effective_provider != "custom":
+        # Identity outranks URL: shared gateways are not shared authorities.
+        # The read view omits bad identities; an explicitly requested native
+        # collision must still fail closed rather than become a metadata miss.
+        selected, selected_source = None, ""
+        if effective_provider.startswith("custom:"):
+            selected, selected_source, _exact, _status = _select_custom_provider_record(
+                effective_provider, _custom_provider_slug_key(effective_provider), cfg,
+            )
+        entry = _unique_custom_provider_entry(
+            custom_providers, _custom_provider_slug_key(effective_provider),
+        )
+        if entry is None and selected is not None and selected_source in {"providers", "custom_providers"}:
+            entry = dict(selected)
+            entry["name"] = effective_provider
+    elif custom_providers:
         target_base = effective_base_url.rstrip("/")
         model_candidates = set(_model_lookup_candidates(bare_model or model_for_lookup))
-        for entry in custom_providers:
-            if not isinstance(entry, dict):
-                continue
-            entry_name = str(entry.get("name") or "").strip()
-            entry_slug = _custom_provider_slug_for_context(entry_name)
-            entry_base = str(entry.get("base_url") or "").strip()
-            entry_base_norm = entry_base.rstrip("/")
-            provider_matches = bool(
-                effective_provider
-                and (
-                    effective_provider == entry_slug
-                    or effective_provider == entry_name.lower()
-                    or (effective_provider == "custom" and len(custom_providers) == 1)
-                )
-            )
-            base_matches = bool(target_base and entry_base_norm and target_base == entry_base_norm)
-            model_matches = bool(model_candidates.intersection(set(_model_lookup_candidates(entry.get("model")))))
-            models_cfg = entry.get("models")
+        matches = []
+        for candidate in custom_providers:
+            candidate_base = str(candidate.get("base_url") or "").strip().rstrip("/")
+            models_cfg = candidate.get("models")
+            model_matches = bool(model_candidates.intersection(_model_lookup_candidates(candidate.get("model"))))
             if isinstance(models_cfg, dict):
-                model_matches = model_matches or any(candidate in models_cfg for candidate in model_candidates)
-            if not (provider_matches or base_matches or (not effective_provider and model_matches)):
-                continue
-            if not effective_provider and entry_slug:
-                effective_provider = entry_slug
-            if not effective_base_url and entry_base:
-                effective_base_url = entry_base
-            if not effective_api_key:
-                effective_api_key = _custom_provider_api_key_for_context(entry, effective_provider or entry_slug)
-            custom_context_length = _models_config_context_length(models_cfg, bare_model or model_for_lookup)
-            break
+                model_matches = model_matches or any(mid in models_cfg for mid in model_candidates)
+            if (target_base and target_base == candidate_base) or (not target_base and model_matches):
+                matches.append(candidate)
+        if len(matches) == 1:
+            entry = matches[0]
+    # Downstream metadata resolvers must not repeat a URL-only match against
+    # another identity after we have already selected (or refused) an owner.
+    custom_providers = [entry] if entry is not None else []
+    if entry is not None:
+        entry_slug = _custom_provider_slug_for_context(entry.get("name"))
+        if not effective_provider or effective_provider == "custom":
+            effective_provider = entry_slug
+        if not effective_base_url:
+            effective_base_url = str(entry.get("base_url") or "").strip()
+        if not effective_api_key:
+            effective_api_key = _custom_provider_api_key_for_context(entry, effective_provider)
+        custom_context_length = (
+            _models_config_context_length(entry.get("models"), bare_model or model_for_lookup)
+            or _positive_context_length(entry.get("context_length"))
+        )
 
     global_context_length = None
     if isinstance(model_cfg, dict):
@@ -9191,13 +9219,14 @@ def _repair_removed_qualified_custom_provider_model(
 
     from api.config import (
         AmbiguousCustomProviderError,
+        _custom_provider_entries,
         _custom_provider_slug_key,
         _unique_custom_provider_entry,
     )
 
     try:
         entry = _unique_custom_provider_entry(
-            config_obj.get("custom_providers"),
+            _custom_provider_entries(config_obj),
             _custom_provider_slug_key(prov),
         )
     except AmbiguousCustomProviderError:
@@ -25784,8 +25813,12 @@ def _handle_live_models(handler, parsed):
         # without normalization, provider_model_ids() misses the alias and returns [].
         # Uses the WebUI-owned table (api/config._resolve_provider_alias) which
         # works even when hermes_cli is not on sys.path.
-        from api.config import _resolve_provider_alias
+        from api.config import _resolve_provider_alias, _custom_provider_identity_disabled
         provider = _resolve_provider_alias(provider)
+        # Explicit native disable outranks cached/external catalogs and persisted
+        # pools alike. An absent config identity may still browse its own pool.
+        if _custom_provider_identity_disabled(provider, cfg):
+            return j(handler, {"provider": provider, "models": [], "count": 0})
 
         cache_key = _live_models_cache_key(provider)
         cached = _get_cached_live_models(cache_key)
@@ -25820,8 +25853,8 @@ def _handle_live_models(handler, parsed):
                 if not (provider == "custom" or provider.startswith("custom:")):
                     return []
                 try:
-                    from api.config import _custom_provider_slug_from_name
-                    _cp_entries = cfg.get("custom_providers", [])
+                    from api.config import _custom_provider_entries, _custom_provider_slug_from_name
+                    _cp_entries = _custom_provider_entries(cfg)
                     if not isinstance(_cp_entries, list):
                         return []
                     _matches = []
@@ -25865,11 +25898,11 @@ def _handle_live_models(handler, parsed):
                 if _raw is not None:
                     _key = str(_raw).strip()
                     if _key.startswith("${") and _key.endswith("}") and len(_key) > 3:
-                        _key = os.getenv(_key[2:-1], "").strip()
+                        _key = api_config._thread_local_env_value(_key[2:-1]).strip()
                     if _key:
                         return _key
                 _env = str(_cp.get("key_env") or "").strip()
-                return os.getenv(_env, "").strip() if _env else ""
+                return api_config._thread_local_env_value(_env).strip() if _env else ""
 
             # For 'custom' and 'custom:*' providers, provider_model_ids()
             # returns [] because they aren't real hermes_cli endpoints.
@@ -25896,7 +25929,7 @@ def _handle_live_models(handler, parsed):
                 if custom_provider_entry:
                     _base_url = custom_provider_entry.get("base_url")
                     _api_key = _custom_provider_api_key(custom_provider_entry)
-                else:
+                elif provider == "custom":
                     _model_cfg = cfg.get("model", {})
                     _base_url = _model_cfg.get("base_url")
                     _api_key = _model_cfg.get("api_key")

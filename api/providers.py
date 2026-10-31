@@ -38,9 +38,14 @@ except ImportError:  # pragma: no cover - exercised only where fcntl is unavaila
 from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
+    _canonicalise_provider_id,
     _coerce_provider_cost_budget,
     _configured_model_ids,
+    _custom_provider_entries,
     _custom_provider_slug_from_name,
+    _is_native_custom_provider_key,
+    _resolve_configured_provider_id,
+    _resolve_custom_record_key,
     _get_label_for_model,
     _models_from_live_provider_ids,
     _pool_entry_payloads,
@@ -1257,7 +1262,7 @@ def _provider_has_shadowed_codex_oauth_value(provider_id: str) -> bool:
         provider_cfg = providers_cfg.get(provider_id, {})
         if isinstance(provider_cfg, dict):
             values.append(provider_cfg.get("api_key"))
-    custom_providers = cfg.get("custom_providers", [])
+    custom_providers = _custom_provider_entries(cfg)
     if isinstance(custom_providers, list):
         for cp in custom_providers:
             if isinstance(cp, dict) and _custom_provider_name_matches(provider_id, cp.get("name")):
@@ -1377,6 +1382,8 @@ def _provider_has_key(provider_id: str) -> bool:
     4. ``config.yaml → providers.<id>.api_key``
     5. ``config.yaml → custom_providers[].api_key`` (for custom providers)
     """
+    if provider_id.startswith("custom:"):
+        return _get_provider_api_key(provider_id) is not None
     env_var = _provider_env_var_for(provider_id)
     if env_var:
         env_path = _get_hermes_home() / ".env"
@@ -1427,12 +1434,13 @@ def _provider_has_key(provider_id: str) -> bool:
             if _provider_value_counts_as_api_key(provider_id, provider_cfg.get("api_key")):
                 return True
     # Check custom_providers
-    custom_providers = cfg.get("custom_providers", [])
+    custom_providers = _custom_provider_entries(cfg)
     if isinstance(custom_providers, list):
         for cp in custom_providers:
             if isinstance(cp, dict):
                 if _custom_provider_name_matches(provider_id, cp.get("name")):
-                    if _provider_value_counts_as_api_key(provider_id, cp.get("api_key")):
+                    key = _resolve_custom_record_key(cp.get("api_key"), cp.get("key_env"), provider_id)
+                    if _provider_value_counts_as_api_key(provider_id, key):
                         return True
     return False
 
@@ -1440,6 +1448,33 @@ def _provider_has_key(provider_id: str) -> bool:
 def _get_provider_api_key(provider_id: str) -> str | None:
     """Return a configured provider API key without exposing it to callers."""
     provider_id = (provider_id or "").strip().lower()
+    if provider_id.startswith("custom:"):
+        from api.config import (
+            _select_custom_provider_record, _unique_custom_provider_entry,
+            _custom_provider_slug_key, _custom_provider_identity_disabled,
+        )
+
+        cfg = get_config()
+        if _custom_provider_identity_disabled(provider_id, cfg):
+            return None
+        entry, _source, _exact, _status = _select_custom_provider_record(
+            provider_id, _custom_provider_slug_key(provider_id), cfg,
+        )
+        if entry is None:
+            entry = _unique_custom_provider_entry(
+                _custom_provider_entries(cfg), _custom_provider_slug_key(provider_id),
+            )
+        if entry is not None:
+            key = _resolve_custom_record_key(entry.get("api_key"), entry.get("key_env"), provider_id)
+            if key:
+                return key
+        # No presentation row does not rule out an explicitly owned pool key.
+        for pooled in _pool_entry_payloads(provider_id):
+            if not _pool_entry_currently_unusable(pooled):
+                key = str(pooled.get("runtime_api_key") or pooled.get("agent_key") or pooled.get("access_token") or "").strip()
+                if key:
+                    return key
+        return None
     env_var = _provider_env_var_for(provider_id)
     if env_var:
         env_path = _get_hermes_home() / ".env"
@@ -1474,15 +1509,13 @@ def _get_provider_api_key(provider_id: str) -> str | None:
             if _provider_value_counts_as_api_key(provider_id, provider_key):
                 return provider_key
 
-    custom_providers = cfg.get("custom_providers", [])
+    custom_providers = _custom_provider_entries(cfg)
     if isinstance(custom_providers, list):
         for cp in custom_providers:
             if not isinstance(cp, dict):
                 continue
             if _custom_provider_name_matches(provider_id, cp.get("name")):
-                cp_key = str(cp.get("api_key") or "").strip()
-                if cp_key.startswith("${") and cp_key.endswith("}"):
-                    return _thread_local_env_value(cp_key[2:-1]).strip() or None
+                cp_key = _resolve_custom_record_key(cp.get("api_key"), cp.get("key_env"), provider_id)
                 if _provider_value_counts_as_api_key(provider_id, cp_key):
                     return cp_key
     # Fallback: try credential pool (e.g. bothub key stored via auth.json)
@@ -2921,12 +2954,21 @@ def get_providers() -> dict[str, Any]:
     providers = []
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        known_ids.update(providers_cfg.keys())
+        known_ids.update(
+            key for key, value in providers_cfg.items()
+            if not _is_native_custom_provider_key(key)
+            or (isinstance(value, dict) and not value
+                and not str(key).strip().lower().startswith("custom:"))
+        )  # Empty bare settings remain keyless cards, never native authorities.
 
     # Add OAuth providers even if not in _PROVIDER_DISPLAY
     known_ids.update(_OAUTH_PROVIDERS)
 
     for pid in sorted(known_ids):
+        # Named custom cards come from the read view below, never the raw
+        # providers map (which may contain disabled or shadowed records).
+        if pid.startswith("custom:"):
+            continue
         display_name = effective_provider_display_name(pid, _PROVIDER_DISPLAY)
         is_oauth = _provider_is_oauth(pid)
         has_key = _provider_has_key(pid)
@@ -3169,7 +3211,7 @@ def get_providers() -> dict[str, Any]:
         })
 
     # Scan custom_providers from config.yaml (e.g. glmcode, timicc)
-    custom_providers_cfg = cfg.get("custom_providers", [])
+    custom_providers_cfg = _custom_provider_entries(cfg)
     if isinstance(custom_providers_cfg, list):
         for cp in custom_providers_cfg:
             if not isinstance(cp, dict) or not cp.get("name"):
@@ -3196,13 +3238,7 @@ def get_providers() -> dict[str, Any]:
                 if _mid not in cp_model_ids:
                     cp_model_ids.append(_mid)
             cp_models = [{"id": mid, "label": mid} for mid in cp_model_ids]
-            # Check for env var reference (${VAR_NAME} pattern)
-            cp_api_key = str(cp.get("api_key") or "")
-            cp_has_key = bool(cp_api_key.strip())
-            # Replace env var reference to check actual value
-            if cp_api_key.startswith("${") and cp_api_key.endswith("}"):
-                env_var = cp_api_key[2:-1]
-                cp_has_key = bool(_thread_local_env_value(env_var).strip())
+            cp_has_key = bool(_resolve_custom_record_key(cp.get("api_key"), cp.get("key_env"), cp_id))
             # Fallback: check credential pool (key added via hermes auth add)
             if not cp_has_key:
                 try:
@@ -3213,7 +3249,7 @@ def get_providers() -> dict[str, Any]:
                     pass
             providers.append({
                 "id": cp_id,
-                "display_name": cp_name,
+                "display_name": cp.get("display_name") or cp_name,
                 "has_key": cp_has_key,
                 "configurable": False,  # custom providers managed via config.yaml
                 "is_custom": True,
@@ -3227,6 +3263,24 @@ def get_providers() -> dict[str, Any]:
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
         active_provider = model_cfg.get("provider")
+        # Bare custom stays the default lane, even beside custom:custom.
+        if active_provider and str(active_provider).strip().lower() != "custom":
+            # Existing card IDs own this display namespace (including plugins
+            # and empty bare settings); runtime aliases may use different IDs.
+            card_ids = {card["id"] for card in providers}
+            card_id = str(active_provider).strip().lower()
+            if card_id in card_ids:
+                active_provider = card_id
+            else:
+                # Match native identities BEFORE built-in underscore folding,
+                # using this request's snapshot rather than global cfg.
+                active_provider = _resolve_configured_provider_id(
+                    active_provider, cfg, resolve_alias=False,
+                )
+                card_id = _canonicalise_provider_id(active_provider)
+                if (card_id in card_ids
+                        and (card_id in _PROVIDER_DISPLAY or card_id in _PROVIDER_MODELS)):
+                    active_provider = card_id
 
     # Sort providers: active first, then custom:*, then has_key, then rest.
     def _provider_sort_key(p):

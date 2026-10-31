@@ -1550,12 +1550,125 @@ def _custom_provider_slug_from_name(name: object) -> str:
     return "custom:" + slug
 
 
-def _custom_provider_entries(config_obj: dict | None = None) -> list[dict]:
+def _is_native_custom_provider_key(key: object) -> bool:
+    """Separate custom mapping keys from built-in/plugin provider settings."""
+    if not isinstance(key, str) or not key.strip():
+        return False
+    raw = key.strip().lower()
+    # Registered names preserve underscores; runtime alias folding does not.
+    # Explicit custom:<slug> keys still declare independent named providers.
+    if not raw.startswith("custom:") and _is_plugin_model_provider(raw):
+        return False
+    canonical = _canonicalise_provider_id(key)
+    if canonical == "custom":
+        return False  # generic default-endpoint settings, not a named identity
+    return raw.startswith("custom:") or not (
+        canonical in _PROVIDER_DISPLAY or canonical in _PROVIDER_MODELS
+        or _is_plugin_model_provider(canonical)
+    )
+
+
+def _native_identity_index(native: dict) -> tuple[list, dict, dict, dict]:
+    """One pass over ``providers:`` for :func:`_custom_provider_entries`.
+
+    Maps every alias and slug a record can be named by (the two vocabularies of
+    :func:`_custom_record_names_identity`, from the same ``name or key``
+    expression the selectors use) to the record's position. Built once per view,
+    so resolving N identities costs O(N) instead of rescanning every key per
+    identity, which made the view quadratic in the number of native providers.
+    """
+    items = list(native.items())
+    by_alias: dict[str, set[int]] = {}
+    by_slug: dict[str, set[int]] = {}
+    by_key: dict = {}
+    for pos, (key, record) in enumerate(items):
+        by_key[key] = pos
+        display = (record.get("name") if isinstance(record, dict) else None) or key
+        for alias in _custom_provider_alias_set(display, key):
+            by_alias.setdefault(alias, set()).add(pos)
+        for value in (display, key):
+            if str(value or "").strip():
+                by_slug.setdefault(_custom_provider_slug_key(value), set()).add(pos)
+    return items, by_alias, by_slug, by_key
+
+
+def _native_identity_scope(native: dict, index: tuple, pid: str, slug: str) -> dict:
+    """The ``providers:`` entries that can name ``pid``, in their original order.
+
+    A superset of every key :func:`_native_custom_provider_record` can accept for
+    ``pid`` (its exact key, any record whose name or key carries ``pid`` as an
+    Agent alias, any whose name or key normalizes to ``slug``), so selecting from
+    it gives the same record, the same disabled verdict and the same collision
+    error as selecting from the whole mapping.
+    """
+    items, by_alias, by_slug, by_key = index
+    positions = set(by_alias.get(pid, ())) | set(by_slug.get(slug, ()))
+    if pid in by_key:
+        positions.add(by_key[pid])
+    return dict(items[pos] for pos in sorted(positions))
+
+
+def _custom_provider_entries(
+    config_obj: dict | None = None, *, for_catalog: bool = False,
+) -> list[dict]:
+    """Read-only legacy-shaped view of configured custom providers.
+
+    An explicitly empty/malformed legacy store still suppresses native catalog
+    fallback. In a mixed store legacy identities win. Native mapping keys are
+    identities; their editable names are labels only. Never insert this view
+    into config or use it in place of the complete record during connection
+    selection (``_select_custom_provider_record``). Catalogs retain the older
+    inactive bare models-only exclusion; other metadata readers remain complete.
+    """
     source = config_obj if isinstance(config_obj, dict) else cfg
     entries = source.get("custom_providers", [])
     if not isinstance(entries, list):
         return []
-    return [entry for entry in entries if isinstance(entry, dict)]
+    entries = [entry for entry in entries if isinstance(entry, dict)]
+    if "custom_providers" in source and not entries:
+        return []
+    native = source.get("providers")
+    if not isinstance(native, dict):
+        return entries
+    seen = {_custom_provider_slug_from_name(entry.get("name")) for entry in entries}
+    index = _native_identity_index(native)
+    for key in native:
+        if not _is_native_custom_provider_key(key):
+            continue
+        identity = _custom_provider_slug_from_name(key)
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        # Use the same exact-key precedence and collision check as runtime;
+        # insertion order must never choose a different native authority.
+        slug = _custom_provider_slug_key(identity)
+        try:
+            record, _disabled = _native_custom_provider_record(
+                _native_identity_scope(native, index, identity, slug), identity, slug,
+            )
+        except AmbiguousCustomProviderError:
+            # Omit only this unusable identity. Explicit routing still validates
+            # its raw authority at the point of return, not during enumeration.
+            continue
+        if record is None:
+            continue
+        model_cfg = source.get("model")
+        active = model_cfg.get("provider") if isinstance(model_cfg, dict) else None
+        explicit_native = key.strip().lower().startswith("custom:") or identity in native
+        if (for_catalog and not explicit_native
+                and _custom_provider_slug_from_name(active) != identity
+                and not _custom_record_owns_connection(record, identity)):
+            # A bare models-only settings block is not a new picker route
+            # (#1970/#5301). Explicit custom: keys still declare native catalogs.
+            continue
+        entry = copy.deepcopy(record)
+        entry["name"] = identity if identity in native else key
+        fallback_label = key if explicit_native else key.replace("-", " ").title()
+        entry["display_name"] = str(record.get("name") or fallback_label).strip()
+        if not entry.get("model"):
+            entry["model"] = record.get("default_model") or ""
+        entries.append(entry)
+    return entries
 
 
 def _configured_model_ids(raw_models: object) -> list[str]:
@@ -1627,6 +1740,17 @@ def _configured_model_options(raw_models: object) -> list[dict[str, str]]:
         {"id": model_id, "label": labels.get(model_id, model_id)}
         for model_id in _configured_model_ids(raw_models)
     ]
+
+
+def _configured_model_explicit_labels(raw_models: object) -> dict[str, str]:
+    """Read explicit labels without changing custom catalogs' fallback labels."""
+    if not isinstance(raw_models, list):
+        return {}
+    labelled = [
+        row for row in raw_models
+        if isinstance(row, dict) and str(row.get("label") or "").strip()
+    ]
+    return {row["id"]: row["label"] for row in _configured_model_options(labelled)}
 
 
 def _merge_model_option_rows(*row_lists: object) -> list[dict[str, str]]:
@@ -1756,7 +1880,12 @@ def _canonicalise_provider_id(name: object) -> str:
     """
     if not name:
         return ""
-    raw = str(name).strip().lower().replace("_", "-")
+    raw = str(name).strip().lower()
+    if raw.startswith("custom:"):
+        # This namespace is already minted by _custom_provider_slug_from_name;
+        # folding underscores would disconnect catalog IDs from raw selection.
+        return raw
+    raw = raw.replace("_", "-")
     if not raw:
         return ""
     # Already a canonical id known to _PROVIDER_DISPLAY/_PROVIDER_MODELS:
@@ -3084,17 +3213,13 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         request that resolves to a DIFFERENT provider (an unrelated
         ``@openrouter:...`` / ``@custom:safe-provider:...`` lane, or the bare
         ``custom`` proxy), so the ambiguity check runs only on the slug actually
-        being returned. ``_unique_custom_provider_entry`` raises
-        AmbiguousCustomProviderError when >=2 config entries share the slug, so a
-        downstream credential lookup can never first-match a different entry than
-        the one whose endpoint we resolved. No-op for bare ``custom`` and every
-        non-custom provider.
+        being returned. ``_select_custom_provider_record`` validates the raw
+        legacy/native authority for that target, including identities omitted by
+        the read view, so downstream credential lookup cannot first-match a
+        different record. No-op for bare ``custom`` and non-custom providers.
         """
         if isinstance(provider, str) and provider.startswith("custom:"):
-            _unique_custom_provider_entry(
-                cfg.get('custom_providers', []),
-                _custom_provider_slug_key(provider),
-            )
+            _select_custom_provider_record(provider, _custom_provider_slug_key(provider), cfg)
         return model, provider, base_url
 
     # Read before the strip below, which returns a plain str.
@@ -3168,7 +3293,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             or model_id in _provider_models_set
         )
     )
-    custom_providers = cfg.get('custom_providers', [])
+    custom_providers = _custom_provider_entries(cfg)
     if isinstance(custom_providers, list) and not _skip_custom_providers:
         # Disambiguation guard: when two custom_providers[] entries both list the
         # same bare model id (e.g. dogapi and packyapi both advertise
@@ -3255,6 +3380,8 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         for slug, pdef in providers_cfg.items():
             if not isinstance(pdef, dict):
                 continue
+            if _is_native_custom_provider_key(slug):
+                continue  # handled by the read view, including enabled/legacy precedence
             # Copilot is the documented exception: `providers.copilot.models` is
             # a per-model SETTINGS map (reasoning_effort, limits, etc.), NOT a
             # routable allowlist (see the exception at the catalog-build site).
@@ -3331,7 +3458,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # to _get_provider_base_url() when no exact custom_providers[] row exists.
         if provider_hint.startswith("custom:"):
             entry = _unique_custom_provider_entry(
-                cfg.get('custom_providers', []),
+                _custom_provider_entries(cfg),
                 _custom_provider_slug_key(provider_hint),
             )
             if entry is not None:
@@ -3382,7 +3509,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # instead of falling back to the default config provider. MUST come BEFORE
         # the config_base_url branch because many providers have a base_url set.
         if prefix and config_provider and prefix != config_provider:
-            _custom_cfg = cfg.get("custom_providers", [])
+            _custom_cfg = _custom_provider_entries(cfg)
             if isinstance(_custom_cfg, list):
                 for _entry in _custom_cfg:
                     if isinstance(_entry, dict) and _entry.get("name", "").strip() == prefix:
@@ -3961,6 +4088,64 @@ def _unique_raw_provider_record(providers_cfg: object, pid: str, slug: str) -> d
     return owning[0][1] if owning else None
 
 
+def _native_custom_provider_record(providers_cfg: object, pid: str, slug: str) -> tuple[dict | None, bool]:
+    """Return the native authority and whether its explicit disable is terminal.
+
+    Exact canonical keys outrank aliases, including their disabled verdict.
+    Without one, reuse the raw selector's collision check rather than silently
+    choosing the first key that normalizes to the same identity.
+    """
+    if not isinstance(providers_cfg, dict):
+        return None, False
+    exact = providers_cfg.get(pid)
+    normalized = None
+    if isinstance(exact, dict) and exact:
+        if not _raw_provider_record_enabled(exact):
+            return None, True
+        normalized = _normalized_raw_provider_record(exact, pid)
+        if _custom_record_owns_connection(normalized, pid):
+            return normalized, False
+    record = _unique_raw_provider_record(providers_cfg, pid, slug)
+    if record is not None:
+        return record, False
+    disabled = any(
+        _is_native_custom_provider_key(key)
+        and isinstance(candidate, dict) and bool(candidate)
+        and not _raw_provider_record_enabled(candidate)
+        and _custom_record_names_identity(candidate.get("name") or key, key, pid, slug)
+        for key, candidate in providers_cfg.items()
+    )
+    if disabled:
+        return None, True
+    # Metadata-only rows remain readable, but the runtime candidate loop still
+    # requires a declared connection. They cannot displace an owning alias above.
+    if normalized is not None:
+        return normalized, False
+    metadata = [
+        _normalized_raw_provider_record(candidate, key)
+        for key, candidate in providers_cfg.items()
+        if _is_native_custom_provider_key(key) and isinstance(candidate, dict) and candidate
+        and _raw_provider_record_enabled(candidate) and _custom_provider_slug_key(key) == slug
+    ]
+    return (metadata[0] if len(metadata) == 1 else None), False
+
+
+def _custom_provider_identity_disabled(provider_id: str, cfg_data: dict) -> bool:
+    """Whether an owned native identity forbids even a persisted-pool probe.
+
+    A legacy winner retains its established precedence. Missing configuration
+    is not disabled: explicitly persisted pool-only browsing remains valid.
+    """
+    pid = str(provider_id or "").strip().lower()
+    if not pid.startswith("custom:"):
+        return False
+    slug = _custom_provider_slug_key(pid)
+    if not slug or _unique_custom_provider_entry(cfg_data.get("custom_providers"), slug) is not None:
+        return False
+    _record, disabled = _native_custom_provider_record(cfg_data.get("providers"), pid, slug)
+    return disabled
+
+
 def _select_custom_provider_record(
     pid: str,
     slug: str,
@@ -4025,21 +4210,11 @@ def _select_custom_provider_record(
     # Fallbacks for setups that don't use custom_providers names directly. Every
     # one of them is keyed on this provider's OWN identity.
     providers_cfg = cfg_data.get("providers", {})
-    provider_specific = providers_cfg.get(pid, {}) if isinstance(providers_cfg, dict) else {}
     provider_custom = providers_cfg.get("custom", {}) if isinstance(providers_cfg, dict) else {}
-
-    if (
-        isinstance(provider_specific, dict)
-        and provider_specific
-        and not _raw_provider_record_enabled(provider_specific)
-    ):
-        # ``providers['custom:<slug>']`` names THIS slug by its own exact key, so
-        # switching it off is a statement about this route and not merely about
-        # one candidate among several. Falling through to the generic ``custom``
-        # record or the ``model:`` block would honour the disable by routing the
-        # turn somewhere ELSE — the ambient provider's endpoint and credential
-        # under the name the user just took offline. The slug's own authority
-        # said no, so the route is terminal here.
+    native_record, disabled = _native_custom_provider_record(providers_cfg, pid, slug)
+    if disabled:
+        # The identity's authority said no; generic model/pool fallbacks cannot
+        # resurrect it under the name the user explicitly took offline.
         return None, "", False, CUSTOM_SELECTION_MISSING
 
     model_cfg = cfg_data.get("model", {})
@@ -4069,26 +4244,13 @@ def _select_custom_provider_record(
     )
 
     def _candidates():
-        """Identity-owned candidates, most specific first — evaluated LAZILY.
+        """Identity-owned candidates, most specific first.
 
-        Laziness is load-bearing for the raw-``providers:`` scan alone: that one
-        RAISES on an alias collision, and a config whose route is already decided
-        by the exact ``providers['custom:<slug>']`` key must not be failed closed
-        by a collision further down a list it never reaches.
+        Native exact-key precedence and lazy alias-collision checks are shared
+        with the read view in _native_custom_provider_record().
         """
-        if isinstance(provider_specific, dict) and provider_specific:
-            # Keyed by this provider's own id: ``providers['custom:<slug>']``.
-            yield provider_specific, "providers"
-        # The standard v12 shape: a raw ``providers:<key>`` record that names
-        # this identity by its own config key or display name (``providers:
-        # {omni: ...}`` for ``custom:omni``), matched with the installed Agent's
-        # alias rules. This is identity ownership, not an ambient-field escape —
-        # a record that names some OTHER provider never appears here, and an
-        # unknown slug still matches nothing and falls through to the terminal
-        # verdict below.
-        raw_record = _unique_raw_provider_record(providers_cfg, pid, slug)
-        if raw_record is not None:
-            yield raw_record, "providers"
+        if native_record is not None:
+            yield native_record, "providers"
         if generic_claims_slug:
             yield provider_custom, "providers"
         if isinstance(model_cfg, dict) and model_cfg and _raw_provider_record_enabled(model_cfg) and (
@@ -5133,7 +5295,7 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
         # for collisions, matching the point-of-return guard used by
         # resolve_model_provider. (#7356 maintainer review)
         if provider.startswith("custom:"):
-            custom_providers = cfg.get("custom_providers") if isinstance(cfg, dict) else []
+            custom_providers = _custom_provider_entries(cfg) if isinstance(cfg, dict) else []
             if (
                 _unique_custom_provider_entry(
                     custom_providers, _custom_provider_slug_key(provider)
@@ -6900,7 +7062,7 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                     # exactly like every other path — otherwise the ambiguity
                     # would be swallowed and the wrong endpoint persisted.
                     _cp_match = _unique_custom_provider_entry(
-                        config_data.get("custom_providers", []),
+                        _custom_provider_entries(config_data),
                         _custom_provider_slug_key(provider),
                     )
                     if _cp_match is not None:
@@ -7629,6 +7791,8 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         if isinstance(providers_cfg, dict):
             for provider_key, provider_cfg in providers_cfg.items():
+                if _is_native_custom_provider_key(provider_key):
+                    continue  # named groups are populated from the read view below
                 canonical = _canonicalise_provider_id(provider_key)
                 if not canonical:
                     continue
@@ -7685,13 +7849,13 @@ def _static_models_catalog_without_live_probes() -> dict:
                     detected_providers.add(provider)
                     _append_model_id(provider, entry.get("model"))
 
-        for entry in _custom_provider_entries(cfg):
+        for entry in _custom_provider_entries(cfg, for_catalog=True):
             provider_name = str(entry.get("name") or "").strip()
             provider_slug = _custom_provider_slug_from_name(provider_name) or "custom"
             if provider_slug != "custom":
                 named_custom_groups.setdefault(
                     provider_slug,
-                    {"name": provider_name, "models": []},
+                    {"name": entry.get("display_name") or provider_name, "models": []},
                 )
             detected_providers.add(provider_slug)
 
@@ -7703,8 +7867,9 @@ def _static_models_catalog_without_live_probes() -> dict:
                 if configured_id not in configured_ids:
                     configured_ids.append(configured_id)
 
+            configured_labels = _configured_model_explicit_labels(entry.get("models"))
             for configured_id in configured_ids:
-                label = _get_label_for_model(configured_id, [])
+                label = configured_labels.get(configured_id) or _get_label_for_model(configured_id, [])
                 if provider_slug == "custom":
                     custom_group_models.append({"id": configured_id, "label": label})
                 else:
@@ -10296,6 +10461,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         _canonical_to_raw_provider_key: dict[str, str] = {}
         if isinstance(_cfg_providers, dict):
             for _pid_key, _provider_cfg in _cfg_providers.items():
+                if _is_native_custom_provider_key(_pid_key):
+                    continue  # named groups are populated from the read view below
                 _canonical = _canonicalise_provider_id(_pid_key)
                 if not _canonical:
                     continue
@@ -10382,6 +10549,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 for provider_key, provider_cfg in providers_cfg.items():
                     if not isinstance(provider_cfg, dict):
                         continue
+                    if _is_native_custom_provider_key(provider_key):
+                        continue  # normalized native URLs/identities come from the view
                     provider_base_url = _normalize_base_url_for_match(
                         provider_cfg.get("base_url")
                     )
@@ -10608,7 +10777,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             little smaller, whereas under-counting would over-spend the budget.
             """
             count = 1 if cfg_base_url else 0
-            custom_providers_cfg = cfg.get("custom_providers", [])
+            custom_providers_cfg = _custom_provider_entries(cfg, for_catalog=True)
             if isinstance(custom_providers_cfg, list):
                 for entry in custom_providers_cfg:
                     if not isinstance(entry, dict):
@@ -10616,7 +10785,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     if not (entry.get("name") or "").strip():
                         continue
                     configured_models = entry.get("models")
-                    if isinstance(configured_models, (dict, list)) and len(configured_models) > 0:
+                    if (isinstance(configured_models, (dict, list)) and len(configured_models) > 0
+                            and not _provider_models_are_discovered_catalog(entry)):
                         continue
                     count += 1
             # The LM Studio provider-group branch re-probes the same
@@ -10710,7 +10880,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         break
 
             _trusted_custom_bases: list[object] = [cfg_base_url]
-            _custom_providers_for_trust = cfg.get("custom_providers", [])
+            _custom_providers_for_trust = _custom_provider_entries(cfg)
             if isinstance(_custom_providers_for_trust, list):
                 _trusted_custom_bases.extend(
                     _cp.get("base_url")
@@ -10731,7 +10901,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 detected_providers.add(provider_key)
             _active_probe_owner = (provider.lower(), str(api_key or "").strip())
 
-        _custom_providers_cfg = cfg.get("custom_providers", [])
+        _custom_providers_cfg = _custom_provider_entries(cfg, for_catalog=True)
         _named_custom_groups: dict = {}
         _named_custom_errors: dict[str, dict] = {}
         if isinstance(_custom_providers_cfg, list):
@@ -10742,14 +10912,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 _cp_name = (_cp.get("name") or "").strip()
                 _slug = _custom_provider_slug_from_name(_cp_name) if _cp_name else None
                 if _slug and _slug not in _named_custom_groups:
-                    _named_custom_groups[_slug] = (_cp_name, [])
+                    _named_custom_groups[_slug] = (_cp.get("display_name") or _cp_name, [])
 
                 _cp_base_url = str(_cp.get("base_url") or "").strip()
-                _cp_api_key = str(_cp.get("api_key") or "").strip()
-                if not _cp_api_key:
-                    _cp_key_env = str(_cp.get("key_env") or "").strip()
-                    if _cp_key_env:
-                        _cp_api_key = _thread_local_env_value(_cp_key_env).strip()
+                _cp_api_key = _resolve_custom_record_key(
+                    _cp.get("api_key"), _cp.get("key_env"), _slug,
+                ) or ""
                 # Fallback: check credential pool for both api_key and base_url
                 if (not _cp_api_key or not _cp_base_url) and _slug:
                     try:
@@ -10779,6 +10947,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     _cp_has_configured_models = (
                         isinstance(_cp_configured_models, (dict, list))
                         and len(_cp_configured_models) > 0
+                        and not _provider_models_are_discovered_catalog(_cp)
                     )
                     if (
                         _active_probe_owner
@@ -10827,6 +10996,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         )
 
                 # Collect configured model IDs as a fallback/sticky entry after live discovery.
+                _cp_labels = _configured_model_explicit_labels(_cp.get("models"))
                 _cp_model_ids: list[str] = []
                 _cp_model = _cp.get("model", "")
                 if _cp_model:
@@ -10838,7 +11008,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 for _cp_model in _cp_model_ids:
                     _dedup_key = f"{_slug}:{_cp_model}" if _slug else _cp_model
                     if _cp_model and _dedup_key not in _seen_custom_ids:
-                        _cp_label = _get_label_for_model(_cp_model, [])
+                        _cp_label = _cp_labels.get(_cp_model) or _get_label_for_model(_cp_model, [])
                         _seen_custom_ids.add(_dedup_key)
                         if _slug:
                             detected_providers.add(_slug)
@@ -10885,13 +11055,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 configured_providers.add(active_provider)
             cfg_providers = cfg.get("providers", {})
             if isinstance(cfg_providers, dict):
-                # Canonicalise here too — same rationale as #1568 detection
-                # path. Without this, only_show_configured mode could
-                # exclude detected ``opencode-go`` because configured_providers
-                # only has the underscore-variant key from config.yaml.
-                configured_providers.update(
-                    _canonicalise_provider_id(k) or k for k in cfg_providers.keys()
-                )
+                # Native keys use the same stable identity as the read view;
+                # built-in/plugin aliases retain their existing canonical ids.
+                # Scalar siblings such as only_configured are settings, not ids.
+                for key, value in cfg_providers.items():
+                    if _is_native_custom_provider_key(key):
+                        if isinstance(value, dict):
+                            configured_providers.add(_custom_provider_slug_from_name(key))
+                    else:
+                        configured_providers.add(_canonicalise_provider_id(key) or key)
             # Only show providers that are both detected and configured
             detected_providers = detected_providers.intersection(configured_providers)
 
