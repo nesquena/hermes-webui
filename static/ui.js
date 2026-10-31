@@ -26906,6 +26906,7 @@ function _showFileContextMenu(e, item){
   menu.style.left=(e.clientX+140>vw?e.clientX-150:e.clientX)+'px';
   menu.style.top=(e.clientY+100>vh?e.clientY-100:e.clientY)+'px';
   const isDirLike=item.type==='dir'||(item.type==='symlink'&&item.is_dir);
+  const isExternalLink=item.type==='symlink'&&!!item.target_outside_workspace;
   const targetDir=isDirLike ? item.path : _workspaceParentDir(item.path);
   const isReadOnlyEscape=typeof _workspaceEscapeGrantForPath==='function' ? !!_workspaceEscapeGrantForPath(item.path) : false;
 
@@ -27002,6 +27003,31 @@ function _showFileContextMenu(e, item){
       }
     };
     menu.appendChild(copyRelPathItem);
+
+    // Copy file URL — the absolute http(s) URL of the raw file, resolved
+    // against document.baseURI so a subpath mount is kept. inline=1 only for
+    // HTML, which the raw route then renders sandboxed (as "Open in browser"
+    // does) instead of downloading; on other types it would only add the
+    // sandbox CSP, which some browsers' PDF viewers refuse to run under.
+    // Files only: the raw route has no directory form, and a symlink to a
+    // target outside the workspace 404s there. Kept inside the non-escape
+    // block, and rechecked at click time (a grant may land while the menu is
+    // open), so the copied URL never carries an escape grant token.
+    if(!isDirLike&&!isExternalLink){
+      menu.appendChild(_workspaceContextMenuItem(t('copy_file_url'),()=>{
+        menu.remove();
+        // The server picks the MIME type from the resolved target's suffix,
+        // so an in-workspace symlink is judged by its target.
+        const typePath=(item.type==='symlink'&&item.target)||item.path||'';
+        const isHtml=HTML_EXTS.has(fileExt(typePath));
+        const url=_workspaceEscapeGrantForPath(item.path)?'':_workspaceRouteForPath(item.path,'raw',isHtml?{inline:true}:{});
+        if(!/^https?:\/\//i.test(url)){
+          showToast(t('file_url_copy_failed').replace(/[\s:：]+$/,''));
+          return;
+        }
+        _copyTextWithFallback(url,t('file_url_copied'),t('file_url_copy_failed'));
+      }));
+    }
   }
 
   if(isDirLike){
