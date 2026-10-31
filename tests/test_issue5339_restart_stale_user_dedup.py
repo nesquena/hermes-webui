@@ -164,6 +164,9 @@ def test_content_key_is_idempotent_for_bare_user_message():
         "just a plain message",
         "",
         "",
+        # #7587 occurrence discriminator: a row with no timestamp keys with an
+        # empty occurrence, so it still matches another timestamp-less row.
+        "",
     )
 
 
