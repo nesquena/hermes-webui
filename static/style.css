@@ -1505,6 +1505,17 @@
   :root{--app-titlebar-safe-top:0px;}
   .pwa-standalone{overscroll-behavior:none;}
   .pwa-standalone body{-webkit-tap-highlight-color:transparent;}
+  /* iOS 26/27 status-bar "scroll pocket": WebKit hides the wide top blur only
+     while a fixed or sticky box with an opaque background is hit-tested 4px
+     inside the top edge. The titlebar already paints var(--sidebar) across the
+     full width at the very top of the page, so making it sticky turns it into
+     that box: the status bar adopts the titlebar colour and the blur is
+     suppressed (paired with status-bar-style=default in index.html — with
+     black-translucent WebKit's mechanism never activates).
+     body is 100dvh + overflow:hidden and the titlebar sits outside .layout, so
+     body never scrolls and sticky is position-neutral: no layout shift, and the
+     titlebar cannot float over content. Scoped to installed iOS web apps. */
+  .pwa-standalone.pwa-ios .app-titlebar{position:sticky;top:0;}
   .app-titlebar-new-chat{display:none;}
   .pwa-standalone .app-titlebar-reload{display:inline-flex;}
   .pwa-offline .app-titlebar::after{content:'';position:absolute;left:50%;bottom:5px;width:5px;height:5px;border-radius:999px;background:var(--warning);box-shadow:0 0 0 3px color-mix(in srgb,var(--warning) 22%,transparent);transform:translateX(-50%);}
