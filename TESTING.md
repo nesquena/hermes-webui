@@ -295,8 +295,55 @@ trigger of its own), and Enter, Space and a click must each send the move. The
 batch picker must open on its first row and return focus to the selection
 bar's Move button. "No project" and "+ New project" must follow the interface
 language; in a touch context, with the drawer open, every row must be at least
-44px tall; and in a long list the focused row must be inside the picker's box,
-or, in the batch picker, scrolled onto the screen by the conversation list.
+44px tall, and so must every row of the ⋮ menu that opens the picker, which on
+a phone on its side must stay on the screen, scroll to its last row, and reveal
+the row a key moves focus to. That last part is checked with the menu opened by
+the script's own call and keys sent by the browser, and on two paths of real
+input: a right click on the row followed by End and the screen turned from
+390x844 to 844x390 (a viewport resize, not a rotated device), after which the
+row that has focus must still be inside the menu's box; and a touch (browser
+touch events) held on the row until the menu opens and lifted beside it, after
+which focus must still be in the menu and End must reach its last row without
+scrolling the conversation list; and a touch held on a row in the middle of the
+screen, where the menu opens over the finger (390x844 and 844x390, and a fork's
+row at 844x390), and lifted there, after which no menu row may have been
+clicked, no request sent, the menu must still be open with focus in it, and a
+tap on a menu row or on the fork must then work; and, at 1280x800 with the
+mouse as the main pointer and touch events as well (a touch laptop, the only
+place a row's ⋮ button and touch meet), a long press on a conversation and on
+a fork, Escape, the mouse resting on the row, and then a tap on the row's ⋮
+button, which must open the menu. Three more paths of real input follow: at
+1440x900 a right click on a row and then keys only, where Tab from the first
+row must reach the second (and focus the script then blurs must come back to
+it), End the last, and three Tabs from there must leave the menu and reach a
+control of the page, with the menu still open and Escape closing it; a pen (the
+browser's pen pointer, which sends pointer events and a click and no touch
+events) held on a conversation at 390x844 and on a fork at 844x390 where the
+menu opens over it, and lifted, after which the menu must still be open with
+focus in it, no menu row clicked and no request sent, and the next pen tap must
+run the menu row it lands on, or open the fork, while a pen pressed on a fork
+at 390x844, dragged off it at once and lifted on another row must neither click
+nor open the fork, and a pen pressed on a conversation or a fork, moved off its
+row in one step and lifted before the long press is due, must get no ⋮ menu
+afterwards, and a finger or a pen held on a conversation or a fork at 844x390
+until the menu opens, then dragged right, left or up and lifted, must send no
+request (a swipe to the right archives, one to the left asks to delete), leave
+no row drawn swiped or dragged, open no dialog, and leave the menu open on the
+row that was pressed; and one conversation's picker left open while another
+row's ⋮ menu is opened, by a long press at 390x844 and by a right click at
+1440x900, after which the picker must be gone and Escape must leave neither
+open. A hardware keyboard on a phone, a real rotation, a real finger and a real
+stylus are not checked. In a long list the focused row must be inside
+the picker's box, or, in the batch picker, scrolled onto the screen by the
+conversation list. With a mouse on the light theme, a keyboard-focused row's
+ring must be the skin's `--accent-text` at 3:1 or more against the picker
+(checked for the single picker, on a project row and on "+ New project", which
+must be drawn at full opacity while it has focus, on the default skin and on
+the three skins with the palest accents, Terracotta, Sienna and Neon Paint, and
+for the batch picker's first row on the default skin; other skins are not
+checked), a row under the pointer must show the skin's hover wash, and
+"+ New project" must keep its accent tint; the dark theme must keep the ring,
+the wash and the 70% "+ New project" it had.
 With forty more conversations and fifteen projects, a mouse wheel over the open
 batch picker must still scroll the conversation list, and on four phone sizes
 every row of the single picker must be tappable wherever in the list it was
@@ -721,6 +768,52 @@ EXPECT:
   - The dropdown updates to "Gemini 2.5 Pro"
   - Switching away and back to the conversation restores the same model in the footer selector
 FAIL: Dropdown shows the wrong active model after a session switch, or sending uses a stale model.
+
+### T3.2a: Reasoning Effort Reflects Active Conversation
+SETUP: Two sessions using the same reasoning-capable model.
+STEPS:
+  1. In session A, select Low reasoning effort.
+  2. In session B, select High reasoning effort.
+  3. Switch A → B → A using the sidebar.
+  4. Repeat at desktop width and at a narrow/mobile width using the mobile composer configuration action.
+  5. Reload the page on each session and send a turn.
+EXPECT:
+  - The reasoning chip/action reads Low in session A and High in session B after every switch and reload.
+  - The next turn in each session uses that session's restored effort.
+  - The model chip remains unchanged when both sessions use the same model.
+FAIL: The reasoning control keeps the previously viewed session's value, resets after reload, or the next turn uses a stale effort.
+
+Repeat with different models: use a fast model with High/XHigh/Max in session A
+and a flagship model with Low in session B, selecting efforts supported by each
+model. Both the model and reasoning controls must restore together on desktop
+and narrow/mobile after A → B → A and reload. Capture before/after screenshots
+of both sessions for PR review.
+
+Configuration regressions are covered by `tests/test_session_reasoning_effort.py`:
+new-session model/effort defaults honor an external `HERMES_CONFIG_PATH` for root.
+With request-local context set to a named profile, a root/external config override
+must not replace that profile's model or effort; an override inside its own home
+still applies. Gateway legacy and runs API requests use the named session
+profile's reasoning default when no stored override exists. An explicit session
+override wins over both the named and process/root profile values. With distinct
+root/named Gateway URLs and keys, the initial request's URL, Authorization header,
+and retained stream endpoint must all belong to the session's profile, matching
+the endpoint used for reattachment, Stop, and approval replies while the stream
+holds it. (Once that entry is cleaned up, Stop and approval fall back to the
+ambient endpoint, as on master.)
+
+Same-chat ordering is covered by `tests/test_reasoning_effort_save_race.py` too:
+pick High then Low in one chat with the first save delayed. Low must not be sent
+until High settles, and the chip must end on Low. If the newest save fails, the
+chip must re-read the stored value.
+
+Delayed-save regressions are covered by `tests/test_reasoning_effort_save_race.py`.
+With a throttled connection, change A's effort through the dropdown or
+`/reasoning high`, then switch to B before the save returns. B must keep its own
+effort after the response and routine topbar sync; returning to A must fetch its
+saved effort. Repeat on desktop and mobile, and with a model, provider, or profile
+change while the save is pending. A save in an unchanged context must still update
+both desktop and mobile labels, even if an older reasoning GET returns afterward.
 
 ### T3.3: Context Badge Shares Footer Space Cleanly
 SETUP: Active session with at least one completed response.

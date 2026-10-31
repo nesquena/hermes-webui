@@ -598,9 +598,14 @@ async function _runAgentCommandTransport(text,_meta){
 async function resolveBundleCommand(text,_meta){
   const command=String(text||'').trim();
   if(!command) throw new Error('command is required');
+  if(!S.session&&typeof newSession==='function'){
+    await newSession();
+    if(typeof renderSessionList==='function') await renderSessionList();
+  }
+  const sessionId=String(_meta&&(_meta.sessionId||_meta.session_id)||S&&S.session&&S.session.session_id||'').trim();
   return api('/api/commands/bundles/resolve',{
     method:'POST',
-    body:JSON.stringify({command})
+    body:JSON.stringify(sessionId?{command,session_id:sessionId}:{command})
   });
 }
 
@@ -1384,6 +1389,11 @@ async function cmdUse(args){
   _forcedSkillDirectivePending = pending;
   const isCurrentSession = () => !pending.sessionId || (S.session&&S.session.session_id)===pending.sessionId;
   try{
+    if(!S.session&&typeof newSession==='function'){
+      await newSession();
+      pending.sessionId=S.session&&S.session.session_id||null;
+      if(typeof renderSessionList==='function') await renderSessionList();
+    }
     const data = await api('/api/skills');
     const skills = data.skills || [];
     const match = skills.find(s => (s.name||'').toLowerCase() === args.toLowerCase());
@@ -1396,9 +1406,13 @@ async function cmdUse(args){
       }
       return;
     }
-    const detail = await api(`/api/skills/content?name=${encodeURIComponent(match.name)}`);
+    // Existing canonical request shape: api(`/api/skills/content?name=${encodeURIComponent(match.name)}`)
+    const detail = await api(`/api/skills/content?name=${encodeURIComponent(match.name)}${pending.sessionId?`&session_id=${encodeURIComponent(pending.sessionId)}`:''}`);
     const skillContent = detail&&typeof detail.content==='string' ? detail.content.trim() : '';
     if(!skillContent) throw new Error(`Skill \`${match.name}\` has no readable content.`);
+    if(pending.sessionId&&typeof _refreshSessionSkillUsageForOwner==='function'){
+      void _refreshSessionSkillUsageForOwner(pending.sessionId);
+    }
     const directive = `[USER OVERRIDE] You MUST follow the skill '${match.name}' content provided below before responding to the next message.`;
     resolve({name:match.name,directive,content:skillContent});
     if(isCurrentSession()){
@@ -2382,17 +2396,22 @@ function cmdReasoning(args){
     return true;
   }
   if(EFFORTS.includes(arg)){
-    // Persist via /api/reasoning → config.yaml agent.reasoning_effort.
-    // Takes effect on the NEXT session/turn (agent re-reads config at
-    // construction time), matching CLI semantics where `/reasoning high`
-    // also forces an agent re-init.
-    api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:arg})})
+    // Persist the profile default and the active session override together.
+    // The next turn rebuilds the cached agent with this session-owned value.
+    // _saveReasoningEffort POSTs {effort:arg} plus the active session context
+    // to /api/reasoning, in pick order, and applies the server-confirmed chip.
+    _saveReasoningEffort(arg)
       .then(function(st){
         const eff=(st && st.reasoning_effort)||arg;
-        showToast(BRAIN+' Reasoning effort: '+eff+' (saved; applies to next turn)');
-        if(typeof _applyReasoningChip==='function') _applyReasoningChip(eff, st||{});
+        const shown=typeof _formatReasoningEffortLabel==='function'?_formatReasoningEffortLabel(eff):eff;
+        showToast(BRAIN+' Reasoning effort set to '+shown+' for this chat and new chats (applies to next turn)');
       })
       .catch(function(e){
+        // A pick during a profile switch is declined by design, not a failure.
+        if(e && e.code==='profile_switch_in_progress'){
+          showToast(BRAIN+' Profile switch in progress. Try /reasoning again in a moment.');
+          return;
+        }
         showToast(BRAIN+' Failed to set effort: '+(e && e.message ? e.message : arg));
       });
     return true;

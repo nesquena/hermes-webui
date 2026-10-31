@@ -11,6 +11,114 @@ Start here before changing how the live catalog of a custom provider is
 filtered, how discovery snapshots are distinguished from allowlists, or what
 the endpoint returns when the upstream probe fails.
 
+## Custom-provider read view
+
+The Providers cards, cold and refreshed `/api/models` catalogs, live-model
+fallback, reasoning/context metadata and named-custom model repair read custom
+entries through `api.config._custom_provider_entries()`. This accepts legacy
+`custom_providers` lists and native `providers` mappings without migrating or
+rewriting config. Native mapping keys define stable provider IDs; editable
+`name` values are display labels. Native `api` / `url` / `base_url`,
+`default_model`, credential references and model metadata retain their meaning.
+Built-in and plugin provider settings remain separate. The generic
+`providers.custom` default-endpoint settings do not create a named
+`custom:custom` card or catalog group; an explicitly configured
+`providers['custom:custom']` entry remains a supported named provider. Empty
+bare settings such as `providers.groq: {}` retain their keyless Settings-card
+placeholder and sort behavior, without creating native connection authority.
+
+A missing `custom_providers` key permits native fallback. An explicitly empty
+or malformed legacy store suppresses that fallback; a non-empty legacy store
+wins on overlapping identities while unrelated native entries remain visible.
+Disabled native entries are omitted. Among native records, an exact canonical
+`providers['custom:<slug>']` key outranks bare or normalized aliases regardless
+of insertion order, matching runtime selection. Without that exact key,
+competing enabled connection records for one normalized identity fail closed.
+The read view omits that unusable identity, leaving unrelated cards, catalogs
+and explicit routes available; routing/runtime and explicit context lookup still
+reject the requested colliding identity. A display label never silently selects
+the first record. Context lookup selects
+by identity before URL, and only an identity-absent, unambiguous lookup may infer
+a custom owner from its configured URL/model. Its downstream metadata view is
+restricted to that selected owner.
+
+Connection/runtime selection still reads the complete original owned record,
+not the presentation view, so transport, credential-pool and other advanced
+fields cannot be lost. Metadata-only rows remain readable without thereby declaring a runtime
+connection. Cards and metadata lookup retain those rows. For picker catalogs,
+an inactive **bare-key**, metadata-only settings block follows the restored
+models-only exclusion (#1970/#5301); an active bare key or an explicit native
+`custom:<slug>` key may contribute its configured models. Cold and refreshed
+catalogs apply that same admission rule. An explicit native disable is terminal
+before live-model cache, external catalog or persisted-pool fallback; an absent
+config identity may still browse its explicitly persisted pool. Credential
+references are resolved within the request's profile environment, without
+borrowing a process-global key for an empty named profile.
+
+**Change from the published PR8448 head:** its initial read view allowed inactive
+bare-key metadata-only settings to become picker routes. This follow-up
+intentionally narrows that admission to restore the earlier #1970/#5301
+exclusion: metadata readability or a Settings card's capabilities do not
+authorize an inactive bare picker route. Those rows remain readable and visible
+on cards; active bare entries, explicitly prefixed native entries and complete
+connection-owning records retain their existing visibility. This requires no
+config or session migration and does not change raw connection authority.
+
+Named-custom key/capability readers likewise allow an explicitly owned pool
+without a presentation row. Raw disabled/ambiguous identity checks run before
+pool access. A configured row's key retains precedence; usable pool entries
+prefer `runtime_api_key`, then `agent_key`, then `access_token`. An absent own
+credential never authorizes another provider's or profile's key, a default
+endpoint's key, or ambient/process credentials.
+
+Forced `/api/models` refreshes also probe non-active named/native discovered
+snapshots when discovery is allowed, merge live IDs with saved IDs in the
+existing picker ordering, and retain saved IDs if probing fails. Explicit
+`discover_models: false` still pins the configured snapshot and skips that
+catalog probe. `providers.only_configured` compares native mapping keys in this
+same stable `custom:<slug>` namespace, including non-active bare-key entries;
+built-in/plugin aliases and legacy-store visibility keep their existing rules.
+
+### Native identity and persisted-input compatibility
+
+New cards, catalog `provider_id` values and unqualified native ownership scans
+use the canonical named-custom identity `custom:<slug>`, preserving the custom
+slug producer's underscores (rather than applying built-in underscore-to-hyphen
+alias folding), including when the
+native mapping uses a bare key such as `providers.myprov`. A native key named
+`custom-configured` therefore appears as `custom:custom-configured`, not as a
+reserved sentinel for the default endpoint. Non-active picker options carry
+that identity as `@custom:<slug>:<model>`; active-provider options may stay bare
+while the session retains their provider separately. Editable labels do not
+change this identity or split colon-tagged model IDs. Configured object-list
+model rows using `id`, `model`, or `name` retain their explicit `label` when
+materialized as configured fallback rows in cold catalogs and in the
+configured-fallback stage of refreshed catalogs. Live/discovered rows keep
+their existing precedence: if an active-endpoint prewarm or live probe has already
+supplied the same model, its upstream label may win. This change does not reorder
+live and configured model rows.
+
+This is a read-only normalization, not a config/session migration. Existing
+bare mapping keys, active-provider values and persisted explicit inputs such as
+`model_provider: myprov` / `@myprov:<model>` remain accepted and route to the
+same owned endpoint with the complete model ID. An explicit historical hint
+may retain its bare spelling in the resolved triple; that does not make it a
+second identity newly advertised by the catalog. Built-in/plugin aliases keep
+their existing routing rules. The bare `custom` lane remains distinct: when it
+represents the configured default endpoint, a named provider cannot take its
+URL or credential, even if its name resembles an internal lane description.
+
+### Selected-owner metadata boundary
+
+Context lookup reads the current request/profile config on each call. It passes
+only the selected owner's custom-provider metadata to downstream resolvers,
+not the full raw list. Two owners sharing a URL and model still have separate
+context overrides and keys; an explicit unknown owner receives neither owner's
+metadata or key. The selected projection's contents and ownership are the
+contract, not its Python list identity. Global `model.context_length` remains
+default-model-only; null/malformed provider stores do not authorize borrowing
+another provider's connection. Reading these views never rewrites either store.
+
 ## Why the endpoint filters at all
 
 OpenAI-compatible gateways (New-API-style aggregators, LM Studio, Ollama
