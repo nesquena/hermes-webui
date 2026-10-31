@@ -12090,6 +12090,124 @@ def _message_summary(messages) -> dict:
     return {"message_count": len(messages), "last_message_at": last_message_at}
 
 
+def _merged_sidecar_state_messages_for_display(
+    session,
+    state_db_messages,
+    *,
+    owner_positions=None,
+) -> list:
+    """Merge one session's sidecar lineage with its state.db rows for display.
+
+    Single source of truth for the /api/session DISPLAY coordinate space: the
+    ``messages=1`` transcript and the ``messages=0`` message count are both
+    derived from the list this returns. Keeping the merge in one place is what
+    stops the two response modes from drifting apart again (#7050): a metadata
+    count computed in state.db's raw row domain made the frontend's
+    external-refresh poll see a permanent "change" and force-reload the whole
+    transcript every 30s.
+    """
+    state_db_messages = _suppress_native_image_display_mirrors(
+        session,
+        state_db_messages,
+    )
+    # #quiet-delegation: stamp the pending turn's _source onto the
+    # freshly-read state.db rows BEFORE merge/projection, so a reload during
+    # the deferred-save window cannot adopt the hidden handoff as a visible
+    # user row.
+    state_db_messages = _stamp_pending_source_for_display(
+        session,
+        state_db_messages,
+    )
+    lineage_owners = {}
+    sidecar_messages = _webui_sidecar_lineage_messages_for_display(
+        session, owner_positions=lineage_owners,
+    )
+    lineage_parent = _webui_lineage_parent_session_for_display(session)
+    projection_sidecar_messages = _merged_webui_lineage_messages_for_display(
+        session,
+        sidecar_messages,
+        parent_session=lineage_parent,
+    )
+    merged = merge_session_messages_append_only(
+        sidecar_messages,
+        state_db_messages,
+        truncation_watermark=getattr(session, "truncation_watermark", None),
+        truncation_boundary=getattr(session, "truncation_boundary", None),
+        incoming_provenance="state_db",
+        cancelled_journal_owner_messages=getattr(session, "messages", None) or [],
+    )
+    merged = _merged_webui_lineage_messages_for_display(
+        session,
+        merged,
+        parent_session=lineage_parent,
+    )
+    merged = _project_native_image_payload_conflicts_for_display(
+        projection_sidecar_messages,
+        state_db_messages,
+        merged,
+    )
+    if owner_positions is not None:
+        owner_positions.clear()
+        owner_positions.update(_display_projected_owner_positions(
+            sidecar_messages, merged, lineage_owners,
+        ))
+    return merged
+
+
+def _foreign_session_display_message_summary(
+    session,
+    sid: str,
+    profile: str | None = None,
+) -> dict:
+    """Return a foreign/CLI session's message summary in DISPLAY coordinates.
+
+    ``_metadata_only_message_summary()`` answers in state.db's RAW row domain:
+    its ``COUNT(*)`` includes archived rows (``active = 0``), replayed transport
+    rows and tool rows that the display reader/merge folds away. For a foreign
+    (TUI/CLI) session that domain is far larger than the transcript the WebUI
+    renders (measured on the #7050 repro: 2543 raw rows vs 696 display rows), so
+    a metadata poll answering with it could never match the count a message load
+    returns -- the external-refresh comparison always saw a change and
+    force-reloaded the whole transcript every 30s.
+
+    This path therefore runs the SAME sidecar + state.db merge the message-load
+    branch runs, and reports that merge's count/timestamp. It stays bounded by
+    the display path's own defensive row backstop, and it still ships no
+    transcript: only the cheap coordinate leaves the server.
+    """
+    source_session = session
+    if not (getattr(session, "messages", None) or []):
+        # A metadata-only stub never carries the transcript, so load the sidecar
+        # to feed the merge the same sidecar rows a message load would use.
+        try:
+            loaded = Session.load(sid)
+        except Exception:
+            loaded = None
+        if loaded is not None and (getattr(loaded, "messages", None) or []):
+            source_session = loaded
+    reader_kwargs = {"profile": profile}
+    if _cancelled_journal_turn_owner(
+        getattr(source_session, "messages", None) or [], include_live_partial=True
+    ):
+        # Same reader shape the message-load branch uses for a cancelled-journal
+        # turn: the private row identities are what let the merge dedupe
+        # correctly, so the coordinate must be computed with them too.
+        reader_kwargs["include_row_identity"] = True
+    # Mirror the display path's defensive row backstop so a pathological
+    # >50k-row state.db is read with the same boundaries in both response modes.
+    # No `since_timestamp` floor here: that floor is derived from a msg_limit
+    # paginated load, and the poll carries no msg_limit (see
+    # _state_db_since_timestamp_for_limited_display, which returns (None, None)).
+    backstop = _state_db_backstop_limit_for_display(source_session, None)
+    if backstop is not None:
+        reader_kwargs["limit"] = backstop
+    merged = _merged_sidecar_state_messages_for_display(
+        source_session,
+        get_state_db_session_messages(sid, **reader_kwargs),
+    )
+    return _message_summary(merged)
+
+
 def _metadata_only_message_summary(sid: str, profile: str | None = None) -> dict:
     """Return the cheap message summary used by metadata-only session loads.
 
@@ -15952,7 +16070,21 @@ def _handle_session_get(handler, parsed) -> bool:
             # state.db rows do not make sidebar polling think the
             # transcript is always newer. Helper threads profile= to
             # honor #2827's TLS-vs-thread fix.
-            metadata_summary = _metadata_only_message_summary(sid, profile=_session_profile)
+            #
+            # #7050: a foreign/CLI session must answer in the SAME display
+            # coordinate space a message load uses. The cheap COUNT(*) summary
+            # lives in state.db's raw row domain (archived rows, replayed
+            # transport rows, tool rows the display merge folds away), so the
+            # frontend's 30s external-refresh poll compared 2543 against 696 for
+            # the same session, always saw a change, and force-reloaded the
+            # entire transcript forever. WebUI-native sessions keep the cheap
+            # growth-signal path (their sidecar count is the display count).
+            if cli_meta and not _session_source_is_webui(cli_meta):
+                metadata_summary = _foreign_session_display_message_summary(
+                    s, sid, _session_profile,
+                )
+            else:
+                metadata_summary = _metadata_only_message_summary(sid, profile=_session_profile)
         _t2 = _time.monotonic()
         if _diag: _diag.stage("t2_after_state_db_load")
         effective_model = (
@@ -15990,51 +16122,11 @@ def _handle_session_get(handler, parsed) -> bool:
                         owner_positions=_display_owner_positions,
                     )
             else:
-                state_db_messages = _suppress_native_image_display_mirrors(
+                _all_msgs = _merged_sidecar_state_messages_for_display(
                     s,
                     state_db_messages,
+                    owner_positions=_display_owner_positions,
                 )
-                # #quiet-delegation: stamp the pending turn's _source onto the
-                # freshly-read state.db rows BEFORE merge/projection, so a
-                # reload during the deferred-save window cannot adopt the
-                # hidden handoff as a visible user row.
-                state_db_messages = _stamp_pending_source_for_display(
-                    s,
-                    state_db_messages,
-                )
-                lineage_owners = {}
-                sidecar_messages = _webui_sidecar_lineage_messages_for_display(
-                    s, owner_positions=lineage_owners,
-                )
-                lineage_parent = _webui_lineage_parent_session_for_display(s)
-                projection_sidecar_messages = _merged_webui_lineage_messages_for_display(
-                    s,
-                    sidecar_messages,
-                    parent_session=lineage_parent,
-                )
-                _all_msgs = merge_session_messages_append_only(
-                    sidecar_messages,
-                    state_db_messages,
-                    truncation_watermark=getattr(s, "truncation_watermark", None),
-                    truncation_boundary=getattr(s, "truncation_boundary", None),
-                    incoming_provenance="state_db",
-                    cancelled_journal_owner_messages=getattr(s, "messages", None) or [],
-                )
-                _all_msgs = _merged_webui_lineage_messages_for_display(
-                    s,
-                    _all_msgs,
-                    parent_session=lineage_parent,
-                )
-                _all_msgs = _project_native_image_payload_conflicts_for_display(
-                    projection_sidecar_messages,
-                    state_db_messages,
-                    _all_msgs,
-                )
-                if _display_owner_positions is not None:
-                    _display_owner_positions.clear()
-                    _display_owner_positions.update(_display_projected_owner_positions(
-                        sidecar_messages, _all_msgs, lineage_owners,
-                    ))
         else:
             if is_messaging_session and cli_messages:
                 _all_msgs = _merged_session_messages_for_display(s, cli_messages)
