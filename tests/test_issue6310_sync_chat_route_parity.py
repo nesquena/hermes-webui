@@ -124,8 +124,13 @@ def _contents(rows):
     return [r.get("content") for r in rows if isinstance(r, dict)]
 
 
-def _sync_http_send(tmp_path, monkeypatch, sid, history, prompt, answer):
-    """One real synchronous ``POST /api/chat``; returns the cold-reloaded session."""
+def _sync_http_send(tmp_path, monkeypatch, sid, history, prompt, answer, reseed=True):
+    """One real synchronous ``POST /api/chat``; returns the cold-reloaded session.
+
+    ``reseed=False`` keeps whatever the previous request persisted for ``sid``
+    on disk and sends a follow-up into it — the cold-load shape, where the
+    previous turn's persisted result is this turn's input.
+    """
     import server as server_mod
     from api import models
 
@@ -133,7 +138,15 @@ def _sync_http_send(tmp_path, monkeypatch, sid, history, prompt, answer):
     monkeypatch.setitem(
         sys.modules, "run_agent", SimpleNamespace(AIAgent=_agent_class(sid, answer))
     )
-    _new_session(tmp_path, sid, history)
+    if reseed:
+        _new_session(tmp_path, sid, history)
+    else:
+        # Force the follow-up to start from the DISK state the previous request
+        # persisted, not an in-memory session object cached by this process.
+        models.SESSIONS.pop(sid, None)
+        assert models.Session.load(sid) is not None, (
+            f"a cold follow-up needs the session {sid!r} persisted on disk"
+        )
 
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), server_mod.Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -766,4 +779,193 @@ def test_dedup_token_branch_still_replaces_an_id_less_prior_row():
     )
     assert out[0].get("id") == 9 and out[0].get("_active_turn_token") == "s2:5", (
         f"the retained row must be the token holder; got {out[0]}"
+    )
+
+
+# ── #8574 gate certification RED, finding 2 ────────────────────────────
+#
+# ``user_exact_index`` names only the MOST RECENT same-exact-key owner. With
+# two independently owned turns that repeat a prompt verbatim inside one
+# timestamp bucket — ``_DISTINCT_OWNER_HISTORY`` (durable ids 1 and 3) — a
+# durable REPLAY of the first owner (same id, same timestamp, same
+# active-turn token: the shape a recovery/import path leaves behind after the
+# second committed turn) was compared against owner 3, judged independently
+# owned, and APPENDED. The same durable owner then reached the persisted model
+# context twice while the display transcript kept one. A token-bearing
+# collision must be resolved against EVERY retained same-key durable owner, so
+# this replay collapses into owner 1's own slot.
+
+
+def _user_ids(rows):
+    return [
+        r.get("id") for r in rows if isinstance(r, dict) and r.get("role") == "user"
+    ]
+
+
+def _replayed_first_owner_history():
+    """``_DISTINCT_OWNER_HISTORY`` plus a durable replay of its first owner."""
+    return copy.deepcopy(_DISTINCT_OWNER_HISTORY) + [
+        copy.deepcopy(_DISTINCT_OWNER_HISTORY[0])
+    ]
+
+
+def test_dedup_token_branch_collapses_replay_of_the_earlier_owner():
+    """Three-occurrence helper case: the replay updates its OWN slot.
+
+    The replayed row is byte-identical to owner 1, so the exact index (which
+    owner 3 republished) points at owner 3's slot; the independently-owned
+    judgement then lets the replay fall through to the append. It must instead
+    find owner 1 among ALL retained same-key owners and update that slot.
+    """
+    from api.streaming import _deduplicate_context_messages
+
+    out = _deduplicate_context_messages(_replayed_first_owner_history())
+    assert _contents(out) == ["higher", "guess 50", "higher", "guess 75"], (
+        "a durable replay of an already-retained owner must collapse into that "
+        f"owner's own slot, not append a third copy; got {_contents(out)}"
+    )
+    assert _user_ids(out) == [1, 3], (
+        "owner 1 must appear exactly once, in its original slot, with owner 3 "
+        f"untouched behind it; got ids={_user_ids(out)}"
+    )
+    assert out[0].get("_active_turn_token") == "s1:100" and out[0].get("id") == 1, (
+        "the collapsed slot must keep its own durable id and active-turn token; "
+        f"got {out[0]}"
+    )
+    assert out[2].get("id") == 3 and out[2].get("_active_turn_token") == "s2:100", (
+        "the genuinely distinct owner must keep its own id, token and slot; "
+        f"got {out[2]}"
+    )
+
+
+def test_dedup_token_branch_collapses_a_timestamp_shifted_owner_replay():
+    """Same collapse when the replay's timestamp moved off the exact index."""
+    from api.streaming import _deduplicate_context_messages
+
+    rows = _replayed_first_owner_history()
+    rows[-1]["timestamp"] = 250.0
+    out = _deduplicate_context_messages(rows)
+    assert _user_ids(out) == [1, 3], (
+        "a replayed durable owner whose timestamp drifted must still collapse "
+        f"into its own slot; got ids={_user_ids(out)} contents={_contents(out)}"
+    )
+    assert out[0].get("timestamp") == 250.0, (
+        "the surviving row must be the newest (token-preferred) replay; got "
+        f"{out[0].get('timestamp')}"
+    )
+    # Control: the same replay WITHOUT a token keeps collapsing on the
+    # long-standing stable-id path.
+    tokenless = _replayed_first_owner_history()
+    tokenless[-1]["timestamp"] = 250.0
+    tokenless[-1].pop("_active_turn_token")
+    tokenless_out = _deduplicate_context_messages(tokenless)
+    assert _user_ids(tokenless_out) == [1, 3], (
+        "the tokenless control must keep the legacy collapse; got "
+        f"ids={_user_ids(tokenless_out)}"
+    )
+    assert tokenless_out[0].get("timestamp") == 100.0, (
+        "the tokenless replay must be dropped rather than replace its owner; "
+        f"got {tokenless_out[0].get('timestamp')}"
+    )
+
+
+def test_dedup_token_branch_still_appends_a_genuinely_new_owner():
+    """A token-bearing row matching no retained owner still appends."""
+    from api.streaming import _deduplicate_context_messages
+
+    rows = copy.deepcopy(_DISTINCT_OWNER_HISTORY) + [
+        {
+            "role": "user",
+            "content": "higher",
+            "timestamp": 100.0,
+            "id": 9,
+            "_source": "webui",
+            "_active_turn_token": "s3:100",
+        },
+        {"role": "assistant", "content": "guess 110", "timestamp": 104.0, "id": 10},
+    ]
+    out = _deduplicate_context_messages(rows)
+    assert _user_ids(out) == [1, 3, 9], (
+        "a third independently owned turn with a distinct durable id must still "
+        f"be appended; got ids={_user_ids(out)} contents={_contents(out)}"
+    )
+    assert _contents(out) == [
+        "higher",
+        "guess 50",
+        "higher",
+        "guess 75",
+        "higher",
+        "guess 110",
+    ], f"the appended owner must keep the historical order; got {_contents(out)}"
+
+
+def test_sync_chat_cold_follow_up_collapses_replayed_owner(tmp_path, monkeypatch):
+    """#8574 finding 2 over the real route: cold follow-up, no re-seed.
+
+    Request 1 seeds two independently owned turns plus a durable replay of the
+    first owner. Its persisted result then becomes the INPUT of request 2 — a
+    real follow-up ``POST /api/chat`` on the same session, cold-loaded from
+    disk with no re-seeding. The replay must collapse into owner 1's own slot,
+    so the model context and the display transcript each carry exactly one row
+    per owner, in the same order.
+    """
+    sid = "i8574-replay-followup"
+    first = _sync_http_send(
+        tmp_path,
+        monkeypatch,
+        sid,
+        _replayed_first_owner_history(),
+        "lower",
+        "guess 90",
+    )
+    assert first is not None
+    first_ids = _user_ids(first.context_messages)
+    assert first_ids == [1, 3, 5], (
+        "request 1 must persist one row per owner plus the new turn; got "
+        f"ids={first_ids} contents={_contents(first.context_messages)}"
+    )
+    assert _contents(first.context_messages).count("higher") == 2, (
+        "the replayed owner must be collapsed out of the persisted context; got "
+        f"{_contents(first.context_messages)}"
+    )
+
+    second = _sync_http_send(
+        tmp_path,
+        monkeypatch,
+        sid,
+        first.context_messages,
+        "even lower",
+        "guess 95",
+        reseed=False,
+    )
+    assert second is not None
+    context = second.context_messages
+    display = second.messages
+
+    assert _user_ids(context) == [1, 3, 5, 7], (
+        "the cold follow-up must keep exactly one row per owner, in order, "
+        f"followed by the new turn; got ids={_user_ids(context)} "
+        f"contents={_contents(context)}"
+    )
+    assert _contents(context) == [
+        "higher",
+        "guess 50",
+        "higher",
+        "guess 75",
+        "lower",
+        "guess 90",
+        "even lower",
+        "guess 95",
+    ], f"the cold follow-up context order drifted; got {_contents(context)}"
+    assert _contents(context).count("higher") == 2, (
+        "the model context must not carry the replayed owner twice; got "
+        f"{_contents(context)}"
+    )
+    assert _user_ids(display) == [1, 3, 5, 7], (
+        "the display transcript must agree on owner count and order; got "
+        f"ids={_user_ids(display)} contents={_contents(display)}"
+    )
+    assert _contents(display).count("higher") == 2, (
+        "the display must retain exactly the two independently owned turns; got "
+        f"{_contents(display)}"
     )
