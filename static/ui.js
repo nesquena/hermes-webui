@@ -2361,7 +2361,21 @@ function _commitMessageWindow(target, staged, anchor, reuse){
     }
     _restoreMessageWindowReader(target,anchor);
     for(const node of target.querySelectorAll('[data-session-msg-idx]')){
-      node.dataset.msgIdx=String(_messageRawIdxForSessionIndex(Number(node.dataset.sessionMsgIdx)));
+      // Display-only rows (#8519/#8543) carry an EMPTY data-session-msg-idx:
+      // Number('') is 0, which restamped a recovered prompt as canonical
+      // message 0 after an older-history load, and a registered extension
+      // message action then invoked with messageIndex 0 against the wrong
+      // message. Skip display-only rows and any empty/non-canonical index
+      // before the numeric conversion - a recovered row keeps the raw index
+      // the builder stamped until the canonical row it mirrors lands.
+      if(node.dataset.displayOnly==='1') continue;
+      const _sessionIdxRaw=node.dataset.sessionMsgIdx;
+      if(_sessionIdxRaw==null||_sessionIdxRaw==='') continue;
+      const _sessionIdx=Number(_sessionIdxRaw);
+      if(!Number.isSafeInteger(_sessionIdx)||_sessionIdx<0) continue;
+      const _rawIdx=_messageRawIdxForSessionIndex(_sessionIdx);
+      if(_rawIdx==null||!Number.isSafeInteger(_rawIdx)||_rawIdx<0) continue;
+      node.dataset.msgIdx=String(_rawIdx);
     }
     _initializeMessageWindowOwnership(target);
   }finally{
@@ -24184,119 +24198,13 @@ function renderMessages(options){
       }
     }
   }
-  // Re-attach the preserved live turn (#3877). The rebuild above recreated a
-  // live turn from S.messages, but the live assistant message's content lags the
-  // stream (it is only persisted to S.messages on a throttled write-back) — so the
-  // fresh node often shows LESS streamed text than the ORIGINAL node, which is
-  // still referenced by the smd parser and holds the real in-progress reply. Swap
-  // the preserved (parser) node back in so the parser target stays connected and
-  // the visible text never blanks.
-  //
-  // The swap fires when the preserved node carries at least as much streamed text
-  // as the rebuilt one (`_rebuiltLen <= _preservedLen`). The `<=` (not `<`) is
-  // load-bearing: at the throttled-persist boundary the rebuilt turn's live
-  // content can EQUAL the preserved length, and the old `<` guard then skipped the
-  // swap — leaving the smd parser writing into the detached original node, which
-  // is exactly the residual "disappears, then reappears" frame (#3877 reopen). On
-  // a tie the preserved node is strictly preferable (it holds the live parser
-  // reference; identical length means nothing is lost). When the rebuilt turn
-  // genuinely has MORE content (e.g. a reconnect where S.messages caught up past
-  // the parser), the guard correctly skips and lets the parser re-resolve to the
-  // fuller node.
-  //
-  // Swap at the SEGMENT level — replace only the rebuilt live segment with the
-  // preserved one — so a multi-segment turn (earlier settled segments + tool/
-  // worklog groups built by the rebuild) keeps that rebuilt-only structure; a
-  // whole-turn replaceWith would discard it when the preserved snapshot predates
-  // those segments. Fall back to whole-turn replace only when the rebuilt turn has
-  // no live segment to swap into. No-op for a settled turn or when nothing was
-  // streaming.
-  if(_preservedLiveTurn){
-    // #7676: the transferred node may hold the final answer in a segment that
-    // the transparent live scene hides (`assistant-segment-worklog-source` +
-    // aria-hidden + hidden) while its scene rows rendered the activity. If this
-    // node is about to become the pane's only copy of the reply (rows already
-    // removed by the settle render), the reply would go blank — so normalize the
-    // retained prose FIRST (it un-hides only when no visible scene row owns it),
-    // before any branch re-attaches the node.
-    _normalizeTransferredLiveProse(_preservedLiveTurn);
-    const _rebuilt=document.getElementById('liveAssistantTurn');
-    // Pick the PARSER-OWNED live segment, not just the first one. On reconnect /
-    // post-tool activity boundaries a live turn can carry MULTIPLE
-    // [data-live-assistant="1"] segments, and the smd parser writes into the
-    // LAST (tail) one (see ensureAssistantRow in messages.js — it re-attaches to
-    // the last live segment). Prefer the preserved segment whose
-    // data-live-segment-seq matches the rebuilt tail (same logical segment), then
-    // fall back to the last preserved live segment. Using querySelector() (first)
-    // here would move the wrong segment and leave the parser-owned tail detached
-    // in a multi-segment turn.
-    const _rebuiltSegs=_rebuilt?_rebuilt.querySelectorAll('[data-live-assistant="1"]'):null;
-    const _rebuiltSeg=(_rebuiltSegs&&_rebuiltSegs.length)?_rebuiltSegs[_rebuiltSegs.length-1]:null;
-    const _preservedSegs=_preservedLiveTurn.querySelectorAll('[data-live-assistant="1"]');
-    let _preservedSeg=_preservedSegs.length?_preservedSegs[_preservedSegs.length-1]:null;
-    const _rebuiltSeq=_rebuiltSeg?_rebuiltSeg.getAttribute('data-live-segment-seq'):null;
-    if(_rebuiltSeq){
-      for(const _seg of _preservedSegs){
-        if(_seg.getAttribute('data-live-segment-seq')===_rebuiltSeq){_preservedSeg=_seg;break;}
-      }
-    }
-    const _preservedLen=_liveAssistantSegmentTextLength(_preservedSeg||_preservedLiveTurn);
-    // Structural-block counts: a live turn can be AHEAD of S.messages with
-    // Activity/tool/worklog blocks that haven't persisted yet — even with ZERO
-    // streamed text (e.g. an Activity-only turn mid-tool-call). The text-length
-    // gate alone would skip preservation in that case, so a scroll-triggered
-    // rebuild on a long (virtualized) transcript could blink those live-only
-    // blocks for a frame. Also restore when the preserved turn carries more
-    // structure than the rebuilt (lagging-S.messages) turn. (#3714 ship-review)
-    const _structuralCount=(turn)=> turn?turn.querySelectorAll(
-      '[data-live-assistant="1"],.tool-call-group,.tool-card-row,'+
-      '.tool-worklog-group,.live-worklog[data-live-worklog-shell="1"],'+
-      '.wl-reason,.agent-activity-thinking,.thinking-card-row'
-    ).length:0;
-    const _preservedStructure=_structuralCount(_preservedLiveTurn);
-    const _rebuiltStructure=_structuralCount(_rebuilt);
-    if(_preservedLen>0 || _preservedStructure>_rebuiltStructure){
-      const _rebuiltLen=_rebuilt?_liveAssistantSegmentTextLength(_rebuiltSeg||_rebuilt):-1;
-      if(_rebuiltLen<=_preservedLen){
-        // Decide segment-level vs whole-turn restore. Segment-level keeps the
-        // rebuilt turn's structure (good when the rebuild is the structural
-        // superset). But the whole premise here is that the live DOM can be
-        // AHEAD of S.messages: a tool/worklog group can land in the live turn
-        // between the last throttled persist and this rebuild, so the rebuilt
-        // turn (built from the lagging S.messages) may have FEWER structural
-        // blocks. In that case a segment-only swap would drop those live-only
-        // blocks for a frame — so restore the WHOLE preserved turn instead.
-        // Otherwise (rebuild has >= the preserved turn's structural blocks) do
-        // the precise segment swap so rebuilt-only structure is kept.
-        if(_rebuilt&&_rebuiltSeg&&_preservedSeg&&_rebuiltStructure>=_preservedStructure){
-          // Rebuild is the structural superset — swap only the parser-owned
-          // (tail) live segment, keeping rebuilt-only segments / tool groups.
-          // (No dataset.sessionId stamp here: only the segment enters the DOM;
-          // the rebuilt turn was already stamped at build time, see above.)
-          _rebuiltSeg.replaceWith(_preservedSeg);
-        }else if(_rebuilt){
-          // Rebuilt turn lacks structure the live turn already has (live-only
-          // tool card not yet persisted), or has no live segment to target —
-          // restore the whole preserved turn so nothing the user saw vanishes.
-          if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
-          _rebuilt.replaceWith(_preservedLiveTurn);
-        }else if(!(typeof _settledTranscriptOwnsLiveTurn==='function'
-                   &&_settledTranscriptOwnsLiveTurn(sid,_preservedLiveTurn))){
-          // #6948 follow-up (duplicate assistant answer; #2051): this is the
-          // only branch that ADDS a turn — the rebuild produced no live turn of
-          // its own. When the settled transcript already ends with THIS stream's
-          // own answer and the preserved node carries nothing unpersisted, the
-          // node is a dead leftover (the row persisted and the turn settled while
-          // INFLIGHT[sid] was not yet cleaned) and appending pins a SECOND copy
-          // that re-preserves itself on every later render until a reload.
-          // Mid-stream the transcript ends with the user turn (or still carries a
-          // live projection), so #3877 preservation is untouched.
-          if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
-          inner.appendChild(_preservedLiveTurn);
-        }
-      }
-    }
-  }
+  // (#3877) The preserved live turn is reconciled exactly once per render, in
+  // _reconcilePreservedLiveTurn after the window commit. The inline re-attach
+  // pass that used to run here was a retained duplicate of that helper: on a
+  // two-segment live turn whose earlier segment is longer than the parser-owned
+  // tail, the second pass replaced the rebuilt tail with the preserved earlier
+  // segment - disconnecting the smd parser target and duplicating the earlier
+  // prose (release gate at af988ebd, regression 1).
   // Fail-safe invariant (#3875): a settled assistant turn must never render with
   // ZERO visible content. The Worklog redesign (#3401) folds intermediate
   // assistant segments into a collapsed Worklog card and hides the source segment

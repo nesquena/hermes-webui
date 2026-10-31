@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._browser_engines import resolved_engines
 from tests.browser_conversation_lifecycle import _start_webui_server, _terminate_process
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,8 +28,14 @@ def isolated_webui(tmp_path_factory):
         log.close()
 
 
-@pytest.fixture(params=os.environ.get('BROWSERS', 'chromium,webkit').split(','))
+@pytest.fixture(params=resolved_engines() or ["chromium"])
 def page(request, isolated_webui):
+    if not resolved_engines():
+        # Default engine set found nothing launchable on this host (e.g. no
+        # WebKit system libraries and no Chromium). Skip the module's tests
+        # instead of erroring every parametrized fixture; an explicit BROWSERS
+        # request never lands here (strict — it fails loudly at launch below).
+        pytest.skip("no launchable Playwright engine; set BROWSERS to force one")
     sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
     with sync_playwright() as pw:
         browser = getattr(pw, request.param).launch(headless=True)
@@ -128,3 +135,57 @@ def test_activity_disclosure_restoration_is_opt_in(page, live, restore, saved_op
         expanded:group.querySelector('.activity-summary').getAttribute('aria-expanded')};
     }""", {'live': live, 'restore': restore, 'savedOpen': saved_open})
     assert result == {'open': expected_open, 'expanded': str(expected_open).lower()}
+
+
+@pytest.mark.parametrize('virtualized', [False, True])
+def test_default_path_reconciles_preserved_live_turn_once(page, virtualized):
+    """The preserved live turn must reconcile exactly once per render (#3877).
+
+    renderMessages used to retain BOTH the inline re-attach pass and the
+    extracted _reconcilePreservedLiveTurn call. On the default render path the
+    rebuild happens through a full wipe, so the two passes saw DIFFERENT
+    rebuilt turns: pass one moved the parser-owned tail into the freshly built
+    turn, and pass two then found the earlier segment as the preserved turn's
+    last remaining live segment and replaced the rebuilt tail with it. With a
+    two-segment live turn whose earlier segment is longer than the parser tail,
+    that disconnects the real smd parser target and renders the earlier prose
+    twice (release gate af988ebd, regression 1; virtualization off and on).
+    """
+    result = page.evaluate("""async virtualized=>{
+      const earlierProse='EARLIER-PROSE-MARKER '
+        +'and plenty of settled prose so this segment outgrows the tail '.repeat(6);
+      window._virtualizeTranscript=virtualized;
+      document.getElementById('liveAssistantTurn')?.remove();
+      S.messages.push(
+        {role:'assistant',content:earlierProse,_live:true,_liveSegmentSeq:1,_activityBurstId:'a'},
+        {role:'assistant',content:'Tail',_live:true,_liveSegmentSeq:2,_activityBurstId:'b'});
+      renderMessages();
+      const turn=document.getElementById('liveAssistantTurn');
+      const segments=turn.querySelectorAll('[data-live-assistant=\"1\"]');
+      if(segments.length<2) throw new Error('fixture must render two live segments');
+      // The shipped smd parser owns the rendered tail's .msg-body, exactly as
+      // messages.js binds it mid-stream.
+      const tail=segments[segments.length-1];
+      const target=tail.querySelector('.msg-body')||tail;
+      const parser=window.smd.parser(window.smd.default_renderer(target));
+      window.smd.parser_write(parser,'Tail streamed');
+      target.__smdParser=parser;
+      // The default-path re-render rebuilds through the full wipe; afterwards
+      // the parser must still own a connected target and stream into it.
+      renderMessages({preserveScroll:true});
+      window.smd.parser_write(parser,' parser still owns this');
+      window.smd.parser_end(parser);
+      const rebuilt=document.getElementById('liveAssistantTurn');
+      const innerText=document.getElementById('msgInner').textContent;
+      return {
+        connected:target.isConnected,
+        seqs:rebuilt?Array.from(rebuilt.querySelectorAll('[data-live-assistant=\"1\"]'))
+          .map(segment=>segment.getAttribute('data-live-segment-seq')):[],
+        earlierCopies:innerText.split('EARLIER-PROSE-MARKER').length-1,
+        tailLanded:innerText.includes('Tail streamed parser still owns this')
+      };
+    }""", virtualized)
+    assert result['connected'], (virtualized, result)
+    assert result['seqs'] == ['1', '2'], (virtualized, result)
+    assert result['earlierCopies'] == 1, (virtualized, result)
+    assert result['tailLanded'], (virtualized, result)
