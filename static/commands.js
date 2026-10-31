@@ -9,32 +9,35 @@ const _WEBUI_DISPATCHABLE_AGENT_COMMANDS = new Set([
 const COMMANDS=[
   // noEcho:true = action-only commands that don't produce a chat response.
   // Commands without noEcho get a user message echoed to the chat (#840).
+  // arg convention: '<required>' for required, '[optional]' for optional,
+  // omit when the command takes no argument. normalizeArgHint() enforces
+  // the same convention for registry-derived rows (#7675 follow-up #2).
   {name:'help',      desc:t('cmd_help'),             fn:cmdHelp},
   {name:'clear',     desc:t('cmd_clear'),         fn:cmdClear,     noEcho:true},
   {name:'compress',  desc:t('cmd_compress'),       fn:cmdCompress, arg:'[focus topic]', noEcho:true},
   {name:'compact',   desc:t('cmd_compact_alias'),       fn:cmdCompact, noEcho:true},
-  {name:'model',     desc:t('cmd_model'),  fn:cmdModel,     arg:'model_name', subArgs:'models', noEcho:true},
-  {name:'workspace', desc:t('cmd_workspace'),            fn:cmdWorkspace, arg:'name',           noEcho:true},
+  {name:'model',     desc:t('cmd_model'),  fn:cmdModel,     arg:'<model_name>', subArgs:'models', noEcho:true},
+  {name:'workspace', desc:t('cmd_workspace'),            fn:cmdWorkspace, arg:'<name>',           noEcho:true},
   {name:'terminal',  desc:t('cmd_terminal'),             fn:cmdTerminal,                        noEcho:true},
   {name:'new',       desc:t('cmd_new'),            fn:cmdNew,       noEcho:true},
   {name:'usage',     desc:t('cmd_usage'),   fn:cmdUsage,     noEcho:true},
-  {name:'theme',     desc:t('cmd_theme'), fn:cmdTheme, arg:'name',  noEcho:true},
-  {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'name', subArgs:'personalities'},
-  {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query'},
-  {name:'use',       desc:t('cmd_use'),      fn:cmdUse,      arg:'skill-name', subArgs:'skills', noEcho:true},
+  {name:'theme',     desc:t('cmd_theme'), fn:cmdTheme, arg:'<name>',  noEcho:true},
+  {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'[name]', subArgs:'personalities'},
+  {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'[query]'},
+  {name:'use',       desc:t('cmd_use'),      fn:cmdUse,      arg:'<skill-name>', subArgs:'skills', noEcho:true},
   {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop,      noEcho:true},
   {name:'goal',      desc:t('cmd_goal'),     fn:cmdGoal,      arg:'[status|pause|resume|clear|text]', subArgs:['status','pause','resume','clear']},
-  {name:'queue',     desc:t('cmd_queue'),    fn:cmdQueue,     arg:'message', noEcho:true},
-  {name:'interrupt', desc:t('cmd_interrupt'), fn:cmdInterrupt, arg:'message', noEcho:true},
-  {name:'steer',     desc:t('cmd_steer'),    fn:cmdSteer,     arg:'message', noEcho:true},
+  {name:'queue',     desc:t('cmd_queue'),    fn:cmdQueue,     arg:'<message>', noEcho:true},
+  {name:'interrupt', desc:t('cmd_interrupt'), fn:cmdInterrupt, arg:'<message>', noEcho:true},
+  {name:'steer',     desc:t('cmd_steer'),    fn:cmdSteer,     arg:'<message>', noEcho:true},
   {name:'title',     desc:t('cmd_title'),    fn:cmdTitle,    arg:'[title]'},
   {name:'retry',     desc:t('cmd_retry'),    fn:cmdRetry,     noEcho:true},
   {name:'undo',      desc:t('cmd_undo'),     fn:cmdUndo,      noEcho:true},
-  {name:'btw',       desc:t('cmd_btw'),      fn:cmdBtw,       arg:'question', noEcho:true},
-  {name:'background',desc:t('cmd_background'),fn:cmdBackground,arg:'prompt',  noEcho:true},
+  {name:'btw',       desc:t('cmd_btw'),      fn:cmdBtw,       arg:'<question>', noEcho:true},
+  {name:'background',desc:t('cmd_background'),fn:cmdBackground,arg:'<prompt>',  noEcho:true},
   {name:'status',    desc:t('cmd_status'),   fn:cmdStatus},
   {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice,     noEcho:true},
-  {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh|max', subArgs:['show','hide','none','minimal','low','medium','high','xhigh','max'], noEcho:true},
+  {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'[show|hide|<effort>]', subArgs:['show','hide','none','minimal','low','medium','high','xhigh','max'], noEcho:true},
   {name:'yolo', desc:t('cmd_yolo'), fn:cmdYolo, noEcho:true},
   {name:'branch', desc:t('cmd_branch'), fn:cmdBranch, arg:'[name]', noEcho:true},
 ];
@@ -204,6 +207,24 @@ function executeCommand(text){
 // Plugin-category commands are always dispatchable via the plugin exec
 // transport. #6951.
 
+// Normalize an argument hint to one of three shapes: undefined (no hint),
+// '[<optional>]', or '<required>'. Bare hints are wrapped in angle brackets
+// so every autocomplete row renders with the same convention. Previously
+// builtin rows used bare strings or `[optional]` while registry rows used
+// `<required>`, which read as inconsistent in the same dropdown
+// (#7675 follow-up #2).
+function normalizeArgHint(hint){
+  const text=String(hint||'').trim();
+  if(!text) return undefined;
+  // A hint that is ALREADY shaped is passed through untouched. The test is on
+  // the FIRST character, not a full-match pair: a mixed hint like
+  // `<file> [options]` starts with `<` but does not end with `>`, and the old
+  // `/^<.*>$/` test let it fall through to the wrap below, producing
+  // `<<file> [options]>` (#7683).
+  if(text.startsWith('<')||text.startsWith('[')) return text;
+  return `<${text}>`;
+}
+
 function _isWebuiDispatchableAgentCommand(cmd){
   const name=String(cmd&&cmd.name||'').trim().toLowerCase();
   if(_WEBUI_DISPATCHABLE_AGENT_COMMANDS.has(name))return true;
@@ -270,11 +291,15 @@ function getMatchingCommands(prefix){
     matches.push({
       name,
       desc:spec.desc,
-      arg:'name',
+      arg:normalizeArgHint('name'),
       source:'subarg-command',
     });
     seen.add(name);
   }
+  // /pet is dispatched by handlePetSlashCommand, but its argument hint comes
+  // from the agent metadata like any other registry command. We still need a
+  // row so the dropdown surfaces an arg hint when the user types `/pet` and
+  // the metadata cache is populated (#7675 follow-up #1).
   if(_slashCommandMatchesPrefix('pet',q)&&!seen.has('pet')){
     const petMeta=Array.isArray(_agentCommandCache)
       ? _agentCommandCache.find(cmd=>String(cmd&&cmd.name||'').toLowerCase()==='pet')
@@ -282,6 +307,7 @@ function getMatchingCommands(prefix){
     matches.push({
       name:'pet',
       desc:String((petMeta&&petMeta.description)||'Desktop Companion command').trim()||'Desktop Companion command',
+      arg:normalizeArgHint(petMeta&&petMeta.args_hint),
       source:'agent',
     });
     seen.add('pet');
@@ -298,12 +324,19 @@ function getMatchingCommands(prefix){
       name,
       desc:String(cmd&&cmd.description||'').trim()||'Agent command',
       // Surface the registry's argument hint on the autocomplete row (#6951).
-      arg:String(cmd&&cmd.args_hint||'').trim()||undefined,
+      // normalizeArgHint wraps bare hints in angle brackets so the row renders
+      // with the same convention as builtin rows (#7675 follow-up #2).
+      arg:normalizeArgHint(cmd&&cmd.args_hint),
       source:cmd.category==='Plugin'?'plugin':'agent',
     });
     seen.add(name);
   }
-  if(_agentCommandCacheReady){
+  // #7683 [SILENT]: bundle rows are gated on the BUNDLE cache's readiness,
+  // not the agent registry's. A registry failure leaves
+  // _agentCommandCacheReady=false while _bundleCommandCache is already
+  // populated, and the old gate then hid successfully loaded bundles from
+  // autocomplete (Chromium: /release-bundle present on master, gone here).
+  if(_bundleCommandCacheReady){
     for(const bundle of _bundleCommandCache){
       if(!_slashCommandMatchesPrefix(bundle.name,q)||seen.has(bundle.name)||reserved.has(bundle.name))continue;
       matches.push(bundle);
@@ -497,6 +530,12 @@ function _getSlashSubArgOptions(spec){
 }
 
 let _agentCommandCacheReady=false;
+let _agentCommandCacheAvailable=false;
+// #7683 [CORE]: the composer fires this on every input event, so a failing
+// /api/commands must not be refetched per keystroke. After a failure the next
+// attempt waits this long. A successful load resets the window.
+const _AGENT_COMMAND_METADATA_RETRY_COOLDOWN_MS=5000;
+let _agentCommandMetadataRetryAt=0;
 async function loadAgentCommandMetadata(force=false){
   if(_agentCommandCacheReady&&!force)return _agentCommandCache||[];
   if(_agentCommandCachePromise&&!force)return _agentCommandCachePromise;
@@ -504,49 +543,85 @@ async function loadAgentCommandMetadata(force=false){
     try{
       const data=await api('/api/commands');
       _agentCommandCache=Array.isArray(data&&data.commands)?data.commands:[];
-    }catch(_){
-      _agentCommandCache=[];
-    }finally{
+      _agentCommandCacheAvailable=true;
       _agentCommandCacheReady=true;
+      // A successful load clears the cooldown so the next real need (a force
+      // reload, a profile switch) is not throttled by an earlier failure.
+      _agentCommandMetadataRetryAt=0;
+    }catch(_){
+      // A transient registry failure must NOT be cached as an authoritative
+      // empty registry: leave ready=false so the next call retries, and record
+      // the failure so callers can distinguish an unavailable registry from a
+      // genuine unknown command (#7683).
+      _agentCommandCache=null;
+      _agentCommandCacheAvailable=false;
+      _agentCommandCacheReady=false;
+    }finally{
       _agentCommandCachePromise=null;
     }
-    return _agentCommandCache;
+    return _agentCommandCache||[];
   })();
   return _agentCommandCachePromise;
 }
 
 async function getAgentCommandMetadata(name){
   const needle=String(name||'').trim().toLowerCase();
-  if(!needle) return null;
+  if(!needle) return {available:true,command:null};
   const commands=await loadAgentCommandMetadata();
   // Exact native-name match ranks first: when BOTH `_` and `-` spellings are
   // genuinely registered, the literal spelling the user typed must win
   // regardless of registry order (#8203 round 2 re-gate).
   const byName=commands.find(cmd=>String(cmd&&cmd.name||'').toLowerCase()===needle);
-  if(byName) return byName;
+  if(byName) return {available:_agentCommandCacheAvailable,command:byName};
   // Then the EXPLICIT aliases array (registry order preserved).
   const byAlias=commands.find(cmd=>Array.isArray(cmd&&cmd.aliases)&&cmd.aliases.some(a=>String(a||'').toLowerCase()===needle));
-  if(byAlias) return byAlias;
+  if(byAlias) return {available:_agentCommandCacheAvailable,command:byAlias};
   // Finally the same `_` ≡ `-` slug variants the autocomplete matcher
   // advertises: typing the underscore spelling of a hyphenated command (or
   // vice versa) must resolve the registered native name, so the submit path
   // dispatches it instead of falling through to chat (#8143, #8203 round 2).
   const needles=_slashCommandSlugVariants(needle);
-  return commands.find(cmd=>{
+  const command=commands.find(cmd=>{
     const n=String(cmd&&cmd.name||'').toLowerCase();
     return needles.some(v=>n===v);
   })||null;
+  // Preserve metadata availability separately from the lookup result so the
+  // send path can fail closed on a transient registry failure instead of
+  // leaking a known CLI-only command as plain chat text (#7683). Every
+  // return above carries the same {available, command} envelope: the raw
+  // early returns #8203 shipped read as undefined here and dropped known
+  // CLI-only commands (e.g. /browser) into the generic chat path.
+  return {available:_agentCommandCacheAvailable,command};
 }
+
+// Registry commands whose CLI behaviour is "hand the agent this prompt". Typing
+// the same text without the slash asks the agent directly in the WebUI, so the
+// explainer points at that instead of leaving the user at a dead end (#7683
+// review). Extend the set when another prompt-style command joins the registry.
+const PROMPT_STYLE_CLI_ONLY_COMMANDS=new Set(['plan','review','learn']);
 
 function cliOnlyCommandResponse(cmdName, meta){
   const name=String((meta&&meta.name)||cmdName||'').trim();
   const desc=String((meta&&meta.description)||'').trim();
   const detail=desc?`\n\n${desc}`:'';
   let extra='';
+  if(PROMPT_STYLE_CLI_ONLY_COMMANDS.has(name)){
+    extra='\n\nYour request is in the composer without the slash. Press Send to ask the agent directly.';
+  }
+  if(name==='bg'){
+    extra='\n\nWebUI has the same thing: `/background` runs a prompt in a background session.';
+  }
   if(name==='browser'){
     extra='\n\nBrowser tools in WebUI must be configured server-side with the agent/browser environment. Once configured, ask the model to use browser tools directly; `/browser` itself only works in `hermes chat`.';
   }
-  return `\`/${name}\` is a Hermes CLI-only command and cannot run inside the WebUI.${detail}${extra}`;
+  return `\`/${name}\` isn't available in the WebUI.${detail}${extra}`;
+}
+
+// True when a CLI-only explainer tells the user their de-slashed text is
+// already in the composer (#7683 review round 3). send() keeps the composer
+// text in that case so the user presses Send instead of retyping.
+function isPromptStyleCliOnlyCommand(name){
+  return PROMPT_STYLE_CLI_ONLY_COMMANDS.has(String(name||'').trim());
 }
 
 async function executeAgentCommand(text,_meta){
@@ -709,8 +784,18 @@ function _compressionAnchorMessageKey(m){
 
 function cmdHelp(){
   const lines=COMMANDS.map(c=>{
-    const usage=c.arg ? (String(c.arg).startsWith('[') ? ` ${c.arg}` : ` <${c.arg}>`) : '';
-    return `  /${c.name}${usage} — ${c.desc}`;
+    // The table already stores bracketed hints ('<required>' / '[optional]')
+    // after #7675 follow-up #2, so render it verbatim with one leading
+    // space -- adding another pair here produced `<<model_name>>` (#7683).
+    const usage=c.arg ? ` ${normalizeArgHint(c.arg)}` : '';
+    // Wrap the command + usage in a code span. This text is pushed as an
+    // assistant message, so it goes through renderMd(), and that pipeline
+    // decodes HTML entities FIRST and then drops anything shaped like an
+    // unknown HTML tag -- so bare `<effort>` / `<model_name>` vanish from the
+    // rendered row (`/reasoning [show|hide|]`, `/model `) and escaping them
+    // cannot help (#7683 review round 3). A code span is stashed before every
+    // markdown pass, so the brackets survive.
+    return `  \`/${c.name}${usage}\` — ${c.desc}`;
   });
   const msg={role:'assistant',content:t('available_commands')+'\n'+lines.join('\n')};
   S.messages.push(msg);
@@ -2708,14 +2793,28 @@ function refreshSlashCommandDropdown(){
 }
 function ensureSkillCommandsLoadedForAutocomplete(){
   if(!_skillCommandCacheReady&&!_skillCommandLoadPromise){
-    loadSkillCommands().then(()=>{refreshSlashCommandDropdown();});
+    loadSkillCommands().then(()=>{
+      if(_skillCommandCacheReady)refreshSlashCommandDropdown();
+    });
   }
   if(!_bundleCommandCacheReady&&!_bundleCommandLoadPromise){
-    loadBundleCommands().then(()=>{refreshSlashCommandDropdown();});
+    loadBundleCommands().then(()=>{
+      if(_bundleCommandCacheReady)refreshSlashCommandDropdown();
+    });
   }
-  // Also preload agent/plugin command metadata for autocomplete
+  // Also preload agent/plugin command metadata for autocomplete.
+  // #7683 [CORE]: refresh ONLY when the metadata actually loaded. A failed
+  // fetch used to refresh anyway, which reopened a dropdown the user had
+  // already dismissed and swallowed the Enter that /new's handler was waiting
+  // for. The call is also rate-limited by a cooldown below, because this runs
+  // on every composer input event — an endpoint that is down would otherwise be
+  // hit once per keystroke (3 fetches vs master's 1 in the reviewer's probe).
   if(!_agentCommandCacheReady&&!_agentCommandCachePromise){
-    loadAgentCommandMetadata().then(()=>{refreshSlashCommandDropdown();});
+    if(_agentCommandMetadataRetryAt>Date.now())return;
+    _agentCommandMetadataRetryAt=Date.now()+_AGENT_COMMAND_METADATA_RETRY_COOLDOWN_MS;
+    loadAgentCommandMetadata().then(()=>{
+      if(_agentCommandCacheAvailable)refreshSlashCommandDropdown();
+    });
   }
 }
 
