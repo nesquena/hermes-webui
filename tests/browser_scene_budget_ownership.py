@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import tempfile
 from playwright.sync_api import sync_playwright
+from _browser_engines import resolved_engines
 from browser_conversation_lifecycle import _start_webui_server, _terminate_process
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -68,8 +69,12 @@ def main():
         agent=Path(temp)/'no-agent';agent.mkdir();(agent/'run_agent.py').write_text('')
         proc,log,_,base=_start_webui_server(ROOT,env,artifacts)
         try:
+            engines=resolved_engines()
+            if not engines:
+                raise SystemExit('no launchable Playwright engine (checked chromium, webkit); '
+                                 'install one or set BROWSERS to force a specific engine')
             with sync_playwright() as pw:
-                for engine in os.environ.get('BROWSERS','chromium,webkit').split(','):
+                for engine in engines:
                     if os.environ.get('SCENE_ENGINE') and os.environ['SCENE_ENGINE'] != engine: continue
                     browser=getattr(pw,engine).launch(headless=True)
                     for width,height in [(1440,1000),(820,900),(390,844)]:

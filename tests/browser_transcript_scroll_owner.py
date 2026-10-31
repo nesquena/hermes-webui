@@ -2,7 +2,10 @@
 """Independent, real-browser transcript geometry gate (no provider or user state).
 
 Run: .venv/bin/python tests/browser_transcript_scroll_owner.py
-BROWSERS=chromium,webkit (default); VIEWPORTS=desktop,narrow,mobile (default).
+BROWSERS selects engines; unset runs every DEFAULT engine that can actually
+launch here (chromium, webkit) so hosts missing one engine's system libraries
+still run. An explicit BROWSERS value is strict: a requested engine that
+cannot launch fails loudly. VIEWPORTS=desktop,narrow,mobile (default).
 SCROLL_ACTIVITY_MODE=compact_worklog|transparent_stream|hide_all_activity.
 SCROLL_FIXTURE=tools supports SCROLL_TOOL_TURNS=12 and SCROLL_TOOL_STEPS=55;
 use 4 turns x 240 steps to exercise oversized assistant turns.
@@ -24,6 +27,7 @@ import time
 from urllib.parse import parse_qs, urlsplit
 
 from playwright.sync_api import sync_playwright
+from _browser_engines import resolved_engines
 from browser_conversation_lifecycle import _start_webui_server, _terminate_process
 def live_fixture(count):
     tools = [dict(name='terminal', tid=f'tool-{i}', args={'command': f'printf result-{i}'},
@@ -280,15 +284,30 @@ def production_message_window():
     namespace = {}
     wanted = {
         'api/models.py': {'_is_empty_partial_activity_message'},
+        # is_hidden_transcript_row is a pure predicate in process_event_utils;
+        # the extracted _message_counts_as_renderable_for_window calls it, and
+        # without it in the namespace the exec'd helper dies with NameError at
+        # call time (release gate af988ebd, finding 3b).
+        'api/process_event_utils.py': {'is_hidden_transcript_row'},
         'api/routes.py': {'_message_counts_as_renderable_for_window',
                           '_tool_call_ids_in_messages', '_tool_result_matches_call_ids',
                           '_message_window_for_display'},
     }
+    # The exec'd defs must not evaluate server-module annotations (e.g.
+    # process_event_utils' `msg: Any`): the namespace holds no typing imports.
+    def strip_annotations(node):
+        node.returns = None
+        args = node.args
+        for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg):
+            if arg is not None:
+                arg.annotation = None
+        return node
     for filename, names in wanted.items():
         tree = ast.parse((ROOT / filename).read_text())
         nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
         assert {node.name for node in nodes} == names, f'pagination helper contract changed: {filename}'
-        exec(compile(ast.Module(body=nodes, type_ignores=[]), filename, 'exec'), namespace)
+        exec(compile(ast.Module(body=[strip_annotations(node) for node in nodes],
+                                  type_ignores=[]), filename, 'exec'), namespace)
     return namespace['_message_window_for_display']
 
 
@@ -408,6 +427,60 @@ def continuity_case(page, transport, evidence):
         idle(page)
 
 
+def recovered_prompt_composed_check(page, transport):
+    """Composed _loadOlderMessages must not restamp a recovered prompt (gate af988ebd).
+
+    A display-only recovered prompt (#8519/#8543) carries an EMPTY
+    data-session-msg-idx. The keyed commit's reindex loop used to Number('') it
+    to 0 and re-stamp the row as canonical message 0 after an older-history
+    load; a registered extension message action then resolved onto the wrong
+    message. Regression runs on the composed older-load path through the real
+    keyed commit.
+    """
+    registration=page.evaluate("""()=>{
+      window.__recoveredInvoked=[];
+      try{
+        window.HermesExtensionSettings.primeFromStatus({extensions:[{id:'scroll-owner-gate.ext',name:'Gate Probe'}]});
+        const handle=window.hermesExt.register('scroll-owner-gate.ext');
+        if(!handle) return {registered:false};
+        const unregister=handle.messages.registerAction({id:'probe',label:'Probe',icon:'pin',roles:['user'],
+          onInvoke(context){window.__recoveredInvoked.push(context);}});
+        return {registered:!!unregister};
+      }catch(err){return {registered:false,error:String(err)};}
+    }""")
+    state=page.evaluate("""async registered=>{
+      const sentinel='Recovered prompt sentinel';
+      const visible=ownerSnapshot().visible;
+      const firstVisible=S.messages.findIndex(m=>m&&m._test_id===visible[0]);
+      if(firstVisible<0) throw new Error('no mounted row to anchor the recovered prompt');
+      const recovered={role:'user',content:sentinel,_ts:1700000000.5};
+      _markDisplayOnlyRow(recovered);
+      S.messages.splice(firstVisible+1,0,recovered);
+      renderMessages();
+      const row=Array.from(document.querySelectorAll('#msgInner [data-display-only="1"]'))
+        .find(n=>n.dataset.rawText===sentinel);
+      if(!row) throw new Error('recovered prompt did not render as a display-only row');
+      const rawBefore=row.dataset.msgIdx;
+      await _loadOlderMessages();
+      const rowAfter=Array.from(document.querySelectorAll('#msgInner [data-display-only="1"]'))
+        .find(n=>n.dataset.rawText===sentinel);
+      if(!rowAfter) throw new Error('recovered prompt lost after the older-history load');
+      const expectedRaw=String(S.messages.findIndex(m=>m&&m.content===sentinel));
+      return {rawBefore,rawAfter:rowAfter.dataset.msgIdx,expectedRaw,
+        sessionIdx:rowAfter.dataset.sessionMsgIdx,
+        buttons:rowAfter.querySelectorAll('.extension-msg-action').length,
+        invoked:window.__recoveredInvoked,registered};
+    }""",registration.get('registered',False))
+    assert state['sessionIdx']=='', ('recovered prompt must stay non-canonical',state)
+    assert state['rawAfter']==state['expectedRaw'], (
+        'composed older load restamped the recovered prompt off its raw index',state)
+    assert state['rawBefore']!='0', ('recovered prompt rendered as canonical message 0 pre-load',state)
+    if state['registered']:
+        assert state['buttons']==0, ('extension action appeared on the recovered prompt',state)
+        assert state['invoked']==[], ('extension action invoked on the recovered prompt',state)
+    return state
+
+
 def prepend_case(page, transport, evidence, variant):
     position(page)
     transport.hold=True
@@ -437,6 +510,12 @@ def prepend_case(page, transport, evidence, variant):
         assert len(after['rows'])<COUNT//2, 'prepend mounted whole history'
     evidence.update(before=before,after=after,requests=transport.requests)
     idle(page)
+    # The recovered-prompt composed check injects a display-only row and runs
+    # its own older-history load; it must not perturb the case's geometry
+    # assertions above, so it runs after the idle snap. Each case renders in a
+    # fresh browser context, so nothing leaks into the next case.
+    if variant=='prepend' and page.evaluate("typeof _markDisplayOnlyRow==='function'"):
+        evidence['recovered_prompt']=recovered_prompt_composed_check(page,transport)
 
 
 def image_case(page, transport, evidence):
@@ -675,6 +754,10 @@ def main():
     activity_mode=os.environ.get('SCROLL_ACTIVITY_MODE','compact_worklog')
     if activity_mode not in ('compact_worklog','transparent_stream','hide_all_activity'):
         raise ValueError('invalid SCROLL_ACTIVITY_MODE: '+activity_mode)
+    engines=resolved_engines()
+    if not engines:
+        raise SystemExit('no launchable Playwright engine (checked chromium, webkit); '
+                         'install one or set BROWSERS to force a specific engine')
     oracle_self_test()
     artifact=Path(args.artifacts)/('baseline' if args.baseline_ref else 'candidate')
     artifact.mkdir(parents=True,exist_ok=True)
@@ -699,7 +782,7 @@ def main():
         proc,log,_,base=_start_webui_server(ROOT,env,artifact)
         try:
             with sync_playwright() as pw:
-                for engine in os.environ.get('BROWSERS','chromium,webkit').split(','):
+                for engine in engines:
                     browser=getattr(pw,engine).launch(headless=True)
                     try:
                         for size in os.environ.get('VIEWPORTS','desktop,narrow,mobile').split(','):
