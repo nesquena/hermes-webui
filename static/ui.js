@@ -15381,38 +15381,55 @@ function _formatTurnTps(value){
   const fixed=n>=100?Math.round(n).toLocaleString():n>=10?n.toFixed(1):n.toFixed(1);
   return `${fixed} t/s`;
 }
+function _formatToolSeconds(value){
+  const n=Number(value);
+  if(!Number.isFinite(n)||n<=0) return '';
+  const total=Math.round(n);
+  if(total<60) return `工具 ${total}s`;
+  const m=Math.floor(total/60), s=total%60;
+  return `工具 ${m}m${s?` ${s}s`:''}`;
+}
 function isTpsDisplayEnabled(){
   return window._showTps===true;
 }
-function _assistantRoleHtml(tsTitle='', tpsText=''){
+function _assistantRoleHtml(tsTitle='', tpsText='', toolText=''){
   const _bn=assistantDisplayName();
-  const tps=(isTpsDisplayEnabled()&&tpsText)?`<span class="msg-tps-inline" title="Tokens per second">${esc(tpsText)}</span>`:'';
-  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span class="msg-role-name">${esc(_bn)}</span>${tps}</div>`;
+  const tps=(isTpsDisplayEnabled()&&tpsText)?`<span class="msg-tps-inline" title="Generation speed (tokens per second)">${esc(tpsText)}</span>`:'';
+  const tool=(isTpsDisplayEnabled()&&toolText)?`<span class="msg-tps-inline msg-toolsec-inline" title="Tool execution time this turn">${esc(toolText)}</span>`:'';
+  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span class="msg-role-name">${esc(_bn)}</span>${tps}${tool}</div>`;
 }
-function _setAssistantTurnTps(turn, tpsText=''){
+function _setAssistantTurnTps(turn, tpsText='', toolText=''){
   if(!turn) return;
   const role=turn.querySelector('.msg-role.assistant');
   if(!role) return;
-  let chip=role.querySelector('.msg-tps-inline');
-  const text=String(tpsText||'').trim();
-  if(!text){if(chip) chip.remove();return;}
-  if(!chip){
-    chip=document.createElement('span');
-    chip.className='msg-tps-inline';
-    chip.title='Tokens per second';
-    role.appendChild(chip);
-  }
-  chip.textContent=text;
+  const setChip=(selector, className, text, title)=>{
+    let chip=role.querySelector(selector);
+    const value=String(text||'').trim();
+    if(!value){if(chip) chip.remove();return;}
+    if(!chip){
+      chip=document.createElement('span');
+      chip.className=className;
+      chip.title=title;
+      role.appendChild(chip);
+    }
+    chip.textContent=value;
+  };
+  setChip('.msg-tps-inline:not(.msg-toolsec-inline)', 'msg-tps-inline', tpsText, 'Generation speed (tokens per second)');
+  setChip('.msg-toolsec-inline', 'msg-tps-inline msg-toolsec-inline', toolText, 'Tool execution time this turn');
 }
-function _setLiveAssistantTps(value){
-  _setAssistantTurnTps($('liveAssistantTurn'), isTpsDisplayEnabled()?_formatTurnTps(value):'');
+function _setLiveAssistantTps(value, toolText=''){
+  _setAssistantTurnTps(
+    $('liveAssistantTurn'),
+    isTpsDisplayEnabled()?_formatTurnTps(value):'',
+    isTpsDisplayEnabled()?_formatToolSeconds(toolText):''
+  );
 }
-function _createAssistantTurn(tsTitle='', tpsText=''){
+function _createAssistantTurn(tsTitle='', tpsText='', toolText=''){
   const row=document.createElement('div');
   row.className='msg-row assistant-turn';
   row.dataset.role='assistant';
   if(S.session) row.dataset.sessionId=S.session.session_id;
-  row.innerHTML=`${_assistantRoleHtml(tsTitle, tpsText)}<div class="assistant-turn-blocks"></div>`;
+  row.innerHTML=`${_assistantRoleHtml(tsTitle, tpsText, toolText)}<div class="assistant-turn-blocks"></div>`;
   return row;
 }
 function _setLatestAssistantTurnLandmark(turn, isLatest){
@@ -22504,10 +22521,10 @@ function renderMessages(options){
         if(blocks) blocks.innerHTML='';
         for(const attr of _recycleResetAttrs) recycled.removeAttribute(attr);
         const role=recycled.querySelector('.msg-role.assistant');
-        if(role) role.outerHTML=_assistantRoleHtml(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'');
+        if(role) role.outerHTML=_assistantRoleHtml(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'', isTpsDisplayEnabled()?_formatToolSeconds(m._turnToolSeconds):'');
         currentAssistantTurn=recycled;
       }else{
-        currentAssistantTurn=_createAssistantTurn(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'');
+        currentAssistantTurn=_createAssistantTurn(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'', isTpsDisplayEnabled()?_formatToolSeconds(m._turnToolSeconds):'');
       }
       currentAssistantTurn.dataset.role='assistant';
       if(S.session) currentAssistantTurn.dataset.sessionId=S.session.session_id;
