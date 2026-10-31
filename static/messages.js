@@ -1522,7 +1522,6 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
 
 async function send(){
   if(S.session&&S.session.chat_read_only_reason){
-    if(typeof showToast==='function') showToast(S.session.chat_read_only_reason,3000);
     return;
   }
   // Static guards expect _defaultMessageMode to stay near send() while the actual

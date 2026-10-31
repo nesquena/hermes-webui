@@ -167,6 +167,52 @@ def test_gateway_http_error_body_is_bounded_and_always_redacted(monkeypatch):
     assert len(repr(payload)) < 1500
 
 
+@pytest.mark.parametrize("filename,name", [("ui.js", "syncTopbar"), ("panels.js", "syncAppTitlebar")])
+def test_source_badge_tracks_chat_availability_when_switching_sessions(filename, name):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node required for frontend behavior test")
+    source = Path("static", filename).read_text(encoding="utf-8")
+    start = re.search(rf"^function {name}\(", source, re.M).start()
+    end = re.search(r"^(?:async )?function \w+\(", source[start + 1:], re.M)
+    function = source[start:start + 1 + end.start()] if end else source[start:]
+    script = r"""
+const assert=require('node:assert/strict');
+const element=()=>({children:[],hidden:false,
+  set textContent(value){this.text=value;this.children=[]},
+  get textContent(){return this.text},
+  appendChild(child){this.children.push(child)}});
+const elements=Object.fromEntries(['topbarTitle','topbarMeta','appTitlebarTitle','appTitlebarSub'].map(id=>[id,element()]));
+const $=id=>elements[id];
+const document={getElementById:$,createElement:element,createTextNode:text=>({textContent:text}),querySelector:()=>null};
+const window={};
+const S={session:null,messages:[]};
+const assistantDisplayName=()=> 'Hermes';
+const _topbarMessageMetaText=()=> '0';
+const _applyModelToDropdown=()=>true;
+const _currentPanel='chat',_renamingAppTitlebar=false;
+const t=key=>key;
+""" + function + f"\nconst sync={name};\n" + r"""
+const meta=elements.topbarMeta;
+const title=elements.appTitlebarSub;
+for(const state of [
+  {source_label:'Desktop',chat_read_only_reason:'Read-only in WebUI.'},
+  {source_label:'Desktop'},
+  {source_label:'Desktop',read_only:true},
+  {source_label:'WebUI',chat_read_only_reason:'Read-only in WebUI.'},
+  {source_label:'Desktop'},
+]){
+  S.session={model:'example',title:'Example conversation',...state};sync();
+  const badges=[...meta.children,...title.children].filter(child=>child.className==='topbar-source-badge');
+  const expected=state.source_label==='WebUI' ? [] :
+    ['Desktop'+(state.read_only||state.chat_read_only_reason ? ' · read-only' : '')];
+  assert.deepEqual(badges.map(badge=>badge.textContent),expected);
+}
+"""
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+
+
 def test_external_composer_disables_send_preserves_draft_and_resets_on_navigation():
     node = shutil.which("node")
     if not node:
@@ -189,7 +235,8 @@ const attrs={'aria-describedby':'composerWorkspaceContext'};
 const msg={value:'keep this draft',dataset:{},disabled:false,readOnly:false,getAttribute:k=>attrs[k],setAttribute:(k,v)=>attrs[k]=v,removeAttribute:k=>delete attrs[k]};
 const btn={dataset:{},style:{},classList:{toggle(){},remove(){},contains(){return true}},setAttribute(){}};
 const notice={hidden:true};
-const reason={textContent:''};
+let reasonText='',reasonWrites=0;
+const reason={get textContent(){return reasonText},set textContent(value){reasonText=value;reasonWrites++}};
 const help={hidden:true};
 let _compressionPlaceholderSaved=null;
 const assistantDisplayName=()=> 'Hermes';
@@ -198,7 +245,8 @@ const $=id=>elements[id];
 const _composerHasContent=()=>!!msg.value;
 const _getExplicitBusyCommandAction=()=>null;
 const _setComposerPrimaryButtonIcon=()=>{};
-const showToast=()=>{};
+let toastCount=0;
+const showToast=()=>{toastCount++};
 const window={};
 const requestAnimationFrame=fn=>fn();
 """ + functions + r"""
@@ -207,16 +255,34 @@ const requestAnimationFrame=fn=>fn();
  assert.equal(msg.readOnly,true);
  assert.equal(btn.disabled,true);
  assert.equal(notice.hidden,false);
- assert.equal(reason.textContent,S.session.chat_read_only_reason);
+ assert.equal(reason.textContent,'Continue in Desktop.');
+ assert.equal(btn.title,S.session.chat_read_only_reason);
+ const writes=reasonWrites;
+ updateSendBtn();
+ assert.equal(reasonWrites,writes);
  assert.equal(msg.placeholder,"Read-only in WebUI");
  assert.equal(help.hidden,false);
  assert.match(attrs['aria-describedby'],/composerWorkspaceContext composerChatReadOnlyReason/);
  await send();
+ assert.equal(toastCount,0);
  assert.equal(msg.value,'keep this draft');
  S.busy=true;S.activeStreamId='owned-stream';
  assert.equal(getComposerPrimaryAction(),'stop');
  S.busy=false;S.activeStreamId=null;S.session={chat_read_only_reason:'Read-only in WebUI.'};
  updateSendBtn();
+ assert.equal(help.hidden,true);
+ assert.equal(notice.hidden,true);
+ assert.equal(reason.textContent,'');
+ assert.equal(msg.readOnly,true);
+ assert.equal(attrs['aria-describedby'],'composerWorkspaceContext');
+ S.session={chat_read_only_reason:'Read-only in WebUI. Continue in the original client.',chat_read_only_can_connect:true};
+ updateSendBtn();
+ assert.equal(reason.textContent,'Continue in the original client.');
+ assert.equal(notice.hidden,false);
+ S.session={chat_read_only_reason:'This conversation is unavailable.'};
+ updateSendBtn();
+ assert.equal(reason.textContent,'This conversation is unavailable.');
+ assert.equal(notice.hidden,false);
  assert.equal(help.hidden,true);
  S.session={session_source:'webui'};
  updateSendBtn();

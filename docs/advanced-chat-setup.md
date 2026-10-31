@@ -303,10 +303,12 @@ Use this when the connected gateway advertises approval support and you want too
 The Gateway REST API refuses Desktop, CLI/TUI and messaging conversations with
 `permission_denied`; reading or importing them does not authorize a REST turn.
 By default, Gateway mode shows an explanation and a read-only composer for these
-conversations. The notice names the original client and links to the connection
-instructions below. The message box says "Read-only in WebUI" and keeps any draft
-when you switch conversations. Unsupported sources, such as scheduled jobs and
-subagents, stay read-only and do not offer a connection that cannot help them.
+conversations. The message box says "Read-only in WebUI" and keeps any draft
+when you switch conversations. The notice below it adds only where to continue,
+such as "Continue in Desktop.", followed by a "How to connect" documentation link.
+The source badge also marks the conversation read-only, and a send attempt does
+not add a duplicate popup. Unsupported sources, such as scheduled jobs and
+subagents, keep the read-only placeholder without an extra notice or connection link.
 HTTP refusals also retain bounded, credential-redacted details,
 including structured error codes, in the browser and saved error message.
 

@@ -11540,21 +11540,23 @@ function _setComposerPrimaryButtonIcon(btn,action){
 
 function updateSendBtn(){
   const chatReadOnlyReason=(S.session&&S.session.chat_read_only_reason)||'';
+  const chatReadOnlyNoticeText=chatReadOnlyReason.replace(/^Read-only in WebUI\.\s*/, '');
+  const showChatReadOnlyHelp=!!(chatReadOnlyReason&&S.session.chat_read_only_can_connect);
   const chatReadOnlyNotice=$('composerChatReadOnlyNotice');
   const chatReadOnlyText=$('composerChatReadOnlyReason');
   const chatReadOnlyHelp=$('composerChatReadOnlyHelp');
-  if(chatReadOnlyText&&chatReadOnlyText.textContent!==chatReadOnlyReason){
-    chatReadOnlyText.textContent=chatReadOnlyReason;
+  if(chatReadOnlyText&&chatReadOnlyText.textContent!==chatReadOnlyNoticeText){
+    chatReadOnlyText.textContent=chatReadOnlyNoticeText;
   }
-  if(chatReadOnlyHelp) chatReadOnlyHelp.hidden=!(chatReadOnlyReason&&S.session.chat_read_only_can_connect);
+  if(chatReadOnlyHelp) chatReadOnlyHelp.hidden=!showChatReadOnlyHelp;
   if(chatReadOnlyNotice){
-    chatReadOnlyNotice.hidden=!chatReadOnlyReason;
+    chatReadOnlyNotice.hidden=!(chatReadOnlyNoticeText||showChatReadOnlyHelp);
   }
   const chatInput=$('msg');
   if(chatInput){
     chatInput.readOnly=!!chatReadOnlyReason;
     const descriptionIds=new Set((chatInput.getAttribute('aria-describedby')||'').split(/\s+/).filter(Boolean));
-    if(chatReadOnlyReason) descriptionIds.add('composerChatReadOnlyReason');
+    if(chatReadOnlyNoticeText) descriptionIds.add('composerChatReadOnlyReason');
     else descriptionIds.delete('composerChatReadOnlyReason');
     if(descriptionIds.size) chatInput.setAttribute('aria-describedby',[...descriptionIds].join(' '));
     else chatInput.removeAttribute('aria-describedby');
@@ -15458,7 +15460,7 @@ function syncTopbar(){
     if(sourceLabel){
       const badge=document.createElement('span');
       badge.className='topbar-source-badge';
-      badge.textContent=sourceLabel+(S.session.read_only?' · read-only':'');
+      badge.textContent=sourceLabel+((S.session.read_only||S.session.chat_read_only_reason)?' · read-only':'');
       _topbarMeta.appendChild(document.createTextNode(' '));
       _topbarMeta.appendChild(badge);
     }
