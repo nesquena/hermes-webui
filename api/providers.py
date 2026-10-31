@@ -40,6 +40,7 @@ from api.config import (
     _PROVIDER_MODELS,
     _coerce_provider_cost_budget,
     _configured_model_ids,
+    _custom_provider_entry_slug_key,
     _custom_provider_slug_from_name,
     _get_label_for_model,
     _models_from_live_provider_ids,
@@ -67,17 +68,32 @@ def _provider_env_var_for(provider_id: str) -> str | None:
     return effective_provider_env_var(provider_id, _PROVIDER_ENV_VAR)
 
 
-def _custom_provider_name_matches(provider_id: str, name: object) -> bool:
-    """Return True when *provider_id* refers to a named custom provider."""
+def _custom_provider_name_matches(provider_id: str, entry: object) -> bool:
+    """Return True when *provider_id* refers to this custom provider record.
+
+    The raw-name spellings match first (the historical contract: a record
+    named ``Local Proxy`` is reachable as ``custom:local proxy``). When
+    none of them match, fall back to the record's canonical catalog
+    identity (:func:`_custom_provider_entry_slug_key`) so lookups through
+    the identity the catalog advertises (for example ``custom:cgxy-cpa``
+    for a pure-CJK name with a ``provider_key``) find the row instead of
+    silently missing it.
+    """
     pid = str(provider_id or "").strip().lower()
-    raw_name = str(name or "").strip().lower()
-    if not pid or not raw_name:
+    if not pid or not isinstance(entry, dict):
         return False
-    slug = _custom_provider_slug_from_name(raw_name)
-    candidates = {raw_name, f"custom:{raw_name}"}
-    if slug:
-        candidates.add(slug)
-    return pid in candidates
+    raw_name = str(entry.get("name") or "").strip().lower()
+    if raw_name:
+        slug = _custom_provider_slug_from_name(raw_name)
+        candidates = {raw_name, f"custom:{raw_name}"}
+        if slug:
+            candidates.add(slug)
+        if pid in candidates:
+            return True
+    slug_key = _custom_provider_entry_slug_key(entry).strip().lower()
+    if slug_key:
+        return pid in {slug_key, f"custom:{slug_key}"}
+    return False
 
 _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 _OPENCODE_GO_QUOTA_URL = "https://opencode.ai/zen/go/v1/usage"
@@ -1260,7 +1276,7 @@ def _provider_has_shadowed_codex_oauth_value(provider_id: str) -> bool:
     custom_providers = cfg.get("custom_providers", [])
     if isinstance(custom_providers, list):
         for cp in custom_providers:
-            if isinstance(cp, dict) and _custom_provider_name_matches(provider_id, cp.get("name")):
+            if isinstance(cp, dict) and _custom_provider_name_matches(provider_id, cp):
                 cp_key = cp.get("api_key")
                 if isinstance(cp_key, str) and cp_key.startswith("${") and cp_key.endswith("}"):
                     values.append(_thread_local_env_value(cp_key[2:-1]))
@@ -1431,7 +1447,7 @@ def _provider_has_key(provider_id: str) -> bool:
     if isinstance(custom_providers, list):
         for cp in custom_providers:
             if isinstance(cp, dict):
-                if _custom_provider_name_matches(provider_id, cp.get("name")):
+                if _custom_provider_name_matches(provider_id, cp):
                     if _provider_value_counts_as_api_key(provider_id, cp.get("api_key")):
                         return True
     return False
@@ -1479,7 +1495,7 @@ def _get_provider_api_key(provider_id: str) -> str | None:
         for cp in custom_providers:
             if not isinstance(cp, dict):
                 continue
-            if _custom_provider_name_matches(provider_id, cp.get("name")):
+            if _custom_provider_name_matches(provider_id, cp):
                 cp_key = str(cp.get("api_key") or "").strip()
                 if cp_key.startswith("${") and cp_key.endswith("}"):
                     return _thread_local_env_value(cp_key[2:-1]).strip() or None
@@ -3387,7 +3403,7 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
             if isinstance(custom_providers, list):
                 for cp in custom_providers:
                     if isinstance(cp, dict):
-                        if _custom_provider_name_matches(provider_id, cp.get("name")):
+                        if _custom_provider_name_matches(provider_id, cp):
                             if cp.get("api_key"):
                                 del cp["api_key"]
                                 changed = True

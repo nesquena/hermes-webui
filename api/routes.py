@@ -25820,7 +25820,10 @@ def _handle_live_models(handler, parsed):
                 if not (provider == "custom" or provider.startswith("custom:")):
                     return []
                 try:
-                    from api.config import _custom_provider_slug_from_name
+                    from api.config import (
+                        _custom_provider_entry_slug,
+                        _custom_provider_slug_from_name,
+                    )
                     _cp_entries = cfg.get("custom_providers", [])
                     if not isinstance(_cp_entries, list):
                         return []
@@ -25828,11 +25831,19 @@ def _handle_live_models(handler, parsed):
                     for _cp in _cp_entries:
                         if not isinstance(_cp, dict):
                             continue
-                        _slug = _custom_provider_slug_from_name(_cp.get("name", ""))
                         if provider.startswith("custom:"):
-                            if _slug == provider:
+                            # Match on the canonical entry identity — the
+                            # exact slug the catalog mints for the row. A
+                            # name-only comparison can never match a
+                            # fallback identity (provider_key /
+                            # endpoint+hash / name-hash), so those rows
+                            # silently fell through to ambient config and
+                            # the provider was never called.
+                            if _custom_provider_entry_slug(_cp) == provider:
                                 _matches.append(_cp)
-                        elif provider == "custom" and not _slug:
+                        elif provider == "custom" and not _custom_provider_slug_from_name(
+                            _cp.get("name", "")
+                        ):
                             _matches.append(_cp)
                     return _matches
                 except Exception:
@@ -25880,12 +25891,29 @@ def _handle_live_models(handler, parsed):
             # prevent the live fetch below from running (#3718).
             _config_ids = []
             _allowlist_ids = []
+            _custom_matches = _custom_provider_entries_for_request()
+            # A qualified identity minted by several rows is ambiguous:
+            # fail closed instead of merging those rows, and do not borrow
+            # the ambient model config's endpoint/key for them.
+            _custom_identity_ambiguous = (
+                provider.startswith("custom:") and len(_custom_matches) > 1
+            )
+            if _custom_identity_ambiguous:
+                # Ambiguity is terminal. No row owns this identity, so no
+                # fallback below may speak for it either — in particular
+                # the explicit credential-pool fallback would resurrect an
+                # endpoint/key for it and serve models for an identity
+                # with no unique owner. Return the empty response now,
+                # before the pool, live-request, allowlist and static
+                # fallback paths can run.
+                return _finish({"provider": provider, "models": [], "count": 0})
             if provider == "custom" or provider.startswith("custom:"):
-                for _cp in _custom_provider_entries_for_request():
-                    if custom_provider_entry is None:
-                        custom_provider_entry = _cp
-                    _config_ids.extend(_custom_provider_model_ids(_cp))
-                    _allowlist_ids.extend(_custom_provider_allowlist_ids(_cp))
+                if not _custom_identity_ambiguous:
+                    for _cp in _custom_matches:
+                        if custom_provider_entry is None:
+                            custom_provider_entry = _cp
+                        _config_ids.extend(_custom_provider_model_ids(_cp))
+                        _allowlist_ids.extend(_custom_provider_allowlist_ids(_cp))
             
             # Always try live fetch for custom providers — config entries are a
             # fallback, not a replacement.  The live endpoint should return ALL

@@ -1550,6 +1550,110 @@ def _custom_provider_slug_from_name(name: object) -> str:
     return "custom:" + slug
 
 
+def _url_port_or_none(parsed_url) -> int | None:
+    """``parsed_url.port`` without the ValueError a malformed port raises.
+
+    ``http://host:notaport`` (or an out-of-range port) makes urllib raise
+    ValueError on ``.port`` access. Identity derivation must degrade to
+    "no usable port" instead of aborting the whole catalog build; the
+    entry then surfaces through its normal connection-error path.
+    """
+    try:
+        return parsed_url.port
+    except ValueError:
+        return None
+
+
+def _custom_provider_fallback_slug(
+    name: object,
+    provider_key: object = None,
+    base_url: object = None,
+) -> str:
+    """Derive a stable identity for a named entry whose name slugifies to "".
+
+    A name with no ASCII characters at all (for example a pure-CJK name)
+    leaves :func:`_custom_provider_slug_from_name` with nothing to build
+    from, and the catalog used to drop such entries silently (#8017).
+    Fall back deterministically, in order:
+
+    1. the record's ``provider_key``, slugified the same way as a name;
+    2. an endpoint-derived slug ``custom:<host>-<port>-<hash>`` — the
+       short hash of the name keeps two records that share one endpoint
+       (but are separately configured) from merging into one identity;
+    3. ``custom:name-<hash>`` from the name alone.
+
+    The hash is a plain SHA-256 of the configured name, so the same
+    config yields the same identity on every call and every restart.
+    Returns "" only when the entry carries no name at all.
+    """
+    raw_name = str(name or "").strip()
+    if not raw_name:
+        return ""
+    key_slug = _custom_provider_slug_from_name(provider_key)
+    if key_slug:
+        return key_slug
+    digest = hashlib.sha256(raw_name.encode("utf-8")).hexdigest()[:8]
+    url = str(base_url or "").strip().rstrip("/")
+    if url:
+        try:
+            parsed_url = urlparse(url if "://" in url else f"http://{url}")
+            host = (parsed_url.hostname or "").strip().lower()
+        except ValueError:
+            # A malformed URL (e.g. an unmatched IPv6 bracket in
+            # "http://[::1/v1") makes urlparse() / .hostname raise
+            # ValueError. Identity derivation runs for every row in the
+            # profile, so one bad row must not brick every lookup —
+            # degrade to the name-only fallback below.
+            host = ""
+        if host:
+            port = _url_port_or_none(parsed_url)
+            if port is None:
+                scheme = (parsed_url.scheme or "http").lower()
+                port = 443 if scheme == "https" else 80
+            # An IPv6 literal's colons would corrupt the @provider:model
+            # grammar this slug is embedded in, so fold them to dashes.
+            # The slug is only an identity token — the real endpoint
+            # always comes from the configured record, never the slug.
+            host = host.replace(":", "-")
+            return f"custom:{host}-{port}-{digest}"
+    return f"custom:name-{digest}"
+
+
+def _custom_provider_entry_slug(entry: dict) -> str:
+    """The identity the catalog uses for one ``custom_providers`` entry.
+
+    The name-derived slug whenever the name provides one (unchanged
+    behaviour for every ASCII name); otherwise the deterministic
+    fallback from the entry's ``provider_key`` / ``base_url`` / name.
+    This slug is the WebUI routing identity only — the persisted Agent
+    identity is the row's name / ``provider_key``, and a generated
+    fallback slug is translated back to the name at persistence time
+    (see :func:`_agent_provider_identity_for_persistence`).
+    """
+    slug = _custom_provider_slug_from_name(entry.get("name"))
+    if slug:
+        return slug
+    return _custom_provider_fallback_slug(
+        entry.get("name"), entry.get("provider_key"), entry.get("base_url")
+    )
+
+
+def _custom_provider_entry_slug_key(entry: dict) -> str:
+    """Bare canonical identity key (no ``custom:`` prefix) for one entry.
+
+    Derived from the SAME slug the catalog mints for the entry
+    (:func:`_custom_provider_entry_slug`), so name-derived identities and
+    fallback identities (provider_key / endpoint+hash / name-hash) live in
+    one namespace. This is the entry-side counterpart of
+    :func:`_custom_provider_slug_key`, which derives the key from an id or
+    name string on the lookup side; every membership / uniqueness /
+    collision comparison must use this key for the entry side, or fallback
+    identities silently match nothing.
+    """
+    slug = _custom_provider_entry_slug(entry)
+    return slug.split(":", 1)[1] if slug.startswith("custom:") else slug
+
+
 def _custom_provider_entries(config_obj: dict | None = None) -> list[dict]:
     source = config_obj if isinstance(config_obj, dict) else cfg
     entries = source.get("custom_providers", [])
@@ -1656,7 +1760,7 @@ def _named_custom_provider_slugs(config_obj: dict | None = None) -> set[str]:
     return {
         slug
         for slug in (
-            _custom_provider_slug_from_name(entry.get("name"))
+            _custom_provider_entry_slug(entry)
             for entry in _custom_provider_entries(config_obj)
         )
         if slug
@@ -1673,7 +1777,7 @@ def _named_custom_provider_slug_for_provider(
     raw_suffix = raw.removeprefix("custom:")
     for entry in _custom_provider_entries(config_obj):
         entry_name = str(entry.get("name") or "").strip().lower()
-        slug = _custom_provider_slug_from_name(entry_name)
+        slug = _custom_provider_entry_slug(entry)
         if not entry_name or not slug:
             continue
         if raw in {entry_name, slug} or raw_suffix == slug.removeprefix("custom:"):
@@ -1806,7 +1910,7 @@ def _custom_endpoint_slugs_for_base_url(value: object) -> set[str]:
     host = (parsed_url.hostname or "").strip().lower()
     if not host:
         return set()
-    port = parsed_url.port
+    port = _url_port_or_none(parsed_url)
     if port is None:
         scheme = (parsed_url.scheme or "http").lower()
         port = 443 if scheme == "https" else 80
@@ -1898,7 +2002,7 @@ def _named_custom_provider_slug_for_base_url(
         entry_base_url = _normalize_base_url_for_match(entry.get("base_url"))
         if entry_base_url != target:
             continue
-        slug = _custom_provider_slug_from_name(entry.get("name")) or "custom"
+        slug = _custom_provider_entry_slug(entry) or "custom"
         if not fallback:
             fallback = slug
         if model_id and _custom_provider_entry_owns_model(entry, model_id):
@@ -2763,7 +2867,7 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
     if prov.startswith("custom:"):
         raw_suffix = prov.removeprefix("custom:")
         for entry in _custom_provider_entries():
-            slug = _custom_provider_slug_from_name(entry.get("name"))
+            slug = _custom_provider_entry_slug(entry)
             entry_name = str(entry.get("name") or "").strip().lower()
             if not (prov in {entry_name, slug} or (slug and raw_suffix == slug.removeprefix("custom:"))):
                 continue
@@ -2996,10 +3100,16 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
 
     Membership is built from ALL named entries, INDEPENDENT of model ownership,
     because slug-only credential resolution scans every same-slug entry and
-    returns the first match. Raises ``AmbiguousCustomProviderError`` when 2+
-    entries share the key so an endpoint and an API key can never be resolved
-    from different entries on any path. Returns the matching entry, or ``None``
-    when no entry matches.
+    returns the first match. An entry matches by its CANONICAL catalog
+    identity (:func:`_custom_provider_entry_slug_key`) — the name-derived
+    slug when the name provides one, otherwise the fallback identity minted
+    from its ``provider_key`` / endpoint / name — so an identity the catalog
+    handed out always round-trips to the row that minted it, and two rows
+    minting the same identity (e.g. an ASCII name and another row's
+    ``provider_key``) are a collision. Raises
+    ``AmbiguousCustomProviderError`` when 2+ entries share the key so an
+    endpoint and an API key can never be resolved from different entries on
+    any path. Returns the matching entry, or ``None`` when no entry matches.
     """
     if not slug_key or not isinstance(custom_providers, list):
         return None
@@ -3010,7 +3120,7 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
         name = str(entry.get("name") or "").strip()
         if not name:
             continue
-        if _custom_provider_slug_key(name) == slug_key:
+        if _custom_provider_entry_slug_key(entry) == slug_key:
             matches.append(entry)
     if len(matches) >= 2:
         names = [str(e.get("name") or "").strip() for e in matches]
@@ -3205,7 +3315,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                     e for e in custom_providers
                     if isinstance(e, dict)
                     and _entry_owns_model(e)
-                    and _custom_provider_slug_key(e.get('name')) == _active_key
+                    and _custom_provider_entry_slug_key(e) == _active_key
                 ),
                 None,
             )
@@ -3232,7 +3342,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 entry_model_ids.add(entry_model)
             entry_model_ids.update(_configured_model_ids(entry.get('models')))
             if entry_name and model_id in entry_model_ids:
-                provider_hint = _custom_provider_slug_from_name(entry_name)
+                provider_hint = _custom_provider_entry_slug(entry)
                 # _finalize() applies the all-entry collision guard on this
                 # bare-'custom' / fall-through path before returning the slug.
                 return _finalize(model_id, provider_hint, entry_base_url or None)
@@ -3386,7 +3496,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             if isinstance(_custom_cfg, list):
                 for _entry in _custom_cfg:
                     if isinstance(_entry, dict) and _entry.get("name", "").strip() == prefix:
-                        _slug = _custom_provider_slug_from_name(prefix)
+                        _slug = _custom_provider_entry_slug(_entry)
                         _base = (_entry.get("base_url") or "").strip()
                         return _finalize(model_id, _slug, _base or None)
 
@@ -3739,6 +3849,12 @@ def _custom_record_claims_slug(record: object, slug: str, *, allow_name: bool = 
             continue
         if _custom_provider_slug_key(value) == slug:
             return True
+    # A record whose name slugifies to "" (e.g. a pure-CJK name) claims the
+    # fallback identity minted from its own name/provider_key/base_url —
+    # the same canonical identity a custom_providers[] row with those
+    # fields would mint — not nothing.
+    if allow_name and _custom_provider_entry_slug_key(record) == slug:
+        return True
     return False
 
 
@@ -5980,7 +6096,7 @@ def _resolve_model_reasoning_efforts_impl(
     try:
         if provider and provider.startswith("custom:"):
             for _entry in _custom_provider_entries():
-                if _custom_provider_slug_from_name(_entry.get("name")) == provider:
+                if _custom_provider_entry_slug(_entry) == provider:
                     _re_lists = _configured_reasoning_effort_lists(
                         _entry, hinted_model
                     )
@@ -6612,6 +6728,98 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
         model_cfg["api_key"] = api_key
 
 
+def _agent_provider_identity_for_persistence(provider: str, config_data: dict) -> str:
+    """Translate a generated WebUI routing slug to the Agent identity for config.yaml.
+
+    Identity scheme: a ``custom_providers`` row has two identities. The
+    catalog slug (``custom:<slug>``) is the WebUI routing identity; the
+    hermes-agent instead resolves a persisted provider by the row's own
+    name / ``provider_key``. Name- and provider_key-derived slugs are
+    spellings of that Agent identity, so they persist unchanged. A
+    GENERATED slug — the endpoint (``custom:<host>-<port>-<hash>``) or
+    name-hash fallback minted when a name slugifies to "" (e.g. a pure-CJK
+    name, #8017) — means nothing to the Agent, so at persistence time only
+    it is translated to the owning row's name. WebUI routing keeps using
+    the generated slug everywhere else.
+
+    Fails closed like every other slug boundary in this module: when more
+    than one row could own the generated slug, raises
+    ``AmbiguousCustomProviderError`` instead of persisting a guess.
+
+    Slug uniqueness alone does NOT prove the save is safe. The value being
+    persisted is the selected row's NAME, and the Agent resolves a
+    persisted name by FIRST match over the loaded ``custom_providers``
+    rows (a row claims a name through its own ``name`` / ``provider_key``
+    alias set). Two rows can mint DISTINCT generated slugs — the endpoint
+    fallback embeds each row's own host/port — while sharing one name, so
+    the slug check above passes and the persisted name then resolves to
+    the FIRST same-named row: the main runtime takes that row's endpoint
+    and key, and compression takes its key, even when a later row was the
+    one selected. The persisted alias must therefore ALSO resolve
+    uniquely: exactly one loaded row may claim the name, and it must be
+    the selected row. Anything else raises before either setter writes.
+
+    Returns ``provider`` unchanged when it is not a generated slug or no
+    row owns it. Pure over the passed-in ``config_data`` snapshot, so it is
+    safe to call while holding ``_cfg_lock``.
+    """
+    if not provider.startswith("custom:"):
+        return provider
+    entries = config_data.get("custom_providers") if isinstance(config_data, dict) else None
+    if not isinstance(entries, list):
+        return provider
+    matches = [
+        entry
+        for entry in entries
+        if isinstance(entry, dict)
+        and str(entry.get("name") or "").strip()
+        and _custom_provider_entry_slug(entry) == provider
+    ]
+    generated = [
+        entry
+        for entry in matches
+        # The slug came from the fallback exactly when neither the name
+        # nor the provider_key slugifies to it.
+        if not _custom_provider_slug_from_name(entry.get("name"))
+        and _custom_provider_slug_from_name(entry.get("provider_key")) != provider
+    ]
+    if not generated:
+        return provider
+    if len(matches) > 1:
+        names = [str(entry.get("name") or "").strip() for entry in matches]
+        raise AmbiguousCustomProviderError(
+            f"Custom providers {names!r} all mint the same generated provider slug "
+            f"{provider!r}; the provider the Agent should persist cannot be "
+            f"chosen safely. Rename one so each custom provider has a unique slug."
+        )
+    selected = generated[0]
+    alias = str(selected.get("name") or "").strip()
+    if not alias:
+        return provider
+    # Prove the alias being persisted resolves uniquely to the selected
+    # row under the Agent's first-match semantics (see the docstring):
+    # count every loaded row claiming this name through its name /
+    # provider_key alias set, not just the rows minting this slug.
+    alias_forms = _custom_provider_alias_set(alias, None)
+    claimants = [
+        entry
+        for entry in entries
+        if isinstance(entry, dict)
+        and alias_forms
+        & _custom_provider_alias_set(entry.get("name"), entry.get("provider_key"))
+    ]
+    if len(claimants) != 1 or claimants[0] is not selected:
+        names = [str(entry.get("name") or "").strip() for entry in claimants]
+        raise AmbiguousCustomProviderError(
+            f"Custom providers {names!r} all answer to the provider name "
+            f"{alias!r} that saving {provider!r} would persist; the Agent "
+            f"resolves a saved name by first match, so the endpoint and API "
+            f"key could come from a different row than the one selected. "
+            f"Rename one so each custom provider has a unique name."
+        )
+    return alias
+
+
 def set_hermes_default_model(model_id: str, provider: str | None = None, advanced: dict | None = None) -> dict:
     """Persist the Hermes default model in config.yaml and reload runtime config."""
     selected_model = str(model_id or "").strip()
@@ -6652,6 +6860,14 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         # so the agent's auxiliary client uses the ``no-key-required`` path.
         if persisted_provider.lower() == "local":
             persisted_provider = "custom"
+
+        # A generated routing slug (the endpoint/name-hash fallback for a
+        # name that slugifies to "", e.g. pure CJK) is not an identity the
+        # Agent can resolve — persist the owning row's name instead, and
+        # fail closed if more than one row could own the slug.
+        persisted_provider = _agent_provider_identity_for_persistence(
+            persisted_provider, config_data
+        )
 
         model_cfg["default"] = persisted_model
         if persisted_provider:
@@ -6923,6 +7139,15 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                 except ValueError as exc:
                     msg = str(exc).replace("advanced model options", "advanced auxiliary options")
                     raise ValueError(msg) from exc
+            # Persist the Agent identity, not a generated routing slug: an
+            # endpoint/name-hash fallback slug (minted when the row's name
+            # slugifies to "", e.g. pure CJK) is unknown to the Agent, so
+            # translate it to the selected row's name — derived from the
+            # same in-lock `config_data` snapshot the base_url lookup above
+            # used — and fail closed if more than one row could own it.
+            # The slug itself stays the routing identity everywhere else.
+            provider = _agent_provider_identity_for_persistence(provider, config_data)
+            slot_cfg["provider"] = provider
             aux_cfg[task] = slot_cfg
             config_data["auxiliary"] = aux_cfg
 
@@ -7687,7 +7912,7 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         for entry in _custom_provider_entries(cfg):
             provider_name = str(entry.get("name") or "").strip()
-            provider_slug = _custom_provider_slug_from_name(provider_name) or "custom"
+            provider_slug = _custom_provider_entry_slug(entry) or "custom"
             if provider_slug != "custom":
                 named_custom_groups.setdefault(
                     provider_slug,
@@ -7723,8 +7948,16 @@ def _static_models_catalog_without_live_probes() -> dict:
             )
 
         if detected_providers:
+            # Custom-provider ids are minted by _custom_provider_entry_slug
+            # and are the canonical identity for this catalog — the groups
+            # above are keyed by that exact slug. Folding their underscores
+            # here (custom:cgxy_cpa -> custom:cgxy-cpa) would orphan the
+            # group and drop the provider from the cold picker, so only
+            # non-custom ids go through canonicalisation.
             detected_providers = {
-                _canonicalise_provider_id(provider_id) or provider_id
+                provider_id
+                if provider_id.startswith("custom:")
+                else _canonicalise_provider_id(provider_id) or provider_id
                 for provider_id in detected_providers
                 if provider_id
             }
@@ -10740,7 +10973,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 if not isinstance(_cp, dict):
                     continue
                 _cp_name = (_cp.get("name") or "").strip()
-                _slug = _custom_provider_slug_from_name(_cp_name) if _cp_name else None
+                _slug = _custom_provider_entry_slug(_cp) if _cp_name else None
                 if _slug and _slug not in _named_custom_groups:
                     _named_custom_groups[_slug] = (_cp_name, [])
 
@@ -10901,12 +11134,18 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # #1568 — protects against future regressions in any of the ~25
         # `detected_providers.add(...)` callsites without auditing each one.
         # The fold is idempotent for already-canonical ids, so safe to run
-        # unconditionally.
+        # unconditionally. Minted custom: identities are exempt (mirroring
+        # the static catalog): they are already the canonical entry identity
+        # and their groups are keyed by the exact slug, so folding their
+        # underscores (custom:cgxy_cpa -> custom:cgxy-cpa) would orphan the
+        # group and drop the provider from the warm picker.
         if detected_providers:
             _canonicalised_detected = set()
             for _pid in detected_providers:
-                _c = _canonicalise_provider_id(_pid) or _pid
-                _canonicalised_detected.add(_c)
+                if _pid.startswith("custom:"):
+                    _canonicalised_detected.add(_pid)
+                else:
+                    _canonicalised_detected.add(_canonicalise_provider_id(_pid) or _pid)
             detected_providers = _canonicalised_detected
 
         try:
