@@ -7893,6 +7893,30 @@ function _applyReasoningOptions(supportedEfforts){
   const dd=$('composerReasoningDropdown');
   if(!dd) return;
   const supported=new Set(Array.isArray(supportedEfforts)?supportedEfforts:[]);
+  // The effort ladder is agent-owned (api/config.py sources it from
+  // hermes_constants), so a thinking level released into Hermes Agent above
+  // the ladder shipped in the page markup (the agent added 'ultra' above
+  // 'max') arrives in supported_efforts with no matching DOM row. Render the
+  // missing rows so the dropdown always reaches the agent's current ceiling
+  // without waiting for a WebUI release. Guarded on appendChild so harnesses
+  // with a querySelectorAll-only fake dropdown keep exercising the hide/show
+  // path unchanged.
+  if(supported.size&&typeof dd.appendChild==='function'){
+    const rendered=new Set();
+    dd.querySelectorAll('.reasoning-option').forEach(function(opt){
+      rendered.add(opt.dataset.effort);
+    });
+    supportedEfforts.forEach(function(level){
+      const effort=_normalizeReasoningEffort(level);
+      if(!effort||rendered.has(effort)) return;
+      const opt=document.createElement('div');
+      opt.className='reasoning-option';
+      opt.dataset.effort=effort;
+      opt.textContent=_formatReasoningEffortLabel(effort);
+      dd.appendChild(opt);
+      rendered.add(effort);
+    });
+  }
   dd.querySelectorAll('.reasoning-option').forEach(function(opt){
     const effort=opt.dataset.effort;
     // 'none' (turn thinking off) and '' (Default = clear override, provider

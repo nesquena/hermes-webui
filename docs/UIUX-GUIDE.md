@@ -169,6 +169,17 @@ When adding a control, consider where users will find it on both wide desktop an
 mobile. If a setting or quota/control surface does not fit in the composer, route
 it through the appropriate Control Center panel instead of squeezing the footer.
 
+The Reasoning chip's effort list is capped by Hermes Agent, not by the WebUI
+release: the server sources the ladder from the agent's
+`hermes_constants.VALID_REASONING_EFFORTS` (the same tuple the terminal
+`hermes model` picker reads), and the dropdown renders a row for every level the
+active model reports as supported — including levels with no row shipped in the
+static page, so a thinking level released into the agent (e.g. `ultra` above
+`max`) appears without a WebUI change. Documented provider ceilings still win:
+routes that top out at `xhigh` or `max` hide the levels above their ceiling
+rather than sending a level the wire would reject. The composer's `/reasoning`
+slash command accepts the same levels.
+
 ### Composer sizing
 
 The composer grows with its content up to a 200px cap. Where the browser supports

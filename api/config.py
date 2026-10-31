@@ -5414,11 +5414,20 @@ def get_effective_default_model(config_data: dict | None = None) -> str:
 
 
 # ── Reasoning config (CLI parity for /reasoning) ─────────────────────────────
-# Mirrors hermes_constants.parse_reasoning_effort so WebUI can validate without
-# importing from the agent tree (which may not be installed).  Any drift here
-# will show up in the shared test suite since both sides accept the same set.
-# Keep this WebUI-visible set aligned with hermes-agent#29248.
-VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
+# The canonical effort ladder lives in the agent tree: hermes_constants
+# .VALID_REASONING_EFFORTS — the same tuple the CLI `hermes model` picker and
+# `/reasoning` tab-completion read. Import it so a thinking level released into
+# hermes-agent (e.g. 'ultra') appears in this picker automatically, without a
+# matching WebUI release. The hardcoded tuple is the fallback for standalone
+# installs where the agent tree is not importable — keep that fallback aligned
+# with hermes-agent#29248.
+# parse_reasoning_effort below mirrors hermes_constants.parse_reasoning_effort so
+# WebUI can validate without importing the function itself. Any drift shows up in
+# the shared test suite since both sides accept the same set.
+try:
+    from hermes_constants import VALID_REASONING_EFFORTS as VALID_REASONING_EFFORTS
+except Exception:
+    VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
 
 def parse_reasoning_effort(effort):
@@ -5437,6 +5446,22 @@ def parse_reasoning_effort(effort):
     if eff in VALID_REASONING_EFFORTS:
         return {"enabled": True, "effort": eff}
     return None
+
+
+def _efforts_above(ceiling: str) -> frozenset:
+    """Ladder levels strictly above *ceiling*, sourced from the agent ladder.
+
+    The provider ceiling rules in ``_filter_reasoning_efforts_for_provider`` and
+    the coercion default-deny strip "everything at or above" a documented cap,
+    so a thinking level released into hermes-agent above the cap (this is how
+    'ultra' joined above 'max') is capped by those rules exactly like 'max' is
+    today, without a per-level WebUI edit.
+    """
+    try:
+        idx = VALID_REASONING_EFFORTS.index(ceiling)
+    except ValueError:
+        return frozenset()
+    return frozenset(VALID_REASONING_EFFORTS[idx + 1:])
 
 
 def _strip_provider_hint_for_reasoning(model_id: str, provider: str | None = None) -> str:
@@ -5767,14 +5792,14 @@ def _filter_reasoning_efforts_for_provider(
         if bare.startswith(("o1", "o3", "o4")):
             return [eff for eff in normalized if eff in {"low", "medium", "high"}]
         if bare.startswith("gpt-5") and not _is_gpt_5_6_reasoning_model(bare):
-            return [eff for eff in normalized if eff != "max"]
+            return [eff for eff in normalized if eff not in _efforts_above("xhigh")]
     # Providers whose native ladder tops out below 'max' must NOT advertise it,
     # otherwise a stored/CLI 'max' degrades WORSE than the
     # prior max->xhigh coercion (Gemini's adapter treats unknown 'max' as medium;
     # pre-adaptive Anthropic manual-thinking lacks a 'max' budget and falls to 8k).
     # Dropping 'max' here lets the existing downgrade ladder land on xhigh/high.
     if provider in {"gemini", "google", "google-gemini", "google-vertex", "vertex"}:
-        return [eff for eff in normalized if eff != "max"]
+        return [eff for eff in normalized if eff not in _efforts_above("xhigh")]
     # Legacy Claude is pre-adaptive whether served natively OR via Azure Foundry /
     # Bedrock / Vertex — the ceiling follows the MODEL, not just the provider name.
     _anthropic_lanes = {
@@ -5783,13 +5808,16 @@ def _filter_reasoning_efforts_for_provider(
         "vertex", "google-vertex",
     }
     if provider in _anthropic_lanes and "claude" in bare and _is_pre_adaptive_anthropic(bare):
-        return [eff for eff in normalized if eff != "max"]
+        return [eff for eff in normalized if eff not in _efforts_above("xhigh")]
     # Z.AI / GLM native-endpoint gate: see _zai_glm_reasoning_efforts_supported.
-    # True → keep the full ladder (GLM-5.2+); False → strip it entirely (pre-5.2
-    # GLM and forced-thinking GLM-4.7); None → not a zai GLM case, defer.
+    # True → keep the ladder through Z.AI's documented ceiling 'max' (GLM-5.2+);
+    # anything above it (agent-ladder 'ultra' and future rungs) is Hermes-internal
+    # and stripped so it is never advertised as a Z.AI wire level; False → strip
+    # the ladder entirely (pre-5.2 GLM and forced-thinking GLM-4.7); None → not a
+    # zai GLM case, defer.
     zai_supports = _zai_glm_reasoning_efforts_supported(model_id, provider_id)
     if zai_supports is True:
-        return normalized
+        return [eff for eff in normalized if eff not in _efforts_above("max")]
     if zai_supports is False:
         return []
     return normalized
@@ -6349,7 +6377,8 @@ def coerce_reasoning_effort_for_model(
     # "unknown", so preserve the user's configured effort verbatim where it is
     # still valid. (#3505 review)
     #
-    # EXCEPTION for 'max' (the #3505 default-deny refinement, maintainer call
+    # EXCEPTION for 'max' and anything above it (the #3505 default-deny
+    # refinement, maintainer call
     # 2026-07-11): 'max' is ABOVE the universally-safe ceiling 'xhigh'. A
     # genuinely unknown/custom provider will 400 on it. So when the
     # capability list is empty AND the provider is not one we recognize as
@@ -6368,7 +6397,7 @@ def coerce_reasoning_effort_for_model(
     if not supported:
         if _zai_glm_reasoning_efforts_supported(model_id, provider_id) is False:
             return ""
-        if raw == "max" and not _provider_known_reasoning_capable(provider_id):
+        if raw in _efforts_above("xhigh") and not _provider_known_reasoning_capable(provider_id):
             return "xhigh"
         return raw
     if raw in supported:
@@ -6640,8 +6669,10 @@ def set_reasoning_effort(
 ) -> dict:
     """Persist ``agent.reasoning_effort`` to the active profile's config.yaml.
 
-    Mirrors CLI ``/reasoning <level>``: same key, same valid values
-    (``none`` | ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh`` | ``max``).
+    Mirrors CLI ``/reasoning <level>``: same key, same valid values — the
+    ``VALID_REASONING_EFFORTS`` ladder (sourced from the agent's
+    ``hermes_constants``, currently ``none`` | ``minimal`` | ``low`` |
+    ``medium`` | ``high`` | ``xhigh`` | ``max`` | ``ultra``).
 
     An empty string is accepted as "clear the override" — it removes the
     ``agent.reasoning_effort`` key so the provider default takes effect. This is

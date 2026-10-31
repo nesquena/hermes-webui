@@ -271,7 +271,12 @@ def test_non_glm_model_on_zai_provider_unaffected():
     # non-GLM models fall through unchanged. (The OpenAI-family ceiling does NOT
     # fire here because that branch is keyed on provider, not model family.)
     efforts = cfg.resolve_model_reasoning_efforts("gpt-5", provider_id="zai")
-    assert set(efforts) == {"minimal", "low", "medium", "high", "xhigh", "max"}
+    assert set(efforts) == {
+        "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
+    }, (
+        "non-GLM models defer to the agent-sourced ladder, which now reaches "
+        f"'ultra' where no ceiling applies; got {efforts!r}"
+    )
 
 
 # ── Coercion agrees with advertising (UI/coercion invariant) ─────────────────────
