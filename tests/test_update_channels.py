@@ -142,6 +142,29 @@ def test_stable_user_PAST_latest_stable_on_untagged_commit_is_up_to_date(channel
     assert updates._select_apply_compare_ref(channel_repo, 'stable', 'webui') is None
 
 
+def test_stable_user_on_diverged_branch_is_not_called_up_to_date(channel_repo):
+    """A stable webui checkout on a local branch that neither contains the
+    latest stable tag nor can fast-forward to it must NOT report up-to-date.
+
+    This is a real install state (a local feature branch left checked out), and
+    the stable-channel suppression used to short-circuit it to behind == 0,
+    hiding hundreds of commits of drift to origin/master behind "up to date".
+    Both the check and the apply side must fall through to the branch
+    comparison instead.
+    """
+    _git(channel_repo, 'checkout', '-q', 'v0.52.2')
+    _git(channel_repo, 'checkout', '-q', '-b', 'fix/local')
+    _git(channel_repo, 'commit', '-q', '--allow-empty', '-m', 'local-only')
+
+    info = updates._check_repo_release(channel_repo, 'webui', 'stable')
+    assert info is None, 'a diverged checkout must fall through, not claim up-to-date'
+
+    apply_ref = updates._select_apply_compare_ref(channel_repo, 'stable', 'webui')
+    assert apply_ref is not None and apply_ref.startswith('origin/'), (
+        'the apply side must fall through to the branch comparison too'
+    )
+
+
 def test_experimental_user_sees_unpromoted_exp_commit(channel_repo):
     """Same HEAD (v0.52.5), experimental channel, sees exp-v0.52.6 as behind=1."""
     _git(channel_repo, 'commit', '-q', '--allow-empty', '-m', 'batch6')
