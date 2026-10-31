@@ -169,6 +169,40 @@ When adding a control, consider where users will find it on both wide desktop an
 mobile. If a setting or quota/control surface does not fit in the composer, route
 it through the appropriate Control Center panel instead of squeezing the footer.
 
+The Reasoning chip's effort list is a union of the levels the WebUI has always
+accepted and whatever the installed Hermes Agent adds on top: the server ranks
+the canonical levels first, then appends extras from the agent's
+`hermes_constants.VALID_REASONING_EFFORTS` (the same tuple the terminal
+`hermes model` picker reads), so a stored level never dies when an older agent
+lacks it and a thinking level released into the agent (e.g. `ultra` above
+`max`) appears without a WebUI change. Above-`max` levels are only offered and
+accepted when the installed Agent ships the clamping route rule
+(`agent.reasoning_effort.route_supported_efforts`, landed 2026-09-19 in
+`39726f8bb7f2`, `api_mode`-aware since 2026-10-02 in `3f4aedb37e5d`);
+older Agents that list such a level but forward it verbatim keep the six-level
+ladder and coerce a stored value down instead. The decision uses the runtime
+the turn actually resolved — the chat path's runtime bundle (falling back to
+the session profile when the runtime resolver failed), the reasoning status
+path's session-profile config, and the Gateway worker's session-profile config
+— not the process-ambient profile, so a named profile that opts into (or out
+of) the Codex app-server runtime answers for its own sessions. The dropdown
+renders a row for
+every level the active model reports as supported, including levels with no row
+shipped in the page markup. Documented provider ceilings still win: routes that
+top out at `xhigh` or `max` hide the levels above their ceiling rather than
+sending a level the wire would reject. Any level above `max` (today `ultra`,
+whatever a future Agent adds next) is sent only where the Agent's route rule
+includes it; otherwise it steps down to the highest level the route does accept
+— `max` on ordinary routes, `xhigh` on legacy Codex ids whose ladder tops out
+there; `max` outright on pre-clamp Agents. Everywhere a step happened the chip,
+toast, and `/reasoning` status read
+`<level> (sends <effective> on this route)` naming that effective level — like
+the CLI's phrasing — rather than claiming a level nothing sends. The annotation
+is cached alongside the effort, so routine chip refreshes keep it, and it
+clears with the effort on model/provider/profile changes. The composer's
+`/reasoning` slash command accepts the agent's
+levels; on an Agent that cannot carry one, the server rejects it.
+
 ### Composer sizing
 
 The composer grows with its content up to a 200px cap. Where the browser supports

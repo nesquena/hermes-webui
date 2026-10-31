@@ -315,7 +315,7 @@ class TestReasoningCommand:
         m = re.search(r'function cmdReasoning\(.*?\n\}', src, re.DOTALL)
         assert m
         fn = m.group(0)
-        for level in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'):
+        for level in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'):
             assert f"'{level}'" in fn, (
                 f"cmdReasoning must accept '{level}' (CLI parity with "
                 f"hermes_constants.parse_reasoning_effort)"
@@ -328,7 +328,7 @@ class TestReasoningCommand:
         assert m, "reasoning COMMANDS entry not found"
         entry = m.group(0)
         for suggestion in (
-            'show', 'hide', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'
+            'show', 'hide', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'
         ):
             assert f"'{suggestion}'" in entry, (
                 f"reasoning subArgs must include '{suggestion}' for CLI parity"
@@ -357,13 +357,42 @@ class TestReasoningConfigHelpers:
         assert parse_reasoning_effort('  HIGH  ') == {'enabled': True, 'effort': 'high'}
 
     def test_valid_reasoning_efforts_matches_hermes_constants(self):
-        """Ensure our mirror stays in sync with hermes_constants."""
-        from api.config import VALID_REASONING_EFFORTS
-        # Snapshot-style assertion: if hermes_constants adds a level, this
-        # test will fail fast so we know to update WebUI too.
-        assert VALID_REASONING_EFFORTS == (
-            'minimal', 'low', 'medium', 'high', 'xhigh', 'max'
+        """Union contract: the six canonical levels the WebUI has always
+        accepted come first (fixed ascending rank), then any extras the
+        installed Agent adds. A stored 'max' must keep running on April-July
+        agents whose tuple lacks it, and a future above-max release (the way
+        'ultra' joined) must appear without a WebUI release."""
+        from api.config import (
+            VALID_REASONING_EFFORTS,
+            _rank_valid_efforts,
+            _WEBUI_BASE_EFFORTS,
         )
+        assert set(_WEBUI_BASE_EFFORTS).issubset(VALID_REASONING_EFFORTS), (
+            "levels the WebUI has always accepted must never vanish because "
+            "an older installed Agent's tuple lacks them"
+        )
+        assert list(VALID_REASONING_EFFORTS[:len(_WEBUI_BASE_EFFORTS)]) == list(
+            _WEBUI_BASE_EFFORTS
+        ), "the ladder must stay canonically ranked regardless of agent order"
+        try:
+            from hermes_constants import VALID_REASONING_EFFORTS as _agent_ladder
+        except Exception:
+            _agent_ladder = None
+        if _agent_ladder is not None:
+            assert VALID_REASONING_EFFORTS == _rank_valid_efforts(_agent_ladder), (
+                "with the agent tree importable the ladder must be exactly "
+                "base+agent extras in canonical rank (single source of truth)"
+            )
+            from api.config import _agent_route_supported_efforts
+
+            if 'ultra' in _agent_ladder and _agent_route_supported_efforts():
+                assert 'ultra' in VALID_REASONING_EFFORTS, (
+                    "the agent's current ceiling must be reachable"
+                )
+            elif 'ultra' in _agent_ladder:
+                # Pre-clamp Agent (no route rule): its transports forward
+                # verbatim, so above-max levels stay un-offered and un-accepted.
+                assert 'ultra' not in VALID_REASONING_EFFORTS
 
     def test_set_reasoning_effort_persists_to_config_yaml(self, tmp_path, monkeypatch):
         """set_reasoning_effort writes agent.reasoning_effort to the active

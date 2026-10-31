@@ -3665,6 +3665,7 @@ from api.config import (
     write_reasoning_effort,
     normalize_reasoning_effort,
     effective_session_reasoning_effort,
+    openai_runtime_api_mode,
     create_stream_channel,
     publish_pre_admission_claim,
     retire_pre_admission_claim_if_owned,
@@ -17250,10 +17251,16 @@ def handle_get(handler, parsed) -> bool:
             if reasoning_session is not None:
                 from api.profiles import get_hermes_home_for_profile
 
+                _reasoning_home = get_hermes_home_for_profile(
+                    getattr(reasoning_session, "profile", None)
+                )
                 effort_kwargs["effort_override"] = effective_session_reasoning_effort(
                     getattr(reasoning_session, "reasoning_effort", None),
-                    get_hermes_home_for_profile(getattr(reasoning_session, "profile", None)),
+                    _reasoning_home,
                 )
+                # Same session-profile isolation as the chat path: the runtime
+                # opt-in lives in the SESSION's profile, not the ambient one.
+                effort_kwargs["api_mode"] = openai_runtime_api_mode(_reasoning_home)
         return j(
             handler,
             get_reasoning_status(
@@ -19234,6 +19241,8 @@ def handle_post(handler, parsed) -> bool:
                     )
                 # Report this session's stored value, not the shared profile
                 # default another chat may have rewritten since the lock was released.
+                from api.profiles import get_hermes_home_for_profile
+
                 return j(
                     handler,
                     get_reasoning_status(
@@ -19241,6 +19250,11 @@ def handle_post(handler, parsed) -> bool:
                         provider_id=provider_id,
                         base_url=base_url,
                         effort_override=normalized_effort,
+                        # Same session-profile isolation as the chat path — the
+                        # runtime opt-in lives in the session's profile.
+                        api_mode=openai_runtime_api_mode(
+                            get_hermes_home_for_profile(reasoning_profile)
+                        ),
                     ),
                 )
             return bad(handler, "reasoning: must supply 'display' or 'effort'")
