@@ -3621,6 +3621,7 @@ from api.config import (
     PENDING_GOAL_CONTINUATION,
     _get_config_path,
     _load_yaml_config_file,
+    _load_yaml_config_file_raw,
     _save_yaml_config_file,
     reload_config,
     get_config_for_profile_home,
@@ -34328,14 +34329,66 @@ def _normalize_names_list(names) -> list[str]:
     return list(dict.fromkeys(str(d).strip() for d in names if str(d).strip()))
 
 
-def _toggle_name_in_list(names, name: str, enabled: bool) -> list[str]:
-    """Add or remove *name* from *names*, returning a new list."""
-    names = _normalize_names_list(names)
+def _toggle_name_in_list(names, name: str, enabled: bool) -> list | str:
+    """Add or remove *name* from *names*, returning the value to persist.
+
+    COMPARED the way the READER sees them — the value is env-expanded first
+    and a scalar serialized list is parsed (``_normalize_disabled_set``) — but
+    RETURNED raw, so ``skills.disabled: ["${DISABLED_SKILL}"]`` matches its
+    resolved name while the ``${VAR}`` stays on disk (#5619). A literal
+    ``res != name`` compared the raw placeholder and missed both a padded env
+    value and a scalar ``${VAR}`` holding a whole list, so the API reported
+    success while the skill stayed disabled. A ``${VAR}`` that expands to
+    several names cannot survive a partial edit, so the remaining resolved
+    names are written explicitly and logged instead.
+    """
+    # Expand-then-parse mirrors the reader; a ${VAR} entry never matches its
+    # resolved name if we compare raw.
+    expanded = _expand_env_vars(names)
+    effective = _normalize_names_list(expanded)
+    if names is None:
+        raw = []  # absent key: nothing on disk to preserve
+    elif isinstance(names, str):
+        single = _parse_config_string_list(expanded)
+        # Carry a one-name scalar as a single raw entry; a serialized list
+        # ('["a"]') read back as one entry would mean something else.
+        raw = (
+            [names]
+            if expanded.strip()
+            and len(single) == 1
+            and single[0].strip() == expanded.strip()
+            else None
+        )
+    elif isinstance(names, list):
+        raw = names
+    else:
+        raw = None
+
     if enabled:
-        return [d for d in names if d != name]
-    if name not in names:
-        names.append(name)
-    return names
+        if name not in effective:
+            return names or []  # no-op: leave the raw value untouched
+    elif name in effective:
+        return names or []  # no-op: already disabled
+
+    if raw is None:
+        keep = (
+            [n for n in effective if n != name]
+            if enabled
+            else [*effective, name]
+        )
+        logger.info(
+            "skills toggle: %r expands to %r; wrote the edited names resolved "
+            "because the placeholder cannot survive a partial edit",
+            names,
+            keep,
+        )
+        return keep
+
+    if enabled:
+        # Each raw entry contributes exactly one name, so dropping the entry
+        # whose resolved+stripped name matches removes it, placeholder and all.
+        return [e for e in raw if str(_expand_env_vars(e)).strip() != name]
+    return [*raw, name]
 
 
 def _handle_skill_toggle(handler, body):
@@ -34363,7 +34416,9 @@ def _handle_skill_toggle(handler, body):
 
     config_path = _active_profile_config_path()
     with _cfg_lock:
-        cfg = _load_yaml_config_file(config_path)
+        # RAW load — the write transaction must not bake env-expanded secrets
+        # into the profile's config.yaml (#5619 write-target rule).
+        cfg = _load_yaml_config_file_raw(config_path)
 
         # Ensure skills section exists as a dict
         if "skills" not in cfg or not isinstance(cfg["skills"], dict):
