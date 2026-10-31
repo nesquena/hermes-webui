@@ -52,3 +52,28 @@ def test_session_save_writes_compact_copy_without_mutating_model_payload(tmp_pat
     assert "data:image" not in json.dumps(persisted["messages"])
     assert source[0]["content"][0]["image_url"]["url"] == huge
     assert session.messages == source
+
+
+def test_compaction_runs_on_the_guarded_snapshot_not_the_live_transcript(tmp_path, monkeypatch):
+    """The replay guard owns the scan-time snapshot; compaction must not move it."""
+    import api.models as models
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    huge = "data:image/jpeg;base64," + ("A" * 1_000_000)
+    live_row = {"role": "user", "content": [{"type": "image_url", "image_url": {"url": huge}}]}
+    session = Session(session_id="snapshot-identity", messages=[live_row])
+    original_messages = session.messages
+    real_guard = models._deduplicate_exact_stable_messages
+    scanned = []
+
+    def recording_guard(messages):
+        scanned.append(messages)
+        return real_guard(messages)
+
+    monkeypatch.setattr(models, "_deduplicate_exact_stable_messages", recording_guard)
+    session.save(touch_updated_at=False)
+
+    assert scanned == [original_messages]
+    assert session.messages is original_messages
+    persisted = json.loads((tmp_path / "snapshot-identity.json").read_text())
+    assert "data:image" not in json.dumps(persisted["messages"])
