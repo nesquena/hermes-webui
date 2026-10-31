@@ -15436,6 +15436,20 @@ function _setLatestAssistantTurnLandmark(turn, isLatest){
 function _assistantTurnBlocks(turn){
   return turn?turn.querySelector('.assistant-turn-blocks'):null;
 }
+// Substantive interim prose — a checklist, a table, or a direct answer the
+// model emitted mid-turn (e.g. ahead of a tool call it was about to make) —
+// is reading content, not progress narration. Compact Worklog keeps short
+// narration folded into the rail by design (#3401/#4587), but silently
+// folding a content-bearing segment hides information the final reply only
+// points at ("the list above"), which reads as data loss; #7894 reports the
+// same failure class from the model-guidance side and #3875 already ruled
+// that folding a visible answer is a defect. Threshold: trimmed characters.
+const _INTERIM_PROSE_SUBSTANTIVE_MIN_CHARS=200;
+function _interimProseIsSubstantive(text){
+  const min=(typeof _INTERIM_PROSE_SUBSTANTIVE_MIN_CHARS==='number')
+    ?_INTERIM_PROSE_SUBSTANTIVE_MIN_CHARS:200;
+  return String(text||'').trim().length>=min;
+}
 function _assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, visibleContent, opts){
   if(!m||m.role!=='assistant') return false;
   if(m._error) return false;
@@ -15451,6 +15465,12 @@ function _assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, vis
   // of the fold; every other `_live` message folds as before. Kept as a separate
   // guard so the live rule below keeps its position.
   if(m._live&&hasVisibleText&&isTurnFinalAssistant) return false;
+  // Substantive interim prose stays visible inline (see
+  // _interimProseIsSubstantive); short narration keeps folding as before.
+  // The typeof guard keeps sliced test drivers without the helper on the
+  // conservative (fold) branch.
+  if(m._live&&hasVisibleText&&typeof _interimProseIsSubstantive==='function'
+     &&_interimProseIsSubstantive(visibleText)) return false;
   if(m._live) return true;
   if(hasVisibleText&&m._anchor_activity_scene) return false;
   if(hasVisibleText&&isTurnFinalAssistant) return false;
@@ -17382,6 +17402,17 @@ function _anchorSceneRowsForRendering(scene, opts){
     if(settledFinalAnswer&&row.role==='prose'
        &&typeof _anchorSceneProseDuplicatesFinalAnswer==='function'
        &&_anchorSceneProseDuplicatesFinalAnswer(text,settledFinalAnswer)) continue; // #6948 follow-up
+    // Substantive interim prose renders as a visible inline segment (see
+    // _assistantMessageBelongsInWorklog and the rail-install loop in
+    // _renderSettledAnchorSceneForMessage), so a settled COMPACT rail must not
+    // also carry it as a second copy. Short narration keeps its rail row — its
+    // inline segment stays folded, so the rail is still its only home.
+    // Transparent Stream keeps every prose row (chronological contract) and
+    // the LIVE render keeps them (the open live rail is the streaming surface).
+    if(settled&&row.role==='prose'&&row.kind==='process_prose'
+       &&typeof chatActivityMode==='function'&&chatActivityMode()==='compact_worklog'
+       &&typeof _interimProseIsSubstantive==='function'
+       &&_interimProseIsSubstantive(text)) continue;
     const key=keyFor(row);
     if(byKey.has(key)){
       const index=byKey.get(key);
@@ -19135,6 +19166,11 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   blocks.querySelectorAll('.assistant-segment[data-msg-idx]').forEach(node=>{
     const idx=Number(node.getAttribute('data-msg-idx'));
     if(Number.isFinite(idx)&&idx<rawIdx){
+      // Substantive prose segments stay visible (their rail row is dropped);
+      // content-less segments and short narration keep folding.
+      const segText=String((node.dataset&&node.dataset.rawText)||'').trim();
+      if(typeof _interimProseIsSubstantive==='function'
+         &&_interimProseIsSubstantive(segText)) return;
       node.classList.add('assistant-segment-worklog-source');
       node.setAttribute('aria-hidden','true');
       node.hidden=true;
