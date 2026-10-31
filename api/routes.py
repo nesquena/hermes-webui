@@ -12729,6 +12729,7 @@ from api.models import (
     get_session_for_scan,
     find_compression_recovery_session,
     get_session_for_file_ops,
+    attach_local_workspace_view,
     persist_recovered_workspace_binding,
     WorkspaceBindingPersistenceError,
     new_session,
@@ -13061,6 +13062,8 @@ from api.workspace import (
     safe_resolve_ws,
     raw_authorized_escape_target,
     resolve_trusted_workspace,
+    resolve_webui_workspace,
+    workspace_translation_applies,
     _resolve_path,
     resolve_implicit_workspace_with_recovery,
     open_anchored_fd,
@@ -17374,7 +17377,9 @@ def handle_get(handler, parsed) -> bool:
         if not sid:
             return bad(handler, "session_id required")
         try:
-            workspace = get_session(sid).workspace
+            # #7217: local git reads go through the translation tier; a
+            # session's agent-visible workspace is not a host path.
+            git_session = get_session(sid)
         except KeyError:
             # state.db-only sessions (CLI, delegated subagents): same fallback as /api/list.
             cli_meta = _lookup_cli_session_metadata(sid)
@@ -17382,10 +17387,45 @@ def handle_get(handler, parsed) -> bool:
                 return bad(handler, "Session not found", 404)
             if not cli_meta.get("workspace"):
                 return j(handler, {"git": None})
+            cli_profile = cli_meta.get("profile")
             try:
-                workspace = resolve_trusted_workspace(cli_meta["workspace"])
+                if cli_profile and workspace_translation_applies(
+                    cli_meta["workspace"], cli_profile
+                ):
+                    from api.workspace import resolve_webui_workspace
+                    workspace = resolve_webui_workspace(
+                        cli_meta["workspace"], profile=cli_profile
+                    )
+                else:
+                    # No declared map translates this workspace: keep the
+                    # TRUSTED resolution. A CLI session's workspace is a host
+                    # path unless the owner profile declares a map, so a repo
+                    # outside the home (or revoked from the saved list) has to
+                    # be refused instead of inspected -- master resolved it
+                    # here too, and the profile-only arm answered it.
+                    try:
+                        workspace = resolve_trusted_workspace(
+                            cli_meta["workspace"], profile=cli_profile
+                        )
+                    except TypeError:
+                        # A resolver without a profile kwarg keeps the
+                        # pre-existing direct-path semantics.
+                        workspace = resolve_trusted_workspace(cli_meta["workspace"])
             except (FileNotFoundError, ValueError):
                 return j(handler, {"git": None})
+        else:
+            raw_ws = getattr(git_session, "workspace", None)
+            if not raw_ws:
+                return j(handler, {"git": None})
+            git_profile = getattr(git_session, "profile", None)
+            if not git_profile:
+                workspace = raw_ws
+            else:
+                try:
+                    from api.workspace import resolve_webui_workspace
+                    workspace = resolve_webui_workspace(raw_ws, profile=git_profile)
+                except (FileNotFoundError, ValueError):
+                    return j(handler, {"git": None})
         from api.workspace_git import GitWorkspaceError, git_status
 
         try:
@@ -22008,7 +22048,10 @@ def _handle_session_export(handler, parsed):
     # ``public_session_projection`` supersedes the narrower
     # ``redact_session_data`` path so export context_messages uses the same
     # alias-stripping boundary as the visible transcript.
-    snapshot = dict(s.__dict__)
+    # Underscore attributes are per-request caches (e.g. the file-ops
+    # ``_local_workspace`` PosixPath translation, #7217) and must never
+    # serialise into the export artifact — same contract as ``Session.save()``.
+    snapshot = {k: v for k, v in s.__dict__.items() if not k.startswith("_")}
     if _cancelled_journal_turn_owner(getattr(s, "messages", None) or [], include_live_partial=True):
         state_messages = get_state_db_session_messages(
             sid, profile=getattr(s, "profile", None), include_row_identity=True,
@@ -22220,7 +22263,15 @@ def _handle_list_dir(handler, parsed):
             cli_meta = _lookup_cli_session_metadata(sid)
             if not cli_meta:
                 cli_meta = _lookup_cli_session_metadata(sid, all_profiles=True)
-                cli_owner_profile = cli_meta.get("profile") if cli_meta else None
+            # Derive the owner profile from EVERY successful lookup, not just
+            # the all-profiles fallback. Re-gate round 3 (reviewer finding 2,
+            # 2026-10-22): the active-hit branch used to discard
+            # cli_meta["profile"], leaving _list_profile None, so the CLI
+            # translation arm below was skipped and a mapped CLI session
+            # listed through profile-less trusted resolution — 404 on its
+            # host-absent agent-visible path, for both the default and named
+            # profiles.
+            cli_owner_profile = cli_meta.get("profile") if cli_meta else None
             if not cli_meta:
                 return bad(handler, "Session not found", 404)
             workspace = cli_meta.get("workspace", "")
@@ -22231,31 +22282,66 @@ def _handle_list_dir(handler, parsed):
         if webui_session is None and cli_owner_profile:
             _list_profile = cli_owner_profile
         if webui_session is None:
+            # CLI session: when the OWNER profile's map actually translates
+            # the agent-visible workspace, list through the WebUI-local root
+            # (the same local-root contract as the file-manager handlers,
+            # #7217); otherwise keep the pre-existing trusted resolution,
+            # which also keeps trust validation for map-less profiles.
             try:
-                workspace = resolve_trusted_workspace(workspace, profile=_list_profile)
+                if _list_profile and workspace_translation_applies(
+                    workspace, _list_profile
+                ):
+                    workspace = resolve_webui_workspace(
+                        workspace, profile=_list_profile
+                    )
+                else:
+                    workspace = resolve_trusted_workspace(
+                        workspace, profile=_list_profile
+                    )
             except TypeError:
                 workspace = resolve_trusted_workspace(workspace)
             recovered = False
         else:
             stored_workspace = workspace
+            # #7217 re-gate: resolve the WebUI-local operation view BEFORE
+            # recovery's host-local existence check. A mapped session's
+            # agent-side path is absent on this host by design — judging it
+            # a deleted directory overwrites the agent-visible binding with
+            # the fallback and hides files created through the translated
+            # root (the reviewer's replayed create→list regression).
             try:
-                workspace, recovered = resolve_implicit_workspace_with_recovery(
-                    stored_workspace,
-                    get_last_workspace,
-                    profile=_list_profile,
-                )
-            except TypeError:
-                workspace, recovered = resolve_implicit_workspace_with_recovery(
-                    stored_workspace,
-                    get_last_workspace,
-                )
-            if recovered:
-                persisted = persist_recovered_workspace_binding(
-                    webui_session,
-                    workspace,
-                    expected_workspace=stored_workspace,
-                )
-                workspace = Path(persisted.workspace)
+                s, translated = attach_local_workspace_view(webui_session)
+            except KeyError:
+                # Profile-scoped translation rejected: fail closed, exactly
+                # like the other file-manager handlers.
+                return bad(handler, "Session not found", 404)
+            if translated:
+                # Translated session: the WebUI-local root is the only
+                # stat-able answer and was validated fail-closed above;
+                # host-local recovery must never judge the agent-side name.
+                workspace = _file_ops_ws_root(s)
+                recovered = False
+            else:
+                # Unmapped/legacy session: pre-existing recovery semantics,
+                # byte-for-byte.
+                try:
+                    workspace, recovered = resolve_implicit_workspace_with_recovery(
+                        stored_workspace,
+                        get_last_workspace,
+                        profile=_list_profile,
+                    )
+                except TypeError:
+                    workspace, recovered = resolve_implicit_workspace_with_recovery(
+                        stored_workspace,
+                        get_last_workspace,
+                    )
+                if recovered:
+                    persisted = persist_recovered_workspace_binding(
+                        webui_session,
+                        workspace,
+                        expected_workspace=stored_workspace,
+                    )
+                    workspace = Path(persisted.workspace)
         rel_path = qs.get("path", ["."])[0]
         entries = list_dir(Path(workspace), rel_path)
         return j(
@@ -22287,6 +22373,27 @@ def _read_json_request_body(handler, *, max_bytes: int = 4096) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def _file_ops_ws_root(s) -> Path:
+    """WebUI-LOCAL workspace root for file-manager handlers (#7217).
+
+    File-manager handlers receive a session view from
+    ``get_session_for_file_ops``, which attaches the profile-scoped resolver's
+    translated ``local_workspace`` (the session's agent-visible workspace may
+    differ from the WebUI-container path in multi-container deployments).
+    Operations must be rooted there. The session object itself is never
+    rewritten.
+
+    A session WITH a profile whose translation was rejected never reaches
+    this helper — ``get_session_for_file_ops`` raises
+    :class:`SessionWorkspaceUnavailable` (KeyError) first, which the
+    handlers already answer with 404. Reaching this helper with no attached
+    translation therefore means a legacy/profile-less session, which keeps
+    the unchanged ``workspace`` field (explicitly deferred in the #7217 PR).
+    """
+    local = getattr(s, "local_workspace", None)
+    return Path(local) if local is not None else Path(s.workspace)
+
+
 def _handle_escape_authorize(handler, parsed, body: dict | None = None):
     if handler.command != "POST":
         return bad(handler, "method not allowed", 405)
@@ -22314,7 +22421,7 @@ def _handle_escape_authorize(handler, parsed, body: dict | None = None):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        payload = authorize_escape_target(Path(s.workspace), sid, rel)
+        payload = authorize_escape_target(_file_ops_ws_root(s), sid, rel)
     except ValueError as exc:
         return bad(handler, _sanitize_error(exc), 404)
     return j(handler, payload)
@@ -22334,7 +22441,7 @@ def _handle_escape_list_dir(handler, parsed):
         return bad(handler, "Session not found", 404)
     rel_path = qs.get("path", ["."])[0]
     try:
-        payload = list_authorized_escape_dir(Path(s.workspace), sid, token, rel_path)
+        payload = list_authorized_escape_dir(_file_ops_ws_root(s), sid, token, rel_path)
         payload["entries"] = serialize_workspace_entries_for_browser(payload.get("entries"))
         return j(handler, payload)
     except FileNotFoundError as exc:
@@ -22359,7 +22466,7 @@ def _handle_escape_file_read(handler, parsed):
         return bad(handler, "Session not found", 404)
     rel = qs.get("path", [""])[0]
     try:
-        return j(handler, read_authorized_escape_file_content(Path(s.workspace), sid, token, rel))
+        return j(handler, read_authorized_escape_file_content(_file_ops_ws_root(s), sid, token, rel))
     except FileNotFoundError as exc:
         return bad(handler, _sanitize_error(exc), 404)
     except EscapeAuthorizationExpiredError as exc:
@@ -22387,7 +22494,7 @@ def _handle_escape_file_raw(handler, parsed):
     rel = qs.get("path", [""])[0]
     force_download = qs.get("download", [""])[0] == "1"
     try:
-        anchor_root, target = raw_authorized_escape_target(Path(s.workspace), sid, token, rel)
+        anchor_root, target = raw_authorized_escape_target(_file_ops_ws_root(s), sid, token, rel)
     except FileNotFoundError:
         return j(handler, {"error": "not found"}, status=404)
     except EscapeAuthorizationExpiredError as exc:
@@ -25103,7 +25210,7 @@ def _handle_media(handler, parsed):
 
 def _file_raw_target(session, sid: str, rel: str) -> tuple[Path, Path] | None:
     """Resolve /api/file/raw paths from the workspace or this session's uploads."""
-    workspace_root = Path(session.workspace)
+    workspace_root = _file_ops_ws_root(session)
     try:
         target = safe_resolve(workspace_root, rel)
     except ValueError:
@@ -25215,7 +25322,7 @@ def _handle_folder_download(handler, parsed):
 
     rel = qs.get("path", [""])[0]
     try:
-        target = safe_resolve(Path(s.workspace), rel)
+        target = safe_resolve(_file_ops_ws_root(s), rel)
     except ValueError:
         return bad(handler, "invalid path", 400)
     if not target.exists():
@@ -25223,7 +25330,7 @@ def _handle_folder_download(handler, parsed):
     if not target.is_dir():
         return bad(handler, "path must be a directory; use /api/file/raw for single files", 400)
 
-    workspace_root = Path(s.workspace).resolve()
+    workspace_root = _file_ops_ws_root(s).resolve()
     max_bytes = _folder_zip_max_bytes()
     max_files = _folder_zip_max_files()
 
@@ -25342,7 +25449,7 @@ def _handle_file_read(handler, parsed):
     if not rel:
         return bad(handler, "path is required")
     try:
-        return j(handler, read_file_content(Path(s.workspace), rel))
+        return j(handler, read_file_content(_file_ops_ws_root(s), rel))
     except ImportError as e:
         return bad(handler, str(e), 503)
     except (FileNotFoundError, ValueError) as e:
@@ -30975,18 +31082,46 @@ def _git_session(handler, session_id: str):
         return None
 
 
+def _git_local_workspace(handler, session):
+    """#7217: WebUI-local root for local git operations on *session*.
+
+    ``session.workspace`` is the agent-visible path (the gateway keeps needing
+    it verbatim), so local git consumers resolve through the translation tier
+    instead of treating it as a host path. The session object is never
+    rewritten. Sessions without a profile attribute (legacy rows) keep the
+    pre-existing direct-path behaviour — they are listed as explicitly
+    deferred in the #7217 PR.
+    """
+    from api.workspace import resolve_webui_workspace
+
+    raw = getattr(session, "workspace", None)
+    if not raw:
+        return None
+    profile = getattr(session, "profile", None)
+    if not profile:
+        return Path(raw)
+    try:
+        return resolve_webui_workspace(raw, profile=profile)
+    except (ValueError, FileNotFoundError) as e:
+        bad(handler, f"Workspace not usable for local git operations: {e}", 400)
+        return None
+
+
 def _git_session_workspace(handler, session_id: str):
     session = _git_session(handler, session_id)
     if session is None:
         return None
-    return Path(session.workspace)
+    return _git_local_workspace(handler, session)
 
 
 def _git_session_and_workspace(handler, session_id: str):
     session = _git_session(handler, session_id)
     if session is None:
         return None, None
-    return session, Path(session.workspace)
+    local_ws = _git_local_workspace(handler, session)
+    if local_ws is None:
+        return None, None
+    return session, local_ws
 
 
 def _git_locked_by_active_stream(session) -> bool:
@@ -31269,7 +31404,14 @@ def _handle_git_commit_message(handler, body):
     try:
         require(body, "session_id")
         session = get_session(body["session_id"])
-        workspace = Path(session.workspace)
+        if not getattr(session, "workspace", None):
+            return bad(handler, "Session has no workspace", 400)
+        # #7217: the local git readers work on the WebUI-local root, not on
+        # the agent-visible name -- the session object is never rewritten.
+        workspace = _git_local_workspace(handler, session)
+        if workspace is None:
+            # The translation tier refused the workspace and has answered.
+            return True
 
         prompt = staged_commit_message_prompt(workspace)
         message = clean_generated_commit_message(
@@ -31302,7 +31444,14 @@ def _handle_git_commit_message_selected(handler, body):
         require(body, "session_id")
         paths = _git_paths_from_body(body)
         session = get_session(body["session_id"])
-        workspace = Path(session.workspace)
+        if not getattr(session, "workspace", None):
+            return bad(handler, "Session has no workspace", 400)
+        # #7217: the local git readers work on the WebUI-local root, not on
+        # the agent-visible name -- the session object is never rewritten.
+        workspace = _git_local_workspace(handler, session)
+        if workspace is None:
+            # The translation tier refused the workspace and has answered.
+            return True
 
         prompt = selected_commit_message_prompt(workspace, paths)
         message = clean_generated_commit_message(
@@ -31464,7 +31613,7 @@ def _handle_file_delete(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        ws_root = Path(s.workspace)
+        ws_root = _file_ops_ws_root(s)
         target = safe_resolve(ws_root, body["path"])
         # Reject a symlinked entry BEFORE the follow-based exists() check: a
         # dangling symlink resolves to a missing target, so an exists()-first
@@ -31496,7 +31645,7 @@ def _handle_file_save(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        ws_root = Path(s.workspace)
+        ws_root = _file_ops_ws_root(s)
         target = safe_resolve(ws_root, body["path"])
         if (ws_root / body["path"]).is_symlink():
             return bad(handler, "Cannot save to a symlinked entry")
@@ -31527,7 +31676,7 @@ def _handle_office_file_save(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        ws_root = Path(s.workspace)
+        ws_root = _file_ops_ws_root(s)
         target = safe_resolve(ws_root, body["path"])
         if (ws_root / body["path"]).is_symlink():
             return bad(handler, "Cannot save to a symlinked entry")
@@ -31562,7 +31711,7 @@ def _handle_file_create(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        ws_root = Path(s.workspace)
+        ws_root = _file_ops_ws_root(s)
         target = safe_resolve(ws_root, body["path"])
         if target.exists():
             return bad(handler, "File already exists")
@@ -31589,7 +31738,7 @@ def _handle_file_rename(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        ws_root = Path(s.workspace)
+        ws_root = _file_ops_ws_root(s)
         ws_root_resolved = ws_root.resolve()
         source = safe_resolve(ws_root, body["path"])
         # Reject a symlinked entry BEFORE the follow-based exists() check (see
@@ -31624,7 +31773,7 @@ def _handle_file_move(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        ws_root = Path(s.workspace)
+        ws_root = _file_ops_ws_root(s)
         # safe_resolve() returns paths under the RESOLVED root, so compute
         # returned relative paths against the resolved root too — otherwise a
         # symlinked workspace root (e.g. macOS /tmp -> /private/tmp) makes
@@ -31722,7 +31871,7 @@ def _handle_create_dir(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        ws_root = Path(s.workspace)
+        ws_root = _file_ops_ws_root(s)
         target = safe_resolve(ws_root, body["path"])
         if target.exists():
             return bad(handler, "Path already exists")
@@ -31744,7 +31893,7 @@ def _handle_file_reveal(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        target = safe_resolve(Path(s.workspace), body["path"])
+        target = safe_resolve(_file_ops_ws_root(s), body["path"])
         if not target.exists():
             # Include the resolved server-side path in the error message so
             # the frontend toast can show *which* file the system expected.
@@ -31805,7 +31954,7 @@ def _handle_file_path(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        target = safe_resolve(Path(s.workspace), body["path"])
+        target = safe_resolve(_file_ops_ws_root(s), body["path"])
         return j(handler, {"ok": True, "path": str(target)})
     except (ValueError, PermissionError, OSError) as e:
         return bad(handler, _sanitize_error(e))
@@ -31835,7 +31984,7 @@ def _handle_file_open_vscode(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        target = safe_resolve(Path(s.workspace), body["path"])
+        target = safe_resolve(_file_ops_ws_root(s), body["path"])
         if not target.exists():
             return bad(handler, f"File not found: {target}", 404)
 
