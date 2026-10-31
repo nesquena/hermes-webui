@@ -27,6 +27,14 @@ def _make_run_git_side_effect(*sequence):
     return _side_effect
 
 
+def _git(repo, *args):
+    """Run a real git command against a throwaway repo (no network)."""
+    subprocess.run(
+        ['git', *args], cwd=str(repo), check=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Path used for patching
 # ---------------------------------------------------------------------------
@@ -353,3 +361,75 @@ class TestCheckRepoDirtyFlag:
         assert info is not None
         assert info['dirty'] is True
         assert info['stale_check'] is True
+
+
+# Issue #8556: on the `stable` channel a checkout whose local branch DIVERGED
+# from the stable line — HEAD neither contains the latest stable tag nor can
+# fast-forward to it — used to be reported as "Up to date" (behind == 0), hiding
+# the hundreds of commits it is missing. Conditions 1-2 (HEAD at/past the tag)
+# are the up-to-date states; a divergence is their opposite.
+class TestStableDivergedBranchIsNotUpToDate:
+    CURRENT_TAG = 'v0.52.492'
+    LATEST_TAG = 'v0.52.544'
+
+    def _diverged_stable_repo(self, tmp_path):
+        """Linear stable line .492→.544 plus a local branch off .492 with a
+        local-only commit that exists on no stable tag."""
+        upstream = tmp_path / 'upstream'
+        upstream.mkdir()
+        _git(upstream, 'init', '-q', '-b', 'master')
+        _git(upstream, 'config', 'user.email', 't@t.co')
+        _git(upstream, 'config', 'user.name', 'Test')
+        tracked = upstream / 'APP'
+        tracked.write_text('release 492\n', encoding='utf-8')
+        _git(upstream, 'add', 'APP')
+        _git(upstream, 'commit', '-q', '-m', self.CURRENT_TAG)
+        _git(upstream, 'tag', self.CURRENT_TAG)
+        for patch in range(493, 545):
+            tracked.write_text(f'release {patch}\n', encoding='utf-8')
+            _git(upstream, 'commit', '-q', '-am', f'v0.52.{patch}')
+            _git(upstream, 'tag', f'v0.52.{patch}')
+
+        origin = tmp_path / 'origin.git'
+        subprocess.run(
+            ['git', 'init', '--bare', '-q', '--initial-branch=master', str(origin)],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        _git(upstream, 'push', '-q', str(origin), '--all')
+        _git(upstream, 'push', '-q', str(origin), '--tags')
+
+        repo = tmp_path / 'local'
+        _git(tmp_path, 'clone', '-q', str(origin), str(repo))
+        _git(repo, 'config', 'user.email', 't@t.co')
+        _git(repo, 'config', 'user.name', 'Test')
+        _git(repo, 'checkout', '-q', '-b', 'stable-local', self.CURRENT_TAG)
+        (repo / 'APP').write_text('local hotfix\n', encoding='utf-8')
+        _git(repo, 'commit', '-q', '-am', 'local hotfix not on the stable line')
+        _git(repo, 'branch', '--set-upstream-to=origin/master', 'stable-local')
+        return repo
+
+    def test_check_reports_the_divergence_not_up_to_date(self, tmp_path):
+        from api import updates
+
+        repo = self._diverged_stable_repo(tmp_path)
+        info = updates._check_repo(repo, 'webui', 'stable')
+
+        assert info is not None
+        assert info['behind'] == 52, (
+            'a divergent stable checkout must report the real gap, not 0'
+        )
+        # The truthful comparison target is the configured branch, not the
+        # stable tag HEAD can neither contain nor fast-forward to.
+        assert info['branch'] == 'origin/master'
+        assert info['current_tag'] == self.CURRENT_TAG
+        assert info['latest_tag'] == self.LATEST_TAG
+        assert info['current_sha'] != info['latest_sha']
+        assert info.get('release_based') is None  # branch payload, not tag payload
+
+    def test_apply_mirror_selects_the_branch_not_no_update(self, tmp_path):
+        from api import updates
+
+        repo = self._diverged_stable_repo(tmp_path)
+        # The apply side must mirror the check side: no suppression of the
+        # branch comparison when HEAD is OFF the stable line (#2653/#2846).
+        assert updates._select_apply_compare_ref(repo, 'stable', 'webui') == 'origin/master'
