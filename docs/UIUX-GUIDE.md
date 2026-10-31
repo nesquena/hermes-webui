@@ -11,6 +11,25 @@ Use this guide when a change touches layout, chat rendering, composer chrome,
 navigation, theme/skin behavior, responsive behavior, or visual hierarchy. For
 purely backend changes, use the runtime/state contracts instead.
 
+## Sidebar lineage and selection
+
+Large lists remain virtualized in both Compact and Detailed density, including
+rows with lineage summaries. The rendered list owns measured row heights and
+prefix-sum spacers; unseen rows use plain/summary estimates until rendered.
+Measurements include expanded children/segments and localized wrapping, and are
+invalidated by layout, search-preview or selection changes. Selected row heights
+do not inflate unselected-row estimates. Scroll callbacks use the current
+layout even when queued before a density change. Repainting preserves the top
+conversation and offset; off-window active anchoring uses rendered geometry so
+preceding controls and date-group headers are included. On activation or filter
+changes, an overscan-only target is brought into the viewport while an already
+visible target stays put; ordinary refreshes do not steal the user's scroll.
+
+Child hover and selection use a neutral wash derived from the theme's text
+color, so it remains visible in both light and dark themes. Attention tint is
+restored on hover leave; the attention bar and semantic state mark remain
+visible while hovering or selecting delegated and fork children.
+
 ## Product shape
 
 Hermes WebUI is a browser workbench for Hermes Agent with near-CLI parity and a
