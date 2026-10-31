@@ -26,6 +26,28 @@ Each test drives a REAL synchronous ``POST /api/chat`` against
 streaming worker, followed by a cold ``models.Session.load``. Only
 inference is substituted: the fake Agent echoes the sent history verbatim
 (the standard replay shape) and appends the new exchange.
+
+Maintainer acceptance slice (nesquena-hermes 2026-10-31, on issue #6310):
+
+    cover both stale-user repair paths through a subsequent settlement and
+    cold reload, checking that model context and display retain the same
+    stable current-row identity and chronological order.
+
+The August-14 contract this closes:
+
+    Both boundary and full-prefix stale-user repair paths must retain the
+    result-owned row (or propagate one shared ID explicitly). A deep-copied
+    repaired row can otherwise persist with ``id=None`` in context while
+    display gets an integer ID.
+
+Two Agent-return shapes drive the two repair paths over the real
+synchronous route, each followed by a cold reload and a SECOND real
+``POST /api/chat`` (the subsequent settlement): the boundary shape (the
+Agent's role-sequence repair folds the prior user tail INTO the current
+row, so the merged row sits at the previous-context boundary) and the
+full-prefix shape (the whole projection echoed, the merged row appended
+after it). A clean-history control proves the assertions discriminate the
+pollution instead of over-firing.
 """
 
 from __future__ import annotations
@@ -1994,3 +2016,241 @@ def test_sync_chat_cold_follow_up_retains_the_replacement(tmp_path, monkeypatch)
         "the retained history must still reach the model context; got "
         f"{_contents(follow_up.context_messages)}"
     )
+
+
+# ── #6310 maintainer acceptance: both stale-user repair paths ────────────
+#
+# The installed Agent's role-sequence repair can concatenate the prior
+# user context with the submitted current turn as ``<stale>\n\n<current>``.
+# Two return shapes reach the WebUI's repair sites, and the maintainer's
+# August-14 contract requires BOTH to keep one shared current-row identity
+# across model context and display:
+#
+#   boundary    — the merged row sits AT the previous-context boundary (the
+#                 unanswered tail row is replaced), so
+#                 ``_settle_existing_current_turn_user_row`` /
+#                 ``_proven_tail_merge_exchange`` own the current row;
+#   full-prefix — the whole projection is echoed and the merged row is
+#                 appended after it, so
+#                 ``_messages_have_prefix(result, previous_context)`` holds
+#                 and the current turn is the proven suffix.
+#
+# Each shape is driven over the REAL synchronous route, then cold-reloaded
+# and settled a SECOND time (a real follow-up ``POST /api/chat`` with no
+# re-seed), which is the "subsequent settlement" the acceptance text
+# demands: the identity the repair established must survive it.
+
+_STALE_PRIOR_TAIL = "please use the larger context model"
+_STALE_CURRENT_TURN = "can you summarize the release blockers?"
+_STALE_POLLUTED = f"{_STALE_PRIOR_TAIL}\n\n{_STALE_CURRENT_TURN}"
+_STALE_FIRST_ANSWER = "sure, checking that now."
+_STALE_FOLLOW_UP = "and the migration window?"
+_STALE_SECOND_ANSWER = "the window is Tuesday 02:00 UTC."
+_STALE_HISTORY = [
+    {"role": "user", "content": "earlier question", "timestamp": 0.0, "id": 10},
+    {"role": "assistant", "content": "earlier answer", "timestamp": 1.0, "id": 11},
+    {"role": "user", "content": _STALE_PRIOR_TAIL, "timestamp": 2.0, "id": 20},
+]
+_STALE_EXPECTED_ORDER = [
+    "earlier question",
+    "earlier answer",
+    _STALE_PRIOR_TAIL,
+    _STALE_CURRENT_TURN,
+    _STALE_FIRST_ANSWER,
+    _STALE_FOLLOW_UP,
+    _STALE_SECOND_ANSWER,
+]
+
+
+def _install_stale_user_agent(monkeypatch, sid, shape):
+    """Substitute the fake Agent so the FIRST turn's user row is stale-merged.
+
+    ``shape`` selects which repair path the Agent's return drives
+    (``boundary`` or ``full-prefix``); ``clean`` is the positive control
+    whose turns are never polluted. Only the first turn carries the merge —
+    the follow-up returns an ordinary current row, so the subsequent
+    settlement measures whether the identity the repair established
+    survived it rather than re-running the repair.
+    """
+    original_setitem = monkeypatch.setitem
+    turns = []
+
+    def setitem(mapping, key, value):
+        if mapping is sys.modules and key == "run_agent":
+            turns.append(1)
+            first_turn = len(turns) == 1
+            answer = _STALE_FIRST_ANSWER if first_turn else _STALE_SECOND_ANSWER
+            parent = _agent_class(sid, answer)
+            if shape != "clean" and first_turn:
+
+                class StaleUserAgent(parent):
+                    def run_conversation(self, **kwargs):
+                        result = super().run_conversation(**kwargs)
+                        msgs = result["messages"]
+                        if shape == "boundary":
+                            # The Agent's consecutive-user repair folds the
+                            # unanswered tail INTO the current row and drops
+                            # the standalone tail row: the merged row lands
+                            # at the previous-context boundary.
+                            msgs[-3] = {"role": "user", "content": _STALE_POLLUTED}
+                            del msgs[-2]
+                            result["current_turn_user_idx"] = len(msgs) - 2
+                        else:
+                            # The whole projection is echoed and the merged
+                            # current row is appended after it.
+                            msgs[-2]["content"] = _STALE_POLLUTED
+                        return result
+
+                value = SimpleNamespace(AIAgent=StaleUserAgent)
+            else:
+                value = SimpleNamespace(AIAgent=parent)
+        return original_setitem(mapping, key, value)
+
+    monkeypatch.setattr(monkeypatch, "setitem", setitem)
+
+
+def _stale_user_rows(rows, content):
+    return [
+        r
+        for r in rows or []
+        if isinstance(r, dict) and r.get("role") == "user" and r.get("content") == content
+    ]
+
+
+def _assert_shared_current_row(reloaded, content, label):
+    """Model context and display must carry ONE shared row for ``content``.
+
+    Pins the August-14 identity contract on a single current row: the same
+    integer id on both surfaces (never ``id=None`` in context while display
+    holds an integer), the same active-turn token, and the same row (same
+    position) — not merely the same text.
+    """
+    context = reloaded.context_messages
+    display = reloaded.messages
+    context_rows = _stale_user_rows(context, content)
+    display_rows = _stale_user_rows(display, content)
+    assert len(context_rows) == 1, (
+        f"the model context must carry exactly one {label} row; got "
+        f"{_contents(context)}"
+    )
+    assert len(display_rows) == 1, (
+        f"the display transcript must carry exactly one {label} row; got "
+        f"{_contents(display)}"
+    )
+    context_row = context_rows[0]
+    display_row = display_rows[0]
+    assert type(context_row.get("id")) is int, (
+        f"the {label} row must keep a stable integer id in the model context "
+        f"(a deep-copied repair row with id=None desynchronises the surfaces); "
+        f"got id={context_row.get('id')!r} in {_contents(context)}"
+    )
+    assert type(display_row.get("id")) is int, (
+        f"the {label} row must keep a stable integer id on the display "
+        f"surface; got id={display_row.get('id')!r} in {_contents(display)}"
+    )
+    assert context_row["id"] == display_row["id"], (
+        f"model context and display must share ONE integer id for the {label} "
+        f"row; context={context_row['id']!r} display={display_row['id']!r}"
+    )
+    assert (
+        context_row.get("_active_turn_token") == display_row.get("_active_turn_token")
+    ), (
+        f"model context and display must carry the SAME active-turn token for "
+        f"the {label} row; context={context_row.get('_active_turn_token')!r} "
+        f"display={display_row.get('_active_turn_token')!r}"
+    )
+    context_idx = next(i for i, r in enumerate(context) if r is context_row)
+    display_idx = next(i for i, r in enumerate(display) if r is display_row)
+    assert context_idx == display_idx, (
+        f"the {label} row must be the SAME row (same position) in model "
+        f"context and display; context index={context_idx} display "
+        f"index={display_idx} context={_contents(context)} "
+        f"display={_contents(display)}"
+    )
+
+
+def _assert_stale_user_surfaces_agree(reloaded, label):
+    """Both surfaces must keep one chronological order, pollution-free."""
+    context_contents = _contents(reloaded.context_messages)
+    display_contents = _contents(reloaded.messages)
+    assert context_contents == _STALE_EXPECTED_ORDER, (
+        f"the model context must keep the repaired chronological order after "
+        f"the {label} settle; got {context_contents}"
+    )
+    assert display_contents == _STALE_EXPECTED_ORDER, (
+        f"the display transcript must keep the same chronological order as "
+        f"the model context after the {label} settle; got {display_contents}"
+    )
+    for surface, rows in (
+        ("model context", reloaded.context_messages),
+        ("display", reloaded.messages),
+    ):
+        for row in rows:
+            content = row.get("content") if isinstance(row, dict) else None
+            assert _STALE_POLLUTED not in str(content), (
+                f"the stale-merged <prior tail>\\n\\n<current> row must not "
+                f"survive on the {surface} after the {label} settle; got "
+                f"{content!r}"
+            )
+
+
+@pytest.mark.parametrize("shape", ["boundary", "full-prefix", "clean"])
+def test_stale_user_repair_keeps_current_row_identity_across_settlement(
+    tmp_path, monkeypatch, shape
+):
+    """#6310 acceptance: both stale-user repair paths, subsequent settlement.
+
+    Request 1 drives a REAL ``POST /api/chat`` whose Agent returns the
+    current user row as ``<stale>\\n\\n<current>`` in the shape the
+    parametrized path owns. The persisted state is then cold-reloaded and
+    settled a SECOND time by a real follow-up request. After that
+    subsequent settlement the model context and the display transcript must
+    still retain the SAME stable current-row identity — one integer id, one
+    active-turn token, one row, one chronological order — for the repaired
+    turn and for the follow-up turn. The ``clean`` parameter is the
+    positive control: the same history with an unpolluted Agent must settle
+    unchanged, so a regression on one path cannot hide behind the other.
+    """
+    sid = f"i6310-stale-user-{shape}"
+    _install_stale_user_agent(monkeypatch, sid, shape)
+    first = _sync_http_send(
+        tmp_path,
+        monkeypatch,
+        sid,
+        copy.deepcopy(_STALE_HISTORY),
+        _STALE_CURRENT_TURN,
+        _STALE_FIRST_ANSWER,
+    )
+    assert first is not None
+    # Cold reload + subsequent settlement: a second real POST /api/chat into
+    # the state request 1 persisted, with no re-seed.
+    reloaded = _sync_http_send(
+        tmp_path,
+        monkeypatch,
+        sid,
+        first.context_messages,
+        _STALE_FOLLOW_UP,
+        _STALE_SECOND_ANSWER,
+        reseed=False,
+    )
+    assert reloaded is not None
+    _assert_stale_user_surfaces_agree(reloaded, shape)
+    _assert_shared_current_row(reloaded, _STALE_CURRENT_TURN, "repaired stale-user")
+    _assert_shared_current_row(reloaded, _STALE_FOLLOW_UP, "follow-up")
+    if shape != "clean":
+        # The repair must actually have fired on the polluted turn: the
+        # prior tail is retained as history and the current turn is the
+        # clean submitted prompt on BOTH surfaces.
+        for surface, rows in (
+            ("model context", reloaded.context_messages),
+            ("display", reloaded.messages),
+        ):
+            contents = _contents(rows)
+            assert contents.count(_STALE_PRIOR_TAIL) == 1, (
+                f"the prior user tail must be retained exactly once as "
+                f"history on the {surface}; got {contents}"
+            )
+            assert contents.count(_STALE_CURRENT_TURN) == 1, (
+                f"the repaired current turn must appear exactly once on the "
+                f"{surface}; got {contents}"
+            )
