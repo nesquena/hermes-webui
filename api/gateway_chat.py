@@ -751,6 +751,36 @@ def _gateway_status_approval(status: dict) -> dict | None:
     return None
 
 
+def _gateway_approval_identity_v1(approval_data: dict, base_url: str, api_key: str) -> bool:
+    """Decide once, at card-creation time, whether this card carries a canonical identity.
+
+    Shared by every card origin — the Runs API relay and the default
+    ``/v1/chat/completions`` stream — so both publish the same creation-time
+    decision and ``/api/approval/respond`` never has to re-derive it: it
+    cannot, because the advertised capability is not published by gateways
+    that fence prompts by generation.
+
+    Exact-id answering needs a trustworthy per-prompt identity. A gateway that
+    published an ``execution_generation`` for this prompt proves it can fence
+    the answer to that exact prompt (canonical Runs API contract), so the
+    generation itself is the authority; the advertised capability remains the
+    fallback for gateways that only promise it via ``/v1/capabilities``.
+
+    A locally generated fallback id (``_gateway_raw_approval_id_present`` is
+    False) is never canonical: the gateway did not publish that id, so
+    answering with it is a guaranteed 400. It must not be promoted into one
+    here — the legacy body shape is the only honest answer for such a card.
+    """
+    from api.config import gateway_supports_approval_identity_v1
+
+    approval_data = approval_data or {}
+    if not bool(approval_data.get("_gateway_raw_approval_id_present")):
+        return False
+    if approval_data.get("_gateway_execution_generation") is not None:
+        return True
+    return bool(gateway_supports_approval_identity_v1(base_url, api_key))
+
+
 def _relay_gateway_run_approval(session_id, run_id, payload, base_url, api_key, *, put_gateway_event) -> bool:
     """Auto-approve or surface one runs-API approval request as a WebUI approval card.
 
@@ -762,17 +792,9 @@ def _relay_gateway_run_approval(session_id, run_id, payload, base_url, api_key, 
     if not approval_data:
         return False
     approval_data["run_id"] = run_id
-    from api.config import gateway_supports_approval_identity_v1
-    # Exact-id answering needs a trustworthy per-prompt identity. A gateway
-    # that published an ``execution_generation`` for this prompt proves it can
-    # fence the answer to that exact prompt (canonical Runs API contract), so
-    # the generation itself is the authority; the advertised capability remains
-    # the fallback for gateways that only promise it via /v1/capabilities.
-    identity_v1 = bool(approval_data.get("_gateway_raw_approval_id_present")) and (
-        approval_data.get("_gateway_execution_generation") is not None
-        or gateway_supports_approval_identity_v1(base_url, api_key)
+    approval_data["_gateway_agent_identity_v1"] = _gateway_approval_identity_v1(
+        approval_data, base_url, api_key
     )
-    approval_data["_gateway_agent_identity_v1"] = identity_v1
     auto_approved, head, total = _settle_gateway_run_approval(
         session_id,
         approval_data,
@@ -3310,6 +3332,16 @@ def _run_gateway_chat_streaming(
                             _approval_run_id = str(approval_data.get("run_id") or "").strip()
                             if _approval_run_id:
                                 _STREAM_RUN_IDS[stream_id] = _approval_run_id
+                            # Same creation-time identity decision the Runs API
+                            # relay makes (#8579): the mirror must carry the
+                            # marker /api/approval/respond reads, or a
+                            # generation-fenced gateway rejects the relayed
+                            # answer with 400 invalid_params and the card never
+                            # settles. Skipping it here silently downgraded
+                            # every default-stream card to the legacy body.
+                            approval_data["_gateway_agent_identity_v1"] = _gateway_approval_identity_v1(
+                                approval_data, base_url, api_key
+                            )
                             try:
                                 head, total = _submit_stream_approval_mirror(session_id, approval_data, cancel_event)
                                 approval_data = {**(head or approval_data), "pending_count": total}
