@@ -357,7 +357,11 @@ def test_reviewer_identified_direct_session_transitions_reach_sync_topbar():
     start_correction = _between(
         messages,
         "if(startData&&startData.effective_model && S.session){",
-        "if(S.session&&typeof startData.pending_started_at==='number')",
+        # #6649 moved the pending_started_at stamp ahead of the model-correction
+        # block so the optimistic row's timestamp is synced before any optional
+        # post-start step can throw. Anchor the end of this window on the next
+        # stable marker instead of that moved block.
+        "\n\n    if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();",
     )
     assert start_correction.count("syncTopbar()") == 2
     assert "S.session.model_provider=startData.effective_model_provider||S.session.model_provider||null;" in start_correction
