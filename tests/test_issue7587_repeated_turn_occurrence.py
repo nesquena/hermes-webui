@@ -22,7 +22,9 @@ These tests pin three properties:
     the fix turns an over-dedup bug into a duplicate-rows bug.
 3.  Rows with no timestamp (malformed or legacy data) must keep a well-defined
     behaviour: they must not crash, and they must not become permanently
-    unmatchable.
+    unmatchable.  When the clock is missing the discriminator falls back to the
+    row's private identity, so two rows that are provably different are
+    preserved rather than suppressed (fail closed).
 """
 
 SAME_TEXT = "please summarise the attached log"
@@ -432,3 +434,34 @@ def test_state_db_delta_still_surfaces_a_repeated_occurrence():
     delta = state_db_delta_after_context(sidecar_context, state_messages)
 
     assert [m["content"] for m in delta] == [SAME_TEXT, "second answer"]
+
+
+def test_occurrence_falls_back_to_private_identity_when_the_clock_is_missing():
+    """#7587 fail-closed: no clock, but different ids -- the rows are distinct.
+
+    The issue asks for suppression only when the timestamps AND all available
+    private identities agree.  When there is no timestamp at all, the private
+    identity is what tells two rows apart, and it has to be enough: preserving
+    two rows is the safe direction, deleting a real user turn is not.
+    """
+    from api.models import _session_message_visible_key
+
+    first = {"role": "user", "content": SAME_TEXT, "id": "row-a"}
+    second = {"role": "user", "content": SAME_TEXT, "id": "row-b"}
+
+    assert _session_message_visible_key(first) != _session_message_visible_key(second)
+
+
+def test_occurrence_without_clock_or_identity_still_collapses():
+    """With neither a clock nor an identity the two rows are indistinguishable.
+
+    There is nothing to tell them apart with, so they key together; the point
+    is that the behaviour stays defined instead of raising or turning into a
+    permanent mismatch.
+    """
+    from api.models import _session_message_visible_key
+
+    first = {"role": "user", "content": SAME_TEXT}
+    second = {"role": "user", "content": SAME_TEXT}
+
+    assert _session_message_visible_key(first) == _session_message_visible_key(second)
