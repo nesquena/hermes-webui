@@ -21,9 +21,11 @@ UI_JS = (Path(__file__).resolve().parent.parent / "static" / "ui.js").read_text(
 
 
 def _render_messages_body() -> str:
-    start = UI_JS.find("function renderMessages(")
-    assert start != -1, "renderMessages() not found"
-    return UI_JS[start:start + 80000]
+    # renderMessages has grown past any fixed window (the #7653 tool-card
+    # occurrence handling lives inside it); extract the full function body so
+    # the Worklog assertions hold regardless of length. Same brace-matching
+    # logic as _function_body below.
+    return _function_body("renderMessages")
 
 
 def _function_body(name: str) -> str:

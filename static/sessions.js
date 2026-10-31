@@ -2358,6 +2358,8 @@ async function newSession(flash, options={}){
     if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
     updateQueueBadge();
     S.toolCalls=[];
+    // #7358 r10 (f4): a new chat must not inherit the previous session's verdict map.
+    S._settledToolIsErrorByTid=null;
     _messagesTruncated=false;
     _oldestIdx=0;
     clearLiveToolCards();
@@ -3275,6 +3277,12 @@ async function loadSession(sid){
     _ensureInflightLiveAssistantMessage(INFLIGHT[sid]);
     const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);
     S.toolCalls=[];
+    // #7358 round 10 (re-gate finding 4): the INFLIGHT restore path bypasses
+    // _syncToolCallsForLoadedMessages (the _ensureMessagesLoaded guard skips it
+    // when INFLIGHT[sid] exists), so without an explicit reset here the
+    // previous session's persisted error map would leak into this session's
+    // render. Same one-way cleanup as the New Chat path.
+    S._settledToolIsErrorByTid=null;
     // Switching between active sessions should rebuild the live worklog from
     // this session's INFLIGHT snapshot, not leave prior-session rows in place.
     if(typeof clearLiveToolCards==='function') clearLiveToolCards();
@@ -4275,17 +4283,87 @@ function _messageReloadLimitForSession(sid){
   return _INITIAL_MSG_LIMIT;
 }
 
-function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
+function _syncToolCallsForLoadedMessages(messages, sessionToolCalls, sessionId, ownerOffset, mergePrevMap){
   const msgs=Array.isArray(messages)?messages:[];
-  // During active streaming, skip — clearing S.toolCalls would lose Activity
-  // and the renderMessages fallback is blocked by S.busy=true.
+  // #7653 re-gate round 12 (finding 1, SILENT): the server already rebases
+  // every ``session.tool_calls`` ``assistant_msg_idx`` into the RETURNED
+  // window's coordinates (``_tool_calls_for_message_window``,
+  // api/routes.py), so the response summaries are used UNCHANGED in both
+  // paging strategies — the round-11 ``ownerOffset`` here double-shifted a
+  // failed owner onto a newer successful occurrence (cumulative paging:
+  // owner 1 -> 4; prepend paging: owner 1 -> 7). ``ownerOffset`` now
+  // applies ONLY to the RETAINED transcript's previous verdict map when
+  // ``mergePrevMap`` is set (the prepend path): a ``msg_before`` response
+  // carries only the OLDER page's summaries, so the current transcript's
+  // verdicts would be dropped by the wholesale replace — merge them back
+  // with their owners shifted by the page length (the retained rows moved
+  // down the combined array). The older page itself sits at the FRONT of
+  // the combined array, so its own page-relative indices are already the
+  // combined ones.
+  const _ownerOffset=(ownerOffset!=null&&ownerOffset!==''&&Number.isFinite(Number(ownerOffset)))?Number(ownerOffset):0;
+  // The previous verdict map (the current transcript's), captured BEFORE it
+  // is replaced below; only the prepend path merges it back.
+  const _prevVerdictMap=(mergePrevMap&&S._settledToolIsErrorByTid)||null;
+  // #7358 round 9 (re-gate 10/01 finding 2): the persisted verdict map is
+  // keyed on the call *occurrence*, never on the tid alone — llama.cpp reuses
+  // one id and other providers reuse ``call_0`` every turn, so a tid-only
+  // handoff paints every card sharing that tid red. The fresh, session-scoped
+  // map is built up front, *before* the active-streaming early return below,
+  // so switching to another session cannot leak the previous session's verdict
+  // map into it (that refresh bails early and used to leave the old map in
+  // place). Session-scoping is implicit: every invocation replaces the map.
+  //
+  // #7653 re-gate round 14 (10-19 review, item 2): NO FLAT ENTRIES, singletons
+  // included. A flat ``true`` cannot distinguish two occurrences of a reused
+  // id, so a singleton failure painted a later successful reuse red
+  // (reload-then-reuse) and an older successful page red (prepend). Every
+  // verdict is scoped to a VERIFIED owning assistant message index; an entry
+  // whose owner cannot be proven writes nothing (fail closed — a row without
+  // a verdict renders from its own data). The builder is shared with the
+  // done/recovery paths (messages.js) so a settlement that arrives without a
+  // full load still rebuilds the map.
+  const _persistedIsErrorByTid=_buildSettledToolIsErrorMap(sessionToolCalls);
+  // #7653 re-gate round 14 (item 2): prepend paging merges the RETAINED
+  // transcript's verdicts back into the map (a ``msg_before`` response
+  // carries only the OLDER page's summaries), shifting only THEIR owners by
+  // the prepended page length. Every entry is owner-scoped now, so the merge
+  // is a plain union of failed owners — a retained success can no longer be
+  // dropped by (or merged into) a flat response verdict.
+  if(_prevVerdictMap&&_ownerOffset>0){
+    for(const _tid of Object.keys(_prevVerdictMap)){
+      const _prevEntry=_prevVerdictMap[_tid];
+      if(!_prevEntry||typeof _prevEntry!=='object'||_prevEntry.is_error!==true) continue;
+      const _shiftedOwners=[];
+      if(_prevEntry.assistant_msg_idx!=null&&_prevEntry.assistant_msg_idx!==''&&Number.isFinite(Number(_prevEntry.assistant_msg_idx))){
+        _shiftedOwners.push(Number(_prevEntry.assistant_msg_idx)+_ownerOffset);
+      }
+      if(_prevEntry.occurrences&&typeof _prevEntry.occurrences==='object'){
+        for(const _k of Object.keys(_prevEntry.occurrences)){
+          const _n=Number(_k);
+          if(Number.isFinite(_n)) _shiftedOwners.push(_n+_ownerOffset);
+        }
+      }
+      if(!_shiftedOwners.length) continue;
+      const _existing=_persistedIsErrorByTid[_tid];
+      if(!_existing||typeof _existing!=='object'){
+        _persistedIsErrorByTid[_tid]={assistant_msg_idx:_shiftedOwners[0],is_error:true};
+        for(const _o of _shiftedOwners.slice(1)){
+          if(!_persistedIsErrorByTid[_tid].occurrences) _persistedIsErrorByTid[_tid].occurrences={};
+          _persistedIsErrorByTid[_tid].occurrences[_o]=true;
+        }
+      }else{
+        if(!_existing.occurrences) _existing.occurrences={};
+        for(const _o of _shiftedOwners) _existing.occurrences[_o]=true;
+        _existing.is_error=true;
+      }
+    }
+  }
+  S._settledToolIsErrorByTid=_persistedIsErrorByTid;
+  // During active streaming, skip the S.toolCalls / S.session.tool_calls
+  // mutation below — clearing them would lose Activity and the renderMessages
+  // fallback is blocked by S.busy=true. The persisted verdict map above has
+  // already been reset to this session's data, so no stale map leaks.
   if(S.busy||S.activeStreamId) return;
-  // Persist the loaded compact tool summary onto S.session so the renderMessages
-  // derived rebuild can use it as a durable per-tid snippet fallback on cold
-  // load (#4927). loadSession keeps the messages=0 session object (tool_calls
-  // []), and the messages=1 summary arrives only as this argument — without
-  // copying it across, the fallback source is empty exactly on the cold-load
-  // path it's meant to repair.
   if(S.session&&Array.isArray(sessionToolCalls)) S.session.tool_calls=sessionToolCalls.map(tc=>({...tc}));
   const hasMessageToolMetadata=msgs.some(m=>{
     if(!m) return false;
@@ -4303,6 +4381,41 @@ function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
     S.toolCalls=[];
   }
 }
+
+// #7653 re-gate round 14 (10-19 review, item 2): the shared verdict-map
+// builder. Every verdict is scoped to a VERIFIED owning assistant message
+// index — no flat entries, singletons included. A flat ``true`` cannot
+// distinguish two occurrences of a reused id, so a singleton failure painted
+// a later successful reuse red (reload-then-reuse) and an older successful
+// page red (prepend). An entry whose owner cannot be proven writes NOTHING:
+// the render paths fail closed (a row without a verdict renders from its own
+// data). Called from _syncToolCallsForLoadedMessages (every load) and from
+// the done / recovery paths in static/messages.js (a settlement that arrives
+// without a full load must rebuild the map too — the reviewer's case A, where
+// the stale reload map kept painting the new successful occurrence red).
+function _buildSettledToolIsErrorMap(sessionToolCalls){
+  const map=Object.create(null);
+  if(!Array.isArray(sessionToolCalls)) return map;
+  for(const tc of sessionToolCalls){
+    if(!tc||typeof tc!=='object') continue;
+    if(tc.is_error!==true) continue;
+    const tid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
+    if(!tid) continue;
+    const raw=tc.assistant_msg_idx;
+    const owner=(raw!=null&&raw!==''&&Number.isFinite(Number(raw)))?Number(raw):null;
+    if(owner==null) continue; // unprovable owner: no verdict (fail closed)
+    const existing=map[tid];
+    if(!existing||typeof existing!=='object'){
+      map[tid]={assistant_msg_idx:owner,is_error:true};
+    }else{
+      if(!existing.occurrences) existing.occurrences={};
+      existing.occurrences[owner]=true;
+      existing.is_error=true;
+    }
+  }
+  return map;
+}
+
 
 async function _ensureMessagesLoaded(sid, opts) {
   // `opts` is an explicit named parameter (vs loadSession's arguments[1]
@@ -5279,7 +5392,25 @@ async function _loadOlderMessages() {
       );
     }
     S.messages = nextMessages;
-    _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);
+    // #7653 re-gate round 12 (finding 1, SILENT): the server rebases
+    // ``session.tool_calls`` into the returned window's coordinates
+    // (``_tool_calls_for_message_window``, api/routes.py), so the response
+    // summaries need NO owner shift in either paging strategy — the round-11
+    // ``olderMsgs.length`` offset here moved a failed owner onto a newer
+    // successful occurrence (cumulative: owner 1 -> 4; prepend: owner 1 ->
+    // 7). For prepends the OLDER page sits at the FRONT of the combined
+    // array, so its page-relative indices are already the combined ones; the
+    // RETAINED transcript's verdicts are the only entries that move (they
+    // shifted down by the page length), and only the prepend path has
+    // retained entries to merge — ``tailMatches`` (the cumulative replace)
+    // merges nothing because the response already covers the whole window.
+    _syncToolCallsForLoadedMessages(
+      nextMessages,
+      responseSession.tool_calls,
+      sid,
+      olderMsgs.length,
+      !tailMatches,
+    );
     // #7882 (greptile round-4 P2): older rows prepended during an in-flight
     // send are server-known rows — advance the send's optimistic-count
     // baseline by exactly the prepended visible rows so the send's eventual

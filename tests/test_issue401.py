@@ -16,11 +16,9 @@ import textwrap
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
-_SYNC_TOOL_CALLS_FN_NAME = (
-    "function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){"
-)
+_SYNC_TOOL_CALLS_FN_HEADER = "function _syncToolCallsForLoadedMessages("
 _SYNC_TOOL_CALLS_FN_END_MARKER = "async function _ensureMessagesLoaded"
-_SYNC_TOOL_CALLS_FN_START = SESSIONS_JS.find(_SYNC_TOOL_CALLS_FN_NAME)
+_SYNC_TOOL_CALLS_FN_START = SESSIONS_JS.find(_SYNC_TOOL_CALLS_FN_HEADER)
 _SYNC_TOOL_CALLS_FN_END = SESSIONS_JS.find(
     _SYNC_TOOL_CALLS_FN_END_MARKER,
     _SYNC_TOOL_CALLS_FN_START,
@@ -31,7 +29,6 @@ _SYNC_TOOL_CALLS_FN = SESSIONS_JS[_SYNC_TOOL_CALLS_FN_START:_SYNC_TOOL_CALLS_FN_
 
 
 def _run_sync_tool_calls(messages: list, session_tool_calls: list) -> list:
-    assert _SYNC_TOOL_CALLS_FN_NAME in SESSIONS_JS
     assert _SYNC_TOOL_CALLS_FN.strip()
     script = textwrap.dedent(
         f"""
@@ -63,7 +60,7 @@ def test_loadsession_preserves_tool_rows():
 
 def test_loadsession_uses_session_toolcalls_only_as_fallback():
     """Session summaries are the fallback, not the primary reload source."""
-    assert "function _syncToolCallsForLoadedMessages(messages, sessionToolCalls)" in SESSIONS_JS
+    assert "function _syncToolCallsForLoadedMessages(messages, sessionToolCalls" in SESSIONS_JS
     assert "if(!hasMessageToolMetadata&&Array.isArray(sessionToolCalls)&&sessionToolCalls.length)" in SESSIONS_JS
     assert "windowOffset" not in SESSIONS_JS
     assert "copy.assistant_msg_idx=idx-offset;" not in SESSIONS_JS
