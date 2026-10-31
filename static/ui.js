@@ -7839,7 +7839,12 @@ if(document.readyState==='loading'){
 
 // ── Reasoning effort chip ────────────────────────────────────────────────────
 let _currentReasoningEffort=null;
+// Annotation for a stored level above the route's wire level ("ultra (sends
+// max on this route)"), set from every fresh server response and CLEARED by
+// the cache resets alongside _currentReasoningEffort — never a stale one.
+let _currentReasoningEffortDisplay=null;
 let _currentReasoningEffortsSupported=null;
+let _currentReasoningEffortsKey=null;
 // Whether the model accepts the thinking on/off toggle when supported_efforts
 // is empty (GLM-4.5–5.1 on native zai). Undefined = unknown, treated as true
 // so the chip stays visible by default (prior behavior).
@@ -7850,15 +7855,19 @@ function _normalizeReasoningEffort(eff){
   return String(eff||'').trim().toLowerCase();
 }
 
-function _formatReasoningEffortLabel(effort){
+// Chip/status label. Pass forRow=true for a dropdown row: the rows keep the
+// fuller names the page markup uses (XHigh chip / "Extra High" row, Ultra chip /
+// "Ultra High" row), so a wide level never has to fit the composer chip.
+function _formatReasoningEffortLabel(effort, forRow){
   if(effort==='none') return 'None';
   if(!effort) return 'Default';
   if(effort==='minimal') return 'Minimal';
   if(effort==='low') return 'Low';
   if(effort==='medium') return 'Medium';
   if(effort==='high') return 'High';
-  if(effort==='xhigh') return 'XHigh';
+  if(effort==='xhigh') return forRow?'Extra High':'XHigh';
   if(effort==='max') return 'Max';
+  if(effort==='ultra') return forRow?'Ultra High':'Ultra';
   return effort.charAt(0).toUpperCase()+effort.slice(1);
 }
 
@@ -7891,6 +7900,17 @@ function _reasoningEffortQuery(){
   const params=new URLSearchParams(_reasoningEffortContext());
   const qs=params.toString();
   return qs?('?'+qs):'';
+}
+
+function _reasoningCommandEfforts(){
+  // The /reasoning autocomplete reuses the chip's route-owned list: no second
+  // fetch per keystroke. The list counts only for the context its GET was
+  // dispatched for, so a switch never borrows the old route's extra levels.
+  const key=((S&&S.activeProfile)||'default')+'\n'+_reasoningEffortQuery();
+  if(_currentReasoningEffortsKey===key&&Array.isArray(_currentReasoningEffortsSupported)){
+    return Array.from(new Set(['none'].concat(_currentReasoningEffortsSupported.filter(Boolean))));
+  }
+  return ['none','minimal','low','medium','high','xhigh','max'];
 }
 
 // Monotonic save counter plus the newest save per profile/session: only the
@@ -7994,6 +8014,38 @@ function _applyReasoningOptions(supportedEfforts){
   const dd=$('composerReasoningDropdown');
   if(!dd) return;
   const supported=new Set(Array.isArray(supportedEfforts)?supportedEfforts:[]);
+  // The effort ladder is agent-owned (api/config.py sources it from
+  // hermes_constants), so a thinking level released into Hermes Agent above
+  // the ladder shipped in the page markup (the agent added 'ultra' above
+  // 'max') arrives in supported_efforts with no matching DOM row. Render the
+  // missing rows so the dropdown always reaches the agent's current ceiling
+  // without waiting for a WebUI release. Guarded on appendChild so harnesses
+  // with a querySelectorAll-only fake dropdown keep exercising the hide/show
+  // path unchanged.
+  if(supported.size&&typeof dd.appendChild==='function'){
+    const byEffort=new Map();
+    dd.querySelectorAll('.reasoning-option').forEach(function(opt){
+      byEffort.set(opt.dataset.effort,opt);
+    });
+    let prev=null;
+    supportedEfforts.forEach(function(level){
+      const effort=_normalizeReasoningEffort(level);
+      if(!effort) return;
+      const existing=byEffort.get(effort);
+      if(existing){prev=existing;return;}
+      const opt=document.createElement('div');
+      opt.className='reasoning-option';
+      opt.dataset.effort=effort;
+      opt.textContent=_formatReasoningEffortLabel(effort,true);
+      // Insert at the ladder position — right after the last row that was
+      // already present for a supported level — instead of always appending,
+      // so levels stay in ascending order even when a gap is below the top.
+      if(prev&&typeof dd.insertBefore==='function') dd.insertBefore(opt,prev.nextSibling||null);
+      else dd.appendChild(opt);
+      byEffort.set(effort,opt);
+      prev=opt;
+    });
+  }
   dd.querySelectorAll('.reasoning-option').forEach(function(opt){
     const effort=opt.dataset.effort;
     // 'none' (turn thinking off) and '' (Default = clear override, provider
@@ -8017,10 +8069,16 @@ function _applyReasoningOptions(supportedEfforts){
 
 function _applyReasoningChip(eff){
   const meta=arguments[1]||null;
+  // The context the meta was fetched for (fetchReasoningChip's dispatch key).
+  // Omitted for saves and cached replays, which are always for the current one.
+  const metaKey=arguments.length>2?arguments[2]:undefined;
   const effort=_normalizeReasoningEffort(eff);
   _currentReasoningEffort=effort;
   if(meta&&Array.isArray(meta.supported_efforts)){
     _currentReasoningEffortsSupported=meta.supported_efforts;
+    _currentReasoningEffortsKey=(metaKey!==undefined)?metaKey
+      :(typeof _reasoningEffortQuery==='function'
+        ?((typeof S!=='undefined'&&S&&S.activeProfile)||'default')+'\n'+_reasoningEffortQuery():null);
   }
   // supports_thinking_toggle: the model accepts the thinking on/off toggle even
   // when the effort ladder is empty (GLM-4.5–5.1 on native zai accept
@@ -8057,17 +8115,31 @@ function _applyReasoningChip(eff){
   wrap.style.display='';
   if(mobileAction) mobileAction.style.display='';
   if(typeof _applyReasoningOptions==='function') _applyReasoningOptions(supportedEfforts);
+  // Keep the chip compact and aligned with the selected effective level. The
+  // stored-choice explanation belongs in the tooltip, accessible name and
+  // selection toast, not in the narrow composer label. Cache it for routine
+  // no-fetch chip refreshes, and replace/clear it on every fresh response.
+  if(meta){
+    const _d=(typeof meta.reasoning_effort_display==='string')?meta.reasoning_effort_display.trim():'';
+    _currentReasoningEffortDisplay=(_d&&_d!==effort)?_d:null;
+  }
+  const annotated=(typeof _currentReasoningEffortDisplay==='string'&&_currentReasoningEffortDisplay)
+    ?_currentReasoningEffortDisplay:null;
   const text=_formatReasoningEffortLabel(effort);
+  const labelText='Reasoning effort for this chat: '+(annotated||_formatReasoningEffortLabel(effort,true));
   label.textContent=text;
   if(mobileLabel) mobileLabel.textContent=text;
   if(chip){
     const inactive=!effort||effort==='none';
     chip.classList.toggle('inactive',inactive);
-    const labelText='Reasoning effort for this chat: '+text;
     chip.title=labelText;
     chip.setAttribute('aria-label',labelText);
   }
-  if(mobileAction) mobileAction.classList.toggle('inactive',!effort||effort==='none');
+  if(mobileAction){
+    mobileAction.classList.toggle('inactive',!effort||effort==='none');
+    mobileAction.title=labelText;
+    mobileAction.setAttribute('aria-label',labelText);
+  }
   _highlightReasoningOption(effort);
 }
 
@@ -8088,27 +8160,30 @@ function fetchReasoningChip(keyOverride){
   // while this GET is in flight short-circuit instead of re-dispatching (that
   // in-flight window is exactly where the #4650 storm lived).
   const key=keyOverride===undefined?_reasoningEffortQuery():keyOverride;
+  const effortsKey=((typeof S!=='undefined'&&S&&S.activeProfile)||'default')+'\n'+key;
   const seq=++_reasoningFetchSeq;
   _lastReasoningFetchKey=key;
   api('/api/reasoning'+key).then(function(st){
     // Ignore a stale/superseded response: only the most recent dispatch may
     // apply, so an older in-flight GET can't poison the current chip (#4650).
     if(seq!==_reasoningFetchSeq) return;
-    _applyReasoningChip((st&&st.reasoning_effort)||'', st||{});
+    _applyReasoningChip((st&&st.reasoning_effort)||'', st||{}, effortsKey);
   }).catch(function(){
     // Same staleness guard on failure: a stale error must neither hide the chip
     // nor clear a newer fetch's key. Only the latest dispatch clears the key so
     // routine syncs retry after a genuine transient failure.
     if(seq!==_reasoningFetchSeq) return;
     _lastReasoningFetchKey=null;
-    _applyReasoningChip('', {supported_efforts:[], supports_thinking_toggle:false});
+    _applyReasoningChip('', {supported_efforts:[], supports_thinking_toggle:false}, effortsKey);
   });
 }
 
 function refreshProfileTransitionReasoningChip(model, provider){
   _profileTransitionReasoningContext={profile:(S&&S.activeProfile)||'default',model,provider};
   _currentReasoningEffort=null;
+  _currentReasoningEffortDisplay=null;
   _currentReasoningEffortsSupported=null;
+  _currentReasoningEffortsKey=null;
   _currentReasoningToggleSupported=undefined;
   _lastReasoningFetchKey=null;
   ++_reasoningFetchSeq;
@@ -8216,8 +8291,13 @@ document.addEventListener('click',function(e){
       _saveReasoningEffort(effort)
         .then(function(st){
           // For Default (effort=''), the returned reasoning_effort is '' (clear)
-          // — display 'Default' rather than an empty toast.
-          const display=_formatReasoningEffortLabel((st&&st.reasoning_effort)||effort||'');
+          // — display 'Default' rather than an empty toast. An above-wire level
+          // (stored ultra on a route that sends max) carries the annotated
+          // display label from the server; prefer it verbatim.
+          const annotatedDisplay=(st&&st.reasoning_effort_display
+            &&st.reasoning_effort_display!==st.reasoning_effort)
+            ?st.reasoning_effort_display:null;
+          const display=annotatedDisplay||_formatReasoningEffortLabel((st&&st.reasoning_effort)||effort||'',true);
           showToast('🧠 Reasoning effort set to '+display+' for this chat and new chats (applies to next turn)');
         })
         .catch(function(){showToast('🧠 Failed to set effort');});
