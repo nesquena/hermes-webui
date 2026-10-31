@@ -6147,6 +6147,19 @@ def _resolve_model_reasoning_efforts_impl(
                         _entry, hinted_model
                     )
                     break
+            else:
+                # v12+ configs keep named endpoints in the ``providers:`` dict
+                # (keyed by name) instead of the legacy custom_providers list.
+                for _name, _entry in (cfg.get("providers") or {}).items():
+                    if (
+                        isinstance(_entry, dict)
+                        and _entry.get("enabled", True) is not False
+                        and _custom_provider_slug_from_name(_name) == provider
+                    ):
+                        _re_lists = _configured_reasoning_effort_lists(
+                            _entry, hinted_model
+                        )
+                        break
         elif provider:
             _prov_entry = (cfg.get("providers") or {}).get(provider, {})
             if isinstance(_prov_entry, dict):
