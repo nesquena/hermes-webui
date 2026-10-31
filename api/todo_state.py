@@ -1,10 +1,10 @@
 """Derive ``todo_state`` snapshots from tool results and settled session messages.
 
-The ``todo`` tool's in-memory store lives on the per-session AIAgent. The
+The ``todo_list`` tool's in-memory store lives on the per-session AIAgent. The
 WebUI bridge needs to mirror that state to the browser in two situations:
 
-1. **Live**: when the agent calls ``todo`` mid-stream, ``api.streaming``
-   emits a dedicated ``todo_state`` SSE event so the Todos panel updates
+1. **Live**: when the agent calls ``todo_list`` (or legacy ``todo``) mid-stream,
+   ``api.streaming`` emits a dedicated ``todo_state`` SSE event so the panel updates
    without waiting for the turn to finish. See :func:`emit_todo_state`.
 
 2. **Cold-load**: when the browser opens a session (no live stream), the
@@ -249,7 +249,7 @@ def emit_todo_state(
     stream_id: Optional[str],
     source: str = "tool",
 ) -> bool:
-    """Emit a ``todo_state`` SSE event when ``name == 'todo'``.
+    """Emit a ``todo_state`` SSE event for ``todo_list`` or legacy ``todo``.
 
     Returns ``True`` if an event was emitted, ``False`` otherwise.
     Always swallows internal errors — emission must never break tool
@@ -257,7 +257,7 @@ def emit_todo_state(
 
     Args:
         put: streaming queue callback; signature ``put(event, data)``.
-        name: tool name from the callback. Skipped when not ``'todo'``.
+        name: tool name from the callback; accepts ``'todo_list'`` and ``'todo'``.
         function_result: raw tool result (JSON string or dict).
         session_id: tag so the frontend can filter cross-session events.
         stream_id: tag so SSE replay can dedupe by stream.
@@ -269,7 +269,7 @@ def emit_todo_state(
     before emission (see :func:`_redact_snapshot`); if redaction fails the
     event is dropped (fail-closed) rather than leaking an unredacted payload.
     """
-    if name != "todo":
+    if name not in ("todo", "todo_list"):
         return False
     try:
         snapshot = parse_todo_tool_result(function_result)

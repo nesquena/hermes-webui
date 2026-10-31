@@ -15389,7 +15389,7 @@ def _run_agent_streaming(
                     # Mirror the todo tool's in-memory state into a
                     # dedicated SSE event so the Todos panel can update
                     # in real-time without waiting for the turn to
-                    # settle. The helper guards on name=='todo', sends
+                    # settle. The helper accepts todo_list and legacy todo, sending
                     # the full snapshot (idempotent under SSE replay)
                     # and swallows internal errors so emission never
                     # breaks tool delivery. Prefer the structured
