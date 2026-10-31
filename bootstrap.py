@@ -166,11 +166,57 @@ def discover_launcher_python(agent_dir: Path | None) -> str:
     return shutil.which("python3") or shutil.which("python") or sys.executable
 
 
+# Emitted by the probe below when it dies, so a failed launch says which interpreter
+# actually failed and why instead of only that it failed.
+_PROBE_MARKER = "HERMES_WEBUI_PROBE_FAIL"
+
+# (interpreter, one-line reason) for each candidate that failed, in probe order.
+_LAST_PROBE_FAILURES: list[tuple[str, str]] = []
+
+
+def _probe_failure_detail(python_exe: str, completed: "subprocess.CompletedProcess") -> str:
+    """One line explaining why `python_exe` could not run both WebUI and the agent."""
+    stderr = completed.stderr or ""
+    for line in stderr.splitlines():
+        if line.startswith(_PROBE_MARKER):
+            parts = line.split("\t", 2)
+            reported_exe = parts[1] if len(parts) > 1 else ""
+            reason = parts[2] if len(parts) > 2 else "unknown error"
+            # Importing the agent can os.execv into the managed runtime, which re-runs
+            # this snippet from the top under different flags. Naming only the
+            # interpreter we asked for sends the reader to the wrong site-packages.
+            if reported_exe and _same_interpreter(reported_exe, python_exe):
+                return f"{python_exe}: {reason}"
+            return f"{python_exe} relaunched into {reported_exe} on agent import, which failed: {reason}"
+    tail = [line.strip() for line in stderr.splitlines() if line.strip()]
+    if tail:
+        return f"{python_exe}: {tail[-1]}"
+    return f"{python_exe}: probe exited {completed.returncode} without an error message"
+
+
+def _same_interpreter(a: str, b: str) -> bool:
+    try:
+        return os.path.realpath(a) == os.path.realpath(b)
+    except OSError:
+        return a == b
+
+
 def _python_can_run_webui_and_agent(python_exe: str, agent_dir: Path | None = None) -> bool:
     # Agent first: it may relaunch into its managed runtime, which ships ruamel.yaml only.
+    # The probe reports the interpreter it actually ended up running under, so a
+    # relaunch is visible in the diagnostic instead of silently re-running the snippet.
     script = (
-        "from run_agent import AIAgent\n"
-        "try:\n    import yaml\nexcept ImportError:\n    import ruamel.yaml\n"
+        "import sys\n"
+        "try:\n"
+        "    from run_agent import AIAgent\n"
+        "    try:\n"
+        "        import yaml\n"
+        "    except ImportError:\n"
+        "        import ruamel.yaml\n"
+        "except BaseException as exc:\n"
+        f"    print({_PROBE_MARKER!r} + '\\t' + sys.executable + '\\t'"
+        " + type(exc).__name__ + ': ' + str(exc), file=sys.stderr)\n"
+        "    raise\n"
     )
     env = os.environ.copy()
     if agent_dir:
@@ -190,7 +236,20 @@ def _python_can_run_webui_and_agent(python_exe: str, agent_dir: Path | None = No
         text=True,
         env=env,
     )
-    return check.returncode == 0
+    if check.returncode == 0:
+        return True
+    _LAST_PROBE_FAILURES.append(
+        (python_exe, _probe_failure_detail(python_exe, check))
+    )
+    return False
+
+
+def _probe_failure_report() -> str:
+    """The per-interpreter probe failures, for the messages below."""
+    if not _LAST_PROBE_FAILURES:
+        return ""
+    lines = "\n".join(f"  - {detail}" for _, detail in _LAST_PROBE_FAILURES)
+    return f"\nProbe results, in the order they were tried:\n{lines}"
 
 
 def ensure_python_has_webui_deps(python_exe: str, agent_dir: Path | None = None) -> str:
@@ -202,6 +261,9 @@ def ensure_python_has_webui_deps(python_exe: str, agent_dir: Path | None = None)
     with "AIAgent not available". Prefer the agent venv when it is usable, and
     validate the final interpreter before starting the server.
     """
+    # Each launch probes fresh; don't carry a previous launch's failures into the
+    # report below.
+    _LAST_PROBE_FAILURES.clear()
     if _python_can_run_webui_and_agent(python_exe, agent_dir):
         return python_exe
 
@@ -224,6 +286,7 @@ def ensure_python_has_webui_deps(python_exe: str, agent_dir: Path | None = None)
             "Python environment cannot import both WebUI dependencies and Hermes Agent, "
             "and local .venv creation is disabled for this packaged launch. Set "
             "HERMES_WEBUI_PYTHON to an interpreter with Hermes Agent dependencies."
+            + _probe_failure_report()
         )
 
     venv_dir = REPO_ROOT / ".venv"
@@ -264,8 +327,9 @@ def ensure_python_has_webui_deps(python_exe: str, agent_dir: Path | None = None)
         return str(venv_python)
     raise RuntimeError(
         "Python environment cannot import both WebUI dependencies and Hermes Agent. "
-        "Set HERMES_WEBUI_PYTHON to the Hermes Agent venv Python or install the "
-        "WebUI requirements into that environment."
+        "Set HERMES_WEBUI_PYTHON to an interpreter whose Python environment can import "
+        "both the Hermes Agent and the WebUI dependencies."
+        + _probe_failure_report()
     )
 
 
