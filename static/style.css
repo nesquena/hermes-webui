@@ -9,7 +9,7 @@
     --bg:#FEFCF7;--sidebar:#FAF7F0;--border:#E0D8C8;--border2:rgba(0,0,0,0.15);
     --text:#1A1610;--muted:#5C5344;--accent:#B8860B;--blue:#0288A8;--gold:#8B6508;--code-bg:#F5F0E5;
     --surface:#F3EEE3;--topbar-bg:rgba(250,247,240,.98);--main-bg:rgba(254,252,247,0.5);
-    --focus-ring:rgba(184,134,11,.35);--focus-glow:rgba(184,134,11,.1);
+    --focus-ring:rgba(184,134,11,.35);--focus-glow:rgba(184,134,11,.1);--focus-ring-strong:var(--text);
     --input-bg:rgba(0,0,0,.03);--hover-bg:rgba(0,0,0,.05);
     --strong:#0F0D08;--em:#5C5344;--code-text:#8b4513;--code-inline-bg:rgba(0,0,0,.06);--pre-text:#1A1610;
     --accent-hover:#996F08;--accent-bg:rgba(184,134,11,0.08);--accent-bg-strong:rgba(184,134,11,0.15);--accent-text:#8B6508;
@@ -190,7 +190,7 @@
   :root[data-skin="graphite"] .session-item.active.streaming,
   :root[data-skin="graphite"] .session-item.active.unread,
   :root[data-skin="graphite"] .session-item.active.needs-attention,
-  :root[data-skin="graphite"] .session-item.active:focus-within,
+  :root[data-skin="graphite"] .session-item.active:has(:focus-visible),
   :root[data-skin="graphite"] .session-item.active.menu-open{padding-right:40px;}
   @media (hover:hover){:root[data-skin="graphite"] .session-item.active:hover{padding-right:40px;}}
   :root[data-skin="graphite"] .session-item.active::before{content:"";position:absolute;left:7px;top:12px;bottom:12px;width:2px;border-radius:999px;background:color-mix(in srgb,var(--accent) 70%,var(--border2));opacity:.55;}
@@ -199,7 +199,7 @@
   :root[data-skin="graphite"] .session-item.active .session-meta{margin-top:2px;}
   :root[data-skin="graphite"] .session-item.active .session-time{padding-left:4px;}
   :root[data-skin="graphite"] .session-item.active:hover .session-time:not(.is-hidden),
-  :root[data-skin="graphite"] .session-item.active:focus-within .session-time:not(.is-hidden),
+  :root[data-skin="graphite"] .session-item.active:has(:focus-visible) .session-time:not(.is-hidden),
   :root[data-skin="graphite"] .session-item.active.menu-open .session-time:not(.is-hidden){display:inline-flex;visibility:hidden;}
   :root[data-skin="graphite"] .session-item.active .session-lineage-count{height:17px;padding:0 6px;margin-left:0;background:var(--surface)!important;color:var(--muted)!important;border:1px solid var(--border);}
   :root[data-skin="graphite"] .session-item.active .session-title,
@@ -316,7 +316,7 @@
   :root[data-skin="codex"] .session-item.active.streaming,
   :root[data-skin="codex"] .session-item.active.unread,
   :root[data-skin="codex"] .session-item.active.needs-attention,
-  :root[data-skin="codex"] .session-item.active:focus-within,
+  :root[data-skin="codex"] .session-item.active:has(:focus-visible),
   :root[data-skin="codex"] .session-item.active.menu-open{padding-right:40px;}
   @media (hover:hover){:root[data-skin="codex"] .session-item.active:hover{padding-right:40px;}}
   :root[data-skin="codex"] .session-item.active::before{content:"";position:absolute;left:7px;top:12px;bottom:12px;width:2px;border-radius:999px;background:color-mix(in srgb,var(--accent) 70%,var(--border2));opacity:.55;}
@@ -325,7 +325,7 @@
   :root[data-skin="codex"] .session-item.active .session-meta{margin-top:2px;}
   :root[data-skin="codex"] .session-item.active .session-time{padding-left:4px;}
   :root[data-skin="codex"] .session-item.active:hover .session-time:not(.is-hidden),
-  :root[data-skin="codex"] .session-item.active:focus-within .session-time:not(.is-hidden),
+  :root[data-skin="codex"] .session-item.active:has(:focus-visible) .session-time:not(.is-hidden),
   :root[data-skin="codex"] .session-item.active.menu-open .session-time:not(.is-hidden){display:inline-flex;visibility:hidden;}
   :root[data-skin="codex"] .session-item.active .session-lineage-count{height:17px;padding:0 6px;margin-left:0;background:var(--surface)!important;color:var(--muted)!important;border:1px solid var(--border);}
   :root[data-skin="codex"] .session-item.active .session-title,
@@ -442,7 +442,7 @@
   :root[data-skin="terracotta"] .session-item.active.streaming,
   :root[data-skin="terracotta"] .session-item.active.unread,
   :root[data-skin="terracotta"] .session-item.active.needs-attention,
-  :root[data-skin="terracotta"] .session-item.active:focus-within,
+  :root[data-skin="terracotta"] .session-item.active:has(:focus-visible),
   :root[data-skin="terracotta"] .session-item.active.menu-open{padding-right:40px;}
   @media (hover:hover){:root[data-skin="terracotta"] .session-item.active:hover{padding-right:40px;}}
   :root[data-skin="terracotta"] .session-item.active::before{content:"";position:absolute;left:7px;top:12px;bottom:12px;width:2px;border-radius:999px;background:color-mix(in srgb,var(--accent) 70%,var(--border2));opacity:.55;}
@@ -451,7 +451,7 @@
   :root[data-skin="terracotta"] .session-item.active .session-meta{margin-top:2px;}
   :root[data-skin="terracotta"] .session-item.active .session-time{padding-left:4px;}
   :root[data-skin="terracotta"] .session-item.active:hover .session-time:not(.is-hidden),
-  :root[data-skin="terracotta"] .session-item.active:focus-within .session-time:not(.is-hidden),
+  :root[data-skin="terracotta"] .session-item.active:has(:focus-visible) .session-time:not(.is-hidden),
   :root[data-skin="terracotta"] .session-item.active.menu-open .session-time:not(.is-hidden){display:inline-flex;visibility:hidden;}
   :root[data-skin="terracotta"] .session-item.active .session-lineage-count{height:17px;padding:0 6px;margin-left:0;background:var(--surface)!important;color:var(--muted)!important;border:1px solid var(--border);}
   :root[data-skin="terracotta"] .session-item.active .session-title,
@@ -568,7 +568,7 @@
   :root[data-skin="github"] .session-item.active.streaming,
   :root[data-skin="github"] .session-item.active.unread,
   :root[data-skin="github"] .session-item.active.needs-attention,
-  :root[data-skin="github"] .session-item.active:focus-within,
+  :root[data-skin="github"] .session-item.active:has(:focus-visible),
   :root[data-skin="github"] .session-item.active.menu-open{padding-right:40px;}
   @media (hover:hover){:root[data-skin="github"] .session-item.active:hover{padding-right:40px;}}
   :root[data-skin="github"] .session-item.active::before{content:"";position:absolute;left:7px;top:12px;bottom:12px;width:2px;border-radius:999px;background:color-mix(in srgb,var(--accent) 70%,var(--border2));opacity:.55;}
@@ -577,7 +577,7 @@
   :root[data-skin="github"] .session-item.active .session-meta{margin-top:2px;}
   :root[data-skin="github"] .session-item.active .session-time{padding-left:4px;}
   :root[data-skin="github"] .session-item.active:hover .session-time:not(.is-hidden),
-  :root[data-skin="github"] .session-item.active:focus-within .session-time:not(.is-hidden),
+  :root[data-skin="github"] .session-item.active:has(:focus-visible) .session-time:not(.is-hidden),
   :root[data-skin="github"] .session-item.active.menu-open .session-time:not(.is-hidden){display:inline-flex;visibility:hidden;}
   :root[data-skin="github"] .session-item.active .session-lineage-count{height:17px;padding:0 6px;margin-left:0;background:var(--surface)!important;color:var(--muted)!important;border:1px solid var(--border);}
   :root[data-skin="github"] .session-item.active .session-title,
@@ -865,8 +865,8 @@
   :root.dark[data-skin="nous"] .session-tree-badge{background:rgba(99,179,237,.2);color:#4682B4;}
   :root.dark[data-skin="nous"] .session-tag{background:rgba(99,179,237,.2);color:#4682B4;}
   /* Image lightbox */
-  :root[data-skin="nous"] .img-lightbox-close:hover{background:rgba(70,130,180,.4);}
-  :root.dark[data-skin="nous"] .img-lightbox-close:hover{background:rgba(70,130,180,.4);}
+  :root[data-skin="nous"] .img-lightbox-close:hover,:root[data-skin="nous"] .img-lightbox-fit:hover{background:rgba(70,130,180,.4);}
+  :root.dark[data-skin="nous"] .img-lightbox-close:hover,:root.dark[data-skin="nous"] .img-lightbox-fit:hover{background:rgba(70,130,180,.4);}
   :root[data-skin="nous"] .img-lightbox-nav:hover{background:rgba(70,130,180,.5);}
   :root.dark[data-skin="nous"] .img-lightbox-nav:hover{background:rgba(70,130,180,.5);}
   /* Diff blocks */
@@ -969,6 +969,12 @@
   :root[data-skin="geist-contrast"] .theme-pick-btn.active,
   :root[data-skin="geist-contrast"] .font-size-pick-btn.active{background:var(--surface-subtle)!important;border-color:var(--border2)!important;color:var(--text)!important;box-shadow:inset 0 0 0 1px var(--border)!important;font-weight:500!important;}
   :root[data-skin="geist-contrast"] .session-item.active{position:relative;border:1px solid var(--border2)!important;}
+  /* The Geist Contrast active-row rule sets an `!important` inset 1px shadow that
+     would otherwise override the keyboard focus ring, leaving a focused active
+     conversation with no keyboard-specific indicator. Restore the 2px focus ring
+     at higher specificity + `!important` when the row's open-control is
+     keyboard-focused. */
+  :root[data-skin="geist-contrast"] .session-item.active:has(.session-open-control:focus-visible){box-shadow:inset 0 0 0 2px var(--focus-ring-strong)!important;}
   :root[data-skin="geist-contrast"] .session-item.active::before{content:"";position:absolute;left:6px;top:10px;bottom:10px;width:2px;border-radius:999px;background:var(--accent);}
   :root[data-skin="geist-contrast"] .session-item.active .session-title,
   :root[data-skin="geist-contrast"] .session-item.active .session-meta,
@@ -1150,7 +1156,7 @@
   :root.dark[data-skin="neon"] .mcp-http{color:#c8a0ff;}
   :root.dark[data-skin="neon"] .mcp-status-active{color:#00dd88;}
   /* Image lightbox */
-  :root.dark[data-skin="neon"] .img-lightbox-close:hover{background:rgba(179,71,255,.35);}
+  :root.dark[data-skin="neon"] .img-lightbox-close:hover,:root.dark[data-skin="neon"] .img-lightbox-fit:hover{background:rgba(179,71,255,.35);}
   /* Links: cyan with hover glow */
   :root.dark[data-skin="neon"] a{color:var(--info);transition:text-shadow 0.2s;}
   :root.dark[data-skin="neon"] a:hover{text-shadow:0 0 8px rgba(0,221,255,0.4);}
@@ -1217,7 +1223,7 @@
   :root.dark[data-skin="neon-soft"] .diff-block .diff-plus{color:#b347ff;}
   :root.dark[data-skin="neon-soft"] .mcp-http{color:#c8a0ff;}
   :root.dark[data-skin="neon-soft"] .mcp-status-active{color:#00dd88;}
-  :root.dark[data-skin="neon-soft"] .img-lightbox-close:hover{background:rgba(179,71,255,.35);}
+  :root.dark[data-skin="neon-soft"] .img-lightbox-close:hover,:root.dark[data-skin="neon-soft"] .img-lightbox-fit:hover{background:rgba(179,71,255,.35);}
   :root.dark[data-skin="neon-soft"] a{color:var(--info);transition:text-shadow 0.2s;}
   :root.dark[data-skin="neon-soft"] a:hover{text-shadow:0 0 8px rgba(0,221,255,0.4);}
 
@@ -1283,7 +1289,7 @@
   :root.dark[data-skin="neon-paint"] .diff-block .diff-plus{color:#FF2D95;}
   :root.dark[data-skin="neon-paint"] .mcp-http{color:#FF80BF;}
   :root.dark[data-skin="neon-paint"] .mcp-status-active{color:#00E676;}
-  :root.dark[data-skin="neon-paint"] .img-lightbox-close:hover{background:rgba(255,45,149,.35);}
+  :root.dark[data-skin="neon-paint"] .img-lightbox-close:hover,:root.dark[data-skin="neon-paint"] .img-lightbox-fit:hover{background:rgba(255,45,149,.35);}
   :root.dark[data-skin="neon-paint"] a{color:var(--info);transition:text-shadow 0.2s;}
   :root.dark[data-skin="neon-paint"] a:hover{text-shadow:0 0 10px rgba(0,229,255,0.5);}
 
@@ -1332,7 +1338,7 @@
   :root.dark[data-skin="verdigris"] .mcp-http{color:#E4C28D;}
   :root.dark[data-skin="verdigris"] .mcp-status-active{color:#E4C28D;}
   /* Image lightbox */
-  :root.dark[data-skin="verdigris"] .img-lightbox-close:hover{background:rgba(200,154,90,.35);}
+  :root.dark[data-skin="verdigris"] .img-lightbox-close:hover,:root.dark[data-skin="verdigris"] .img-lightbox-fit:hover{background:rgba(200,154,90,.35);}
   :root.dark[data-skin="verdigris"] .img-lightbox-nav:hover{background:rgba(200,154,90,.40);}
 
   /* #594: app-dialog light mode overrides — base styles use hardcoded dark gradients */
@@ -1596,9 +1602,9 @@
      action button (.session-actions, position:absolute, 26x26 at right:6px)
      and attention indicator (26x26 at right:6px) still need 40px reserved
      when they're visible — covered by the hover / streaming / unread /
-     menu-open / focus-within rule below. */
+     menu-open / keyboard-focus rule below. */
   .session-item{padding:8px 8px;margin-bottom:2px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted);transition:background .15s,color .15s,transform .5s cubic-bezier(.22,.61,.36,1),box-shadow .15s ease;display:flex;align-items:flex-start;gap:8px;min-width:0;position:relative;touch-action:pan-y;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;transform:translate3d(var(--session-swipe-offset,0),var(--session-reflow-offset,0),0);}
-  .session-item.streaming,.session-item.unread,.session-item.needs-attention,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}
+  .session-item.streaming,.session-item.unread,.session-item.needs-attention,.session-item:has(:focus-visible),.session-item.menu-open{padding-right:40px;}
   .session-item.needs-attention{box-shadow:inset 3px 0 0 var(--warning);background:color-mix(in srgb,var(--warning) 8%,transparent);}
   .session-item.attention-approval{box-shadow:inset 3px 0 0 var(--error);background:color-mix(in srgb,var(--error) 9%,transparent);}
   .session-item.attention-clarify{box-shadow:inset 3px 0 0 var(--warning);background:color-mix(in srgb,var(--warning) 8%,transparent);}
@@ -1655,9 +1661,30 @@
   .session-item.streaming .session-title-row{color:var(--text);}
   .session-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow:hidden;}
   .session-title-row{display:flex;align-items:center;gap:6px;min-width:0;}
-  .session-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);user-select:none;}
-  .session-title:focus-visible{outline:none;}
-  .session-item:has(> .session-text > .session-title-row > .session-title:focus-visible){box-shadow:inset 0 0 0 2px var(--accent);}
+  /* Title first, chips after it. The group wraps and shows exactly one line (1lh = the title's
+     inherited line box), so a chip that does not fit beside the title moves, whole, to the hidden
+     second line instead of shrinking the title or being clipped mid-pill. The title itself only
+     ellipsizes when it is wider than the whole group, as it did on master when the chips lived
+     inside it. Tags stay reachable through the row tooltip and the #tag filter. */
+  .session-title-group{display:flex;flex-wrap:wrap;align-items:center;align-content:flex-start;column-gap:6px;row-gap:0;flex:1 1 auto;min-width:6ch;max-width:100%;height:1lh;overflow:hidden;}
+  .session-title-group:has(> .session-title-input){height:auto;overflow:visible;}
+  .session-title{flex:0 1 auto;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);user-select:none;border:0;background:transparent;padding:0;margin:0;text-align:left;font:inherit;line-height:inherit;}
+  .session-open-control{cursor:pointer;}
+  .session-open-control:focus-visible{outline:2px solid transparent;outline-offset:-2px;}
+  /* Session rows need an opaque, 3:1 keyboard indicator. The shared
+     --focus-ring token is deliberately translucent for glow-style controls;
+     --focus-ring-strong follows each skin's already contrast-safe text token. */
+  .session-item:has(.session-open-control:focus-visible){box-shadow:inset 0 0 0 2px var(--focus-ring-strong);}
+  /* Preserve the attention owner while the row also owns keyboard focus.
+     Put the 3px state stripe first so it remains visible above the 2px ring. */
+  .session-item.needs-attention:has(.session-open-control:focus-visible),
+  .session-item.attention-clarify:has(.session-open-control:focus-visible){box-shadow:inset 3px 0 0 var(--warning),inset 0 0 0 2px var(--focus-ring-strong);}
+  .session-item.attention-approval:has(.session-open-control:focus-visible){box-shadow:inset 3px 0 0 var(--error),inset 0 0 0 2px var(--focus-ring-strong);}
+  /* Geist Contrast's active-row shadow is !important, so its combined states
+     need the same cascade strength rather than losing either indicator. */
+  :root[data-skin="geist-contrast"] .session-item.active.needs-attention:has(.session-open-control:focus-visible),
+  :root[data-skin="geist-contrast"] .session-item.active.attention-clarify:has(.session-open-control:focus-visible){box-shadow:inset 3px 0 0 var(--warning),inset 0 0 0 2px var(--focus-ring-strong)!important;}
+  :root[data-skin="geist-contrast"] .session-item.active.attention-approval:has(.session-open-control:focus-visible){box-shadow:inset 3px 0 0 var(--error),inset 0 0 0 2px var(--focus-ring-strong)!important;}
   .session-search-hit{border-radius:4px;background:var(--accent-bg);color:var(--accent-text);box-decoration-break:clone;-webkit-box-decoration-break:clone;padding:0 .08em;}
   .session-search-preview{font-size:11px;line-height:1.35;color:var(--muted);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow-wrap:anywhere;opacity:.9;}
   .session-search-hit-preview{background:var(--accent-bg);color:var(--accent-text);}
@@ -1668,7 +1695,7 @@
   .session-item.active .session-meta{color:var(--accent-text);opacity:.8;}
   .session-state-indicator{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:10px;height:10px;color:var(--accent);visibility:hidden;}
   .session-attention-indicator{position:absolute;right:6px;top:50%;transform:translateY(-50%);width:26px;height:26px;z-index:1;pointer-events:none;transition:opacity .15s ease,visibility .15s ease;}
-  .session-item:hover .session-attention-indicator,.session-item:focus-within .session-attention-indicator,.session-item.menu-open .session-attention-indicator{opacity:0;visibility:hidden;}
+  .session-item:hover .session-attention-indicator,.session-item:has(:focus-visible) .session-attention-indicator,.session-item.menu-open .session-attention-indicator{opacity:0;visibility:hidden;}
   .session-state-indicator.is-streaming,.session-state-indicator.is-unread,.session-state-indicator.is-attention-approval,.session-state-indicator.is-attention-clarify,.session-state-indicator.is-attention-generic{visibility:visible;}
   .session-state-indicator.is-attention-approval{color:var(--error);}
   .session-state-indicator.is-attention-clarify{color:var(--warning);}
@@ -1717,11 +1744,14 @@
     flex-shrink:0;
   }
   .session-time.is-hidden{display:none;}
-  .session-item:hover .session-time,.session-item:focus-within .session-time,.session-item.menu-open .session-time{display:none;}
+  .session-item:has(:focus-visible) .session-time,.session-item.menu-open .session-time{display:none;}
+  @media (hover:hover){
+    .session-item:hover .session-time{display:none;}
+  }
   /* ── Session action trigger + dropdown ── */
   .session-actions{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .15s ease;}
-  .session-item:hover .session-actions,.session-item:focus-within .session-actions,.session-item.menu-open .session-actions{opacity:1;pointer-events:auto;}
-  .session-item.streaming:not(:hover):not(:focus-within):not(.menu-open) .session-actions,.session-item.unread:not(:hover):not(:focus-within):not(.menu-open) .session-actions{opacity:0;pointer-events:none;}
+  .session-item:hover .session-actions,.session-item:has(:focus-visible) .session-actions,.session-item.menu-open .session-actions{opacity:1;pointer-events:auto;}
+  .session-item.streaming:not(:hover):not(:has(:focus-visible)):not(.menu-open) .session-actions,.session-item.unread:not(:hover):not(:has(:focus-visible)):not(.menu-open) .session-actions{opacity:0;pointer-events:none;}
   .session-actions-trigger{width:26px;height:26px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer;padding:0;line-height:1;display:inline-flex;align-items:center;justify-content:center;transition:background .12s,color .12s,border-color .12s;}
   .session-actions-trigger:hover{background:var(--hover-bg);color:var(--text);}
   .session-actions-trigger.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text);}
@@ -1740,6 +1770,8 @@
   .session-action-opt.is-disabled:hover{background:transparent;}
   .session-action-opt.danger:hover{background:rgba(239,83,80,.08);}
   .session-action-opt.danger .ws-opt-icon,.session-action-opt.danger .ws-opt-name{color:var(--error);}
+  /* Finger-sized rows on a touch screen, as the project picker this menu opens has. */
+  @media (pointer:coarse){.session-action-opt .ws-opt-action{min-height:44px;}}
   @media (prefers-reduced-motion:reduce){
     .session-action-menu{animation:none;will-change:auto;}
     .session-item,.session-item.dragging,.session-item.session-reflowing,.session-item.swipe-committed,.session-item.swipe-removing{transition:none;}
@@ -1747,8 +1779,13 @@
     .session-item.session-list-flip-enter{animation:none;}
     .session-state-indicator.is-attention-approval:not(.is-streaming):not(.is-unread)::before{animation:none;}
   }
-  /* Hide overlay during inline rename */
+  /* Keep overlays and tag chips from competing with the inline rename input.
+     Scope the tag hide to the RENAMING row's own title-group so a nested
+     child's rename does not also hide the containing parent row's tag chips
+     (the `:has(.session-title-input)` ancestor match otherwise reaches the
+     top-level parent row when a fork/child under it is being renamed). */
   .session-item:has(.session-title-input) .session-actions{display:none;}
+  .session-title-group:has(> .session-title-input) > .session-tag{display:none;}
   @keyframes session-menu-in{from{opacity:0;transform:translate3d(0,-4px,0) scale(.985);}to{opacity:1;transform:translate3d(0,0,0) scale(1);}}
   @keyframes session-long-press{from{filter:brightness(1);}to{filter:brightness(1.08);}}
   @keyframes sessionSwipeReturn{0%{opacity:.62;transform:translate3d(var(--session-swipe-return-offset,32px),var(--session-reflow-offset,0),0) scale(.985);}100%{opacity:1;transform:translate3d(0,var(--session-reflow-offset,0),0) scale(1);}}
@@ -1956,6 +1993,20 @@
   .agent-health-dismiss{flex-shrink:0;padding:6px 12px;border-radius:8px;border:1px solid color-mix(in srgb,var(--error) 45%,var(--surface));background:color-mix(in srgb,var(--error) 10%,var(--surface));color:var(--error);font-size:12px;font-weight:600;cursor:pointer;}
   .agent-health-dismiss:hover{background:color-mix(in srgb,var(--error) 18%,var(--surface));}
   .agent-health-actions{display:flex;gap:8px;flex-shrink:0;}
+  /* #8517: quiet, dismissible notice above the composer when this session's memory is off. */
+  .memory-off-notice{display:flex;align-items:center;gap:8px;margin:10px auto 0;max-width:var(--msg-max);width:calc(100% - 40px);box-sizing:border-box;padding:4px 4px 4px 12px;border:1px solid var(--border);border-radius:10px;background:var(--surface-subtle,var(--hover-bg));color:var(--muted);font-size:13px;line-height:1.4;}
+  .memory-off-notice[hidden]{display:none;}
+  .memory-off-notice-icon{flex:0 0 auto;width:14px;height:14px;}
+  .memory-off-notice-text{flex:1 1 auto;min-width:0;padding:4px 0;overflow-wrap:anywhere;}
+  .memory-off-notice-dismiss{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;padding:0;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer;}
+  .memory-off-notice-dismiss:hover{background:var(--hover-bg);color:var(--text);}
+  .memory-off-notice-dismiss:focus-visible{outline:2px solid var(--focus-ring-strong);outline-offset:2px;}
+  /* #8517: the composer's top fade only ever covers the notice when the notice is shown */
+  .memory-off-notice:not([hidden])+.composer-wrap::before{display:none;}
+  /* #8517: a composer flyout (queue, approval, clarify) rises over the notice and already reserves
+     its own space, so collapse the notice instead of keeping its band (a double blank above the card) */
+  .memory-off-notice:has(+ .composer-wrap :is(.queue-card,.approval-card,.clarify-card).visible){display:none;}
+  @media(max-width:700px),(pointer:coarse){.memory-off-notice-dismiss{width:44px;height:44px;}.memory-off-notice{width:calc(100% - 24px);}}
   .agent-health-restart{flex-shrink:0;padding:6px 12px;border-radius:8px;border:1px solid color-mix(in srgb,var(--accent) 55%,var(--surface));background:color-mix(in srgb,var(--accent) 15%,var(--surface));color:var(--accent);font-size:12px;font-weight:600;cursor:pointer;transition:background-color .15s;}
   .agent-health-restart:hover{background:color-mix(in srgb,var(--accent) 25%,var(--surface));}
   .agent-health-restart:disabled{opacity:0.5;cursor:not-allowed;}
@@ -1974,6 +2025,7 @@
   .update-btn:hover{background:var(--accent-bg-strong);}
   .update-primary{background:var(--accent-bg-strong);border-color:var(--accent);}
   .update-btn:disabled{opacity:0.5;cursor:not-allowed;}
+  @media (pointer:coarse){#updateBanner .update-btn{min-height:44px;padding:8px 14px;}}
   /* ── Composer flyout (approval/clarify slide up from behind composer) ── */
   .composer-flyout{position:relative;height:0;z-index:1;}
   .composer-wrap.terminal-dock-visible .composer-flyout{z-index:4;}
@@ -2602,9 +2654,12 @@
   /* MEDIA: inline image rendering (feat #450) */
   .msg-media-img{display:inline-block;width:120px;height:90px;border-radius:6px;margin:3px 4px 3px 0;cursor:zoom-in;object-fit:cover;border:1px solid var(--border);vertical-align:bottom;transition:opacity .15s;}
   .msg-media-img:hover{opacity:.85;}
-  .img-lightbox{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.82);display:flex;align-items:center;justify-content:center;cursor:zoom-out;animation:lb-in .15s ease;}
+  .img-lightbox{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.82);display:flex;align-items:center;justify-content:center;cursor:zoom-out;animation:lb-in .15s ease;outline:none;}
   @keyframes lb-in{from{opacity:0}to{opacity:1}}
-  .img-lightbox img{max-width:90vw;max-height:90vh;object-fit:contain;border-radius:8px;box-shadow:0 8px 48px rgba(0,0,0,.6);cursor:default;}
+  .img-lightbox-viewport{position:relative;width:90vw;height:90vh;overflow:hidden;border-radius:8px;touch-action:none;user-select:none;-webkit-user-select:none;cursor:grab;}
+  .img-lightbox-viewport.is-panning{cursor:grabbing;}
+  .img-lightbox-canvas{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform;}
+  .img-lightbox-canvas img{display:block;width:100%;height:100%;max-width:none;max-height:none;border-radius:8px;box-shadow:0 8px 48px rgba(0,0,0,.6);cursor:inherit;-webkit-user-drag:none;}
   .mermaid-viewer{display:flex;flex-direction:column;gap:6px;max-width:100%;min-width:0;}
   .mermaid-viewer-toolbar{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:4px;align-items:center;flex-shrink:0;}
   .mermaid-viewer-btn{width:28px;height:28px;border:1px solid var(--border2);border-radius:6px;background:var(--input-bg);color:var(--muted);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;transition:background .15s,color .15s,border-color .15s,transform .15s;flex:0 0 auto;padding:0;}
@@ -2620,8 +2675,24 @@
   .mermaid-viewer-canvas{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform;}
   .mermaid-viewer-svg{display:block;width:100%;height:100%;}
   .img-lightbox .mermaid-lightbox-svg{background:var(--code-bg);cursor:default;}
-  .img-lightbox-close{position:absolute;top:16px;right:20px;width:36px;height:36px;border:none;border-radius:50%;background:rgba(255,255,255,.12);color:#fff;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s;}
-  .img-lightbox-close:hover{background:rgba(255,255,255,.22);}
+  .img-lightbox-close{position:absolute;top:max(16px,env(safe-area-inset-top,0px));right:max(20px,env(safe-area-inset-right,0px));width:36px;height:36px;border:1px solid rgba(255,255,255,.28);border-radius:50%;background:rgba(0,0,0,.5);color:#fff;font-size:26px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s,border-color .15s;}
+    /* Hover lightens to a mid-grey disc: visible over the near-black scrim AND over a bright image, where the white
+       glyph keeps its contrast (a darker hover on a dark scrim was invisible; a white one washes out over light
+       images). Shared by the Mermaid lightbox, which reuses this class. */
+    .img-lightbox-close:hover{background:rgba(72,72,78,.88);border-color:rgba(255,255,255,.55);}
+    .img-lightbox-close:focus-visible{outline:2px solid rgba(255,255,255,.85);outline-offset:2px;}
+    .img-lightbox-fit{position:absolute;top:max(16px,env(safe-area-inset-top,0px));right:max(64px,calc(env(safe-area-inset-right,0px) + 64px));width:36px;height:36px;padding:0;border:1px solid rgba(255,255,255,.28);border-radius:50%;background:rgba(0,0,0,.5);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s,border-color .15s;z-index:1;}
+    .img-lightbox-fit:hover{background:rgba(72,72,78,.88);border-color:rgba(255,255,255,.55);}
+    .img-lightbox-fit svg{width:18px;height:18px;display:block;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;}
+    .img-lightbox-fit:focus-visible{outline:2px solid rgba(255,255,255,.85);outline-offset:2px;}
+    /* Touch: 44px targets (WCAG/HIG minimum) with a 12px gap so a near-miss on Fit cannot close a zoomed image. The
+       Mermaid lightbox reuses the close button, so its toolbar keeps clear of the larger target (44px + 12px gap);
+       otherwise a tap on Reset view at 320px lands on close. */
+    @media (pointer:coarse){
+      .img-lightbox-close,.img-lightbox-fit{width:44px;height:44px;}
+      .img-lightbox-fit{right:max(76px,calc(env(safe-area-inset-right,0px) + 76px));}
+      .mermaid-viewer--lightbox .mermaid-viewer-toolbar{padding-right:calc(max(20px,env(safe-area-inset-right,0px)) + 56px);}
+    }
   .img-lightbox-nav{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:44px;border:none;border-radius:50%;background:rgba(255,255,255,.12);color:#fff;font-size:28px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s,opacity .15s;z-index:1;opacity:.6;}
   .img-lightbox-nav:hover{background:rgba(255,255,255,.28);opacity:1;}
   .img-lightbox-nav-prev{left:16px;}
@@ -2789,6 +2860,8 @@
   .composer-workspace-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .composer-reasoning-chip{display:inline-flex;align-items:center;gap:5px;max-width:none;padding:8px 10px;border-radius:999px;border:1px solid transparent;background-color:transparent;color:var(--muted);font-weight:500;cursor:pointer;transition:color .15s,background-color .15s,border-color .15s;}
   .composer-reasoning-chip.inactive{opacity:.78;}
+  .composer-reasoning-chip:disabled,.composer-mobile-config-action:disabled{opacity:.65;cursor:wait;}
+  .composer-footer.cf-measuring,.composer-footer.cf-measuring *{transition:none!important;}
   .composer-reasoning-chip:hover{color:var(--text);background-color:var(--hover-bg);}
   .composer-reasoning-chip.active{color:var(--text);background:var(--accent-bg);border-color:var(--accent-bg);}
   .composer-reasoning-icon,.composer-reasoning-chevron{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1;}
@@ -3437,7 +3510,7 @@
     .session-actions{display:none;}
     .session-item{padding-right:6px;}
     .session-item.streaming,.session-item.unread{padding-right:40px;}
-    .session-item:focus-within,.session-item.menu-open{padding-right:6px;}
+    .session-item:has(:focus-visible),.session-item.menu-open{padding-right:6px;}
   }
 
   @media (max-width: 340px){
@@ -3508,6 +3581,11 @@
 .ws-dropdown-footer{left:0;right:auto;bottom:calc(100% + 4px);min-width:280px;max-width:min(420px,calc(100vw - 32px));}
 .model-dropdown{display:none;position:absolute;bottom:calc(100% + 4px);left:0;min-width:280px;max-width:min(420px,calc(100vw - 32px));background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:200;overflow:hidden;max-height:min(70vh,640px);overflow-y:auto;}
 .model-dropdown.open{display:block;}
+/* The dropdown container is a programmatic focus target (touch-only devices), and
+   after any key press it matches :focus-visible. The highlighted row already
+   shows where the keyboard is, so Chromium's default ring around the whole menu
+   is noise — suppressed on purpose. */
+.model-dropdown:focus-visible{outline:none;}
 /* Phone path (#6080): the model picker is reparented to <body> and switched to
    position:fixed by _positionModelDropdown() so it escapes the .composer-footer
    containing block (container-type:inline-size, plus a backdrop-filter under the
@@ -3604,6 +3682,7 @@
 .ws-drag-handle:active{cursor:grabbing;}
 .ws-row.dragging{opacity:.35;border:1px dashed var(--accent-bg-strong);}
 .ws-row.drag-over{border-color:var(--accent-text);background:var(--accent-bg);}
+.workspaces-list{flex:1;overflow-y:auto;padding:8px;min-height:0;}
 .ws-action-btn{padding:4px 8px;border-radius:6px;font-size:11px;font-weight:600;border:1px solid var(--border2);background:rgba(255,255,255,.05);color:var(--muted);cursor:pointer;transition:all .15s;white-space:nowrap;}
 .ws-action-btn:hover{background:rgba(255,255,255,.1);color:var(--text);}
 /* ── Profile dropdown + management panel ── */
@@ -3791,7 +3870,8 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
   display:flex;align-items:center;justify-content:center;
   line-height:1;
 }
-.file-item:hover .file-del-btn{ width:16px;opacity:1;margin-left:2px; }
+.file-item:hover .file-del-btn,.file-item:focus-visible .file-del-btn{ width:16px;opacity:1;margin-left:2px; }
+.file-item:focus-visible{ outline:2px solid var(--accent);outline-offset:-2px; }
 .file-del-btn:hover{ color:var(--accent); }
 
 /* file-name must be a flex child that can shrink to zero */
@@ -3852,8 +3932,13 @@ body.resizing .sidebar{transition:none!important;}
 
 /* ── Tool call cards ── */
 /* Running indicator dot (pulsing) */
-@keyframes wlpulse{0%,100%{box-shadow:0 0 0 0 var(--accent-bg-strong);}50%{box-shadow:0 0 0 5px rgba(255,215,0,0);}}
+/* The dot core stays solid (full-opacity contrast in every theme); the pulse
+   lives on a ::after ring animated with transform:scale + opacity — both
+   compositor-only, so no scene repaint per frame (UX gate: an opacity-only
+   pulse on the dot itself dropped to ~1.6:1 contrast in light theme). */
+@keyframes wlring{0%{transform:scale(1);opacity:.45;}100%{transform:scale(2.4);opacity:0;}}
 .tool-card-running-dot{
+  position:relative;
   display:inline-block;
   width:7px;
   height:7px;
@@ -3862,9 +3947,20 @@ body.resizing .sidebar{transition:none!important;}
   opacity:1;
   flex-shrink:0;
   vertical-align:middle;
-  animation:wlpulse 1.3s ease-in-out infinite;
 }
-.tl-rundot{width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0;animation:wlpulse 1.3s ease-in-out infinite;}
+.tool-card-running-dot::after,.tl-rundot::after{
+  content:"";
+  position:absolute;
+  inset:0;
+  border-radius:50%;
+  background:var(--accent);
+  animation:wlring 1.3s ease-out infinite;
+  pointer-events:none;
+}
+.tl-rundot{position:relative;width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0;}
+@media (prefers-reduced-motion:reduce){
+  .tool-card-running-dot::after,.tl-rundot::after{animation:none;opacity:0;}
+}
 /* Show more button inside tool card result */
 .tool-card-more{background:none;border:none;color:var(--blue);font-size:10px;cursor:pointer;padding:3px 0 0;opacity:.7;display:block;}
 .tool-card-more:hover{opacity:1;}
@@ -4246,8 +4342,17 @@ body.resizing .sidebar{transition:none!important;}
 .tool-group-body .tool-card-row{width:100%;max-width:100%;margin:0;box-sizing:border-box;}
 .tool-worklog-tool-group-body .tool-card-icon,
 .tool-group-body .tool-card-icon{display:none;}
+/* #7495 UX gate: the compact header keeps ~5px of left room for the running
+   dot — the ::after ring scales to 2.4x of the 7px dot (~4.9px past the dot
+   each side), and with padding-left:0 the dot sat on the card's
+   overflow:hidden edge, clipping the ring straight (D shape) in the default
+   Compact Worklog mode. Applies to EVERY compact worklog card header — the
+   standalone live running card included, not only grouped rows — so running
+   and completed rows share one left inset and the completed→grouped move
+   doesn't shift the row by those pixels. */
+.tool-worklog-list .tool-card-header,
 .tool-worklog-tool-group-body .tool-card-header,
-.tool-group-body .tool-card-header{margin-left:0;padding-left:0;}
+.tool-group-body .tool-card-header{margin-left:0;padding-left:5px;}
 .tool-worklog-tool-group-body .tool-card-detail,
 .tool-group-body .tool-card-detail{width:100%;max-width:100%;box-sizing:border-box;}
 .agent-activity-status{display:grid;grid-template-columns:18px minmax(0,1fr) auto;align-items:start;gap:var(--space-2);padding:5px 0;color:var(--muted);font-size:var(--font-size-xs);line-height:1.45;border-bottom:1px solid color-mix(in srgb,var(--border-subtle) 60%,transparent);}
@@ -4262,11 +4367,6 @@ body.resizing .sidebar{transition:none!important;}
 .tool-call-group-label{font-weight:600;color:var(--muted);position:relative;display:inline-block;overflow:hidden;}
 .tool-call-group[data-live-tool-call-group="1"] .tool-call-group-label{
   color:var(--muted);
-}
-@media (prefers-reduced-motion: reduce){
-  .tool-card-running-dot{
-    animation:none;
-  }
 }
 .tool-card{background:var(--surface-subtle);border:1px solid var(--border);border-left:2px solid var(--border-muted);border-radius:8px;margin:0;overflow:hidden;transition:border-color .15s,background .15s;}
 .tl{background:transparent;border:0;border-left:0;border-radius:0;margin:0;overflow:visible;transition:none;}
@@ -4360,6 +4460,11 @@ body.resizing .sidebar{transition:none!important;}
 .transparent-event-row:focus-within{
   border-color:var(--border-subtle);
   background:color-mix(in srgb,var(--surface-subtle) 48%,transparent);
+}
+/* Hover on an open row should brighten it, not fade it back below its open tint (62%). */
+.transparent-event-row[data-expanded="1"]:hover,
+.transparent-event-row[data-expanded="1"]:focus-within{
+  background:color-mix(in srgb,var(--surface-subtle) 72%,transparent);
 }
 /* Transparent Stream: both tool AND thinking inner cards must reset to a flat,
    transparent row. The thinking-card previously kept its base accent-bg/border/
@@ -4571,9 +4676,24 @@ body.resizing .sidebar{transition:none!important;}
 .transparent-event-progress::after{
   content:none;
 }
+/* The running segment is 60% of the track. Translate it across the clip
+   instead of changing offsets and relaying out the transcript each frame. */
 @keyframes transparent-progress-shimmer{
-  0%{left:0;right:100%;}
-  100%{left:100%;right:0;}
+  0%{transform:translateX(-100%);}
+  100%{transform:translateX(200%);}
+}
+@media (prefers-reduced-motion:reduce){
+  /* #7495 UX gate: with the animation simply stopped, the 60%-wide segment
+     froze at the left edge and read as determinate progress stuck at 60%,
+     then jumped to 100% on completion. Render the running state as a
+     full-width faint rail instead — no motion, no fake percent, and the
+     completion geometry no longer changes. Declared after the
+     [data-progress-percent] width rule so it wins at equal specificity. */
+  .transparent-event-progress[data-progress-running="1"]::before{
+    animation:none;
+    left:0;right:0;width:100%;
+    transition:none;
+  }
 }
 .transparent-event-row + .transparent-event-row::before{
   content:none;
@@ -5192,6 +5312,7 @@ main.main > #mainPlugin{display:none;}
 /* Sidebar menu (lives in the left sidebar under the cog panel) */
 .panel-view#panelSettings{gap:0;padding:0;}
 .panel-head{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:41px;padding:8px 12px;border-bottom:1px solid var(--border);font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;flex-shrink:0;}
+.panel-head-title{margin:0;font:inherit;color:inherit;letter-spacing:inherit;text-transform:inherit;}
 .panel-head-actions{display:flex;align-items:center;gap:4px;text-transform:none;letter-spacing:normal;}
 .panel-head-btn{width:24px;height:24px;padding:0;display:inline-flex;align-items:center;justify-content:center;border:none;background:transparent;border-radius:6px;color:var(--muted);cursor:pointer;transition:background .15s,color .15s;flex-shrink:0;}
 .mobile-sidebar-close{display:none;}
@@ -5514,6 +5635,7 @@ main.main > #mainPlugin{display:none;}
 .provider-quota-details{display:flex;flex-wrap:wrap;gap:6px;width:100%;}
 .provider-quota-details span{font-size:11px;line-height:1.35;color:var(--muted);border:1px solid var(--border);border-radius:999px;background:var(--sidebar);padding:4px 8px;}
 .provider-quota-message{font-size:12px;color:var(--muted);line-height:1.45;}
+.provider-quota-body>.provider-quota-message{width:100%;}
 .provider-quota-pool{width:100%;min-width:0;border:1px solid var(--border);border-radius:10px;background:var(--sidebar);overflow:hidden;}
 .provider-quota-pool summary{display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer;list-style:none;padding:9px 10px;font-size:12px;color:var(--text);font-weight:650;}
 .provider-quota-pool summary::-webkit-details-marker{display:none;}
@@ -5529,7 +5651,7 @@ main.main > #mainPlugin{display:none;}
 .provider-quota-pool-row-head strong{font-size:10px;text-transform:capitalize;border-radius:999px;padding:2px 7px;background:var(--accent-bg);color:var(--accent-text);white-space:nowrap;}
 .provider-quota-pool-row-available .provider-quota-pool-row-head strong{background:rgba(34,197,94,.12);color:#16a34a;}
 :root.dark .provider-quota-pool-row-available .provider-quota-pool-row-head strong{background:rgba(34,197,94,.16);color:#4ade80;}
-.provider-quota-pool-row-exhausted .provider-quota-pool-row-head strong{background:rgba(234,179,8,.12);color:var(--warning);}
+.provider-quota-pool-row-exhausted .provider-quota-pool-row-head strong{background:rgba(234,179,8,.12);color:color-mix(in srgb,var(--warning) 55%,var(--text));}
 .provider-quota-pool-windows{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:6px;}
 .provider-quota-pool-window{min-width:0;border:1px solid var(--border);border-radius:7px;background:var(--sidebar);padding:7px 8px;}
 .provider-quota-pool-window span{display:block;font-size:10.5px;color:var(--muted);margin-bottom:2px;}
@@ -5540,8 +5662,13 @@ main.main > #mainPlugin{display:none;}
 .provider-quota-pool-details span{font-size:10.5px;line-height:1.3;color:var(--muted);border:1px solid var(--border);border-radius:999px;background:var(--sidebar);padding:3px 7px;}
 .provider-quota-card-available .provider-quota-badge{background:rgba(34,197,94,.12);color:#16a34a;}
 :root.dark .provider-quota-card-available .provider-quota-badge{background:rgba(34,197,94,.16);color:#4ade80;}
-.provider-quota-card-no_key .provider-quota-badge,.provider-quota-card-unsupported .provider-quota-badge{background:rgba(234,179,8,.12);color:var(--warning);}
+/* Warning badges share the message's hue, pulled toward the text colour: pure --warning on its own
+   12% pill is ~2.4:1 on the default light theme. */
+.provider-quota-card-no_key .provider-quota-badge,.provider-quota-card-unsupported .provider-quota-badge,.provider-quota-card-unavailable .provider-quota-badge{background:rgba(234,179,8,.12);color:color-mix(in srgb,var(--warning) 55%,var(--text));}
 .provider-quota-card-invalid_key .provider-quota-badge{background:color-mix(in srgb,var(--error) 12%,transparent);color:var(--error);}
+.provider-quota-card-invalid_key .provider-quota-body>.provider-quota-message{color:var(--error);}
+/* Body copy, not a badge: pull the warning hue toward the text colour so a light card keeps readable contrast. */
+.provider-quota-card-unavailable:not(.provider-quota-card-neutral) .provider-quota-body>.provider-quota-message{color:color-mix(in srgb,var(--warning) 55%,var(--text));}
 @media (max-width: 520px){
   .provider-quota-card{padding:12px;}
   .provider-quota-header{flex-wrap:wrap;}
@@ -5880,8 +6007,8 @@ main.main > #mainPlugin{display:none;}
 .session-worktree-indicator svg{width:12px;height:12px;}
 .session-item:hover .session-branch-indicator,
 .session-item:hover .session-worktree-indicator,
-.session-item:focus-within .session-branch-indicator,
-.session-item:focus-within .session-worktree-indicator,
+.session-item:has(:focus-visible) .session-branch-indicator,
+.session-item:has(:focus-visible) .session-worktree-indicator,
 .session-item.menu-open .session-branch-indicator{
   opacity:.85;
   color:var(--text);
@@ -5954,7 +6081,7 @@ main.main > #mainPlugin{display:none;}
 .session-tree-badge{display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;font-size:9px;font-weight:700;padding:0 4px;border-radius:8px;background:rgba(99,179,237,.2);color:#63b3ed;margin-left:auto;flex-shrink:0;user-select:none;}
 
 /* ── Session tags ── */
-.session-tag{display:inline-block;font-size:9px;font-weight:600;padding:1px 5px;margin-left:4px;border-radius:3px;background:rgba(99,179,237,.2);color:#63b3ed;cursor:pointer;vertical-align:middle;}
+.session-tag{display:inline-block;flex:0 0 auto;min-width:0;max-width:10ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:9px;font-weight:600;padding:1px 5px;margin-left:0;border-radius:3px;background:rgba(99,179,237,.2);color:#63b3ed;cursor:pointer;vertical-align:middle;}
 .session-tag:hover{background:rgba(99,179,237,.35);}
 
 /* ── File rename input ── */
@@ -6058,6 +6185,21 @@ main.main > #mainPlugin{display:none;}
    past the viewport's height now that its rows are taller there. */
 .project-picker-item:focus-visible{background:rgba(255,255,255,.08);color:var(--text);outline:2px solid var(--focus-ring);outline-offset:-2px;}
 .project-picker-item.active:focus-visible{color:var(--blue);}
+.project-picker-create:focus-visible{background:linear-gradient(rgba(255,255,255,.08),rgba(255,255,255,.08)),var(--sidebar);}
+/* On a light theme the white wash above is invisible and the translucent
+   --focus-ring is about 1.5:1 on the picker: the theme's own hover wash under
+   the pointer, and the skin's --accent-text as the focus ring. Not --accent:
+   on the palest skins (Terracotta, Sienna, Neon Paint) and on the default
+   skin's batch picker it is under 3:1 against the picker; --accent-text is
+   the accent made dark enough to read as text, and is over 4:1 on every skin.
+   "+ New project" keeps its accent tint: the first rule outranks its own hover,
+   so it repeats the opaque form of that hover (the row is sticky and the list
+   scrolls under it). Its focus rule drawing it in full is kept for skins that
+   still dim it with opacity. */
+:root:not(.dark) .project-picker-item:hover{background:var(--hover-bg);}
+:root:not(.dark) .project-picker-create:hover{background:linear-gradient(var(--accent-bg),var(--accent-bg)),var(--sidebar);}
+:root:not(.dark) .project-picker-item:focus-visible{outline-color:var(--accent-text);}
+:root:not(.dark) .project-picker-create:focus-visible{opacity:1;}
 @media (pointer:coarse){.project-picker-item{min-height:44px;padding-top:8px;padding-bottom:8px;font-size:13px;}}
 .project-picker:not(.batch-project-picker){max-height:calc(100dvh - 16px);overflow-y:auto;overscroll-behavior:contain;scroll-padding-bottom:52px;}
 /* The batch picker renders inline in the selection bar, so on touch its 44px rows would push the
@@ -6528,6 +6670,14 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
 .msg-row[data-role="assistant"]:hover .msg-foot-with-usage .msg-actions {
   opacity: 1;
 }
+/* Touch devices cannot hover: keep the timestamp and actions of a footer that
+   carries usage or a model label visible there (#8287 UX gate). */
+@media (hover: none), (max-width: 640px) {
+  .msg-foot-with-usage .msg-time,
+  .msg-foot-with-usage .msg-actions {
+    opacity: 1;
+  }
+}
 
 /* Hide footer while editing to keep the edit bar the only footer-level affordance */
 .msg-row[data-editing="1"] .msg-foot { display: none; }
@@ -6761,7 +6911,16 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
   .workspace-artifact-directory{display:flex;min-width:0;overflow:hidden;white-space:nowrap;font-family:var(--font-mono);font-size:11px;color:var(--muted);}
   .workspace-artifact-directory-head{min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;}
   .workspace-artifact-directory-tail{flex:0 0 auto;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;}
-  .workspace-artifact-meta{display:inline-block;margin-top:4px;padding:1px 5px;border:1px solid var(--border);border-radius:999px;color:var(--muted);font-size:11px;line-height:1.3;}
+.workspace-artifact-meta{display:inline-block;margin-top:4px;padding:1px 5px;border:1px solid var(--border);border-radius:999px;color:var(--muted);font-size:11px;line-height:1.3;}
+.workspace-artifact-files>summary,.workspace-artifact-skills>summary{cursor:pointer;color:var(--text);font-size:12px;font-weight:500;}
+.workspace-artifact-skills{margin-top:10px;border-top:1px solid var(--border);padding-top:8px;}
+.workspace-artifact-skills-only{margin-top:0;border-top:0;padding-top:0;}
+.workspace-artifact-file-count,.workspace-artifact-skill-count{margin-left:6px;color:var(--muted);}
+@media(pointer:coarse){.workspace-artifact-files>summary,.workspace-artifact-skills>summary{min-height:44px;box-sizing:border-box;padding:14px 0;}}
+.workspace-artifact-skill-list{margin-top:4px;}
+.workspace-artifact-skill-row{display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:5px 0;border-top:1px solid var(--border);font-size:11px;}
+.workspace-artifact-skill-name{min-width:0;overflow-wrap:anywhere;font-family:var(--font-mono);}
+.workspace-artifact-skill-uses{flex:0 0 auto;color:var(--muted);text-align:right;white-space:nowrap;}
 .workspace-artifacts-count{opacity:.65;font-size:11px;}
 .rightpanel[data-active-tab="artifacts"] .breadcrumb-bar,.rightpanel[data-active-tab="artifacts"] .file-tree,.rightpanel[data-active-tab="artifacts"] #wsEmptyState{display:none!important;}
 .rightpanel[data-active-tab="artifacts"] .workspace-artifacts{display:block;}

@@ -131,40 +131,7 @@ def test_merge_helper_repairs_malformed_order_and_is_idempotent():
     """A reconnect can already contain [live assistant, pending user]. The
     canonical helper must move that exact user row before the live boundary,
     preserve its metadata/attachments, and remain ordered on repeated probes."""
-    helpers = "\n".join(
-        [
-            _function_source(SESSIONS_JS, "_messageComparableText"),
-            _function_source(SESSIONS_JS, "_stripAttachedFilesMarker"),
-            _function_source(SESSIONS_JS, "_stripForcedSkillEnvelope"),
-            _function_source(SESSIONS_JS, "_normalizeUserTranscriptText"),
-            _function_source(SESSIONS_JS, "_sameTranscriptMessage"),
-            _function_source(SESSIONS_JS, "_currentTailUserMessage"),
-            _function_source(SESSIONS_JS, "_hasCurrentTailUserDuplicate"),
-            _function_source(SESSIONS_JS, "_mergePendingSessionMessage"),
-        ]
-    )
-    script = f"""
-{helpers}
-function getPendingSessionMessage(session, messages){{
-  const text=String(session.pending_user_message||'').trim();
-  if(!text) return null;
-  return {{role:'user',content:text,_pending:true,_ts:session.pending_started_at}};
-}}
-const historical={{role:'user',content:'same prompt',_ts:1}};
-const settled={{role:'assistant',content:'old answer',_ts:2}};
-const live={{role:'assistant',content:'working',_live:true,_ts:4}};
-const misplaced={{
-  role:'user',content:'same prompt',_pending:true,_ts:3,
-  attachments:[{{path:'proof.txt'}}],_source:'resume'
-}};
-const messages=[historical,settled,live,misplaced];
-const session={{pending_user_message:'same prompt',pending_started_at:3}};
-const first=_mergePendingSessionMessage(session,messages);
-const afterFirst=messages.map(m=>({{role:m.role,content:m.content,live:!!m._live,ts:m._ts,attachments:m.attachments,source:m._source}}));
-const second=_mergePendingSessionMessage(session,messages);
-process.stdout.write(JSON.stringify({{first,second,afterFirst,final:messages}}));
-"""
-    result = _run_node(script)
+    result = _run_node(_malformed_order_script())
 
     assert result["first"] is True
     assert result["second"] is False
@@ -179,6 +146,131 @@ process.stdout.write(JSON.stringify({{first,second,afterFirst,final:messages}}))
     assert repaired["attachments"] == [{"path": "proof.txt"}]
     assert repaired["source"] == "resume"
     assert sum(1 for row in result["final"] if row.get("_ts") == 3) == 1
+
+
+# The turn-ownership helpers the zero-offset branch of the merge uses (#8632). The repair test above must load them:
+# without them the merge's `typeof _currentTurnInsertIndex` guard sends every probe down the legacy path and the
+# ownership branch is never exercised.
+_OWNERSHIP_HELPERS = (
+    "_messageTimestampValue",
+    "_messageTurnOwnership",
+    "_isCompactionMarkerRow",
+    "_currentTurnInsertIndex",
+    "_markRecoveredPromptRow",
+)
+
+
+# The real pending-prompt producer (static/ui.js) and the helpers it calls. A stub that never adopts an existing row
+# hides the adopt-and-hydrate behaviour the ownership branch relies on, so the ownership tests load the real one.
+_REAL_PRODUCER = (
+    "_pendingCurrentTailUserMessage",
+    "_messageTimestampSeconds",
+    "_activeTurnTokenMatches",
+    "_pendingActiveTurnUserMessage",
+    "getPendingSessionMessage",
+)
+
+
+def _malformed_order_script(
+    extra_rows: str = "",
+    ownership: bool = True,
+    real_producer: bool = False,
+    misplaced_attachments: bool = True,
+    pending_attachments: str = "",
+) -> str:
+    names = [
+        "_messageComparableText",
+        "_stripAttachedFilesMarker",
+        "_stripForcedSkillEnvelope",
+        "_normalizeUserTranscriptText",
+        "_sameTranscriptMessage",
+        "_currentTailUserMessage",
+        "_hasCurrentTailUserDuplicate",
+        "_mergePendingSessionMessage",
+    ]
+    if ownership:
+        names += list(_OWNERSHIP_HELPERS)
+    helpers = "\n".join(_function_source(SESSIONS_JS, name) for name in names)
+    epsilon = "const _RECOVERED_PROMPT_TS_EPSILON=0.001;" if ownership else ""
+    if real_producer:
+        producer = "const _PENDING_ACTIVE_TURN_TS_EPSILON=1e-6;\n" + "\n".join(
+            _function_source(UI_JS, name) for name in _REAL_PRODUCER
+        )
+    else:
+        producer = """function getPendingSessionMessage(session, messages){
+  const text=String(session.pending_user_message||'').trim();
+  if(!text) return null;
+  return {role:'user',content:text,_pending:true,_ts:session.pending_started_at};
+}"""
+    attachments = "attachments:[{path:'proof.txt'}]," if misplaced_attachments else ""
+    session_attachments = f",pending_attachments:{pending_attachments}" if pending_attachments else ""
+    return f"""
+{epsilon}
+{helpers}
+{producer}
+const historical={{role:'user',content:'same prompt',_ts:1}};
+const settled={{role:'assistant',content:'old answer',_ts:2}};
+const live={{role:'assistant',content:'working',_live:true,_ts:4}};
+const misplaced={{
+  role:'user',content:'same prompt',_pending:true,_ts:3,
+  {attachments}_source:'resume'
+}};
+const messages=[historical,settled{extra_rows},live,misplaced];
+const session={{pending_user_message:'same prompt',pending_started_at:3{session_attachments}}};
+const first=_mergePendingSessionMessage(session,messages);
+const afterFirst=messages.map(m=>({{role:m.role,content:m.content,live:!!m._live,ts:m._ts,attachments:m.attachments,source:m._source,displayOnly:!!m._displayOnlyRow}}));
+const second=_mergePendingSessionMessage(session,messages);
+process.stdout.write(JSON.stringify({{first,second,afterFirst,final:messages}}));
+"""
+
+
+_TURN_ROWS = ",{role:'tool',content:'ran tests',_ts:3.5},{role:'assistant',content:'narration',_ts:3.6}"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_ownership_branch_moves_a_misplaced_prompt_in_front_of_persisted_turn_rows():
+    """#8632 follow-up: with persisted current-turn rows before the live tail, the zero-offset ownership branch must
+    move the misplaced prompt row in front of them (one row, attachments and provenance kept), not insert a second
+    copy and leave the original behind the live row. The moved row is display-only, like a freshly recovered prompt:
+    an unpersisted row in front of saved rows must not shift the saved-row indices edit/fork rely on."""
+    result = _run_node(_malformed_order_script(_TURN_ROWS, real_producer=True))
+
+    assert result["first"] is True
+    assert result["second"] is False
+    assert [(row["role"], row["content"]) for row in result["afterFirst"]] == [
+        ("user", "same prompt"),
+        ("assistant", "old answer"),
+        ("user", "same prompt"),
+        ("tool", "ran tests"),
+        ("assistant", "narration"),
+        ("assistant", "working"),
+    ]
+    moved = result["afterFirst"][2]
+    assert moved["ts"] == 3
+    assert moved["attachments"] == [{"path": "proof.txt"}]
+    assert moved["source"] == "resume"
+    assert moved["displayOnly"] is True
+    assert sum(1 for row in result["final"] if row.get("_ts") == 3) == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_ownership_branch_hydrates_pending_attachments_onto_the_moved_prompt():
+    """The moved row goes through the real producer's adopter, so attachments the session still carries as
+    `pending_attachments` reach a misplaced row that lost them (badges and previews stay on the prompt)."""
+    result = _run_node(
+        _malformed_order_script(
+            _TURN_ROWS,
+            real_producer=True,
+            misplaced_attachments=False,
+            pending_attachments="[{path:'proof.txt'}]",
+        )
+    )
+
+    assert result["first"] is True
+    moved = result["afterFirst"][2]
+    assert (moved["role"], moved["ts"]) == ("user", 3)
+    assert moved["attachments"] == [{"path": "proof.txt"}]
+    assert sum(1 for row in result["final"] if row.get("role") == "user") == 2
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

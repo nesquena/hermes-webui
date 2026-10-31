@@ -14,10 +14,12 @@ import sqlite3
 import threading
 import time
 import uuid
+import weakref
+from collections.abc import Mapping
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast, overload
+from typing import Literal, NamedTuple, cast, overload
 
 try:  # pragma: no cover - platform-specific imports.
     import fcntl as _fcntl
@@ -1455,6 +1457,12 @@ def _load_session_from_path(path: Path) -> "Session | None":
         data = json.loads(path.read_text(encoding='utf-8'))
     except Exception:
         return None
+    # The writer (`save`) already validated the eager-checkpoint fact against
+    # the transcript it persisted, so a full load restores it as written and
+    # keeps only the turn-identity check (fact vs pending_started_at). Re-walking
+    # a transcript `load()` may itself rewrite (duplicate-partial collapse) would
+    # drop a fact the writer vouched for.
+    data['_pending_hidden_wakeup_from_writer'] = True
     data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
     session_id = data.get('session_id')
     if not isinstance(session_id, str) or not session_id:
@@ -1626,6 +1634,7 @@ def _deduplicate_exact_stable_messages(messages):
 
 
 _SIDEBAR_HEAVY_METADATA_FIELDS = (
+    'skill_provenance',
     'compression_anchor_summary',
     'compression_anchor_details',
     'context_engine_state',
@@ -1642,6 +1651,92 @@ def _strip_sidebar_heavy_metadata(row: dict) -> dict:
     for key in _SIDEBAR_HEAVY_METADATA_FIELDS:
         row.pop(key, None)
     return row
+
+
+def _has_persisted_truncation(value) -> bool:
+    """True when ``value`` is a real persisted truncation boundary.
+
+    ``truncation_boundary`` rides the sidecar metadata prefix and marks a
+    transcript the writer rewrote: the rows below it are gone from the sidecar
+    while the append-only state.db still carries them. Absent/zero/unparseable
+    answers False.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(parsed) and parsed > 0
+
+
+def _validated_pending_hidden_wakeup_at(session, *, require_row: bool = True):
+    """Return the checkpoint fact only while it names the current pending turn.
+
+    The fact is stamped by the eager checkpoint, and it must survive only as long
+    as the pending turn it belongs to. With ``require_row`` (the writer's check)
+    it must also still name a row in this transcript: a truncation or a reload
+    that dropped the row invalidates it.
+
+    ``require_row`` also lets the transcript stand in for the stamp when the
+    object never held one: the sidecar row that the pending turn materialised
+    into IS the fact, so a save of a session built without the eager stamp (a
+    sidecar written before the fact existed, a reload that dropped it) proves it
+    from the rows it is about to persist instead of falling back to the
+    conservative branch and discounting a row the sidecar already excludes.
+
+    A persisted truncation boundary still invalidates the fact: the rewrite may
+    already have removed that row (#7882 re-gate finding 2).
+    ``load_metadata_only`` skips the transcript on PURPOSE and therefore passes
+    ``require_row=False``: a transcript-less ingress is no evidence either way,
+    so the fact survives it (#7882 re-gate finding 1, pinned by the
+    metadata-stub and missing-index tests).
+
+    Every unknown answers ``None`` -- the sidebar then treats the pending hidden
+    row as still owed a discount, which is the conservative branch (#7882 cap
+    follow-up, GUIDELINES rule 3).
+    """
+    source = str(getattr(session, 'pending_user_source', '') or '').strip().lower()
+    if source != 'delegation_wakeup':
+        return None
+    value = getattr(session, '_pending_hidden_wakeup_at', None)
+    started = getattr(session, 'pending_started_at', None)
+    if isinstance(started, bool) or not isinstance(started, (int, float)):
+        return None
+    if float(started) <= 0:
+        return None
+    if value is None:
+        if not require_row:
+            # No stamp and no transcript to prove one from: nothing vouches for
+            # the row, so the discount stays owed.
+            return None
+        value = started
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if float(value) <= 0:
+        return None
+    if float(value) != float(started):
+        # The fact belongs to a different pending turn.
+        return None
+    if not require_row:
+        return float(value)
+    if _has_persisted_truncation(
+        getattr(session, 'truncation_boundary', None)
+    ):
+        # The transcript was rewritten past this boundary and the append-only
+        # state.db still holds the removed rows: the checkpointed row is gone,
+        # so its fact must not come back on the next full load (#7882 re-gate
+        # finding 2).
+        return None
+    for message in getattr(session, 'messages', None) or []:
+        if not isinstance(message, dict):
+            continue
+        if str(message.get('_source') or '').strip().lower() != 'delegation_wakeup':
+            continue
+        timestamp, timestamp_valid = _message_exact_timestamp_details(message)
+        if timestamp_valid and timestamp == float(value):
+            return float(value)
+    return None
 
 
 def _validated_webui_pending_user_timestamp_identity(session, value):
@@ -1674,11 +1769,30 @@ def _validated_webui_pending_user_timestamp_identity(session, value):
     return (stream_id, pending_timestamp)
 
 
+def _normalize_skill_provenance(value) -> dict[str, int]:
+    """Keep only the persisted skill-name to positive-count mapping shape."""
+    if not isinstance(value, Mapping):
+        return {}
+    normalized = {}
+    for name, count in value.items():
+        if (
+            not isinstance(name, str)
+            or not name
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count <= 0
+        ):
+            continue
+        normalized[name] = count
+    return normalized
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), created_workspace=None,
                  model=DEFAULT_MODEL,
                  model_provider=None,
+                 reasoning_effort=None,
                  messages=None, created_at=None, updated_at=None,
                  tool_calls=None, pinned: bool=False, archived: bool=False,
                  project_id: str=None, profile=None,
@@ -1732,6 +1846,7 @@ class Session:
                  gateway_run=None,
                  delegation_reservation=None,
                  delegation_cutoff_ts=None,
+                 skill_provenance=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -1754,6 +1869,17 @@ class Session:
         )
         self.model = model
         self.model_provider = str(model_provider).strip().lower() if model_provider else None
+        # None means a legacy session with no session-owned preference yet;
+        # the runtime then falls back to the active profile config.  The empty
+        # string is meaningful: it explicitly selects the provider default.
+        self.reasoning_effort = (
+            str(reasoning_effort).strip().lower()
+            if reasoning_effort is not None
+            else None
+        )
+        # The effort this object last loaded or saved; save() uses it to tell
+        # an own change from a stale snapshot (#7881).
+        self._reasoning_effort_saved = self.reasoning_effort
         # #5979: signature of the model the user DELIBERATELY picked this session
         # (``"<model>\x1f<provider>"``), or None. Used by the streaming resolver
         # to preserve a custom-proxy vendor namespace on a COLD catalog ONLY when
@@ -1785,6 +1911,21 @@ class Session:
         self.pending_attachments = pending_attachments or []
         self.pending_started_at = pending_started_at
         self.pending_user_source = pending_user_source
+        # Exact start timestamp of the transcript row the CURRENT pending hidden
+        # wakeup materialised into (#7882 cap follow-up). The eager checkpoint
+        # stamps it at the point of intent; ``save`` re-validates it against the
+        # transcript and emits it in the metadata prefix as
+        # ``_pending_hidden_wakeup_at`` so a capped-out sidebar row -- which
+        # cannot re-walk the transcript -- still knows the row it would
+        # otherwise discount a second time is already excluded. Restored from
+        # persisted metadata on load (it rides the prefix), but only while it
+        # still names this session's pending turn: an index rebuild that reloads
+        # the sidecar keeps the fact, a leftover fact from a finished turn does
+        # not come back.
+        # Raw persisted value: the constructor must never read the attribute it
+        # is about to assign (the validator would always see ``None``). Validated
+        # below, once ``truncation_boundary`` is assigned.
+        self._pending_hidden_wakeup_at = kwargs.get('_pending_hidden_wakeup_at')
         self._webui_pending_user_timestamp_identity = (
             _validated_webui_pending_user_timestamp_identity(
                 self, kwargs.get('_webui_pending_user_timestamp_identity')
@@ -1826,6 +1967,16 @@ class Session:
         )
         self.truncation_watermark = truncation_watermark
         self.truncation_boundary = truncation_boundary
+        # Validate the fact only now: the check reads ``truncation_boundary``,
+        # which is fresh from this call's argument, and a truncated transcript
+        # means the checkpointed row may already be gone.
+        self._pending_hidden_wakeup_at = _validated_pending_hidden_wakeup_at(
+            self,
+            require_row=not (
+                kwargs.get('_pending_hidden_wakeup_transcript_absent', False)
+                or kwargs.get('_pending_hidden_wakeup_from_writer', False)
+            ),
+        )
         self.clear_generation = clear_generation
         self.intentional_shrink_generation = intentional_shrink_generation
         self.transcript_generation = max(0, _parse_nonnegative_int(transcript_generation) or 0)
@@ -1854,11 +2005,16 @@ class Session:
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
         self.share_token = str(share_token).strip() if share_token else None
         self.share_created_at = share_created_at
+        self.skill_provenance_generation = max(
+            0,
+            _parse_nonnegative_int(kwargs.get('skill_provenance_generation')) or 0,
+        )
         self.gateway_run = gateway_run if isinstance(gateway_run, dict) else None
         # Gateway delegation rows leased for this session's next accepted turn (api.gateway_delegation_wakeup).
         self.delegation_reservation = delegation_reservation if isinstance(delegation_reservation, dict) else None
         # Last clear/truncation: Gateway delegation rows written before it are never woken into context.
         self.delegation_cutoff_ts = delegation_cutoff_ts if isinstance(delegation_cutoff_ts, (int, float)) else None
+        self.skill_provenance = _normalize_skill_provenance(skill_provenance)
         # #5854: a compact fingerprint of anchor_activity_scenes ({scene_key:
         # updated_at}) persisted BEFORE the messages array so the sidebar-poll
         # freshness check can compare scene freshness without parsing the full
@@ -1896,6 +2052,15 @@ class Session:
         return SESSION_DIR / f'{self.session_id}.json'
 
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+        # #7881: every save of this session id, skip_index=True included,
+        # holds one reentrant persistence lock across the persisted-effort
+        # read, the payload construction and the atomic replacement, so a
+        # save cannot freeze an effort that another save replaces before it
+        # lands. Lock order: persist -> _INDEX_WRITE_LOCK -> LOCK.
+        with _session_persist_lock(self.session_id):
+            return self._save_locked(touch_updated_at=touch_updated_at, skip_index=skip_index)
+
+    def _save_locked(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────
@@ -1922,16 +2087,42 @@ class Session:
             )
         if touch_updated_at:
             self.updated_at = time.time()
+        # #7881: only /api/reasoning picks an effort, and it saves under the
+        # session lock. Any other writer may hold a snapshot resolved before
+        # that pick. If this object has not changed the effort since it last
+        # loaded or saved it, keep the value on disk instead of rolling the
+        # pick back. This closes the stale-snapshot class for every writer.
+        # The persistence lock held by save() keeps this read current until
+        # the replacement below.
+        if self.reasoning_effort == getattr(self, '_reasoning_effort_saved', self.reasoning_effort):
+            on_disk = _persisted_reasoning_effort(self.path)
+            if on_disk is not _REASONING_EFFORT_ABSENT:
+                self.reasoning_effort = on_disk
+                # Move the baseline with the adoption, so a refused (early
+                # return) or failed (raise) save below cannot leave the
+                # adopted value looking like this object's own change.
+                self._reasoning_effort_saved = on_disk
         self._webui_pending_user_timestamp_identity = (
             _validated_webui_pending_user_timestamp_identity(
                 self, getattr(self, '_webui_pending_user_timestamp_identity', None)
             )
         )
+        # Keep the checkpoint fact only while it still names a row in this
+        # transcript AND the same turn the pending fields name (#7882 cap
+        # follow-up). The eager checkpoint is the only writer, but it is not the
+        # only path that later mutates the object: a reload drops the fact (a
+        # restored transcript has no pending turn), a truncation can remove the
+        # row, and settlement clears the pending fields before the next save.
+        # Any of those invalidates the fact, and an invalid fact must never
+        # reach the prefix -- a stale one would excuse a discount that is
+        # actually still owed.
+        _pending_hidden_wakeup_at = _validated_pending_hidden_wakeup_at(self)
+        self._pending_hidden_wakeup_at = _pending_hidden_wakeup_at
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
         METADATA_FIELDS = [
-            'session_id', 'title', 'workspace', 'created_workspace', 'model', 'model_provider', 'model_explicit_pick_signature', 'created_at', 'updated_at',
+            'session_id', 'title', 'workspace', 'created_workspace', 'model', 'model_provider', 'reasoning_effort', 'model_explicit_pick_signature', 'created_at', 'updated_at',
             'pinned', 'archived', 'project_id', 'profile',
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
@@ -1961,6 +2152,8 @@ class Session:
             'process_wakeup_pause',
             'share_token', 'share_created_at',
             'gateway_run', 'delegation_reservation', 'delegation_cutoff_ts',
+            'skill_provenance',
+            'skill_provenance_generation',
         ]
         guarded_messages, exact_replay_rows_removed = _deduplicate_exact_stable_messages(self.messages)
         if exact_replay_rows_removed:
@@ -1970,6 +2163,7 @@ class Session:
                 self.session_id,
             )
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
+        written_reasoning_effort = meta.get('reasoning_effort')
         # #5854: message_count and a compact anchor-scene fingerprint go in the
         # metadata prefix (BEFORE messages) so load_metadata_only() and the
         # sidebar-poll freshness check never have to parse the full (250-480KB)
@@ -1996,6 +2190,15 @@ class Session:
         # shrink as a growth and skip the #1558 backup. One save re-marks the
         # file, so the fast path still covers steady state.
         meta['_mc_v'] = _MESSAGE_COUNT_MARKER
+        # Eager-checkpoint provenance (#7882 cap follow-up): the exact start
+        # timestamp of the hidden wakeup row this sidecar already carries AND
+        # already excludes. Emitted in the prefix next to _mc_v, i.e. inside the
+        # metadata head a capped-out sidebar row reads, because the overlay's
+        # capped-out branch cannot re-walk the transcript. Only written while
+        # the fact is valid (see _validated_pending_hidden_wakeup_at), so a
+        # sidecar without a checkpoint is byte-identical to before.
+        if _pending_hidden_wakeup_at:
+            meta['_pending_hidden_wakeup_at'] = _pending_hidden_wakeup_at
         meta['anchor_scene_index'] = _anchor_scene_index_from_records(self.anchor_activity_scenes)
         # Keep the in-memory fingerprint aligned with what we just persisted, so a
         # later metadata-only reload of THIS object (or any fingerprint reader)
@@ -2171,9 +2374,11 @@ class Session:
                 f.flush()
                 os.fsync(f.fileno())
             if skip_index:
-                # Callers that explicitly skip the sidebar projection retain
-                # the existing same-session concurrency contract: their unique
-                # temp files may replace the sidecar independently.
+                # Callers that explicitly skip the sidebar projection do not
+                # take _INDEX_WRITE_LOCK; the per-session persistence lock
+                # held by save() still orders them against every other save
+                # of this session (#7881). The replace still bumps the
+                # #8267 sidecar write generation.
                 _replace_session_sidecar(tmp, self.path, self.session_id)
             else:
                 # Publish the sidecar and its sidebar projection as one ordered
@@ -2199,6 +2404,9 @@ class Session:
             except Exception:
                 pass
             raise
+        # The value this save actually wrote, not one set on the live object
+        # after the payload was built.
+        self._reasoning_effort_saved = written_reasoning_effort
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
@@ -2239,6 +2447,13 @@ class Session:
         # during the parse (TOCTOU guard against an atomic replace mid-read).
         _pre_read_sig = _sidecar_stat_signature(p)
         data = json.loads(p.read_text(encoding='utf-8'))
+        # The writer (`save`) already validated the eager-checkpoint fact
+        # against the transcript it persisted, so a full load restores it as
+        # written and keeps only the turn-identity check (fact vs
+        # pending_started_at). Re-walking a transcript `load()` may itself
+        # rewrite (duplicate-partial collapse) would drop a fact the writer
+        # vouched for.
+        data['_pending_hidden_wakeup_from_writer'] = True
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         data = _apply_session_draft_overlay(data, sid)
         session = cls(**data)
@@ -2312,6 +2527,14 @@ class Session:
             parsed['messages'] = []
             parsed['tool_calls'] = []
             parsed = _apply_session_draft_overlay(parsed, sid)
+            # This loader skips the transcript on PURPOSE, so an empty
+            # ``messages`` is no evidence that a checkpointed row vanished.
+            # Without this the eager-checkpoint fact would be dropped on every
+            # missing-index / metadata-stub ingress and the capped-out sidebar
+            # would undercount the continued conversation by one (#7882
+            # re-gate finding 1). A real truncation boundary still invalidates
+            # it (see _validated_pending_hidden_wakeup_at).
+            parsed['_pending_hidden_wakeup_transcript_absent'] = True
             session = cls(**parsed)
             sidecar_message_count = _parse_nonnegative_int(parsed.get('message_count'))
             index_message_count = None
@@ -2467,18 +2690,31 @@ class Session:
         last_message_at = _last_message_timestamp(self.messages) or self.updated_at
         if has_pending_user_message and self.pending_started_at:
             last_message_at = self.pending_started_at
+        # #7882 cap follow-up: the checkpoint fact is only emitted while it still
+        # names THIS session's pending turn. A truncation or a settled turn can
+        # leave a stale value in memory, and a stale fact would excuse a discount
+        # that is actually still owed.
+        _pending_hidden_wakeup_at = _validated_pending_hidden_wakeup_at(
+            self, require_row=False
+        )
         compact = {
             'session_id': self.session_id,
             'title': self.title,
             'workspace': self.workspace,
             'model': self.model,
             'model_provider': self.model_provider,
+            'reasoning_effort': self.reasoning_effort,
             'message_count': message_count,
             'created_at': self.created_at,
             'updated_at': self.updated_at,
             'last_message_at': last_message_at,
             'transcript_generation': self.transcript_generation,
             'transcript_generation_baseline': self.transcript_generation_baseline,
+            # A capped-out sidebar row cannot afford the reconciled walk, so
+            # the overlay needs the sidecar's own shrink authority from the
+            # metadata prefix: a truncated sidecar plus append-only state.db
+            # rows must not re-credit the removed suffix (#7882 cap follow-up).
+            **({'truncation_boundary': self.truncation_boundary} if self.truncation_boundary else {}),
             'pinned': self.pinned,
             'archived': self.archived,
             'project_id': self.project_id,
@@ -2544,6 +2780,22 @@ class Session:
                 not in ('', 'webui', 'fork')
                 else {}
             ),
+            # #7882 cap follow-up: the overlay's capped-out branch cannot re-walk
+            # the transcript, so the row has to carry the checkpoint provenance
+            # itself -- together with the pending turn's exact start timestamp,
+            # which is the identity ``_active_turn_token`` and every
+            # timestamp-provenance check in this module are built on. Emitting
+            # both here binds the fact to the turn that is pending NOW instead of
+            # trusting any older same-text row; a settled turn owes no discount
+            # and therefore carries neither.
+            **(
+                {
+                    'pending_started_at': self.pending_started_at,
+                    '_pending_hidden_wakeup_at': _pending_hidden_wakeup_at,
+                }
+                if _pending_hidden_wakeup_at
+                else {}
+            ),
             'is_cli_session': self.is_cli_session,
             'source_tag': self.source_tag,
             'raw_source': self.raw_source,
@@ -2555,6 +2807,7 @@ class Session:
             'process_wakeup_pause': self.process_wakeup_pause if isinstance(self.process_wakeup_pause, dict) else {},
             'share_token': self.share_token,
             'share_created_at': self.share_created_at,
+            'skill_provenance': dict(self.skill_provenance),
             'is_streaming': _is_streaming_session(
                 self.active_stream_id, active_stream_ids
             ) if include_runtime else False,
@@ -2562,6 +2815,27 @@ class Session:
         if sidebar_metadata_only:
             _strip_sidebar_heavy_metadata(compact)
         return compact
+
+    def record_skill_usage(self, names) -> bool:
+        """Increment counts for already-resolved, nonempty skill names."""
+        current = _normalize_skill_provenance(self.skill_provenance)
+        if isinstance(names, str):
+            names = (names,)
+        try:
+            iterator = iter(names)
+        except TypeError:
+            return False
+        for name in iterator:
+            if isinstance(name, str) and name:
+                current[name] = current.get(name, 0) + 1
+        if current == self.skill_provenance:
+            return False
+        self.skill_provenance = current
+        return True
+
+    def clear_skill_usage(self) -> None:
+        self.skill_provenance = {}
+        self.skill_provenance_generation += 1
 
 
 PROCESS_WAKEUP_PROVIDER_UNAVAILABLE_TYPES = frozenset({
@@ -5961,6 +6235,270 @@ def _prefix_message_count(path):
     return _parse_nonnegative_int(parsed.get('message_count'))
 
 
+#: ``_persisted_reasoning_effort()`` result for a CONFIRMED absence only: no
+#: sidecar yet, or a sidecar whose top-level object has no
+#: ``reasoning_effort`` key (written before #7881). A read miss is not this.
+_REASONING_EFFORT_ABSENT = object()
+
+
+def _normalize_persisted_reasoning_effort(value):
+    return str(value).strip().lower() if value is not None else None
+
+
+def _persisted_reasoning_effort(path):
+    """The sidecar's persisted ``reasoning_effort`` (#7881).
+
+    The bounded metadata prefix answers the common case. A prefix MISS --
+    metadata past the 1 MiB budget (a large pending prompt or compression
+    summary), a truncated, corrupt or unreadable prefix, or a prefix without
+    the key -- is not an absence, so the whole sidecar is parsed instead.
+    Only a missing file or a parsed sidecar without the key returns
+    ``_REASONING_EFFORT_ABSENT``; a sidecar whose content is not a JSON object
+    holds no recoverable value and counts as absent too. A sidecar that exists
+    but cannot be read raises OSError, so save() fails closed instead of
+    writing a value it could not compare.
+    """
+    parsed = None
+    try:
+        raw = _read_metadata_json_prefix(path)
+        parsed = json.loads(raw) if raw else None
+    except FileNotFoundError:
+        return _REASONING_EFFORT_ABSENT
+    except (OSError, ValueError):
+        parsed = None
+    if isinstance(parsed, dict) and 'reasoning_effort' in parsed:
+        return _normalize_persisted_reasoning_effort(parsed['reasoning_effort'])
+    try:
+        text = Path(path).read_text(encoding='utf-8')
+    except FileNotFoundError:
+        return _REASONING_EFFORT_ABSENT
+    except UnicodeDecodeError:
+        text = None
+    data = None
+    if text is not None:
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+    if not isinstance(data, dict):
+        logger.warning(
+            "session sidecar %s is not a JSON object; no persisted reasoning effort to keep", path,
+        )
+        return _REASONING_EFFORT_ABSENT
+    if 'reasoning_effort' not in data:
+        return _REASONING_EFFORT_ABSENT
+    return _normalize_persisted_reasoning_effort(data['reasoning_effort'])
+
+
+# #7881: per-session reentrant persistence locks. Every Session.save() of one
+# session id -- skip_index=True included -- holds the same lock across its
+# persisted-effort read, payload construction and atomic replacement; the
+# /api/reasoning pick holds it across its in-memory change and save. Lock
+# order: persist -> _INDEX_WRITE_LOCK -> LOCK (never take this lock while
+# holding either of those). Weak values, so ids nobody is saving do not
+# accumulate.
+_SESSION_PERSIST_LOCKS = weakref.WeakValueDictionary()
+_SESSION_PERSIST_LOCKS_GUARD = threading.Lock()
+
+
+def _session_persist_lock(sid):
+    """Return the shared reentrant persistence lock for ``sid``."""
+    key = str(sid or '')
+    with _SESSION_PERSIST_LOCKS_GUARD:
+        lock = _SESSION_PERSIST_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _SESSION_PERSIST_LOCKS[key] = lock
+        return lock
+
+
+# The source-identity fields CLI materialization stamps on a session, and the
+# subset whose presence marks a sidecar as already owning an identity.
+_CLI_SOURCE_IDENTITY_FIELDS = (
+    "is_cli_session", "source_tag", "raw_source", "session_source", "source_label",
+    "user_id", "chat_id", "chat_type", "thread_id", "session_key", "platform",
+)
+_CLI_SOURCE_IDENTITY_MARKERS = ("is_cli_session", "source_tag", "raw_source", "session_source", "source_label")
+
+# Top-level sidecar keys that save() writes after the metadata prefix.
+_SIDECAR_BODY_KEYS = frozenset({'messages', 'tool_calls', 'anchor_activity_scenes'})
+
+
+def _set_sidecar_metadata_fields(data: dict, fields: dict) -> dict:
+    """Return ``data`` with ``fields`` set; a key the sidecar lacks is placed
+    before the message body, where save() and the bounded prefix reader keep
+    metadata. Existing keys keep their position."""
+    missing = {k: v for k, v in fields.items() if k not in data}
+    for key, value in fields.items():
+        if key in data:
+            data[key] = value
+    if not missing:
+        return data
+    rebuilt = {}
+    for key, item in data.items():
+        if missing and key in _SIDECAR_BODY_KEYS:
+            rebuilt.update(missing)
+            missing = {}
+        rebuilt[key] = item
+    rebuilt.update(missing)
+    return rebuilt
+
+
+#: ``set_session_reasoning_effort(profile=...)`` default: keep the sidecar's owner.
+_KEEP_PERSISTED_PROFILE = object()
+
+
+def _write_persisted_reasoning_effort(sid, value, identity_source=None, profile=_KEEP_PERSISTED_PROFILE):
+    """Replace ONLY ``reasoning_effort`` in ``sid``'s LATEST sidecar (#7881).
+
+    The caller holds ``_session_persist_lock(sid)``, so no save can land
+    between this read and the replacement. Every other persisted field
+    (share token, draft, turns, ...) is written back exactly as read, so an
+    effort pick can neither roll another writer's fields back nor be ignored
+    because a cached object's baseline already equals the requested value.
+    The CLI source identity of ``identity_source`` is copied only into a
+    sidecar that has none (the ``_carry_cli_source_identity`` rule: an
+    existing identity, a fork's included, is never overwritten). ``profile``
+    is written only when given (the pick's refusal path, see
+    set_session_reasoning_effort).
+
+    Returns ``(previous, written)`` -- the persisted effort before this write
+    (None when the key was absent) and the parsed sidecar as written -- or
+    None, writing nothing, when there is no sidecar or it is not a JSON
+    object (the caller then saves the session whole). A sidecar that exists
+    but cannot be read raises.
+    """
+    if not is_safe_session_id(sid):
+        raise ValueError(f"Unsafe session_id {sid!r}; refusing to write outside session store")
+    path = SESSION_DIR / f'{sid}.json'
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return None
+    except ValueError:  # corrupt JSON or undecodable bytes
+        logger.warning("session sidecar %s is not valid JSON; saving the session whole", path)
+        return None
+    if not isinstance(data, dict):
+        return None
+    previous = _normalize_persisted_reasoning_effort(data.get('reasoning_effort'))
+    fields = {'reasoning_effort': value}
+    if profile is not _KEEP_PERSISTED_PROFILE:
+        fields['profile'] = profile
+    if (
+        identity_source is not None
+        and str(getattr(identity_source, 'session_id', '') or '') == str(sid)
+        and any(getattr(identity_source, name, None) for name in _CLI_SOURCE_IDENTITY_MARKERS)
+        and not any(data.get(name) for name in _CLI_SOURCE_IDENTITY_MARKERS)
+    ):
+        for name in _CLI_SOURCE_IDENTITY_FIELDS:
+            fields[name] = getattr(identity_source, name, None)
+    data = _set_sidecar_metadata_fields(data, fields)
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
+    try:
+        payload.encode('utf-8')
+    except UnicodeEncodeError:
+        payload = json.dumps(data, ensure_ascii=True, indent=2)
+    tmp = path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+    try:
+        with open(tmp, 'w', encoding='utf-8') as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        with _INDEX_WRITE_LOCK:
+            # Count the replace like Session.save() does (#8267), so a cold
+            # get_session() that read the pre-pick sidecar re-reads instead of
+            # publishing the old effort.
+            _replace_session_sidecar(tmp, path, sid)
+            # The sidecar replace is the COMMIT point (#8253 review): from here
+            # the pick is on disk and a cold load will restore it, so the
+            # caller must update memory and the baseline whatever happens
+            # below. The sidebar index is a projection that any later save or
+            # a full rebuild regenerates; a failure writing it (ENOSPC, a
+            # permission change) is logged, never raised, so the route cannot
+            # report a failed pick that the next reload quietly applies.
+            try:
+                # Built from the sidecar just written, never from a possibly
+                # stale live object (same ordered publish as save()).
+                index_session = Session(**dict(data))
+                index_session._metadata_message_count = len(index_session.messages or [])
+                _write_session_index(updates=[index_session])
+            except Exception:
+                logger.warning(
+                    "session %s: reasoning effort persisted but the sidebar index "
+                    "write failed; the index will be rebuilt on the next save",
+                    sid,
+                    exc_info=True,
+                )
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+    return previous, data
+
+
+def set_session_reasoning_effort(session_id_or_session, value, *, profile=_KEEP_PERSISTED_PROFILE):
+    """Persist an explicit reasoning-effort pick for one session (#7881).
+
+    Writes only ``reasoning_effort`` against the LATEST sidecar under the
+    session's persistence lock instead of saving a whole (possibly older)
+    cached object, so the pick cannot erase fields another writer saved in
+    the meantime (share token, draft, turns) and is never mistaken for an
+    unchanged snapshot. With no sidecar yet (a never-sent New Conversation)
+    the session object is saved whole, as nothing persisted can be lost.
+
+    The given session (or, for an id, the cached one) and the cached entry
+    for the id get the written value as both ``reasoning_effort`` and their
+    ``_reasoning_effort_saved`` baseline; on failure nothing in memory
+    changes and the error propagates. Returns the persisted effort before the
+    write (the value a rollback restores). The general ``Session.save()``
+    contract is unchanged: an object that changes its own effort and saves
+    still writes it.
+
+    ``profile`` is for the /api/reasoning refusal rollback only: when the
+    post-write owner recheck finds the canonical object retagged to another
+    profile during the pick, the rollback also persists that newer in-memory
+    owner, as the whole-object save it replaces did (#7738 contract).
+    """
+    if isinstance(session_id_or_session, str):
+        sid = session_id_or_session
+        session = None
+    else:
+        session = session_id_or_session
+        sid = str(getattr(session, 'session_id', '') or '')
+    normalized = _normalize_persisted_reasoning_effort(value)
+    with _session_persist_lock(sid):
+        with LOCK:
+            cached = SESSIONS.get(sid)
+        if cached is not None and str(getattr(cached, 'session_id', '') or '') != sid:
+            cached = None
+        if session is None:
+            session = cached
+        result = _write_persisted_reasoning_effort(
+            sid, normalized, identity_source=session, profile=profile,
+        )
+        if result is None:
+            if session is None:
+                raise KeyError(sid)
+            previous = getattr(session, 'reasoning_effort', None)
+            previous_baseline = getattr(session, '_reasoning_effort_saved', previous)
+            session.reasoning_effort = normalized
+            try:
+                # A preference change is not conversation activity.
+                session.save(touch_updated_at=False)
+            except Exception:
+                session.reasoning_effort = previous
+                session._reasoning_effort_saved = previous_baseline
+                raise
+        else:
+            previous = result[0]
+        for target in {id(o): o for o in (session, cached) if o is not None}.values():
+            target.reasoning_effort = normalized
+            target._reasoning_effort_saved = normalized
+        return previous
+
+
 def _legacy_sidecar_facts_get(sid):
     """Return cached authoritative facts for a LEGACY sidecar, or None (#5854).
 
@@ -6928,8 +7466,9 @@ def _profile_default_model_state(profile=None):
     default_provider = None
     try:
         from api.profiles import get_hermes_home_for_profile
-        config_path = Path(get_hermes_home_for_profile(profile)) / "config.yaml"
-        config_data = _cfg._load_yaml_config_file(config_path)
+        config_data = _cfg.get_config_for_profile_home(
+            get_hermes_home_for_profile(profile), isolate_config_override=True,
+        )
     except Exception:
         config_data = {}
 
@@ -6941,6 +7480,20 @@ def _profile_default_model_state(profile=None):
         default_provider = str(model_cfg.get("provider") or "").strip() or None
 
     return default_model or get_effective_default_model(), default_provider
+
+
+def _profile_default_reasoning_effort(profile=None):
+    """Return the profile reasoning preference for a newly-created session."""
+    try:
+        from api.profiles import get_hermes_home_for_profile
+        return _cfg.effective_session_reasoning_effort(
+            None, get_hermes_home_for_profile(profile),
+        )
+    except Exception:
+        # Stay legacy (None) so the turn-time fallback still reads the profile
+        # instead of pinning this chat to the provider default.
+        logger.warning("profile reasoning default read failed for %r", profile, exc_info=True)
+        return None
 
 
 def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None, worktree_info=None, enabled_toolsets=None):
@@ -6989,6 +7542,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         workspace=workspace_path or get_last_workspace(profile=profile),
         model=effective_model,
         model_provider=effective_model_provider,
+        reasoning_effort=_profile_default_reasoning_effort(profile),
         profile=profile,
         project_id=project_id,
         personality=None,
@@ -7450,17 +8004,49 @@ def _refresh_index_rows_from_sidecar_metadata(
             continue
         compact = sidecar.compact(include_runtime=True)
         refreshed = dict(session)
+        # #7882 re-gate finding 2: the checkpoint fact must come from the
+        # CURRENT sidecar, never from the older index row. The index row can
+        # hold a fact stamped by a previous eager checkpoint; keeping it while
+        # the sidecar describes a newer deferred turn lets the stale fact vouch
+        # for a turn it never named and overcounts the visible total. So drop
+        # the index row's fact and re-apply it only when ``compact()`` emits it
+        # -- which it does only while the fact names the turn pending now.
+        # ``pending_user_source`` keeps flowing through the field copy below:
+        # the overlay needs it to know a hidden row is still owed its discount.
+        refreshed.pop('_pending_hidden_wakeup_at', None)
         for key in (
             'message_count', 'updated_at', 'last_message_at', 'title', 'workspace',
             'model', 'model_provider', 'created_at', 'pinned', 'archived', 'project_id',
             'profile', 'pre_compression_snapshot', 'parent_session_id', 'source_tag',
             'raw_source', 'session_source', 'source_label', 'active_stream_id',
-            'has_pending_user_message', 'pending_user_message', 'pending_started_at',
+            'has_pending_user_message', 'pending_user_message',
             'visible_message_count',
         ):
             value = compact.get(key)
             if value is not None:
                 refreshed[key] = value
+        # #7882 re-gate (round-5): the pending turn's provenance is ONE unit and
+        # the CURRENT sidecar owns it. ``compact()`` deliberately omits the
+        # default ``webui``/``fork`` source and emits ``pending_started_at``
+        # only together with the checkpoint fact, so a non-None field copy
+        # keeps the older index row's ``delegation_wakeup`` source after the
+        # fact it excused is gone: an older hidden checkpoint followed by a
+        # current ordinary turn then gets its user row discounted as a hidden
+        # pending row (gate scene: visible 4 where the reconciled count is 5).
+        # Read source and start from the sidecar itself and clear what it does
+        # not describe, so the overlay classifies the row against the turn that
+        # is pending NOW.
+        for key in ('pending_user_source', 'pending_started_at'):
+            refreshed.pop(key, None)
+        pending_source = str(getattr(sidecar, 'pending_user_source', '') or '').strip()
+        if pending_source:
+            refreshed['pending_user_source'] = pending_source
+        pending_started = getattr(sidecar, 'pending_started_at', None)
+        if isinstance(pending_started, (int, float)) and not isinstance(pending_started, bool):
+            refreshed['pending_started_at'] = pending_started
+        compact_fact = compact.get('_pending_hidden_wakeup_at')
+        if compact_fact is not None:
+            refreshed['_pending_hidden_wakeup_at'] = compact_fact
         try:
             refreshed['message_count'] = max(
                 int(session.get('message_count') or 0),
@@ -7713,28 +8299,48 @@ def _agent_state_db_path(*, profile=None) -> Path | None:
     return db_path
 
 
-def agent_session_rows_existing(
-    session_ids: list[str] | set[str] | frozenset[str],
-    *,
-    profile=None,
-) -> frozenset[str]:
-    """Return session ids confirmed present in the agent ``sessions`` table.
+def _strict_agent_state_db_path(*, profile=None) -> Path | None:
+    """Return only the state.db owned by *profile*, without fallback.
 
-    Used by the sidebar orphan-prune path (#3238) to batch existence probes
-    instead of opening one SQLite connection per candidate row.
-
-    Degrades safely to ``frozenset(wanted)`` (assume all present) on any error,
-    when the DB is missing, or when the ``sessions`` table is absent — matching
-    ``agent_session_row_exists()`` so a transient failure never causes pruning.
+    Destructive absence checks must not answer a named-profile query from the
+    active profile's database.  An unavailable explicit profile is therefore
+    unknown (``None``), not an invitation to consult another profile.
     """
-    wanted = {str(sid).strip() for sid in (session_ids or []) if str(sid or "").strip()}
-    if not wanted:
-        return frozenset()
     try:
-        import sqlite3
-    except ImportError:
-        return frozenset(wanted)
-    db_path = _agent_state_db_path(profile=profile)
+        if isinstance(profile, str) and profile:
+            from api.profiles import (
+                _is_isolated_profile_mode,
+                _isolated_profile_name,
+                _profiles_match,
+            )
+
+            # The generic resolver intentionally clamps every lookup to the
+            # pinned home in isolated mode.  That is safe for reads, but a
+            # destructive absence check must not mistake the pinned profile's
+            # DB for a foreign logical owner's DB.  Root aliases remain valid
+            # through the canonical profile matcher.
+            if _is_isolated_profile_mode() and not _profiles_match(
+                profile,
+                _isolated_profile_name(),
+            ):
+                return None
+            db_path = _get_profile_home(profile) / 'state.db'
+        else:
+            db_path = _strict_active_state_db_path()
+        # Inside the try: an inaccessible profile directory makes exists()
+        # raise PermissionError, which must fail closed (retain), never 500.
+        if db_path is None or not db_path.exists():
+            return None
+    except Exception:
+        return None
+    return db_path
+
+
+def _agent_session_rows_existing_at_path(
+    wanted: set[str],
+    db_path: Path | None,
+) -> frozenset[str]:
+    """Probe *wanted* at one authoritative path, failing closed."""
     if db_path is None:
         return frozenset(wanted)
     try:
@@ -7758,11 +8364,55 @@ def agent_session_rows_existing(
             return frozenset(existing)
     except Exception:
         logger.debug(
-            "agent_session_rows_existing probe failed for %d ids",
+            "agent session existence probe failed for %d ids",
             len(wanted),
             exc_info=True,
         )
         return frozenset(wanted)
+
+
+def agent_session_rows_existing(
+    session_ids: list[str] | set[str] | frozenset[str],
+    *,
+    profile=None,
+) -> frozenset[str]:
+    """Return session ids confirmed present in the agent ``sessions`` table.
+
+    Used by the sidebar orphan-prune path (#3238) to batch existence probes
+    instead of opening one SQLite connection per candidate row.
+
+    Degrades safely to ``frozenset(wanted)`` (assume all present) on any error,
+    when the DB is missing, or when the ``sessions`` table is absent — matching
+    ``agent_session_row_exists()`` so a transient failure never causes pruning.
+    """
+    wanted = {str(sid).strip() for sid in (session_ids or []) if str(sid or "").strip()}
+    if not wanted:
+        return frozenset()
+    return _agent_session_rows_existing_at_path(
+        wanted,
+        _agent_state_db_path(profile=profile),
+    )
+
+
+def agent_session_rows_existing_strict(
+    session_ids: list[str] | set[str] | frozenset[str],
+    *,
+    profile=None,
+) -> frozenset[str]:
+    """Return rows confirmed by the row-owning profile's state.db only.
+
+    This is the destructive-prune variant.  Missing, unreadable, or
+    unresolvable profile databases fail closed to "all present"; unlike the
+    legacy helper, a missing named-profile DB never falls back to the active
+    profile DB.
+    """
+    wanted = {str(sid).strip() for sid in (session_ids or []) if str(sid or "").strip()}
+    if not wanted:
+        return frozenset()
+    return _agent_session_rows_existing_at_path(
+        wanted,
+        _strict_agent_state_db_path(profile=profile),
+    )
 
 
 def agent_session_zero_message_sids(
@@ -7910,12 +8560,14 @@ def _read_state_db_sidebar_overrides(
             has_messages_table = cur.fetchone() is not None
             messages_has_session_id = False
             messages_has_timestamp = False
+            messages_has_active = False
             messages_has_title_fields = False
             if has_messages_table:
                 cur.execute("PRAGMA table_info(messages)")
                 message_cols = {str(row[1]) for row in cur.fetchall()}
                 messages_has_session_id = 'session_id' in message_cols
                 messages_has_timestamp = 'timestamp' in message_cols
+                messages_has_active = 'active' in message_cols
                 messages_has_title_fields = {'session_id', 'role', 'content', 'timestamp'}.issubset(message_cols)
 
             delegated_title_ids: set[str] = set()
@@ -7963,9 +8615,29 @@ def _read_state_db_sidebar_overrides(
                         continue
                     count_placeholders = ','.join('?' * len(count_chunk))
                     last_at_expr = "MAX(timestamp) AS last_message_at" if messages_has_timestamp else "NULL AS last_message_at"
+                    # #7882 re-gate: this aggregate is compared against the
+                    # DETAILED reader's count by the sidebar revision check, and
+                    # that reader excludes ``active = 0`` archive rows by default
+                    # (``include_inactive=False``). Counting every row here
+                    # compares two different row domains: a static store with
+                    # two active rows and four archives read as a concurrent
+                    # append on every poll, so the check refused a settled
+                    # transcript and the raw-growth fallback reported six. Both
+                    # numbers are kept — the raw one still feeds the growth
+                    # guard and the displayed message_count — while the
+                    # active-domain one is what the revision check gets, so
+                    # archived rows never become visible growth.
+                    if messages_has_active:
+                        active_count_expr = (
+                            "SUM(CASE WHEN active IS NULL OR active != 0 "
+                            "THEN 1 ELSE 0 END) AS active_message_count"
+                        )
+                    else:
+                        active_count_expr = "COUNT(*) AS active_message_count"
                     cur.execute(
                         f"""
-                        SELECT session_id, COUNT(*) AS actual_message_count, {last_at_expr}
+                        SELECT session_id, COUNT(*) AS actual_message_count,
+                               {active_count_expr}, {last_at_expr}
                         FROM messages
                         WHERE session_id IN ({count_placeholders})
                         GROUP BY session_id
@@ -7979,6 +8651,13 @@ def _read_state_db_sidebar_overrides(
                             entry['_state_db_message_count'] = max(
                                 int(entry.get('_state_db_message_count') or 0),
                                 int(row['actual_message_count'] or 0),
+                            )
+                        except (TypeError, ValueError):
+                            pass
+                        try:
+                            entry['_state_db_active_message_count'] = max(
+                                int(entry.get('_state_db_active_message_count') or 0),
+                                int(row['active_message_count'] or 0),
                             )
                         except (TypeError, ValueError):
                             pass
@@ -8059,6 +8738,25 @@ def _apply_sidebar_state_db_overrides(sessions: list[dict]) -> None:
     concurrent poll (#5132). The cap is env-configurable and fails open; rows
     beyond it keep their JSON message-count/last-message until the history panel
     opens (lazily corrected, exactly as with the lineage cap #4638).
+
+    Three cost tiers, default limits and their reasons:
+
+    * ``message-latest`` — the ``sessions.message_count`` column plus the
+      ``messages`` ``GROUP BY`` that yields the latest timestamp — runs for the
+      top ``HERMES_WEBUI_STATE_DB_OVERRIDE_TOP_N`` rows (default ``300``, the
+      documented and previously shipped value). It decides which rows are
+      recent at all, so shrinking it to a smaller paint window silently froze
+      the sort order of settled conversations.
+    * ``reconcile`` — the transcript walk runs for every row whose state.db
+      count grew past the sidecar's, whatever the paint window: only the walk
+      can tell a display row from a tool row, so it is the only honest source
+      for ``visible_message_count`` once state.db advanced (a raw delta counts
+      every appended row of any role and overstates any settled tool-using
+      session). Rows whose count did NOT grow never walk: the growth guard
+      above is what bounds the cost, and the per-build memo makes a repeat
+      poll on an unchanged row a metadata-only load.
+    * everything else (source/title, the cheap count/timestamp repair, the
+      hidden-row discount) runs for every row.
     """
     import os as _os
     try:
@@ -8078,10 +8776,31 @@ def _apply_sidebar_state_db_overrides(sessions: list[dict]) -> None:
         )
     except Exception:
         return
-    _apply_sidebar_state_db_override_metadata(sessions, metadata)
+    _apply_sidebar_state_db_override_metadata(sessions, metadata, count_ids)
 
 
-def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: dict[str, dict]) -> None:
+def _apply_sidebar_state_db_override_metadata(
+    sessions: list[dict],
+    metadata: dict[str, dict],
+    count_session_ids: set[str] | None = None,
+) -> None:
+    # ``count_session_ids`` bounds the SQL count/timestamp tier to the top-N
+    # rows (None = no cap). It does NOT bound the transcript walk: the walk is
+    # the only authority that can distinguish a display row from a tool row,
+    # so it must run for every row whose state.db count grew. Metadata-only
+    # overrides still apply to every row: they are free and the sidebar source
+    # filter depends on them.
+    memo_token = _SIDEBAR_RECONCILE_MEMO.set({})
+    try:
+        _apply_sidebar_state_db_override_rows(sessions, metadata)
+    finally:
+        _SIDEBAR_RECONCILE_MEMO.reset(memo_token)
+
+
+def _apply_sidebar_state_db_override_rows(
+    sessions: list[dict],
+    metadata: dict[str, dict],
+) -> None:
     for session in sessions:
         sid = session.get('session_id')
         if sid not in metadata:
@@ -8094,6 +8813,7 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
         state_db_session_source = entry.pop('_state_db_session_source', None)
         state_db_source_label = entry.pop('_state_db_source_label', None)
         state_db_message_count = entry.pop('_state_db_message_count', None)
+        state_db_active_message_count = entry.pop('_state_db_active_message_count', None)
         state_db_last_message_at = entry.pop('_state_db_last_message_at', None)
         state_db_display_title = entry.pop('_state_db_display_title', None)
         if state_db_source in ('webui', 'subagent'):
@@ -8124,6 +8844,30 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
             except (TypeError, ValueError):
                 current_count = 0
                 state_count = 0
+            # The revision check below compares the walk's row count with the
+            # overlay's count, so both sides must count the SAME row domain.
+            # The walk reads through the detailed reader, which excludes
+            # `active = 0` archive rows; the raw total legitimately includes
+            # them for the growth guard and the displayed message_count.
+            #
+            # The expectation therefore exists ONLY in the active domain, and
+            # only when the aggregate that computed it is actually present
+            # (it is produced by the SQL read inside the cap). Falling back to
+            # the raw stored counter is what made archived rows visible
+            # growth: three hundred fillers keep the row outside the cap, the
+            # aggregate is absent, the raw counter (six, two active + four
+            # archived) was handed to the revision check, the walk was
+            # refused and the raw-growth fallback reported six where master
+            # and the full GET report two. Unknown expectations skip the
+            # check (``None``); they never fail it with the wrong domain.
+            expected_state_count = None
+            if state_db_active_message_count is not None:
+                try:
+                    expected_state_count = max(
+                        0, int(state_db_active_message_count)
+                    )
+                except (TypeError, ValueError):
+                    expected_state_count = None
             try:
                 current_last = max(
                     float(session.get('last_message_at') or 0),
@@ -8139,6 +8883,35 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
             # sidecar metadata-only write happened after the state.db append,
             # keep the conservative anti-resurrection guard and wait for a
             # newer settled state.db message before overlaying counts again.
+            #
+            # The overlay below is split by cost. The raw/actual count, the
+            # last-message timestamps and the visible fallback are all cheap
+            # (sessions-table columns already fetched by the caller's
+            # two-tier read) and they decide whether the row is *publicly
+            # visible at all*, so they must run for EVERY row: state.db is
+            # the cross-surface writer (a CLI/Telegram continuation appends
+            # there), and gating the count on the top-N window froze such a
+            # row at 0 and dropped it from /api/sessions entirely — including
+            # the case where archived fillers consume the pre-filter budget.
+            # Only the transcript reconciliation is expensive (one full
+            # sidecar+state.db merge per grown row: measured 98 rows x 0.19 s
+            # = 18.8 s of a 20 s build, 307k _cached_message_key calls), so
+            # only that call is bounded by ``reconcile_ids``.
+            # The timestamp guard is load-bearing: it is what keeps a
+            # TRUNCATED session truncated. Without it, the state.db rows for
+            # the removed suffix still carry an older ``last_message_at`` and
+            # count, so a four-to-zero truncate reports 4 raw / 4 visible and
+            # a four-to-two truncate reports 4 raw / 2 visible, both of which
+            # bring deleted messages back into the sidebar (master hides the
+            # empty row and reports 2). Growth from state.db is only credible
+            # when it is NEWER than the sidecar; a row the user just deleted is
+            # not. Keep master's condition verbatim.
+            #
+            # The guard also settles the equal-count replay: an equal-count
+            # restamp must NOT move ``last_message_at`` forward (that is
+            # #8368's ``latest_replaceable`` branch, removed there and not
+            # reintroduced here), because a replayed transcript would jump to
+            # the top of the sidebar as if it had new activity.
             if state_count > current_count and (state_last <= 0 or state_last > current_last):
                 try:
                     existing_actual = max(0, int(session.get('actual_message_count') or 0))
@@ -8146,6 +8919,13 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
                     existing_actual = 0
                 session['message_count'] = state_count
                 session['actual_message_count'] = max(state_count, existing_actual)
+                # Set BEFORE the reconciliation attempt: it is cheap, it is
+                # monotone, and it is what makes the row discoverable. A row
+                # outside the reconcile window keeps this value (state.db is
+                # authoritative for growth) instead of a stale zero.
+                if state_last > 0:
+                    session['last_message_at'] = max(float(session.get('last_message_at') or 0), state_last)
+                    session['updated_at'] = max(float(session.get('updated_at') or 0), state_last)
                 # #7882 re-gate should-fix 3 (greptile follow-up): the visible
                 # count must follow state.db growth, but a delegation wakeup
                 # turn adds a hidden user row the Agent core appends to
@@ -8169,6 +8949,24 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
                     pending_source = str(
                         session.get('pending_user_source') or ''
                     ).strip().lower()
+                    # A pending hidden wakeup is only owed a visible-count
+                    # discount when it did NOT materialise in the sidecar. An
+                    # eager checkpoint already wrote (and excluded) the row, so
+                    # the sidecar's own visible count reflects it; discounting
+                    # again when the visible reply lands undercounts by one.
+                    pending_hidden_materialized = (
+                        pending_source == 'delegation_wakeup'
+                        and _pending_hidden_row_materialized(session)
+                    )
+                    # The sidebar payload strips the compact transcript right
+                    # after the overlay (#7882 cap follow-up: only the hidden
+                    # materialisation check above ever read it, and that check
+                    # has been metadata-only since the fact commit — the pop
+                    # here is a leftover and no longer needed).
+                    # Shrink authority for the capped-out branch: the sidecar
+                    # metadata prefix carries the truncation boundary (state.db
+                    # is append-only and cannot refute it).
+                    truncation_boundary = session.get('truncation_boundary') or 0
                     # #7882 re-gate round-3 must-fix 2: derive the visible
                     # total from the reconciled, provenance-stamped rows for
                     # the owning profile instead of delta arithmetic. The
@@ -8180,27 +8978,98 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
                     # reconciled transcript has 4). The reconciled walk is
                     # the same authority the full save uses; the raw delta
                     # remains the fallback when rows can't be read.
+                    #
+                    # This walk is the only expensive part of the overlay, and
+                    # it is also the only honest authority for the visible
+                    # total: state.db's count includes every appended row of
+                    # any role (tool rows included) while the sidecar holds
+                    # display rows only, so crediting the raw delta overstates
+                    # any settled tool-using session for as long as the row
+                    # sits outside a paint window. The walk therefore runs for
+                    # EVERY row whose raw count grew, whatever the paint
+                    # window bounds elsewhere. The growth guard above is what
+                    # bounds the cost (only rows state.db advanced past the
+                    # sidecar reach this line), and the memo returns the
+                    # reconciled count at the price of a metadata-only load
+                    # while state.db has not advanced again. The raw delta
+                    # survives only as the fallback when the sources cannot be
+                    # read at all (``None``), never as a proven total.
                     reconciled_visible = _reconciled_visible_count_for_sidebar(
-                        session.get('session_id')
+                        session.get('session_id'),
+                        expected_state_count=expected_state_count,
+                        expected_last_message_at=state_last or None,
+                        fresh_if_unchanged_state_count=(
+                            current_count,
+                            current_visible,
+                        ),
                     )
                     if reconciled_visible is not None:
-                        session['visible_message_count'] = min(
-                            state_count, max(current_visible, reconciled_visible)
+                        # The walk returns its count together with whether it
+                        # already excluded the pending hidden row. A bare int
+                        # is a test double that cannot express the flag; it
+                        # keeps the pre-existing behaviour (no proof, so the
+                        # caller takes the discount itself).
+                        reconciled_count = cast(
+                            int, getattr(reconciled_visible, 'visible', reconciled_visible)
                         )
+                        reconciled_hidden_excluded = bool(
+                            getattr(reconciled_visible, 'hidden_excluded', False)
+                        )
+                        visible_total = min(
+                            state_count,
+                            max(current_visible, reconciled_count),
+                        )
+                        if (
+                            pending_source == 'delegation_wakeup'
+                            and not pending_hidden_materialized
+                            and not reconciled_hidden_excluded
+                        ):
+                            # The walk already paid this discount whenever it
+                            # could identify the pending hidden row as hidden
+                            # (``hidden_excluded``); subtracting again here made
+                            # a deferred wakeup count 2 instead of 3 (#7882
+                            # re-gate). The subtraction is still owed for a row
+                            # the walk could NOT stamp, so that shape keeps the
+                            # explicit control and its own test.
+                            visible_total = max(current_visible, visible_total - 1)
+                        session['visible_message_count'] = visible_total
                     else:
                         # The outer guard already ensures state_count > current_count.
-                        hidden_pending_delta = 1 if pending_source == 'delegation_wakeup' else 0
+                        #
+                        # Two cheap invariants keep the fallback honest without
+                        # the reconciled walk:
+                        #
+                        # 1. A hidden row the sidecar ALREADY materialised (an
+                        #    eager-checkpointed delegation wakeup) is already
+                        #    discounted by ``current_visible``; subtracting it
+                        #    again when the delta is the visible reply
+                        #    undercounts. Only a hidden row that produced no
+                        #    sidecar message is still owed a discount.
+                        # 2. A truncated sidecar is authoritative for its own
+                        #    shrink: append-only state.db rows must not
+                        #    re-credit a removed suffix. With a truncation
+                        #    boundary the delta is not evidence of visible
+                        #    growth at all.
+                        #    state.db carries no truncation metadata, so this
+                        #    branch never credits growth the sidecar refutes.
+                        if truncation_boundary:
+                            hidden_pending_delta = 0
+                            growth = 0
+                        else:
+                            hidden_pending_delta = (
+                                1
+                                if pending_source == 'delegation_wakeup'
+                                and not pending_hidden_materialized
+                                else 0
+                            )
+                            growth = max(0, state_count - current_count - hidden_pending_delta)
                         session['visible_message_count'] = min(
                             state_count,
                             max(
                                 current_visible,
-                                current_visible
-                                + max(0, state_count - current_count - hidden_pending_delta),
+                                current_visible + growth,
                             ),
                         )
-                if state_last > 0:
-                    session['last_message_at'] = max(float(session.get('last_message_at') or 0), state_last)
-                    session['updated_at'] = max(float(session.get('updated_at') or 0), state_last)
         title = session.get('title')
         if (
             state_db_title
@@ -11881,7 +12750,39 @@ def get_state_db_regeneration_tail_snapshot(
         return None
 
 
-def _reconciled_visible_count_for_sidebar(sid) -> int | None:
+# Per-call memo for the sidebar transcript reconciliation (#8368). The overlay
+# walks the sidecar+state.db transcript of every grown row, and a settled board
+# whose state.db has stopped advancing used to pay one 1.5 s walk per poll for
+# the same answer. Each ``_apply_sidebar_state_db_overrides`` call sets a fresh
+# token here, so a memo entry can never outlive the request that created it:
+# key ``(session_id, state.db message count)`` -> reconciled visible count.
+_SIDEBAR_RECONCILE_MEMO: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    'sidebar_reconcile_memo', default=None
+)
+
+
+class _ReconciledSidebarVisible(NamedTuple):
+    """Result of the reconciled sidebar walk.
+
+    ``visible`` is the count the sidebar may report. ``hidden_excluded`` says
+    whether the walk already dropped a hidden transcript row from that count --
+    the caller must not subtract the pending hidden turn a second time (#7882
+    re-gate: "deferred wakeup discounted twice"). A row the walk could not
+    identify as hidden reports ``False``, so the caller keeps its explicit
+    unstamped-row fallback.
+    """
+
+    visible: int
+    hidden_excluded: bool
+
+
+def _reconciled_visible_count_for_sidebar(
+    sid,
+    *,
+    expected_state_count: int | None = None,
+    expected_last_message_at: float | None = None,
+    fresh_if_unchanged_state_count: tuple[int, int] | None = None,
+) -> _ReconciledSidebarVisible | None:
     """Count visible rows in the reconciled sidecar+state.db transcript.
 
     The sidebar growth overlay's authority for ``visible_message_count``
@@ -11901,6 +12802,25 @@ def _reconciled_visible_count_for_sidebar(sid) -> int | None:
     single session being overlaid (the growth guard already limits this to
     rows whose count actually advanced), not a full transcript walk per
     sidebar poll.
+
+    Two optional bounds keep that per-poll cost bounded across a whole board
+    without letting a caller outside the transcript window pay it:
+
+    * ``expected_state_count`` / ``expected_last_message_at``: the overlay
+      already read both columns from the ``sessions`` table. A transcript that
+      GREW past that pair is a different revision (a tool row landed between the
+      two reads), so the walk is refused (``None``) instead of stamping a visible
+      count that disagrees with the raw count it is clamped by. A transcript that
+      SHRANK is the newer answer — the Agent archived rows (compaction, rewind)
+      in that window — and is used as read. Unknown expectations skip the check,
+      they never fail it.
+    * ``fresh_if_unchanged_state_count`` = ``(previous_state_count,
+      previous_visible_count)``: while state.db has not advanced past
+      ``previous_state_count``, the previously reconciled visible count still
+      holds, so the read and the merge are skipped and that value is returned
+      at the cost of one metadata-only load. The memo lives only for this call
+      of the overlay (:data:`_SIDEBAR_RECONCILE_MEMO`), so it cannot go stale
+      across polls.
     """
     if not sid:
         return None
@@ -11921,6 +12841,30 @@ def _reconciled_visible_count_for_sidebar(sid) -> int | None:
         sidecar_messages = list(getattr(session, 'messages', None) or [])
     except Exception:
         return None
+    if fresh_if_unchanged_state_count is not None:
+        # The sidecar was read: a settled transcript whose state.db append
+        # already happened before the save needs no second walk this poll.
+        try:
+            previous_state_count, previous_visible_count = fresh_if_unchanged_state_count
+            memo_state_count = int(previous_state_count)
+            memo_visible_count = int(previous_visible_count)
+        except (TypeError, ValueError):
+            pass
+        else:
+            memo = _SIDEBAR_RECONCILE_MEMO.get()
+            memo_key = (str(sid), memo_state_count)
+            if isinstance(memo, dict) and memo_visible_count >= 0:
+                cached = memo.get(memo_key)
+                # The cached entry carries the count *and* whether that walk
+                # had already excluded a hidden row; a bare int is a cache
+                # written before this round and is treated as a miss, so the
+                # answer is never reported without its provenance.
+                if isinstance(cached, tuple) and len(cached) == 2:
+                    cached_visible, cached_hidden = cached
+                    if int(cached_visible) == memo_visible_count:
+                        return _ReconciledSidebarVisible(
+                            int(cached_visible), bool(cached_hidden)
+                        )
     try:
         state_messages = get_state_db_session_messages(
             str(sid),
@@ -11946,6 +12890,36 @@ def _reconciled_visible_count_for_sidebar(sid) -> int | None:
         return None
     if not sidecar_messages and not state_messages:
         return None
+    if expected_state_count is not None or expected_last_message_at is not None:
+        built_count, built_last = _state_db_shape_of_messages(state_messages)
+        # Only real GROWTH invalidates this transcript: it then holds rows the
+        # caller's row never counted. A SMALLER transcript is not a mismatch —
+        # the Agent archives rows between the two reads whenever it compacts or
+        # rewinds, so the detailed read is the newer, correct answer. Refusing it
+        # on inequality made that poll fall back to the raw stored counter (six
+        # where master and the detail payload report two); the next poll
+        # corrected it, but one wrong sidebar count per compaction is new with
+        # this overlay. A shrink is honoured below, with the timestamp rejection
+        # skipped for it (the expectation came from the pre-archive aggregate).
+        grew = (
+            expected_state_count is not None
+            and built_count is not None
+            and built_count > expected_state_count
+        )
+        shrank = (
+            expected_state_count is not None
+            and built_count is not None
+            and built_count < expected_state_count
+        )
+        if grew:
+            return None
+        if (
+            not shrank
+            and expected_last_message_at is not None
+            and built_last is not None
+            and float(built_last) > float(expected_last_message_at) + 0.000001
+        ):
+            return None
     try:
         stamped = _stamp_pending_source_for_display(session, state_messages)
     except Exception:
@@ -11965,10 +12939,98 @@ def _reconciled_visible_count_for_sidebar(sid) -> int | None:
         return None
     if not merged:
         return None
-    return sum(
+    visible = sum(
         1 for m in merged
         if isinstance(m, dict) and not is_hidden_transcript_row(m)
     )
+    # Did the merge actually drop a hidden row? That is the one signal that
+    # proves this walk already paid the pending hidden turn's discount, so the
+    # caller does not take it twice (#7882 re-gate: "deferred wakeup discounted
+    # twice"). A row the stamping could not identify stays visible, the flag
+    # stays False, and the caller's explicit unstamped-row fallback still runs.
+    hidden_excluded = any(
+        isinstance(m, dict) and is_hidden_transcript_row(m) for m in merged
+    )
+    boundary = getattr(session, 'truncation_boundary', None)
+    if not sidecar_messages and _boundary_lies_above_every_state_row(boundary, state_messages):
+        # Truncated session with an empty sidecar, and every state.db row sits
+        # BELOW the cutoff: none of them is the removed suffix. The sidecar is
+        # what keeps the rows this turn owns, and on this shape it keeps none —
+        # so the transcript this session will render starts past the cutoff, and
+        # the rows below it are rows the user already deleted.
+        boundary_ts = _message_exact_timestamp_details({'timestamp': boundary})[0]
+        kept = sum(
+            1 for m in merged
+            if isinstance(m, dict)
+            and not is_hidden_transcript_row(m)
+            and (_message_exact_timestamp_details(m)[0] or 0) > boundary_ts
+        )
+        visible = min(visible, kept)
+    memo = _SIDEBAR_RECONCILE_MEMO.get()
+    if isinstance(memo, dict):
+        # Remember the answer under the revision it was derived from, so the
+        # next poll on this board can skip the walk while state.db is unchanged.
+        # The count travels with its provenance so a memo hit is never
+        # reported as "no hidden row excluded" by accident.
+        built_count, _built_last = _state_db_shape_of_messages(state_messages)
+        if built_count is not None:
+            memo[(str(sid), int(built_count))] = (visible, hidden_excluded)
+    return _ReconciledSidebarVisible(visible, hidden_excluded)
+
+
+def _boundary_lies_above_every_state_row(boundary, state_messages) -> bool:
+    """True when *boundary* is older than every timestamped state.db row.
+
+    The merge can only refute a state.db row against the cutoff when the
+    sidecar has rows to anchor it (it compares the cutoff with the sidecar's
+    newest timestamp). With an empty sidecar that anchor is missing, so this
+    answers whether there is any row left to refute at all: if the cutoff sits
+    below every row, none of them is the removed suffix.
+    """
+    boundary_ts, boundary_valid = _message_exact_timestamp_details(
+        {'timestamp': boundary}
+    )
+    if not boundary_valid or boundary_ts is None or boundary_ts <= 0:
+        return False
+    oldest = None
+    for message in state_messages or []:
+        if not isinstance(message, dict):
+            continue
+        timestamp, valid = _message_exact_timestamp_details(message)
+        if not valid or timestamp is None:
+            continue
+        if oldest is None or timestamp < oldest:
+            oldest = timestamp
+    return oldest is not None and boundary_ts < oldest
+
+
+def _state_db_shape_of_messages(messages) -> tuple[int | None, float | None]:
+    """``(count, max timestamp)`` of freshly read state.db rows, as SQL sees it.
+
+    The overlay reads both columns in one GROUP BY; the detailed read below
+    fetches the same rows through a different path. Comparing the two refuses a
+    visible count derived from a revision the caller did not overlay. Unknown
+    values (no timestamp column, unparseable timestamp) answer ``None``, which
+    makes the caller skip the check rather than fail it.
+    """
+    if not isinstance(messages, list):
+        return None, None
+    last_at = None
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        raw = message.get('_ts')
+        if raw is None:
+            raw = message.get('timestamp')
+        try:
+            candidate = float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            continue
+        if candidate is None or not math.isfinite(candidate):
+            continue
+        if last_at is None or candidate > last_at:
+            last_at = candidate
+    return len(messages), last_at
 
 
 def get_state_db_session_summary(sid, *, profile=None) -> dict:
@@ -11995,6 +13057,20 @@ def get_state_db_session_summary(sid, *, profile=None) -> dict:
             available = {str(row['name']) for row in cur.fetchall()}
             if 'session_id' not in available:
                 return {"message_count": 0, "last_message_at": 0.0}
+            # #7882 re-gate: this aggregate is a GROWTH signal, not a display
+            # count, so it must stay in the RAW row domain. Both of its
+            # consumers compare it with a count that spans every persisted
+            # row -- `_metadata_only_message_summary()` against the sidecar's
+            # message count, `_maybe_sync_newer_sidecar_from_state_db()`
+            # against `len(session.messages)` -- and require `state >
+            # sidecar` before exposing a newer transcript. Filtering
+            # `active = 0` here changed the count domain without changing
+            # theirs: a six-row sidecar whose first four state.db rows were
+            # archived reported 6 and the old timestamp on the metadata poll
+            # while the full load reported 8 and the new reply, i.e. the
+            # growth signal died after a compaction. The sidebar overlay's
+            # active-domain need is served separately by the batch
+            # aggregate's `active_message_count`.
             if 'timestamp' in available:
                 cur.execute(
                     "SELECT COUNT(*) AS message_count, MAX(timestamp) AS last_message_at "
@@ -12169,6 +13245,49 @@ def _native_image_leading_text(message):
             return None
         parts.append(text)
     return None
+
+
+def _pending_hidden_row_materialized(session) -> bool:
+    """True when the sidecar already holds the CURRENT pending hidden wakeup row.
+
+    The eager-save checkpoint (``_checkpoint_user_message_for_eager_session_save``)
+    appends the delegation wakeup user turn to the transcript BEFORE streaming
+    starts, so ``visible_message_count`` in the sidebar metadata already excludes
+    that row and the overlay's raw-delta fallback must not subtract it a second
+    time. Without the checkpoint the row exists only in state.db and the discount
+    is still owed.
+
+    The evidence rides the metadata, never a transcript: a capped-out sidebar
+    row cannot re-walk the transcript, the overlay pops ``messages`` and
+    ``_strip_sidebar_heavy_metadata`` drops it from the index snapshot, and no
+    producer emits a ``messages`` key into a sidebar row at all. So the
+    checkpoint records the exact start timestamp of the row it materialised,
+    ``Session.save`` re-validates it against the transcript and writes it into
+    the metadata prefix as ``_pending_hidden_wakeup_at``, and ``compact()``
+    carries it into the index entry and the sidebar row.
+
+    Ownership is bound to the current turn: the fact is only accepted when it
+    names the same exact start timestamp the row reports as its pending turn.
+    An older checkpointed row (or one stamped for a different stream) cannot
+    vouch for a newly pending wakeup. Every unknown -- absent fact, absent
+    pending timestamp, unparseable value -- answers False, i.e. the discount is
+    still owed: the conservative anti-resurrection branch.
+    """
+    if not isinstance(session, dict):
+        return False
+    if str(session.get('pending_user_source') or '').strip().lower() != 'delegation_wakeup':
+        return False
+
+    def _epoch(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return float(value) if value > 0 else None
+
+    materialized_at = _epoch(session.get('_pending_hidden_wakeup_at'))
+    pending_started_at = _epoch(session.get('pending_started_at'))
+    if materialized_at is None or pending_started_at is None:
+        return False
+    return materialized_at == pending_started_at
 
 
 def _stamp_pending_source_for_display(session, state_messages):

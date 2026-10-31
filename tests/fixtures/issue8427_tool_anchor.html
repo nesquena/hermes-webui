@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>#8427 synthetic tool anchor regression</title>
+  <link rel="stylesheet" href="../../static/style.css">
+  <style>
+    .fixture-toolbar { flex: none; padding: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .fixture-transcript { flex: 1; min-height: 0; overflow: auto; }
+    body { display: flex; flex-direction: column; height: 100vh; }
+  </style>
+</head>
+<body>
+  <header class="fixture-toolbar">#8427 — synthetic renderer fixture; no provider/server calls.
+<span id="fixtureResult">Loading…</span></header>
+  <main class="messages fixture-transcript" id="messages">
+    <div id="emptyState"></div>
+    <div class="messages-inner" id="msgInner"></div>
+  </main>
+  <script src="issue8427_tool_anchor.js"></script>
+  <script src="../../static/i18n.js"></script>
+  <script src="../../static/icons.js"></script>
+  <script src="../../static/assistant_turn_anchors.js"></script>
+  <script src="../../static/ui.js"></script>
+  <script src="../../static/workspace.js"></script>
+  <script src="../../static/sessions.js"></script>
+  <script src="../../static/messages.js"></script>
+  <script>
+    // For real-browser use, serve only a disposable checkout on localhost.
+    // Query parameters: ?mode=compact_worklog&thinking=true (or other modes).
+    window.addEventListener('load', () => {
+      const params = new URLSearchParams(location.search);
+      document.documentElement.dataset.viewportWidth = String(window.innerWidth);
+      document.documentElement.dataset.viewportHeight = String(window.innerHeight);
+      document.documentElement.dataset.devicePixelRatio = String(window.devicePixelRatio);
+      try {
+        const result = issue8427.run(params.get('mode') || 'compact_worklog', params.get('thinking') !== 'false');
+        document.getElementById('fixtureResult').textContent = JSON.stringify(result);
+        document.documentElement.dataset.result = 'PASS';
+      } catch (error) {
+        document.getElementById('fixtureResult').textContent = error.message;
+        document.documentElement.dataset.result = 'FAIL';
+        throw error;
+      }
+    });
+  </script>
+</body>
+</html>

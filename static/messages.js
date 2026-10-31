@@ -4368,7 +4368,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         status:options.sealed?'completed':'running',
         payload:{text,activitySegmentSeq:segmentSeq,activityBurstId:_currentActivityBurstId},
       });
-      _renderAnchorLiveScene();
+      if(options.render!==false) _renderAnchorLiveScene();
       return replaced;
     }
     _applyToAnchor('token',{
@@ -4378,7 +4378,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       status:options.sealed?'completed':'running',
       activitySegmentSeq:segmentSeq,
       activityBurstId:_currentActivityBurstId,
-    },null);
+    },null,null,options);
     return _findAnchorActivityEventByLocalId(localId,'token');
   }
   // Persistent incremental renderer for anchor-scene live prose rows. The compact
@@ -6481,8 +6481,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const pendingDisplayTextBeforeTool=segmentStart===0
         ? (_parseStreamState().displayText||'')
         : _stripXmlToolCalls(assistantText.slice(segmentStart));
-      if(String(pendingDisplayTextBeforeTool||'').trim()) _upsertAnchorProcessProse(pendingDisplayTextBeforeTool,{sealed:true});
-      _applyToAnchor('tool',{...d,...tc},e);
+      if(String(pendingDisplayTextBeforeTool||'').trim()) _upsertAnchorProcessProse(pendingDisplayTextBeforeTool,{sealed:true,render:false});
+      _applyToAnchor('tool',{...d,...tc},e,null,{render:false});
 
       if(S.session&&S.session.session_id===activeSid&&typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
       if(!S.session||S.session.session_id!==activeSid) return;
@@ -6497,8 +6497,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if((assistantRow&&assistantBody)||String(pendingDisplayText||'').trim()){
         ensureAssistantRow(true);
       }
-      _flushPendingSegmentRender({force:true});
-      appendLiveToolCard(tc,{sessionId:activeSid,streamId});
+      // Prose and tool state are already in the registry. Paint their combined
+      // result once, synchronously, before snapshotting; no deferred timer.
+      _flushPendingSegmentRender({force:true,skipAnchorProcessProse:true});
+      if(!_renderAnchorLiveScene()) appendLiveToolCard(tc,{sessionId:activeSid,streamId});
       snapshotLiveTurn();
       _freshSegment=true;
       _smdEndParser();
@@ -6518,8 +6520,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const pendingDisplayTextBeforeComplete=segmentStart===0
         ? (_parseStreamState().displayText||'')
         : _stripXmlToolCalls(assistantText.slice(segmentStart));
-      if(String(pendingDisplayTextBeforeComplete||'').trim()) _upsertAnchorProcessProse(pendingDisplayTextBeforeComplete,{sealed:true});
-      _applyToAnchor('tool_complete',{...d,...tc,is_error:!!d.is_error},e);
+      if(String(pendingDisplayTextBeforeComplete||'').trim()) _upsertAnchorProcessProse(pendingDisplayTextBeforeComplete,{sealed:true,render:false});
+      _applyToAnchor('tool_complete',{...d,...tc,is_error:!!d.is_error},e,null,{render:false});
       if(typeof noteWorkspaceMutationsFromToolCall==='function') noteWorkspaceMutationsFromToolCall(tc);
       if(S.session&&S.session.session_id===activeSid&&typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
       if(!S.session||S.session.session_id!==activeSid) return;
@@ -6531,14 +6533,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           : _stripXmlToolCalls(assistantText.slice(segmentStart));
         if((assistantRow&&assistantBody)||String(pendingDisplayText||'').trim()){
           ensureAssistantRow(true);
-          _flushPendingSegmentRender({force:true});
+          _flushPendingSegmentRender({force:true,skipAnchorProcessProse:true});
         }
-        appendLiveToolCard(tc,{sessionId:activeSid,streamId});
+        if(!_renderAnchorLiveScene()) appendLiveToolCard(tc,{sessionId:activeSid,streamId});
         _freshSegment=true;
         _smdEndParser();
         _resetAssistantSegment();
       } else {
-        appendLiveToolCard(tc,{sessionId:activeSid,streamId});
+        if(!_renderAnchorLiveScene()) appendLiveToolCard(tc,{sessionId:activeSid,streamId});
       }
       snapshotLiveTurn();
       scrollIfPinned();
@@ -7360,8 +7362,25 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       });
     });
 
+    source.addEventListener('memory_status',e=>{
+      // #8517: memory is on for the agent now serving this stream's session.
+      try{
+        const _memoryStatus=JSON.parse(e.data);
+        if(_memoryStatus&&_memoryStatus.state==='ok'&&typeof noteSessionMemoryStatus==='function') noteSessionMemoryStatus(_memoryStatus.session_id,{state:'ok'});
+      }catch(_){}
+    });
+
     source.addEventListener('warning',e=>{
       // Non-fatal warning from server (e.g. fallback activated, retrying)
+      // #8517: memory is off for the agent serving this stream's session. It updates
+      // the session on screen only (its quiet notice, never a composer status).
+      try{
+        const _memoryOff=JSON.parse(e.data);
+        if(_memoryOff&&_memoryOff.type==='memory_off'){
+          if(typeof noteSessionMemoryStatus==='function') noteSessionMemoryStatus(_memoryOff.session_id,{state:'off',reason:String(_memoryOff.reason||''),scope:String(_memoryOff.scope||'')});
+          return;
+        }
+      }catch(_){}
       if(!S.session||S.session.session_id!==activeSid) return;
       try{
         const d=JSON.parse(e.data);
@@ -7588,7 +7607,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
                 : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
             clearLiveToolCards();if(!assistantText)removeThinking();
             const cancelAgentName=(assistantDisplayName()+'').trim()||'Hermes';
-            S.messages.push({role:'assistant',content:`**Task cancelled:** Task cancelled.\n\n*The run was cancelled by the user before ${cancelAgentName} finished. No provider failure occurred.*`,provider_details:'Task cancelled.',provider_details_label:'Cancellation details',_error:true});
+            // #7293: a run the WebUI server stopped (shutdown drain / forced
+            // update) must not be shown as cancelled by the user.
+            const _cancelByServer=_cancelData&&_cancelData.cancel_initiator==='server';
+            const _cancelDetail=_cancelByServer?(String(_cancelData.message||'').trim()||'The WebUI server stopped this run'):'Task cancelled.';
+            const _cancelDetailText=_cancelDetail.endsWith('.')?_cancelDetail:`${_cancelDetail}.`;
+            const _cancelHint=_cancelByServer
+              ?`The WebUI server stopped this run before ${cancelAgentName} finished; you did not cancel it. No provider failure occurred.`
+              :`The run was cancelled by the user before ${cancelAgentName} finished. No provider failure occurred.`;
+            S.messages.push({role:'assistant',content:`**Task cancelled:** ${_cancelDetailText}\n\n*${_cancelHint}*`,provider_details:_cancelDetail,provider_details_label:'Cancellation details',_error:true});
             _attachProjectedAnchorSceneToLastAssistant(S.messages);
             renderMessages({preserveScroll:true});
             if(_wasFollowingAtCancelFb && typeof scrollToBottom==='function') scrollToBottom();
@@ -7603,7 +7630,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       })();
     });
 
-    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
+    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','memory_status','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
     }
   }
@@ -8444,6 +8471,12 @@ function _captureApprovalResponseOwner() {
     _approvalDisplayedOwner.sid !== sid ||
     _approvalDisplayedOwner.approvalId !== approvalId
   ) return null;
+  // The snapshot comes from the RENDERED card (`_approvalDisplayedOwner`, set
+  // in showApprovalCard AFTER the dismissed/belongs-to-session early returns),
+  // never from the mutable pending map: the map can hold a successor that
+  // never rendered (a cross-tab-dismissed B is stored by _rememberApprovalPending
+  // and then suppressed), so reading the map here would snapshot B while the
+  // user is looking at A.
   return {..._approvalDisplayedOwner, generation: _loadSessionGeneration};
 }
 
@@ -8543,6 +8576,14 @@ function showApprovalCard(pending, pendingCount) {
   _approvalSessionId = sid;
   _approvalCurrentId = pending.approval_id || null;
   _approvalDisplayedOwner = _approvalOwnerForPending(sid, pending);
+  // The rendered card's logical identity — the ONLY valid basis for the
+  // click-time snapshot. The per-session pending map can hold a successor that
+  // never rendered (e.g. a cross-tab-dismissed B is stored by
+  // _rememberApprovalPending above and then suppressed by the early returns),
+  // so the snapshot must reflect what the user is actually looking at here.
+  if (_approvalDisplayedOwner) {
+    _approvalDisplayedOwner.displayedKey = _approvalLogicalKey(sid, pending);
+  }
   _approvalSignature = sig;
   // Show "1 of N" counter when multiple approvals are queued
   const counter = $("approvalCounter");
@@ -8580,10 +8621,39 @@ function showApprovalCard(pending, pendingCount) {
   if (typeof syncTopbar === 'function') syncTopbar();
 }
 
-function dismissApprovalCard() {
+function _approvalDismissTarget(sid, owner) {
+  // A dismissal recorded without the run/mirror owner would suppress a different
+  // run's approval that shares the transport id space, which is the cross-owner
+  // leak #7493 guards. Prefer the captured owner, whose id the reconcile already
+  // adopted to the authoritative head on the same-logical path, then the pending
+  // entry, and only then the bare id.
+  if (owner) {
+    return {
+      approval_id: owner.approvalId,
+      run_id: owner.runId,
+      _gateway_mirror_token: owner.mirrorToken,
+    };
+  }
+  const pendingEntry = _approvalPendingBySession.get(sid);
+  if (pendingEntry && pendingEntry.pending) return pendingEntry.pending;
+  return _approvalCurrentId ? {approval_id: _approvalCurrentId} : null;
+}
+
+async function dismissApprovalCard() {
   const sid = _approvalSessionId;
-  const entry = _approvalPendingBySession.get(sid);
-  if (entry && entry.pending) _markApprovalDismissed(sid, entry.pending);
+  const owner = _captureApprovalResponseOwner();
+  // #7091: reconcile the dismiss target against the authoritative head so a
+  // stale render-time transport id can't leave the X appearing to do nothing.
+  const reconciled = await _reconcileApprovalToHead(owner);
+  if (reconciled === "rerender") return;
+  // Post-await ownership guard: the reconcile is an await, so a session switch
+  // (or card change) during it must not let this dismissal hide or mark a
+  // newer session's card. Fail closed when the owner is no longer current.
+  if (owner && !_approvalResponseOwnerIsCurrent(owner)) return;
+  // Dismiss exactly what the reconcile established as current. The bare
+  // approval id is NOT enough (see _approvalDismissTarget).
+  const dismissTarget = _approvalDismissTarget(sid, owner);
+  if (dismissTarget) _markApprovalDismissed(sid, dismissTarget);
   // Keep the unresolved owner for authoritative resolution/replacement.
   // Local dismissal hides attention, not the server-owned prompt.
   if (typeof syncTopbar === 'function') syncTopbar();
@@ -8612,7 +8682,9 @@ function _syncApprovalTranscriptSpace(card, opts) {
   opts = opts || {};
   const messages = $("messages");
   if (!messages) return;
-  const wasNearBottom = _approvalMessagesNearBottom(messages);
+  // Never yank a reader who scrolled away (sticky-unpin model): a viewport change as the card
+  // opens (e.g. the memory-off notice collapsing) can bring them under the near-bottom threshold.
+  const wasNearBottom = !(typeof _messageUserUnpinned !== 'undefined' && _messageUserUnpinned) && _approvalMessagesNearBottom(messages);
   if (!card || !card.classList.contains("visible")) {
     messages.classList.remove("approval-open");
     messages.classList.remove("approval-collapsed");
@@ -8650,6 +8722,58 @@ function _restoreFailedApprovalResponse(owner, errMsg) {
   if (typeof setStatus === "function") setStatus(errMsg);
 }
 
+// A gateway-owned (mirror) approval whose gateway run has been retired cannot
+// be answered: the server rejects it with `gateway_run_unavailable` (HTTP 409).
+// We must NOT blindly clear the card here, because the head may have advanced
+// to a successor (B) between our reconcile GET and this respond POST — clearing
+// would hide B's live, still-actionable card. So re-fetch the head: if a
+// successor is pending, re-render it and keep it actionable; only a true orphan
+// (nothing pending) is cleared.
+function _isGatewayUnavailableOrphan(owner, info) {
+  if (!owner || !owner.mirrorToken || !info) return false;
+  const code = String(info.code || "").toLowerCase();
+  const text = String(info.error || info.message || "").toLowerCase();
+  return code.indexOf("gateway_run_unavailable") === 0 ||
+    text.indexOf("gateway_run_unavailable") >= 0 ||
+    text.indexOf("active run is unavailable") >= 0;
+}
+
+async function _handleGatewayUnavailable(owner, errMsg) {
+  const isCurrent = _approvalResponseOwnerIsCurrent(owner);
+  _releaseApprovalResponseOwner(owner);
+  if (!isCurrent) return false;
+  _setApprovalControlsDisabled(null, false);
+  let data = null;
+  try {
+    data = await api("/api/approval/pending?session_id=" + encodeURIComponent(owner.sid), {timeoutToast: false});
+  } catch (_) {
+    // Best-effort: cannot re-fetch the head; restore the local projection so a
+    // successor is not lost, and let the poll re-sync.
+    _renderPendingApprovalForActiveSession();
+    return false;
+  }
+  const head = (data && data.pending) || null;
+  if (head) {
+    // A successor (or the same head) is pending: keep the card actionable.
+    showApprovalForSession(owner.sid, head, (data && data.pending_count) || 1);
+  } else if (
+    !!(S.session && S.session.session_id === owner.sid) &&
+    // True orphan: nothing pending, we are still on the owner's session, AND the
+    // card still shows the captured approval. If a same-session successor B
+    // rendered (SSE) while this re-fetch was in flight, `_approvalDisplayedOwner`
+    // no longer matches the captured owner — a live successor is pending and must
+    // not be cleared or hidden. Only a genuine orphan (same approval, nothing
+    // pending) is cleared.
+    _approvalOwnerIdentityMatches(_approvalDisplayedOwner, owner)
+  ) {
+    // True orphan: nothing pending and we are still on the owner's session.
+    _clearApprovalPendingForSession(owner.sid);
+    hideApprovalCard(true);
+    if (typeof showToast === "function") showToast(errMsg, 5000);
+  }
+  return false;
+}
+
 function _applyApprovalYoloProjection(result) {
   if (!result || typeof result.yolo_enabled !== "boolean") return;
   _yoloEnabled = result.yolo_enabled;
@@ -8676,7 +8800,32 @@ async function respondApproval(choice, options = {}) {
   _approvalResponding = {...owner, choice};
   _approvalResponding.controlChoice = controlChoice;
   _setApprovalControlsDisabled(controlChoice, true);
+  // #7091: the card's transport approval_id can be stale at click time (the
+  // chat-stream SSE producer and the 1.5s fallback poll both render the card,
+  // and the server head may have advanced past what the last render wrote).
+  // Reconcile against the authoritative head before POSTing so the first click
+  // resolves instead of being burned by the #527 stale-id guard. Best-effort:
+  // on fetch failure we fall back to the captured id and the server guard
+  // remains the backstop.
+  const reconciled = await _reconcileApprovalToHead(owner);
+  if (reconciled === "rerender") {
+    _releaseApprovalResponseOwner(owner);
+    _setApprovalControlsDisabled(null, false);
+    return false;
+  }
+  // Post-await ownership guard: the reconcile is an await, so the user can
+  // switch sessions (or the card can change) while it is in flight. Never let
+  // this click fire against a session the user has navigated away from; fail
+  // closed. The post-POST check below stays as a belt-and-suspenders guard.
+  if (!_approvalResponseOwnerIsCurrent(owner)) {
+    _releaseApprovalResponseOwner(owner);
+    _setApprovalControlsDisabled(null, false);
+    return false;
+  }
   try {
+    // The reconcile may have advanced owner.approvalId to the head's transport
+    // id; the POST must carry the authoritative value, not the stale capture.
+    const approvalId = owner.approvalId;
     const result = await api("/api/approval/respond", {
       method: "POST",
       body: JSON.stringify({
@@ -8726,6 +8875,12 @@ async function respondApproval(choice, options = {}) {
       return options.yolo ? result : true;
     }
     const errMsg = (result && result.error) || "Approval response not accepted.";
+    // A retired gateway run cannot be answered; re-sync to the head so a live
+    // successor stays actionable and only a true orphan is cleared.
+    if (_isGatewayUnavailableOrphan(owner, result)) {
+      await _handleGatewayUnavailable(owner, errMsg);
+      return false;
+    }
     _restoreFailedApprovalResponse(owner, errMsg);
     return false;
   } catch(e) {
@@ -8741,9 +8896,145 @@ async function respondApproval(choice, options = {}) {
       return false;
     }
     if (options.yolo) _applyApprovalYoloProjection(errorPayload);
+    // A retired gateway run cannot be answered; re-sync to the head so a live
+    // successor stays actionable and only a true orphan is cleared.
+    if (_isGatewayUnavailableOrphan(owner, errorPayload)) {
+      await _handleGatewayUnavailable(owner, errMsg);
+      return false;
+    }
     _restoreFailedApprovalResponse(owner, errMsg);
     return false;
   }
+}
+
+// ── #7091: reconcile the card's transport id against the server head ─────────
+// The approval card's `approval_id` is written by whichever producer rendered
+// last (the chat-stream SSE 'approval' event or the 1.5s fallback poll). If the
+// server head advanced between render and click, the card holds a stale
+// transport id and the click is rejected by the #527 stale-id guard. We cannot
+// fix that by blindly trusting the head: in the queued case the user may still
+// be looking at approval A after the server advanced to approval B, and
+// auto-transferring the click to B would approve a command the user never
+// selected. So we reconcile by LOGICAL identity — everything the user can see
+// plus the request/run/mirror ownership fields, minus the volatile
+// `approval_id` — and only adopt the head's id when it proves to be the same
+// approval the card is showing.
+//
+// Content is NOT identity: two queued approvals can share the command,
+// description and patterns (an identical retried command), and the core stamps
+// exactly one stable `request_id` per `_ApprovalEntry`. Without that stable
+// identity a content-only match would let a click on A adopt B's transport id
+// and answer the approval the user never saw (#7144 r6). So the key requires a
+// non-empty stable identity — the `request_id`, or the gateway producer token
+// (run id + mirror token) — and returns null when neither is available, which
+// makes `_reconcileApprovalToHead` fail closed (re-render, no POST).
+function _approvalLogicalKey(sid, pending) {
+  if (!sid || !pending) return null;
+  const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
+  const desc = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
+  const requestId = String(pending.request_id || "").trim();
+  const runId = String(pending.run_id || "").trim();
+  const mirrorToken = String(pending._gateway_mirror_token || "").trim();
+  if (!requestId && !(runId && mirrorToken)) return null;
+  return JSON.stringify({
+    sid,
+    desc,
+    cmd: pending.command || "",
+    request_id: requestId,
+    run_id: runId,
+    mirror_token: mirrorToken,
+  });
+}
+
+// Reconcile the visible card against the server-authoritative head for the
+// session. Returns:
+//   'same'        — the head is the same logical approval as the card (or
+//                   nothing is pending, or the head cannot be identified): the
+//                   caller may act. When the transport id advanced, the card
+//                   state and `owner.approvalId` are updated to the head's id
+//                   so the click completes once.
+//   'rerender'    — the head is a DIFFERENT logical approval, or the card
+//                   cannot be proven to be the same one (no stable identity):
+//                   the card has been re-rendered to the head (or hidden when
+//                   the head was already dismissed) and the caller MUST NOT
+//                   act; a fresh deliberate click is required.
+//   'unavailable' — the best-effort /api/approval/pending fetch failed; the
+//                   caller falls back to the captured id (the #527 server
+//                   guard remains the backstop).
+async function _reconcileApprovalToHead(owner) {
+  const sid = owner ? owner.sid : _approvalSessionId;
+  if (!sid) return "unavailable";
+  let data = null;
+  try {
+    data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid), {timeoutToast: false});
+  } catch (_) {
+    return "unavailable";
+  }
+  const head = (data && data.pending) || null;
+  const count = (data && data.pending_count) || 1;
+  // The fetch is an await, so the user may have switched sessions while it ran.
+  // Never mutate or hide a different session's card here. The caller's own
+  // post-await ownership check still bails on a switch, but this keeps the
+  // reconcile from writing the wrong globals (or hiding the new session's card)
+  // before that check runs.
+  const stillOnSession = !!(S.session && S.session.session_id === sid);
+  // No pending head: the local path resolves an orphan with {ok:true,
+  // stale_cleared}, so the caller still submits and the server guard decides.
+  // A mirror-owned respond is NOT cleared here even without a local head,
+  // because the gateway is authoritative and the respond can still succeed
+  // (the retired-run case is cleared in the respond failure path).
+  if (!head) return "same";
+  // Same transport id: the visible card and the head are literally the same
+  // queue entry, so no stable identity is needed to prove it. This keeps
+  // id-less entries actionable — the server mints `gwlocal-mirrorless:<hex>`
+  // for the raw `_pending` shape, which carries no `request_id` and no
+  // producer token, and failing closed on it would make the card unanswerable.
+  const displayedId = owner ? owner.approvalId : _approvalCurrentId;
+  if (head.approval_id && displayedId && head.approval_id === displayedId) return "same";
+  const headKey = _approvalLogicalKey(sid, head);
+  const pendingEntry = _approvalPendingBySession.get(sid);
+  // Compare the head against the captured RENDER-time key when an owner was
+  // captured. Never fall back to the mutable map in that case, even when the
+  // captured key is null (fail closed -> rerender): the map can hold a
+  // successor that never rendered. The map is only a fallback for callers
+  // that did not capture an owner.
+  let displayedKey = null;
+  if (owner && owner.displayedKey) {
+    displayedKey = owner.displayedKey;
+  } else if (!owner) {
+    displayedKey = _approvalLogicalKey(sid, pendingEntry && pendingEntry.pending);
+  }
+  const sameLogical = !!(headKey && head.approval_id && displayedKey && headKey === displayedKey);
+  if (sameLogical) {
+    // Only adopt when we are still on the reconcile's session AND the original
+    // owner is still current (the visible card did not change under the await).
+    // Otherwise the head matches the snapshot but a newer render owns the card;
+    // fail closed and require a fresh deliberate click.
+    if (stillOnSession && (!owner || _approvalResponseOwnerIsCurrent(owner))) {
+      const currentId = owner ? owner.approvalId : _approvalCurrentId;
+      if (head.approval_id !== currentId) {
+        _approvalCurrentId = head.approval_id;
+        if (_approvalDisplayedOwner) {
+          _approvalDisplayedOwner = {..._approvalDisplayedOwner, approvalId: head.approval_id};
+        }
+        if (owner) owner.approvalId = head.approval_id;
+        if (_approvalResponding) _approvalResponding.approvalId = head.approval_id;
+        if (pendingEntry && pendingEntry.pending) {
+          pendingEntry.pending = {...pendingEntry.pending, ...head};
+        }
+      }
+    }
+    return "same";
+  }
+  // Different logical approval — never auto-transfer the click. Re-render the
+  // authoritative head and require a fresh deliberate click; if the head was
+  // already dismissed the render is suppressed and the stale card is hidden.
+  showApprovalForSession(sid, head, count);
+  // Only hide if we are still on the reconcile's session. After a session
+  // switch, _approvalCurrentId belongs to the NEW session, so an unguarded
+  // hide would hide that session's card.
+  if (stillOnSession && _approvalCurrentId !== head.approval_id) hideApprovalCard(true);
+  return "rerender";
 }
 
 function startApprovalPolling(sid) {
@@ -9519,7 +9810,9 @@ function _syncClarifyTranscriptSpace(card, opts) {
   opts = opts || {};
   const messages = $("messages");
   if (!messages) return;
-  const wasNearBottom = _clarifyMessagesNearBottom(messages);
+  // Never yank a reader who scrolled away (sticky-unpin model): a viewport change as the card
+  // opens (e.g. the memory-off notice collapsing) can bring them under the near-bottom threshold.
+  const wasNearBottom = !(typeof _messageUserUnpinned !== 'undefined' && _messageUserUnpinned) && _clarifyMessagesNearBottom(messages);
   if (!card || !card.classList.contains("visible")) {
     messages.classList.remove("clarify-open");
     messages.classList.remove("clarify-collapsed");

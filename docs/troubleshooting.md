@@ -312,6 +312,7 @@ silently re-enable the operation you were trying to change.
 **Notes.**
 
 - Runs without a complete terminal row (including a journal truncated mid-write) are **never** archived — a crashed run stays in place, readable, exactly as before.
+- A run the session still needs to recover an interrupted answer (its active stream, or the run an interrupted-turn marker names) stays live, so rolling back to a release that predates the archive format (such as v0.52.492) can still recover it.
 - An archived run's compressed copy is verified byte-exact before the live file is dropped; a failure at any step leaves the live file untouched (a missed archive is always safe).
 - Deleting a session deletes its archives too.
 - Set `HERMES_WEBUI_RUN_JOURNAL_SWEEP=0` to turn the sweep off entirely.
@@ -603,6 +604,34 @@ python3 -c "import hermes_constants; print(hasattr(hermes_constants, 'pin_proces
 **Fix.** `unavailable` while a turn is running is expected: refresh once the turn finishes. If it persists with no turn running, the Agent predates the process-home pin; upgrade Hermes Agent. `legacy_process` means the Agent has no profile-scoped MCP ledger at all; its `/reload-mcp` stays process-wide by design. After changing a profile's `mcp_servers`, run `/reload-mcp` **from that profile**: it only resets that profile's own connections and retries its failed servers.
 
 **When to file a bug.** File a WebUI bug if `runtime_scope` is `"profile"` and a server is still reported *Active* with tools you cannot see in the inventory, or if `/reload-mcp` from one profile changes another profile's `tool_count`.
+
+---
+
+## Memory is off, or a memory provider is disabled for a profile (#8517)
+
+**Symptom.** Agents stop recalling or saving memory (the built-in MEMORY.md/USER.md, an external provider such as Hindsight or Mnemosyne, or both), on some profiles or once more than one profile is in use. The WebUI server log has a `[webui] #8517:` warning.
+
+**Why.** WebUI holds every agent to the memory of its own session's profile and fails closed (#8517): when it cannot prove that, the profile runs without that memory instead of reading or writing another profile's. Each is logged once per WebUI process (the shared-instance one once per pair of profiles):
+
+| Log text | Cause | Effect |
+|---|---|---|
+| `has no context-local home override (older than v0.18.0)` | Hermes Agent older than v0.18.0 | All memory (external and built-in) is off for every agent. |
+| `no claim_instance; older than 2026-10-17` | Agent without `claim_instance`, and this WebUI serves several profiles (a named profile directory exists, or two profile homes were used) | External providers are off for every agent; built-in memory still works. A single-profile install keeps them. |
+| `returned the same shared provider instance that already serves profile home` | The provider plugin hands every agent one shared instance | The first profile that used it keeps it until the WebUI restarts; the others run without it. |
+
+Session boundaries (cache eviction, a new chat, shutdown) commit memory as the session's owner. A commit that cannot run as the owner is logged as `not run` (`The work stays pending`); one the Agent refuses logs `It is NOT counted as committed; the work stays pending`. Both are retried at the next boundary. WebUI notices the Agent's refusal at the Agent's own refusal function (`agent.memory_caller_scope._refuse`), before anything is logged, so the refusal is detected whatever the logging configuration (levels above WARNING, disabled loggers, `logging.disable`) and that configuration is never changed (#8613). An Agent without that function has no caller-scope check and never refuses. An evicted agent whose owner cannot be resolved (its session file was removed outside the WebUI) gets no session end, and its provider is not shut down either: other agents of the same profile may share that provider instance, so its worker stays until the WebUI restarts.
+
+**Diagnostic commands.** Run the Python lines with the Agent's interpreter (the one the WebUI uses).
+
+```bash
+grep -E '\[webui\] #(8517|8613)' <webui-server-log>
+python3 -c "import hermes_constants as h; print('v0.18.0 home override:', callable(getattr(h, 'set_hermes_home_override', None)))"
+python3 -c "import agent.memory_manager as m; print('claim_instance:', callable(getattr(m, 'claim_instance', None)))"
+```
+
+**Fix.** Upgrade Hermes Agent and restart the WebUI. For the shared-instance warning, the provider plugin must return a new instance per agent (the documented provider contract); until it does, only the first profile keeps it.
+
+**When to file a bug.** File a WebUI bug if memory is off while every diagnostic prints `True` and there is no shared-instance warning, or if one profile's memory shows another profile's entries.
 
 ---
 
