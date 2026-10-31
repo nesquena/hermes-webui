@@ -275,6 +275,10 @@ class SessionRelay:
         prompt_id = payload.get("prompt_id")
         if not prompt_id or self.approvals.get(prompt_id) == generation:
             return
+        if self.cancel.is_set():
+            # Stopped: the socket can still deliver an approval until the Gateway
+            # confirms the interrupt. Never auto-approve it or show a card.
+            return
         self.approvals[prompt_id] = generation
         data = _gateway_runs_approval_event({**payload, "approval_id": prompt_id})
         if data is None:
@@ -282,8 +286,10 @@ class SessionRelay:
         data.update(run_id=self.run_id, _gateway_agent_identity_v1=True)
         # Reuse the existing session-YOLO handoff and exact-owner mirror. This
         # runs off the socket loop because approval settlement can RPC back to it.
-        settled, head, count = _settle_gateway_run_approval(self.session_id, data, "", "")
-        if not settled:
+        settled, head, count = _settle_gateway_run_approval(
+            self.session_id, data, "", "", cancel_event=self.cancel,
+        )
+        if not settled and not self.cancel.is_set():
             self.emit("approval", {**(head or data), "pending_count": count})
 
     async def receive_event(self, frame):

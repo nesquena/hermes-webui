@@ -496,14 +496,32 @@ def _settle_gateway_run_approval(
     approval_data: dict,
     base_url: str,
     api_key: str,
+    *,
+    cancel_event=None,
 ) -> tuple[bool, dict | None, int]:
-    """Auto-approve or mirror one run approval at a session-linearized point."""
-    from api.route_approvals import gateway_yolo_handoff, submit_gateway_pending_mirror
+    """Auto-approve or mirror one run approval at a session-linearized point.
+
+    ``cancel_event`` is the run's retained Stop signal, for relays that can still
+    receive an approval after Stop (the native session transport keeps reading
+    its socket until the Gateway confirms the interrupt). A cancelled run gets
+    no auto-approval and no card: the flag is checked before either, and again
+    under the approval registry lock by ``submit_gateway_pending_mirror``, the
+    same lock Stop retires the run's cards under (#8634). A card published in
+    the instant before Stop is retired here as a second line of defence. The
+    return is then ``(False, None, 0)``; the caller must not surface a card.
+    """
+    from api.route_approvals import (
+        gateway_yolo_handoff,
+        settle_gateway_pending_run,
+        submit_gateway_pending_mirror,
+    )
 
     run_id = str(approval_data.get("run_id") or "").strip()
     identity_v1 = bool(approval_data.get("_gateway_agent_identity_v1"))
     execution_generation = approval_data.get("_gateway_execution_generation")
     with gateway_yolo_handoff(session_id):
+        if cancel_event is not None and cancel_event.is_set():
+            return False, None, 0
         if _gateway_session_yolo_enabled(session_id):
             try:
                 _auto_approve_gateway_run(
@@ -526,8 +544,20 @@ def _settle_gateway_run_approval(
                     run_id,
                     exc_info=True,
                 )
-        head, total = submit_gateway_pending_mirror(session_id, approval_data)
-        return False, head, total
+        # Only the cancel-aware relays pass the flag; the existing Runs API caller
+        # keeps its exact call shape.
+        head, total = submit_gateway_pending_mirror(
+            session_id,
+            approval_data,
+            **({"cancel_event": cancel_event} if cancel_event is not None else {}),
+        )
+    if cancel_event is not None and cancel_event.is_set():
+        if run_id:
+            settle_gateway_pending_run(
+                session_id, run_id, reason="Gateway run was cancelled before approval resolution",
+            )
+        return False, None, 0
+    return False, head, total
 
 
 def _auto_approve_gateway_run(

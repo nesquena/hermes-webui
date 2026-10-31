@@ -330,8 +330,8 @@ def test_canonical_auto_approval_uses_exact_socket_owner(monkeypatch):
 def test_approval_reuses_existing_yolo_handoff_and_mirror(monkeypatch):
     from api import gateway_chat
     calls = []
-    def settle(sid, data, base, key):
-        calls.append((sid, data))
+    def settle(sid, data, base, key, **kwargs):
+        calls.append((sid, data, kwargs))
         return True, None, 0
     monkeypatch.setattr(gateway_chat, "_settle_gateway_run_approval", settle)
     instance, events, _ = relay()
@@ -339,6 +339,61 @@ def test_approval_reuses_existing_yolo_handoff_and_mirror(monkeypatch):
     assert not events  # auto-settled prompt must not show an actionable card
     assert calls[0][1]["run_id"] == instance.run_id
     assert calls[0][1]["approval_id"] == "prompt-1"
+    assert calls[0][2]["cancel_event"] is instance.cancel  # Stop-aware publication
+
+
+@pytest.mark.parametrize("stopped_when,yolo", [
+    ("before_event", False), ("before_event", True), ("during_publication", False),
+])
+def test_native_approval_after_stop_publishes_no_card_and_sends_nothing(monkeypatch, stopped_when, yolo):
+    """A native approval that arrives after Stop must stay dead (#8634 on the session transport).
+
+    The relay keeps reading its socket until the Gateway confirms the interrupt,
+    so an approval can still arrive. Before the fix it recreated the card and a
+    click relayed ``approval.respond``; now no card exists, the click is refused
+    and nothing reaches the Gateway, with or without session YOLO.
+    """
+    from unittest.mock import MagicMock
+
+    from api import gateway_chat, route_approvals, routes
+
+    instance, events, _ = relay()
+    sid = instance.session_id
+    client = Client()
+    client.status = "started"
+    instance.client, instance.receipt = client, {"admission_id": "one-admission"}
+    monkeypatch.setattr(gateway_chat, "_gateway_session_yolo_enabled", lambda _: yolo)
+    auto = MagicMock(side_effect=AssertionError("a stopped run must not be auto-approved"))
+    monkeypatch.setattr(gateway_chat, "_auto_approve_gateway_run", auto)
+    if stopped_when == "before_event":
+        instance.cancel.set()
+    else:
+        # Stop lands while the card is being published: the registry-lock recheck
+        # (or the post-publication retirement) must leave no card behind.
+        real_submit = route_approvals.submit_gateway_pending_mirror
+
+        def submit(session_key, approval, *, cancel_event=None):
+            instance.cancel.set()
+            return real_submit(session_key, approval, cancel_event=cancel_event)
+
+        monkeypatch.setattr(route_approvals, "submit_gateway_pending_mirror", submit)
+    replies = []
+    monkeypatch.setattr(routes, "j", lambda h, data, status=200, **kw: replies.append((status, data)))
+    try:
+        instance.approval({"prompt_id": "prompt-1", "command": "example", "choices": ["once", "deny"]}, 3)
+        assert route_approvals.gateway_pending_mirror(sid, run_id=instance.run_id) is None
+        assert not [e for e in events if e and e[0] == "approval"]
+        auto.assert_not_called()
+        routes._handle_approval_respond(MagicMock(), {
+            "session_id": sid, "run_id": instance.run_id, "approval_id": "prompt-1",
+            "mirror_token": "stale-token", "choice": "once",
+        })
+        assert replies and replies[0][0] == 409 and replies[0][1].get("ok") is not True
+        assert all(method != "approval.respond" for method, _ in client.calls)
+    finally:
+        with route_approvals._lock:
+            route_approvals._pending.pop(sid, None)
+            route_approvals._gateway_queues.pop(sid, None)
 
 
 @pytest.mark.parametrize("profile", ["default", "josue", "tomo", "tristan"])
