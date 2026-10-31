@@ -3342,7 +3342,8 @@
     /* Give the conversation title its own row when a source badge is present. */
     .app-titlebar-inner:has(.topbar-source-badge){display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:0 6px;}
     .app-titlebar-inner:has(.topbar-source-badge) .app-titlebar-title{flex:0 1 auto;min-width:0;max-width:calc(100% - 22px);}
-    .app-titlebar-inner:has(.topbar-source-badge) .app-titlebar-sub{flex:0 0 100%;display:flex;justify-content:center;align-items:center;gap:4px;min-width:0;max-width:100%;box-sizing:border-box;}
+    .app-titlebar-inner:has(.topbar-source-badge)::after{content:'';flex:0 0 100%;order:1;height:0;}
+    .app-titlebar-inner:has(.topbar-source-badge) .app-titlebar-sub{order:2;flex:0 1 auto;display:flex;justify-content:center;align-items:center;gap:4px;min-width:0;max-width:100%;box-sizing:border-box;}
     .app-titlebar-sub .topbar-source-badge{display:block;flex:0 1 auto;min-width:0;margin-left:0;box-sizing:border-box;overflow:hidden;text-overflow:ellipsis;}
     .app-titlebar:has(.topbar-source-badge) .app-titlebar-spacer{display:none;}
     /* Keep the optional profile control from crowding the conversation title. */
