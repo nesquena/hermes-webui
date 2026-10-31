@@ -2128,6 +2128,15 @@ class Session:
             'gateway_run', 'delegation_reservation', 'delegation_cutoff_ts',
         ]
         guarded_messages, exact_replay_rows_removed = _deduplicate_exact_stable_messages(self.messages)
+        # IMPORTANT: local compatibility override. Keep this call at the save
+        # boundary across upstream updates; see api/session_image_persistence_override.py
+        # and its regression test before modifying/removing it. Model-facing image
+        # bytes may be huge, but durable WebUI session JSON must remain bounded.
+        # The guard above already returns a deep scan snapshot, so compacting it
+        # in place never touches the owner-visible transcript and preserves the
+        # scan-time snapshot contract (a mutation after the scan stays out).
+        from api.session_image_persistence_override import compact_persisted_image_parts
+        compact_persisted_image_parts(guarded_messages)
         if exact_replay_rows_removed:
             logger.warning(
                 "Removed %d exact stable replay messages from persisted snapshot for session %s",
@@ -2187,6 +2196,18 @@ class Session:
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
+        # Durable contract for BOTH histories: `messages` is the display
+        # transcript, `context_messages` is the provider replay prefix. Neither
+        # may persist inline image bytes. The provider replay is bounded to a
+        # marker (the same policy upstream applies to completed tool images),
+        # and the live objects stay untouched so the next model call still sees
+        # real bytes. Attachment availability after reload comes from the
+        # unchanged `attachments` field plus the files in the session inbox --
+        # the renderer never drew inline user image parts (static/ui.js:20548).
+        from api.session_image_persistence_override import compact_persisted_image_parts
+        persisted_context = copy.deepcopy(getattr(self, 'context_messages', None) or [])
+        compact_persisted_image_parts(persisted_context)
+        extra['context_messages'] = persisted_context
         payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
         try:
             payload.encode('utf-8')
