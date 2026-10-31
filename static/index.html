@@ -240,7 +240,7 @@
           <button class="btn primary kanban-run-dispatch-btn" onclick="runKanbanDispatcher()" data-i18n="kanban_run_dispatcher" title="Claims Ready tasks and spawns worker subprocesses">Run dispatcher</button>
         </div>
         <div class="kanban-new-task-row">
-          <input id="kanbanNewTaskTitle" placeholder="New task" data-i18n-placeholder="kanban_new_task" onkeydown="if(event.key==='Enter')createKanbanTask()">
+          <input id="kanbanNewTaskTitle" placeholder="New task" data-i18n-placeholder="kanban_new_task" onkeydown="kanbanNewTaskKeydown(event)">
           <button class="btn secondary" onclick="createKanbanTask()" data-i18n="kanban_new_task">New task</button>
         </div>
       </div>
