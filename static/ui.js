@@ -15589,8 +15589,9 @@ function _fmtDateSep(d){
   const todayStart=new Date();todayStart.setHours(0,0,0,0);
   const dStart=new Date(d);dStart.setHours(0,0,0,0);
   const diffDays=Math.round((todayStart-dStart)/86400000);
-  if(diffDays===0) return 'Today';
-  if(diffDays===1) return 'Yesterday';
+  // hwc: same strings as the sidebar day buckets, already in every locale.
+  if(diffDays===0) return t('session_time_bucket_today');
+  if(diffDays===1) return t('session_time_bucket_yesterday');
   if(diffDays>0 && diffDays<7) return dStart.toLocaleDateString([], {weekday:'long'});
   const opts={month:'short', day:'numeric'};
   if(todayStart.getFullYear()!==dStart.getFullYear()) opts.year='numeric';
