@@ -1373,6 +1373,12 @@ _METADATA_PREFIX_MAX_BYTES = 1024 * 1024
 #: even when the stop key sits at 2 KB.
 _METADATA_PREFIX_FIRST_STAGE_BYTES = 64 * 1024
 
+# A compression snapshot can carry the latest todo list before ``messages``.
+# Keep the ordinary metadata ceiling unchanged, but allow that one explicitly
+# bounded field to grow to the largest payload accepted by the todo tool. The
+# reader adopts this ceiling only after seeing the top-level todo_state key.
+_TODO_STATE_METADATA_PREFIX_MAX_BYTES = 8 * 1024 * 1024
+
 # Marks a sidecar as written by the CURRENT writer contract, where the
 # persisted `message_count` equals len(messages) by construction (both keys
 # land in the same atomic write). save()'s bounded-prefix shrink check trusts
@@ -1394,6 +1400,11 @@ def _read_metadata_json_prefix(path, max_prefix_bytes=_METADATA_PREFIX_MAX_BYTES
     — still captures ``message_count`` (which is written before both). Without
     the scenes-stop a legacy large-scene sidecar overflows ``max_prefix_bytes``
     and forces a full multi-MB parse on every poll (the #4633 churn).
+
+    Compression snapshots may carry a bounded ``todo_state`` before ``messages``.
+    After that top-level key is detected, the reader uses a larger todo-specific
+    ceiling so a valid list does not fall back to parsing the parent transcript.
+    Other oversized metadata remains subject to ``max_prefix_bytes``.
     """
     if max_prefix_bytes <= 0:
         return None
@@ -1418,13 +1429,14 @@ def _read_metadata_json_prefix(path, max_prefix_bytes=_METADATA_PREFIX_MAX_BYTES
     # sizes form a bounded geometric series (total work < 2x the bytes actually
     # read, worst case). `_find_top_level_json_key` returns AT the key, so the
     # final scan costs O(offset of the stop key), not O(stage).
-    stage = min(_METADATA_PREFIX_FIRST_STAGE_BYTES, max_prefix_bytes)
+    read_limit = max_prefix_bytes
+    stage = min(_METADATA_PREFIX_FIRST_STAGE_BYTES, read_limit)
     raw = b''
     buf = ''
     stop_pos = None
     with open(path, 'rb') as f:
-        while len(raw) < max_prefix_bytes:
-            chunk = f.read(min(stage, max_prefix_bytes - len(raw)))
+        while len(raw) < read_limit:
+            chunk = f.read(min(stage, read_limit - len(raw)))
             if not chunk:
                 # EOF before the stop key: no metadata prefix to serve, so the
                 # caller falls back to a full parse (same answer as a budget miss).
@@ -1438,6 +1450,13 @@ def _read_metadata_json_prefix(path, max_prefix_bytes=_METADATA_PREFIX_MAX_BYTES
             scenes_pos = _find_top_level_json_key(buf, 'anchor_activity_scenes')
             if scenes_pos is not None and (stop_pos is None or scenes_pos < stop_pos):
                 stop_pos = scenes_pos
+            todo_pos = _find_top_level_json_key(buf, 'todo_state')
+            if (
+                todo_pos is not None
+                and (stop_pos is None or todo_pos < stop_pos)
+                and read_limit < _TODO_STATE_METADATA_PREFIX_MAX_BYTES
+            ):
+                read_limit = _TODO_STATE_METADATA_PREFIX_MAX_BYTES
             if stop_pos is not None:
                 break
             stage *= 2
@@ -1810,9 +1829,10 @@ class Session:
                  last_used_model=None,
                  llm_title_generated: bool=False,
                  manual_title: bool=False,
-                parent_session_id: str=None,
-                worktree_path=None,
-                worktree_branch=None,
+                 parent_session_id: str=None,
+                 compression_disjoint_parent_boundary=None,
+                 worktree_path=None,
+                 worktree_branch=None,
                  worktree_repo_root=None,
                  worktree_created_at=None,
                  enabled_toolsets=None,
@@ -1955,6 +1975,11 @@ class Session:
         self.llm_title_generated = bool(llm_title_generated)
         self.manual_title = bool(manual_title)
         self.parent_session_id = parent_session_id
+        self.compression_disjoint_parent_boundary = (
+            copy.deepcopy(compression_disjoint_parent_boundary)
+            if isinstance(compression_disjoint_parent_boundary, dict)
+            else None
+        )
         self.worktree_path = str(Path(worktree_path).expanduser().resolve()) if worktree_path else None
         self.worktree_branch = str(worktree_branch) if worktree_branch else None
         self.worktree_repo_root = str(Path(worktree_repo_root).expanduser().resolve()) if worktree_repo_root else None
@@ -1984,7 +2009,15 @@ class Session:
         # fall back to reading keys/updated_at off anchor_activity_scenes.
         _raw_scene_index = kwargs.get('anchor_scene_index')
         self._anchor_scene_index = _raw_scene_index if isinstance(_raw_scene_index, dict) else None
+        raw_todo_state = kwargs.get('todo_state')
+        self.todo_state = raw_todo_state if isinstance(raw_todo_state, dict) else None
+        self._todo_state_metadata_available = 'todo_state' in kwargs
         raw_message_count = kwargs.get('message_count')
+        self._metadata_message_count_exact = (
+            raw_message_count
+            if type(raw_message_count) is int and raw_message_count >= 0
+            else None
+        )
         parsed_message_count = None
         if raw_message_count is not None:
             try:
@@ -1996,6 +2029,11 @@ class Session:
         # (written by save()); None on legacy sidecars → compact() walks
         # messages instead.
         _raw_visible_count = kwargs.get('visible_message_count')
+        self._metadata_visible_message_count_exact = (
+            _raw_visible_count
+            if type(_raw_visible_count) is int and _raw_visible_count >= 0
+            else None
+        )
         _parsed_visible_count = None
         if _raw_visible_count is not None:
             try:
@@ -2005,6 +2043,14 @@ class Session:
         self._metadata_visible_message_count = (
             _parsed_visible_count
             if _parsed_visible_count is not None and _parsed_visible_count >= 0
+            else None
+        )
+        _raw_last_message_at = kwargs.get('last_message_at')
+        self._metadata_last_message_at = (
+            float(_raw_last_message_at)
+            if type(_raw_last_message_at) in (int, float)
+            and math.isfinite(float(_raw_last_message_at))
+            and float(_raw_last_message_at) >= 0
             else None
         )
 
@@ -2039,6 +2085,11 @@ class Session:
             )
         if touch_updated_at:
             self.updated_at = time.time()
+        self.todo_state = None
+        if self.pre_compression_snapshot:
+            from api.todo_state import derive_todo_state
+            self.todo_state = derive_todo_state(self.messages)
+        self._todo_state_metadata_available = True
         self._webui_pending_user_timestamp_identity = (
             _validated_webui_pending_user_timestamp_identity(
                 self, getattr(self, '_webui_pending_user_timestamp_identity', None)
@@ -2069,6 +2120,7 @@ class Session:
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',
             'pre_compression_continuation_session_id',
+            'compression_disjoint_parent_boundary', 'todo_state',
             'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',
             'compression_anchor_details', 'context_engine_state',
             'context_length', 'threshold_tokens', 'last_prompt_tokens',
@@ -2114,6 +2166,13 @@ class Session:
             1 for m in (guarded_messages or [])
             if not is_hidden_transcript_row(m)
         )
+        # The disjoint-compression boundary validator must prove the archived
+        # parent's freshness without parsing its messages array. Persist the
+        # same timestamp compact() publishes in the bounded metadata prefix;
+        # legacy files without it fail closed to the full-lineage path.
+        meta['last_message_at'] = (
+            _last_message_timestamp(guarded_messages) or self.updated_at
+        )
         # _mc_v marks this file as written by the current writer contract,
         # where `message_count` equals len(the persisted guarded messages) by
         # construction and both keys land in the same atomic write. save()'s
@@ -2145,7 +2204,16 @@ class Session:
         meta['anchor_activity_scenes'] = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
         # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end. Exclude
         # the keys we placed explicitly above so they aren't emitted twice.
-        _placed = {'message_count', '_mc_v', 'anchor_scene_index', 'messages', 'tool_calls', 'anchor_activity_scenes'}
+        _placed = {
+            'message_count',
+            'visible_message_count',
+            'last_message_at',
+            '_mc_v',
+            'anchor_scene_index',
+            'messages',
+            'tool_calls',
+            'anchor_activity_scenes',
+        }
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
@@ -12230,6 +12298,8 @@ def get_state_db_regeneration_tail_snapshot(
     floor,
     *,
     profile=None,
+    include_prefix_keys=True,
+    include_fallback_rows=False,
 ):
     """Return prefix proof + bounded tail from ONE read transaction (#6826 r3).
 
@@ -12302,31 +12372,35 @@ def get_state_db_regeneration_tail_snapshot(
                 "count": int(row["count"]) if row else 0,
                 "null_timestamp_count": int(row["null_timestamp_count"]) if row else 0,
             }
-            # 2) ordered prefix keys (rows < floor) in durable order
-            prefix_key_cols = "COALESCE(role,'') AS role, COALESCE(content,'') AS content"
-            if 'tool_calls' in available:
-                prefix_key_cols += ", tool_calls"
-            if 'api_content' in available:
-                prefix_key_cols += ", api_content"
-            prefix_key_sql = (
-                f"SELECT {prefix_key_cols} FROM messages "
-                "WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ? "
-                f"{active_clause} ORDER BY {durable_order} ASC"
-            )
-            try:
-                cur.execute(prefix_key_sql, (str(sid), floor_ts))
-            except Exception:
-                cur.execute("ROLLBACK")
-                return None
-            prefix_keys = [
-                _session_message_visible_key({
-                    "role": r["role"],
-                    "content": _decode_state_db_content(r["content"]),
-                    "tool_calls": _json_loads_if_string(r["tool_calls"]) if "tool_calls" in r.keys() and r["tool_calls"] is not None else None,
-                    "api_content": r["api_content"] if "api_content" in r.keys() else None,
-                }, normalize_workspace_prefix=True)
-                for r in cur.fetchall()
-            ]
+            # 2) ordered prefix keys (rows < floor) in durable order. Compression
+            # tail loads need only prove this prefix empty; skipping key projection
+            # avoids materialising a huge parent-era state prefix.
+            prefix_keys = []
+            if include_prefix_keys:
+                prefix_key_cols = "COALESCE(role,'') AS role, COALESCE(content,'') AS content"
+                if 'tool_calls' in available:
+                    prefix_key_cols += ", tool_calls"
+                if 'api_content' in available:
+                    prefix_key_cols += ", api_content"
+                prefix_key_sql = (
+                    f"SELECT {prefix_key_cols} FROM messages "
+                    "WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ? "
+                    f"{active_clause} ORDER BY {durable_order} ASC"
+                )
+                try:
+                    cur.execute(prefix_key_sql, (str(sid), floor_ts))
+                except Exception:
+                    cur.execute("ROLLBACK")
+                    return None
+                prefix_keys = [
+                    _session_message_visible_key({
+                        "role": r["role"],
+                        "content": _decode_state_db_content(r["content"]),
+                        "tool_calls": _json_loads_if_string(r["tool_calls"]) if "tool_calls" in r.keys() and r["tool_calls"] is not None else None,
+                        "api_content": r["api_content"] if "api_content" in r.keys() else None,
+                    }, normalize_workspace_prefix=True)
+                    for r in cur.fetchall()
+                ]
             # 3) bounded tail (rows >= floor) with the canonical projection
             optional = [
                 'tool_call_id', 'tool_calls', 'tool_name', 'reasoning',
@@ -12347,6 +12421,23 @@ def get_state_db_regeneration_tail_snapshot(
                 _project_state_db_message(r, available, 'id' in available, optional)
                 for r in cur.fetchall()
             ]
+            fallback_rows = tail_rows
+            if include_fallback_rows and (
+                prefix["count"] or prefix["null_timestamp_count"]
+            ):
+                # The bounded proof failed, so capture the exact full source in
+                # this SAME read transaction. Callers can fall back to their full
+                # sidecar/lineage merge without opening a second SQLite snapshot.
+                full_sql = (
+                    f"SELECT {', '.join(tail_select)} FROM messages "
+                    f"WHERE session_id = ? {active_clause} "
+                    f"ORDER BY {durable_order} ASC"
+                )
+                cur.execute(full_sql, (str(sid),))
+                fallback_rows = [
+                    _project_state_db_message(r, available, 'id' in available, optional)
+                    for r in cur.fetchall()
+                ]
             tail_keys = [
                 _session_message_visible_key(
                     {
@@ -12366,12 +12457,15 @@ def get_state_db_regeneration_tail_snapshot(
                 # a concurrent WAL commit landed during the proof → stale
                 # snapshot; refuse the bounded path (TOCTOU).
                 return None
-            return {
+            result = {
                 "prefix": prefix,
                 "prefix_keys": prefix_keys,
                 "tail": tail_rows,
                 "tail_keys": tail_keys,
             }
+            if include_fallback_rows:
+                result["fallback_rows"] = fallback_rows
+            return result
     except Exception:
         return None
 
@@ -13202,6 +13296,47 @@ def _session_message_merge_key(msg: dict):
         str(msg.get("tool_name") or msg.get("name") or ""),
         _tc_key,
     ), msg)
+
+
+def _compression_child_message_semantic_key(msg):
+    """Return the canonical fields that can change a child's display identity."""
+    if not isinstance(msg, dict):
+        return {"non_dict": repr(msg)}
+    return {
+        "id": msg.get("id"),
+        "message_id": msg.get("message_id"),
+        "role": msg.get("role"),
+        "content": msg.get("content"),
+        "api_content": msg.get("api_content"),
+        # Visibility is semantic: changing a persisted row into (or out of) an
+        # internal delegation wakeup changes display counts and coordinates.
+        "_source": msg.get("_source"),
+        # Keep the exact persisted timestamp. The display merge can reorder a
+        # same-id row after even a sub-second rewrite.
+        "timestamp": msg.get("timestamp"),
+        "_ts": msg.get("_ts"),
+        "tool_call_id": msg.get("tool_call_id"),
+        "tool_name": msg.get("tool_name"),
+        "name": msg.get("name"),
+        "tool_calls": msg.get("tool_calls"),
+        "function_call": msg.get("function_call"),
+    }
+
+
+def _compression_child_messages_digest(messages) -> str:
+    """Return a semantic digest binding a disjoint-parent proof to one child array."""
+    semantic_messages = [
+        _compression_child_message_semantic_key(msg)
+        for msg in list(messages or [])
+    ]
+    encoded = json.dumps(
+        semantic_messages,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(',', ':'),
+        default=str,
+    ).encode('utf-8')
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _session_messages_have_prefix(messages, prefix) -> bool:

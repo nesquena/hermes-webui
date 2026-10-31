@@ -12,6 +12,7 @@ import errno
 import io
 import gzip
 import json
+import math
 from api.sse_chunked import end_sse_headers
 import logging
 import mimetypes
@@ -11221,6 +11222,7 @@ def _limited_webui_messages_for_display_with_sidecar(
     state_db_signature=_DISPLAY_STATE_SIGNATURE_UNSET,
     msg_before=None,
     owner_positions=None,
+    allow_cache=True,
 ) -> list:
     sidecar_owners = dict(owner_positions or {})
     if sidecar_messages is None:
@@ -11282,7 +11284,7 @@ def _limited_webui_messages_for_display_with_sidecar(
     # scope than the initial tail request.  It must bypass both cache layers:
     # skipping only the pre-load probe still let this inner lookup reuse the
     # initial 50k-row backstop merge and made the oldest row unreachable.
-    if msg_before is None and not _display_merge_session_is_active(session):
+    if allow_cache and msg_before is None and not _display_merge_session_is_active(session):
         if state_db_signature is _DISPLAY_STATE_SIGNATURE_UNSET:
             _state_key = _state_db_rows_fingerprint(state_db_messages)
         else:
@@ -11746,6 +11748,242 @@ def _state_db_rows_fingerprint(rows) -> str | None:
         return None
 
 
+def _metadata_message_count_for_display(session) -> int | None:
+    raw_count = getattr(session, "_metadata_message_count", None)
+    if raw_count is not None:
+        try:
+            count = int(float(_safe_first(raw_count, 0) or 0))
+        except (TypeError, ValueError):
+            return None
+        return count if count >= 0 else None
+    if getattr(session, "_loaded_metadata_only", False):
+        return None
+    try:
+        compact_count = session.compact().get("message_count")
+    except Exception:
+        return None
+    if compact_count is None:
+        return None
+    try:
+        count = int(float(_safe_first(compact_count, 0) or 0))
+    except (TypeError, ValueError):
+        return None
+    return count if count >= 0 else None
+
+
+def _compression_parent_lineage_metadata_count(
+    session,
+    *,
+    max_hops: int = 20,
+    parent=None,
+) -> int | None:
+    """Return the immediate parent snapshot length for safe metadata pagination.
+
+    The full stitch path merges/deduplicates cumulative snapshot ancestors.  A
+    metadata-only count cannot know whether a parent with its own parent already
+    includes that ancestor prefix, so multi-hop lineages must fall back to the
+    full stitch rather than summing counts and publishing inflated cursors.
+    """
+    try:
+        if int(max_hops) < 1:
+            return None
+    except (TypeError, ValueError):
+        return None
+    parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
+    if not parent_id or not is_safe_session_id(parent_id):
+        return None
+    if parent is None:
+        parent = Session.load_metadata_only(parent_id)
+    if not parent or not getattr(parent, "pre_compression_snapshot", False):
+        return None
+    if getattr(parent, "truncation_watermark", None) not in (None, ""):
+        return None
+    if getattr(parent, "truncation_boundary", None) not in (None, ""):
+        return None
+    parent_parent_id = str(getattr(parent, "parent_session_id", "") or "").strip()
+    if parent_parent_id:
+        return None
+    source = str(getattr(session, "session_source", "") or "").strip().lower()
+    parent_source = str(getattr(parent, "session_source", "") or "").strip().lower()
+    if source == "fork" and parent_source != "fork":
+        return None
+    return _metadata_message_count_for_display(parent)
+
+
+def _loaded_prefix_count_before_sidecar(merged_messages, sidecar_messages) -> int:
+    """Return how many rows precede the exact sidecar sequence in a merged list."""
+    merged_keys = [
+        _session_message_merge_key(msg)
+        for msg in list(merged_messages or [])
+    ]
+    sidecar_keys = [
+        _session_message_merge_key(msg)
+        for msg in list(sidecar_messages or [])
+    ]
+    if not merged_keys or not sidecar_keys or len(sidecar_keys) > len(merged_keys):
+        return 0
+    first_key = sidecar_keys[0]
+    last_start = len(merged_keys) - len(sidecar_keys)
+    for idx in range(last_start + 1):
+        if merged_keys[idx] != first_key:
+            continue
+        if merged_keys[idx : idx + len(sidecar_keys)] == sidecar_keys:
+            return idx
+    return 0
+
+
+def _sidecar_sequence_matches_at_offset(
+    merged_messages,
+    sidecar_messages,
+    offset,
+) -> bool:
+    """Prove a child-local coordinate span exists in the merged transcript."""
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        return False
+    merged_messages = list(merged_messages or [])
+    sidecar_messages = list(sidecar_messages or [])
+    if not sidecar_messages or offset + len(sidecar_messages) > len(merged_messages):
+        return False
+    return [
+        _session_message_merge_key(message)
+        for message in merged_messages[offset : offset + len(sidecar_messages)]
+    ] == [
+        _session_message_merge_key(message)
+        for message in sidecar_messages
+    ]
+
+
+def _first_message_timestamp(messages) -> float | None:
+    for msg in messages or []:
+        timestamp = _message_timestamp_as_float(msg)
+        if timestamp is not None:
+            return timestamp
+    return None
+
+
+def _visible_message_identity_sequence(messages) -> list[tuple]:
+    """Return the exact visible-row identity sequence used by display merging."""
+    return [
+        _session_message_visible_key(message, normalize_workspace_prefix=True)
+        for message in list(messages or [])
+        if isinstance(message, dict) and not is_hidden_transcript_row(message)
+    ]
+
+
+def _limited_compression_child_projection_unchanged(merged_messages, child_messages) -> bool:
+    """Prove a one-snapshot state merge did not change any child coordinate."""
+    merged_messages = list(merged_messages or [])
+    child_messages = list(child_messages or [])
+    if len(merged_messages) != len(child_messages):
+        return False
+    if (
+        _compression_child_messages_digest(merged_messages)
+        != _compression_child_messages_digest(child_messages)
+    ):
+        return False
+    return (
+        _visible_message_identity_sequence(merged_messages)
+        == _visible_message_identity_sequence(child_messages)
+    )
+
+
+def _validated_omitted_compression_parent_metadata(
+    session,
+    direct_sidecar_messages,
+) -> dict | None:
+    """Return trusted metadata for one safely omitted compression parent.
+
+    Timestamp and relative-length heuristics cannot distinguish a disjoint child
+    from one that replays only a suffix of its parent. New compression rotations
+    therefore persist counts and freshness only after the write path proves the
+    full parent/child merge contains every row. Legacy or ambiguous children
+    fail closed to the established full-lineage stitch.
+    """
+    parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
+    if not parent_id or not is_safe_session_id(parent_id):
+        return None
+    parent = Session.load_metadata_only(parent_id)
+    if (
+        not parent
+        or not getattr(parent, "pre_compression_snapshot", False)
+        or not getattr(parent, "_todo_state_metadata_available", False)
+        or getattr(parent, "truncation_watermark", None) not in (None, "")
+        or getattr(parent, "truncation_boundary", None) not in (None, "")
+    ):
+        return None
+    parent_count = getattr(parent, "_metadata_message_count_exact", None)
+    parent_visible_count = getattr(
+        parent,
+        "_metadata_visible_message_count_exact",
+        None,
+    )
+    parent_last_message_at = getattr(parent, "_metadata_last_message_at", None)
+    boundary = getattr(session, "compression_disjoint_parent_boundary", None)
+    if not isinstance(boundary, dict):
+        return None
+
+    marker_count = boundary.get("message_count")
+    marker_visible_count = boundary.get("visible_message_count")
+    marker_child_count = boundary.get("child_message_count")
+    if any(
+        type(value) is not int or value < 0
+        for value in (marker_count, marker_visible_count, marker_child_count)
+    ):
+        return None
+    marker_last_message_at = boundary.get("last_message_at")
+    marker_updated_at = boundary.get("parent_updated_at")
+    parent_updated_at = getattr(parent, "updated_at", None)
+    if any(
+        type(value) not in (int, float)
+        or not math.isfinite(float(value))
+        or float(value) < 0
+        for value in (
+            marker_last_message_at,
+            marker_updated_at,
+            parent_updated_at,
+            parent_last_message_at,
+        )
+    ):
+        return None
+    marker_last_message_at = float(marker_last_message_at)
+    marker_updated_at = float(marker_updated_at)
+    parent_updated_at = float(parent_updated_at)
+    parent_last_message_at = float(parent_last_message_at)
+    if (
+        str(boundary.get("parent_session_id") or "") != parent_id
+        or boundary.get("canonical_parent_proof") is not True
+        or parent_count is None
+        or marker_count != parent_count
+        or parent_visible_count is None
+        or marker_visible_count != parent_visible_count
+        or marker_last_message_at != parent_last_message_at
+        or marker_updated_at <= 0
+        or marker_updated_at != parent_updated_at
+        or marker_child_count != len(direct_sidecar_messages)
+        or str(boundary.get("child_messages_digest") or "")
+        != _compression_child_messages_digest(direct_sidecar_messages)
+    ):
+        return None
+    if _compression_parent_lineage_metadata_count(session, parent=parent) != parent_count:
+        return None
+    return {
+        "message_count": parent_count,
+        "visible_message_count": marker_visible_count,
+        "last_message_at": marker_last_message_at,
+        "updated_at": parent_updated_at,
+        "todo_state": copy.deepcopy(getattr(parent, "todo_state", None)),
+        "todo_state_available": True,
+    }
+
+
+class _CompressionParentOffset(int):
+    """Integer pagination offset carrying its already-validated metadata."""
+
+    def __new__(cls, value, parent_metadata):
+        instance = int.__new__(cls, value)
+        instance.parent_metadata = parent_metadata
+        return instance
+
 def _sidecar_file_exceeds_threshold(session_id, threshold_bytes) -> bool:
     """Check if the sidecar JSON file for ``session_id`` exceeds ``threshold_bytes``."""
     from api.config import SESSION_DIR
@@ -11756,8 +11994,13 @@ def _sidecar_file_exceeds_threshold(session_id, threshold_bytes) -> bool:
         return False
 
 
-def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before=None, *, owner_positions=None):
-    """Return (timestamp floor, sidecar messages) for bounded state.db tail reads.
+def _state_db_since_timestamp_for_limited_display(
+    session,
+    msg_limit,
+    msg_before=None,
+    owner_positions=None,
+):
+    """Return bounded-read coordinates and validated omitted-parent metadata.
 
     The display window limit counts visible transcript rows after WebUI sidecar
     and state.db reconciliation, so this deliberately does not SQL ``LIMIT`` raw
@@ -11766,31 +12009,58 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
     page loads and edit/truncation recovery shapes stay on the full state.db
     path because their correctness depends on older reconciliation rows.
     """
-    if msg_limit is None or msg_before is not None:
-        return None, None
+    if msg_limit is None or msg_before is not None or owner_positions is not None:
+        return None, None, 0
     if getattr(session, "truncation_watermark", None) not in (None, ""):
-        return None, None
+        return None, None, 0
     if getattr(session, "truncation_boundary", None) not in (None, ""):
-        return None, None
-    if _cancelled_journal_turn_owner(getattr(session, "messages", None) or []):
-        return None, None  # The exact cancelled owner is needed before slicing.
-
-    sidecar_messages = _webui_sidecar_lineage_messages_for_display(session, owner_positions=owner_positions)
-    if not sidecar_messages:
-        return None, sidecar_messages
-    sidecar_timestamps = [_message_timestamp_as_float(msg) for msg in sidecar_messages]
-    if any(ts is None for ts in sidecar_timestamps):
-        return None, sidecar_messages
+        return None, None, 0
 
     try:
         limit = max(1, int(msg_limit))
     except (TypeError, ValueError):
-        return None, sidecar_messages
+        return None, None, 0
     raw_budget = max(300, limit * 10)
+
+    # Initial msg_limit loads only need enough local sidecar context to render
+    # the tail window.  Compression-continuation sessions can have very long
+    # pre-compression parents; stitching those parents here can take longer than
+    # Apache's 60s local-proxy timeout.  Use the direct child sidecar only when
+    # it has enough renderable rows and metadata can preserve full-coordinate
+    # pagination offsets for a safely classified single-hop continuation child.
+    direct_sidecar_messages = list(getattr(session, "messages", []) or [])
+    if len(direct_sidecar_messages) > raw_budget:
+        renderable_count = sum(
+            1
+            for msg in direct_sidecar_messages
+            if _message_counts_as_renderable_for_window(msg)
+        )
+        if renderable_count >= limit:
+            parent_metadata = _validated_omitted_compression_parent_metadata(
+                session,
+                direct_sidecar_messages,
+            )
+            if parent_metadata is not None:
+                return (
+                    None,
+                    direct_sidecar_messages,
+                    _CompressionParentOffset(
+                        parent_metadata["message_count"],
+                        parent_metadata,
+                    ),
+                )
+
+    sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+    if not sidecar_messages:
+        return None, sidecar_messages, 0
+    sidecar_timestamps = [_message_timestamp_as_float(msg) for msg in sidecar_messages]
+    if any(ts is None for ts in sidecar_timestamps):
+        return None, sidecar_messages, 0
+
     if len(sidecar_messages) <= raw_budget:
         _sid = getattr(session, "session_id", "") or ""
         if not _sid or not _sidecar_file_exceeds_threshold(_sid, _SIDECAR_BYTE_TAIL_THRESHOLD):
-            return None, sidecar_messages
+            return None, sidecar_messages, 0
 
     floor = min(sidecar_timestamps[-raw_budget:])
     sidecar_before_count = sum(1 for ts in sidecar_timestamps if ts < floor)
@@ -11800,16 +12070,16 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
         profile=getattr(session, "profile", None) or None,
     )
     if prefix_summary is None:
-        return None, sidecar_messages
+        return None, sidecar_messages, 0
     try:
         state_before_count = int(prefix_summary["count"])
         null_timestamp_count = int(prefix_summary["null_timestamp_count"])
     except (KeyError, TypeError, ValueError):
-        return None, sidecar_messages
+        return None, sidecar_messages, 0
     if null_timestamp_count or state_before_count != sidecar_before_count:
-        return None, sidecar_messages
+        return None, sidecar_messages, 0
     if sidecar_before_count == 0:
-        return floor, sidecar_messages
+        return floor, sidecar_messages, 0
 
     sidecar_before_keys = [
         _session_message_visible_key(msg)
@@ -11822,8 +12092,8 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
         profile=getattr(session, "profile", None) or None,
     )
     if state_before_keys is None or state_before_keys != sidecar_before_keys:
-        return None, sidecar_messages
-    return floor, sidecar_messages
+        return None, sidecar_messages, 0
+    return floor, sidecar_messages, 0
 
 
 def _messages_start_with_visible_prefix(messages, prefix) -> bool:
@@ -12745,6 +13015,7 @@ from api.models import (
     get_state_db_session_messages,
     get_state_db_session_message_prefix_summary,
     get_state_db_session_message_keys_before_timestamp,
+    get_state_db_regeneration_tail_snapshot,
     get_state_db_session_summary,
     merge_session_messages_append_only,
     reconciled_state_db_messages_for_session,
@@ -12759,6 +13030,7 @@ from api.models import (
     _evict_sessions_over_cap,
     _merge_session_display_metadata,
     _session_message_merge_key,
+    _compression_child_messages_digest,
     _session_messages_have_prefix,
     _session_message_visible_key,
     _message_timestamp_as_float,
@@ -13058,7 +13330,6 @@ from api.workspace import (
     list_workspace_suggestions,
     read_file_content,
     read_authorized_escape_file_content,
-    safe_resolve_ws,
     raw_authorized_escape_target,
     resolve_trusted_workspace,
     _resolve_path,
@@ -13122,7 +13393,7 @@ from api.run_journal import (
     terminal_settled_prompt_events,
     SSE_RELAY_CLOSE_EVENTS,
 )
-from api.todo_state import attach_todo_state
+from api.todo_state import attach_todo_snapshot, attach_todo_state
 from api.providers import (
     get_providers,
     get_provider_quota,
@@ -15894,7 +16165,10 @@ def _handle_session_get(handler, parsed) -> bool:
         state_db_messages = []
         metadata_summary = None
         limited_sidecar_messages = None
+        limited_display_base_offset = 0
+        limited_parent_metadata = None
         state_db_since_timestamp = None
+        _state_db_rows_preloaded = False
         # Set by the limited-display path when the memoized merge can be
         # reused without loading the state.db rows; must exist for every
         # branch below, including the ones that never probe the cache.
@@ -15910,12 +16184,61 @@ def _handle_session_get(handler, parsed) -> bool:
                 (
                     state_db_since_timestamp,
                     limited_sidecar_messages,
+                    limited_display_base_offset,
                 ) = _state_db_since_timestamp_for_limited_display(
                     s,
                     msg_limit,
                     msg_before=msg_before,
                     owner_positions=_display_owner_positions,
                 )
+                limited_parent_metadata = getattr(
+                    limited_display_base_offset,
+                    "parent_metadata",
+                    None,
+                )
+                if limited_display_base_offset and limited_sidecar_messages is not None:
+                    # Close the guard/read TOCTOU window with one SQLite snapshot:
+                    # prove that no active row predates the child and read every
+                    # remaining row from that same transaction. Equal-boundary
+                    # rows are validated through the production merge below.
+                    first_child_timestamp = _first_message_timestamp(
+                        limited_sidecar_messages,
+                    )
+                    state_snapshot = (
+                        get_state_db_regeneration_tail_snapshot(
+                            sid,
+                            first_child_timestamp,
+                            profile=_session_profile,
+                            include_prefix_keys=False,
+                            include_fallback_rows=True,
+                        )
+                        if first_child_timestamp is not None
+                        else None
+                    )
+                    prefix = state_snapshot.get("prefix") if isinstance(state_snapshot, dict) else None
+                    try:
+                        prefix_is_empty = (
+                            int(prefix["count"]) == 0
+                            and int(prefix["null_timestamp_count"]) == 0
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        prefix_is_empty = False
+                    snapshot_tail = state_snapshot.get("tail") if isinstance(state_snapshot, dict) else None
+                    if prefix_is_empty and isinstance(snapshot_tail, list):
+                        state_db_messages = snapshot_tail
+                        _state_db_rows_preloaded = True
+                    else:
+                        limited_sidecar_messages = None
+                        limited_display_base_offset = 0
+                        limited_parent_metadata = None
+                        fallback_rows = (
+                            state_snapshot.get("fallback_rows")
+                            if isinstance(state_snapshot, dict)
+                            else None
+                        )
+                        if isinstance(fallback_rows, list):
+                            state_db_messages = fallback_rows
+                            _state_db_rows_preloaded = True
             _state_db_reader_kwargs = {"profile": _session_profile}
             if _cancelled_journal_turn_owner(getattr(s, "messages", None) or [], include_live_partial=True):
                 _state_db_reader_kwargs["include_row_identity"] = True
@@ -15944,7 +16267,8 @@ def _handle_session_get(handler, parsed) -> bool:
             # work that would have produced an identical merged result.
             _display_cache_hit = None
             if (
-                msg_limit is not None
+                not _state_db_rows_preloaded
+                and msg_limit is not None
                 and not getattr(s, "active_stream_id", None)
                 and not getattr(s, "pending_user_message", None)
             ):
@@ -15954,7 +16278,9 @@ def _handle_session_get(handler, parsed) -> bool:
                     msg_before=msg_before,
                     owner_positions=_display_owner_positions,
                 )
-            if _display_cache_hit is not None:
+            if _state_db_rows_preloaded:
+                pass
+            elif _display_cache_hit is not None:
                 state_db_messages = []
             else:
                 if (
@@ -16017,7 +16343,28 @@ def _handle_session_get(handler, parsed) -> bool:
                         state_db_signature=_display_state_db_signature,
                         msg_before=msg_before,
                         owner_positions=_display_owner_positions,
+                        allow_cache=not _state_db_rows_preloaded,
                     )
+                    if limited_display_base_offset and limited_sidecar_messages is not None:
+                        if not _limited_compression_child_projection_unchanged(
+                            _all_msgs,
+                            limited_sidecar_messages,
+                        ):
+                            # The exact state rows returned by the one-snapshot
+                            # read alter the child projection. Fall back to the
+                            # full parent stitch while reusing those same rows.
+                            limited_sidecar_messages = None
+                            limited_display_base_offset = 0
+                            limited_parent_metadata = None
+                            _all_msgs = _limited_webui_messages_for_display_with_sidecar(
+                                s,
+                                None,
+                                state_db_messages,
+                                state_db_signature=_display_state_db_signature,
+                                msg_before=msg_before,
+                                owner_positions=_display_owner_positions,
+                                allow_cache=False,
+                            )
             else:
                 state_db_messages = _suppress_native_image_display_mirrors(
                     s,
@@ -16093,7 +16440,17 @@ def _handle_session_get(handler, parsed) -> bool:
         else:
             _summary_message_count = None
             _summary_last_message_at = None
-        _display_tool_calls = getattr(s, "tool_calls", []) if load_messages else []
+        limited_effective_base_offset = 0
+        if (
+            load_messages
+            and msg_limit is not None
+            and limited_display_base_offset
+            and limited_sidecar_messages is not None
+            and _all_msgs
+        ):
+            limited_effective_base_offset = int(limited_display_base_offset)
+        _raw_session_tool_calls = getattr(s, "tool_calls", []) if load_messages else []
+        _display_tool_calls = _raw_session_tool_calls
         if _display_owner_positions is not None:
             if msg_limit is None:
                 _display_owner_positions.update(_display_exact_owner_positions(s, _all_msgs))
@@ -16107,17 +16464,74 @@ def _handle_session_get(handler, parsed) -> bool:
                 msg_before=msg_before,
                 expand_renderable=expand_renderable,
             )
+            _direct_session_messages = list(getattr(s, "messages", []) or [])
+            _session_has_lineage_prefix = bool(
+                getattr(s, "parent_session_id", None)
+                or len(_all_msgs) != len(_direct_session_messages)
+            )
+            _session_message_base_offset = (
+                _loaded_prefix_count_before_sidecar(
+                    _all_msgs,
+                    _direct_session_messages,
+                )
+                if _direct_session_messages and _session_has_lineage_prefix
+                else 0
+            )
+            _session_child_span_available = bool(
+                _direct_session_messages
+                and _sidecar_sequence_matches_at_offset(
+                    _all_msgs,
+                    _direct_session_messages,
+                    _session_message_base_offset,
+                )
+            )
+            _child_payload_start = 0
+            _child_payload_end = 0
+            _anchor_window_offset = 0
+            if _session_child_span_available:
+                _window_start = _messages_offset
+                _window_end = _window_start + len(_truncated_msgs)
+                _child_span_start = _session_message_base_offset
+                _child_span_end = _child_span_start + len(_direct_session_messages)
+                _overlap_start = max(_window_start, _child_span_start)
+                _overlap_end = min(_window_end, _child_span_end)
+                if _overlap_start < _overlap_end:
+                    _child_payload_start = _overlap_start - _window_start
+                    _child_payload_end = _overlap_end - _window_start
+                    _anchor_window_offset = _overlap_start - _child_span_start
+            # Raw persisted cards are child-local. Cancellation-aware cards have
+            # already been projected into _all_msgs coordinates above. Keep the
+            # overlap length and response shift explicit: a parent-only page has
+            # no child coordinate zero, while a straddling page starts the child
+            # later than response index zero.
+            if _display_owner_positions is not None:
+                _tool_call_window_offset = _messages_offset
+                _tool_call_window_count = len(_truncated_msgs)
+                _tool_call_response_shift = 0
+            else:
+                _tool_call_window_offset = _anchor_window_offset
+                _tool_call_window_count = _child_payload_end - _child_payload_start
+                _tool_call_response_shift = _child_payload_start
             if msg_limit is not None:
                 _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
-            _truncated_msgs = _hydrate_anchor_activity_scenes(
-                _truncated_msgs,
-                getattr(s, "anchor_activity_scenes", None),
-                message_offset=_messages_offset,
-                tool_calls=_display_tool_calls,
-            )
+            if _child_payload_end > _child_payload_start:
+                _hydrated_child_window = _hydrate_anchor_activity_scenes(
+                    _truncated_msgs[_child_payload_start:_child_payload_end],
+                    getattr(s, "anchor_activity_scenes", None),
+                    message_offset=_anchor_window_offset,
+                    tool_calls=_raw_session_tool_calls,
+                )
+                _truncated_msgs[
+                    _child_payload_start:_child_payload_end
+                ] = _hydrated_child_window
+            if limited_effective_base_offset:
+                _messages_offset += limited_effective_base_offset
         else:
             _truncated_msgs = []
             _messages_offset = 0
+            _tool_call_window_offset = 0
+            _tool_call_window_count = 0
+            _tool_call_response_shift = 0
         # Index of the first returned message in the full message array.
         # Frontend uses this as cursor for scroll-to-top paging.
         # Session-level tool_calls windowing keys off whether the returned
@@ -16194,10 +16608,21 @@ def _handle_session_get(handler, parsed) -> bool:
         if _windowed_messages:
             _session_tool_calls = _tool_calls_for_message_window(
                 _session_tool_calls,
-                _messages_offset,
-                len(_truncated_msgs),
+                _tool_call_window_offset,
+                _tool_call_window_count,
             )
-        _merged_message_count = _summary_message_count if _summary_message_count is not None else len(_all_msgs)
+            if _tool_call_response_shift:
+                _shifted_tool_calls = []
+                for _tool_call in _session_tool_calls:
+                    _shifted_tool_call = dict(_tool_call)
+                    _shifted_tool_call["assistant_msg_idx"] += _tool_call_response_shift
+                    _shifted_tool_calls.append(_shifted_tool_call)
+                _session_tool_calls = _shifted_tool_calls
+        _merged_message_count = (
+            _summary_message_count
+            if _summary_message_count is not None
+            else len(_all_msgs) + limited_effective_base_offset
+        )
         _merged_last_message_at = _summary_last_message_at if _summary_last_message_at is not None else 0
         if _summary_last_message_at is None and _all_msgs:
             try:
@@ -16208,6 +16633,11 @@ def _handle_session_get(handler, parsed) -> bool:
                 )
             except (TypeError, ValueError):
                 _merged_last_message_at = 0
+        if limited_parent_metadata is not None and limited_effective_base_offset:
+            _merged_last_message_at = max(
+                _merged_last_message_at,
+                float(limited_parent_metadata["last_message_at"]),
+            )
         active_stream_ids = _active_stream_ids()
         try:
             compact_session = s.compact(
@@ -16259,8 +16689,17 @@ def _handle_session_get(handler, parsed) -> bool:
         # tool result is outside msg_limit, and treats an explicit empty
         # todo list as the current state instead of falling through to an
         # older non-empty write.
+        todo_attached = False
         if load_messages and _all_msgs:
-            attach_todo_state(raw, _all_msgs)
+            todo_attached = attach_todo_state(raw, _all_msgs)
+        if load_messages:
+            _attach_todo_state_from_omitted_compression_parent(
+                raw,
+                s,
+                child_state_attached=todo_attached,
+                parent_omitted=bool(limited_effective_base_offset),
+                parent_metadata=limited_parent_metadata,
+            )
         if _merged_last_message_at:
             raw["last_message_at"] = max(
                 float(raw.get("last_message_at") or 0),
@@ -16269,6 +16708,11 @@ def _handle_session_get(handler, parsed) -> bool:
             raw["updated_at"] = max(
                 float(raw.get("updated_at") or 0),
                 _merged_last_message_at,
+            )
+        if limited_parent_metadata is not None and limited_effective_base_offset:
+            raw["updated_at"] = max(
+                float(raw.get("updated_at") or 0),
+                float(limited_parent_metadata["updated_at"]),
             )
         # #2980: surface the visible continuation for a hidden pre-compression
         # snapshot so a mobile reload mid-compression can recover to it.
@@ -16296,6 +16740,10 @@ def _handle_session_get(handler, parsed) -> bool:
                 1 for m in _all_msgs
                 if isinstance(m, dict) and not is_hidden_transcript_row(m)
             )
+            if limited_parent_metadata is not None and limited_effective_base_offset:
+                raw["visible_message_count"] += int(
+                    limited_parent_metadata["visible_message_count"]
+                )
         # Signal to the frontend that older messages were omitted. The
         # message window cursor already reflects visible-row pagination and
         # avoids false positives when raw hidden tool rows exceed msg_limit.
@@ -18023,6 +18471,41 @@ def _validate_session_toolsets_shape(toolsets):
     if not all(isinstance(t, str) and t for t in toolsets):
         raise ValueError("each toolset must be a non-empty string")
     return toolsets
+
+
+def _attach_todo_state_from_omitted_compression_parent(
+    payload,
+    session,
+    *,
+    child_state_attached: bool,
+    parent_omitted: bool,
+    parent_metadata=None,
+) -> None:
+    """Recover todo state from one skipped fast-path compression parent."""
+    if child_state_attached or not parent_omitted:
+        return
+
+    # The bounded initial-load fast path omits only a proven single-hop
+    # compression parent. Consult that one snapshot when the child/state rows
+    # have no todo write. The direct child attach runs first, so its latest write
+    # (including an explicit empty list) always wins by transcript position.
+    if isinstance(parent_metadata, dict):
+        if parent_metadata.get("todo_state_available") is True:
+            attach_todo_snapshot(payload, parent_metadata.get("todo_state"))
+        return
+
+    parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
+    if not parent_id or not is_safe_session_id(parent_id):
+        return
+    parent = Session.load_metadata_only(parent_id)
+    if (
+        not parent
+        or not getattr(parent, "pre_compression_snapshot", False)
+        or not getattr(parent, "_todo_state_metadata_available", False)
+        or getattr(parent, "parent_session_id", None)
+    ):
+        return
+    attach_todo_snapshot(payload, getattr(parent, "todo_state", None))
 
 
 def _resolve_new_session_workspace(body, visible_prev_session_id, profile=None):

@@ -1,6 +1,12 @@
 import json
 
-from api.todo_state import VERSION, attach_todo_state, derive_todo_state, parse_todo_tool_result
+from api.todo_state import (
+    VERSION,
+    attach_todo_snapshot,
+    attach_todo_state,
+    derive_todo_state,
+    parse_todo_tool_result,
+)
 
 
 def _todo_payload(todos):
@@ -90,3 +96,15 @@ def test_attach_todo_state_mutates_payload_and_swallows_missing_state():
     empty_payload: dict = {"session_id": "s2"}
     assert attach_todo_state(empty_payload, [{"role": "assistant", "content": "none"}]) is False
     assert "todo_state" not in empty_payload
+
+
+def test_attach_todo_snapshot_preserves_empty_state_and_timestamp():
+    payload = {"session_id": "s1"}
+
+    assert attach_todo_snapshot(payload, {"todos": [], "summary": {}, "ts": 42}) is True
+    assert payload["todo_state"] == {
+        "todos": [],
+        "summary": {},
+        "version": VERSION,
+        "ts": 42.0,
+    }
