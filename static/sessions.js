@@ -10991,9 +10991,18 @@ function renderSessionListFromCache(){
       };
       const childLabelFor=(child)=>{
         const childTitle=_nestedChildTitle(child)||'Untitled child session';
-        const childTime=_formatRelativeSessionTime(_sessionTimestampMs(child));
         const parentNote=child._parent_segment_title?` via ${child._parent_segment_title}`:'';
-        return `-> ${childTitle}${parentNote} - ${childTime}`;
+        return `-> ${childTitle}${parentNote}`;
+      };
+      // Title and time are separate spans so a long title ellipsizes without hiding the time.
+      const setChildLabel=(el, child)=>{
+        const label=document.createElement('span');
+        label.className='session-child-label';
+        label.textContent=childLabelFor(child);
+        const time=document.createElement('span');
+        time.className='session-child-time';
+        time.textContent=` - ${_formatRelativeSessionTime(_sessionTimestampMs(child))}`;
+        el.replaceChildren(label,time);
       };
       const installForkChildSwipe=(rowEl, childSession, actionsEl)=>{
         let _pointerDownX=0;
@@ -11229,7 +11238,7 @@ function renderSessionListFromCache(){
           const mainBtn=document.createElement('button');
           mainBtn.type='button';
           mainBtn.className='session-child-session-main'+(childIsActive?' active':'');
-          mainBtn.textContent=childLabelFor(child);
+          setChildLabel(mainBtn,child);
           mainBtn.title='Open forked session';
           mainBtn.onclick=async(e)=>{
             if(row._skipNextChildOpen){
@@ -11244,7 +11253,7 @@ function renderSessionListFromCache(){
           };
           _wireSessionNewTabListeners(mainBtn, ()=>child.session_id, ()=>child, {exact:true});
           row._startRename=_buildSessionRenameStarter(child, mainBtn, ()=>{
-            mainBtn.textContent=childLabelFor(child);
+            setChildLabel(mainBtn,child);
           });
           row.appendChild(mainBtn);
           const state=document.createElement('span');
@@ -11304,7 +11313,7 @@ function renderSessionListFromCache(){
         const row=document.createElement('button');
         row.type='button';
         row.className='session-child-session'+(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'');
-        row.textContent=childLabelFor(child);
+        setChildLabel(row,child);
         row.title='Open child session';
         row.onclick=async(e)=>{
           e.stopPropagation();
