@@ -17807,6 +17807,12 @@ def handle_get(handler, parsed) -> bool:
                 "path": str(profiles_api.get_active_hermes_home()),
                 "is_default": profiles_api._is_root_profile(active_profile_name),
                 "default_workspace": _profile_default_workspace,
+                # Presentation-only label from profile.yaml, so the composer chip
+                # / titlebar / assistant name can show it instead of the canonical
+                # id (#8055). Empty when unset — clients fall back to the id.
+                "display_name": profiles_api._profile_display_name(
+                    profiles_api.get_active_hermes_home()
+                ),
             },
         )
 
