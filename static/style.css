@@ -1594,7 +1594,7 @@
   .session-search-clear:hover,.session-search-clear:focus-visible{background:var(--hover);color:var(--text);opacity:1;}
   .session-search-clear:focus-visible{outline:2px solid var(--accent);outline-offset:1px;}
   /* Inline session title edit */
-  .session-title-input{flex:1;background:var(--surface);border:1px solid var(--accent);border-radius:6px;color:var(--text);padding:3px 8px;font-size:13px;outline:none;min-width:0;box-shadow:0 0 0 2px var(--accent-bg-strong);font-family:inherit;}
+  .session-title-input{flex:1;background:var(--surface);border:1px solid var(--accent);border-radius:6px;color:var(--text);padding:3px 8px;font-size:13px;outline:none;min-width:0;box-shadow:0 0 0 2px var(--accent-bg-strong);font-family:inherit;-webkit-touch-callout:default;user-select:text;-webkit-user-select:text;}
   /* padding-right was 86px to reserve space for the absolute-positioned
      timestamp + action button (which appears on hover). Now that .session-time
      lives in the flex flow of .session-title-row, the timestamp sits at the
