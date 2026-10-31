@@ -12198,6 +12198,7 @@ def get_state_db_session_message_keys_before_timestamp(
                 SELECT
                     COALESCE(role, '') AS role,
                     COALESCE(content, '') AS content,
+                    timestamp,
                     tool_calls{api_content_select}
                 FROM messages
                 WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ?
@@ -12214,6 +12215,12 @@ def get_state_db_session_message_keys_before_timestamp(
                         # prefix/tail collision proof can miss a genuine
                         # repeated recovered turn.
                         "content": _decode_state_db_content(row["content"]),
+                        # Occurrence discriminator (#7587): without the
+                        # timestamp the prefix/tail keys would still collapse
+                        # two occurrences of the same prompt into one identity,
+                        # so the projection below could not tell a replayed row
+                        # from a genuinely repeated turn.
+                        "timestamp": row["timestamp"],
                         "tool_calls": _json_loads_if_string(row["tool_calls"]),
                         "api_content": row["api_content"] if "api_content" in available else None,
                     },
@@ -12303,7 +12310,9 @@ def get_state_db_regeneration_tail_snapshot(
                 "null_timestamp_count": int(row["null_timestamp_count"]) if row else 0,
             }
             # 2) ordered prefix keys (rows < floor) in durable order
-            prefix_key_cols = "COALESCE(role,'') AS role, COALESCE(content,'') AS content"
+            prefix_key_cols = (
+                "COALESCE(role,'') AS role, COALESCE(content,'') AS content, timestamp"
+            )
             if 'tool_calls' in available:
                 prefix_key_cols += ", tool_calls"
             if 'api_content' in available:
@@ -12322,6 +12331,12 @@ def get_state_db_regeneration_tail_snapshot(
                 _session_message_visible_key({
                     "role": r["role"],
                     "content": _decode_state_db_content(r["content"]),
+                    # Occurrence discriminator (#7587): the prefix keys must be
+                    # built from the same occurrence-sensitive identity the
+                    # sidecar proof uses, otherwise a repeated prompt below and
+                    # above the floor still collapses into one key and the
+                    # prefix/tail collision proof cannot see it.
+                    "timestamp": r["timestamp"],
                     "tool_calls": _json_loads_if_string(r["tool_calls"]) if "tool_calls" in r.keys() and r["tool_calls"] is not None else None,
                     "api_content": r["api_content"] if "api_content" in r.keys() else None,
                 }, normalize_workspace_prefix=True)
@@ -12352,6 +12367,12 @@ def get_state_db_regeneration_tail_snapshot(
                     {
                         "role": r.get("role"),
                         "content": r.get("content"),
+                        # Occurrence discriminator (#7587): the prefix and tail
+                        # key builders must select the SAME fields, otherwise a
+                        # row that sits below one floor and above another keys
+                        # with two different occurrences and the prefix/tail
+                        # collision proof silently stops matching.
+                        "timestamp": r.get("timestamp"),
                         "tool_calls": r.get("tool_calls"),
                         "api_content": r.get("api_content"),
                     },
@@ -13919,10 +13940,52 @@ def _loose_session_message_content(value: str) -> str:
     return " ".join(re.findall(r"\w+", str(value or "").casefold()))
 
 
+def _session_message_occurrence_for_key(msg: dict) -> str:
+    """Occurrence discriminator shared by the visible/content keys (#7587).
+
+    ``_session_message_merge_key()`` already carries the second-truncated
+    timestamp, so it can tell two occurrences of the same content apart.  The
+    visible/content keys did not, which meant two genuinely distinct user
+    turns carrying identical text (or an identical image payload) collapsed
+    into ONE visible identity; the later one was then suppressed as an
+    "already visible duplicate" on the restore / context-reconstruction path
+    and lost from the projection.
+
+    The second-level truncation is deliberate and unchanged: it is what makes
+    the discriminator tolerant of the sub-second drift between the sidecar
+    JSON write and the state.db created_at write for the SAME logical row, so
+    a replayed durable record still collapses.
+
+    A missing/empty timestamp yields ``""`` and an unparseable one yields its
+    own string, so rows without usable clock data still key stably against
+    each other (they never become permanently unmatchable) and never raise.
+
+    When the clock is missing entirely the discriminator falls back to the
+    private identities the row carries (``id`` / ``message_id`` /
+    ``_state_db_row_id``).  That direction is deliberate: it fails **closed**,
+    preserving two rows that are provably different rather than suppressing
+    one of them -- over-dedup deletes real user turns, whereas under-dedup at
+    worst shows a duplicate row.  Only a row with neither a usable clock nor
+    any identity at all stays indistinguishable, and those key together
+    because the information to tell them apart simply is not there.
+    """
+    if not isinstance(msg, dict):
+        return ""
+    stamp = _normalized_message_timestamp_for_key(msg.get("timestamp"))
+    if stamp:
+        return stamp
+    for field in ("id", "message_id", "_state_db_row_id"):
+        identity = msg.get(field)
+        if identity not in (None, ""):
+            return f"id:{field}:{identity}"
+    return ""
+
+
 def _session_message_content_key(
     msg: dict,
     *,
     normalize_workspace_prefix: bool = True,
+    include_occurrence: bool = True,
 ):
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
@@ -13953,6 +14016,11 @@ def _session_message_content_key(
         content,
         str(msg.get("tool_call_id") or ""),
         str(msg.get("tool_name") or msg.get("name") or ""),
+        # Occurrence discriminator (#7587): two independent turns carrying the
+        # same content must not collapse into one identity.  Callers that
+        # deliberately align a mirrored prefix across restamped timestamps
+        # (state_db_delta_after_context) opt out explicitly.
+        _session_message_occurrence_for_key(msg) if include_occurrence else "",
     ), msg)
 
 
@@ -13985,6 +14053,12 @@ def _session_message_visible_key(
         role,
         content,
         _tc_key,
+        # Occurrence discriminator (#7587).  Exact-identity matching is
+        # authoritative in _matching_visible_duplicate(), so without it two
+        # independent same-content turns were indistinguishable and the later
+        # one was suppressed as a duplicate.  Index 3 is reserved for this
+        # field; the provider sidecar, when present, stays at index 4.
+        _session_message_occurrence_for_key(msg),
     ), msg)
 
 
@@ -14009,13 +14083,91 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
 
 _VISIBLE_DUPLICATE_FUZZY_MAX_KEYS = 1000
 
+# Layout of a visible key: (role, content, tool_calls, occurrence[, sidecar]).
+# ``occurrence`` is the second-truncated timestamp added by #7587; the provider
+# sidecar, when present, is appended after it by
+# ``_session_message_key_with_sidecar``.
+_VISIBLE_KEY_OCCURRENCE_INDEX = 3
+_VISIBLE_KEY_SIDECAR_INDEX = 4
+
+
+def _visible_key_field(key: tuple, index: int, default):
+    """Read a positional field of a visible key without assuming its arity."""
+    try:
+        return key[index]
+    except (TypeError, IndexError):
+        return default
+
+
+def _visible_key_without_occurrence(key) -> tuple:
+    """Return ``key`` with the #7587 occurrence discriminator removed.
+
+    Used by the probes that pair a sidecar row with a state.db row across a
+    clock the two stores do not share:
+
+    * the positional sidecar-prefix replay probe in
+      ``merge_session_messages_append_only`` -- a compressed/tip sidecar can
+      persist coarse second-level timestamps while state.db keeps the very same
+      rows with sub-second (or restamped) floats, and an index-aligned replay
+      must still collapse;
+    * the cancelled-journal gap-filling probes -- the model-facing context
+      legitimately carries NO timestamps at all, so requiring clock agreement
+      there would make those rows permanently unmatchable and silently drop the
+      restored prefix.
+
+    Occurrence sensitivity is applied at the content-already-visible skip in
+    ``_matching_visible_duplicate`` instead, which is where #7587's data loss
+    actually happens.
+
+    The result is NORMALISED to the full five-slot shape with the occurrence
+    slot emptied, so a stripped key can be handed straight back to
+    ``_matching_visible_duplicate``: slot 3 then reads as the "not established"
+    sentinel rather than as a provider sidecar leaking in from slot 4.
+    """
+    role = key[0] if isinstance(key, tuple) and key else ""
+    content = key[1] if isinstance(key, tuple) and len(key) > 1 else ""
+    tool_calls = key[2] if isinstance(key, tuple) and len(key) > 2 else ""
+    sidecar = (
+        key[_VISIBLE_KEY_SIDECAR_INDEX]
+        if isinstance(key, tuple) and len(key) > _VISIBLE_KEY_SIDECAR_INDEX
+        else None
+    )
+    return (role, content, tool_calls, "", sidecar)
+
+
+def _session_message_replay_visible_key(msg, *, normalize_workspace_prefix: bool = False) -> tuple:
+    """Visible key with the #7587 occurrence discriminator removed.
+
+    See :func:`_visible_key_without_occurrence` for why the cross-store replay
+    and gap-filling probes are deliberately clock-tolerant.  Clock exactness is
+    enforced separately, by ``_message_exact_timestamp_details``.
+    """
+    return _visible_key_without_occurrence(
+        _session_message_visible_key(
+            msg, normalize_workspace_prefix=normalize_workspace_prefix
+        )
+    )
+
+
+def _visible_keys_share_occurrence(left, right) -> bool:
+    """True when two occurrences are the same, or one cannot be established.
+
+    A row with no usable timestamp cannot prove it is a DIFFERENT occurrence,
+    so it must not be distinguished from a row that has one.  Without this rule
+    the model-facing context (which legitimately carries no timestamps) would
+    stop matching its state.db mirrors and become permanently unmatchable --
+    the exact failure mode #7587 must not introduce.
+    """
+    return left == right or left == "" or right == ""
+
 
 def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lookup: dict | None = None):
     if visible_key in visible_keys:
         return visible_key
     role = visible_key[0]
     content = visible_key[1] if len(visible_key) > 1 else ""
-    sidecar = visible_key[3] if len(visible_key) > 3 else None
+    sidecar = _visible_key_field(visible_key, _VISIBLE_KEY_SIDECAR_INDEX, None)
+    occurrence = _visible_key_field(visible_key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
     if not content:
         return None
     # Structured content is matched by exact identity only (checked above).
@@ -14036,12 +14188,25 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
     for existing_key in lookup.get("by_role", {}).get(role, []):
         existing_role = existing_key[0]
         existing_content = existing_key[1] if len(existing_key) > 1 else ""
-        existing_sidecar = existing_key[3] if len(existing_key) > 3 else None
+        existing_sidecar = _visible_key_field(
+            existing_key, _VISIBLE_KEY_SIDECAR_INDEX, None
+        )
         if (
             role != existing_role
             or sidecar != existing_sidecar
             or not existing_content
             or not isinstance(existing_content, str)
+        ):
+            continue
+        # Occurrence must agree before any fuzzy logic (#7587).  Without this
+        # gate the substring/token fallback below would still pair two
+        # independent same-content turns, re-introducing the collapse through
+        # the back door even though the exact-identity check now rejects them.
+        # An unestablished occurrence on either side is a wildcard: a row with
+        # no usable clock cannot prove it is a different occurrence.
+        if not _visible_keys_share_occurrence(
+            occurrence,
+            _visible_key_field(existing_key, _VISIBLE_KEY_OCCURRENCE_INDEX, ""),
         ):
             continue
         # Exact visible-key equality was checked above. For very large payloads
@@ -14326,11 +14491,11 @@ def _restore_cancelled_journal_prefix(selected, prefix, owner_messages, *, verif
     local_owner_by_row = {id(row): turn for row, turn in zip(selected, local_owners_all, strict=True)}
     source_owner_by_row = {id(row): turn for row, turn in zip(prefix, source_owners, strict=True)}
     local_occurrences = collections.Counter(
-        (id(turn), _session_message_visible_key(row))
+        (id(turn), _session_message_replay_visible_key(row))
         for row, turn in zip(selected, local_owners_all, strict=True)
     )
     source_occurrences = collections.Counter(
-        (id(turn), _session_message_visible_key(row, normalize_workspace_prefix=True))
+        (id(turn), _session_message_replay_visible_key(row, normalize_workspace_prefix=True))
         for row, turn in zip(prefix, source_owners, strict=True)
     )
 
@@ -14342,9 +14507,9 @@ def _restore_cancelled_journal_prefix(selected, prefix, owner_messages, *, verif
             return False
         left_time, left_valid = _message_exact_timestamp_details(local)
         right_time, right_valid = _message_exact_timestamp_details(saved)
-        key = _session_message_visible_key(local, normalize_workspace_prefix=False)
+        key = _session_message_replay_visible_key(local, normalize_workspace_prefix=False)
         if (not left_valid or not right_valid or right_time is None
-                or key != _session_message_visible_key(saved, normalize_workspace_prefix=True)):
+                or key != _session_message_replay_visible_key(saved, normalize_workspace_prefix=True)):
             return False
         for identity in (_state_db_row_identity_details, _stable_message_identity_details):
             local_id, local_valid = identity(local)
@@ -14390,24 +14555,24 @@ def _restore_cancelled_journal_prefix(selected, prefix, owner_messages, *, verif
     local_call_clocks = collections.defaultdict(set)
     for row in local_prefix:
         if row.get('tool_calls'):
-            local_call_clocks[_message_exact_timestamp_details(row)].add(_session_message_visible_key(row))
+            local_call_clocks[_message_exact_timestamp_details(row)].add(_session_message_replay_visible_key(row))
     for row in prefix:
         key = _message_exact_timestamp_details(row)
         if row.get('tool_calls') and key in local_call_clocks:
-            if _session_message_visible_key(row, normalize_workspace_prefix=True) not in local_call_clocks[key]:
+            if _session_message_replay_visible_key(row, normalize_workspace_prefix=True) not in local_call_clocks[key]:
                 return selected
     def anchor_key(row, *, source=False):
         clock, valid = _message_exact_timestamp_details(row)
         if not valid or clock is None:
             return None
-        return clock, _session_message_visible_key(row, normalize_workspace_prefix=source)
+        return clock, _session_message_replay_visible_key(row, normalize_workspace_prefix=source)
 
     source_keys = collections.defaultdict(list)
     for index, row in enumerate(prefix):
-        source_keys[_session_message_visible_key(row, normalize_workspace_prefix=True)].append(index)
+        source_keys[_session_message_replay_visible_key(row, normalize_workspace_prefix=True)].append(index)
     anchors = []
     for local_idx, row in enumerate(local_prefix):
-        candidates = source_keys.get(_session_message_visible_key(row), [])
+        candidates = source_keys.get(_session_message_replay_visible_key(row), [])
         compatible = [index for index in candidates if matches(row, prefix[index])]
         # A clock/content mirror with contradictory private/provider identity
         # is quarantined, never inserted as a second authoritative occurrence.
@@ -14609,11 +14774,16 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
     )
 
     sidecar_keys = [
-        _session_message_content_key(m, normalize_workspace_prefix=False)
+        # Occurrence is deliberately excluded here: state.db mirrors the
+        # model-facing context prefix with FRESH timestamps (LCM/continuation
+        # sessions), and this alignment must recognise that mirror across a
+        # restamped clock.  Making it occurrence-sensitive would break the
+        # alignment and replay the whole state transcript into the next prompt.
+        _session_message_content_key(m, normalize_workspace_prefix=False, include_occurrence=False)
         for m in sidecar_context
     ]
     state_keys = [
-        _session_message_content_key(m, normalize_workspace_prefix=True)
+        _session_message_content_key(m, normalize_workspace_prefix=True, include_occurrence=False)
         for m in state_messages
     ]
     max_offset = min(len(sidecar_keys), len(state_keys))
@@ -15670,8 +15840,16 @@ def _merge_session_messages_append_only_impl(
         replay_target = None
         if not post_cancel_state and state_replay_idx < len(sidecar_visible_sequence):
             expected_visible_key = sidecar_visible_sequence[state_replay_idx]
-            if visible_key == expected_visible_key or _has_visible_duplicate(
-                visible_key, {expected_visible_key}
+            # Positional replay is deliberately clock-tolerant (see
+            # _visible_key_without_occurrence): the sidecar may carry coarse
+            # second-level clocks for rows state.db stores with sub-second
+            # floats, and an index-aligned replay must still collapse.
+            replay_visible_key = _visible_key_without_occurrence(visible_key)
+            expected_replay_visible_key = _visible_key_without_occurrence(
+                expected_visible_key
+            )
+            if replay_visible_key == expected_replay_visible_key or _has_visible_duplicate(
+                replay_visible_key, {expected_replay_visible_key}
             ):
                 replays_sidecar_prefix = True
                 replay_target = sidecar_visible_messages[state_replay_idx]
