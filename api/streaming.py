@@ -4799,12 +4799,13 @@ def generate_title_raw_via_aux(
                         base_url=None if automatic_main else (base_url or None),
                         api_key=None if automatic_main else (api_key or None),
                         api_mode=None if automatic_main else (api_mode or None),
-                        main_runtime=route_credentials.get('main_runtime') if automatic_main else None,
                         messages=messages,
                         max_tokens=max_tokens,
                         temperature=0.2,
                         timeout=_timeout,
                         extra_body=reasoning_extra or None,
+                        **({'main_runtime': route_credentials['main_runtime']}
+                           if automatic_main else {}),
                     )
                     raw, empty_status = _extract_title_response(resp, aux=True)
                     if raw:
