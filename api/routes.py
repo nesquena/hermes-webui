@@ -22170,16 +22170,22 @@ def _handle_sessions_search(handler, parsed):
                 if sess is None:
                     continue
                 # Hidden internal rows neither match nor consume the search
-                # depth budget (#quiet-delegation gate review).
+                # depth budget (#quiet-delegation gate review). Each row keeps
+                # its RAW index into the full sess.messages list (hidden rows
+                # included, as they are in the /api/session payload) so a
+                # content hit can tell the frontend where it matched (#4159).
                 scan_pool = [
-                    m for m in (sess.messages or [])
+                    (raw_idx, m) for raw_idx, m in enumerate(sess.messages or [])
                     if not is_hidden_transcript_row(m)
                 ]
                 msgs = scan_pool[:depth] if depth else scan_pool
-                for m in msgs:
+                for raw_idx, m in msgs:
                     c = _session_search_message_text(m)
                     if q in str(c).lower():
-                        item = dict(s, match_type="content")
+                        # match_message_idx is a FULL-session index, not an
+                        # index into a paged tail window; the frontend
+                        # translates it before jumping (#5106).
+                        item = dict(s, match_type="content", match_message_idx=raw_idx)
                         preview = _session_search_preview(c, q)
                         if preview:
                             item["match_preview"] = _redact_text(preview, _enabled=_search_redact_enabled)

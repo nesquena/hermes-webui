@@ -45,7 +45,7 @@ def test_question_jump_expands_windowed_history_and_highlights_question():
     assert "_messageVirtualWindowKey='';" in UI_JS
     assert "_messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount())" in UI_JS
     assert "renderMessages({ preserveScroll:true })" in UI_JS
-    assert "row.scrollIntoView({block:'center',behavior:'smooth'})" in UI_JS
+    assert "row.scrollIntoView({block:'center',behavior:_messageJumpScrollBehavior(container,row)})" in UI_JS
     assert "_highlightQuestionRow(row)" in UI_JS
     assert "msg-question-highlight" in UI_JS
 
