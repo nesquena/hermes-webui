@@ -12145,8 +12145,41 @@ let _ttsGeneration=0;
 // replacement — and stopTTS() — invalidates all prior tokens, and every
 // asynchronous callback must verify ownership before mutating shared state.
 // `_ttsSpeaking` alone cannot distinguish playback A from playback B.
-function _beginTtsPlayback(){ _ttsSpeaking=true; return ++_ttsGeneration; }
+// A generation bump also cancels the requests the dead generation still has in
+// flight: the token only keeps stale responses out of the AudioContext, while
+// the AbortController below takes the abandoned synthesis off the wire.
+function _beginTtsPlayback(){
+  _ttsSpeaking=true;
+  // Bump BEFORE aborting: the abort handlers are microtasks, but the token must
+  // already be dead when they run so none of them can claim the new playback.
+  const gen=++_ttsGeneration;
+  _abortPendingTtsRequests();
+  return gen;
+}
 function _ownsTtsPlayback(gen){ return gen===_ttsGeneration; }
+// In-flight /api/tts requests, one AbortController per request. Cancelling on
+// stop/replacement matters even though every callback is generation-guarded:
+// the server keeps synthesizing, the response is downloaded and thrown away,
+// and the request still occupies the per-client TTS rate window that the next
+// playback has to wait out.
+let _ttsPendingAborts=null;
+function _newTtsAbortController(){
+  if(typeof AbortController!=='function') return null;
+  try{ return new AbortController(); }catch(_){ return null; }
+}
+function _trackTtsAbort(ctl){
+  if(!ctl) return null;
+  if(!_ttsPendingAborts) _ttsPendingAborts=new Set();
+  _ttsPendingAborts.add(ctl);
+  return ctl;
+}
+function _releaseTtsAbort(ctl){ if(ctl&&_ttsPendingAborts) _ttsPendingAborts.delete(ctl); }
+function _abortPendingTtsRequests(){
+  if(!_ttsPendingAborts||!_ttsPendingAborts.size) return;
+  const pending=Array.from(_ttsPendingAborts);
+  _ttsPendingAborts.clear();
+  pending.forEach(function(ctl){ try{ ctl.abort(); }catch(_){} });
+}
 // Minimum gap between consecutive /api/tts synthesis requests, matching the
 // server-side per-client window in api/routes.py (_TtsRateLimiter, 2 s).
 // Shared by every engine and generation — the server limiter is per-client
@@ -12191,11 +12224,17 @@ function _sendTtsRequest(init, owner){
   let attempt=0;
   function _dispatch(){
     return _acquireTtsRequestSlot(owner).then(function(reserved){
-      if(!reserved) return {ok:false, err:new Error('aborted')};
-      return fetch(new URL('api/tts', document.baseURI || location.href).href, init)
+      if(!reserved) return {ok:false, err:new Error('aborted'), aborted:true};
+      // One AbortController per request: stopTTS()/a replacement aborts it, so
+      // an abandoned synthesis stops consuming the network and the provider
+      // immediately instead of resolving into a generation-guarded no-op.
+      const ctl=_trackTtsAbort(_newTtsAbortController());
+      const opts=ctl?Object.assign({}, init, {signal:ctl.signal}):init;
+      return fetch(new URL('api/tts', document.baseURI || location.href).href, opts)
       .then(function(r){
         if(r.status===429&&attempt<3){
           attempt++;
+          _releaseTtsAbort(ctl);
           return _dispatch();
         }
         if(!r.ok){
@@ -12220,8 +12259,15 @@ function _sendTtsRequest(init, owner){
           if(res&&typeof res==='object'&&('ok' in res)) return res;
           return {ok:true, buf:res};
         },
-        function(err){ return {ok:false, err:err}; }
-      );
+        function(err){
+          // A cancellation is not a failure: report it as such so no caller
+          // turns the user's own stop into an error toast.
+          return {ok:false, err:err, aborted:!!(ctl&&ctl.signal.aborted)};
+        }
+      )
+      // The request is settled (or abandoned): drop the controller so a later
+      // stop cannot abort a request that already delivered its audio.
+      .then(function(res){ _releaseTtsAbort(ctl); return res; });
     });
   }
   return _dispatch();
@@ -12334,7 +12380,7 @@ function _playEdgeTtsChunked(text, btn){
     }, _owns)
     .then(function(res){
       if(!_owns()) return;
-      if(!res.ok){ _fail((res.err&&res.err.message)||'Edge TTS failed'); return; }
+      if(!res.ok){ if(res.aborted) return; _fail((res.err&&res.err.message)||'Edge TTS failed'); return; }
       const url=URL.createObjectURL(new Blob([res.buf],{type:res.type}));
       const audio=new Audio(url);
       _playingEdgeAudio=audio;
@@ -12457,7 +12503,7 @@ function _playElevenLabsTts(text, btn){
   }, _owns)
   .then(function(res){
     if(!_owns()) return;
-    if(!res.ok){ _fail((res.err&&res.err.message)||'ElevenLabs TTS failed'); return; }
+    if(!res.ok){ if(res.aborted) return; _fail((res.err&&res.err.message)||'ElevenLabs TTS failed'); return; }
     return _playAudioBuf(res.buf, btn, 'ElevenLabs TTS', gen);
   })
   .catch(function(e){ _fail((e&&e.message)||'ElevenLabs TTS failed'); });
@@ -12482,9 +12528,11 @@ function _playOpenaiTts(text, btn){
   const _fail=function(msg){
     // Terminal failure: invalidate every scheduled/pending callback of this
     // playback (paced prefetch timers, in-flight fetch then-chains) so no
-    // follow-on request can fire after a terminal error, and stop/disconnect
-    // any partially constructed source before dropping the handle.
+    // follow-on request can fire after a terminal error, stop/disconnect
+    // any partially constructed source before dropping the handle, and cancel
+    // whatever this playback still has in flight.
     _ttsGeneration++;
+    _abortPendingTtsRequests();
     _ttsSpeaking=false;
     _stopActivePlaybackAudio();
     if(btn)btn.dataset.speaking='0';
@@ -12533,7 +12581,7 @@ function _playOpenaiTts(text, btn){
     bufPromise
     .then(function(res){
       if(!_ttsSpeaking||!_ownsTtsPlayback(gen)) return;
-      if(!res.ok){ _fail((res.err&&res.err.message)||'OpenAI TTS failed'); return; }
+      if(!res.ok){ if(res.aborted) return; _fail((res.err&&res.err.message)||'OpenAI TTS failed'); return; }
       var ctx=_getTtsAudioCtx();
       if(!ctx){ _fail('Web Audio API not available'); return; }
       var buf;
@@ -12710,8 +12758,11 @@ function _playAudioBuf(arrayBuffer, btn, label, gen){
 function stopTTS(){
   // Invalidate every in-flight generation (all engines, all chains) before
   // clearing state, so a late fetch/onended/decode callback can neither
-  // resume a stopped chain nor clobber a later playback.
+  // resume a stopped chain nor clobber a later playback. Then cancel the
+  // requests those generations still have on the wire: stopping must stop the
+  // synthesis, not just ignore its response.
   _ttsGeneration++;
+  _abortPendingTtsRequests();
   if('speechSynthesis' in window){
     speechSynthesis.cancel();
   }
