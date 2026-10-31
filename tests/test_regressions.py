@@ -354,7 +354,9 @@ def test_server_delete_prunes_session_index(cleanup_test_sessions):
             text.find('if parsed.path == "/api/session/delete":'),
         )
         if delete_idx >= 0:
-            delete_block = text[delete_idx:delete_idx+4000]
+            # Wide window: the handler must stay within one block for this scan
+            # even after the state.db-first reordering (#8300).
+            delete_block = text[delete_idx:delete_idx+8000]
             assert "prune_session_from_index(sid)" in delete_block, \
                 f"{label} session/delete must prune SESSION_INDEX_FILE"
             return
@@ -369,7 +371,8 @@ def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
         routes_src.find('if parsed.path == "/api/session/delete":'),
     )
     assert delete_idx >= 0, "session/delete handler not found in api/routes.py"
-    delete_block = routes_src[delete_idx:delete_idx+4000]
+    # Wide window: see test_server_delete_prunes_session_index (#8300).
+    delete_block = routes_src[delete_idx:delete_idx+8000]
     assert "with_suffix('.json.bak').unlink" in delete_block or 'with_suffix(".json.bak").unlink' in delete_block, \
         "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
 
@@ -585,7 +588,10 @@ def test_queue_card_cross_session_clear_called_before_draft_save(cleanup_test_se
         "const draftText = ($('msg') || {}).value || '';",
         "const draftFiles = S.pendingFiles ? [...S.pendingFiles] : [];",
         "try {",
-        "await _saveComposerDraftNow(currentSid, draftText, draftFiles);",
+        # #7855 (round 7+): the save now also carries the departing session's
+        # restored continuation token as a 4th argument. The ordering this
+        # test pins (clear → capture → await) is unchanged.
+        "await _saveComposerDraftNow(currentSid, draftText, draftFiles, _switchContId);",
     )
     positions = [cross_block.index(step) for step in ordered_steps]
     assert positions == sorted(positions), (

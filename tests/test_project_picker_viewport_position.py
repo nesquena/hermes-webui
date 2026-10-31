@@ -2237,14 +2237,22 @@ def test_batch_completions_ship_the_immediate_keep_picker_contract():
     completion must use the explicit nondeferred keep-picker contract instead.
     """
     bar = _completion_function_body("_renderBatchActionBar")
+    delete_batch = _completion_function_body("_deleteSelectedSessionsBatch")
     picker = _completion_function_body("_showBatchProjectPicker")
-    assert bar.count(KEEP_PICKER_REFETCH) == 2, (
-        "the batch archive and delete completions must use the keep-picker refetch"
+    # The delete completion moved into its own function when the batch handler
+    # learned to settle each request (refused sessions must not discard the
+    # ones that committed), so the archive refetch is all that stays here.
+    assert bar.count(KEEP_PICKER_REFETCH) == 1, (
+        "the batch archive completion must use the keep-picker refetch"
+    )
+    assert delete_batch.count(KEEP_PICKER_REFETCH) == 2, (
+        "both batch delete completions (partial and full) must use the keep-picker refetch"
     )
     assert picker.count(KEEP_PICKER_REFETCH) == 2, (
         "the batch unassign and move completions must use the keep-picker refetch"
     )
     assert "await renderSessionList();" not in bar
+    assert "await renderSessionList();" not in delete_batch
     assert "await renderSessionList();" not in picker
 
 
@@ -2459,6 +2467,8 @@ function autoResize(){}
 function hideCmdDropdown(){}
 function renderTray(){}
 function showToast(){}
+function _normalizeGoalContinuationId(id){return String(id||'').trim();}
+function _takeRestoredDraftGoalContinuationId(){return '';}
 """ + send_source + r"""
 (async()=>{
   const pending=send();

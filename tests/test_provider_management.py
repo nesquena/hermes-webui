@@ -5,14 +5,33 @@ Part of #604 — multi-provider model picker support.
 """
 
 import json
+import os
 import sys
 import types
 import urllib.error
 import urllib.request
+from unittest import mock
+
+import pytest
 
 import api.config as config
 import api.profiles as profiles
 from tests._pytest_port import BASE
+
+
+@pytest.fixture(autouse=True)
+def _restore_process_env():
+    """Put os.environ back after each test.
+
+    set_provider_key()/remove_provider_key() export the key into this process's
+    environment, as the running server needs. Left behind, a later in-process
+    Agent call (e.g. the real ContextCompressor) finds ANTHROPIC_API_KEY and seeds
+    the shared test auth.json with an env-sourced credential pool, which a later
+    models rebuild then re-syncs mid-build and discards
+    (test_ttl_cache::test_mtime_invalidation).
+    """
+    with mock.patch.dict(os.environ):
+        yield
 
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────

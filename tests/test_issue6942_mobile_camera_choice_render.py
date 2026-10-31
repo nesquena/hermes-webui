@@ -42,12 +42,23 @@ def test_attachment_choice_is_visible_across_mobile_render_matrix(tmp_path):
     for key in list(env):
         if key.endswith("_API_KEY"):
             env.pop(key, None)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
     env.update({
         "HERMES_WEBUI_PORT": str(port),
         "HERMES_WEBUI_HOST": "127.0.0.1",
         "HERMES_WEBUI_STATE_DIR": str(state_dir),
         "HERMES_HOME": str(state_dir),
         "HERMES_BASE_HOME": str(state_dir),
+        # conftest points HERMES_CONFIG_PATH / HERMES_WEBUI_DEFAULT_WORKSPACE at the
+        # shared test server's state, and os.environ.copy() above inherits them. Earlier
+        # tests in a full run write a configured provider into that shared config.yaml,
+        # so this server's /api/onboarding/status auto-completes onboarding and persists
+        # onboarding_completed=true into settings.json. Every later browser context then
+        # skips the status fetch the test waits for, and the run times out. Keep this
+        # server on its own (absent) config and workspace so it is order-independent.
+        "HERMES_CONFIG_PATH": str(state_dir / "config.yaml"),
+        "HERMES_WEBUI_DEFAULT_WORKSPACE": str(workspace),
         "HERMES_WEBUI_SKIP_ONBOARDING": "1",
         "HERMES_WEBUI_AGENT_DIR": str(state_dir / "no-agent"),
         "BROWSER": "echo",

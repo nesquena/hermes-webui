@@ -9,7 +9,7 @@ def run(body, extra=()):
              '_rememberApprovalPending', '_clearApprovalPendingForSession',
              '_clearClarifyPendingForSession', '_approvalDismissKey', '_legacyApprovalDismissKey',
              '_getDismissedApprovals', '_isApprovalDismissed', '_markApprovalDismissed',
-             '_unmarkApprovalDismissed', 'dismissApprovalCard',
+             '_unmarkApprovalDismissed', '_approvalDismissTarget', 'dismissApprovalCard',
              '_startApprovalFallbackPoll', 'showApprovalCard',
              'activeSessionHasPendingPromptAttention']
     source = '\n'.join(_extract_fn(MESSAGES_JS, n) for n in names + list(extra))
@@ -31,6 +31,13 @@ const _approvalPollingSessionMissingOrMismatched=()=>false;
 const _hideApprovalCardIfOwner=()=>{};
 const stopApprovalPolling=()=>{}, stopApprovalPollingForSession=()=>{};
 const hideApprovalCard=()=>{};
+// #7091: dismissApprovalCard reconciles the dismiss target against the
+// authoritative pending head before acting. These tests cover dismissal and
+// notification ownership, not that reconcile path (which has its own sandbox
+// cases and a browser gate), so model the no-owner / nothing-pending shape:
+// no rendered card to capture and an empty head.
+const _captureApprovalResponseOwner=()=>null;
+const _reconcileApprovalToHead=async()=>'same';
 const setInterval=()=>1;
 const _isSessionActivelyViewed=()=>false;
 const flush=()=>new Promise(r=>setImmediate(r));
@@ -68,7 +75,7 @@ global.sendBrowserNotification=()=>{sent.push(1);return true};
 const a={_session_id:'s',approval_id:'id',run_id:'r1',_gateway_mirror_token:'t1'};
 global.showApprovalForSession=(sid,p)=>showApprovalCard(p,1);
 showApprovalForSession('s',a);
-dismissApprovalCard();
+await dismissApprovalCard();
 const dismissed=_isApprovalDismissed('s',a);
 if(activeSessionHasPendingPromptAttention())throw Error('dismissed attention remains');
 showApprovalForSession('s',a);
@@ -76,7 +83,7 @@ const quiet=sent.length;
 const b={...a,run_id:'r2',_gateway_mirror_token:'t2'};
 showApprovalForSession('s',b);
 const replacement=sent.length;
-dismissApprovalCard();
+await dismissApprovalCard();
 global.api=async()=>({pending:null});
 _startApprovalFallbackPoll('s');await flush();
 showApprovalForSession('s',b);

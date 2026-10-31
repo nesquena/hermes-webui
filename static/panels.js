@@ -5101,8 +5101,9 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
         const showLabel = idx === 0 || idx === chartRows.length - 1 || idx % labelEvery === 0;
         const titleDate = r.title || r.date;
         const cacheRead = Number(r.cache_read_tokens || 0);
-        // Bounded daily cache hit rate: reads / (input + reads), 0-100%.
-        const cacheDenom = input + cacheRead;
+        // Daily cache hit rate: reads over the full prompt total. The server
+        // already counts cache reads and writes inside input_tokens.
+        const cacheDenom = input;
         const cacheStr = (cacheRead > 0 && cacheDenom > 0)
           ? ` · ${Math.min(100, Math.round((cacheRead / cacheDenom) * 100))}% ${t('insights_model_cache')}`
           : '';
@@ -6596,10 +6597,6 @@ function renderWorkspacesPanel(workspaces){
 
     panel.appendChild(row);
   }
-  const hint=document.createElement('div');
-  hint.style.cssText='font-size:11px;color:var(--muted);padding:8px 0';
-  hint.textContent=t('workspace_paths_validated_hint');
-  panel.appendChild(hint);
   // Re-render detail if we have one cached and we're not in a form
   if (_currentWorkspaceDetail && _workspaceMode !== 'create' && _workspaceMode !== 'edit') {
     const refreshed = workspaces.find(w => w.path === _currentWorkspaceDetail.path);
@@ -6921,6 +6918,38 @@ async function promptWorkspacePath(){
   }
 }
 
+// #8514 (review): one place decides what a workspace transition does to the open
+// preview, and it answers with unsaved TEXT rather than with what is on screen.
+// `_previewDirty` is deliberately false for a closed panel, so gating a
+// transition on it let a hidden edit cross into another workspace, where the
+// session's next Save resolved its relative path against the new tree and wrote
+// A's text into B's same-named file.
+//   - different workspace + unsaved text  → ask, and honour Cancel before the
+//     session workspace is mutated or a new chat is created;
+//   - different workspace + clean editor  → drop the editor silently (it belongs
+//     to the tree we are leaving, so it must not stay savable);
+//   - same workspace (in-place refresh / directory navigation) → leave the
+//     preview alone: loadDir() preserves its hidden edits, nothing to warn about.
+async function _settlePreviewForWorkspaceSwitch(targetWs){
+  const cur=(S.session&&S.session.workspace)||'';
+  const target=targetWs||cur;
+  if(!cur||!target||String(target)===String(cur)) return true;
+  if(typeof _previewNeedsDiscardPrompt==='function'&&_previewNeedsDiscardPrompt()){
+    const discard=await showConfirmDialog({
+      title:t('discard_file_edits_title'),
+      message:t('discard_file_edits_message'),
+      confirmLabel:t('discard'),
+      danger:true
+    });
+    if(!discard) return false;
+  }
+  if(typeof _previewBelongsToWorkspace==='function'&&!_previewBelongsToWorkspace(target)){
+    if(typeof cancelEditMode==='function')cancelEditMode();
+    if(typeof clearPreview==='function')clearPreview({keepPanelOpen:true});
+  }
+  return true;
+}
+
 async function switchToWorkspace(path,name){
   // Opus review Q6: if called from blank page, auto-create a session bound to
   // the requested workspace so the switch doesn't silently no-op.
@@ -6952,17 +6981,8 @@ async function switchToWorkspace(path,name){
     S.session && S.session.workspace && path && path!==S.session.workspace &&
     Array.isArray(S.messages) && S.messages.length>0
   ){
-    if(typeof _previewDirty!=='undefined'&&_previewDirty){
-      const discard=await showConfirmDialog({
-        title:t('discard_file_edits_title'),
-        message:t('discard_file_edits_message'),
-        confirmLabel:t('discard'),
-        danger:true
-      });
-      if(!discard)return;
-      if(typeof cancelEditMode==='function')cancelEditMode();
-      if(typeof clearPreview==='function')clearPreview();
-    }
+    if(typeof _settlePreviewForWorkspaceSwitch==='function'
+       && !(await _settlePreviewForWorkspaceSwitch(path))) return;
     closeWsDropdown();
     // Bind the new chat to the selected workspace via the one-shot flag newSession() reads.
     S._profileSwitchWorkspace=path;
@@ -6975,17 +6995,8 @@ async function switchToWorkspace(path,name){
     showToast(t('workspace_switched_new_chat',name||getWorkspaceFriendlyName(path)));
     return;
   }
-  if(typeof _previewDirty!=='undefined'&&_previewDirty){
-    const discard=await showConfirmDialog({
-      title:t('discard_file_edits_title'),
-      message:t('discard_file_edits_message'),
-      confirmLabel:t('discard'),
-      danger:true
-    });
-    if(!discard)return;
-    if(typeof cancelEditMode==='function')cancelEditMode();
-    if(typeof clearPreview==='function')clearPreview();
-  }
+  if(typeof _settlePreviewForWorkspaceSwitch==='function'
+     && !(await _settlePreviewForWorkspaceSwitch(path))) return;
   const composerDd=(typeof $==='function')?$('composerWsDropdown'):null;
   const restoreComposerFocusTarget=(composerDd&&composerDd.classList.contains('open')&&typeof _getComposerWorkspaceFocusTarget==='function')
     ? _getComposerWorkspaceFocusTarget()
@@ -7645,6 +7656,7 @@ async function switchToProfile(name) {
     sessionInProgress = true;
   }
   const _workspaceVisibleAtStart = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
+  let _reasoningSwitchHeld = false;
   // Stale-snapshot guard ownership for THIS switch: armed the instant
   // S.activeProfile changes (see below), handed to the settings reconciliation
   // on success, released in `finally` on every other exit. The counter arms are
@@ -7678,8 +7690,16 @@ async function switchToProfile(name) {
     // red error while the real switch completes and renders. The catch block below is
     // the single source of truth for switch failure and is gated on _switchGen, so the
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
+    // Effort saves queued in the previous profile must go out under its cookie.
+    if (typeof _beginReasoningProfileSwitch === 'function') {
+      _reasoningSwitchHeld = true;
+      await _beginReasoningProfileSwitch();
+    }
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
     if (_switchGen !== _profileSwitchGeneration) return false;
+    // A retained empty-composer pick belongs to the old profile's providers; keeping it
+    // would make New Chat / Send post the old profile's model (#6506 gate).
+    if (typeof _clearEmptyComposerModelOverride === 'function') _clearEmptyComposerModelOverride();
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
     resetSkillsForProfileTransition();
@@ -7920,6 +7940,7 @@ async function switchToProfile(name) {
     }
     return false;
   } finally {
+    if (_reasoningSwitchHeld) _endReasoningProfileSwitch();
     // Always remove loading indicator regardless of success or failure
     if (_switchGen === _profileSwitchGeneration && _chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
     if (_switchGen === _profileSwitchGeneration && _titlebarBtn) { _titlebarBtn.classList.remove('switching'); _titlebarBtn.disabled = false; }
@@ -9309,7 +9330,11 @@ if(typeof window!=='undefined') window._pickChatActivityDisplayMode=_pickChatAct
 function _pickTransparentEventTimestamps(enabled){
   _syncTransparentEventTimestampsControl(enabled,window._chatActivityDisplayMode);
   if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
-  if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+  // Reconcile both preserved live rows and settled history immediately. A full
+  // transcript rebuild can restore a structurally-ahead live turn unchanged.
+  if(typeof _syncTransparentEventTimestampVisibility==='function'){
+    document.querySelectorAll('#msgInner .transparent-event-row').forEach(_syncTransparentEventTimestampVisibility);
+  }
   _scheduleAppearanceAutosave();
 }
 if(typeof window!=='undefined') window._pickTransparentEventTimestamps=_pickTransparentEventTimestamps;
@@ -9501,6 +9526,8 @@ function _preferencesPayloadFromUi(){
   if(showTpsCb) payload.show_tps=showTpsCb.checked;
   const fadeTextCb=$('settingsFadeTextEffect');
   if(fadeTextCb) payload.fade_text_effect=fadeTextCb.checked;
+  const screenReaderModeCb=$('settingsScreenReaderMode');
+  if(screenReaderModeCb) payload.screen_reader_mode=screenReaderModeCb.checked;
   const terminalAutoExpandCb=$('settingsTerminalAutoExpand');
   if(terminalAutoExpandCb) payload.terminal_auto_expand_on_output=terminalAutoExpandCb.checked;
   const workspaceTodosTabCb=$('settingsWorkspaceTodosTab');
@@ -9675,6 +9702,9 @@ function _schedulePreferencesAutosave(){
 async function _autosavePreferencesSettings(payload){
   try{
     const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
+    if(payload&&payload.screen_reader_mode!==undefined){
+      setScreenReaderMode(saved&&saved.screen_reader_mode);
+    }
     if(payload&&payload.terminal_auto_expand_on_output!==undefined){
       window._terminalAutoExpandOnOutput=!!(saved&&saved.terminal_auto_expand_on_output);
     }
@@ -10208,7 +10238,12 @@ async function loadSettingsPanel(){
       window._showQuotaChip=showQuotaChipCb.checked;
       showQuotaChipCb.addEventListener('change',()=>{
         window._showQuotaChip=showQuotaChipCb.checked;
-        if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
+        if(typeof refreshProviderQuotaIndicator==='function'){
+          const provider=(typeof _currentQuotaProvider==='function')
+            ? _currentQuotaProvider()
+            : ((typeof S!=='undefined'&&S&&S.session&&S.session.model_provider)||null);
+          void refreshProviderQuotaIndicator(provider);
+        }
         _schedulePreferencesAutosave();
       },{once:false});
     }
@@ -10282,6 +10317,8 @@ async function loadSettingsPanel(){
     }
     const terminalAutoExpandCb=$('settingsTerminalAutoExpand');
     if(terminalAutoExpandCb){terminalAutoExpandCb.checked=!!settings.terminal_auto_expand_on_output;window._terminalAutoExpandOnOutput=terminalAutoExpandCb.checked;terminalAutoExpandCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const screenReaderModeCb=$('settingsScreenReaderMode');
+    if(screenReaderModeCb){screenReaderModeCb.checked=!!settings.screen_reader_mode;setScreenReaderMode(screenReaderModeCb.checked);screenReaderModeCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const workspaceTodosTabCb=$('settingsWorkspaceTodosTab');
     if(workspaceTodosTabCb){
       workspaceTodosTabCb.checked=!!settings.workspace_todos_tab;
@@ -12067,6 +12104,8 @@ function _buildProviderQuotaCard(status){
   const card=document.createElement('div');
   const state=(status.status||'unavailable').replace(/[^a-z0-9_-]/gi,'').toLowerCase()||'unavailable';
   card.className='provider-quota-card provider-quota-card-'+state;
+  // No provider configured is a neutral state, not a failure: keep its message muted.
+  if(!status.provider) card.classList.add('provider-quota-card-neutral');
   const accountLimits=status.account_limits||null;
   const providerBase=status.display_name||status.provider||t('provider_quota_active_provider');
   const provider=(accountLimits&&accountLimits.plan)?`${providerBase} · ${accountLimits.plan}`:providerBase;
@@ -12074,7 +12113,9 @@ function _buildProviderQuotaCard(status){
   let body='';
   if(accountLimits&&(status.status==='available'||accountLimits.pool)){
     const windows=Array.isArray(accountLimits.windows)?accountLimits.windows:[];
-    const details=Array.isArray(accountLimits.details)&&!accountLimits.pool?accountLimits.details:[];
+    // A pool snapshot's own details only repeat the breakdown below; usage-API details
+    // (e.g. credit balance) are the account's and stay visible next to the pool.
+    const details=Array.isArray(accountLimits.details)&&(!accountLimits.pool||accountLimits.source==='usage_api')?accountLimits.details:[];
     const windowHtml=windows.map(w=>{
       const used=_formatProviderQuotaPercent(w&&w.used_percent);
       const reset=_formatProviderQuotaReset(w&&w.reset_at);
@@ -12095,6 +12136,9 @@ function _buildProviderQuotaCard(status){
     const poolHtml=_buildProviderQuotaPoolBreakdown(accountLimits);
     body=windowHtml+detailHtml+poolHtml;
     if(!body) body=`<div class="provider-quota-message">${esc(status.message||t('provider_quota_account_limits_loaded'))}</div>`;
+    // A pool breakdown shown next to a failure reflects locally recorded credential
+    // state, not the failed check: keep the failure message visible above it.
+    else if(status.status!=='available'&&status.message) body=`<div class="provider-quota-message">${esc(status.message)}</div>`+body;
   }else if(status.status==='available'&&quota){
     body=`
       <div class="provider-quota-metric"><span>${esc(t('provider_quota_metric_remaining'))}</span><strong>${esc(_formatProviderQuotaMoney(quota.limit_remaining))}</strong></div>
@@ -12989,6 +13033,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._simplifiedToolCalling=true;
   _syncChatActivityDisplayModeControl(body.chat_activity_display_mode);
   _syncTransparentEventTimestampsControl(body.transparent_stream_event_timestamps, body.chat_activity_display_mode);
+  setScreenReaderMode(saved&&saved.screen_reader_mode!==undefined?saved.screen_reader_mode:body.screen_reader_mode);
   window._terminalAutoExpandOnOutput=!!body.terminal_auto_expand_on_output;
   window._workspaceTodosTab=!!body.workspace_todos_tab;
   if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
@@ -13730,6 +13775,7 @@ async function saveSettings(andClose){
   body.show_busy_placeholder_hint=showBusyPlaceholderHint===true;
   body.show_tps=showTps;
   body.fade_text_effect=fadeTextEffect;
+  body.screen_reader_mode=!!($('settingsScreenReaderMode')||{}).checked;
   body.terminal_auto_expand_on_output=!!($('settingsTerminalAutoExpand')||{}).checked;
   body.workspace_todos_tab=!!window._workspaceTodosTab;
   body.api_redact_enabled=!!($('settingsApiRedact')||{}).checked;
@@ -14185,9 +14231,9 @@ function toggleMcpServer(name, enabled){
       _refreshMcpToolsetsCatalog();
       showToast(t(enabled?'mcp_enabled_toast':'mcp_disabled_toast',name));
     }
-    else showToast(t('mcp_toggle_failed'),'error');
+    else showToast(t('mcp_toggle_failed'),null,'error');
     loadMcpServers();
-  }).catch(()=>{showToast(t('mcp_toggle_failed'),'error');loadMcpServers();});
+  }).catch(()=>{showToast(t('mcp_toggle_failed'),null,'error');loadMcpServers();});
 }
 function _refreshMcpToolsetsCatalog(payload){
   if(typeof window.invalidateToolsetsCatalog==='function') window.invalidateToolsetsCatalog(payload);
@@ -14367,7 +14413,43 @@ function _gatewayActionButton(action){
   const labels={start:t('gateway_start'),stop:t('gateway_stop'),restart:t('gateway_restart')};
   return `<button class="sm-btn gateway-action-btn" data-gateway-action="${esc(action)}" onclick="_gatewayAction(${jsArg(action)})" ${_gatewayActionInFlight?'disabled':''} style="padding:5px 10px;font-size:12px">${esc(labels[action]||action)}</button>`;
 }
+function _gatewayLockNote(kind,bodyHtml){
+  const icon=typeof li==='function'?`<span style="display:inline-flex;flex-shrink:0;margin-top:2px">${li('lock',12)}</span>`:'';
+  return `<div class="gateway-external-note" data-gateway-note="${esc(kind)}" style="display:flex;align-items:flex-start;gap:6px;margin-top:10px;font-size:12px;line-height:1.45;color:var(--muted)">${icon}<span>${bodyHtml}</span></div>`;
+}
+function _gatewayLocalUnprovenNoteHtml(lifecycle){
+  // The exact one-time start command comes from the server (it adds
+  // `--profile <name>` for a named profile, like the Start button does).
+  // Escape the whole translation first, then put the escaped command, wrapped
+  // in inline code, at the locale's {cmd} placeholder. Only static markup and
+  // escaped text are added after esc(), so the note stays XSS-safe.
+  const raw=lifecycle&&lifecycle.start_command;
+  const command=(typeof raw==='string'&&raw.trim())?raw:'hermes gateway start';
+  const codeStyle='font-family:var(--font-mono,monospace);font-size:11px;background:var(--code-bg);padding:1px 5px;border-radius:4px;white-space:pre-wrap;overflow-wrap:anywhere';
+  // Keep each `--flag` whole when the chip wraps: a break inside `--profile`
+  // left a bare `--` at the line end, which reads as the end-of-options marker.
+  // The pattern only matches `--` plus letters/hyphens in the already escaped
+  // text, so it cannot touch an entity or markup.
+  const cmdHtml=esc(command).replace(/(^|\s)(--[a-z][a-z-]*)/g,'$1<span style="white-space:nowrap">$2</span>');
+  return esc(t('gateway_local_unproven')).split('{cmd}').join(`<code style="${codeStyle}">${cmdHtml}</code>`);
+}
 function _gatewayActionControls(r){
+  // Lifecycle actions drive the LOCAL `hermes gateway` CLI. Offer them only when
+  // the server proved that CLI controls the Gateway shown here (#8391); a remote
+  // or unproven Gateway stays read-only. Missing capability fails closed.
+  const lifecycle=(r&&r.lifecycle&&typeof r.lifecycle==='object')?r.lifecycle:null;
+  const managed=!!(lifecycle&&lifecycle.managed===true);
+  if(!managed){
+    // A loopback Gateway WebUI has not yet seen running for this profile, and
+    // that is not running now: most likely this machine's own Gateway, stopped
+    // since before the upgrade. Point at the one-time CLI start that proves it.
+    // A RUNNING unproven loopback Gateway (e.g. a Docker port map) really is
+    // managed elsewhere, so it keeps the external note.
+    if(lifecycle&&lifecycle.reason==='local_gateway_unproven'&&!(r&&r.running)){
+      return _gatewayLockNote('local_unproven',_gatewayLocalUnprovenNoteHtml(lifecycle));
+    }
+    return _gatewayLockNote('external',esc(t('gateway_external_managed')));
+  }
   const actions=(r&&r.running)?['stop','restart']:['start'];
   return `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px">${actions.map(_gatewayActionButton).join('')}</div>`;
 }

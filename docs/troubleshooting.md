@@ -283,6 +283,50 @@ The on-disk locations below assume the default `~/.hermes/webui` state directory
 
 ---
 
+## Run journal is large / disk keeps filling (#7613)
+
+**Symptom.** `sessions/_run_journal/` grows without bound — hundreds of MB to several GB on installs with long-lived sessions or many long runs. Every run appends one `{run_id}.jsonl` and nothing removes them, so the directory only ever grows.
+
+**What runs now.** An hourly sweep (on the existing maintenance tick, never on a request path) **archives** runs past the retention caps — it does *not* delete them:
+
+```bash
+du -sh ~/.hermes/webui/sessions/_run_journal          # live run files
+du -sh ~/.hermes/webui/sessions/_run_journal_archive  # compressed archives
+```
+
+Archived runs live at `_run_journal_archive/<session_id>/<run_id>.jsonl.gz` and every read path (run status, session reload, replay after reconnect) falls back to them transparently, so recovery still works for archived runs.
+
+**Caps** (env var > `settings.json` > default; `0` disables an individual cap):
+
+| Cap | Default | Meaning |
+| --- | --- | --- |
+| `run_journal_retention_ttl_days` | `14` | Archive runs older than N days |
+| `run_journal_retention_max_runs_per_session` | `40` | Keep at most N newest runs live per session |
+| `run_journal_retention_max_bytes_per_session` | `256 MiB` | Per-session budget for live run-journal bytes |
+| `run_journal_archive_ttl_days` | `0` (never) | **Only destructive knob** — delete archives older than N days (an archive a session still needs to recover an interrupted answer is kept until the session no longer references it or is deleted) |
+
+An explicitly supplied but invalid or out-of-range value **disables** that cap
+instead of falling back to `settings.json` or the default, so a typo can never
+silently re-enable the operation you were trying to change.
+
+**Notes.**
+
+- Runs without a complete terminal row (including a journal truncated mid-write) are **never** archived — a crashed run stays in place, readable, exactly as before.
+- A run the session still needs to recover an interrupted answer (its active stream, or the run an interrupted-turn marker names) stays live, so rolling back to a release that predates the archive format (such as v0.52.492) can still recover it.
+- An archived run's compressed copy is verified byte-exact before the live file is dropped; a failure at any step leaves the live file untouched (a missed archive is always safe).
+- Deleting a session deletes its archives too.
+- Set `HERMES_WEBUI_RUN_JOURNAL_SWEEP=0` to turn the sweep off entirely.
+- On Windows (no `dir_fd` support) the sweep disables itself; retention is POSIX-only until the move can be made race-safe there.
+- To manually reclaim live journal bytes immediately, run a sweep in-process (the hourly schedule otherwise applies):
+
+  ```bash
+  python3 -c "from api.run_journal import sweep_run_journal; print(sweep_run_journal())"
+  ```
+
+  (Run from the repo root with the same Python/venv the server uses.)
+
+---
+
 ## "Context compression exhausted" after a long-running turn
 
 **Symptom.** A long-running session, often with many tool calls or a small
@@ -581,6 +625,34 @@ grep -A6 '^skills:' <profile-home>/config.yaml
 **Fix.** If no external root appears, check that `config.yaml` parses and that `skills.external_dirs` is a list (or one string) under a `skills:` mapping: like the Agent, a malformed section lists none. `unavailable` means `config.yaml` exists but could not be read (for example, a permission error); fix its permissions. A single missing root usually means its path variable is not defined in that profile's `.env` (or, for the root profile, in the server's launch environment), or that a `.env` replacement value relies on another `$VAR` / `${VAR}` (expansion is a single pass, so that token stays literal). Confirm the external path is listed under `skills.external_dirs` in that profile's `config.yaml` and exists on disk. Switching profiles retires both panel and cron skill caches, including pending responses; a late response must never restore the previous profile's list.
 
 **When to file a bug.** File a WebUI bug if `runtime_scope` is `"profile"` and `/api/skills` lists a root that only another profile's `config.yaml` names, or omits a root that the Agent loads for this profile.
+
+---
+
+## Memory is off, or a memory provider is disabled for a profile (#8517)
+
+**Symptom.** Agents stop recalling or saving memory (the built-in MEMORY.md/USER.md, an external provider such as Hindsight or Mnemosyne, or both), on some profiles or once more than one profile is in use. The WebUI server log has a `[webui] #8517:` warning.
+
+**Why.** WebUI holds every agent to the memory of its own session's profile and fails closed (#8517): when it cannot prove that, the profile runs without that memory instead of reading or writing another profile's. Each is logged once per WebUI process (the shared-instance one once per pair of profiles):
+
+| Log text | Cause | Effect |
+|---|---|---|
+| `has no context-local home override (older than v0.18.0)` | Hermes Agent older than v0.18.0 | All memory (external and built-in) is off for every agent. |
+| `no claim_instance; older than 2026-10-17` | Agent without `claim_instance`, and this WebUI serves several profiles (a named profile directory exists, or two profile homes were used) | External providers are off for every agent; built-in memory still works. A single-profile install keeps them. |
+| `returned the same shared provider instance that already serves profile home` | The provider plugin hands every agent one shared instance | The first profile that used it keeps it until the WebUI restarts; the others run without it. |
+
+Session boundaries (cache eviction, a new chat, shutdown) commit memory as the session's owner. A commit that cannot run as the owner is logged as `not run` (`The work stays pending`); one the Agent refuses logs `It is NOT counted as committed; the work stays pending`. Both are retried at the next boundary. WebUI notices the Agent's refusal at the Agent's own refusal function (`agent.memory_caller_scope._refuse`), before anything is logged, so the refusal is detected whatever the logging configuration (levels above WARNING, disabled loggers, `logging.disable`) and that configuration is never changed (#8613). An Agent without that function has no caller-scope check and never refuses. An evicted agent whose owner cannot be resolved (its session file was removed outside the WebUI) gets no session end, and its provider is not shut down either: other agents of the same profile may share that provider instance, so its worker stays until the WebUI restarts.
+
+**Diagnostic commands.** Run the Python lines with the Agent's interpreter (the one the WebUI uses).
+
+```bash
+grep -E '\[webui\] #(8517|8613)' <webui-server-log>
+python3 -c "import hermes_constants as h; print('v0.18.0 home override:', callable(getattr(h, 'set_hermes_home_override', None)))"
+python3 -c "import agent.memory_manager as m; print('claim_instance:', callable(getattr(m, 'claim_instance', None)))"
+```
+
+**Fix.** Upgrade Hermes Agent and restart the WebUI. For the shared-instance warning, the provider plugin must return a new instance per agent (the documented provider contract); until it does, only the first profile keeps it.
+
+**When to file a bug.** File a WebUI bug if memory is off while every diagnostic prints `True` and there is no shared-instance warning, or if one profile's memory shows another profile's entries.
 
 ---
 

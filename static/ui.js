@@ -574,6 +574,83 @@ function _messageVirtualDefaultHeightForRole(role){
     role&&Object.prototype.hasOwnProperty.call(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS,role)?role:'default'
   ];
 }
+// #7591: the flat per-role constants above are only a PRIOR. On long sessions
+// with tall tool outputs, tables and inline images they ran 3.6x the measured
+// row height (#7591) — and 34% short on a 2,000-message session (#7283) — so
+// every virtual pad built from them was wrong by tens of thousands of px, which
+// is the error that flings the viewport on each mid-gesture re-window. Seed
+// unmeasured rows with what THIS transcript actually renders: per-role samples
+// shrink toward that role's flat prior until they carry the estimate alone, and
+// a role's mean freezes once it has MESSAGE_VIRTUAL_CALIBRATION_FREEZE_SAMPLES
+// samples so a live running mean cannot wobble the pads while the restore layer
+// chases the wobble. Measured rows never use this path (the height cache wins).
+const MESSAGE_VIRTUAL_CALIBRATION_PRIOR_SAMPLES=5;
+const MESSAGE_VIRTUAL_CALIBRATION_FREEZE_SAMPLES=20;
+let _messageVirtualRoleHeightSamples=Object.create(null);
+function _resetMessageVirtualRoleCalibration(){
+  _messageVirtualRoleHeightSamples=Object.create(null);
+}
+function _recordMessageVirtualRoleMeasurement(role,rawIdx,height){
+  const h=Number(height);
+  const idx=Number(rawIdx);
+  if(!(h>0)||!Number.isFinite(idx)) return;
+  const key=(role&&Object.prototype.hasOwnProperty.call(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS,role))?role:'default';
+  if(!(Number(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS[key])>0)) return;
+  let slot=_messageVirtualRoleHeightSamples[key];
+  // Rows, not render passes: the measure pass runs on every render over the SAME
+  // handful of mounted rows, so counting passes would freeze a role's mean on a
+  // couple of rows before the rest of the transcript was ever seen (#7591 P2).
+  if(!slot){ slot={rows:new Map(),frozen:0}; _messageVirtualRoleHeightSamples[key]=slot; }
+  if(slot.frozen>0) return;
+  if(slot.rows.get(idx)===h) return;
+  slot.rows.set(idx,h);
+  if(slot.rows.size>=MESSAGE_VIRTUAL_CALIBRATION_FREEZE_SAMPLES){
+    let sum=0;
+    for(const value of slot.rows.values()) sum+=value;
+    slot.frozen=sum/slot.rows.size;
+  }
+}
+function _shiftMessageVirtualRoleSamples(previousEntries, nextEntries, prependedCount){
+  const count=Math.max(0, Number(prependedCount)||0);
+  if(!(count>0)) return;
+  if(!Array.isArray(previousEntries)||!Array.isArray(nextEntries)) return;
+  // #7591: rawIdx is POSITIONAL over S.messages (see _getVisibleMessagesWithIdx),
+  // so prepending older history moves every key. The height cache is shifted for
+  // exactly this reason in _syncMessageVirtualHeightCache; these per-role samples
+  // must travel with it, or re-measuring the same rows after a prepend lands under
+  // fresh keys and counts them twice toward the freeze.
+  const remap=new Map();
+  for(let i=0;i<previousEntries.length;i++){
+    const previous=previousEntries[i];
+    const next=nextEntries[i+count];
+    if(!previous||!next) continue;
+    const from=Number(previous.rawIdx);
+    const to=Number(next.rawIdx);
+    if(Number.isFinite(from)&&Number.isFinite(to)&&from!==to) remap.set(from,to);
+  }
+  if(!remap.size) return;
+  for(const role in _messageVirtualRoleHeightSamples){
+    const slot=_messageVirtualRoleHeightSamples[role];
+    if(!slot||!slot.rows||!slot.rows.size) continue;
+    // A frozen role already carries its mean and ignores these rows; shifting
+    // them would be inert, so leave the slot untouched.
+    if(slot.frozen>0) continue;
+    const shifted=new Map();
+    for(const [idx,height] of slot.rows) shifted.set(remap.has(idx)?remap.get(idx):idx, height);
+    slot.rows=shifted;
+  }
+}
+function _messageVirtualCalibratedRoleHeight(role){
+  const key=(role&&Object.prototype.hasOwnProperty.call(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS,role))?role:'default';
+  const prior=Number(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS[key])||MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS.default;
+  const slot=_messageVirtualRoleHeightSamples[key];
+  if(!slot||!slot.rows.size) return Math.max(1,Math.round(prior));
+  if(slot.frozen>0) return Math.max(1,Math.round(slot.frozen));
+  let sum=0;
+  for(const value of slot.rows.values()) sum+=value;
+  const blended=(sum+MESSAGE_VIRTUAL_CALIBRATION_PRIOR_SAMPLES*prior)/(slot.rows.size+MESSAGE_VIRTUAL_CALIBRATION_PRIOR_SAMPLES);
+  return Math.max(1,Math.round(blended));
+}
 // Cycle-aware measurement burst tracking (#6654/#6717): instead of a flat
 // render cap, the burst remembers every window cycle key it has already seen.
 // An UNSEEN key means the window is still converging forward (A->B->C->settled
@@ -632,16 +709,28 @@ const _recycleResetAttrs=[
   'data-live-assistant-turn',
 ];
 let _scrollbarDragActive=false;
+// #7591: blank-viewport recovery clamps at most once per detection cycle (see
+// _clampVirtualizedBlankViewportToRenderedEdge); reset when a render lands on
+// rendered rows and on session switch (_clearMessageVirtualHeightCache).
+let _messageVirtualBlankClampAttempts=0;
+// #7591: the blank-viewport clamp writes scrollTop from INSIDE a render that
+// _compensateScrollForMeasurementDelta wraps. That wrapper then reads its own
+// deliberate jump as a measurement delta and writes scrollTopBefore+delta over
+// the recovered position, dropping the reader back into the blank gap it just
+// escaped (scrollbar-driven and measurement-driven renders alike). The clamp
+// stamps a FRESH token here; the wrapper compares the token it saw before its
+// render against the stamp, so only a recovery performed by ITS OWN render is
+// recognised — a stale stamp from an unwrapped render (jumpToTurnQuestion calls
+// renderMessages directly) can never suppress a legitimate compensation. The
+// stamp is cleared in the wrapper's finally so a throw cannot leak it.
+let _blankViewportRecoveryToken=0;
+let _blankViewportRecoveryApplied=0;
 function _markMessageVirtualScrollActive(){
   _messageVirtualScrollActive=true;
   clearTimeout(_messageVirtualScrollSettleTimer);
   _messageVirtualScrollSettleTimer=setTimeout(()=>{
     _messageVirtualScrollActive=false;
-    if(_messageVirtualDeferredMeasurement){
-      const deferred=_messageVirtualDeferredMeasurement;
-      _messageVirtualDeferredMeasurement=null;
-      _scheduleMessageVirtualMeasurementRefresh(deferred);
-    }
+    _resumeDeferredMessageVirtualMeasurement();
   },150);
 }
 // Cached visWithIdx array — invalidated when S.messages.length changes.
@@ -658,6 +747,10 @@ function _clearMessageVirtualHeightCache(){
   _messageVirtualHeightCacheEntries=[];
   _messageVirtualHeightCacheLen=0;
   _messageVirtualHeightCacheSrc=null;
+  // Per-session geometry state: the role calibration (#7591) and the blank-viewport
+  // clamp budget both describe THIS transcript and must not leak into the next one.
+  if(typeof _resetMessageVirtualRoleCalibration==='function') _resetMessageVirtualRoleCalibration();
+  _messageVirtualBlankClampAttempts=0;
   _messageVirtualEstimatedRowHeight=_messageVirtualDefaultHeightForRole('default');
   _messageVirtualWindowKey='';
   _messageVirtualMeasurementCycleKey='';
@@ -755,10 +848,17 @@ function _messageVirtualWindow(opts){
   const tailStart=Math.max(0, total-keepTailCount);
   const heights=Array.isArray(opts&&opts.heights)?opts.heights:[];
   const roleForIdx=typeof (opts&&opts.roleForIdx)==='function'?opts.roleForIdx:null;
+  // #7591: callers may hand in a calibrated per-role height (measured mean for
+  // this transcript) so unmeasured rows estimate reality instead of the flat
+  // prior; absent that hook the flat role constants remain the fallback.
+  const roleDefaultFor=typeof (opts&&opts.defaultHeightForRole)==='function'?opts.defaultHeightForRole:null;
   const rowHeightFor=(idx)=>{
     const cached=Number(heights[idx]);
     if(Number.isFinite(cached)&&cached>0) return cached;
-    return roleForIdx?Math.max(1,_messageVirtualDefaultHeightForRole(roleForIdx(idx))):defaultHeight;
+    if(!roleForIdx) return defaultHeight;
+    const role=roleForIdx(idx);
+    if(roleDefaultFor) return Math.max(1,roleDefaultFor(role));
+    return Math.max(1,_messageVirtualDefaultHeightForRole(role));
   };
   if(total<=Math.max(threshold, keepTailCount)){
     return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,total,tailStart};
@@ -830,8 +930,28 @@ function _resetMessageVirtualMeasurementBurst(){
   // an internal marker survive onto a render that fires later (#6717 re-gate).
   _messageVirtualRenderQueuedOrigin=null;
 }
+function _resumeDeferredMessageVirtualMeasurement(){
+  const deferred=_messageVirtualDeferredMeasurement;
+  if(!deferred) return;
+  _messageVirtualDeferredMeasurement=null;
+  _scheduleMessageVirtualMeasurementRefresh(deferred);
+}
+function _messageJumpScrollOwnsViewport(){
+  return typeof _messageJumpScrollOwner!=='undefined'&&!!_messageJumpScrollOwner;
+}
 function _scheduleMessageVirtualMeasurementRefresh(windowMetrics){
   if(_messageVirtualScrollActive){
+    _messageVirtualDeferredMeasurement=windowMetrics;
+    return;
+  }
+  // #7591: a jump-to-question is smooth-scrolling toward an answer row the
+  // render window does not contain yet, and it holds ownership of the viewport
+  // while it settles. An internal measurement render fired in that window
+  // re-derives the window from a stale key and restores its own anchor, which
+  // REPLACES the smooth-scroll target — the requested answer then settles above
+  // the viewport. Hold the measurement chain until the jump releases ownership
+  // (_finishMessageJumpScroll / _cancelMessageJumpScroll flush it back).
+  if(typeof _messageJumpScrollOwnsViewport==='function'&&_messageJumpScrollOwnsViewport()){
     _messageVirtualDeferredMeasurement=windowMetrics;
     return;
   }
@@ -882,12 +1002,43 @@ function _scheduleMessageVirtualMeasurementRefresh(windowMetrics){
   // external request coalesces into the queued rAF, EXTERNAL wins and the
   // render that fires degrades to an unmarked (burst-resetting) render
   // (#6717 re-gate).
-  requestAnimationFrame(()=>{ _scheduleMessageVirtualizedRender(true,{origin:'internal'}); });
+  requestAnimationFrame(()=>{
+    // Re-check ownership at FIRE time: a jump can begin between this schedule
+    // and the next frame, and rendering then would replace the jump's
+    // smooth-scroll target. Hold it for the jump's own settlement to flush.
+    if(typeof _messageJumpScrollOwnsViewport==='function'&&_messageJumpScrollOwnsViewport()){
+      _messageVirtualDeferredMeasurement=windowMetrics;
+      return;
+    }
+    _scheduleMessageVirtualizedRender(true,{origin:'internal'});
+  });
 }
 function _markMessageVirtualMeasurementsSettled(windowMetrics){
   _messageVirtualMeasurementCycleKey=_messageVirtualMeasurementCycleKeyFor(windowMetrics);
   _resetMessageVirtualMeasurementBurst();
 }
+// Identity-only height reuse — the #8228 re-review (2026-10-15) found the
+// fingerprint/digest reuse machinery structurally broken on tool transcripts
+// and costly on every append, and explicitly accepted restoring identity-only
+// matching:
+//   - The tool digest was sealed inside _syncMessageVirtualHeightCache, which
+//     renderMessages calls BEFORE it derives the settled S.toolCalls list. The
+//     first seal hashed settled:null; every later seal hashed the derived item
+//     (carrying assistant_msg_idx / done), so the two never matched — one
+//     mismatching row defeated the all-or-nothing reuse: on a virtualized tool
+//     transcript 0 of 189 heights were kept, and 0 via loadSession(force).
+//   - Sealing ran on every length-change sync even with virtualization off: a
+//     3.6 MB tool-output session paid ~63 ms median per appended message.
+//   - The cached _rfp inverted matching after an in-place mutation: a fresh
+//     object equal to the pre-mutation content was refused, while one equal to
+//     the current (mutated) content reused the height measured for the old
+//     content.
+// Identity-only matching is the pre-PR baseline and is safe in both directions:
+// in-session appends keep the same message objects, so their measured heights
+// carry over; loadSession(force) replaces S.messages with fresh objects, so
+// those rows are re-measured instead of reusing a possibly-stale height (the
+// conservative direction — this is what the review's [SILENT] width/font-size
+// point refers to: identity-only discards rather than risk a wrong height).
 function _messageVirtualHeightEntryMatches(previousEntry, nextEntry){
   return !!(
     previousEntry&&nextEntry&&
@@ -902,14 +1053,26 @@ function _messageVirtualHeightPrefixEntryMatches(previousEntry, nextEntry){
   );
 }
 function _syncMessageVirtualHeightCache(visWithIdx){
-  const nextEntries=Array.isArray(visWithIdx)
-    ? visWithIdx.map(entry=>entry?{rawIdx:entry.rawIdx,m:entry.m}:entry)
-    : [];
+  const _entryCount=Array.isArray(visWithIdx)?visWithIdx.length:0;
   if(
     _messageVirtualHeightCacheLen===S.messages.length &&
     _messageVirtualHeightCacheSrc===S.messages &&
-    _messageVirtualHeightCacheEntries.length===nextEntries.length
+    _messageVirtualHeightCacheEntries.length===_entryCount
   ) return;
+  // Build the next-entry view only AFTER the early-return above: this function
+  // runs on every render / scroll window recompute, so the no-op check keeps a
+  // steady-state scroll from paying the O(messages) entry build. (nextEntries
+  // length equals visWithIdx length for both arrays and non-arrays, so the
+  // check above is equivalent to the former nextEntries.length test.)
+  // Entries carry the identity only: the #8228 re-review accepted dropping the
+  // sealed tool digest — it was computed before renderMessages derived
+  // S.toolCalls, so the settled state never matched across passes (0/189
+  // heights kept on a virtualized tool transcript) and the per-append walk
+  // cost ~63 ms on large tool sessions. Reuse is decided by message-object
+  // identity alone (see _messageVirtualHeightEntryMatches).
+  const nextEntries=Array.isArray(visWithIdx)
+    ? visWithIdx.map(entry=>entry?{rawIdx:entry.rawIdx,m:entry.m}:entry)
+    : [];
   const previousEntries=Array.isArray(_messageVirtualHeightCacheEntries)?_messageVirtualHeightCacheEntries:[];
   const previousHeights=Array.isArray(_messageVirtualHeightCache)?_messageVirtualHeightCache.slice():[];
   let nextHeights=null;
@@ -946,6 +1109,9 @@ function _syncMessageVirtualHeightCache(visWithIdx){
         for(let i=0;i<previousEntries.length;i++){
           nextHeights[prependedCount+i]=previousHeights[i];
         }
+        // #7591: the role calibration samples are keyed by the same positional
+        // rawIdx, so they shift with the heights they were measured for.
+        if(typeof _shiftMessageVirtualRoleSamples==='function') _shiftMessageVirtualRoleSamples(previousEntries, nextEntries, prependedCount);
       }
     }
   }
@@ -993,6 +1159,7 @@ function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
     heights:_messageVirtualHeightCache,
     defaultHeight:_messageVirtualEstimatedRowHeight,
     roleForIdx:idx=>_messageVirtualRoleForEntry(visWithIdx[idx]),
+    defaultHeightForRole:(typeof _messageVirtualCalibratedRoleHeight==='function')?_messageVirtualCalibratedRoleHeight:null,
     keepTailCount,
   });
 }
@@ -1006,7 +1173,11 @@ function _messageVirtualPrependedHeightDelta(prependedRenderableCount){
   let total=0;
   for(let i=0;i<limit;i++){
     const cached=Number(_messageVirtualHeightCache[i]);
-    total+=(Number.isFinite(cached)&&cached>0)?cached:_messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(visWithIdx[i]));
+    if(Number.isFinite(cached)&&cached>0){ total+=cached; continue; }
+    const role=_messageVirtualRoleForEntry(visWithIdx[i]);
+    total+=(typeof _messageVirtualCalibratedRoleHeight==='function')
+      ? _messageVirtualCalibratedRoleHeight(role)
+      : _messageVirtualDefaultHeightForRole(role);
   }
   return Math.max(0,Math.round(total));
 }
@@ -1060,25 +1231,109 @@ function _messageSessionIndexBase(){
   const n=Number(typeof _oldestIdx!=='undefined'?_oldestIdx:0);
   return Number.isFinite(n)?Math.max(0,n):0;
 }
+// A prompt recovered from the live tail / pending cache while the loaded
+// transcript is a TAIL window sits OUTSIDE the canonical window (or is not
+// persisted yet): it is a DISPLAY-ONLY row. It renders like any other row, but
+// it must not shift the absolute index of the real window rows — fork, edit,
+// regenerate and the older-page cursor all derive `_oldestIdx + raw` from them.
+// Counting display-only rows out of the raw->absolute mapping keeps a window
+// that starts at absolute 31 on 31 instead of looking like 32 (fork sends 33).
+function _displayOnlyIndexState(){
+  const root=(typeof globalThis!=='undefined')?globalThis:(typeof window!=='undefined'?window:null);
+  if(!root) return null;
+  if(!root.__hermesDisplayOnlyIndexState){
+    root.__hermesDisplayOnlyIndexState={seen:false,cache:null,src:null,len:-1};
+  }
+  return root.__hermesDisplayOnlyIndexState;
+}
+function _markDisplayOnlyRow(row){
+  if(!row||typeof row!=='object') return row;
+  row._displayOnlyRow=true;
+  const state=_displayOnlyIndexState();
+  if(state){
+    state.seen=true;
+    state.cache=null;
+    state.src=null;
+    state.len=-1;
+  }
+  return row;
+}
+function _displayOnlyRawIndices(){
+  const state=_displayOnlyIndexState();
+  if(!state||!state.seen) return [];
+  const arr=(typeof S!=='undefined'&&S&&Array.isArray(S.messages))?S.messages:[];
+  if(state.cache&&state.src===arr&&state.len===arr.length) return state.cache;
+  const idxs=[];
+  for(let i=0;i<arr.length;i++){
+    if(arr[i]&&arr[i]._displayOnlyRow) idxs.push(i);
+  }
+  state.cache=idxs;
+  state.src=arr;
+  state.len=arr.length;
+  state.seen=idxs.length>0;
+  return idxs;
+}
+function _displayOnlyCountBefore(rawIdx){
+  const idxs=_displayOnlyRawIndices();
+  if(!idxs.length) return 0;
+  let count=0;
+  for(let i=0;i<idxs.length;i++){
+    if(idxs[i]<rawIdx) count++;
+    else break;
+  }
+  return count;
+}
+function _displayOnlyRowAt(rawIdx){
+  const idxs=_displayOnlyRawIndices();
+  if(!idxs.length) return false;
+  return idxs.indexOf(Number(rawIdx))!==-1;
+}
 function _messageSessionIndexForRawIdx(rawIdx){
   const n=Number(rawIdx);
-  if(!Number.isFinite(n)) return null;
-  return _messageSessionIndexBase()+n;
+  if(!Number.isFinite(n)||n<0) return null;
+  // Display-only rows have no canonical position: any value here would be a
+  // fabricated index that fork/edit/regenerate could act on.
+  const hasDisplayOnlyHelpers=typeof _displayOnlyRowAt==='function'&&typeof _displayOnlyCountBefore==='function';
+  if(!hasDisplayOnlyHelpers) return _messageSessionIndexBase()+n;
+  if(_displayOnlyRowAt(n)) return null;
+  const shiftedBy=_displayOnlyCountBefore(n);
+  if(!shiftedBy) return _messageSessionIndexBase()+n;
+  return _messageSessionIndexBase()+n-shiftedBy;
 }
 function _messageRawIdxForSessionIndex(sessionIdx){
   const n=Number(sessionIdx);
   if(!Number.isFinite(n)) return null;
+  let raw=n-_messageSessionIndexBase();
+  const idxs=typeof _displayOnlyRawIndices==='function'?_displayOnlyRawIndices():[];
+  if(raw<0||!idxs.length) return raw;
+  // Invert the counting: every display-only row at/before the candidate pushes
+  // the array position one slot further right.
+  for(let i=0;i<idxs.length;i++){
+    if(idxs[i]<=raw) raw++;
+    else break;
+  }
+  return raw;
+}
+// Window-relative index for keep_count math: `_oldestIdx + raw` must stay the
+// CANONICAL absolute index, so display-only rows are never counted here.
+function _canonicalRawIdxForSessionIndex(sessionIdx){
+  const n=Number(sessionIdx);
+  if(!Number.isFinite(n)) return null;
   return n-_messageSessionIndexBase();
 }
-// Current S.messages index of the message a rendered row shows. data-msg-idx is
-// relative to the _oldestIdx at render time and goes stale when full history
-// loads without a re-render (opening the outline does that); the row's
-// data-session-msg-idx is absolute and does not. Edit, regenerate and fork turn
-// this into an absolute keep_count (#2184), so a stale value truncated or forked
-// at the wrong turn.
+// Current canonical (window-relative) index of the message a rendered row
+// shows. data-msg-idx is relative to the _oldestIdx at render time and goes
+// stale when full history loads without a re-render (opening the outline does
+// that); the row's data-session-msg-idx is absolute and does not. Edit,
+// regenerate and fork turn this into an absolute keep_count (#2184), so a stale
+// value truncated or forked at the wrong turn.
 function _rowCurrentRawIdx(row, fallback){
   const abs=row&&row.dataset?Number(row.dataset.sessionMsgIdx):NaN;
-  const raw=Number.isSafeInteger(abs)&&abs>=0?_messageRawIdxForSessionIndex(abs):null;
+  const raw=Number.isSafeInteger(abs)&&abs>=0
+    ?(typeof _canonicalRawIdxForSessionIndex==='function'
+      ?_canonicalRawIdxForSessionIndex(abs)
+      :abs-_messageSessionIndexBase())
+    :null;
   return Number.isSafeInteger(raw)&&raw>=0?raw:fallback;
 }
 function _messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container){
@@ -1088,7 +1343,11 @@ function _messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container
   let offset=0;
   for(let i=0;i<limit;i++){
     const cached=Number(_messageVirtualHeightCache[i]);
-    offset+=(Number.isFinite(cached)&&cached>0)?cached:_messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(visWithIdx[i]));
+    if(Number.isFinite(cached)&&cached>0){ offset+=cached; continue; }
+    const role=_messageVirtualRoleForEntry(visWithIdx[i]);
+    offset+=(typeof _messageVirtualCalibratedRoleHeight==='function')
+      ? _messageVirtualCalibratedRoleHeight(role)
+      : _messageVirtualDefaultHeightForRole(role);
   }
   const viewport=container?Math.max(0,Number(container.clientHeight)||0):0;
   return Math.max(0,Math.round(offset-(viewport*0.35)));
@@ -1100,10 +1359,85 @@ function _captureMessageViewportAnchor(){
   const container=$('messages');
   if(!container) return null;
   const containerRect=container.getBoundingClientRect();
-  const rows=Array.from(container.querySelectorAll('[data-msg-idx]'));
+  // The fallback scan below reads getBoundingClientRect() once per row just to
+  // find the first row whose bottom edge crosses the container's top edge. On
+  // long transcripts that per-row scan was the hot spot (#7695 measured 18,682
+  // forced synchronous layouts / 21.8s cumulative). Rendered rows stack
+  // vertically in document order, so their bottom edges are monotonic — a
+  // binary search over the RENDERED rows finds the same row in O(log n) rect
+  // reads, with no dependency on the height cache (works identically in
+  // virtualized and full-render modes). An earlier cache-accumulation attempt
+  // was inert as written: estimated heights for rows above the render window
+  // always drifted, the search landed off-anchor, and the correctness gate
+  // then always fell back — a real-browser proof now lives in
+  // tests/browser_virtual_transcript_anchor.py (review finding on #8228).
+  // The per-row scan below stays as the safety net for an empty row set or a
+  // thrown error.
+  // Opt-out: window.__vmFastAnchor=false disables the fast path.
+  try{
+    const _fast=(typeof window==='undefined')||window.__vmFastAnchor!==false;
+    if(_fast){
+      // #8228 CORE: search ONLY the rows that actually lay out. In the default
+      // compact_worklog mode every tool-call assistant message also renders a
+      // hidden `assistant-segment-worklog-source` row (display:none!important —
+      // style.css) that still carries data-msg-idx, and `assistant-segment-anchor`
+      // rows are display:none too. A hidden row's rect is all zeros, so bottom
+      // edges across the FULL [data-msg-idx] set are no longer monotonic and
+      // the binary search lands arbitrarily far from the true anchor
+      // (reproduced in real Chromium: row 539 / 88,424 px below the container
+      // top instead of row 15; mobile virtualization anchored row 127 instead
+      // of visible row 75). Excluding the two hidden classes restores
+      // monotonicity; the fallback scan below uses the SAME predicate so fast
+      // and slow can never disagree about which rows are candidates.
+      const rows=container.querySelectorAll('[data-msg-idx]:not(.assistant-segment-worklog-source):not(.assistant-segment-anchor)');
+      const rowCount=rows?rows.length:0;
+      if(rowCount){
+        // First row with bottom > containerRect.top + 1 — the exact predicate
+        // of the per-row fallback scan below, located in log2(rowCount) reads.
+        let lo=0, hi=rowCount-1, hit=-1;
+        while(lo<=hi){
+          const mid=(lo+hi)>>1;
+          const probeRect=rows[mid].getBoundingClientRect();
+          if(probeRect.bottom>containerRect.top+1){ hit=mid; hi=mid-1; }
+          else { lo=mid+1; }
+        }
+        if(hit>=0){
+          // The binary search assumes laid-out row bottoms are monotonic; the
+          // :not() query restores that for the two display:none classes. As a
+          // defense in depth, if the nearest laid-out previous row ALSO crosses
+          // the container's top edge the hit is not provably the first covering
+          // row, so fall back to the per-row scan below.
+          const predOk=(hit===0)||!(rows[hit-1].getBoundingClientRect().bottom>containerRect.top+1);
+          if(predOk){
+            const row=rows[hit];
+            const rawIdx=Number(row&&row.dataset&&row.dataset.msgIdx);
+            if(Number.isFinite(rawIdx)){
+              // Re-read the HIT row's rect: the search probed midpoints, and
+              // topOffset must describe the returned row itself.
+              const rect=row.getBoundingClientRect();
+              const sessionIdx=Number(row&&row.dataset&&row.dataset.sessionMsgIdx);
+              const spacer=container.querySelector('[data-virtual-spacer="before"]');
+              const topPadBefore=spacer?parseFloat(spacer.style.height||'0')||0:0;
+              return {
+                rawIdx,
+                sessionIdx:Number.isFinite(sessionIdx)?sessionIdx:_messageSessionIndexForRawIdx(rawIdx),
+                key:row&&row.dataset?String(row.dataset.messageAnchorKey||''):'',
+                topOffset:rect.top-containerRect.top,
+                topPadBefore,
+                scrollHeightAtCapture:container.scrollHeight,
+                inputGeneration:typeof _messageScrollInputGeneration==='number' ? _messageScrollInputGeneration : 0,
+              };
+            }
+          }
+        }
+      }
+    }
+  }catch(_e){ /* fast path failed: fall back silently to the original per-row path */ }
+  const rows=Array.from(container.querySelectorAll('[data-msg-idx]:not(.assistant-segment-worklog-source):not(.assistant-segment-anchor)'));
   for(const row of rows){
     const rawIdx=Number(row&&row.dataset&&row.dataset.msgIdx);
     if(!Number.isFinite(rawIdx)) continue;
+    if(typeof window!=='undefined'){window.__vmAnchorFallbackRowReads=(window.__vmAnchorFallbackRowReads||0)+1;}
     const rect=row.getBoundingClientRect();
     if(rect.bottom>containerRect.top+1){
       const sessionIdx=Number(row&&row.dataset&&row.dataset.sessionMsgIdx);
@@ -1359,8 +1693,29 @@ function _compensateScrollForMeasurementDelta(renderFn){
   if(!container) return renderFn();
   const anchorBefore=_captureMessageViewportAnchor();
   const scrollTopBefore=container.scrollTop;
+  // A stamp left by an earlier, unwrapped render must never be mistaken for a
+  // recovery performed by THIS render (#7591).
+  _blankViewportRecoveryApplied=0;
+  const tokenBefore=_blankViewportRecoveryToken;
   container.classList.add('vscroll-measuring');
-  try{ renderFn(); }finally{ container.classList.remove('vscroll-measuring'); }
+  let recoveryApplied=false;
+  try{
+    renderFn();
+    recoveryApplied=_blankViewportRecoveryApplied>tokenBefore;
+  }finally{
+    container.classList.remove('vscroll-measuring');
+    // Read-then-clear in one finally, so a throw inside the render cannot leak
+    // the stamp into the next render and suppress a legitimate correction.
+    _blankViewportRecoveryApplied=0;
+  }
+  // #7591: the blank-viewport clamp moved scrollTop ON PURPOSE from inside this
+  // render. That deliberate jump is indistinguishable from a measurement delta,
+  // so the old-anchor compensation below would write scrollTopBefore+delta over
+  // the recovered position and put the reader back in the blank gap. The
+  // recovered position is the settled one for this render: the clamp already put
+  // a rendered row on screen, and the anchor it was captured against is no longer
+  // a reading position worth preserving.
+  if(recoveryApplied) return;
   if(!anchorBefore) return;
   if(scrollTopBefore<1){
     const spacer=container.querySelector('[data-virtual-spacer="before"]');
@@ -1409,7 +1764,10 @@ function _compensateScrollForMeasurementDelta(renderFn){
   const delta=actualOffset-anchorBefore.topOffset;
   if(Math.abs(delta)<2) return;
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
-  container.scrollTop=scrollTopBefore+delta;
+  // Correct from the CURRENT position. The render may already have moved scrollTop (the renderer restores its
+  // own anchor after calibration changes the spacer geometry); `delta` is measured against that position, so
+  // writing scrollTopBefore+delta threw the reader ~95 messages back on mobile (#8122 re-gate).
+  container.scrollTop+=delta;
   _lastScrollTop=container.scrollTop;
   _deferClearProgrammaticScroll();
 }
@@ -1552,6 +1910,11 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
       _messageVirtualHeightCache[visibleIdx]=totalHeight;
       changed=true;
     }
+    // #7591: publish what this row really rendered so unmeasured rows of the
+    // same role estimate from the measured mean instead of the flat constant.
+    if(typeof _recordMessageVirtualRoleMeasurement==='function'){
+      _recordMessageVirtualRoleMeasurement(_messageVirtualRoleForEntry(entry), entry&&entry.rawIdx, totalHeight);
+    }
     measuredTotal+=totalHeight;
     measuredCount++;
   }
@@ -1666,6 +2029,20 @@ function _scheduleMessageVirtualizedRender(force, request){
     // unrelated render could steal (#6717 re-gate).
     const internalMeasurement=_messageVirtualRenderQueuedOrigin==='internal';
     _messageVirtualRenderQueuedOrigin=null;
+    // #7591: THIS callback is the LAST asynchronous hop of the internal
+    // measurement chain (measurement rAF -> here). The ownership re-check above
+    // runs in the first frame, so a jump that takes ownership BETWEEN the two
+    // frames used to render anyway: an internal measurement render re-derives
+    // the window from a stale key and restores its own anchor, which REPLACES
+    // the jump's smooth-scroll target and strands the requested answer above
+    // the viewport. Re-check before any compensation, programmatic-latch write
+    // or render, hold only INTERNAL work (genuine external renders must never
+    // be blanket-suppressed while a jump runs), and let finish/cancel flush it.
+    if(internalMeasurement&&typeof _messageJumpScrollOwnsViewport==='function'&&_messageJumpScrollOwnsViewport()){
+      const heldVisWithIdx=_getVisibleMessagesWithIdx();
+      _messageVirtualDeferredMeasurement=_currentMessageVirtualWindow(heldVisWithIdx,_messageVirtualKeepTailCount());
+      return;
+    }
     const liveVisWithIdx=_getVisibleMessagesWithIdx();
     const liveWindow=_currentMessageVirtualWindow(liveVisWithIdx,_messageVirtualKeepTailCount());
     const liveKey=_messageVirtualWindowKeyFor(liveWindow);
@@ -1693,15 +2070,28 @@ function _scheduleMessageVirtualizedRender(force, request){
 const _renderCache = new Map();
 const _renderCacheMax = 300;
 function _clearRenderCache(){ _renderCache.clear(); }
+// Two independent 32-bit multiplicative hashes over every UTF-16 unit of `text` (~64 bits together). Used for
+// long render-cache keys: the key must change whenever ANY character changes.
+function _renderCacheTextHash(text){
+  let a=0x811c9dc5, b=0x9e3779b9;
+  for(let i=0;i<text.length;i++){
+    const c=text.charCodeAt(i);
+    a=Math.imul(a^c,16777619)>>>0;
+    b=Math.imul(b^c,0x5bd1e995)>>>0;
+    b=(b^(b>>>15))>>>0;
+  }
+  return a.toString(36)+'.'+b.toString(36);
+}
 function _renderCacheKey(text, isUser){
   // Fold render_user_markdown state into user-message keys so toggling the
   // setting invalidates cached plain-text renders (#3870).
   const p = isUser ? (window._renderUserMarkdown ? 'um' : 'u') : 'a';
   // Short content: use the full string as key (cheap Map lookup).
-  // Long content: length + prefix + suffix is good enough — collisions on
-  // 20-char prefix+suffix are vanishingly rare for chat messages.
   if(text.length <= 500) return p + ':' + text;
-  return p + ':' + text.length + ':' + text.slice(0,20) + ':' + text.slice(-20);
+  // Long content: length + a hash of the whole text. The old length + first/last 20 characters key collided for
+  // equal-length messages that differ only in the middle (templated reports, regenerated answers, edited code),
+  // and the second message then displayed the first one's body.
+  return p + ':' + text.length + ':' + _renderCacheTextHash(text);
 }
 function _getCachedRender(text, isUser){
   const key = _renderCacheKey(text, isUser);
@@ -2687,22 +3077,796 @@ function _openMermaidLightbox(svgEl) {
   document.addEventListener('keydown', lb._keyHandler);
   return lb;
 }
+/* Mount pinch/pan/zoom gestures on an enlarged-image lightbox stage.
+ * Mirrors the Mermaid viewer's gesture architecture (see
+ * _mountMermaidViewer): Pointer Events drive single-finger drag/pan,
+ * Touch Events drive two-finger pinch-to-zoom, and the mouse wheel
+ * zooms anchored at the cursor. `touch-action: none` on the viewport
+ * is required so the browser never claims the touch sequence.
+ * state.pendingNav is set by _navigateLightbox to keep the zoom level
+ * while re-centring when switching to the next/previous image. */
+function _mountImgLightboxZoom(viewport, canvas, img, lb) {
+  const state = {
+    boxH: 0,
+    boxW: 0,
+    canvas,
+    dragOriginX: 0,
+    dragOriginY: 0,
+    dragPointerId: null,
+    dragStartX: 0,
+    dragStartY: 0,
+    dragged: false,
+    dragging: false,
+    fitScale: 1,
+    img,
+    navSrc: null,
+    pendingNav: false,
+    pinchCX: 0,
+    pinchCY: 0,
+    pinchDist: 0,
+    pinchIds: null,
+    pinchStartCX: 0,
+    pinchStartCY: 0,
+    pinchStartDist: 0,
+    pinchStartScale: 1,
+    pinchStartX: 0,
+    pinchStartY: 0,
+    pinching: false,
+    pointerX: 0,
+    pointerY: 0,
+    pressOnImage: false,
+    scale: 1,
+    // The pointerIds of the touch contacts currently down, in press order. The
+    // pointer events carry the id, the touch events do not, and the pan has to
+    // be re-armed from the contact still down when a pinch ends (see
+    // _imgArmDragFromRemainingTouch), so the two streams are tied together
+    // here (greptile P2 on 6f462d82, 2026-10-16T01:39:15Z, static/ui.js:3235).
+    touchPointerIds: [],
+    viewport,
+    x: 0,
+    y: 0,
+  };
+
+  function _imgViewportSize() {
+    const rect = viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : null;
+    return {
+      width: Math.max(1, (rect && rect.width) || viewport.clientWidth || 1),
+      height: Math.max(1, (rect && rect.height) || viewport.clientHeight || 1),
+    };
+  }
+
+  function _imgClampPan() {
+    // Keep the transformed canvas inside the clipped viewport: an axis
+    // whose scaled size fits inside the stage gets centered, an overflow
+    // axis is clamped so the image can never be dragged wholly out of
+    // view (no reset path existed before — closing and reopening the
+    // lightbox was the only recovery). Called from _imgApplyTransform so
+    // every pan/pinch/wheel/resize/nav path is covered.
+    const size = _imgViewportSize();
+    const scaledW = state.boxW * state.scale;
+    const scaledH = state.boxH * state.scale;
+    if(scaledW <= size.width){
+      state.x = (size.width - scaledW) / 2;
+    } else {
+      state.x = Math.max(size.width - scaledW, Math.min(0, state.x));
+    }
+    if(scaledH <= size.height){
+      state.y = (size.height - scaledH) / 2;
+    } else {
+      state.y = Math.max(size.height - scaledH, Math.min(0, state.y));
+    }
+  }
+
+  function _imgApplyTransform() {
+    _imgClampPan();
+    canvas.style.transform = 'translate(' + Math.round(state.x) + 'px,' + Math.round(state.y) + 'px) scale(' + state.scale + ')';
+    canvas.style.transformOrigin = '0 0';
+  }
+
+  function _imgMinScale() {
+    return Math.min(0.25, state.fitScale);
+  }
+
+  function _imgFitScale() {
+    const size = _imgViewportSize();
+    // Cap at 1 to preserve the pre-PR no-upscale behavior
+    // (img{max-width:90vw;max-height:90vh;object-fit:contain} constrained
+    // oversized images but left small ones at intrinsic size). An unbounded
+    // ratio on a tiny image (e.g. 50px in a 900px viewport -> 18) would
+    // exceed the 8x zoom max, so the first wheel gesture would snap from 18
+    // to 8 instead of zooming smoothly. state.fitScale stores this bounded
+    // value because _imgMinScale() and the at-fit resize comparison depend
+    // on it.
+    return Math.min(1, size.width / state.boxW, size.height / state.boxH);
+  }
+
+  function _imgSetScale(nextScale, anchorX, anchorY) {
+    const bounded = Math.max(_imgMinScale(), Math.min(8, nextScale));
+    if(!Number.isFinite(bounded) || !state.boxW || !state.boxH) return;
+    const size = _imgViewportSize();
+    const focusX = Number.isFinite(anchorX) ? anchorX : size.width / 2;
+    const focusY = Number.isFinite(anchorY) ? anchorY : size.height / 2;
+    if(state.scale){
+      const ratio = bounded / state.scale;
+      state.x = focusX - (focusX - state.x) * ratio;
+      state.y = focusY - (focusY - state.y) * ratio;
+    }
+    state.scale = bounded;
+    _imgApplyTransform();
+  }
+
+  function _fit() {
+    // A fresh fit owns the geometry, so an in-flight gesture must not be able
+    // to write over it: a pinch or pan that began while the image was still
+    // decoding held a baseline from before the fit existed, and its next
+    // update scaled the just-fitted frame with it — a 4000×3000 image jumped
+    // from the fitted 351px width to 4080px on an iPhone, Fit was undone by
+    // the next finger movement, and a resize restored stale gesture positions
+    // (maintainer re-gate 2026-10-15T17:54:15Z, static/ui.js:2795). Cancel
+    // before measuring so the fit wins.
+    _imgCancelGesture();
+    const size = _imgViewportSize();
+    if(!state.boxW || !state.boxH) return;
+    const fitScale = _imgFitScale();
+    state.fitScale = fitScale;
+    state.scale = fitScale;
+    state.x = (size.width - state.boxW * fitScale) / 2;
+    state.y = (size.height - state.boxH * fitScale) / 2;
+    _imgApplyTransform();
+  }
+
+  function _centerPan() {
+    const size = _imgViewportSize();
+    state.x = (size.width - state.boxW * state.scale) / 2;
+    state.y = (size.height - state.boxH * state.scale) / 2;
+    _imgApplyTransform();
+  }
+
+  // The source + natural size of the frame whose geometry is already
+  // initialized. A cached image is decoded synchronously at mount
+  // (`img.complete`), yet the browser still dispatches its `load` event
+  // afterwards; that duplicate re-ran this initializer (through `_fit()`) after
+  // a navigation had already consumed `pendingNav`, silently dropping the
+  // user's zoom (trusted-Chromium reproduction: 1.7578125 → 0.9 — re-gate
+  // 2026-10-08T19:21:38Z, static/ui.js:3049 vs :2774). The pair is cleared by
+  // `_imgOnError()` so a failed image never looks "already initialized".
+  let _imgInitSrc = null;
+  let _imgInitW = 0;
+  let _imgInitH = 0;
+
+  function _onImgLoad() {
+    const nw = img.naturalWidth || img.width || 0;
+    const nh = img.naturalHeight || img.height || 0;
+    const src = img.currentSrc || img.src || '';
+    // Idempotent for an already initialized frame: a duplicate `load` for the
+    // SAME source and natural size, with no navigation pending, must not
+    // re-initialize (that re-fit is the zoom reset above). A pending navigation
+    // always initializes — that is the new image's geometry — and so does any
+    // change of source or natural size.
+    if(!state.pendingNav && _imgInitSrc === src && _imgInitW === nw && _imgInitH === nh){
+      return;
+    }
+    // A navigation is armed. The source the navigation asked for is recorded
+    // in `navSrc` by _navigateLightbox, so a load event for any OTHER source is
+    // the previous image's late `load` (it cannot be the frame that navigation
+    // asked for — the src swap reports its own source) and must not consume the
+    // flag. Comparing sources alone misread a navigation between two entries
+    // that SHARE a source as that duplicate, so the navigation's own load
+    // skipped init and recentring and the previous off-centre position was kept
+    // (maintainer re-gate 2026-10-15T17:54:15Z, static/ui.js:2843). With no
+    // recorded source (a directly armed flag) the duplicate test still applies.
+    if(state.pendingNav){
+      if(state.navSrc){
+        if(_imgSrcKey(src) !== state.navSrc) return;
+      } else if(src && _imgInitSrc === src && _imgInitW === nw && _imgInitH === nh){
+        return;
+      }
+    }
+    _imgInitSrc = src;
+    _imgInitW = nw;
+    _imgInitH = nh;
+    state.boxW = nw || 800;
+    state.boxH = nh || 450;
+    canvas.style.width = state.boxW + 'px';
+    canvas.style.height = state.boxH + 'px';
+    if(state.pendingNav){
+      state.pendingNav = false;
+      // The navigation this flag was armed for has now initialized its frame;
+      // drop the recorded source so it cannot classify a later load.
+      state.navSrc = null;
+      // The new image has its own fit baseline. Navigation keeps the user's
+      // zoom level, but a stale fitScale from the previous image would skew
+      // _imgMinScale() (zoom-out clamp) and the at-fit resize comparison:
+      // e.g. a small first image (fit 1.0) followed by a huge one (fit 0.1)
+      // would clamp zoom-out at 0.25 and make the real fit unreachable.
+      // Recompute only the baseline and re-clamp the kept scale to the new
+      // image's constraints.
+      //
+      // Fit is carried over, not the raw scale. If the previous image was at
+      // its fit (no user zoom), the new image must open at ITS OWN fit too —
+      // keeping the numeric scale crops a large image or shrinks a small one
+      // (reviewer re-gate 2026-10-08T23:18:39Z, static/ui.js:2800: 100×100 at
+      // fit 1 → 4000×3000 kept scale 1 and cropped; the reverse shrank the
+      // small image to ~25 px). A genuine user zoom (scale != fit) is still
+      // retained, bounded to the new image's constraints.
+      const wasAtFit = Math.abs(state.scale - state.fitScale) < 1e-9;
+      state.fitScale = _imgFitScale();
+      state.scale = wasAtFit
+        ? state.fitScale
+        : Math.max(_imgMinScale(), Math.min(8, state.scale));
+      _centerPan();
+      // A press that began while the new image was still loading recorded its
+      // baseline against the previous geometry, so its first move would undo
+      // the re-centre above. The image change also cancels the gesture (see
+      // _imgCancelGesture).
+      _imgCancelGesture();
+    } else {
+      _fit();
+    }
+  }
+
+  // A pan belongs to the pointer that started it. A second pointer pressing
+  // the stage mid-gesture must neither re-anchor the drag (that teleports the
+  // image to the new pointer) nor end it by releasing, and only the owning
+  // pointer's move/release may drive the pan — the same guard the sidebar
+  // resize handle carries (greptile review of #6896, 2026-10-05).
+  function _imgOwnsDrag(e) {
+    if(!e || e.pointerId == null) return true;
+    return state.dragPointerId == null || e.pointerId === state.dragPointerId;
+  }
+
+  function _imgOnError() {
+    // A failed load (navigating to a broken/missing image) must not leave the
+    // previous image's stage behind: only _onImgLoad used to clear pendingNav
+    // and refresh the canvas geometry, so the broken image inherited the old
+    // boxW/boxH, the old zoom baseline and the armed one-shot nav flag until
+    // some later image happened to load (greptile review of #6896,
+    // 2026-10-05).
+    //
+    // state.scale is deliberately NOT reset: keeping the user's zoom level
+    // across a navigation is this feature's stated contract, so a broken image
+    // in the middle of a sequence must not silently drop it. The next
+    // navigation re-arms pendingNav and the next successful load re-centres at
+    // the preserved scale (greptile follow-up, 2026-10-05).
+    //
+    // fitScale is deliberately left ALONE here. It holds the PREVIOUS image's
+    // fit baseline, and the next load compares |scale - fitScale| < 1e-9 to
+    // decide whether the new image opens at ITS own fit. Overwriting it in the
+    // error path misreads the user's zoom either way: a constant 1 made an
+    // image that WAS at fit (fitScale != 1) look user-zoomed and open cropped
+    // or undersized (greptile P1, 2026-10-08T23:43:03Z), while writing
+    // state.scale classified a deliberate zoom that happens to sit at exactly 1
+    // as "at fit", so the next image threw that zoom away and opened at its own
+    // fit (maintainer re-gate 2026-10-09T00:47:03Z, static/ui.js:2861). With no
+    // geometry (boxW=0) no scale math runs anyway: _fit() and _imgSetScale()
+    // bail out on the missing box.
+    state.pendingNav = false;
+    state.navSrc = null;
+    // A failed load cancels any gesture that is still in flight: the stage
+    // geometry is dropped below, so a pan or pinch baseline measured against it
+    // must not be re-applied to whatever loads next (maintainer re-gate
+    // 2026-10-15T17:54:15Z, static/ui.js:2795).
+    _imgCancelGesture();
+    state.dragging = false;
+    state.dragPointerId = null;
+    state.boxW = 0;
+    state.boxH = 0;
+    state.x = 0;
+    state.y = 0;
+    // Drop the "already initialized" tracking: a failed image has no usable
+    // geometry, so a later load of the very same source must initialize for
+    // real instead of being skipped as a duplicate (re-gate
+    // 2026-10-08T19:21:38Z).
+    _imgInitSrc = null;
+    _imgInitW = 0;
+    _imgInitH = 0;
+    canvas.style.width = '';
+    canvas.style.height = '';
+    canvas.style.transform = '';
+    viewport.classList.remove('is-panning');
+  }
+
+  // Whether a viewport point lands on the transformed canvas — i.e. on the
+  // image's own pixels rather than the letterboxed stage around it. Needed
+  // because pointer capture retargets the trusted click produced by a real
+  // mouse press on image pixels to the viewport (mouseup is captured, so the
+  // click's target is the closest common ancestor, the viewport), which made
+  // `e.target === viewport` also match a click on the image and dismissed the
+  // dialog (maintainer gate recheck of #6896, 2026-10-06).
+  function _imgPointOnCanvas(x, y) {
+    if(!Number.isFinite(x) || !Number.isFinite(y)) return false;
+    if(!canvas || typeof canvas.getBoundingClientRect !== 'function') return false;
+    const r = canvas.getBoundingClientRect();
+    if(!(r.width > 0) || !(r.height > 0)) return false;
+    return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+  }
+
+  function _imgOnPointerDown(e) {
+    if(e.pointerType === 'touch' && e.pointerId != null) _imgTrackTouchPointer(e.pointerId, true);
+    if(state.pinching) return;
+    if(e.button != null && e.button !== 0) return;
+    if(state.dragging) return;
+    // Record where the press landed BEFORE pointer capture is taken, and only
+    // for the press that actually owns the gesture (the guards above refuse a
+    // second pointer): a refused press must not re-classify the active
+    // gesture, or the owning pointer's click would be judged by a foreign
+    // press and a legitimate letterbox dismissal would be blocked (greptile
+    // review of #6896, 2026-10-05). e.target here is still the real hit
+    // element, and the geometric hit-test covers browsers that do not
+    // retarget the follow-up click to the viewport.
+    state.pressOnImage = !!((e.target && e.target !== viewport) ||
+      _imgPointOnCanvas(Number(e.clientX), Number(e.clientY)));
+    state.dragging = true;
+    state.dragged = false;
+    state.dragOriginX = Number(e.clientX) || 0;
+    state.dragOriginY = Number(e.clientY) || 0;
+    // The owning pointer's current position is remembered so a wheel zoom can
+    // rebase this drag's baseline (see _imgRebaseDrag).
+    state.pointerX = state.dragOriginX;
+    state.pointerY = state.dragOriginY;
+    state.dragPointerId = e.pointerId != null ? e.pointerId : null;
+    state.dragStartX = state.x;
+    state.dragStartY = state.y;
+    viewport.classList.add('is-panning');
+    if(viewport.setPointerCapture){
+      try{ viewport.setPointerCapture(e.pointerId); }catch(_){}
+    }
+    if(e.preventDefault) e.preventDefault();
+  }
+
+  function _imgOnPointerMove(e) {
+    if(state.pinching || !state.dragging) return;
+    if(!_imgOwnsDrag(e)) return;
+    const px = Number(e.clientX) || 0;
+    const py = Number(e.clientY) || 0;
+    // Only the owning pointer's position counts (the guards above refuse any
+    // other pointer), and a wheel zoom reads it to rebase the drag baseline.
+    state.pointerX = px;
+    state.pointerY = py;
+    const dx = px - state.dragOriginX;
+    const dy = py - state.dragOriginY;
+    if(Math.abs(dx) + Math.abs(dy) > 3) state.dragged = true;
+    state.x = state.dragStartX + dx;
+    state.y = state.dragStartY + dy;
+    _imgApplyTransform();
+    // _imgApplyTransform() clamped the pan to the stage. The baseline must
+    // follow the CLAMPED position: leaving the clamped-away overshoot inside
+    // dx made a drag that was reversed after overshooting an edge do nothing
+    // until the overshoot was retraced (maintainer re-gate 2026-10-15T17:54:15Z,
+    // static/ui.js:2993). Identity when the clamp did not bite.
+    state.dragStartX = state.x - dx;
+    state.dragStartY = state.y - dy;
+  }
+
+  function _imgEndPointerDrag(e) {
+    // A touch contact that ends (up / cancel) leaves the tracked set before the
+    // guards below: this handler early-returns whenever the pinch already
+    // cleared `dragging`, so a lost id would leave the set stale (see
+    // _imgTrackTouchPointer).
+    if(e && e.pointerType === 'touch' && e.pointerId != null) _imgTrackTouchPointer(e.pointerId, false);
+    if(!state.dragging) return;
+    // A non-owning pointer's release (or leave/cancel) must not kill the
+    // active pan while its owner is still down.
+    if(e && e.pointerId != null && !_imgOwnsDrag(e)) return;
+    state.dragging = false;
+    if(state.dragPointerId != null && viewport.releasePointerCapture){
+      try{ viewport.releasePointerCapture(state.dragPointerId); }catch(_){}
+    }
+    state.dragPointerId = null;
+    viewport.classList.remove('is-panning');
+    // Chromium withholds the synthesized click of a touch tap that lands in
+    // its post-fling tap-suppression window on a touch-action:none surface,
+    // so a clean letterbox tap right after a flick-pan never reached
+    // _onViewportClick and the dialog stayed open (release gate of #6896,
+    // 2026-10-08: first tap swallowed 4/4, master closed 6/6). Dismiss from
+    // the pointer sequence itself; marking dragged suppresses the click the
+    // browser does synthesize so the close never runs twice.
+    if(e && e.type === 'pointerup' && e.pointerType === 'touch' && !state.dragged && !state.pressOnImage &&
+       !_imgPointOnCanvas(Number(e.clientX), Number(e.clientY))){
+      state.dragged = true;
+      _closeImgLightbox(lb);
+    }
+  }
+
+  // A navigation swaps the image under an in-flight pan. The old gesture's
+  // recorded baseline (dragOrigin/dragStartX/Y) belongs to the previous
+  // image's coordinate space, so the first pointermove after the new image
+  // loads would re-apply it and teleport the freshly-centred image
+  // (maintainer re-warmup of #6896, 2026-10-06: press on the image, 1px move,
+  // ArrowRight, then a 5px move threw the new image 83px up). Changing the
+  // image therefore cancels the owned gesture; the user's zoom level is NOT
+  // touched — the pendingNav re-centre in _onImgLoad keeps it.
+  //
+  // Unlike an ordinary drag end this deliberately KEEPS the pointer capture
+  // (no releasePointerCapture): the browser releases the capture implicitly
+  // when the pointer goes up, and until then the capture keeps a held-button
+  // release retargeted to the viewport, so the follow-up click is still judged
+  // by the recorded press origin. Releasing it here sent a release outside the
+  // viewport straight to the backdrop and dismissed the dialog, bypassing the
+  // drag/click guard (greptile review of #6896, 2026-10-06).
+  function _imgCancelGesture() {
+    // A two-finger pinch keeps pinching/pinchStart* alive and only clears
+    // dragging (_imgOnTouchStart calls _imgEndPointerDrag), so the drag-only
+    // early return below used to let an in-flight zoom outlive a navigation.
+    // The next _imgOnTouchMove then applied the previous image's pinchStart
+    // baselines to the freshly-centred new image (maintainer review of #6896,
+    // 2026-10-06: two fingers down, ArrowRight, spread -> 544px jump).
+    // Clearing pinching makes _imgOnTouchMove a no-op until a fresh two-finger
+    // start re-anchors every pinchStart*; the selected zoom is left intact.
+    state.pinching = false;
+    state.pinchIds = null;
+    if(!state.dragging) return;
+    state.dragging = false;
+    state.dragPointerId = null;
+    viewport.classList.remove('is-panning');
+  }
+
+  function _onViewportClick(e) {
+    const wasDragged = state.dragged;
+    const pressOnImage = state.pressOnImage;
+    state.dragged = false;
+    state.pressOnImage = false;
+    // Suppress the browser's post-drag click (pointerdown+up on the same
+    // element closes the lightbox right after a pan) and clicks on the
+    // transformed canvas (image pixels). An undragged click on the
+    // viewport's own letterboxed area must bubble to the lightbox backdrop
+    // handler so clicking empty space around a fitted image still closes
+    // the dialog — clicks on visible pixels target the img/canvas while
+    // letterboxed clicks target the viewport (the img keeps pointer events so
+    // the native image context menu still works).
+    //
+    // The click's target alone cannot decide that: the pointer capture taken
+    // in _imgOnPointerDown retargets the click of a real mouse press on image
+    // pixels to the viewport, so `e.target === viewport` also matched clicks
+    // on the image and the dialog dismissed itself (maintainer gate recheck of
+    // #6896, 2026-10-06). Fall back to the recorded press origin and to a
+    // hit-test of the click point against the transformed canvas.
+    const onImage = pressOnImage ||
+      (e.target && e.target !== viewport) ||
+      _imgPointOnCanvas(Number(e.clientX), Number(e.clientY));
+    if(wasDragged || onImage){
+      if(e.stopPropagation) e.stopPropagation();
+    }
+  }
+
+  function _imgTouchDist(touches) {
+    if(!touches || touches.length < 2) return 0;
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  // Identifiers of the two contacts a pinch baseline belongs to. A pinch is a
+  // relationship between two specific fingers, so a baseline anchored on one
+  // pair is meaningless for another: replacing a finger of an active pinch (or
+  // lifting one of three) used to keep the stale baseline, and the next move
+  // rescaled and repositioned the image — an iPhone pinch dropped from 0.1638
+  // to 0.1260 after a 1px move (maintainer re-gate 2026-10-15T17:54:15Z,
+  // static/ui.js:3088).
+  function _imgPinchPair(touches) {
+    if(!touches || touches.length < 2) return null;
+    return [touches[0].identifier, touches[1].identifier];
+  }
+
+  function _imgSamePinchPair(touches) {
+    const pair = _imgPinchPair(touches);
+    const prev = state.pinchIds;
+    return !!(pair && prev && pair[0] === prev[0] && pair[1] === prev[1]);
+  }
+
+  // Anchor (or re-anchor) the pinch baseline on the pair of contacts currently
+  // under the fingers, so the ratio and the midpoint are always measured
+  // against the fingers that are down now.
+  function _imgAnchorPinch(touches) {
+    state.pinchIds = _imgPinchPair(touches);
+    state.pinchStartDist = _imgTouchDist(touches);
+    state.pinchStartScale = state.scale;
+    state.pinchStartX = state.x;
+    state.pinchStartY = state.y;
+    const rect = viewport.getBoundingClientRect();
+    state.pinchStartCX = (touches[0].clientX + touches[1].clientX) / 2 - (rect.left || 0);
+    state.pinchStartCY = (touches[0].clientY + touches[1].clientY) / 2 - (rect.top || 0);
+    // The geometry the contacts have RIGHT NOW, which is what a keyboard zoom
+    // re-anchors onto (see _imgRebasePinch).
+    state.pinchCX = state.pinchStartCX;
+    state.pinchCY = state.pinchStartCY;
+    state.pinchDist = state.pinchStartDist;
+  }
+
+  function _imgOnTouchStart(e) {
+    // Without dimensions there is nothing to zoom: a baseline recorded before
+    // the image decoded would be applied to a frame of unknown size and the fit
+    // that follows would be overwritten by the next touch update (maintainer
+    // re-gate 2026-10-15T17:54:15Z, static/ui.js:2795).
+    if(!state.boxW || !state.boxH) return;
+    if(e.touches.length === 2){
+      // A fresh pinch always anchors (pinchIds is cleared as the pinch ends);
+      // a touchstart that lands on an already-active pinch re-anchors whenever
+      // the pair under the fingers changed.
+      const keepsPair = state.pinching && _imgSamePinchPair(e.touches);
+      state.pinching = true;
+      if(!keepsPair) _imgAnchorPinch(e.touches);
+      _imgEndPointerDrag();
+      if(e.preventDefault) e.preventDefault();
+    }
+  }
+
+  function _imgOnTouchMove(e) {
+    if(!state.pinching || e.touches.length < 2) return;
+    if(!state.boxW || !state.boxH) return;
+    // The pair under the fingers can change without a touchstart (one finger of
+    // three is lifted, a finger is replaced): re-anchor before the ratio math
+    // so a stale baseline cannot resize or reposition the image.
+    if(!_imgSamePinchPair(e.touches)) _imgAnchorPinch(e.touches);
+    const rect = viewport.getBoundingClientRect();
+    const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - (rect.left || 0);
+    const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - (rect.top || 0);
+    const currDist = _imgTouchDist(e.touches);
+    state.pinchCX = cx;
+    state.pinchCY = cy;
+    state.pinchDist = currDist;
+    if(state.pinchStartDist > 0 && state.pinchStartScale > 0){
+      const rawScale = state.pinchStartScale * (currDist / state.pinchStartDist);
+      const boundedScale = Math.max(_imgMinScale(), Math.min(8, rawScale));
+      const ratio = boundedScale / state.pinchStartScale;
+      state.scale = boundedScale;
+      state.x = cx - (state.pinchStartCX - state.pinchStartX) * ratio;
+      state.y = cy - (state.pinchStartCY - state.pinchStartY) * ratio;
+      _imgApplyTransform();
+      // Re-anchor the WHOLE pinch baseline onto the frame just produced (the
+      // state.pinchC*/pinchDist set above), exactly as a fresh two-finger start
+      // does. Two reasons: leaving the clamped-away overshoot inside the
+      // baseline made a gesture reversed after overshooting an edge wait until
+      // the overshoot was retraced (greptile P2, 2026-10-15T23:15:55Z,
+      // static/ui.js:3213), and moving only the positional half (x/y) left the
+      // pair (pinchStartCX, pinchStartX) inconsistent with the scale baseline,
+      // so a later spread dragged the image ~700px away from the fingers
+      // (greptile P1, 2026-10-15T23:28:11Z, static/ui.js:3222; measured in
+      // gate1015_pinch_spread_is_path_independent). The anchored-zoom form is
+      // x = cx - (pinchStartCX - pinchStartX) * ratio, so the pair has to be
+      // re-anchored together on the current midpoint.
+      _imgRebasePinch();
+    }
+    if(e.preventDefault) e.preventDefault();
+  }
+
+  function _imgOnTouchEnd(e) {
+    if(e.touches.length < 2 && state.pinching){
+      state.pinching = false;
+      state.pinchIds = null;
+      state.dragged = true;
+      // Lifting one finger of a pinch must leave the contact still down able to
+      // pan, as it can on master: the pinch ended the pointer drag
+      // (_imgOnTouchStart calls _imgEndPointerDrag) and the remaining contact
+      // gets no new pointerdown, so every pointermove of it was dropped until
+      // the user lifted and pressed again (greptile P2 on 6f462d82,
+      // 2026-10-16T01:39:15Z, static/ui.js:3235). Re-arm the pan from the
+      // contact that is still there, anchored on its CURRENT geometry so the
+      // first move continues from the frame the pinch produced instead of
+      // jumping to a stale origin.
+      _imgArmDragFromRemainingTouch(e.touches);
+    }
+  }
+
+  // The touch stream carries no pointer id, so the contacts that are down are
+  // tracked from the pointer events (`down` starts a contact, otherwise it
+  // ended). Only touch pointers are tracked: a mouse press is not part of a
+  // pinch and must not be resurrected as one. Idempotent, so the duplicate
+  // pointerup/pointerleave a touch release delivers is harmless.
+  function _imgTrackTouchPointer(pointerId, down) {
+    if(!Array.isArray(state.touchPointerIds)) state.touchPointerIds = [];
+    const at = state.touchPointerIds.indexOf(pointerId);
+    if(down){
+      if(at === -1) state.touchPointerIds.push(pointerId);
+    } else if(at !== -1){
+      state.touchPointerIds.splice(at, 1);
+    }
+  }
+
+  function _imgArmDragFromRemainingTouch(touches) {
+    if(!touches || touches.length !== 1) return;
+    // A drag that survived the pinch keeps its own baseline.
+    if(state.dragging) return;
+    const contact = touches[0];
+    const ids = Array.isArray(state.touchPointerIds) ? state.touchPointerIds : [];
+    state.dragging = true;
+    // Exactly one tracked contact is expected here (the lifted one has already
+    // reported its pointerup). With anything else the drag stays ownerless
+    // rather than being handed to a pointer that may be gone; _imgOwnsDrag
+    // accepts any pointer while dragPointerId is null, and a second contact
+    // can only arrive through a touchstart, which ends this drag again.
+    state.dragPointerId = ids.length === 1 ? ids[0] : null;
+    state.dragOriginX = Number(contact.clientX) || 0;
+    state.dragOriginY = Number(contact.clientY) || 0;
+    state.pointerX = state.dragOriginX;
+    state.pointerY = state.dragOriginY;
+    state.dragStartX = state.x;
+    state.dragStartY = state.y;
+    // `dragged` stays true (set by the pinch) so the tap-dismiss guards keep
+    // treating this sequence as a gesture rather than a letterbox tap, and
+    // `pressOnImage` keeps the value of the press that started it.
+    viewport.classList.add('is-panning');
+    if(state.dragPointerId != null && viewport.setPointerCapture){
+      try{ viewport.setPointerCapture(state.dragPointerId); }catch(_){}
+    }
+  }
+
+  // Rebase the active pan's baseline onto the geometry the wheel just produced.
+  // A wheel zoom moves the image while the drag's baseline
+  // (dragOrigin / dragStartX/Y) still describes the pre-zoom position, so the
+  // next pointermove re-applied the entire accumulated displacement at the new
+  // scale and the image snapped — a 1px move moved 674px on desktop
+  // (maintainer re-gate 2026-10-15T17:54:15Z, static/ui.js:3134). Moving the
+  // baseline to the new position minus the owning pointer's displacement keeps
+  // the pan continuous.
+  function _imgRebaseDrag() {
+    if(!state.dragging) return;
+    if(!Number.isFinite(state.pointerX) || !Number.isFinite(state.pointerY)) return;
+    state.dragStartX = state.x - (state.pointerX - state.dragOriginX);
+    state.dragStartY = state.y - (state.pointerY - state.dragOriginY);
+  }
+
+  // The keyboard zoom (`state.zoomBy`) can land while a pinch is in flight, and
+  // a pinch holds its own baselines (pinchStartScale / pinchStartX,Y and the
+  // anchor midpoint). Refreshing only the pan left them measured against the
+  // pre-zoom geometry, so the next touchmove rescaled from the OLD scale and
+  // undid the keyboard zoom, and re-applied the old midpoint (greptile P2 on
+  // 860c0e85, 2026-10-15T19:09:46Z, static/ui.js:3293). Re-anchor on the
+  // contacts that are down now - exactly what a fresh two-finger start does - so
+  // the ongoing pinch continues from the new scale instead of reverting it.
+  function _imgRebasePinch() {
+    if(!state.pinching) return;
+    if(!(state.pinchDist > 0)) return;
+    if(!Number.isFinite(state.pinchCX) || !Number.isFinite(state.pinchCY)) return;
+    state.pinchStartScale = state.scale;
+    state.pinchStartX = state.x;
+    state.pinchStartY = state.y;
+    state.pinchStartDist = state.pinchDist;
+    state.pinchStartCX = state.pinchCX;
+    state.pinchStartCY = state.pinchCY;
+  }
+
+  function _imgZoomFromWheel(e) {
+    if(e.preventDefault) e.preventDefault();
+    const rect = viewport.getBoundingClientRect();
+    const anchorX = Number.isFinite(e.clientX) ? e.clientX - rect.left : undefined;
+    const anchorY = Number.isFinite(e.clientY) ? e.clientY - rect.top : undefined;
+    // Normalize the delta's units before scaling them. deltaMode 1 (lines) and
+    // 2 (pages) report a delta of a few units, not pixels, so treating them as
+    // pixels made a three-line tick zoom by 0.45%; the Mermaid viewer already
+    // normalizes with these 30/600 multipliers (maintainer re-gate
+    // 2026-10-15T17:54:15Z, static/ui.js:3133).
+    const deltaMode = Number(e.deltaMode) || 0;
+    const lineScale = deltaMode === 1 ? 30 : deltaMode === 2 ? 600 : 1;
+    const factor = Math.exp((-(Number(e.deltaY) || 0)) * lineScale * 0.0015);
+    _imgSetScale(state.scale * factor, anchorX, anchorY);
+    _imgRebaseDrag();
+    // A wheel tick under two held contacts is the same hazard as a keyboard
+    // zoom: it moves the image but the pinch keeps its own baselines (see
+    // _imgRebasePinch), so the next touchmove rescaled from the OLD scale and
+    // undid the wheel zoom (greptile P2 on the merge-only head 25684d89,
+    // 2026-10-15T22:36:41Z, static/ui.js:3275). Re-anchor the pinch too.
+    _imgRebasePinch();
+  }
+
+  function _onResize() {
+    if(lb._imgZoomResizeTimer && typeof clearTimeout === 'function') clearTimeout(lb._imgZoomResizeTimer);
+    lb._imgZoomResizeTimer = setTimeout(() => {
+      lb._imgZoomResizeTimer = null;
+      // A resize invalidates every gesture baseline (they were measured against
+      // the old viewport size), so it ends the gesture rather than restoring a
+      // stale position on the next move (maintainer re-gate
+      // 2026-10-15T17:54:15Z, static/ui.js:2795).
+      _imgCancelGesture();
+      const wasAtFit = Math.abs(state.scale - state.fitScale) < 1e-9;
+      if(wasAtFit || !state.boxW){
+        _fit();
+      } else {
+        // The fit baseline belongs to the NEW viewport too: keeping the old one
+        // left an obsolete zoom-out limit, so a preview resized from desktop to
+        // an iPhone could not zoom out past 0.25 while its new fit was 0.08775
+        // (maintainer re-gate 2026-10-15T17:54:15Z, static/ui.js:3145).
+        // Recompute the baseline and re-clamp the CHOSEN scale to it.
+        state.fitScale = _imgFitScale();
+        state.scale = Math.max(_imgMinScale(), Math.min(8, state.scale));
+        _centerPan();
+      }
+    }, 120);
+  }
+
+  viewport.onpointerdown = _imgOnPointerDown;
+  viewport.onpointermove = _imgOnPointerMove;
+  viewport.onpointerup = _imgEndPointerDrag;
+  viewport.onpointercancel = _imgEndPointerDrag;
+  viewport.onpointerleave = _imgEndPointerDrag;
+  viewport.onwheel = _imgZoomFromWheel;
+  viewport.onclick = _onViewportClick;
+  viewport.addEventListener('touchstart', _imgOnTouchStart, {passive: false});
+  viewport.addEventListener('touchmove', _imgOnTouchMove, {passive: false});
+  viewport.addEventListener('touchend', _imgOnTouchEnd);
+  viewport.addEventListener('touchcancel', function _imgOnTouchCancel(){ state.pinching = false; });
+
+  if(window && typeof window.addEventListener === 'function'){
+    window.addEventListener('resize', _onResize);
+    lb._imgZoomResizeHandler = _onResize;
+  }
+
+  // Expose keyboard-operable fit/zoom so the lightbox is not pointer-only.
+  state.fit = _fit;
+  state.zoomBy = function(factor){
+    _imgSetScale(state.scale * factor);
+    // A keyboard zoom is a zoom like the wheel's: whatever gesture is in flight
+    // keeps its baseline measured against the geometry it produced, so the next
+    // pointermove/touchmove must not snap the image back (greptile P2 on
+    // 860c0e85, 2026-10-15T19:09:46Z, static/ui.js:3293).
+    _imgRebaseDrag();
+    _imgRebasePinch();
+  };
+  // Used by _navigateLightbox (and by the pendingNav re-centre in
+  // _onImgLoad) to drop a pan that belongs to the image being replaced.
+  state.cancelGesture = _imgCancelGesture;
+
+  if(img.complete && img.naturalWidth){
+    _onImgLoad();
+  }
+  // Always attach onload — a cached/fast image may have taken the sync
+  // branch above, but navigation (src swap) still needs the handler.
+  img.onload = _onImgLoad;
+  // A failed load has its own handler so the stage never keeps the previous
+  // image's geometry (see _imgOnError).
+  img.onerror = _imgOnError;
+
+  return state;
+}
+
 function _openImgLightboxWithNav(src, alt, images, index) {
   const lb = document.createElement('div');
   lb.className = 'img-lightbox';
   lb.setAttribute('role', 'dialog');
   lb.setAttribute('aria-modal', 'true');
   lb.setAttribute('aria-label', alt || 'Image');
+  // Programmatically focusable so opening the dialog moves focus into it
+  // (the document-level shortcuts below then belong to the lightbox).
+  lb.setAttribute('tabindex', '-1');
+  // Zoomable stage: viewport (clip + gestures) > canvas (transform) > img.
+  const viewport = document.createElement('div');
+  viewport.className = 'img-lightbox-viewport';
+  const canvas = document.createElement('div');
+  canvas.className = 'img-lightbox-canvas';
   const img = document.createElement('img');
   img.src = src;
   img.alt = alt || '';
-  img.onclick = e => e.stopPropagation();
+  img.draggable = false;
+  canvas.appendChild(img);
+  viewport.appendChild(canvas);
   const cls = document.createElement('button');
   cls.className = 'img-lightbox-close';
   cls.setAttribute('aria-label', 'Close');
   cls.textContent = '×';
   cls.onclick = () => _closeImgLightbox(lb);
-  lb.appendChild(img);
+  // Fit/reset control — zoom is not pointer-only; a keyboard/button path
+  // recovers the image after it has been zoomed/panned out of view.
+  const fitBtn = document.createElement('button');
+  fitBtn.className = 'img-lightbox-fit';
+  // static/share.html loads ui.js WITHOUT i18n.js, so `t` may be undefined on
+  // the public share page: calling it threw ReferenceError before the lightbox
+  // mounted and broke every shared image preview (maintainer re-gate
+  // 2026-10-09T00:47:03Z, static/ui.js:3153). Fall back to the English string
+  // (the locale i18n.js ships for img_lightbox_fit_title) and reuse the result
+  // for both attributes.
+  const fitTitle = (typeof t === 'function') ? t('img_lightbox_fit_title') : 'Reset zoom to fit (F)';
+  fitBtn.setAttribute('aria-label', fitTitle);
+  fitBtn.setAttribute('title', fitTitle);
+  // Icon-only 36px circle matching the close button: the shared `fit` glyph
+  // from the Mermaid icon set removes the text pill that overlapped the image
+  // band and lost legibility over light images, and is language-neutral. The
+  // translated title/aria-label above keep the control announced for screen
+  // readers (maintainer visual review of #6896, 2026-10-08).
+  fitBtn.innerHTML = _mermaidViewerIcon('fit');
+  fitBtn.onclick = e => { e.stopPropagation(); if(lb._zoom && lb._zoom.fit) lb._zoom.fit(); };
+  lb.appendChild(viewport);
+  // Fit sits LEFT of close, so it comes first in the DOM: Tab order then matches the visual order.
+  lb.appendChild(fitBtn);
   lb.appendChild(cls);
   // Prev/Next navigation — store index and images on lb so a single set of
   // handlers reads live values without closure churn on every nav.
@@ -2728,15 +3892,64 @@ function _openImgLightboxWithNav(src, alt, images, index) {
   }
   lb.onclick = () => _closeImgLightbox(lb);
   document.body.appendChild(lb);
+  // Move focus into the dialog: without this a user could Tab into the
+  // composer behind the overlay and have `+`, `-`, `f` and the arrow keys
+  // hijacked by the shortcuts below (greptile review of #6896, 2026-10-05).
+  // The previous focus is restored when the lightbox closes.
+  lb._restoreFocus = (document.activeElement && document.activeElement !== document.body)
+    ? document.activeElement
+    : null;
+  if(typeof lb.focus === 'function'){
+    try{ lb.focus({preventScroll: true}); }catch(_){ try{ lb.focus(); }catch(__){} }
+  }
+  // Mount zoom gestures AFTER the stage is in the DOM — a synchronously
+  // decoded image (data: URL or cache-hit) otherwise measures a 0x0
+  // viewport and fit-zooms to a near-zero scale.
+  lb._zoom = _mountImgLightboxZoom(viewport, canvas, img, lb);
   // Single keyboard handler — reads lb._navX live, no remove/add churn.
   lb._keyHandler = e => {
     if(e.key==='Escape'){ _closeImgLightbox(lb); return; }
+    // Focus is normally inside the dialog, but never hijack typing: the
+    // handler lives on `document`, so a `+`, `-`, `f` or arrow key typed in
+    // an editable field that happens to hold focus must reach that field
+    // unchanged (greptile review of #6896, 2026-10-05).
+    const tgt = e.target;
+    if(tgt){
+      const tag = String(tgt.tagName || '').toLowerCase();
+      if(tgt.isContentEditable || tag === 'input' || tag === 'textarea' || tag === 'select') return;
+    }
+    // Never hijack a browser/OS shortcut: Ctrl/Meta + '+'/'='/'-'/'_' is the
+    // browser's own page zoom (Ctrl+F is find-in-page, Alt/⌘+Arrow is history
+    // navigation), so leave those combinations unprevented and let the
+    // unmodified image controls below keep working (maintainer gate recheck of
+    // #6896, 2026-10-06).
+    if(e.ctrlKey || e.metaKey || e.altKey) return;
+    if(e.key==='f' || e.key==='F'){ if(lb._zoom && lb._zoom.fit) lb._zoom.fit(); return; }
+    if(e.key==='+' || e.key==='='){ e.preventDefault(); if(lb._zoom && lb._zoom.zoomBy) lb._zoom.zoomBy(1.25); return; }
+    if(e.key==='-' || e.key==='_'){ e.preventDefault(); if(lb._zoom && lb._zoom.zoomBy) lb._zoom.zoomBy(1/1.25); return; }
     if(lb._navImages){
       if(e.key==='ArrowLeft'){ e.preventDefault(); _navigateLightbox(lb, -1); }
       if(e.key==='ArrowRight'){ e.preventDefault(); _navigateLightbox(lb, 1); }
     }
   };
   document.addEventListener('keydown', lb._keyHandler);
+}
+// Resolve an image source to the form the browser reports back in
+// `img.currentSrc`/`img.src`, so a raw string from the images array and a
+// resolved URL compare equal. Used to tell which frame a navigation asked for
+// (see _navigateLightbox / _onImgLoad): the same attachment can be referenced
+// both ways and two entries can share one source.
+function _imgSrcKey(src) {
+  const s = String(src || '');
+  if(!s) return '';
+  try{
+    if(document && document.createElement){
+      const a = document.createElement('a');
+      a.href = s;
+      return a.href;
+    }
+  }catch(_){ /* fall back to the raw string */ }
+  return s;
 }
 function _navigateLightbox(lb, direction) {
   const images = lb._navImages;
@@ -2747,21 +3960,48 @@ function _navigateLightbox(lb, direction) {
   const nextImg = images[newIndex];
   const lbImg = lb.querySelector('img');
   if(!lbImg) return;
+  // The new image invalidates any in-flight pan baseline, which belongs to
+  // the previous image's coordinate space (see _imgCancelGesture). Cancel
+  // before the src swap so the old gesture cannot outlive its image.
+  if(lb._zoom && lb._zoom.cancelGesture) lb._zoom.cancelGesture();
   lbImg.src = nextImg.src;
   lbImg.alt = nextImg.alt || '';
   lb.setAttribute('aria-label', nextImg.alt || 'Image');
+  // Keep the current zoom level when switching images (re-centre on the
+  // new image once it loads) — matches native photo-gallery behaviour.
+  if(lb._zoom) lb._zoom.pendingNav = true;
+  // Record WHICH source this navigation asked for. _onImgLoad uses it to tell
+  // this frame's load apart from the previous image's late load — and, the
+  // point of the record, to keep a navigation between two entries that SHARE a
+  // source an intentional re-centre instead of classifying it as that duplicate
+  // (maintainer re-gate 2026-10-15T17:54:15Z, static/ui.js:2843).
+  if(lb._zoom) lb._zoom.navSrc = _imgSrcKey(nextImg.src);
   // Update counter via stored reference — no DOM query.
   if(lb._counterEl) lb._counterEl.textContent = (newIndex+1) + ' / ' + images.length;
 }
 function _closeImgLightbox(lb) {
   if(!lb || !lb.parentNode) return;
   document.removeEventListener('keydown', lb._keyHandler);
+  // Hand focus back to whatever was focused before the dialog opened — the
+  // lightbox moved focus into itself on open (see _openImgLightboxWithNav).
+  if(lb._restoreFocus && typeof lb._restoreFocus.focus === 'function' &&
+     typeof document.contains === 'function' && document.contains(lb._restoreFocus)){
+    try{ lb._restoreFocus.focus({preventScroll: true}); }catch(_){}
+  }
+  lb._restoreFocus = null;
   if(lb._mermaidResizeHandler && window && typeof window.removeEventListener === 'function'){
     window.removeEventListener('resize', lb._mermaidResizeHandler);
   }
   if(lb._mermaidResizeTimer && typeof clearTimeout === 'function'){
     clearTimeout(lb._mermaidResizeTimer);
     lb._mermaidResizeTimer = null;
+  }
+  if(lb._imgZoomResizeHandler && window && typeof window.removeEventListener === 'function'){
+    window.removeEventListener('resize', lb._imgZoomResizeHandler);
+  }
+  if(lb._imgZoomResizeTimer && typeof clearTimeout === 'function'){
+    clearTimeout(lb._imgZoomResizeTimer);
+    lb._imgZoomResizeTimer = null;
   }
   lb.style.animation = 'lb-in .12s ease reverse';
   setTimeout(() => lb.parentNode && lb.parentNode.removeChild(lb), 120);
@@ -3092,8 +4332,22 @@ function _inlineMediaHtmlForRef(ref, sessionId, altText){
   if(/^file:\/\//i.test(ref)){
     try{
       const u=new URL(ref);
+      // #8033: file:///C:/Users/me/x parses to pathname '/C:/Users/me/x' —
+      // the file-URI grammar keeps the leading separator before the drive
+      // letter. The once-decoded pathname is forwarded to the backend AS-IS
+      // (no client-side strip): the server gates the drive-letter conversion
+      // on its own OS, so on a POSIX server '/C:/...' stays absolute and can
+      // never alias a cwd-relative drive-shaped path. Non-local file
+      // authorities (UNC: file://server/share/...) are explicitly rejected
+      // here — never silently rewired to a local path.
+      if(u.hostname&&!/^(localhost|127\.0\.0\.1|\[::1\])$/i.test(u.hostname)) return '';
       ref=decodeURIComponent(u.pathname||ref.replace(/^file:\/\//i,''));
     }catch(_){
+      // Fail-closed on a parse failure (AGENTS.md): the raw string may hide
+      // a non-local authority that the URL parse above never got to check.
+      // Reject anything shaped like 'file://<authority>/...' rather than
+      // silently rendering a local media element from it.
+      if(/^file:\/\/[^/?#]+/i.test(ref)) return '';
       try{ref=decodeURIComponent(ref.replace(/^file:\/\//i,''));}
       catch(__){ref=ref.replace(/^file:\/\//i,'');}
     }
@@ -3220,7 +4474,17 @@ else _initMediaPlaybackObserver();
 setTimeout(_initMediaPlaybackObserver,0);
 
 // ── Ambient provider quota indicator (#1766) ────────────────────────────────
-let _providerQuotaRefreshInFlight=false;
+// A provider switch can complete before an older account-quota request returns.
+// Only the newest request may update the composer; otherwise an old Codex result
+// can reappear while the active conversation uses another provider.
+let _providerQuotaRefreshSeq=0;
+let _providerQuotaContextIdentity;
+// profile|provider whose numbers the chip currently shows (null when cleared). A refetch for the same
+// profile and provider keeps them visible instead of blanking the chip until the response arrives.
+let _providerQuotaRenderedKey=null;
+function _providerQuotaProfileKey(){
+  return (typeof S!=='undefined'&&S&&S.activeProfile)?String(S.activeProfile):'';
+}
 
 function _formatQuotaMoneyShort(value){
   const n=Number(value);
@@ -3257,62 +4521,105 @@ function _providerQuotaIndicatorText(status){
   }
   return null;
 }
+function clearProviderQuotaIndicator(){
+  _providerQuotaRenderedKey=null;
+  const chip=$('providerQuotaChip');
+  const label=$('providerQuotaChipLabel');
+  const mobileAction=$('composerMobileQuotaAction');
+  const mobileLabel=$('composerMobileQuotaLabel');
+  if(chip){chip.hidden=true;chip.removeAttribute('title');}
+  if(label) label.textContent='';
+  if(mobileAction){mobileAction.hidden=true;mobileAction.removeAttribute('title');}
+  if(mobileLabel) mobileLabel.textContent='';
+}
 function renderProviderQuotaIndicator(status){
   const chip=$('providerQuotaChip');
   const label=$('providerQuotaChipLabel');
   const mobileAction=$('composerMobileQuotaAction');
   const mobileLabel=$('composerMobileQuotaLabel');
-  if(!chip||!label) return;
+  if(!chip||!label){
+    clearProviderQuotaIndicator();
+    return;
+  }
   // Hide entirely when the user has disabled the ambient quota chip in Settings.
   // Boot defaults this on; an explicit false preference suppresses it.
   if(window._showQuotaChip!==true){
-    chip.hidden=true;
-    label.textContent='';
-    chip.removeAttribute('title');
-    if(mobileAction){mobileAction.style.display='none';mobileAction.removeAttribute('title');}
-    if(mobileLabel) mobileLabel.textContent='';
+    clearProviderQuotaIndicator();
     return;
   }
   const text=_providerQuotaIndicatorText(status);
   if(!text||status.status!=='available'||(!status.quota&&!status.account_limits)){
-    chip.hidden=true;
-    label.textContent='';
-    chip.removeAttribute('title');
-    if(mobileAction){mobileAction.style.display='none';mobileAction.removeAttribute('title');}
-    if(mobileLabel) mobileLabel.textContent='';
+    clearProviderQuotaIndicator();
     return;
   }
   label.textContent=text.label;
   chip.title=text.title;
-  chip.hidden=false;
-  if(mobileAction){mobileAction.style.display='';mobileAction.title=text.title;}
   if(mobileLabel) mobileLabel.textContent=text.label;
+  if(mobileAction) mobileAction.title=text.title;
+  chip.hidden=false;
+  if(mobileAction) mobileAction.hidden=false;
 }
-async function refreshProviderQuotaIndicator(){
+async function refreshProviderQuotaIndicator(providerId){
+  const requestSeq=++_providerQuotaRefreshSeq;
+  const provider=String(providerId||'').trim();
+  const requestKey=_providerQuotaProfileKey()+'|'+provider;
+  // Clear before the request when the profile or provider changes, so the old account's numbers are not
+  // visible or keyboard-reachable meanwhile. A same-account refetch (session switch, tab return) keeps them.
+  // An unspecified provider means "the server's current default", which can change underneath, so it always clears.
+  if(!provider||requestKey!==_providerQuotaRenderedKey) clearProviderQuotaIndicator();
   // Short-circuit before the fetch when the chip is disabled — no point asking
   // the server for quota data the UI will throw away.
-  if(window._showQuotaChip!==true){
-    const chip=$('providerQuotaChip');
-    if(chip){chip.hidden=true;chip.removeAttribute('title');}
-    const mobileAction=$('composerMobileQuotaAction');
-    if(mobileAction){mobileAction.style.display='none';mobileAction.removeAttribute('title');}
-    const mobileLabel=$('composerMobileQuotaLabel');
-    if(mobileLabel) mobileLabel.textContent='';
-    return;
-  }
-  if(_providerQuotaRefreshInFlight) return;
-  _providerQuotaRefreshInFlight=true;
+  if(window._showQuotaChip!==true){clearProviderQuotaIndicator();return;}
+  const query=provider?'?provider='+encodeURIComponent(provider):'';
   try{
-    const status=await api('/api/provider/quota');
+    const status=await api('/api/provider/quota'+query);
+    if(requestSeq!==_providerQuotaRefreshSeq) return;
     renderProviderQuotaIndicator(status);
+    const chip=$('providerQuotaChip');
+    _providerQuotaRenderedKey=(chip&&!chip.hidden)?requestKey:null;
   }catch(_e){
-    renderProviderQuotaIndicator(null);
-  }finally{
-    _providerQuotaRefreshInFlight=false;
+    if(requestSeq!==_providerQuotaRefreshSeq) return;
+    clearProviderQuotaIndicator();
+  }
+}
+// Resolve the provider that should drive the composer quota request.
+// Prefers the active session's provider; when the composer is empty, falls
+// back to the retained empty-composer model override so a non-default provider
+// selected before opening a conversation still scopes the quota request.
+function _currentQuotaProvider(){
+  if(typeof S!=='undefined'&&S&&S.session){
+    return S.session.model_provider||null;
+  }
+  if(typeof _readEmptyComposerModelOverride==='function'){
+    const override=_readEmptyComposerModelOverride();
+    if(override&&override.model_provider) return override.model_provider;
+  }
+  return null;
+}
+// Keep account-quota state aligned with the authoritative session/composer
+// context without turning syncTopbar() into a high-frequency network poll.
+// Session identity is part of the key so switching between conversations is a
+// real refresh even when both use the same provider. Explicit visibility and
+// Settings refreshes intentionally bypass this de-duplication.
+function _syncProviderQuotaForActiveContext(){
+  if(typeof S==='undefined'||!S||S._bootReady!==true) return;
+  const provider=_currentQuotaProvider();
+  const providerIdentity=String(provider||'').trim();
+  // Quota is per profile (the route binds the profile env), so the active profile is part of the identity.
+  const profileIdentity='profile:'+_providerQuotaProfileKey()+'|';
+  const contextIdentity=profileIdentity+(S.session
+    ? 'session:'+String(S.session.session_id||'')+'|provider:'+providerIdentity
+    : 'composer|provider:'+providerIdentity);
+  if(contextIdentity===_providerQuotaContextIdentity) return;
+  _providerQuotaContextIdentity=contextIdentity;
+  if(typeof refreshProviderQuotaIndicator==='function'){
+    void refreshProviderQuotaIndicator(provider);
   }
 }
 window.addEventListener('visibilitychange',()=>{
-  if(document.visibilityState==='visible'&&typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
+  if(document.visibilityState==='visible'&&typeof refreshProviderQuotaIndicator==='function'){
+    void refreshProviderQuotaIndicator(_currentQuotaProvider());
+  }
 });
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
@@ -3549,6 +4856,10 @@ function _providerFromModelValue(modelId){
 function _modelPickerOptionIdentity(modelId, providerId){
   let value=String(modelId||'');
   const provider=String(providerId||'').trim();
+  if(provider.toLowerCase()==='openrouter'){
+    const prefix='@openrouter:';
+    return (value.toLowerCase().startsWith(prefix)?value.substring(prefix.length):value).toLowerCase();
+  }
   if(value.startsWith('@')&&value.includes(':')){
     const exactPrefix=provider ? `@${provider}:` : '';
     if(exactPrefix && value.toLowerCase().startsWith(exactPrefix.toLowerCase())){
@@ -3580,7 +4891,9 @@ function _deduplicateModelPickerOptions(sel,selectedValue){
     const options=Array.from(group.children||[]).filter(opt=>opt&&opt.tagName==='OPTION');
     const byIdentity=new Map();
     for(const opt of options){
-      const identity=_modelPickerOptionIdentity(opt.value,_getOptionProviderId(opt));
+      const provider=String(_getOptionProviderId(opt)||'').toLowerCase();
+      const value=String(opt.value||'');
+      const identity=_modelPickerOptionIdentity(value,provider);
       if(!identity) continue;
       if(!byIdentity.has(identity)) byIdentity.set(identity,[]);
       byIdentity.get(identity).push(opt);
@@ -4053,20 +5366,32 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
     explicitProvider=rawModel.slice(1,rawModel.lastIndexOf(':'));
   }
   const preferred=String(preferredProviderId||explicitProvider||'').toLowerCase();
+  const isOpenRouterRoute=preferred==='openrouter'&&(rawModel.includes('/')||rawModel.startsWith('@'));
   if(preferred){
-    if(preferred==='custom'||preferred.startsWith('custom:')){
-      // A slash is part of a custom endpoint's upstream model ID, not a
-      // provider namespace. Match the exact routed ID (allowing only the
-      // WebUI's @provider: wrapper and dash/dot spelling compatibility).
+    if(isOpenRouterRoute||preferred==='custom'||preferred.startsWith('custom:')){
+      // Match the full routed ID. OpenRouter's slash IDs are exact; custom
+      // providers retain their legacy dash/dot spelling compatibility.
       const routeNorm=value=>{
         let routed=String(value||'');
         const prefix=`@${preferred}:`;
         if(routed.toLowerCase().startsWith(prefix)) routed=routed.slice(prefix.length);
-        return routed.toLowerCase().replace(/-/g,'.');
+        const normalized=routed.toLowerCase();
+        return isOpenRouterRoute?normalized:normalized.replace(/-/g,'.');
       };
       const providerOptions=options.filter(o=>_getOptionProviderId(o).toLowerCase()===preferred);
+      if(isOpenRouterRoute){
+        const exactRoute=value=>{
+          let routed=String(value||'');
+          const prefix=`@${preferred}:`;
+          if(routed.toLowerCase().startsWith(prefix.toLowerCase())) routed=routed.slice(prefix.length);
+          return routed.toLowerCase();
+        };
+        const exactProviderMatch=providerOptions.find(o=>exactRoute(o.value)===exactRoute(rawModel));
+        if(exactProviderMatch) return exactProviderMatch.value;
+      }
       const providerMatch=providerOptions.find(o=>routeNorm(o.value)===routeNorm(rawModel));
       if(providerMatch) return providerMatch.value;
+      if(isOpenRouterRoute) return null;
       // Legacy sessions may store only the bare suffix of a routed custom
       // option. Preserve #6195's provider-hinted repair, but only for an
       // explicit @provider: row; an unwrapped slash ID belongs to the active
@@ -4144,9 +5469,9 @@ function _refreshOpenModelDropdown(){
   const sdd=$('settingsModelDropdown');
   if(sdd&&sdd.classList&&sdd.classList.contains('open')&&typeof renderModelDropdown==='function'){
     // Re-rendering the OPEN settings picker (e.g. when a late live-model fetch
-    // resolves) must not re-grab search focus on touch — same coarse-pointer rule
-    // as openSettingsModelDropdown, or the mobile keyboard pops after opening.
-    const _coarsePointer=(typeof window.matchMedia==='function')&&window.matchMedia('(pointer: coarse)').matches;
+    // resolves) must not re-grab search focus. Autofocus is off inside
+    // renderModelDropdown for every caller, so this path inherits the rule and
+    // the old per-call coarse-pointer gate is gone.
     renderModelDropdown({
       dropdownId:'settingsModelDropdown',
       selectId:'settingsModel',
@@ -4154,7 +5479,6 @@ function _refreshOpenModelDropdown(){
       closeDropdown:closeSettingsModelDropdown,
       selectModel:selectSettingsModelFromDropdown,
       scopeNoteText:t('settings_desc_model')||'Used for new conversations. Existing conversations keep their selected model.',
-      autoFocusSearch:!_coarsePointer,
     });
   }
 }
@@ -4202,6 +5526,40 @@ function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
       ?_modelStateForSelect(sel,applied)
       :{model:applied,model_provider:null};
     if(!requestedProvider||String(appliedState&&appliedState.model_provider||'').toLowerCase()===requestedProvider.toLowerCase()) return applied;
+  }
+  if(requestedProvider.toLowerCase()==='openrouter'&&typeof _readModelOverflowData==='function'&&sel.querySelectorAll){
+    const prefix=`@${requestedProvider}:`;
+    const routeKey=value=>{
+      let id=String(value||'');
+      if(id.toLowerCase().startsWith(prefix.toLowerCase())) id=id.slice(prefix.length);
+      return id.toLowerCase();
+    };
+    const target=routeKey(modelId);
+    for(const group of Array.from(sel.querySelectorAll('optgroup'))){
+      if(String(group.dataset&&group.dataset.provider||'').toLowerCase()!==requestedProvider.toLowerCase()) continue;
+      const extra=_readModelOverflowData(group);
+      const matches=extra.map((item,index)=>({item,index})).filter(entry=>routeKey(entry.item.id)===target);
+      const match=matches.find(entry=>String(entry.item.id)===String(modelId))||(matches.length===1?matches[0]:null);
+      if(!match) continue;
+      const opt=document.createElement('option');
+      opt.value=match.item.id;
+      opt.textContent=match.item.label||(typeof getModelLabel==='function'?getModelLabel(opt.value):opt.value);
+      if(String(opt.value).toLowerCase().startsWith(prefix.toLowerCase())){
+        opt.dataset.model=String(opt.value).slice(prefix.length);
+        opt.dataset.provider=requestedProvider;
+      }
+      // A restored overflow row is still an overflow ("extra") row: #7528 sorts a built-in group's curated rows
+      // first and natural-sorts extras after them, so an untagged restore would jump ahead of its siblings.
+      opt.dataset.extra='1';
+      group.appendChild(opt);
+      group.dataset.extraModels=JSON.stringify(extra.filter((_,index)=>index!==match.index));
+      const restored=_applyModelToDropdown(modelId,sel,requestedProvider);
+      if(restored){
+        const state=_modelStateForSelect(sel,restored);
+        if(String(state&&state.model_provider||'').toLowerCase()===requestedProvider.toLowerCase()) return restored;
+      }
+      break;
+    }
   }
   const explicitPrefix=requestedProvider?`@${requestedProvider}:`:'';
   const rawModel=String(modelId||'');
@@ -4491,25 +5849,7 @@ function _addLiveModelsToSelect(provider, models, sel){
   const _isNamedCustomActiveProvider=_ap.startsWith('custom:');
   const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && _ap!=='openai-codex' && (_providerLower===_ap||_isNamedCustomActiveProvider&&_providerLower===_ap);
   // Keep existingNorm.has( within the #907 source slice.
-  const optionIdentity=typeof _modelPickerOptionIdentity==='function'
-    ? (modelId,providerId)=>_modelPickerOptionIdentity(modelId,providerId)
-    : (modelId,providerId)=>{
-        let value=String(modelId||'');
-        const provider=String(providerId||'').trim();
-      if(value.startsWith('@')&&value.includes(':')){
-        const exactPrefix=provider ? `@${provider}:` : '';
-        if(exactPrefix && value.toLowerCase().startsWith(exactPrefix.toLowerCase())){
-          value=value.substring(exactPrefix.length);
-        }else if(value.startsWith('@custom:')){
-          const namedProvider=value.substring('@custom:'.length);
-          const splitAt=namedProvider.indexOf(':');
-          value=splitAt>=0 ? namedProvider.substring(splitAt+1) : namedProvider;
-        }else{
-          value=value.substring(value.indexOf(':')+1);
-        }
-      }
-        return value.split('/').pop().replace(/-/g,'.').toLowerCase();
-      };
+  const optionIdentity=_modelPickerOptionIdentity;
   const existingNorm=new Set([...sel.options].map(o=>optionIdentity(o.value,_getOptionProviderId(o))));
   let added=0;
   for(const m of models){
@@ -4891,7 +6231,15 @@ function _positionModelDropdown(){
     if(dd.parentNode!==document.body) document.body.appendChild(dd);
     dd.classList.add('model-dropdown--floating');
     const anchorRect=anchor.getBoundingClientRect();
-    const visualViewport=window.visualViewport;
+    // Validated read (#8531): garbage fold-transition viewport geometry must
+    // fall back to window dimensions. Inlined + self-contained for the
+    // extracted-function Node harness (no boot.js in that scope).
+    const vvRaw=window.visualViewport;
+    const visualViewport=vvRaw
+      &&Number.isFinite(Number(vvRaw.height))&&Number(vvRaw.height)>0&&Number(vvRaw.height)<=window.innerHeight*1.5
+      &&Number.isFinite(Number(vvRaw.width))&&Number(vvRaw.width)>0&&Number(vvRaw.width)<=window.innerWidth*1.5
+      ?{height:Number(vvRaw.height),width:Number(vvRaw.width),offsetTop:Math.max(0,Number(vvRaw.offsetTop)||0),offsetLeft:Math.max(0,Number(vvRaw.offsetLeft)||0)}
+      :null;
     const viewportWidth=Math.max(1,Number(visualViewport&&visualViewport.width)||window.innerWidth||1);
     const viewportHeight=Math.max(1,Number(visualViewport&&visualViewport.height)||window.innerHeight||1);
     const viewportTop=Math.max(0,Number(visualViewport&&visualViewport.offsetTop)||0);
@@ -5107,16 +6455,74 @@ function _mountSearchableModelSelect(opts={}){
   return {searchInput,selectEl,customInput,customButton};
 }
 
+// Which node owns keyboard focus when a model picker opens. ONE rule for both
+// pickers: on a device with a keyboard in play (desktop, or a tablet with a real
+// keyboard) focus the search input so the first character — and IME composition —
+// lands there; on a touch-only device focus the container instead, so no software
+// keyboard covers the list. boot.js owns the device detection (#3076); the typeof
+// guard keeps this file self-contained for the node harness and any load order.
+function _modelPickerPrefersSearchFocus(){
+  try{
+    if(typeof _isTouchOnlyDevice==='function') return !_isTouchOnlyDevice();
+  }catch(_e){}
+  return true;
+}
+function _modelPickerFocusTarget(dd){
+  if(!dd) return null;
+  if(_modelPickerPrefersSearchFocus()){
+    const si=dd.querySelector('.model-search-input');
+    if(si) return si;
+  }
+  return (typeof dd.focus==='function')?dd:null;
+}
+// Focus AFTER the dropdown is open and positioned: the phone path reparents the
+// menu onto <body>, and a reparent detaches the focused node, while a
+// display:none node ignores focus() outright. preventScroll keeps the scroll
+// position the active-row logic just set.
+function _focusModelPicker(dd){
+  const target=_modelPickerFocusTarget(dd);
+  if(!target) return;
+  try{ target.focus({preventScroll:true}); }
+  catch(_e){ try{ target.focus(); }catch(_e2){} }
+}
+
 function renderModelDropdown(){
   const opts=arguments[0]||{};
   const dd=$(opts.dropdownId||'composerModelDropdown');
   const sel=$(opts.selectId||'modelSelect');
   if(!dd||!sel) return;
+  // Focusability + announced name for the focus target. A plain <div> is not
+  // focusable, so focus() would silently do nothing and arrow-key navigation
+  // would be dead — tabindex="-1" makes it programmatically focusable without
+  // adding it to the tab order. `role="group"` + the picker's label give a screen
+  // reader something to announce when the container takes focus (touch-only
+  // devices, see _modelPickerFocusTarget); the search input announces itself.
+  if(!dd.hasAttribute('tabindex')) dd.setAttribute('tabindex','-1');
+  if(!dd.hasAttribute('role')) dd.setAttribute('role','group');
+  const _pickerLabel=opts.label||'Model picker';
+  if(!dd.hasAttribute('aria-label')) dd.setAttribute('aria-label',_pickerLabel);
+  // Capture who held focus BEFORE this render tears the children down
+  // (dd.innerHTML='' below). Without autofocus, a re-render triggered by a late
+  // live-model fetch or a preferences refresh would silently drop a user who is
+  // mid-word in the search box — the input node is replaced, so
+  // document.activeElement is already <body> by the time _filterModels runs.
+  const _focusBeforeRender=(typeof document!=='undefined')?document.activeElement:null;
+  const _searchHadFocusBefore=!!(_focusBeforeRender
+    &&_focusBeforeRender.classList
+    &&_focusBeforeRender.classList.contains('model-search-input')
+    &&typeof dd.contains==='function'&&dd.contains(_focusBeforeRender));
+  const _ddHadFocusBefore=!!(_focusBeforeRender&&_focusBeforeRender===dd);
   if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,sel.value);
-  // Whether the search input should auto-grab focus on (re-)render. Default true
-  // preserves the composer picker's behavior exactly; the settings picker passes
-  // false on coarse-pointer devices so opening it doesn't pop the mobile keyboard.
-  const _autoFocusSearch=opts.autoFocusSearch!==false;
+  // This picker is a CHOOSER, so opening it must never pop the software keyboard
+  // on a touch-only device — the list would sit behind the IME. But a desktop
+  // user (or a tablet with a real keyboard) SHOULD be able to type straight away,
+  // IME included (#8530), so the OPEN paths focus the search box there, after the
+  // dropdown is visible and positioned. That ordering is the fix for #8530: a
+  // display:none node ignores focus(), which is why the old early `_si.focus()`
+  // looked like a no-op. The decision lives in _modelPickerFocusTarget(); the
+  // renderer itself never auto-focuses, it only preserves an existing focus
+  // across re-renders (see _searchHadFocusBefore / _ddHadFocusBefore).
+  const _autoFocusSearch=false;
   const selectFromDropdown=typeof opts.selectModel==='function'
     ? opts.selectModel
     : (value,provider)=>selectModelFromDropdown(value,provider);
@@ -5683,7 +7089,18 @@ function renderModelDropdown(){
         // so hoisted-configured models aren't double-counted. (#3691)
         const count=hiddenCount?0:groupRows.length;
         const _plainLabel=String(meta.label||'').replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,'');
-        heading.textContent=count>1?`${_plainLabel} (${count})`:meta.label;
+        // The backend's "(a of b)" is fixed at load time. Restoring an overflow model
+        // moves it from the hidden tail into the group, so recompute "a" from what is
+        // still hidden; otherwise the collapsed heading undercounts the rows below it.
+        let collapsedLabel=meta.label;
+        const _ofMatch=hiddenCount?String(meta.label||'').match(/\((\d+)\s+of\s+(\d+)\)\s*$/):null;
+        if(_ofMatch){
+          const total=Number(_ofMatch[2]);
+          const stillHidden=_modelData.filter(m=>m.groupKey===groupKey&&m.hiddenByDefault).length;
+          const shown=Math.max(0,Math.min(total,total-stillHidden));
+          if(shown!==Number(_ofMatch[1])) collapsedLabel=`${_plainLabel} (${shown} of ${total})`;
+        }
+        heading.textContent=count>1?`${_plainLabel} (${count})`:collapsedLabel;
         dd.appendChild(heading);
         const wrapper=document.createElement('div');
         wrapper.className='model-group-body';
@@ -5805,7 +7222,18 @@ function renderModelDropdown(){
       noResult.style.textAlign='center';
       dd.appendChild(noResult);
     }
-    if(_autoFocusSearch||_hadFocus) _si.focus();
+    // Rebuilding replaced every child, so focus must be handed to the nodes that
+    // exist NOW: `_si` is the pre-render input, and focusing a detached node is a
+    // no-op in a browser. Restore the search input for a user who was typing in
+    // it (`_hadFocus`) or whose input a top-level re-render replaced
+    // (`_searchHadFocusBefore`); otherwise hand the container back so arrow-key
+    // navigation survives a background refresh.
+    const _siNow=dd.querySelector('.model-search-input');
+    if(_autoFocusSearch||_hadFocus||_searchHadFocusBefore){
+      if(_siNow){ try{ _siNow.focus(); }catch(_e){} }
+    }else if(_ddHadFocusBefore){
+      try{ dd.focus({preventScroll:true}); }catch(_e){ try{ dd.focus(); }catch(_e2){} }
+    }
   };
   _si.addEventListener('input',()=>_filterModels(_si.value));
   // Keyboard navigation through filtered model rows (#2791).
@@ -5826,8 +7254,36 @@ function renderModelDropdown(){
     if(typeof row.scrollIntoView==='function') row.scrollIntoView({block:'nearest'});
     if(typeof _nudgeModelRowBelowStickyStack==='function') _nudgeModelRowBelowStickyStack(dd,row);
   };
-  _si.addEventListener('keydown',e=>{
-    if(e.key==='Escape'){closeDropdown();return;}
+  // Keyboard contract for the picker, shared so it works whether focus sits on
+  // the search input (desktop open, or a user who tapped it) or on the dropdown
+  // container (touch-only open). Escape closes, arrows move the highlight, Enter
+  // picks it, and a printable character starts a search.
+  const _modelPickerKey=(e)=>{
+    // Innermost layer first: stop the key here so the document-level Escape handler
+    // (boot.js) does not also close the Settings panel, clear the session search or
+    // cancel a message edit behind the picker. A second Escape reaches those.
+    if(e.key==='Escape'){e.preventDefault();e.stopPropagation();closeDropdown();return;}
+    // Printable character while the CONTAINER holds focus (touch-only device with
+    // a hardware keyboard, or a container focused by assistive tech). Hand it to
+    // the search box. Without preventDefault+stopPropagation the key ALSO reaches
+    // the global j/k session switcher in sessions.js and changes the chat behind
+    // the open menu, while the filter stays empty.
+    if(e.target===dd&&typeof e.key==='string'&&e.key.length===1
+       &&!e.ctrlKey&&!e.metaKey&&!e.altKey){
+      e.preventDefault();
+      if(typeof e.stopPropagation==='function') e.stopPropagation();
+      const si=dd.querySelector('.model-search-input');
+      if(si){
+        si.focus();
+        si.value=(typeof si.value==='string'?si.value:'')+e.key;
+        // Programmatic value changes don't fire `input`; dispatch it so the real
+        // filtering listener runs (the minimal-DOM harness feeds the same event
+        // through its listener list). Fall back to the filter directly.
+        try{ si.dispatchEvent(new Event('input',{bubbles:true})); }
+        catch(_e){ try{ _filterModels(si.value); }catch(_e2){} }
+      }
+      return;
+    }
     if(e.key==='ArrowDown'||e.key==='ArrowUp'||e.key==='Enter'){
       const rows=_visibleModelRows();
       if(!rows.length){if(e.key==='Enter') e.preventDefault();return;}
@@ -5840,13 +7296,28 @@ function renderModelDropdown(){
         if(pick) pick.click();
       }
     }
-  });
+  };
+  _si.addEventListener('keydown',e=>{_modelPickerKey(e);});
+  // The container only handles keys when IT holds focus (`e.target!==dd` returns
+  // early), so events bubbling up from the search/custom inputs are never handled
+  // twice. Bind ONCE and dispatch through a slot the current render refreshes:
+  // `dd` survives every re-render (only its children are replaced), so
+  // re-binding would stack duplicate listeners, while a closure captured at first
+  // render would keep pointing at the detached search input.
+  dd._modelPickerKey=_modelPickerKey;
+  if(!dd._modelPickerKeyBound){
+    dd._modelPickerKeyBound=true;
+    dd.addEventListener('keydown',e=>{
+      if(e.target!==dd) return;
+      if(typeof dd._modelPickerKey==='function') dd._modelPickerKey(e);
+    });
+  }
   _si.addEventListener('click',e=>e.stopPropagation());
   _sc.onclick=()=>{ _si.value=''; _filterModels(''); _si.focus(); };
   _sc.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){ _si.value=''; _filterModels(''); _si.focus(); e.preventDefault(); }});
   const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;selectFromDropdown(v,null);_ci.value='';};
   _cb.onclick=_applyCustom;
-  _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){closeDropdown();}});
+  _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){e.preventDefault();e.stopPropagation();closeDropdown();}});
   _ci.addEventListener('click',e=>e.stopPropagation());
   dd.appendChild(_scopeNote);
   dd.appendChild(_searchRow);
@@ -5922,7 +7393,7 @@ async function toggleModelDropdown(){
     if(ready&&typeof ready.catch==='function') ready.catch(()=>{});
   }
   if(dd.classList.contains('open')) return;
-  renderModelDropdown();
+  renderModelDropdown({label:'Conversation model'});
   dd.classList.add('open');
   _positionModelDropdown();
   _syncModelDropdownStickyInsets(dd);
@@ -5930,17 +7401,55 @@ async function toggleModelDropdown(){
   if(activeRow&&typeof activeRow.scrollIntoView==='function') activeRow.scrollIntoView({block:'center'});
   _nudgeModelRowBelowStickyStack(dd,activeRow);
   chip.classList.add('active');
+  chip.setAttribute('aria-expanded','true');
   const mobileAction=$('composerMobileModelAction');
-  if(mobileAction) mobileAction.classList.add('active');
+  if(mobileAction){
+    mobileAction.classList.add('active');
+    mobileAction.setAttribute('aria-expanded','true');
+  }
+  // Hand keyboard focus to the target this device expects: the search box when a
+  // keyboard is in play (type immediately, IME works), the container on a
+  // touch-only device (no software keyboard over the list). Runs AFTER
+  // _positionModelDropdown because the phone path reparents the menu onto <body>
+  // and a reparent detaches the focused node.
+  _focusModelPicker(dd);
+}
+
+// Closing a picker that still holds keyboard focus hands focus back to the button
+// that opened it (the menu-button pattern). Otherwise the focused node is hidden,
+// focus falls to <body>, Tab restarts at the page edge, and the next `k` switches
+// the conversation through the global J/K binding (which ignores keys on buttons).
+// Only when focus is still inside the picker: a close caused by a click elsewhere,
+// or by another panel that already moved focus, keeps that target. Must run before
+// the phone path's reparent in closeModelDropdown, which detaches the focused node.
+function _returnModelPickerFocus(dd, anchors){
+  if(!dd||typeof document==='undefined') return;
+  const active=document.activeElement;
+  if(!active||!(active===dd||(typeof dd.contains==='function'&&dd.contains(active)))) return;
+  for(const el of anchors||[]){
+    if(!el||el.disabled||typeof el.focus!=='function') continue;
+    // A display:none anchor (the desktop chip on a phone, the phone action on a
+    // desktop) has no layout box, and focusing it would be a silent no-op.
+    if(typeof el.getClientRects==='function'&&!el.getClientRects().length) continue;
+    try{el.focus({preventScroll:true});}catch(_){continue;}
+    if(document.activeElement===el) return;
+  }
 }
 
 function closeModelDropdown(){
   const dd=$('composerModelDropdown');
   const chip=$('composerModelChip');
   const mobileAction=$('composerMobileModelAction');
+  if(dd&&dd.classList.contains('open')&&typeof _returnModelPickerFocus==='function') _returnModelPickerFocus(dd,[mobileAction,chip]);
   if(dd) dd.classList.remove('open');
-  if(chip) chip.classList.remove('active');
-  if(mobileAction) mobileAction.classList.remove('active');
+  if(chip){
+    chip.classList.remove('active');
+    chip.setAttribute('aria-expanded','false');
+  }
+  if(mobileAction){
+    mobileAction.classList.remove('active');
+    mobileAction.setAttribute('aria-expanded','false');
+  }
   // If the phone path reparented the menu onto <body>, put it back in the
   // footer and clear the fixed-position inline styles so the DOM returns to its
   // baseline shape and the next desktop open anchors correctly (#6080).
@@ -5950,6 +7459,7 @@ function closeModelDropdown(){
 function closeSettingsModelDropdown(){
   const dd=$('settingsModelDropdown');
   const chip=$('settingsModelChip');
+  if(dd&&dd.classList.contains('open')&&typeof _returnModelPickerFocus==='function') _returnModelPickerFocus(dd,[chip]);
   if(dd) dd.classList.remove('open');
   if(chip){
     chip.classList.remove('active');
@@ -5989,11 +7499,10 @@ function openSettingsModelDropdown(){
   const sel=$('settingsModel');
   const chip=$('settingsModelChip');
   if(!dd||!sel) return;
-  // Auto-focus the search on desktop only. On touch (coarse pointer) grabbing focus
-  // pops the on-screen keyboard the instant the chip is tapped — the composer picker
-  // doesn't do it either, so match that behavior on touch. Computed before render so
-  // renderModelDropdown's own initial focus is suppressed too (not just the outer one).
-  const _coarsePointer=(typeof window.matchMedia==='function')&&window.matchMedia('(pointer: coarse)').matches;
+  // Same single rule as the composer picker (see _modelPickerFocusTarget): a
+  // device with a keyboard focuses the search box after the dropdown is visible,
+  // a touch-only device focuses the container so no IME covers the list. The
+  // setTimeout keeps the async ordering upstream already needed for this panel.
   renderModelDropdown({
     dropdownId:'settingsModelDropdown',
     selectId:'settingsModel',
@@ -6001,19 +7510,14 @@ function openSettingsModelDropdown(){
     closeDropdown:closeSettingsModelDropdown,
     selectModel:selectSettingsModelFromDropdown,
     scopeNoteText:t('settings_desc_model')||'Used for new conversations. Existing conversations keep their selected model.',
-    autoFocusSearch:!_coarsePointer,
+    label:t('settings_label_model')||'Default Model',
   });
   dd.classList.add('open');
   if(chip){
     chip.classList.add('active');
     chip.setAttribute('aria-expanded','true');
   }
-  if(!_coarsePointer){
-    setTimeout(()=>{
-      const input=dd.querySelector('.model-search-input');
-      if(input) input.focus();
-    },0);
-  }
+  setTimeout(()=>{ _focusModelPicker(dd); },0);
 }
 
 function toggleSettingsModelDropdown(){
@@ -6112,6 +7616,15 @@ function _fitComposerFooter(){
   if(!left) return;
   if(!left.clientWidth) return;
   const overflows=function(){return left.scrollWidth>left.clientWidth+1;};
+  // Burger-mode cleanup trigger: cf-burger can flip WITHOUT any 640px
+  // boundary crossing (this fit path measures real overflow at any width,
+  // e.g. a constant 760px viewport). CSS hides the inline model/reasoning/
+  // toolset anchors in burger mode and reveals the shared mobile config
+  // button/panel, so an open dropdown would outlive its hidden anchor.
+  // Capture the pre-measurement burger state and fire the composer menu
+  // cleanup when it actually TRANSITIONS — not on every fit pass, so
+  // mutation-driven refits with unchanged geometry remain harmless.
+  const wasBurger=footer.classList.contains('cf-burger');
   // Measure without ever PAINTING the expanded state. Stripping the stage
   // classes makes the footer briefly full-width, which grows the composer and
   // shrinks #messages by a few px; restoring them a moment later shrinks it
@@ -6127,6 +7640,11 @@ function _fitComposerFooter(){
     footer.style.visibility='hidden';
   }
   let next='';
+  // Buttons carry `transition:all`; measured mid-transition they still report
+  // their icon-stage width, so a footer that collapsed to icons could never
+  // re-expand once its labels fit again (#8253 Fable r1). Freeze transitions
+  // for the synchronous strip-and-measure.
+  footer.classList.add('cf-measuring');
   try{
     footer.classList.remove('cf-icons','cf-burger');
     if(overflows()){
@@ -6146,6 +7664,20 @@ function _fitComposerFooter(){
       footer.style.height=prevHeight;
       footer.style.visibility=prevVisibility;
     }
+    // Commit the restored, visible style while transitions are still frozen,
+    // then unfreeze: otherwise every `transition:all` descendant animates its
+    // inherited visibility from the hidden measuring state and blinks out for a
+    // frame on each fit pass (#8253 Fable r2).
+    void footer.offsetWidth;
+    footer.classList.remove('cf-measuring');
+  }
+  // Post-restore transition check: fire the same composer menu cleanup used
+  // by the 640px MediaQueryList boundary listener (see _onPhoneBoundaryChange
+  // above). Both burger transitions (entering and leaving) close — the same
+  // deterministic both-directions policy as the boundary listener.
+  const isBurger=next.includes('cf-burger');
+  if(isBurger!==wasBurger && typeof _onPhoneBoundaryChange==='function'){
+    try{ _onPhoneBoundaryChange(); }catch(_){ }
   }
 }
 window._fitComposerFooter=_fitComposerFooter;
@@ -6247,6 +7779,10 @@ function _reasoningEffortContext(){
   const ctx={};
   if(model) ctx.model=model;
   if(provider) ctx.provider=provider;
+  // Reasoning effort is session-owned just like the model selection. Including
+  // the session identity also makes the request-cache key change when two
+  // sessions happen to use the same model/provider pair.
+  if(session&&session.session_id) ctx.session_id=session.session_id;
   return ctx;
 }
 
@@ -6254,6 +7790,103 @@ function _reasoningEffortQuery(){
   const params=new URLSearchParams(_reasoningEffortContext());
   const qs=params.toString();
   return qs?('?'+qs):'';
+}
+
+// Monotonic save counter plus the newest save per profile/session: only the
+// newest save for a chat may update that chat's chip, so an older save resolving
+// late cannot undo a newer pick, and another chat's pick cannot hide this one's.
+let _reasoningSaveSeq=0;
+const _reasoningLatestSaveByOwner=new Map();
+// Effort saves are sent one at a time in pick order, so the threaded server
+// stores the latest pick rather than whichever request it handled last.
+let _reasoningSaveChain=Promise.resolve();
+// Every request carries the profile cookie at send time. A profile switch
+// freezes new picks and drains queued saves before it changes the cookie, so a
+// save queued behind a slow one still lands in the profile it was picked in.
+let _reasoningSavesFrozen=0;
+
+function _reasoningSaveOwner(profile, context){
+  return profile+'\n'+((context&&context.session_id)||'');
+}
+
+// While frozen the effort controls are disabled, so a pick is never accepted
+// by the UI and then dropped; /reasoning still reports the refusal in a toast.
+function _setReasoningControlsFrozen(frozen){
+  ['composerReasoningChip','composerMobileReasoningAction'].forEach(function(id){
+    const btn=$(id);
+    if(btn) btn.disabled=frozen;
+  });
+  if(frozen) closeReasoningDropdown();
+}
+
+async function _beginReasoningProfileSwitch(){
+  ++_reasoningSavesFrozen;
+  _setReasoningControlsFrozen(true);
+  await _reasoningSaveChain;
+}
+
+function _endReasoningProfileSwitch(){
+  if(_reasoningSavesFrozen>0) --_reasoningSavesFrozen;
+  if(!_reasoningSavesFrozen) _setReasoningControlsFrozen(false);
+}
+
+function _saveReasoningEffort(effort){
+  if(_reasoningSavesFrozen){
+    const frozen=new Error('profile switch in progress');
+    frozen.code='profile_switch_in_progress';
+    return Promise.reject(frozen);
+  }
+  const context=_reasoningEffortContext();
+  const profile=(S&&S.activeProfile)||'default';
+  const owner=_reasoningSaveOwner(profile, context);
+  const saveSeq=++_reasoningSaveSeq;
+  _reasoningLatestSaveByOwner.set(owner, saveSeq);
+  const payload=Object.assign({effort:effort},context);
+  const post=function(){
+    return api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)});
+  };
+  const request=_reasoningSaveChain.then(post,post);
+  _reasoningSaveChain=request.catch(function(){});
+  return request.then(function(st){
+    _applyReasoningSaveResult(saveSeq, owner, context, profile, (st&&st.reasoning_effort)||effort, st||{});
+    return st;
+  },function(e){
+    _failReasoningSave(saveSeq, owner);
+    throw e;
+  });
+}
+
+function _isLatestReasoningSave(saveSeq, owner){
+  return _reasoningLatestSaveByOwner.get(owner)===saveSeq;
+}
+
+function _failReasoningSave(saveSeq, owner){
+  // This chat's newest save failed, so an older save (whose result was
+  // suppressed) may be what the server stored. Re-read it now if it is visible.
+  if(!_isLatestReasoningSave(saveSeq, owner)) return;
+  _reasoningLatestSaveByOwner.delete(owner);
+  if(owner===_reasoningSaveOwner((S&&S.activeProfile)||'default', _reasoningEffortContext())) fetchReasoningChip();
+}
+
+function _applyReasoningSaveResult(saveSeq, owner, context, profile, effort, status){
+  // The server saved the originating session. This single-entry UI cache
+  // belongs only to the visible context; revisiting another session refetches.
+  if(!_isLatestReasoningSave(saveSeq, owner)) return;
+  _reasoningLatestSaveByOwner.delete(owner);
+  if(profile!==((S&&S.activeProfile)||'default')) return;
+  const params=new URLSearchParams(context).toString();
+  const key=params?('?'+params):'';
+  if(key!==_reasoningEffortQuery()){
+    // Same chat, different model/provider: a GET for the new key may have
+    // read the pre-save value, so re-read it rather than keep a stale cache.
+    const current=_reasoningEffortContext();
+    if(context.session_id&&current.session_id===context.session_id) fetchReasoningChip();
+    return;
+  }
+  // A GET dispatched before this save must not restore the old effort later.
+  ++_reasoningFetchSeq;
+  _lastReasoningFetchKey=key;
+  _applyReasoningChip(effort, status);
 }
 
 function _applyReasoningOptions(supportedEfforts){
@@ -6329,7 +7962,7 @@ function _applyReasoningChip(eff){
   if(chip){
     const inactive=!effort||effort==='none';
     chip.classList.toggle('inactive',inactive);
-    const labelText='Reasoning effort: '+text;
+    const labelText='Reasoning effort for this chat: '+text;
     chip.title=labelText;
     chip.setAttribute('aria-label',labelText);
   }
@@ -6337,9 +7970,9 @@ function _applyReasoningChip(eff){
   _highlightReasoningOption(effort);
 }
 
-// Tracks the model/provider identity of the last reasoning fetch so routine
-// topbar syncs can serve the cached chip state instead of re-hitting the
-// network. null = never fetched.
+// Tracks the session/model/provider identity of the last reasoning fetch so
+// routine topbar syncs can serve the cached chip state instead of re-hitting
+// the network. null = never fetched.
 let _lastReasoningFetchKey=null;
 // Monotonic dispatch counter. Each fetchReasoningChip() increments it and the
 // async handlers capture their own value; a response (success OR failure) only
@@ -6396,12 +8029,12 @@ function syncReasoningChip(){
   // refetch unconditionally to refresh supported-efforts after a model switch,
   // which turned ordinary syncs into a GET /api/reasoning storm (one per token).
   // Restore the cache short-circuit but keep a9ce2889's intent: only hit the
-  // network when nothing is cached yet OR the model/provider identity changed
-  // since the last fetch (the only inputs that change /api/reasoning's answer).
+  // network when nothing is cached yet OR the session/model/provider identity
+  // changed since the last fetch (the inputs that change /api/reasoning's answer).
   // The user-pick and model-switch paths still update the cache directly.
   const key=_reasoningEffortQuery();
-  // Short-circuit on the KEY alone: if a fetch for this exact model/provider has
-  // already been dispatched (in-flight) or completed, do not dispatch another —
+  // Short-circuit on the KEY alone: if a fetch for this exact session/model/provider
+  // has already been dispatched (in-flight) or completed, do not dispatch another —
   // this is what stops the #4650 storm, including the COLD-cache window where
   // _currentReasoningEffort is still null between the first dispatch and its
   // response (10 syncs before the first GET resolves must produce ONE request,
@@ -6427,6 +8060,7 @@ function toggleReasoningDropdown(){
   if(!dd||!chip) return;
   const open=dd.classList.contains('open');
   if(open){closeReasoningDropdown();return;}
+  if(_reasoningSavesFrozen) return;
   if(typeof closeProfileDropdown==='function') closeProfileDropdown();
   if(typeof closeWsDropdown==='function') closeWsDropdown();
   closeModelDropdown();
@@ -6478,14 +8112,12 @@ document.addEventListener('click',function(e){
     // silently ignore the Default click and leave the toggle one-way off-only.
     // (#6219 round-3)
     if(opt){
-      const payload=Object.assign({effort:effort},_reasoningEffortContext());
-      api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)})
+      _saveReasoningEffort(effort)
         .then(function(st){
           // For Default (effort=''), the returned reasoning_effort is '' (clear)
           // — display 'Default' rather than an empty toast.
-          const display=(st&&st.reasoning_effort)||effort||'Default';
-          _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
-          showToast('🧠 Reasoning effort set to '+display);
+          const display=_formatReasoningEffortLabel((st&&st.reasoning_effort)||effort||'');
+          showToast('🧠 Reasoning effort set to '+display+' for this chat and new chats (applies to next turn)');
         })
         .catch(function(){showToast('🧠 Failed to set effort');});
       closeReasoningDropdown();
@@ -6904,14 +8536,39 @@ document.addEventListener('keydown',function(e){
   closeReasoningDropdown();
 });
 
-window.addEventListener('resize',function(){
-  if(window.matchMedia && !window.matchMedia('(max-width: 640px)').matches){
-    closeMobileComposerConfig();
-    closeModelDropdown();
-    closeReasoningDropdown();
-    if(typeof closeWsDropdown==='function') closeWsDropdown();
+// Close phone-mode composer state when the phone/desktop boundary (640px) is
+// actually CROSSED — not on every window resize. Keyboard-induced resizes
+// (on-screen keyboard opening/closing on compact touch devices, e.g. the
+// Pixel Fold inner screen at ~804px) resize the visual viewport and fire a
+// window resize, which previously slammed an open model dropdown shut the
+// moment the user tapped the model search input. A MediaQueryList change
+// listener fires only when the (max-width:640px) match itself flips, so it
+// cannot fire for a keyboard-only height change, and it has no uninitialized
+// first-event state (the first boundary crossing after page load is still
+// delivered). Same pattern as static/pwa-startup.js:37-44.
+//
+// Direction policy: close on BOTH crossings (fold AND unfold). Upstream
+// previously closed only when leaving phone mode; closing when entering it
+// too is intentional — the phone layout's mobile drawer owns the sidebar and
+// the composer footer switches to the mobile config panel, so any desktop
+// dropdown state left open across a fold would render against the wrong
+// layout. Both directions reset the composer menu family deterministically.
+const _phoneWidthQuery=(typeof window!=='undefined'&&window.matchMedia)
+  ? window.matchMedia('(max-width: 640px)')
+  : null;
+function _onPhoneBoundaryChange(){
+  closeMobileComposerConfig();
+  closeModelDropdown();
+  closeReasoningDropdown();
+  if(typeof closeWsDropdown==='function') closeWsDropdown();
+}
+if(_phoneWidthQuery){
+  if(typeof _phoneWidthQuery.addEventListener==='function'){
+    _phoneWidthQuery.addEventListener('change',_onPhoneBoundaryChange);
+  }else if(typeof _phoneWidthQuery.addListener==='function'){
+    _phoneWidthQuery.addListener(_onPhoneBoundaryChange);
   }
-});
+}
 
 // ── Scroll pinning ──────────────────────────────────────────────────────────
 // When streaming, auto-scroll only while the user is following the live tail.
@@ -7002,6 +8659,10 @@ function _finishMessageJumpScroll(generation){
   _lastMessageClientHeight=container.clientHeight;
   _messageJumpScrollOwner=null;
   _programmaticScroll=false;
+  // The jump no longer owns the viewport, so the measurement chain held during
+  // it can run (#7591). Guarded internally: if the reader is actively scrolling
+  // again the refresh is re-held for the scroll-settle timer instead.
+  if(typeof _resumeDeferredMessageVirtualMeasurement==='function') _resumeDeferredMessageVirtualMeasurement();
   if(typeof _syncScrollToBottomCue==='function'){
     _syncScrollToBottomCue(!_scrollPinned&&bottomDistance>80,{newMessage:_newMessageCueVisible});
   }
@@ -7030,6 +8691,9 @@ function _cancelMessageJumpScroll(){
   }
   _messageJumpScrollOwner=null;
   _programmaticScroll=false;
+  // A cancelled jump releases viewport ownership too, so a measurement refresh
+  // held for it must not be stranded (#7591).
+  if(typeof _resumeDeferredMessageVirtualMeasurement==='function') _resumeDeferredMessageVirtualMeasurement();
 }
 let _nearBottomCount=0;
 let _lastScrollTop=null;
@@ -7889,6 +9553,15 @@ function _transparentEventTimestampSeconds(row, opts){
   }
   if(opts.live===true) return _activityNowSeconds();
   return null;
+}
+function _syncTransparentEventTimestampVisibility(row){
+  const header=row&&row.querySelector('.tool-card-header,.thinking-card-header');
+  if(!header) return;
+  const enabled=!(typeof window!=='undefined'&&window._transparentEventTimestamps===false);
+  // A cache hit with unchanged preferences must remain free of DOM writes.
+  if(!!header.querySelector('.transparent-event-time')!==enabled){
+    _syncTransparentEventTimestamp(row,header,{});
+  }
 }
 function _syncTransparentEventTimestamp(row, header, opts){
   if(!row||!header) return null;
@@ -9449,11 +11122,19 @@ function renderMd(raw){
       }
     }
     if(/^file:\/\//i.test(href)){
+      // #8033: same policy as the streaming converter (_smdLinkHref) and media refs (_inlineMediaHtmlForRef): only
+      // local authorities are served, a UNC 'file://server/share/...' link stays an inert file:// href, and the
+      // once-decoded pathname (with its '?…'/'#…' suffix) is forwarded with its leading separator.
       try{
-        const path=decodeURIComponent(href.replace(/^file:\/\//i,''));
+        const u=new URL(href);
+        if(u.hostname&&!/^(localhost|127\.0\.0\.1|\[::1\])$/i.test(u.hostname)) return href;
+        const path=decodeURIComponent((u.pathname||'')+((href.match(/[?#][\s\S]*$/)||[''])[0]));
         return 'api/media?path='+encodeURIComponent(path)+'&inline=1';
       }catch(_){
-        return 'api/media?path='+encodeURIComponent(href.replace(/^file:\/\//i,''))+'&inline=1';
+        // Fail closed: an unparseable URI with an authority may hide a non-local host.
+        if(/^file:\/\/[^/?#]+/i.test(href)) return href;
+        try{ return 'api/media?path='+encodeURIComponent(decodeURIComponent(href.replace(/^file:\/\//i,'')))+'&inline=1'; }
+        catch(__){ return 'api/media?path='+encodeURIComponent(href.replace(/^file:\/\//i,''))+'&inline=1'; }
       }
     }
     return href;
@@ -9707,8 +11388,18 @@ function lockComposerForClarify(placeholderText){
   if (sid && typeof _saveComposerDraftNow === 'function') {
     const saveText = String(input.value || '');
     const saveFiles = Array.isArray(S && S.pendingFiles) ? [...S.pendingFiles] : [];
+    // #7855: an unchanged restored goal continuation keeps its token in this save. Without it the
+    // payload stores goal_continuation_id '' and the continuation sent after a reload is no longer
+    // goal-related, which stops the goal loop. Edited text carries no token (round-7 rule).
+    const restoredCont = (typeof _peekRestoredGoalContinuationDraft === 'function')
+      ? _peekRestoredGoalContinuationDraft()
+      : null;
+    const saveContId = (restoredCont && restoredCont.id
+      && String(restoredCont.text || '').trim() === saveText.trim()) ? restoredCont.id : '';
     try {
-      const saveResult = _saveComposerDraftNow(sid, saveText, saveFiles);
+      const saveResult = saveContId
+        ? _saveComposerDraftNow(sid, saveText, saveFiles, saveContId)
+        : _saveComposerDraftNow(sid, saveText, saveFiles);
       if (saveResult && typeof saveResult.catch === 'function') {
         saveResult.catch((error)=>_handleComposerDraftPostFailure(error,sid,saveText,saveFiles));
       }
@@ -9930,7 +11621,11 @@ function setBusy(v){
         }
         autoResize();
         renderTray();
-        send();
+        // #7855 (round 5): pass the queued entry's continuation ID straight
+        // into THIS send() invocation. Round 4 published it to a shared module
+        // slot that any concurrent send could read, letting a genuine user
+        // turn consume the goal. An argument cannot leak across calls.
+        send({goalContinuationId:next.goal_continuation_id||''});
       },120);
     }
   }
@@ -10034,7 +11729,12 @@ function _renderQueueChips(sid){
         const liveQ=_getSessionQueue(sid,false);
         const first=snapshot.find(e=>e)||{};
         const firstFiles=(snapshot.find(e=>e&&Array.isArray(e.files)&&e.files.length)||{files:[]}).files;
-        liveQ.length=0;liveQ.push({text:combined,files:firstFiles,model:first.model||'',model_provider:first.model_provider||null,_queued_at:Date.now()});
+        // #7855: the combined entry keeps the FIRST continuation ID among the
+        // merged items. Combining a continuation with later user text still
+        // admits it (its ID is intact) — and a combine of pure user messages
+        // carries no ID, so it stays an ordinary turn.
+        const _contId=(snapshot.find(e=>e&&String(e.goal_continuation_id||'').trim())||{}).goal_continuation_id||'';
+        liveQ.length=0;liveQ.push({text:combined,files:firstFiles,model:first.model||'',model_provider:first.model_provider||null,goal_continuation_id:_contId,_queued_at:Date.now()});
         SESSION_QUEUES[sid]=liveQ;
         _persistSessionQueueStorage(sid,liveQ);
         delete _queueRenderKeys[sid];
@@ -10115,7 +11815,11 @@ function _renderQueueChips(sid){
         const liveQ=_getSessionQueue(sid,false);
         const idx=_entryTs!=null?liveQ.findIndex(e=>e&&e._queued_at===_entryTs):i;
         if(idx!==-1){
+          // #7855: keep the continuation ID when the user edits the text — the
+          // queue may rewrite the message, but the admission token stays with
+          // the entry (spread preserves it explicitly).
           liveQ[idx]={...liveQ[idx],text:newText};
+          if(liveQ[idx].goal_continuation_id==null) liveQ[idx].goal_continuation_id='';
           _persistSessionQueueStorage(sid,liveQ);
           delete _queueRenderKeys[sid];
           updateQueueBadge(sid);
@@ -12044,6 +13748,56 @@ function _liveTurnCarriesUnsettledContent(turn){
   ).length) return true;
   return turn.querySelectorAll('[data-live-assistant="1"]').length>1;
 }
+function _normalizeTransferredLiveProse(turn){
+  // #7676 (Transparent Stream): a transferred live turn can carry the final
+  // answer in a segment that is deliberately hidden while its scene rows render
+  // the activity — `assistant-segment-worklog-source` + aria-hidden + hidden.
+  // If that node lands as the pane's ONLY copy of the reply (scene rows already
+  // removed by the settle render), the settled reply renders blank. After the
+  // node is attached, un-hide the retained final prose as the fallback — unless
+  // another visible scene row actually owns the prose.
+  //
+  // Visibility here is STRUCTURAL (hidden/aria-hidden/display), not geometric:
+  // this runs before the node is attached, where getClientRects() is empty for
+  // everything.
+  if(!turn||!turn.querySelectorAll) return turn;
+  const _segs=turn.querySelectorAll('.assistant-segment.assistant-segment-worklog-source[data-live-assistant="1"]');
+  if(!_segs||!_segs.length) return turn;
+  const _structVisible=(el)=>!!(el
+    && !el.hidden
+    && el.getAttribute('aria-hidden')!=='true'
+    && !(el.style&&el.style.display==='none'));
+  const _rows=Array.prototype.slice.call(turn.querySelectorAll(
+    '[data-anchor-scene-row="1"],.transparent-event-row,.tool-worklog-group,.tool-card-row'
+  ));
+  // While a stream is still attached, the transparent live scene keeps the
+  // streaming prose hidden ON PURPOSE (the rows are the progress surface) — a
+  // mid-stream render must not start showing it early. A reconnecting pane has
+  // no attached stream (S.activeStreamId null) and may reveal.
+  const _streaming=(typeof S!=='undefined'&&S&&!!S.activeStreamId);
+  const _otherVisibleContent=(()=>{
+    for(const other of turn.querySelectorAll('.assistant-segment')){
+      if(Array.prototype.indexOf.call(_segs,other)!==-1) continue;
+      if(other.classList.contains('assistant-segment-worklog-source')) continue;
+      if(_structVisible(other)&&(other.textContent||'').trim()) return true;
+    }
+    return _rows.some(row=>_structVisible(row)&&(row.textContent||'').trim());
+  })();
+  Array.prototype.slice.call(_segs).forEach(seg=>{
+    const text=(seg.textContent||'').trim();
+    if(!text) return;
+    const tail=text.slice(-Math.min(40,text.length));
+    const _owned=_rows.some(row=>_structVisible(row)&&(row.textContent||'').indexOf(tail)!==-1);
+    if(_owned) return;             // another visible scene row already shows this prose
+    if(_streaming&&_otherVisibleContent) return;  // live scene still owns the frame
+    seg.classList.remove('assistant-segment-worklog-source');
+    seg.removeAttribute('aria-hidden');
+    seg.removeAttribute('hidden');
+    seg.hidden=false;
+    if(seg.style) seg.style.display='';
+  });
+  return turn;
+}
 function _settledTranscriptOwnsLiveTurn(sid, turn){
   if(!turn) return false;
   const msgs=(typeof S!=='undefined'&&S&&Array.isArray(S.messages))?S.messages:null;
@@ -12176,6 +13930,132 @@ function dismissReconnect() {
   clearInflight();
 }
 
+// ── #8517 memory-off notice ──
+// The server reports the memory status of the agent actually serving a session as
+// `memory_status` ({state:'ok'} or {state:'off',reason,scope}; codes only) in every
+// session payload it knows it for (GET /api/session, the `session` of stream `done`
+// and `apperror`, a compression continuation's own payload), and per turn as a stream
+// event for that session. The notice renders ONLY from the session on screen
+// (S.session.memory_status): there is no per-session client state and nothing to hand
+// over between sessions, so session switch, reload, continuation, redirect and
+// clearing the selected session all follow from the assignment of S.session below.
+// A dismissal is remembered per profile and reason (it applies to every conversation
+// of that profile); an explicit `ok` for the profile forgets its dismissals, so a
+// later recurrence is shown and announced again. No status (healthy sessions, older
+// servers): the element stays `hidden`, so normal sessions never see a layout change.
+const MEMORY_OFF_NOTICE_KEYS={
+  agent_outdated:'memory_off_agent_outdated',
+  agent_no_instance_claim:'memory_off_agent_no_instance_claim',
+  provider_shared_instance:'memory_off_provider_shared_instance',
+};
+const MEMORY_OFF_DISMISS_PREFIX='hermes-webui-memory-off-dismissed:';
+const _memoryOffAnnounced=new Set(); // `${profile}:${reason}` announced on this page
+function _memoryNoticeProfile(session){return String((session&&session.profile)||'default');}
+function _memoryOffDismissKey(profile,reason){return MEMORY_OFF_DISMISS_PREFIX+profile+':'+reason;}
+function _memoryOffDismissed(profile,reason){
+  try{return localStorage.getItem(_memoryOffDismissKey(profile,reason))==='1';}catch(_){return false;}
+}
+function _memoryOffReason(session){
+  const status=session&&session.memory_status;
+  if(!status||typeof status!=='object'||status.state!=='off') return '';
+  const reason=String(status.reason||'');
+  return Object.prototype.hasOwnProperty.call(MEMORY_OFF_NOTICE_KEYS,reason)?reason:'';
+}
+// The server says memory is on for this profile's agent: what was dismissed for the
+// profile is news again when it recurs.
+function _forgetMemoryOffDismissals(profile){
+  for(const reason of Object.keys(MEMORY_OFF_NOTICE_KEYS)){
+    try{localStorage.removeItem(_memoryOffDismissKey(profile,reason));}catch(_){}
+    _memoryOffAnnounced.delete(profile+':'+reason);
+  }
+}
+function syncMemoryOffNotice(){
+  const notice=$('memoryOffNotice');
+  const text=$('memoryOffNoticeText');
+  if(!notice||!text) return;
+  const session=(typeof S!=='undefined'&&S)?S.session:null;
+  const profile=_memoryNoticeProfile(session);
+  if(session&&session.memory_status&&session.memory_status.state==='ok') _forgetMemoryOffDismissals(profile);
+  const reason=_memoryOffReason(session);
+  if(!reason||_memoryOffDismissed(profile,reason)){
+    notice.hidden=true;
+    notice.dataset.reason='';
+    return;
+  }
+  const copy=t(MEMORY_OFF_NOTICE_KEYS[reason]);
+  if(text.textContent!==copy) text.textContent=copy;
+  notice.dataset.reason=reason;
+  const wasHidden=notice.hidden;
+  notice.hidden=false;
+  // Appearing (often mid-turn) shrinks the transcript viewport by the notice's height; keep a
+  // reader pinned to the tail pinned, gated like the chat-todos tray (the helper itself no-ops
+  // for a reader who scrolled away).
+  if(wasHidden&&!(typeof window!=='undefined'&&window._autoScrollFollow===false)&&typeof _repinMessagesAfterComposerResize==='function') _repinMessagesAfterComposerResize();
+  // A live region that was `hidden` is not reliably announced when it appears, so
+  // say it once per profile and reason through the shared polite announcer as well.
+  const announceKey=profile+':'+reason;
+  if(!_memoryOffAnnounced.has(announceKey)){
+    _memoryOffAnnounced.add(announceKey);
+    const announcer=$('a11yAnnouncer');
+    if(announcer) announcer.textContent=copy;
+  }
+}
+// A stream event about session `sid` (warning memory_off / memory_status ok). Only the
+// session on screen is updated; any other session gets its status from its own
+// payload when it is opened. Returns true when the session on screen was updated.
+function noteSessionMemoryStatus(sid,status){
+  if(typeof S==='undefined'||!S||!S.session||!sid||String(S.session.session_id||'')!==String(sid)) return false;
+  if(!status||typeof status!=='object') return false;
+  S.session.memory_status=status;
+  syncMemoryOffNotice();
+  return true;
+}
+function dismissMemoryOffNotice(){
+  const notice=$('memoryOffNotice');
+  const session=(typeof S!=='undefined'&&S)?S.session:null;
+  const reason=_memoryOffReason(session);
+  if(reason){try{localStorage.setItem(_memoryOffDismissKey(_memoryNoticeProfile(session),reason),'1');}catch(_){}}
+  if(notice){notice.hidden=true;notice.dataset.reason='';}
+  // The dismiss button disappears with the notice; keep focus somewhere useful.
+  const composer=$('msg');
+  if(composer&&typeof composer.focus==='function') composer.focus();
+}
+// Render from the session on screen: every assignment of S.session (load, switch,
+// reload, continuation, redirect, new chat, delete -> null) repaints the notice once,
+// after the assigning code has finished. A payload for the SAME session from an
+// endpoint that does not report memory (rename, toolsets, ...) keeps what the server
+// last said about that session; another session never inherits it.
+(function _renderMemoryOffNoticeFromSessionOnScreen(){
+  if(typeof S==='undefined'||!S) return;
+  const desc=Object.getOwnPropertyDescriptor(S,'session');
+  if(!desc||!desc.configurable||!('value' in desc)) return;
+  let current=desc.value;
+  let queued=false;
+  const later=typeof queueMicrotask==='function'?queueMicrotask:(fn=>Promise.resolve().then(fn));
+  Object.defineProperty(S,'session',{
+    configurable:true,
+    enumerable:true,
+    get(){return current;},
+    set(next){
+      if(next&&current&&next!==current&&typeof next==='object'&&!('memory_status' in next)
+        &&current.memory_status&&String(next.session_id||'')===String(current.session_id||'')){
+        next.memory_status=current.memory_status;
+      }
+      current=next;
+      if(queued) return;
+      queued=true;
+      later(()=>{queued=false;syncMemoryOffNotice();});
+    },
+  });
+})();
+if(typeof window!=='undefined'&&typeof window.addEventListener==='function'){
+  // Another tab dismissed (or an ok forgot) a notice: repaint now, not at the next sync.
+  window.addEventListener('storage',e=>{
+    if(e&&typeof e.key==='string'&&e.key.startsWith(MEMORY_OFF_DISMISS_PREFIX)) syncMemoryOffNotice();
+  });
+}
+// ── end #8517 memory-off notice ──
+
 // ── Live host resource health panel (#693) ──
 const SYSTEM_HEALTH_INTERVAL_MS=5000;
 let _systemHealthTimer=null;
@@ -12301,6 +14181,15 @@ function _showAgentHealthAlert(payload){
   if(title) title.textContent='Hermes agent is not responding';
   const state=payload&&payload.details&&payload.details.gateway_state?` State: ${payload.details.gateway_state}.`:'';
   if(details) details.textContent=`Gateway heartbeat failed.${state} Messages may not be delivered until it comes back.`;
+  const restartBtn=$('btnRestartGateway');
+  if(restartBtn){
+    // The restart drives the LOCAL gateway CLI; hide it unless the server
+    // proved WebUI controls the monitored Gateway (#8391). Fails closed.
+    const lifecycle=payload&&payload.gateway_lifecycle;
+    const managed=!!(lifecycle&&lifecycle.managed===true);
+    restartBtn.hidden=!managed;
+    restartBtn.style.display=managed?'':'none';
+  }
   banner.hidden=false;
   banner.classList.add('visible');
 }
@@ -12794,9 +14683,12 @@ function _formatUpdateApplyExceptionMessage(error){
   const message=(error&&error.message)||String(error||'unknown error');
   return _i18nUpdateText('update_failed_prefix','Update failed: ')+message;
 }
-async function applyUpdates(){
+async function applyUpdates(opts){
   if(window._updateApplyInFlight) return;
   window._updateApplyInFlight=true;
+  // #7293: true only on the re-send after the user explicitly confirmed
+  // interrupting the WebUI agent runs that made the server refuse the update.
+  const forceActiveRuns=!!(opts&&opts.forceActiveRuns===true);
   const updateText=(key,fallback)=>(typeof _i18nUpdateText==='function'?_i18nUpdateText(key,fallback):fallback);
   const btn=$('btnApplyUpdate');
   const resetApplyButton=(delayMs)=>{
@@ -12836,9 +14728,13 @@ async function applyUpdates(){
       const _applyBody={target};
       const _ch=window._updateData?.[target]?.channel;
       if(_ch==='stable'||_ch==='experimental') _applyBody.channel=_ch;
+      if(forceActiveRuns) _applyBody.force_active_runs=true;
       const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:120000});
       if(!res.ok){
         _showUpdateError(target,res);
+        if(res.restart_blocked&&res.force_available){
+          _renderActiveRunsForceOffer(target,res,()=>applyUpdates({forceActiveRuns:true}));
+        }
         resetApplyButton(0);
         return;
       }
@@ -12892,16 +14788,82 @@ function _showUpdateError(target,res){
     clearLockBtn.style.display='inline-block';
   }
 }
-async function applyClearUpdateLock(btn){
+function _activeRunsUpdateText(key,count,fallback){
+  if(typeof t==='function'){
+    const val=t(key,count);
+    if(val&&val!==key) return val;
+  }
+  return fallback;
+}
+// #7293: the server refuses a WebUI-initiated update/restart while WebUI agent
+// runs are active (restart_blocked + force_available). Offer one explicit,
+// confirmed override that re-sends the same request with
+// force_active_runs:true; the server then saves those runs as interrupted
+// before it restarts. Gateway runs that a restart can reattach are not counted
+// and keep running in the Gateway.
+function _renderActiveRunsForceOffer(target,res,resend){
+  const errEl=$('updateError');
+  if(!errEl||typeof resend!=='function') return;
+  const prior=$('btnForceUpdateActiveRuns');
+  if(prior&&prior.parentNode) prior.parentNode.remove();
+  // Never show two red force buttons: while this offer is up it is the one
+  // way forward (on the conflict path its re-send also carries the hard reset).
+  const legacyForceBtn=$('btnForceUpdate');
+  if(legacyForceBtn) legacyForceBtn.style.display='none';
+  const rawCount=Number(res&&res.active_runs)||Number(res&&res.active_streams)||1;
+  const count=Math.max(1,Math.floor(rawCount));
+  const plural=count===1?'':'s';
+  const label=_activeRunsUpdateText('update_force_active_runs',count,'Update anyway (interrupts '+count+' run'+plural+')');
+  const actions=document.createElement('div');
+  actions.style.marginTop='6px';
+  const btn=document.createElement('button');
+  btn.type='button';
+  btn.id='btnForceUpdateActiveRuns';
+  btn.className='update-btn';
+  btn.style.background='var(--error,#e05)';
+  btn.style.color='#fff';
+  btn.style.borderColor='var(--error,#e05)';
+  btn.dataset.target=target;
+  btn.textContent=label;
+  btn.onclick=async()=>{
+    if(btn.disabled) return;
+    const confirmed=await showConfirmDialog({
+      title:_activeRunsUpdateText('update_force_active_runs_title',count,'Interrupt active runs?'),
+      message:_activeRunsUpdateText(
+        'update_force_active_runs_message',
+        count,
+        count+' WebUI agent run'+(count===1?' is':'s are')+' still working. Updating now restarts the server and stops '+(count===1?'it':'them')+'; '+(count===1?'it is':'each one is')+' saved as interrupted. Wait for '+(count===1?'it':'them')+' to finish if you can.'
+      ),
+      confirmLabel:_activeRunsUpdateText('update_force_active_runs_confirm',count,'Interrupt and update'),
+      danger:true,
+      focusCancel:true,
+    });
+    if(!confirmed) return;
+    btn.disabled=true;
+    btn.textContent=_i18nUpdateText('update_updating','Updating\u2026');
+    try{
+      await resend();
+    }finally{
+      if(btn.isConnected){btn.disabled=false;btn.textContent=label;}
+    }
+  };
+  actions.appendChild(btn);
+  errEl.appendChild(actions);
+  errEl.style.display='block';
+}
+async function applyClearUpdateLock(btn,opts){
   if(window._clearLockInFlight) return;
   const target=btn.dataset.target;
   if(!target) return;
+  const forceActiveRuns=!!(opts&&opts.forceActiveRuns===true);  // #7293
   window._clearLockInFlight=true;
   btn.disabled=true;
   const originalLabel=btn.textContent;
   btn.textContent='Checking lock…';
   try{
-    const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify({target}),timeoutMs:60000});
+    const _clearBody={target};
+    if(forceActiveRuns) _clearBody.force_active_runs=true;
+    const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify(_clearBody),timeoutMs:60000});
     if(res.ok){
       sessionStorage.removeItem('hermes-update-checked');
       sessionStorage.removeItem('hermes-update-dismissed');
@@ -12919,6 +14881,9 @@ async function applyClearUpdateLock(btn){
       const errEl=$('updateError');
       if(errEl){errEl.textContent=msg;errEl.style.display='block';}
       else showToast(msg);
+      if(res.restart_blocked&&res.force_available){
+        _renderActiveRunsForceOffer(target,res,()=>applyClearUpdateLock(btn,{forceActiveRuns:true}));
+      }
     }
   }catch(e){
     const msg='Lock-check request failed: '+((e&&e.message)||String(e));
@@ -13027,26 +14992,38 @@ async function _readHealthServerIdentity() {
     return null;
   }
 }
-async function forceUpdate(btn){
+async function forceUpdate(btn,opts){
   const target=btn&&btn.dataset.target;
   if(!target) return;
-  const confirmed=await showConfirmDialog({
-    title:'Force update '+target+'?',
-    message:'This will discard all local changes and delete untracked files in the '+target+' repo, then reset to the latest remote version. This cannot be undone.',
-    confirmLabel:'Force update',
-    danger:true,
-    focusCancel:true,
-  });
-  if(!confirmed) return;
+  // #7293: the active-runs override re-sends this request after its own
+  // confirmation; the discard-local-changes confirmation was already given.
+  const forceActiveRuns=!!(opts&&opts.forceActiveRuns===true);
+  if(!forceActiveRuns){
+    const confirmed=await showConfirmDialog({
+      title:'Force update '+target+'?',
+      message:'This will discard all local changes and delete untracked files in the '+target+' repo, then reset to the latest remote version. This cannot be undone.',
+      confirmLabel:'Force update',
+      danger:true,
+      focusCancel:true,
+    });
+    if(!confirmed) return;
+  }
   btn.disabled=true;btn.textContent='Force updating\u2026';
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';}
   try{
     const baselineServerIdentity = await _readHealthServerIdentity();
-    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify((()=>{const b={target};const _ch=window._updateData?.[target]?.channel;if(_ch==='stable'||_ch==='experimental')b.channel=_ch;return b;})()),timeoutMs:120000});
+    const _forceBody={target};
+    const _ch=window._updateData?.[target]?.channel;
+    if(_ch==='stable'||_ch==='experimental') _forceBody.channel=_ch;
+    if(forceActiveRuns) _forceBody.force_active_runs=true;
+    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify(_forceBody),timeoutMs:120000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
-      btn.disabled=false;btn.textContent='Force update';
+      btn.disabled=false;btn.textContent='Force update';btn.style.display='inline-block';
+      if(res.restart_blocked&&res.force_available){
+        _renderActiveRunsForceOffer(target,res,()=>forceUpdate(btn,{forceActiveRuns:true}));
+      }
       return;
     }
     showToast('Force update applied — restarting…');
@@ -13429,6 +15406,7 @@ function syncTopbar(){
     if(_profileLabel) _profileLabel.textContent=S.activeProfile||'default';
     const _titleLabel=$('titlebarProfileLabel');
     if(_titleLabel) _titleLabel.textContent=S.activeProfile||'default';
+    if(typeof _syncProviderQuotaForActiveContext==='function') _syncProviderQuotaForActiveContext();
     return;
   }
   const sessionTitle=S.session.title||t('untitled');
@@ -13556,6 +15534,7 @@ function syncTopbar(){
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
   const titleLabel=$('titlebarProfileLabel');
   if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
+  if(typeof _syncProviderQuotaForActiveContext==='function') _syncProviderQuotaForActiveContext();
 }
 
 function msgContent(m){
@@ -15963,33 +17942,78 @@ function _anchorSceneWorklogGroup(blocks, opts){
   if(opts&&opts.turnStartedAt!==undefined&&opts.turnStartedAt!==null) group.setAttribute('data-turn-started-at',String(opts.turnStartedAt));
   return group;
 }
+// Tool DOM is expensive and usually immutable while prose streams. Keep the
+// signature on the node, not in a global cache: removing a turn drops its cache,
+// and HTML-restored nodes take the normal build/rehydration path once. Include
+// the full row so in-place result/argument corrections cannot reuse stale HTML.
+function _anchorSceneToolRenderSignature(row, opts){
+  if(!row||row.role!=='tool') return null;
+  return JSON.stringify([row,opts||{},document.documentElement.lang,
+    typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling()]);
+}
+function _anchorSceneDataRowKey(row, streamId){
+  const id=String(row.row_id||row.local_id||'').trim();
+  if(!id) return '';
+  return `${String(streamId||'').trim()}\u0000${id}\u0000${String(row.role||'activity').trim()}\u0000${String(row.source_event_type||'').trim()}`;
+}
+function _anchorScenePlaceChildren(parent, nodes){
+  let next=null;
+  for(let i=nodes.length-1;i>=0;i--){
+    const node=nodes[i];
+    if(node.parentNode!==parent||node.nextSibling!==next) parent.insertBefore(node,next);
+    next=node;
+  }
+  const keep=new Set(nodes);
+  Array.from(parent.children).forEach(node=>{if(!keep.has(node)) node.remove();});
+}
 function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   const list=_toolWorklogListEl(group);
   if(!group||!list) return false;
-  list.innerHTML='';
-  let wrote=false;
+  const existing=new Map();
+  list.querySelectorAll('[data-anchor-scene-row="1"]').forEach(node=>{
+    const key=_transparentLiveRowKey(node,'');
+    if(key) existing.set(key,node);
+  });
+  const children=[];
   let currentTools=null;
+  let toolNodes=[];
+  const flushTools=()=>{
+    if(currentTools){
+      const mounted=Array.from(currentTools.querySelectorAll('[data-anchor-row-role="tool"]'));
+      const unchanged=mounted.length===toolNodes.length&&mounted.every((node,i)=>node===toolNodes[i]);
+      if(!unchanged) _anchorScenePlaceChildren(currentTools,toolNodes);
+      currentTools._anchorSceneToolsStable=unchanged;
+    }
+    currentTools=null;
+    toolNodes=[];
+  };
   for(const row of rows){
-    const node=_anchorSceneNodeForRow(row,opts);
+    const key=_anchorSceneDataRowKey(row,'');
+    const previous=key?existing.get(key):null;
+    const signature=_anchorSceneToolRenderSignature(row,opts);
+    const node=signature&&previous&&previous._anchorToolRenderSignature===signature
+      ? previous : _anchorSceneNodeForRow(row,opts);
     if(!node) continue;
+    if(signature) node._anchorToolRenderSignature=signature;
     if(row.role==='tool'){
       if(!currentTools){
-        currentTools=document.createElement('div');
+        const parent=previous&&previous.closest('.wl-step-tools[data-worklog-tools="1"]');
+        currentTools=parent&&parent.parentElement===list&&!children.includes(parent)
+          ? parent : document.createElement('div');
         currentTools.className='wl-step-tools tool-worklog-tools';
         currentTools.setAttribute('data-worklog-tools','1');
-        list.appendChild(currentTools);
+        children.push(currentTools);
       }
-      currentTools.appendChild(node);
+      toolNodes.push(node);
     }else{
-      currentTools=null;
-      list.appendChild(node);
+      flushTools();
+      children.push(node);
     }
-    wrote=true;
   }
-  if(wrote){
-    _syncToolCallGroupSummary(group);
-  }
-  return wrote;
+  flushTools();
+  _anchorScenePlaceChildren(list,children);
+  if(children.length) _syncToolCallGroupSummary(group);
+  return !!children.length;
 }
 function _liveProcessedWorklogAnchorScore(group, index){
   if(!group) return -1;
@@ -16229,8 +18253,22 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
     : null;
   const scrollSnapshot=_captureMessageScrollSnapshot();
   const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);
-  blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
-  blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"],.interim-collapse-toggle').forEach(el=>el.remove());
+  const activityKey=`live:${streamId||S.activeStreamId||'anchor'}`;
+  // The retained group must still be LIVE: an interim_assistant boundary
+  // finalizes the group in place (closeCurrentLiveActivityGroup ->
+  // _finalizeLiveActivityDisclosureGroup strips data-live-tool-call-group and
+  // collapses it) while leaving data-anchor-scene-owner="1". Reusing that
+  // finalized group kept re-rendering into a collapsed, static frame — tools
+  // and later live prose after the boundary never appeared while the turn was
+  // still busy. Requiring the live flag makes the sweep remove the finalized
+  // group so _anchorSceneWorklogGroup builds a fresh live one (#7495 re-gate).
+  const retainedGroup=blocks.querySelector(`.tool-worklog-group[data-anchor-scene-owner="1"][data-live-tool-call-group="1"][data-tool-worklog-key="${CSS.escape(activityKey)}"]`);
+  blocks.querySelectorAll('[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>{
+    if(el!==retainedGroup&&!(retainedGroup&&retainedGroup.contains(el))) el.remove();
+  });
+  blocks.querySelectorAll('.live-worklog[data-live-worklog-shell="1"],.tool-worklog-group[data-live-tool-call-group="1"],.tool-call-group[data-live-tool-call-group="1"],.tool-card-row[data-live-tid]:not(.transparent-event-row),.agent-activity-thinking[data-live-thinking="1"],.interim-collapse-toggle').forEach(el=>{
+    if(el!==retainedGroup&&!(retainedGroup&&retainedGroup.contains(el))) el.remove();
+  });
   blocks.querySelectorAll('[data-live-assistant="1"]').forEach(el=>{
     el.classList.add('assistant-segment-worklog-source');
     el.setAttribute('aria-hidden','true');
@@ -16322,12 +18360,24 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   const renderedRows=[];
   for(const row of rows){
     const rowEventTs=typeof _anchorSceneRowTimestampSeconds==='function'?_anchorSceneRowTimestampSeconds(row):null;
-    const node=_anchorSceneTransparentNodeForRow(row,{
+    const rowOpts={
       live:true,
       settled:false,
       streamId:streamId||S.activeStreamId||'',
       sessionId:S.session&&S.session.session_id,
-    });
+    };
+    const signature=_anchorSceneToolRenderSignature(row,rowOpts);
+    const dataKey=_anchorSceneDataRowKey(row,activeStreamId);
+    const cached=dataKey?preserveByKey.get(dataKey):null;
+    if(signature&&cached&&cached._anchorToolRenderSignature===signature){
+      // Timestamp visibility is presentation state, independent of tool content.
+      // Reconcile it in place so toggles preserve disclosure and text selection.
+      _syncTransparentEventTimestampVisibility(cached);
+      preserveByKey.delete(dataKey);
+      renderedRows.push(cached);
+      continue;
+    }
+    const node=_anchorSceneTransparentNodeForRow(row,rowOpts);
     if(!node) continue;
     const key = _transparentLiveRowKey(node, activeStreamId);
     const existing = key ? preserveByKey.get(key) : null;
@@ -16338,13 +18388,18 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
       : node;
     if(existing) preserveByKey.delete(key);
     if(!renderedNode) continue;
+    if(signature) renderedNode._anchorToolRenderSignature=signature;
     renderedRows.push(renderedNode);
   }
-  const transparentLiveRowAlreadyPositioned=(node, expectedNextSibling)=>!!(
-    node &&
-    node.parentElement===blocks &&
-    node.nextSibling===expectedNextSibling
-  );
+  const transparentLiveRowAlreadyPositioned=(node, expectedNextSibling)=>{
+    if(!node||node.parentElement!==blocks) return false;
+    let next=node.nextSibling;
+    // Streaming may insert a hidden legacy prose anchor between visible rows.
+    // It owns stream metadata, not scene order; moving an unchanged tool past
+    // it needlessly clears selection in Safari/Chromium.
+    while(next&&next.nodeType===1&&next.hidden&&next.getAttribute('data-live-assistant')==='1') next=next.nextSibling;
+    return next===expectedNextSibling;
+  };
   let expectedNextSibling=(liveFooter&&liveFooter.parentElement===blocks) ? liveFooter : null;
   for(let i=renderedRows.length-1;i>=0;i--){
     const renderedNode=renderedRows[i];
@@ -17225,6 +19280,67 @@ function _collapseJustSettledWorklogInPlace(streamId){
       const list=_toolWorklogListEl(group);
       if(list) list.replaceChildren();
     });
+  }
+  return true;
+}
+function _finalizeJustSettledTransparentScene(streamId){
+  // #7676 (Transparent Stream): the settled transparent scene is written by the
+  // FIRST settle render while the keep-open token is still armed, so it renders
+  // uncapped — and the compact path above cannot act on it (transparent activity
+  // rows are flat; there is no disclosure group to collapse). STREAM_DONE
+  // therefore used to fall through to a SECOND full render (`innerHTML=''`
+  // rebuild of the entire transcript) purely to reach the final state — the
+  // widest possible blank window, once per turn end.
+  //
+  // Finalize in place instead: re-render ONLY this turn's settled scene now that
+  // the token is disarmed (so the row cap and the retained-final-prose state are
+  // applied), never touching the rest of the transcript. Returns true only when
+  // that in-place finalize actually happened AND the turn is visibly non-blank;
+  // otherwise the caller must keep the full rebuild as the fallback.
+  if(!streamId) return false;
+  if(typeof isTransparentStream!=='function'||!isTransparentStream()) return false;
+  const inner=$('msgInner');
+  if(!inner||!Array.isArray(S.messages)) return false;
+  const msgs=S.messages;
+  let ownerIdx=-1;
+  for(let i=msgs.length-1;i>=0;i--){
+    const msg=msgs[i];
+    if(msg&&msg.role==='assistant'&&msg._anchor_activity_scene
+       &&typeof _settledAssistantStreamId==='function'
+       &&_settledAssistantStreamId(msg)===String(streamId)){
+      ownerIdx=i;break;
+    }
+  }
+  if(ownerIdx<0) return false;
+  const segment=inner.querySelector('.assistant-segment[data-msg-idx="'+ownerIdx+'"]');
+  if(!segment) return false;
+  const turn=typeof segment.closest==='function'?segment.closest('.assistant-turn'):null;
+  if(!turn) return false;
+  // The scene renderer replaces this turn's rows with the global default
+  // detail state; bracket it with the existing capture/restore pair (the same
+  // bracket renderMessages uses) so the reader's disclosure choices and detail
+  // body scroll survive the in-place finalize.
+  const detailDisclosureState=typeof _captureWorklogDetailDisclosureState==='function'
+    ? _captureWorklogDetailDisclosureState(turn)
+    : null;
+  const settledSceneRendered=_renderSettledAnchorSceneTransparentForMessage(msgs[ownerIdx],segment,ownerIdx);
+  if(typeof _restoreWorklogDetailDisclosureState==='function')
+    _restoreWorklogDetailDisclosureState(turn,detailDisclosureState);
+  if(!settledSceneRendered) return false;
+  const _visibleRows=turn.querySelectorAll('.transparent-event-row:not([hidden]):not([aria-hidden="true"])');
+  if(_assistantTurnHasVisibleRenderedSegment(turn)!==true&&!_visibleRows.length) return false;
+  // The skipped full render was also the pass that enhanced Markdown tables (sort buttons and filter, wired by
+  // the renderMessages wrapper in messages.js). The scene renderer replaced this turn's rows, so enhance them
+  // here; tables in retained activity rows otherwise lose sorting and filtering (#7833 re-gate).
+  if(typeof enhanceMarkdownTables==='function') enhanceMarkdownTables(turn);
+  // The skipped full render was also the one that (re)wrote _sessionHtmlCache:
+  // the first settle render is excluded while the keep-open token is armed, so
+  // drop any older entry for this session — a later switch must rebuild from
+  // S.messages instead of restoring pre-settle HTML.
+  if(typeof _sessionHtmlCache!=='undefined'&&_sessionHtmlCache
+     &&typeof _sessionHtmlCache.delete==='function'){
+    _sessionHtmlCache.delete(S.session&&S.session.session_id);
+    if(typeof _sessionHtmlCacheSid!=='undefined') _sessionHtmlCacheSid=null;
   }
   return true;
 }
@@ -18474,13 +20590,23 @@ window._bindHermesExtensionMessageActions=function(){
 // constant-allocation cost: strings are streamed char-by-char (no copy) and
 // object fields are walked key-by-key so only scalar string forms are ever
 // allocated — no integral JSON.stringify() of a whole payload, and no
-// head/tail slice copies. _renderCacheKey's length+edges shortcut is only
-// safe for the render-window geometry key, where equal span+edges means
-// equal window; here equal signature must mean equal CONTENT.
+// head/tail slice copies. Equal signature must mean equal CONTENT (the
+// per-message _renderCacheKey hashes every character of long bodies for the
+// same reason).
 function _addBoundedHash(add, value, depth){
   if(value==null){ add('null'); return; }
   const t=typeof value;
-  if(t==='string'){ add(value.length); add(value); return; }
+  if(t==='string'){
+    add(value.length);
+    // #8228 re-gate (2026-10-20): hash the WHOLE string. An earlier round
+    // sampled only length + head/tail for long `data:` payloads, which made
+    // equal-length strings with an unchanged head/tail and a different MIDDLE
+    // collide — e.g. rendered `data:text/plain,...` message text and tool
+    // payloads, where _sessionHtmlCache then serves stale HTML. The unrendered
+    // native image parts are excluded where they belong, on the message
+    // projection in _addMessageRenderHash, so this shared helper stays exact.
+    add(value); return;
+  }
   if(t==='number'||t==='boolean'){ add(t); add(value); return; }
   if(t==='object'){ _hashObjectInto(add, value, (depth||0)+1); return; }
   add(t); add(String(value));
@@ -18512,6 +20638,40 @@ function _hashObjectInto(add, value, depth){
   for(let i=0;i<keys.length;i++){ add(keys[i]); add(i); _addBoundedHash(add, value[keys[i]], depth); }
 }
 
+// One definition for every render-affecting message property, feeding the
+// session-HTML cache signature (_messageRenderCacheSignature).
+//
+// The former implementation hand-listed fields, and the #8228 review found the
+// list had drifted: `reasoning_content` (the field the row renderer reads
+// FIRST — see _assistantReasoningPayloadText) was never hashed, `_statusCard`
+// stringified to "[object Object]", `_anchor_activity_scene` and the
+// partial-tool argument payloads were missing, and joined tool results were
+// invisible entirely (they live on other messages). A hand list can always
+// drift again the moment the row renderer learns a new field, so this now
+// deep-hashes the ENTIRE message object: every key, array element and nested
+// object, insertion-ordered, through the same bounded, cycle-safe walk
+// (_hashObjectInto) the signature already used for structured payloads.
+// Over-coverage only costs a redundant re-render; under-coverage serves stale
+// HTML from the session cache, so the conservative direction is deliberate.
+function _addMessageRenderHash(add, m){
+  if(!m||typeof m!=='object'){ add('missing'); return; }
+  // #8228 re-gate (2026-10-20): exclude ONLY the native image parts msgContent()
+  // never draws (`image` / `image_url` / `input_image`) — a pasted screenshot
+  // rides on the user message as an `image_url` data URI (api/helpers.py:1593
+  // exempts it from redaction), so hashing it whole cost ~13x per render on a
+  // vision-heavy session (35 ms -> 450 ms on 320 messages with 8 x 1.44 MB
+  // images). The exclusion is a message PROJECTION: a shallow copy with a
+  // filtered content array, never a mutation of the caller's object. Every
+  // other field — including rendered text that happens to start with `data:` —
+  // is hashed in full, so a middle-only edit still changes the signature.
+  const unrendered=p=>!!p&&(p.type==='image'||p.type==='image_url'||p.type==='input_image');
+  if(Array.isArray(m.content)&&m.content.some(unrendered)){
+    _addBoundedHash(add, Object.assign({}, m, {content:m.content.filter(p=>!unrendered(p))}));
+    return;
+  }
+  _addBoundedHash(add, m);
+}
+
 function _messageRenderCacheSignature(){
   let hash=2166136261;
   function add(value){
@@ -18525,32 +20685,17 @@ function _messageRenderCacheSignature(){
   }
   const messages=Array.isArray(S.messages)?S.messages:[];
   add(messages.length);
+  /* The per-message render surface is hashed by _addMessageRenderHash, which
+     deep-hashes the ENTIRE message object — msgContent(m), m.tool_calls,
+     m._partial_tool_calls, reasoning (including reasoning_content), the
+     activity scene, status cards, attachments and content-array parts are all
+     covered, with no hand-maintained field list that can drift (review
+     finding on #8228). One hash per message: the earlier explicit
+     msgContent/tool_calls extractions re-hashed content the object walk
+     already covers, doubling the cost on large tool sessions (371 ms vs
+     135 ms measured on a 3.6 MB transcript — #8228 re-review). */
   for(const m of messages){
-    if(!m||typeof m!=='object'){ add('missing'); continue; }
-    add(m.role);add(m.timestamp);add(m._ts);add(m._error);add(m._statusCard);
-    add(msgContent(m));
-    if(Array.isArray(m.content)){
-      add('content-array');
-      m.content.forEach(part=>{
-        if(!part||typeof part!=='object'){ add(part); return; }
-        add(part.type);add(part.id);add(part.name);add(part.text);add(part.content);
-      });
-    }
-    if(Array.isArray(m.tool_calls)){
-      add('message-tool-calls');add(m.tool_calls.length);
-      m.tool_calls.forEach(tc=>{
-        add(tc&&tc.id);add(tc&&tc.name);add(tc&&tc.type);
-        add(tc&&tc.function&&tc.function.name);
-        // function.arguments is already a string — streamed in full, no copy.
-        _addBoundedHash(add, tc&&tc.function&&tc.function.arguments);
-      });
-    }
-    if(Array.isArray(m._partial_tool_calls)){
-      add('partial-tool-calls');add(m._partial_tool_calls.length);
-      m._partial_tool_calls.forEach(tc=>{add(tc&&tc.id);add(tc&&tc.name);add(tc&&tc.snippet);});
-    }
-    if(_messageHasReasoningPayload(m)) add(m.reasoning||m.thinking||m._reasoning||'reasoning');
-    if(Array.isArray(m.attachments)) m.attachments.forEach(a=>_addBoundedHash(add, a));
+    _addMessageRenderHash(add, m);
   }
   const toolCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
   add('settled-tool-calls');add(toolCalls.length);
@@ -18681,6 +20826,7 @@ function _assistantToolAnchorIdxForMessage(messages, rawIdx){
   if(_assistantMessageHasVisibleContent(current)) return rawIdx;
   if(_assistantReasoningPayloadText(current)) return rawIdx;
   for(let idx=rawIdx-1;idx>=0;idx--){
+    if(list[idx]&&list[idx].role==='user') break;
     if(_assistantMessageHasVisibleContent(list[idx])) return idx;
   }
   return rawIdx;
@@ -19626,14 +21772,117 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
   scrollToBottom();
 }
 
-function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow){
+// #7591: blank-viewport recovery runs immediately after the render's OWN scroll
+// restore, and that restore re-arms _programmaticScroll with a fresh timestamp
+// (see _restoreMessageScrollSnapshot). So by the time recovery runs it can no
+// longer tell that write apart from an INDEPENDENT programmatic scroll that was
+// already settling — a depth counter read from inside recovery was therefore
+// always non-zero and the guard never consulted the latch at all. Capture the
+// ownership BEFORE the restore at the render call sites and pass it in, so the
+// render's own write can use the bounded clamp while a genuinely foreign write
+// stays protected. A jump-to-question also holds viewport ownership outright.
+function _captureMessageRecoveryOwnership(){
+  return {
+    programmatic:(typeof _freshProgrammaticScrollActive==='function')?_freshProgrammaticScrollActive():false,
+    jumpOwner:(typeof _messageJumpScrollOwner!=='undefined'&&!!_messageJumpScrollOwner),
+  };
+}
+function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow, ownership){
   if(!preserveScroll||!virtualWindow||!virtualWindow.virtualized||!!(options&&options._virtualFallback)) return false;
-  if(_messageViewportIntersectsRenderedRow()) return false;
+  if(_messageViewportIntersectsRenderedRow()){
+    _messageVirtualBlankClampAttempts=0;
+    return false;
+  }
   if(_sessionHtmlCacheSid&&S.session&&S.session.session_id===_sessionHtmlCacheSid){
     _sessionHtmlCache.delete(_sessionHtmlCacheSid);
   }
   _messageVirtualWindowKey='';
+  // #7591: the full-render fallback below re-mounts the WHOLE transcript, which
+  // collapses scrollHeight to its real height; the browser then clamps scrollTop
+  // into the tail, the window re-derives from the clamped position, and the next
+  // blank detection repeats it — the measured windowed<->full-render oscillation
+  // (29 flips / 90s) that reads as "scrolling is stuck". While rows exist, clamp
+  // the viewport to the nearest rendered edge and refresh the WINDOW instead:
+  // that never changes scrollHeight, so nothing fights the input direction. The
+  // full render stays as the bounded escalation when the clamp cannot help (no
+  // rows, an in-flight programmatic write, or a clamp that did not take).
+  if(_clampVirtualizedBlankViewportToRenderedEdge(ownership)){
+    renderMessages({preserveScroll:true});
+    return true;
+  }
   renderMessages({preserveScroll:true,_virtualFallback:true});
+  return true;
+}
+// One clamp per blank detection: the attempt counter is cleared as soon as a
+// render intersects a rendered row again (in _maybeRecoverVirtualizedBlankViewport),
+// so a healthy transcript never accumulates budget and a still-blank viewport
+// escalates to the full render after exactly one geometry clamp instead of recursing.
+function _clampVirtualizedBlankViewportToRenderedEdge(ownership){
+  if(_messageVirtualBlankClampAttempts>=1) return false;
+  // A programmatic scroll write that was ALREADY settling when this render
+  // started is independent of the render's own restore, and a jump-to-question
+  // deliberately owns the viewport while it settles — clamping would fight
+  // either one. `ownership` is captured before _scrollAfterMessageRender at the
+  // render call sites (see _captureMessageRecoveryOwnership), so the restore's
+  // own fresh latch is never mistaken for a foreign write. With no captured
+  // ownership (direct/helper call) fall back to the live latch.
+  if(ownership){
+    if(ownership.programmatic||ownership.jumpOwner) return false;
+  }else if(typeof _freshProgrammaticScrollActive==='function'&&_freshProgrammaticScrollActive()){
+    return false;
+  }
+  const container=(typeof $==='function')?$('messages'):null;
+  if(!container||!container.querySelectorAll) return false;
+  const rows=container.querySelectorAll('[data-msg-idx]');
+  if(!rows||!rows.length) return false;
+  const containerRect=container.getBoundingClientRect();
+  if(!containerRect) return false;
+  const scrollTop=Math.max(0,Number(container.scrollTop)||0);
+  const clientHeight=Math.max(0,Number(container.clientHeight)||0);
+  if(!(clientHeight>0)) return false;
+  const viewBottom=scrollTop+clientHeight;
+  // Nearest ROW edge, not the union block: the render window is head rows plus
+  // the retained tail with a bottomPad gap between them, so the viewport can sit
+  // inside that gap — a position that is neither above the union top nor below
+  // the union bottom, and which the single-block clamp above could never fix.
+  let bestDistance=Infinity;
+  let bestEdge=null;
+  for(const row of rows){
+    if(!row||typeof row.getBoundingClientRect!=='function') continue;
+    // #7591: assistant-segment-worklog-source / assistant-segment-anchor keep
+    // data-msg-idx but are display:none, so their rects are zero. Left in the
+    // comparison they look like nearby edges above the viewport and can beat the
+    // real rows, sending recovery toward an invisible row — it stays blank and
+    // escalates to the full render this clamp exists to avoid. Only rows that
+    // actually generated a client rect are candidates.
+    if(typeof row.getClientRects==='function'&&row.getClientRects().length===0) continue;
+    const rect=row.getBoundingClientRect();
+    if(!rect||!Number.isFinite(rect.top)||!Number.isFinite(rect.bottom)) continue;
+    // Rows are measured in viewport space; lift them into document space.
+    const rowTop=rect.top-containerRect.top+scrollTop;
+    const rowBottom=rect.bottom-containerRect.top+scrollTop;
+    let distance=null;
+    let edge=null;
+    if(rowBottom<=scrollTop){ distance=scrollTop-rowBottom; edge=rowBottom; }
+    else if(rowTop>=viewBottom){ distance=rowTop-viewBottom; edge=rowTop; }
+    else continue; // straddles the viewport: not a blank-region edge
+    if(distance<bestDistance){ bestDistance=distance; bestEdge=edge; }
+  }
+  if(bestEdge===null) return false;
+  // Put the nearest edge at the middle of the viewport so the closest rendered
+  // row is unambiguously on screen after the clamp.
+  const maxScroll=Math.max(0,(Number(container.scrollHeight)||viewBottom)-clientHeight);
+  const next=Math.max(0,Math.min(maxScroll,Math.round(bestEdge-clientHeight*0.5)));
+  if(Math.abs(next-scrollTop)<2) return false;
+  _messageVirtualBlankClampAttempts++;
+  _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+  container.scrollTop=next;
+  _lastScrollTop=container.scrollTop;
+  // #7591: tell the enclosing _compensateScrollForMeasurementDelta that this
+  // render moved scrollTop deliberately, so it skips its old-anchor
+  // compensation instead of writing scrollTopBefore+delta over the recovery.
+  _blankViewportRecoveryApplied=++_blankViewportRecoveryToken;
+  if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
   return true;
 }
 
@@ -19719,6 +21968,15 @@ function _insertSegmentBlock(seg, html){
   }
   seg.insertAdjacentHTML('beforeend', html);
 }
+function _assistantSegmentIsTurnFinal(row, mi){
+  // True for the row's last assistant segment — the turn's final answer, the one
+  // that owns turn-level footer labels (switch/failover warnings). A turn
+  // without discoverable segments counts as final so its labels still render.
+  if(!row) return true;
+  const segs=row.querySelectorAll('.assistant-segment[data-msg-idx]');
+  const last=segs.length?segs[segs.length-1]:null;
+  return !last||String(last.dataset.msgIdx)===String(mi);
+}
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
   // typeof guard: node harnesses extract renderMessages() without its helpers (#6717).
@@ -19794,8 +22052,10 @@ function renderMessages(options){
       if(typeof addCopyButtons==='function') addCopyButtons(inner);
       if(typeof initTreeViews==='function') initTreeViews(inner);
       }catch(_){ /* fail-safe: a bad block (e.g. _buildTreeDOM overflow) must not abort scroll restore, cache or the caller; the deferred pass keeps the old contained failure */ }
+      // #7591: capture ownership before the restore re-arms the latch.
+      const recoveryOwnership=_captureMessageRecoveryOwnership();
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
-      if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
+      if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow, recoveryOwnership)) return;
       _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
       requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
@@ -19837,7 +22097,18 @@ function renderMessages(options){
       const _hasLiveAssistantProjection=Array.isArray(S.messages)&&S.messages.some(m=>
         m&&m.role==='assistant'&&(m._live||m._activityBurstId!==undefined||m._liveSegmentSeq!==undefined)
       );
-      if(S.activeStreamId || _hasLiveAssistantProjection){
+      // #7676: TERMINAL SETTLEMENT OWNS THE TURN. The live-projection branch
+      // above exists for the reconnect case — the pane is still working
+      // (S.busy) when the SSE transport drops and the journal snapshot carries
+      // live markers. It must NOT apply once the pane has settled: after
+      // `done`/`cancel` the projection is the authority, and re-attaching the
+      // parser-owned node over it can re-pin the pre-settle live DOM — which
+      // in Transparent Stream carries the final prose hidden
+      // (`assistant-segment-worklog-source` + aria-hidden + hidden) with its
+      // scene rows already removed, i.e. the reported blank (#7676). A settled
+      // pane (idle, no live stream ownership) therefore never preserves.
+      const _paneSettled=S.busy===false && !S.activeStreamId;
+      if(S.activeStreamId || (_hasLiveAssistantProjection && !_paneSettled)){
         _preservedLiveTurn=_lt;
       }
     }
@@ -20308,8 +22579,12 @@ function renderMessages(options){
     const recoveryHtml=recoveryPayload ? _compressionRecoveryHtml(recoveryPayload, (S.session&&S.session.session_id)||'') : '';
     if(recoveryHtml) bodyHtml += recoveryHtml;
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
+    const isDisplayOnlyRow=!!(m&&m._displayOnlyRow);
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
-    const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
+    // Display-only rows have no canonical index, so a keep_count derived from
+    // them would truncate/fork the wrong point: keep the row's actions off
+    // until the transcript row it mirrors actually lands.
+    const editBtn  = isEditableUser ? (isDisplayOnlyRow ? '' : `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>`) : '';
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
@@ -20319,7 +22594,11 @@ function renderMessages(options){
     const branchableReadOnlySession=typeof _isBranchableReadOnlySession==='function'
       ? _isBranchableReadOnlySession(S.session)
       : false;
-    const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1},this)">${li('git-branch',13)}</button>`;
+    // Display-only rows carry no canonical index, so fork/edit cannot compute a
+    // safe keep_count for them: hide the actions until the transcript row lands.
+    // Keep the read-only suppressor as the leading condition (test_465 pins that
+    // expression); display-only rows are suppressed in the same ternary's result.
+    const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : (isDisplayOnlyRow ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1},this)">${li('git-branch',13)}</button>`);
     const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';
     const tsVal=m._ts||m.timestamp;
     // _formatInServerTz handles fractional-hour offsets (India +0530 etc.)
@@ -20415,13 +22694,15 @@ function renderMessages(options){
       if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
       const newRawText=String(displayContent).trim();
       const nextRowHtml=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
+      const userSessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
       if(row){
         row.className='msg-row';
         row.id=_userMessageDomId(rawIdx);
         row.dataset.msgIdx=rawIdx;
-        row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+        row.dataset.sessionMsgIdx=userSessionMsgIdx===null?'':userSessionMsgIdx;
         row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
         row.dataset.role='user';
+        if(isDisplayOnlyRow) row.dataset.displayOnly='1'; else delete row.dataset.displayOnly;
         delete row.dataset.editing;
         if(row.dataset.rawText!==newRawText||row.innerHTML!==nextRowHtml){
           row.dataset.rawText=newRawText;
@@ -20432,9 +22713,10 @@ function renderMessages(options){
         row.className='msg-row';
         row.id=_userMessageDomId(rawIdx);
         row.dataset.msgIdx=rawIdx;
-        row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+        row.dataset.sessionMsgIdx=userSessionMsgIdx===null?'':userSessionMsgIdx;
         row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
         row.dataset.role='user';
+        if(isDisplayOnlyRow) row.dataset.displayOnly='1'; else delete row.dataset.displayOnly;
         row.dataset.rawText=newRawText;
         row.innerHTML=nextRowHtml;
       }
@@ -21159,8 +23441,17 @@ function renderMessages(options){
       if(msg.role!=='assistant') continue;
       const routing=msg._gatewayRouting||null;
       const gatewayText=_formatGatewayModelLabel(String(msg._usedModel||'').trim()||(S.session&&S.session.model)||'', '', routing);
-      const failoverText=_gatewayRoutingFailoverText(routing);
-      const modelWarningText=_gatewayModelWarningText(routing);
+      const seg=assistantSegments.get(mi);
+      const row=seg?seg.closest('.assistant-turn'):null;
+      // Switch/failover warnings describe the whole turn, not one segment; the
+      // model label below is per-segment. Render the warnings on the turn's
+      // final assistant segment only, so a routed turn with interim answers
+      // shows each label once instead of once per segment.
+      // typeof guard: node harnesses extract renderMessages() without its
+      // helpers (#6717); without the helper every segment counts as final.
+      const isTurnFinal=typeof _assistantSegmentIsTurnFinal==='function' ? _assistantSegmentIsTurnFinal(row, mi) : true;
+      const failoverText=isTurnFinal?_gatewayRoutingFailoverText(routing):'';
+      const modelWarningText=isTurnFinal?_gatewayModelWarningText(routing):'';
       const hasTurnUsage=!!msg._turnUsage;
       // The Worklog summary owns the "Done in …" duration whenever this
       // assistant message contributes tool or thinking detail to a folded
@@ -21169,9 +23460,11 @@ function renderMessages(options){
       const durationText=compactWorklogForMessage?'':_formatTurnDuration(msg._turnDuration);
       const usedModelText=_usedModelTurnChipLabel(msg);
       if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText&&!usedModelText) continue;
-      const seg=assistantSegments.get(mi);
-      const row=seg?seg.closest('.assistant-turn'):null;
-      const footerRows=row?row.querySelectorAll('.msg-foot'):[];
+      // Scope the footer lookup to this message's own segments. The turn's
+      // last .msg-foot belongs to the turn's final answer, and the duplicate
+      // guard below would then make the final message skip its own labels
+      // after an interim answer wrote into that foot (issue #8287).
+      const footerRows=row?row.querySelectorAll(`.assistant-segment[data-msg-idx="${mi}"] .msg-foot`):[];
       const targetFoot=footerRows.length?footerRows[footerRows.length-1]:null;
       if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline,.msg-used-model-inline')) continue;
       const fragments=[];
@@ -21301,83 +23594,6 @@ function renderMessages(options){
       }
     }
   }
-  // Fail-safe invariant (#3875): a settled assistant turn must never render with
-  // ZERO visible content. The Worklog redesign (#3401) folds intermediate
-  // assistant segments into a collapsed Worklog card and hides the source segment
-  // (`assistant-segment-worklog-source` → display:none). That is correct WHEN the
-  // turn also has a visible final answer. But when a turn's ONLY content is folded
-  // into a collapsed Worklog (e.g. an autonomous/interrupted run whose final
-  // assistant message is empty, or a reload where S.toolCalls didn't hydrate so the
-  // worklog card built with no expandable tool steps), every segment is hidden and
-  // the turn paints as nothing — leaving the transcript a bare stack of date
-  // separators (#3875 brick). Reveal such turns so their content is never silently
-  // swallowed: expand the turn's Worklog group(s) when the turn has no other
-  // visible content. This NEVER touches a turn that has any visible segment, so the
-  // intended collapsed-Worklog UX is preserved whenever a visible answer exists.
-  // The live turn is excluded by its `liveAssistantTurn` id (it drives its own
-  // state during a stream), so this sweep is safe to run even while busy — a
-  // historical blank turn must not re-paint blank during a follow-up stream
-  // (Opus advisor, stage-342).
-  {
-    const _turnHasVisibleContent=(turn)=>{
-      if(typeof _assistantTurnHasVisibleRenderedSegment==='function'){
-        return _assistantTurnHasVisibleRenderedSegment(turn)===true;
-      }
-      // Keep the extracted renderMessages test harness self-contained.
-      if(!turn||typeof turn.querySelectorAll!=='function') return false;
-      for(const seg of turn.querySelectorAll('.assistant-segment')){
-        if(seg.classList.contains('assistant-segment-worklog-source')) continue;
-        if(seg.classList.contains('assistant-segment-anchor')) continue;
-        if((seg.textContent||'').trim()) return true;
-      }
-      return false;
-    };
-    for(const turn of inner.querySelectorAll('.assistant-turn')){
-      if(turn.id==='liveAssistantTurn') continue; // live turn drives its own state
-      if(_turnHasVisibleContent(turn)) continue;
-      // No visible content — surface the folded Worklog so the turn isn't blank.
-      const groups=turn.querySelectorAll('.tool-worklog-group,.tool-call-group');
-      let revealed=false;
-      for(const group of groups){
-        // A settled Worklog whose rows are still deferred (#5839) has an empty
-        // textContent but is not empty in substance. Judging it empty here drops
-        // through to the last-resort un-hide below, and the deferred rows then
-        // materialize the same prose beside the segments it just un-hid.
-        // Materialize first, then judge.
-        if(group.getAttribute&&group.getAttribute('data-worklog-rows-deferred')==='1'
-           &&typeof _materializeDeferredWorklogRows==='function'){
-          _materializeDeferredWorklogRows(group);
-        }
-        if(!(group.textContent||'').trim()) continue; // empty group can't help
-        if(group.classList.contains('tool-call-group-collapsed')){
-          group.classList.remove('tool-call-group-collapsed');
-          group.classList.add('open');
-          const summary=group.querySelector('.tool-call-group-summary,.activity-summary');
-          if(summary) summary.setAttribute('aria-expanded','true');
-          // #5839: this turn is otherwise blank, so materialize any deferred
-          // settled rows now that we're force-expanding the worklog to fill it.
-          if(typeof _materializeDeferredWorklogRows==='function') _materializeDeferredWorklogRows(group);
-        }
-        // `revealed` means "this turn has a non-empty Worklog group that the user
-        // can see" — NOT "we just expanded something". An already-open non-empty
-        // group is itself visible (it slips past _turnHasVisibleContent only
-        // because that check inspects .assistant-segment nodes, not group bodies),
-        // so the turn isn't truly blank and the last-resort un-hide below is
-        // unnecessary. Keep this assignment OUTSIDE the if(collapsed) branch.
-        revealed=true;
-      }
-      // Last resort: no usable worklog group either, but hidden worklog-source
-      // segments carry the real text — un-hide them so nothing is lost.
-      if(!revealed){
-        for(const seg of turn.querySelectorAll('.assistant-segment-worklog-source')){
-          if(!(seg.textContent||'').trim()) continue;
-          seg.classList.remove('assistant-segment-worklog-source');
-          seg.removeAttribute('aria-hidden');
-          seg.hidden=false;
-        }
-      }
-    }
-  }
   // Re-attach the preserved live turn (#3877). The rebuild above recreated a
   // live turn from S.messages, but the live assistant message's content lags the
   // stream (it is only persisted to S.messages on a throttled write-back) — so the
@@ -21406,6 +23622,14 @@ function renderMessages(options){
   // no live segment to swap into. No-op for a settled turn or when nothing was
   // streaming.
   if(_preservedLiveTurn){
+    // #7676: the transferred node may hold the final answer in a segment that
+    // the transparent live scene hides (`assistant-segment-worklog-source` +
+    // aria-hidden + hidden) while its scene rows rendered the activity. If this
+    // node is about to become the pane's only copy of the reply (rows already
+    // removed by the settle render), the reply would go blank — so normalize the
+    // retained prose FIRST (it un-hides only when no visible scene row owns it),
+    // before any branch re-attaches the node.
+    _normalizeTransferredLiveProse(_preservedLiveTurn);
     const _rebuilt=document.getElementById('liveAssistantTurn');
     // Pick the PARSER-OWNED live segment, not just the first one. On reconnect /
     // post-tool activity boundaries a live turn can carry MULTIPLE
@@ -21483,6 +23707,90 @@ function renderMessages(options){
       }
     }
   }
+  // Fail-safe invariant (#3875): a settled assistant turn must never render with
+  // ZERO visible content. The Worklog redesign (#3401) folds intermediate
+  // assistant segments into a collapsed Worklog card and hides the source segment
+  // (`assistant-segment-worklog-source` → display:none). That is correct WHEN the
+  // turn also has a visible final answer. But when a turn's ONLY content is folded
+  // into a collapsed Worklog (e.g. an autonomous/interrupted run whose final
+  // assistant message is empty, or a reload where S.toolCalls didn't hydrate so the
+  // worklog card built with no expandable tool steps), every segment is hidden and
+  // the turn paints as nothing — leaving the transcript a bare stack of date
+  // separators (#3875 brick). Reveal such turns so their content is never silently
+  // swallowed: expand the turn's Worklog group(s) when the turn has no other
+  // visible content. This NEVER touches a turn that has any visible segment, so the
+  // intended collapsed-Worklog UX is preserved whenever a visible answer exists.
+  // The live turn is excluded by its `liveAssistantTurn` id while a stream
+  // still owns it (it drives its own state during a stream), so this sweep is
+  // safe to run even while busy — a historical blank turn must not re-paint
+  // blank during a follow-up stream (Opus advisor, stage-342). A SETTLED live
+  // turn is covered (#7676): the invariant runs after every preservation and
+  // swap decision above, so a transferred blank live node is revealed rather
+  // than pinned as the pane's zero-visible-content reply.
+  {
+    const _turnHasVisibleContent=(turn)=>{
+      if(typeof _assistantTurnHasVisibleRenderedSegment==='function'){
+        return _assistantTurnHasVisibleRenderedSegment(turn)===true;
+      }
+      // Keep the extracted renderMessages test harness self-contained.
+      if(!turn||typeof turn.querySelectorAll!=='function') return false;
+      for(const seg of turn.querySelectorAll('.assistant-segment')){
+        if(seg.classList.contains('assistant-segment-worklog-source')) continue;
+        if(seg.classList.contains('assistant-segment-anchor')) continue;
+        if((seg.textContent||'').trim()) return true;
+      }
+      return false;
+    };
+    const _liveTurnSettled=(S.busy===false && !S.activeStreamId); // #7676
+    for(const turn of inner.querySelectorAll('.assistant-turn')){
+      // #7676: the invariant must hold for a SETTLED live turn too — the
+      // transparent settle can transfer a node whose only copy of the reply is
+      // hidden. An ACTIVE stream still owns its node and drives its own state.
+      if(turn.id==='liveAssistantTurn'&&!_liveTurnSettled) continue;
+      if(_turnHasVisibleContent(turn)) continue;
+      // No visible content — surface the folded Worklog so the turn isn't blank.
+      const groups=turn.querySelectorAll('.tool-worklog-group,.tool-call-group');
+      let revealed=false;
+      for(const group of groups){
+        // A settled Worklog whose rows are still deferred (#5839) has an empty
+        // textContent but is not empty in substance. Judging it empty here drops
+        // through to the last-resort un-hide below, and the deferred rows then
+        // materialize the same prose beside the segments it just un-hid.
+        // Materialize first, then judge.
+        if(group.getAttribute&&group.getAttribute('data-worklog-rows-deferred')==='1'
+           &&typeof _materializeDeferredWorklogRows==='function'){
+          _materializeDeferredWorklogRows(group);
+        }
+        if(!(group.textContent||'').trim()) continue; // empty group can't help
+        if(group.classList.contains('tool-call-group-collapsed')){
+          group.classList.remove('tool-call-group-collapsed');
+          group.classList.add('open');
+          const summary=group.querySelector('.tool-call-group-summary,.activity-summary');
+          if(summary) summary.setAttribute('aria-expanded','true');
+          // #5839: this turn is otherwise blank, so materialize any deferred
+          // settled rows now that we're force-expanding the worklog to fill it.
+          if(typeof _materializeDeferredWorklogRows==='function') _materializeDeferredWorklogRows(group);
+        }
+        // `revealed` means "this turn has a non-empty Worklog group that the user
+        // can see" — NOT "we just expanded something". An already-open non-empty
+        // group is itself visible (it slips past _turnHasVisibleContent only
+        // because that check inspects .assistant-segment nodes, not group bodies),
+        // so the turn isn't truly blank and the last-resort un-hide below is
+        // unnecessary. Keep this assignment OUTSIDE the if(collapsed) branch.
+        revealed=true;
+      }
+      // Last resort: no usable worklog group either, but hidden worklog-source
+      // segments carry the real text — un-hide them so nothing is lost.
+      if(!revealed){
+        for(const seg of turn.querySelectorAll('.assistant-segment-worklog-source')){
+          if(!(seg.textContent||'').trim()) continue;
+          seg.classList.remove('assistant-segment-worklog-source');
+          seg.removeAttribute('aria-hidden');
+          seg.hidden=false;
+        }
+      }
+    }
+  }
   // Only force-scroll when not actively streaming — mid-stream re-renders
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
@@ -21502,8 +23810,12 @@ function renderMessages(options){
   if(typeof addCopyButtons==='function') addCopyButtons(inner);
   if(typeof initTreeViews==='function') initTreeViews(inner);
   }catch(_){ /* fail-safe: a bad block (e.g. _buildTreeDOM overflow) must not abort scroll restore, cache or the caller; the deferred pass keeps the old contained failure */ }
+  // #7591: capture viewport ownership BEFORE the restore (see the sibling
+  // cache-branch call site) so recovery can tell an independent in-flight
+  // programmatic write from this render's own.
+  const recoveryOwnership=_captureMessageRecoveryOwnership();
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
-  if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
+  if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow, recoveryOwnership)) return;
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
   // Refresh todo panel if it's currently open
@@ -21916,6 +24228,9 @@ function _toolGroupIcon(rows){
 }
 function _syncToolRowsContainer(tools, isLiveWorklog){
   if(!tools) return;
+  // Scene reconciliation already proved these exact card nodes unchanged.
+  // Do not detach them just to recreate an identical disclosure wrapper.
+  if(tools._anchorSceneToolsStable) return;
   const existingGroup=tools.querySelector(':scope > .tool-worklog-tool-group,:scope > .tool-group[data-tool-worklog-tool-group="1"]');
   const wasOpen=!!(existingGroup&&existingGroup.classList&&existingGroup.classList.contains('open'));
   const rows=_directWorklogToolRows(tools);
@@ -22977,13 +25292,24 @@ function _buildTreeDOM(val, depth){
   return el;
 }
 
+// #2168 (session-switch latency): every other helper called by
+// postProcessRenderedMessages carries a selector-level idempotence marker so a
+// repeat pass matches zero nodes and returns early. This one alone re-walked
+// every code block in the transcript and then ran a nested querySelector() per
+// block to filter out ones that already had a button — on a cached-transcript
+// switch that is O(code blocks) node visits to add nothing. The data-copy-btn
+// marker makes the repeat pass match nothing; the nested guard stays as the
+// correctness backstop for header-placed buttons (see #1096).
 function addCopyButtons(container){
   const el=container||$('msgInner');
   if(!el) return;
-  el.querySelectorAll('pre > code').forEach(codeEl=>{
+  el.querySelectorAll('pre > code:not([data-copy-btn])').forEach(codeEl=>{
     const pre=codeEl.parentElement;
     const header=pre.previousElementSibling;
-    if(pre.querySelector('.code-copy-btn')||(header&&header.classList.contains('pre-header')&&header.querySelector('.code-copy-btn'))) return;
+    if(pre.querySelector('.code-copy-btn')||(header&&header.classList.contains('pre-header')&&header.querySelector('.code-copy-btn'))){
+      codeEl.dataset.copyBtn='1';  // already has one; mark so the selector stops re-matching it
+      return;
+    }
     const btn=document.createElement('button');
     btn.className='code-copy-btn';
     btn.textContent=t('copy');
@@ -23004,6 +25330,9 @@ function addCopyButtons(container){
       btn.style.cssText='position:absolute;top:6px;right:6px;';
       pre.appendChild(btn);
     }
+    // Marked after BOTH placements so a block whose button was appended to the
+    // sibling .pre-header is skipped by the selector on the next pass too.
+    codeEl.dataset.copyBtn='1';
   });
 }
 
@@ -24257,7 +26586,7 @@ if(!S._expandedDirs) S._expandedDirs=new Set();
 // Cache of fetched directory contents: path -> entries[]
 if(!S._dirCache) S._dirCache={};
 
-function renderFileTree(){
+function renderFileTree(opts={}){
   const box=$('fileTree');
   // #5657: capture the scroll position before wiping the container. box.innerHTML=''
   // detaches every row, collapsing scrollHeight so the browser clamps scrollTop to 0;
@@ -24269,7 +26598,24 @@ function renderFileTree(){
   // BELOW the clicked disclosure, so the clicked row keeps its offset from the top (no
   // getBoundingClientRect anchor delta needed — that's only for prepend-above cases).
   const prevScrollTop=box?box.scrollTop:0;
+  // Same class of loss as the scroll position above, one layer up: innerHTML=''
+  // detaches every row, so the roving tab stop would be rebuilt onto the FIRST
+  // row and the keyboard user thrown back to the top of the tree by the very
+  // act of expanding a directory. Remembered by entry path (the index shifts
+  // when rows appear), restored after the render tail. A root load passes
+  // opts.scope naming the tree, and a root refresh its refill object as
+  // opts.partial on its first render and opts.completesRefill on the second
+  // (see loadDir).
+  const prevTreeFocus=(typeof a11yTreeRememberFocus==='function')
+    ? a11yTreeRememberFocus(box, {completesRefill: (opts&&opts.completesRefill)||null}) : null;
   box.innerHTML='';
+  // No rows will be rendered: the container is not a tree any more, and focus
+  // that was on a row goes to the Files tab instead of dropping to <body>.
+  const treeEmptied=()=>{
+    if(typeof a11yTreeReset==='function') a11yTreeReset(box,{
+      hadFocus: !!(prevTreeFocus&&prevTreeFocus.hadFocus), focusTo: $('workspaceFilesTab'),
+    });
+  };
   // Cache current dir entries
   S._dirCache[S.currentDir||'.']=S.entries;
   // Show empty-state when no workspace is set or the directory is empty (#703)
@@ -24278,6 +26624,8 @@ function renderFileTree(){
   if(!hasWorkspace){
     _syncWorkspaceBirthtimeSupportScope('');
     if(emptyEl){emptyEl.textContent=t('workspace_empty_no_path');emptyEl.style.display='flex';}
+    // Before hiding the box: a hidden element may already have lost focus.
+    treeEmptied();
     box.style.display='none';
     return;
   }
@@ -24287,11 +26635,26 @@ function renderFileTree(){
   const visibleEntries=_workspaceEntriesForRender(S.entries);
   if(!visibleEntries.length){
     if(emptyEl){emptyEl.textContent=t('workspace_empty_dir');emptyEl.style.display='flex';}
+    treeEmptied();
     return;
   }
   _renderTreeItems(box, visibleEntries, 0);
+  // The container must be a TREE, not a set of loose divs: without role=tree a
+  // screen reader neither announces it nor offers its own navigation, and
+  // without a name the user does not know what they entered. Called after EVERY
+  // render because innerHTML='' above destroys the rows; the helper is
+  // idempotent and binds its keyboard listener only once.
+  if(typeof a11yTree==='function'){
+    a11yTree(box, {label: t('workspace_tree_aria')});
+  }
   // #5657: restore the pre-wipe scroll position now that the tree is tall again.
   if(box) box.scrollTop=prevScrollTop;
+  // Restore the keyboard position last, after every row carries its contract.
+  // Falls back to a neighbouring or the first row when the remembered entry is
+  // gone, so the tree always keeps exactly one tab stop. A partial render (a
+  // root refresh before the expanded folders' listings are back) carries the
+  // missed position to the render that completes it.
+  if(typeof a11yTreeRestoreFocus==='function') a11yTreeRestoreFocus(box, prevTreeFocus, {carry: (opts&&opts.partial)||null, scope: (opts&&opts.scope)||null});
 }
 
 let _wsActiveDragPath=null;
@@ -24448,6 +26811,28 @@ function elideMiddle(str, maxLen = 60) {
   return str.slice(0, half) + '...' + str.slice(str.length - half);
 }
 
+// Delete buttons stay for pointer users but leave the tab order: a tree has a
+// single tab stop, and a hidden "×" stop on every row would defeat it. The
+// Delete key on the focused row runs the same button instead.
+function _treeDeleteButtonA11y(row, del, name){
+  del.type='button';
+  del.tabIndex=-1;
+  del.setAttribute('aria-label', t('delete_entry_aria', name));
+  row.addEventListener('keydown',(e)=>{
+    if(e.key!=='Delete'||e.target!==row||e.altKey||e.ctrlKey||e.metaKey||e.shiftKey) return;
+    e.preventDefault();
+    del.click();
+  });
+}
+
+// Point the renamed row at its new path before the re-render, so the keyboard
+// position follows the entry instead of falling to a neighbour.
+function _treeRowRenamed(oldPath, newName){
+  const box=$('fileTree');
+  const row=box&&box.querySelector(`[data-a11y-tree-path="${CSS.escape(oldPath)}"]`);
+  if(row) row.dataset.a11yTreePath=_workspaceJoinTargetPath(_workspaceParentDir(oldPath), newName);
+}
+
 function _renderTreeItems(container, entries, depth){
   for(const item of entries){
     const el=document.createElement('div');el.className='file-item';
@@ -24482,6 +26867,9 @@ function _renderTreeItems(container, entries, depth){
       arrow.className='file-tree-toggle';
       const isExpanded=S._expandedDirs.has(item.path);
       arrow.textContent=isExpanded?'\u25BE':'\u25B8';
+      // The glyph says nothing to a screen reader; the row's aria-expanded
+      // carries the state.
+      arrow.setAttribute('aria-hidden','true');
       el.appendChild(arrow);
     }else{
       // Keep file icons aligned with sibling directories that occupy this
@@ -24495,6 +26883,8 @@ function _renderTreeItems(container, entries, depth){
     // Icon
     const iconEl=document.createElement('span');
     iconEl.className='file-icon';
+    // The entry kind is in the row's accessible name (".cache folder").
+    iconEl.setAttribute('aria-hidden','true');
     iconEl.innerHTML = isExternalLink
       ? li('external-link', 14)
       : isDirLike
@@ -24565,6 +26955,7 @@ function _renderTreeItems(container, entries, depth){
                 session_id:S.session.session_id,path:item.path,new_name:newName
               })});
               showToast(t('renamed_to')+newName);
+              _treeRowRenamed(item.path,newName);
               // Update expanded dirs cache key if renaming a directory
               if(isDirLike&&S._expandedDirs){
                 S._expandedDirs.delete(item.path);
@@ -24597,10 +26988,12 @@ function _renderTreeItems(container, entries, depth){
     el.appendChild(nameEl);
 
     // Size -- for real files and symlinks that resolve to files
+    let sizeText='';
     if(isFileLike&&item.size){
+      sizeText=`${(item.size/1024).toFixed(1)}k`;
       const sizeEl=document.createElement('span');
       sizeEl.className='file-size';
-      sizeEl.textContent=`${(item.size/1024).toFixed(1)}k`;
+      sizeEl.textContent=sizeText;
       el.appendChild(sizeEl);
     }
 
@@ -24609,12 +27002,14 @@ function _renderTreeItems(container, entries, depth){
       if(!isReadOnlyEscape){
         const del=document.createElement('button');
         del.className='file-del-btn';del.title=t('delete_title');del.textContent='\u00d7';
+        _treeDeleteButtonA11y(el,del,item.name);
         del.onclick=async(e)=>{e.stopPropagation();await deleteWorkspaceFile(item.path,item.name);};
         el.appendChild(del);
       }
     }else if(isDirLike&& !isReadOnlyEscape){
       const del=document.createElement('button');
       del.className='file-del-btn';del.title=t('delete_title');del.textContent='\u00d7';
+      _treeDeleteButtonA11y(el,del,item.name);
       del.onclick=async(e)=>{e.stopPropagation();await deleteWorkspaceDir(item.path,item.name);};
       el.appendChild(del);
     }
@@ -24670,6 +27065,34 @@ function _renderTreeItems(container, entries, depth){
       el.onclick=async()=>openFile(item.path);
     }
 
+    // Tree contract: only here is everything about the row known - whether it
+    // is a directory, whether it is expanded, and which level it is on.
+    if(typeof a11yTreeRow==='function'){
+      // The icon is aria-hidden, so the kind carries what it showed,
+      // including the link icon of an internal symlink.
+      const kind=isExternalLink
+        ? t('tree_external_link_aria')
+        : isLk ? t('tree_symlink_aria')
+        : isDirLike ? t('tree_folder_aria') : t('tree_file_aria');
+      // The single tab stop is placed by a11yTreeRestoreFocus() after the render.
+      a11yTreeRow(el, {
+        level: depth+1,
+        expandable: isDirLike,
+        expanded: isDirLike && S._expandedDirs.has(item.path),
+        // Name first, then the kind and the size column's text, so a screen
+        // reader says what matters most first (word order is up to each
+        // locale).
+        label: t('tree_row_aria', item.name, kind, sizeText),
+        // What the name's tooltip tells pointer users (symlink target, read
+        // only), with the full target rather than the elided one. The rename
+        // hint is mouse-only.
+        description: isLk&&item.target&&!isExternalLink
+          ? t('symlink_link_to').replace('{target}', () => item.target)
+          : (nameEl.title&&nameEl.title!==t('double_click_rename') ? nameEl.title : ''),
+        path: item.path,
+      });
+    }
+
     container.appendChild(el);
 
     // Render children if directory is expanded
@@ -24682,6 +27105,10 @@ function _renderTreeItems(container, entries, depth){
         empty.className='file-item file-empty';
         empty.style.paddingLeft=(8+(depth+1)*16)+'px';
         empty.textContent=t('empty_dir');
+        // A tree may only contain tree items; announce the placeholder as an
+        // inert one so arrowing into an empty folder says so.
+        // Its path (the folder's, plus "/") lets focus survive a re-render.
+        if(typeof a11yTreeRow==='function') a11yTreeRow(empty,{level:depth+2,disabled:true,path:item.path+'/'});
         container.appendChild(empty);
       }
     }
@@ -24870,6 +27297,7 @@ async function _inlineRenameFileItem(item){
   try{
     await api('/api/file/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path,new_name:newName})});
     showToast(t('renamed_to')+newName);
+    _treeRowRenamed(item.path,newName);
     // Update expanded dirs cache key if renaming a directory
     if(isDirLike&&S._expandedDirs){
       S._expandedDirs.delete(item.path);
@@ -25144,4 +27572,11 @@ async function uploadPendingFiles(options={}){
   const extracted=names.filter(n=>n.extracted);
   if(extracted.length)showToast(t('archive_extracted',extracted.reduce((s,n)=>s+n.extracted,0),extracted.length));
   return names;
+}
+
+// Screen reader mode is a general opt-in preference. This setter owns the
+// runtime flag and pushes it to every consumer (currently the terminal).
+function setScreenReaderMode(enabled){
+  window._screenReaderMode=!!enabled;
+  if(typeof applyTerminalScreenReaderMode==='function') applyTerminalScreenReaderMode();
 }
