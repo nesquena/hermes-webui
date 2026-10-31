@@ -679,9 +679,19 @@ At the anchor-scene persistence boundary, the existing 256,000-byte canonical
 UTF-8 JSON budget and 1,000-row limit remain in force. If adding recovered
 outcomes puts a scene over the byte budget, remove only `side_effects` from the
 scene copy and re-measure before rejecting it. A rows-only scene that fits keeps
-its complete Worklog rows and other metadata; a scene that still exceeds the
-budget is rejected without trimming rows or raising the limit. Scenes already
-within the budget retain their side effects. This fallback does not mutate the
+its complete Worklog rows and other metadata. A scene that still exceeds the
+budget degrades on the copy instead of being rejected whole (#7969), stopping as
+soon as it fits: drop proven byte-for-byte mirrors (never a row's only copy of a
+value), clamp display text only (row/thinking text and tool or payload
+snippet/result/output/preview; ids, args, links, identity, and `final_answer`
+are never rewritten), then drop whole rows, terminal/control/lifecycle first
+and tool/thinking last. Every fit check measures the final shape including the
+`truncated` marker that discloses what was removed. Each clamped field records
+its original byte length and text digest under the row's `clamped` key, so cold
+hydration restores a clamped reasoning row from its exact transcript slot
+instead of adding a second row. The limit is not raised, and a scene that
+cannot fit is still rejected. Scenes already within the budget retain their
+side effects and are stored unchanged. This fallback does not mutate the
 recovery snapshot, provider history, or durable journal; outcomes omitted from
 that saved scene remain available in the journal.
 

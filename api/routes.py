@@ -5024,6 +5024,136 @@ def _anchor_scene_message_ref_digest(payload: dict) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _anchor_scene_json_bytes(value) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8"))
+
+
+# Degrade policy for an over-cap scene (#7969). Rows go least-expendable last:
+# tool and thinking rows are the Worklog's work record.
+_ANCHOR_SCENE_DROP_ROLE_ORDER = ("terminal", "control", "lifecycle", "activity", "prose", "tool", "thinking")
+# Only display leaves are ever shortened; ids, args, links, identity and
+# final_answer are immutable so a degraded row never misstates an invocation.
+_ANCHOR_SCENE_CLAMP_FIELDS = (
+    ("text",), ("thinking", "text"),
+    ("tool", "snippet"), ("tool", "result"), ("tool", "output"), ("tool", "preview"),
+    ("payload", "text"), ("payload", "snippet"), ("payload", "result"), ("payload", "output"), ("payload", "preview"),
+)
+_ANCHOR_SCENE_CLAMP_MAX_BYTES = 32_000
+_ANCHOR_SCENE_CLAMP_MIN_BYTES = 4_000
+_ANCHOR_SCENE_CLAMP_SUFFIX = "\n\n[…truncated to fit the persisted Worklog scene cap…]"
+# payload keys that are byte-for-byte mirrors of the same row.tool key.
+_ANCHOR_SCENE_TOOL_MIRROR_KEYS = (
+    "id", "name", "args", "command", "preview", "snippet", "result", "output", "is_error", "duration", "started_at",
+)
+
+
+def _anchor_scene_text_digest(value) -> str:
+    return hashlib.sha256(_anchor_scene_text_key(value).encode("utf-8")).hexdigest()
+
+
+def _anchor_scene_dedupe_row(row: dict) -> int:
+    """Drop only copies whose value provably survives in the field the renderer reads first."""
+    removed = 0
+    text = row.get("text")
+    tool = row.get("tool") if row.get("role") == "tool" and isinstance(row.get("tool"), dict) else None
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    thinking = row.get("thinking")
+    if isinstance(thinking, dict) and text:
+        # dedupe_key is derived from the same text ("thinking:" + text key).
+        for key, mirror in (("text", text), ("dedupe_key", f"thinking:{_anchor_scene_text_key(text)}")):
+            if thinking.get(key) == mirror:
+                thinking.pop(key)
+                removed += 1
+        if not thinking:
+            row.pop("thinking")
+    for key in list(payload):
+        value = payload[key]
+        if (text and value == text) or (
+            tool is not None and key in _ANCHOR_SCENE_TOOL_MIRROR_KEYS and key in tool and value == tool[key]
+        ):
+            payload.pop(key)
+            removed += 1
+    if tool is not None:
+        for drop, keep in (("tid", "id"), ("preview", "snippet")):
+            if drop in tool and tool.get(drop) == tool.get(keep):
+                tool.pop(drop)
+                removed += 1
+        # row.text is the settled tool card's last snippet fallback.
+        if text and text in (tool.get("snippet"), payload.get("snippet"), payload.get("result"), payload.get("output")):
+            row.pop("text")
+            removed += 1
+    return removed
+
+
+def _anchor_scene_clamp_row(row: dict, budget: int) -> int:
+    clamped = 0
+    for path in _ANCHOR_SCENE_CLAMP_FIELDS:
+        parent = row
+        for key in path[:-1]:
+            parent = parent.get(key) if isinstance(parent, dict) else None
+        value = parent.get(path[-1]) if isinstance(parent, dict) else None
+        raw = value.encode("utf-8") if isinstance(value, str) else b""
+        if len(raw) <= budget:
+            continue
+        marks = row.setdefault("clamped", {})
+        field = ".".join(path)
+        if field not in marks:
+            # Exact identity of the original text, so cold hydration can
+            # reconcile the preview with its transcript slot (not by prefix).
+            marks[field] = {"bytes": len(raw), "sha256": _anchor_scene_text_digest(value)}
+            clamped += 1
+        parent[path[-1]] = raw[:budget].decode("utf-8", "ignore") + _ANCHOR_SCENE_CLAMP_SUFFIX
+    return clamped
+
+
+def _degrade_anchor_activity_scene(scene: dict, *, dropped_outcomes=()) -> dict:
+    """Shrink an over-cap scene instead of rejecting it whole (#7969).
+
+    Stages run in order of least loss and stop once the scene fits: dedupe
+    proven mirrors, clamp display leaves, then drop rows by expendability.
+    Every fit check measures the final shape, truncated marker included.
+    """
+    truncated = scene["truncated"] = {"policy": "activity_scene_v1.degrade"}
+    if dropped_outcomes:
+        truncated["dropped_outcomes"] = list(dropped_outcomes)
+
+    def fits():
+        return _anchor_scene_json_bytes(scene) <= _ANCHOR_ACTIVITY_SCENE_MAX_BYTES
+
+    rows = scene["activity_rows"]
+    dict_rows = [row for row in rows if isinstance(row, dict)]
+    deduped = sum(_anchor_scene_dedupe_row(row) for row in dict_rows)
+    if deduped:
+        truncated["deduped_fields"] = deduped
+    budget = _ANCHOR_SCENE_CLAMP_MAX_BYTES
+    while not fits() and budget >= _ANCHOR_SCENE_CLAMP_MIN_BYTES:
+        clamped = sum(_anchor_scene_clamp_row(row, budget) for row in dict_rows)
+        if clamped:
+            truncated["clamped_fields"] = truncated.get("clamped_fields", 0) + clamped
+        budget //= 2
+    if fits():
+        return scene
+    rank = {role: i for i, role in enumerate(_ANCHOR_SCENE_DROP_ROLE_ORDER)}
+    order = sorted(
+        range(len(rows)),
+        key=lambda i: (rank.get(str(rows[i].get("role") or "activity"), 99) if isinstance(rows[i], dict) else -1, i),
+    )
+    # Exact byte accounting on the retained list: each removal frees the row
+    # and its separating comma; the marker's own counter is charged as it grows.
+    truncated["dropped_rows"] = 0
+    total = _anchor_scene_json_bytes(scene)
+    dropped = set()
+    for i in order:
+        if total <= _ANCHOR_ACTIVITY_SCENE_MAX_BYTES:
+            break
+        total -= _anchor_scene_json_bytes(rows[i]) + (1 if len(rows) - len(dropped) > 1 else 0)
+        dropped.add(i)
+        total += len(str(len(dropped))) - len(str(len(dropped) - 1))
+    scene["activity_rows"] = [row for i, row in enumerate(rows) if i not in dropped]
+    truncated["dropped_rows"] = len(dropped)
+    return scene
+
+
 def _sanitize_anchor_activity_scene(scene):
     if not isinstance(scene, dict):
         raise ValueError("scene must be an object")
@@ -5036,10 +5166,15 @@ def _sanitize_anchor_activity_scene(scene):
         raise ValueError("scene.activity_rows is too large")
     scene_copy = copy.deepcopy(scene)
     encoded = json.dumps(scene_copy, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+    dropped_outcomes = ()
     if len(encoded) > _ANCHOR_ACTIVITY_SCENE_MAX_BYTES and "side_effects" in scene_copy:
         # Recovered outcomes must not displace a rows-only Worklog that fits.
         # Keep the original rows and the same UTF-8 persistence budget.
         scene_copy.pop("side_effects")
+        dropped_outcomes = ("side_effects",)
+        encoded = json.dumps(scene_copy, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+    if len(encoded) > _ANCHOR_ACTIVITY_SCENE_MAX_BYTES:
+        scene_copy = _degrade_anchor_activity_scene(scene_copy, dropped_outcomes=dropped_outcomes)
         encoded = json.dumps(scene_copy, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
     if len(encoded) > _ANCHOR_ACTIVITY_SCENE_MAX_BYTES:
         raise ValueError("scene payload is too large")
@@ -5899,6 +6034,42 @@ def _anchor_scene_settle_live_running_row(row, *, drop_live_thinking: bool = Fal
     return next_row
 
 
+def _anchor_scene_restore_clamped_reasoning(scene, turn_messages):
+    """Swap a clamped reasoning preview back to its exact transcript text."""
+    if not any(
+        isinstance(row, dict) and row.get("role") == "thinking" and isinstance(row.get("clamped"), dict)
+        for row in scene.get("activity_rows") or []
+    ):
+        return scene
+    full = {}
+    for message in turn_messages:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        texts = [
+            _anchor_scene_content_text(part)
+            for part in (content if isinstance(content, list) else [])
+            if isinstance(part, dict) and part.get("type") in ("thinking", "reasoning")
+        ]
+        for text in texts + [_anchor_scene_message_reasoning_text(message)]:
+            if _anchor_scene_clean_text(text):
+                full.setdefault(_anchor_scene_text_digest(text), text)
+    scene = copy.deepcopy(scene)
+    for row in scene["activity_rows"]:
+        marks = row.get("clamped") if isinstance(row, dict) and row.get("role") == "thinking" else None
+        if not isinstance(marks, dict):
+            continue
+        for field, target in (("text", row), ("thinking.text", row.get("thinking"))):
+            mark = marks.get(field)
+            text = full.get(mark.get("sha256")) if isinstance(mark, dict) else None
+            if text is not None and isinstance(target, dict):
+                target["text"] = text
+                marks.pop(field)
+        if not marks:
+            row.pop("clamped")
+    return scene
+
+
 def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_offset=0, tool_calls=None, stream_id=""):
     if not isinstance(messages, list) or not isinstance(scene, dict) or not isinstance(message_index, int):
         return scene
@@ -5914,6 +6085,7 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         if isinstance(message, dict) and message.get("role") == "user":
             turn_start = idx
             break
+    scene = _anchor_scene_restore_clamped_reasoning(scene, messages[turn_start + 1 : local_final_idx + 1])
     message_final_answer = _anchor_scene_final_answer_text(final_message)
     scene_final_answer = scene.get("final_answer") if isinstance(scene.get("final_answer"), str) else ""
     final_answer = message_final_answer if _anchor_scene_clean_text(message_final_answer) else scene_final_answer
@@ -6471,7 +6643,10 @@ def _handle_session_anchor_scene(handler, body):
             records = dict(ordered[-256:])
         s.anchor_activity_scenes = records
         s.save(touch_updated_at=False, skip_index=True)
-    return j(handler, {"ok": True, "message_index": idx, "message_ref": ref})
+    payload = {"ok": True, "message_index": idx, "message_ref": ref}
+    if scene.get("truncated"):
+        payload["truncated"] = scene["truncated"]
+    return j(handler, payload)
 
 
 def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False):
