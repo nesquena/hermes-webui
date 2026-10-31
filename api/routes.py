@@ -13202,6 +13202,7 @@ from api.run_drain import (  # #7293
     RunAdmissionClosed,
     assert_run_admission_open_locked,
     run_admission_closed_response,
+    working_tree_may_be_changing,
 )
 from api.run_journal import (
     runtime_model_from_events,
@@ -22289,8 +22290,20 @@ def _serve_static(handler, parsed):
     # `/`/`/index.html`/`/session/` branch above), and static/sw.js's
     # SHELL_ASSETS list relies on the same convention. So a fingerprinted URL
     # is safe to cache aggressively: any redeploy changes the URL.
+    #
+    # #6992: that assumption breaks for an in-place update. The apply swaps the
+    # checkout and only then does _schedule_restart() sleep before os.execv(),
+    # so this (old) process answers /static/* from a tree that is already the
+    # next revision while ?v= still carries this process's startup version —
+    # the URL does not change but the bytes do, and #5428's skew check cannot
+    # see it because both sides agree on the same token. Stamping such a
+    # response immutable would let a browser pin revision-B bytes under the
+    # revision-A URL for a year: a mixed front-end bundle. While the checkout
+    # may be changing under us, degrade to the short-cache policy instead of
+    # promising immutability (the 304 branch below shares cache_control, so a
+    # revalidation cannot re-pin it either).
     version_values = parse_qs(parsed.query, keep_blank_values=True).get("v", [""])
-    has_fingerprint = bool(version_values[0])
+    has_fingerprint = bool(version_values[0]) and not working_tree_may_be_changing()
     cache_control = (
         "public, max-age=31536000, immutable" if has_fingerprint
         else "public, max-age=300"

@@ -180,6 +180,26 @@ def restart_force_requested() -> bool:
         return bool(_RESTART_PENDING_EPOCH is not None and _RESTART_FORCE)
 
 
+def working_tree_may_be_changing() -> bool:
+    """True while this process's checkout may be changing underneath it.
+
+    ``update_hold`` spans a whole apply (fetch / stash / pull / pop, including
+    ``reset --hard`` on the force path) and ``restart_pending`` spans the
+    ``_schedule_restart`` sleep before ``os.execv`` replaces the image. In both
+    windows the OLD process keeps serving ``/static/*`` from a working tree that
+    is already (or is still becoming) the next revision, so a ``?v=``
+    fingerprint no longer identifies the bytes being returned (#6992).
+
+    ``draining`` counts too: the process is being replaced by its supervisor
+    there as well, so the same "do not promise a year" reasoning applies.
+
+    Cheap by design — one uncontended lock plus a string compare, no I/O, no
+    allocation — because the caller is the static-asset hot path.
+    """
+    with _STATE_LOCK:
+        return _phase_locked() != "open"
+
+
 def begin_shutdown_drain() -> None:
     """Close admission for good: this process is stopping."""
     global _DRAINING
