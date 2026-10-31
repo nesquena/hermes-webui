@@ -11963,6 +11963,8 @@ function _buildProviderQuotaCard(status){
   const card=document.createElement('div');
   const state=(status.status||'unavailable').replace(/[^a-z0-9_-]/gi,'').toLowerCase()||'unavailable';
   card.className='provider-quota-card provider-quota-card-'+state;
+  // No provider configured is a neutral state, not a failure: keep its message muted.
+  if(!status.provider) card.classList.add('provider-quota-card-neutral');
   const accountLimits=status.account_limits||null;
   const providerBase=status.display_name||status.provider||t('provider_quota_active_provider');
   const provider=(accountLimits&&accountLimits.plan)?`${providerBase} · ${accountLimits.plan}`:providerBase;
@@ -11970,7 +11972,9 @@ function _buildProviderQuotaCard(status){
   let body='';
   if(accountLimits&&(status.status==='available'||accountLimits.pool)){
     const windows=Array.isArray(accountLimits.windows)?accountLimits.windows:[];
-    const details=Array.isArray(accountLimits.details)&&!accountLimits.pool?accountLimits.details:[];
+    // A pool snapshot's own details only repeat the breakdown below; usage-API details
+    // (e.g. credit balance) are the account's and stay visible next to the pool.
+    const details=Array.isArray(accountLimits.details)&&(!accountLimits.pool||accountLimits.source==='usage_api')?accountLimits.details:[];
     const windowHtml=windows.map(w=>{
       const used=_formatProviderQuotaPercent(w&&w.used_percent);
       const reset=_formatProviderQuotaReset(w&&w.reset_at);
@@ -11991,6 +11995,9 @@ function _buildProviderQuotaCard(status){
     const poolHtml=_buildProviderQuotaPoolBreakdown(accountLimits);
     body=windowHtml+detailHtml+poolHtml;
     if(!body) body=`<div class="provider-quota-message">${esc(status.message||t('provider_quota_account_limits_loaded'))}</div>`;
+    // A pool breakdown shown next to a failure reflects locally recorded credential
+    // state, not the failed check: keep the failure message visible above it.
+    else if(status.status!=='available'&&status.message) body=`<div class="provider-quota-message">${esc(status.message)}</div>`+body;
   }else if(status.status==='available'&&quota){
     body=`
       <div class="provider-quota-metric"><span>${esc(t('provider_quota_metric_remaining'))}</span><strong>${esc(_formatProviderQuotaMoney(quota.limit_remaining))}</strong></div>
@@ -14265,14 +14272,42 @@ function _gatewayActionButton(action){
   const labels={start:t('gateway_start'),stop:t('gateway_stop'),restart:t('gateway_restart')};
   return `<button class="sm-btn gateway-action-btn" data-gateway-action="${esc(action)}" onclick="_gatewayAction(${jsArg(action)})" ${_gatewayActionInFlight?'disabled':''} style="padding:5px 10px;font-size:12px">${esc(labels[action]||action)}</button>`;
 }
+function _gatewayLockNote(kind,bodyHtml){
+  const icon=typeof li==='function'?`<span style="display:inline-flex;flex-shrink:0;margin-top:2px">${li('lock',12)}</span>`:'';
+  return `<div class="gateway-external-note" data-gateway-note="${esc(kind)}" style="display:flex;align-items:flex-start;gap:6px;margin-top:10px;font-size:12px;line-height:1.45;color:var(--muted)">${icon}<span>${bodyHtml}</span></div>`;
+}
+function _gatewayLocalUnprovenNoteHtml(lifecycle){
+  // The exact one-time start command comes from the server (it adds
+  // `--profile <name>` for a named profile, like the Start button does).
+  // Escape the whole translation first, then put the escaped command, wrapped
+  // in inline code, at the locale's {cmd} placeholder. Only static markup and
+  // escaped text are added after esc(), so the note stays XSS-safe.
+  const raw=lifecycle&&lifecycle.start_command;
+  const command=(typeof raw==='string'&&raw.trim())?raw:'hermes gateway start';
+  const codeStyle='font-family:var(--font-mono,monospace);font-size:11px;background:var(--code-bg);padding:1px 5px;border-radius:4px;white-space:pre-wrap;overflow-wrap:anywhere';
+  // Keep each `--flag` whole when the chip wraps: a break inside `--profile`
+  // left a bare `--` at the line end, which reads as the end-of-options marker.
+  // The pattern only matches `--` plus letters/hyphens in the already escaped
+  // text, so it cannot touch an entity or markup.
+  const cmdHtml=esc(command).replace(/(^|\s)(--[a-z][a-z-]*)/g,'$1<span style="white-space:nowrap">$2</span>');
+  return esc(t('gateway_local_unproven')).split('{cmd}').join(`<code style="${codeStyle}">${cmdHtml}</code>`);
+}
 function _gatewayActionControls(r){
   // Lifecycle actions drive the LOCAL `hermes gateway` CLI. Offer them only when
   // the server proved that CLI controls the Gateway shown here (#8391); a remote
   // or unproven Gateway stays read-only. Missing capability fails closed.
-  const managed=!!(r&&r.lifecycle&&r.lifecycle.managed===true);
+  const lifecycle=(r&&r.lifecycle&&typeof r.lifecycle==='object')?r.lifecycle:null;
+  const managed=!!(lifecycle&&lifecycle.managed===true);
   if(!managed){
-    const icon=typeof li==='function'?`<span style="display:inline-flex;flex-shrink:0;margin-top:2px">${li('lock',12)}</span>`:'';
-    return `<div class="gateway-external-note" style="display:flex;align-items:flex-start;gap:6px;margin-top:10px;font-size:12px;line-height:1.45;color:var(--muted)">${icon}<span>${esc(t('gateway_external_managed'))}</span></div>`;
+    // A loopback Gateway WebUI has not yet seen running for this profile, and
+    // that is not running now: most likely this machine's own Gateway, stopped
+    // since before the upgrade. Point at the one-time CLI start that proves it.
+    // A RUNNING unproven loopback Gateway (e.g. a Docker port map) really is
+    // managed elsewhere, so it keeps the external note.
+    if(lifecycle&&lifecycle.reason==='local_gateway_unproven'&&!(r&&r.running)){
+      return _gatewayLockNote('local_unproven',_gatewayLocalUnprovenNoteHtml(lifecycle));
+    }
+    return _gatewayLockNote('external',esc(t('gateway_external_managed')));
   }
   const actions=(r&&r.running)?['stop','restart']:['start'];
   return `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px">${actions.map(_gatewayActionButton).join('')}</div>`;
