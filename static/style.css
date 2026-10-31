@@ -2968,6 +2968,21 @@
   .mic-status{font-size:11px;color:var(--error);padding:4px 12px;display:flex;align-items:center;gap:6px;}
   .mic-dot{width:6px;height:6px;border-radius:50%;background:var(--error);animation:mic-pulse 1.2s ease-in-out infinite;flex-shrink:0;}
 
+  /* ── Dictation feedback inside the mic button ──
+     Elapsed time / '···' / '✓ 12p' / '0p' replaces the microphone glyph while a
+     capture is active, and a 2px bar shows the input level. Text and symbols
+     only: no new translation key. `.has-tooltip` already makes the button
+     positioned, so the tooltip anchor is unaffected by these children. */
+  .mic-btn .mic-state{display:none;font-size:11px;line-height:1;font-variant-numeric:tabular-nums;letter-spacing:.02em;}
+  .mic-btn .mic-level{position:absolute;left:3px;right:3px;bottom:2px;height:2px;border-radius:1px;background:currentColor;opacity:.25;transform:scaleX(var(--mic-level,0));transform-origin:left center;transition:transform .06s linear;pointer-events:none;}
+  .mic-btn.mic-busy>svg{display:none;}
+  .mic-btn.mic-busy .mic-state{display:inline-block;min-width:2.1em;text-align:center;}
+  .mic-btn.mic-busy .mic-level{opacity:.85;}
+  .mic-btn.state-think{color:#f5b301;}
+  .mic-btn.state-ready{color:#34c759;}
+  .mic-btn.state-empty{color:var(--muted,#9aa0a6);}
+  @media(prefers-reduced-motion:reduce){.mic-btn .mic-level{transition:none;}}
+
   /* ── Turn-based voice mode (#1333) ── */
   .voice-mode-btn{transition:color .15s,background .15s;}
   .voice-mode-btn.active{color:var(--accent);background:rgba(var(--accent-rgb,99,102,241),.15);}

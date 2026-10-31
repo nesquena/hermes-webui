@@ -59,6 +59,10 @@ global.document = { addEventListener: () => {}, visibilityState: 'visible' };
 let SpeechRecognition = function () {};
 let recognition = null;
 let _forceMediaRecorder = false;
+let _micTranscribeSeq = 0;
+const _MIC_EMPTY_MS = 2500;
+const paints = [];
+function _micPaint(state) { paints.push(state === undefined ? null : state); }
 const _micForceMediaRecorderKey = 'mic_force_mediarecorder';
 let ta = { value: input.composerText || '' };
 const toasts = [];
