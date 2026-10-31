@@ -2878,7 +2878,7 @@
   .composer-workspace-chip.active{color:var(--text);background:var(--accent-bg);}
   .composer-workspace-icon,.composer-workspace-chevron{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1;}
   .composer-workspace-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-  .composer-reasoning-chip{display:inline-flex;align-items:center;gap:5px;max-width:none;padding:8px 10px;border-radius:999px;border:1px solid transparent;background-color:transparent;color:var(--muted);font-weight:500;cursor:pointer;transition:color .15s,background-color .15s,border-color .15s;}
+  .composer-reasoning-chip{display:inline-flex;align-items:center;gap:5px;box-sizing:border-box;max-width:88px;padding:8px 10px;border-radius:999px;border:1px solid transparent;background-color:transparent;color:var(--muted);font-weight:500;cursor:pointer;transition:color .15s,background-color .15s,border-color .15s;}
   .composer-reasoning-chip.inactive{opacity:.78;}
   .composer-reasoning-chip:disabled,.composer-mobile-config-action:disabled{opacity:.65;cursor:wait;}
   .composer-footer.cf-measuring,.composer-footer.cf-measuring *{transition:none!important;}
@@ -2886,7 +2886,7 @@
   .composer-reasoning-chip.active{color:var(--text);background:var(--accent-bg);border-color:var(--accent-bg);}
   .composer-reasoning-icon,.composer-reasoning-chevron{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1;}
   .composer-reasoning-chevron{display:none;}
-  .composer-reasoning-label{display:inline-flex;align-items:center;justify-content:center;min-width:1.6ch;font-size:11px;font-weight:700;letter-spacing:0;text-transform:none;}
+  .composer-reasoning-label{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:700;letter-spacing:0;text-transform:none;}
   .composer-reasoning-dropdown{display:none;position:absolute;bottom:calc(100% + 4px);left:0;min-width:140px;background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:200;padding:4px;overflow:hidden;}
   .composer-reasoning-dropdown.open{display:block;}
   .reasoning-option{padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px;color:var(--text);white-space:nowrap;transition:background-color .12s;}

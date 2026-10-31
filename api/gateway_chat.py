@@ -431,16 +431,40 @@ def _gateway_use_runs_api_enabled(config_data=None, environ: dict[str, str] | No
     return raw in ("1", "true", "yes", "on")
 
 
+def _gateway_profile_runtime(profile_home):
+    """The session profile's Codex runtime mode for Gateway-bound turns.
+
+    ``openai_runtime_api_mode`` answers concretely for a consulted profile
+    (``codex_app_server`` on opt-in, ``codex_responses`` on a concrete
+    opt-out); only an unreadable/absent profile yields None (ambient
+    fallback). Never let a config-read failure take down effort resolution.
+    """
+    try:
+        from api.config import openai_runtime_api_mode
+
+        return openai_runtime_api_mode(profile_home)
+    except Exception:
+        logger.warning("profile runtime read failed; falling back to ambient", exc_info=True)
+        return None
+
+
 def _gateway_reasoning_effort_for_request(
-    cfg, *, model=None, model_provider=None, session_effort=None
+    cfg, *, model=None, model_provider=None, session_effort=None, api_mode=None
 ):
-    """Resolve and coerce the session effort, falling back to profile config."""
+    """Resolve and coerce the session effort, falling back to profile config.
+
+    ``api_mode`` MUST be the runtime the Gateway turn will actually use — the
+    SESSION's profile ``openai_runtime_api_mode`` — because the session profile
+    can opt into (or out of) the Codex app-server runtime independently of the
+    ambient profile, and this runs on a worker thread with no request context.
+    """
     try:
         coerced = resolve_session_reasoning_effort(
             cfg,
             session_effort=session_effort,
             model_id=model,
             provider_id=model_provider,
+            api_mode=api_mode,
         )
         # Preserve explicit "none" while still omitting absent or invalid effort.
         return None if not coerced else str(coerced)
@@ -3137,13 +3161,19 @@ def _run_gateway_chat_streaming(
         # own profile's isolated config, as the composer chip and the local worker do:
         # cfg above still honours an ambient HERMES_CONFIG_PATH for a named profile.
         session_effort = getattr(s, "reasoning_effort", None)
+        session_runtime = None
         try:
             from api.config import effective_session_reasoning_effort
             from api.profiles import get_hermes_home_for_profile
 
+            _session_profile_home = get_hermes_home_for_profile(getattr(s, "profile", None))
             session_effort = effective_session_reasoning_effort(
-                session_effort, get_hermes_home_for_profile(getattr(s, "profile", None)),
+                session_effort, _session_profile_home,
             )
+            # Same session-profile isolation as the local chat worker: the
+            # Codex app-server opt-in lives in the SESSION's profile, and the
+            # ambient read on this thread would answer for the wrong profile.
+            session_runtime = _gateway_profile_runtime(_session_profile_home)
         except Exception:
             logger.warning("isolated reasoning config read failed; using the session config", exc_info=True)
         reasoning_effort = _gateway_reasoning_effort_for_request(
@@ -3151,6 +3181,7 @@ def _run_gateway_chat_streaming(
             model=model,
             model_provider=model_provider,
             session_effort=session_effort,
+            api_mode=session_runtime,
         )
         # The session's own profile, not the process-active one: this worker thread has no
         # thread-local profile, so get_config()/os.environ describe whichever profile the

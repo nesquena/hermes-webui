@@ -146,9 +146,16 @@ display:
         encoding="utf-8",
     )
     monkeypatch.setattr(cfg, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(cfg, "VALID_REASONING_EFFORTS", (*cfg._WEBUI_BASE_EFFORTS, "ultra"))
+    monkeypatch.setattr(
+        cfg, "_agent_route_supported_efforts",
+        lambda: lambda provider, model, api_mode=None: cfg._WEBUI_BASE_EFFORTS,
+    )
 
     status = cfg.get_reasoning_status()
 
     assert status["reasoning_effort"] == "medium"
-    assert status["supported_efforts"] == list(cfg.VALID_REASONING_EFFORTS)
+    # models.dev supplies the global ladder; the status response narrows only
+    # above-max extras to what this config's route can actually send.
+    assert status["supported_efforts"] == list(cfg._WEBUI_BASE_EFFORTS)
     assert status["supports_reasoning_effort"] is True
