@@ -18801,12 +18801,19 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as exc:
             return bad(handler, str(exc), 400)
 
+    # A model refresh busts the per-provider model cache AND the Providers
+    # card cache: the card's TTL is keyed on config.yaml mtime, which a
+    # model refresh does not touch, so without the second clear the card
+    # keeps echoing the stale pre-refresh catalog until the TTL lapses
+    # (#7404) and "Refresh models" looks like a no-op.
     if parsed.path == "/api/models/refresh":
         provider_id = (body.get("provider") or "").strip().lower()
         if not provider_id:
             return bad(handler, "provider is required")
         from api.config import invalidate_provider_models_cache
         invalidate_provider_models_cache(provider_id)
+        from api.providers import invalidate_providers_cache as _invalidate_providers_cache
+        _invalidate_providers_cache()
         return j(handler, {"ok": True, "provider": provider_id})
 
     if parsed.path == "/api/reasoning":

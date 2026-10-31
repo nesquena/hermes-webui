@@ -44,6 +44,7 @@ from api.config import (
     _get_label_for_model,
     _models_from_live_provider_ids,
     _pool_entry_payloads,
+    _provider_models_are_discovered_catalog,
     _read_live_provider_model_ids,
     _read_visible_codex_cache_model_ids,
     _save_yaml_config_file,
@@ -148,6 +149,10 @@ _account_usage_status_cache: dict[tuple[str, str, str], tuple[float, Any]] = {}
 _account_usage_status_cache_lock = threading.Lock()
 _providers_cache: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 _providers_cache_lock = threading.Lock()
+# Bumped by every invalidation. A card build that started before an
+# invalidation must not write its (now stale) rows back into the cache
+# after that invalidation cleared it.
+_providers_cache_generation = 0
 _account_usage_worker_pool: dict[str, list["_AccountUsageProbeWorker"]] = {}
 _account_usage_worker_pool_lock = threading.Lock()
 
@@ -1117,6 +1122,23 @@ def _providers_config_fingerprint(cfg: Any) -> str:
         return repr(cfg)
 
 
+def _models_catalog_built_at() -> float | None:
+    """Return the live-rebuild stamp of the model catalog, or ``None``.
+
+    The Providers card is derived from the model catalog, so its cache must
+    not outlive a catalog rebuild: a background rebuild that completes while
+    a card payload sits in the cache would leave the card showing retired
+    ids while the picker already shows the fresh catalog. Folding the stamp
+    into the cache key retires those rows as soon as the catalog moves on.
+    """
+    try:
+        from api.config import _get_models_cache_path, _models_disk_cache_built_at
+
+        return _models_disk_cache_built_at(_get_models_cache_path())
+    except Exception:
+        return None
+
+
 def _providers_cache_key(cfg: Any) -> tuple[Any, ...]:
     """Return a profile-scoped cache key for ``get_providers()`` (#6010).
 
@@ -1135,6 +1157,7 @@ def _providers_cache_key(cfg: Any) -> tuple[Any, ...]:
         _providers_file_mtime_ns(home / ".env"),
         _providers_file_mtime_ns(home / "config.yaml"),
         _providers_config_fingerprint(cfg),
+        _models_catalog_built_at(),
     )
 
 
@@ -1151,8 +1174,19 @@ def _get_cached_providers(cache_key: tuple[Any, ...]) -> dict[str, Any] | None:
         return copy.deepcopy(payload)
 
 
-def _store_cached_providers(cache_key: tuple[Any, ...], payload: dict[str, Any]) -> dict[str, Any]:
+def _store_cached_providers(
+    cache_key: tuple[Any, ...],
+    payload: dict[str, Any],
+    *,
+    generation: int | None = None,
+) -> dict[str, Any]:
     with _providers_cache_lock:
+        # Reject a write that raced an invalidation: these rows were built
+        # from the catalog as it was *before* the invalidation, so storing
+        # them would resurrect the pre-refresh catalog for another TTL
+        # window — the card would show retired ids the picker has dropped.
+        if generation is not None and generation != _providers_cache_generation:
+            return payload
         # Single-entry by design: /api/providers is cacheable only for the
         # active profile/config snapshot, so clear older snapshots to avoid
         # retaining unbounded provider metadata across profile switches.
@@ -1161,10 +1195,18 @@ def _store_cached_providers(cache_key: tuple[Any, ...], payload: dict[str, Any])
     return payload
 
 
+def _providers_cache_generation_snapshot() -> int:
+    """Return the current invalidation generation of the providers cache."""
+    with _providers_cache_lock:
+        return _providers_cache_generation
+
+
 def invalidate_providers_cache() -> None:
     """Clear cached ``GET /api/providers`` responses."""
+    global _providers_cache_generation
     with _providers_cache_lock:
         _providers_cache.clear()
+        _providers_cache_generation += 1
 
 
 def _load_env_file(env_path: Path) -> dict[str, str]:
@@ -2895,6 +2937,74 @@ def get_provider_cost_history(provider_id: str | None = None, days: int = 7) -> 
 # SECTION: Public API
 
 
+def _live_custom_provider_catalog() -> dict:
+    """Resolve the canonical model catalog once for a provider response.
+
+    Several discovered cards in one response share this payload, so the
+    picker and the cards can never disagree, and the ``/v1/models`` probe is
+    not repeated per card.
+    """
+    try:
+        from api.config import get_available_models
+
+        return get_available_models() or {}
+    except Exception:
+        logger.debug("live custom-provider catalog lookup failed", exc_info=True)
+        return {}
+
+
+def _live_custom_provider_models(
+    provider_id: str,
+    catalog: dict | None = None,
+) -> list[dict[str, str]]:
+    """Return the live catalog rows for a custom provider, or ``[]``.
+
+    Reuses ``get_available_models()`` so the Providers card and the model
+    picker read the *same* discovered catalog (#7404) instead of duplicating
+    the ``/v1/models`` probe. The picker prefixes non-active providers' ids
+    with ``@<provider>:`` for routing (``_apply_provider_prefix``); the
+    Providers card lists plain model IDs, so that prefix is stripped here.
+    ``catalog`` lets a caller resolve the canonical catalog once and share it
+    across several discovered cards.
+    Returns ``[]`` on any failure so the caller can fall back to the
+    configured ``models:`` list.
+    """
+    pid = str(provider_id or "").strip()
+    if not pid:
+        return []
+    try:
+        if catalog is None:
+            from api.config import get_available_models
+
+            catalog = get_available_models() or {}
+        payload = catalog or {}
+    except Exception:
+        logger.debug("live custom-provider lookup failed for %s", pid, exc_info=True)
+        return []
+    prefix = f"@{pid}:"
+    for group in payload.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        if str(group.get("provider_id") or "") != pid:
+            continue
+        rows: list[dict[str, str]] = []
+        # The picker renders ``models`` (featured) PLUS ``extra_models`` (the
+        # catalog tail); the Providers card must list the same set, or a
+        # freshly discovered model that lands in the tail is invisible on the
+        # card even after "Refresh models" — the card looks like a no-op.
+        for model in [*(group.get("models") or []), *(group.get("extra_models") or [])]:
+            if not isinstance(model, dict):
+                continue
+            mid = str(model.get("id") or "").strip()
+            if not mid:
+                continue
+            if mid.startswith(prefix):
+                mid = mid[len(prefix):]
+            rows.append({"id": mid, "label": mid})
+        return rows
+    return []
+
+
 def get_providers() -> dict[str, Any]:
     """Return a list of all known providers with their configuration status.
 
@@ -2917,6 +3027,10 @@ def get_providers() -> dict[str, Any]:
     cached = _get_cached_providers(cache_key)
     if cached is not None:
         return cached
+    # Snapshot the cache generation: an invalidation that lands while the
+    # cards are being built must reject the write below, not just the cache
+    # we are about to fill.
+    card_generation = _providers_cache_generation_snapshot()
 
     providers = []
     providers_cfg = cfg.get("providers") or {}
@@ -3170,6 +3284,9 @@ def get_providers() -> dict[str, Any]:
 
     # Scan custom_providers from config.yaml (e.g. glmcode, timicc)
     custom_providers_cfg = cfg.get("custom_providers", [])
+    # Canonical model catalog, resolved at most once per response and shared
+    # by every discovered card below.
+    discovered_catalog: dict | None = None
     if isinstance(custom_providers_cfg, list):
         for cp in custom_providers_cfg:
             if not isinstance(cp, dict) or not cp.get("name"):
@@ -3196,6 +3313,29 @@ def get_providers() -> dict[str, Any]:
                 if _mid not in cp_model_ids:
                     cp_model_ids.append(_mid)
             cp_models = [{"id": mid, "label": mid} for mid in cp_model_ids]
+            # #7404: when ``models:`` is an auto-discovered catalog
+            # (``models_discovered: true`` with discovery not opted out)
+            # it is per-model discovery *metadata*, not a hand-curated
+            # allowlist — so the live ``/v1/models`` catalog is
+            # authoritative and the Providers card must agree with the
+            # model picker instead of echoing stale configured IDs (e.g.
+            # a model the provider has since retired). Mirrors the
+            # ``providers:`` branch and the custom_providers handling in
+            # ``get_available_models()``; fall back to the configured
+            # list only when the probe yields nothing.
+            if _provider_models_are_discovered_catalog(cp):
+                if discovered_catalog is None:
+                    # Resolve the canonical catalog once per response and share
+                    # it across every discovered card.
+                    discovered_catalog = _live_custom_provider_catalog()
+                _live_cp_models = _live_custom_provider_models(cp_id, discovered_catalog)
+                if _live_cp_models:
+                    # Only replace the configured list when the live catalog
+                    # actually has rows. A build fault or an empty probe must
+                    # leave the configured models in place — otherwise the
+                    # Providers panel renders an empty card instead of the
+                    # last known catalog.
+                    cp_models = _live_cp_models
             # Check for env var reference (${VAR_NAME} pattern)
             cp_api_key = str(cp.get("api_key") or "")
             cp_has_key = bool(cp_api_key.strip())
@@ -3244,7 +3384,7 @@ def get_providers() -> dict[str, Any]:
         "providers": providers,
         "active_provider": active_provider,
     }
-    return _store_cached_providers(cache_key, result)
+    return _store_cached_providers(cache_key, result, generation=card_generation)
 
 
 def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:

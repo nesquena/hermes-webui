@@ -10616,7 +10616,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     if not (entry.get("name") or "").strip():
                         continue
                     configured_models = entry.get("models")
-                    if isinstance(configured_models, (dict, list)) and len(configured_models) > 0:
+                    if (
+                        isinstance(configured_models, (dict, list))
+                        and len(configured_models) > 0
+                        and not _provider_models_are_discovered_catalog(entry)
+                    ):
                         continue
                     count += 1
             # The LM Studio provider-group branch re-probes the same
@@ -10739,6 +10743,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             for _cp in _custom_providers_cfg:
                 if not isinstance(_cp, dict):
                     continue
+                _cp_live_won = False
+                _live_models = None
                 _cp_name = (_cp.get("name") or "").strip()
                 _slug = _custom_provider_slug_from_name(_cp_name) if _cp_name else None
                 if _slug and _slug not in _named_custom_groups:
@@ -10788,9 +10794,20 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         # #7176: a shared-URL entry whose credential (even none)
                         # differs must not inherit the active probe's catalog.
                         auto_detected_models_by_provider.pop(_slug, None)
+                    # A ``models_discovered: true`` mapping is a per-model metadata
+                    # catalog written by Hermes discovery, not a hand-curated
+                    # allowlist — so the live /v1/models catalog stays authoritative
+                    # and the refresh button must actually re-probe. Mirror the
+                    # ``providers:`` branch (#7404): only a curated list pins the
+                    # group. The configured IDs are merged in below ONLY when the
+                    # probe returns nothing, so a transient failure keeps the group
+                    # without re-adding models the provider has since dropped.
+                    _cp_models_pin_group = _cp_has_configured_models and not (
+                        _provider_models_are_discovered_catalog(_cp)
+                    )
                     _live_models = auto_detected_models_by_provider.get(_slug)
                     _live_error = None
-                    if _cp_has_configured_models:
+                    if _cp_models_pin_group:
                         # Skip the live /v1/models probe when an allowlist
                         # exists — the curated list wins and probe failures
                         # should not surface as a user-facing diagnostic in
@@ -10810,6 +10827,13 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     if _live_error:
                         _named_custom_errors[_slug] = _live_error
                         detected_providers.add(_slug)
+                    # The live catalog is authoritative - and the configured IDs
+                    # below must NOT be re-appended - only when this is not a
+                    # pinned allowlist AND the probe actually returned models.
+                    # A pinned entry, or an empty/failed probe, still emits the
+                    # configured IDs as the fallback. Mirrors the ``providers:``
+                    # branch so /api/models agrees with /api/models/live (#7404).
+                    _cp_live_won = (not _cp_models_pin_group) and bool(_live_models)
                     for _live_model in _live_models:
                         _live_id = str(_live_model.get("id") or "").strip()
                         if not _live_id:
@@ -10826,14 +10850,28 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             {"id": _cp_option_id, "label": _live_model.get("label") or _get_label_for_model(_live_id, [])}
                         )
 
-                # Collect configured model IDs as a fallback/sticky entry after live discovery.
+                # Configured IDs are emitted only as the fallback: a pinned
+                # allowlist, or a discovered catalog whose live probe returned
+                # nothing (transient failure). On a successful probe the live
+                # catalog is authoritative, so stale configured IDs the provider
+                # Singular sticky default is metadata, not a discovered catalog
+                # entry, so a successful probe does not retire it (#8080).
                 _cp_model_ids: list[str] = []
-                _cp_model = _cp.get("model", "")
-                if _cp_model:
-                    _cp_model_ids.append(_cp_model)
-                for _cp_model_id in _configured_model_ids(_cp.get("models")):
-                    if _cp_model_id not in _cp_model_ids:
-                        _cp_model_ids.append(_cp_model_id)
+                _cp_sticky_default = str(_cp.get("model", "") or "").strip()
+                # ``_live_models`` stays ``None`` for entries that never reach
+                # the probe branch (unnamed entries, named entries without a
+                # resolvable endpoint); tolerate that state here so the
+                # configured fallback below still runs for them.
+                _live_id_set = {
+                    str(_lm.get("id") or "").strip() for _lm in (_live_models or [])
+                }
+                if _cp_sticky_default and _cp_sticky_default not in _live_id_set:
+                    if _cp_sticky_default not in _cp_model_ids:
+                        _cp_model_ids.append(_cp_sticky_default)
+                if not _cp_live_won:
+                    for _cp_model_id in _configured_model_ids(_cp.get("models")):
+                        if _cp_model_id not in _cp_model_ids:
+                            _cp_model_ids.append(_cp_model_id)
 
                 for _cp_model in _cp_model_ids:
                     _dedup_key = f"{_slug}:{_cp_model}" if _slug else _cp_model
