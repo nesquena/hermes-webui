@@ -61,7 +61,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       config.py            Discovery, globals, model detection, reloadable config
       helpers.py           HTTP helpers: j(), bad(), require(), safe_resolve(), security headers
       goals.py             Persistent-goal commands and profile-scoped native GoalManager bridge
-      models.py            Session model + CRUD, per-session profile tracking, CLI/state.db bridge
+      models.py            Session model + CRUD, per-session profile/model/reasoning tracking, CLI/state.db bridge
       profiles.py          Profile state management, hermes_cli wrapper
       onboarding.py        First-run onboarding status, real provider config writes, OAuth linking, readiness detection
       routes.py            All GET + POST route handlers (if/elif dispatch, no decorators)
