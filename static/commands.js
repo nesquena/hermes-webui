@@ -1511,6 +1511,28 @@ async function cmdGoal(args){
       renderMessages({preserveScroll:true});
       showToast(msg.split('\n')[0],2600);
     }
+    // #7862 re-gate round 3 (finding 1): ``/goal resume`` returns the pending
+    // continuation's identity token so the literal ``continue`` the resume
+    // message tells the user to type can be admitted by identity instead of by
+    // text. Bind it to this session's next send; without it the store refused
+    // the tokenless ``continue`` and the goal loop stopped after every resume.
+    //
+    // #7862 re-gate (2026-10-27): the token must SURVIVE a ``/goal status``
+    // between the resume and the continue. Every /goal response used to
+    // re-bind the slot, and a status payload carries no continuation_id, so
+    // the blanking setter deleted the token and the following ``continue``
+    // posted an empty identity. Now the token is updated only when the
+    // response returns one, and cleared only for a retiring action (clear).
+    if(typeof _setResumeGoalContinuationToken==='function'){
+      const _resumeToken=r&&r.continuation_id?String(r.continuation_id):'';
+      if(_resumeToken){
+        _setResumeGoalContinuationToken(activeSid,_resumeToken);
+      } else if(String((r&&r.action)||'')==='clear'){
+        // A retiring action ends the intent; a control-only response
+        // (status/pause/set) must keep whatever token is bound.
+        _setResumeGoalContinuationToken(activeSid,'');
+      }
+    }
     if(!r||!r.stream_id)return;
     // #6705: consume the one-shot pending explicit-pick marker only after a
     // successful kickoff. Re-read the stored marker and clear it only if it

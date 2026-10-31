@@ -337,8 +337,10 @@ def test_the_harness_reproduces_the_shared_slot_defect(tmp_path):
     # Rebuild the old shape: a global slot the drain publishes and the POST
     # reads — plus the round-9 wire defect (`||undefined` instead of `||''`),
     # since that is what made a genuine turn byte-identical to a legacy tab.
+    # The replace target is the current fallback chain (drain ID || resume
+    # identity || restored-draft ID, always ending in `||''`).
     buggy = MESSAGES_SRC.replace(
-        "goal_continuation_id:_goalContinuationId||''",
+        "goal_continuation_id:(options&&options.goalContinuationId)||_resumeContinuationId||_goalContinuationId||''",
         "goal_continuation_id:_drainingGoalContinuationId||undefined",
         1,
     )

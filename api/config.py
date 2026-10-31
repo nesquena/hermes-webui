@@ -12971,6 +12971,21 @@ PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuati
 PENDING_GOAL_CONTINUATION_PROMPTS: dict = {}
 PENDING_GOAL_CONTINUATION_LOCK = threading.Lock()
 
+# #7862: the durable-intent registry this PR adds
+# (api/goal_continuation_store.py) is a separate, generational mirror
+# written under its own lock in that module. Master's #7855 records
+# above and this PR's records below are different collections on
+# purpose: #7855 owns the marker+prompt+ID record consumed by
+# api/goals.py, while goal_continuation_store.py owns the round-7+
+# generation bookkeeping (adoption markers, attempt ids, rollback
+# receipts). Neither consumer reads the other's dict.
+# #7862 re-gate (2026-10-20): the PRODUCTION producer
+# (api.goals.register_pending_goal_continuation) bridges them — it arms
+# the durable store and writes this mirror with the SAME continuation
+# token under one atomic sequence, so the route's store admission and
+# master's marker/peek path can never disagree.
+PENDING_GOAL_CONTINUATION_RECORDS: dict = {}
+
 # ── THE list of per-stream registries (#7302 re-gate) ───────────────────────
 # Every registry a stream owns. Both the local worker teardown (api/streaming.py)
 # and the chat/start orphan recovery (api/routes.py) iterate THIS list instead of

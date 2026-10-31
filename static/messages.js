@@ -43,6 +43,18 @@ const _bgTaskCompleteSeenIds = new Map();
 // synchronously before its first `await`, and it dies with the call frame.
 function _normalizeGoalContinuationId(id){return String(id||'').trim();}
 
+// #7862 re-gate (2026-10-20): the literal control a ``/goal resume`` message
+// asks the user to type. The resume-bound continuation identity is claimed
+// ONLY when the send is exactly this control — whitespace-collapsed like the
+// server's normalize_continuation_text, case-sensitive, and with no
+// attachment/skill wrapping (an annotated send is a different turn and must
+// not spend the pending continuation).
+function _isLiteralResumeContinue(text){
+  const _t=String(text||'').trim();
+  if(!_t) return false;
+  return _t.split(/\s+/).join(' ')==='continue';
+}
+
 // #7855 (round 5): a continuation restored into the composer after a refresh
 // is an IDENTIFIABLE DRAFT, not a global. The ID lives on the composer element
 // together with the exact text it was restored for; it is handed to a send only
@@ -1560,6 +1572,13 @@ async function send(){
       if(!_requeueContId&&typeof _takeRestoredDraftGoalContinuationId==='function'){
         _requeueContId=_takeRestoredDraftGoalContinuationId(_text);
       }
+      // #7862 re-gate (2026-10-20): a re-entrant send whose text IS the
+      // literal ``continue`` control is the resume's intended dispatch, so it
+      // may claim the session's one-shot resume identity for its queue entry.
+      if(!_requeueContId&&typeof _claimResumeGoalContinuationToken==='function'
+         && _isLiteralResumeContinue(_text)&&!S.pendingFiles.length){
+        _requeueContId=_claimResumeGoalContinuationToken(_targetSid);
+      }
       if(_requeueContId) _requeueEntry.goal_continuation_id=_requeueContId;
       queueSessionMessage(_targetSid,_requeueEntry);
       _clearComposerAfterQueuedSelectionSend();
@@ -1578,7 +1597,14 @@ async function send(){
   if(!text&&!S.pendingFiles.length&&!_pendingSelections.length){_sendInProgress=false;_sendInProgressSid=null;return;}
   // Don't send while an inline message edit is active
   if(document.querySelector('.msg-edit-area')){_sendInProgress=false;_sendInProgressSid=null;return;}
-  _flushSelectionBlocksToComposer();
+  // #7862: a tokenized automatic goal continuation is NOT a human send, so a
+  // pending selected-text reply must not be flushed into its composer. The
+  // queued prompt is the recorded continuation verbatim; prepending the
+  // selection blocks made the store's text match reject it even though the
+  // continuation token was correct, and the intent then stayed pending until
+  // expiry -- the goal loop died on a legitimate automatic turn. Leave the
+  // pending selections alone; they belong to the user's next real message.
+  if(!(options&&options.goalContinuationId)) _flushSelectionBlocksToComposer();
   text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
   // #7855: a refresh-restored continuation contributes its token only when the
@@ -1670,8 +1696,15 @@ async function send(){
         // #7855 (round 6): this invocation may itself BE the continuation drain
         // arriving while the session is busy. Its queue entry must carry the
         // token, or the drained turn posts an empty ID and the goal loop ends.
+        // #7862 re-gate (2026-10-20): a literal ``continue`` typed while the
+        // stream is busy claims the resume identity for its queue entry too.
+        let _interruptContId=_goalContinuationId;
+        if(!_interruptContId&&typeof _claimResumeGoalContinuationToken==='function'
+           && _isLiteralResumeContinue(text)&&!S.pendingFiles.length){
+          _interruptContId=_claimResumeGoalContinuationToken(S.session.session_id);
+        }
         const _interruptEntry={text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'};
-        if(_goalContinuationId) _interruptEntry.goal_continuation_id=_goalContinuationId;
+        if(_interruptContId) _interruptEntry.goal_continuation_id=_interruptContId;
         queueSessionMessage(S.session.session_id,_interruptEntry);
         updateQueueBadge(S.session.session_id);
         _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
@@ -1689,8 +1722,15 @@ async function send(){
         // #7855 (round 6): same contract as the interrupt branch — a
         // continuation that arrives while the session is busy must keep its
         // token on the queue entry so the drain re-posts it.
+        // #7862 re-gate (2026-10-20): a literal ``continue`` typed while the
+        // stream is busy claims the resume identity for its queue entry too.
+        let _busyContId=_goalContinuationId;
+        if(!_busyContId&&typeof _claimResumeGoalContinuationToken==='function'
+           && _isLiteralResumeContinue(text)&&!S.pendingFiles.length){
+          _busyContId=_claimResumeGoalContinuationToken(S.session.session_id);
+        }
         const _busyEntry={text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'};
-        if(_goalContinuationId) _busyEntry.goal_continuation_id=_goalContinuationId;
+        if(_busyContId) _busyEntry.goal_continuation_id=_busyContId;
         queueSessionMessage(S.session.session_id,_busyEntry);
         _clearComposerAfterQueuedSelectionSend(S.session&&S.session.session_id);
         S.pendingFiles=[];renderTray();
@@ -1849,6 +1889,22 @@ async function send(){
 
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
+
+  // #7862 re-gate round 3 (finding 1): a ``/goal resume`` binds the pending
+  // continuation's token to this session's next send. The resume message tells
+  // the user to "type continue", and that literal control is a new human turn
+  // the recorded prompt never matches, so without the token the store refused
+  // the admission and the goal loop stopped.
+  //
+  // #7862 re-gate (2026-10-20): the claim is NOT made here for every human
+  // send. Claiming for any text let an unrelated message steal the one-shot
+  // resume identity and post it, and the server's token admission then spent
+  // the pending continuation on that unrelated turn (a durable/restored-record
+  // route fixture classified it goal-related). The identity is claimed only at
+  // the POST boundary below, and only when the FINAL posted text is the
+  // literal ``continue`` control. A token already supplied by the caller (the
+  // automatic queue drain) or by a restored draft always wins.
+  let _resumeContinuationId='';
 
   // Salvage of #4750 (@harryazj): capture the composer text and clear the
   // textarea NOW — immediately after capture and BEFORE the uploadPendingFiles()
@@ -2040,6 +2096,21 @@ async function send(){
     // pick. (#3739/#3737, Codex catch)
     if(_pendingPickMatch && typeof _clearPendingSessionModel==='function') _clearPendingSessionModel(activeSid);
     explicitPickForPostStart=_explicitPick;
+    // #7862 re-gate (2026-10-20): claim the resume-bound continuation identity
+    // here — at the POST boundary, on the FINAL posted text — and ONLY when
+    // that text is the literal ``continue`` control the /goal resume message
+    // asks the user to type. The claim is one-shot; an unrelated message must
+    // not consume it, and an attachment-annotated or forced-skill-wrapped send
+    // is a different turn and must not spend the pending continuation either.
+    // The claimed ID is this invocation's effective identity, carried through
+    // POST, the active-stream-conflict requeue and the rejected-start
+    // restoration below.
+    if(!(options&&options.goalContinuationId)&&!_goalContinuationId){
+      if(typeof _claimResumeGoalContinuationToken==='function'
+         && _isLiteralResumeContinue(msgText)){
+        _resumeContinuationId=_claimResumeGoalContinuationToken(activeSid);
+      }
+    }
     const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
       session_id:activeSid,message:msgText,
       // S.session.model remains authoritative; the helper only resolves a
@@ -2061,7 +2132,14 @@ async function send(){
       // (#6885 again). The explicit empty string keeps the key present so the
       // server can tell "genuine turn" from "pre-upgrade tab that must still
       // get marker admission".
-      goal_continuation_id:_goalContinuationId||''
+      // #7862 re-gate round 3 (finding 1): the payload also falls back to the
+      // token a ``/goal resume`` bound to this session, so the literal
+      // ``continue`` the resume message asks for is admitted by identity.
+      // The fallback chain keeps master's Round-9 contract: the key is always
+      // PRESENT (empty string when neither identity exists), never omitted,
+      // so JSON.stringify cannot make a genuine turn and a pre-upgrade tab
+      // byte-identical on the wire.
+      goal_continuation_id:(options&&options.goalContinuationId)||_resumeContinuationId||_goalContinuationId||''
     })});
     _pendingMoaConfig=null;
     postStartData = startData;
@@ -2102,7 +2180,7 @@ async function send(){
       if(typeof renderSessionList==='function') void renderSessionList();
       return;
     }
-    if(await _recoverCompressedSend(e,activeSid,_failedSendDraftText,_failedSendFilesSnapshot,_composerDraftClearPromise,_goalContinuationId)) return;
+    if(await _recoverCompressedSend(e,activeSid,_failedSendDraftText,_failedSendFilesSnapshot,_composerDraftClearPromise,_resumeContinuationId||_goalContinuationId)) return;
     const conflictActiveStream=/session already has an active stream/i.test(errMsg);
     if(conflictActiveStream){
       delete INFLIGHT[activeSid];
@@ -2115,7 +2193,11 @@ async function send(){
       // it here turned the retry into an ordinary turn and silently ended the
       // goal loop. Re-read the token from THIS invocation (the rejected POST
       // already consumed the server side), never from a shared slot.
-      const _retryContId=_normalizeGoalContinuationId(_goalContinuationId);
+      // #7862 re-gate (2026-10-20): the resume-bound identity is part of this
+      // invocation's effective identity too — an active-stream conflict on the
+      // literal ``continue`` requeued the control WITHOUT the resume token,
+      // and the retry then ran as an ordinary turn, stopping the goal loop.
+      const _retryContId=_normalizeGoalContinuationId(_resumeContinuationId||_goalContinuationId);
       const _retryEntry={text:msgText,files:[],model:_retryModelState.model,model_provider:_retryModelState.model_provider,profile:S.activeProfile||'default'};
       if(_retryContId) _retryEntry.goal_continuation_id=_retryContId;
       queueSessionMessage(activeSid,_retryEntry);
@@ -2146,7 +2228,10 @@ async function send(){
     // draft's continuation ID must come back with its text. Restoring only the
     // text made the retry post an empty ID and the continuation became an
     // ordinary turn.
-    _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _goalContinuationId);
+    // #7862 re-gate (2026-10-20): same rule for the resume-bound identity — a
+    // rejected literal ``continue`` restored its text with an EMPTY identity,
+    // so the one-key retry posted no token and the goal loop stopped.
+    _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _resumeContinuationId||_goalContinuationId);
     if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
     // Reconcile with server truth after immediately clearing the optimistic spinner.
     if(typeof renderSessionList==='function') void renderSessionList();

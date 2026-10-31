@@ -3629,6 +3629,25 @@ from api.config import (
     _parse_provider_qualified_model_id,
 )
 from api import config as api_config
+from api.goal_continuation_store import (
+    CONSUME_COMMITTED,
+    CONSUME_COMMIT_FAILED,
+    CONSUME_NOT_MATCHING,
+    _CONTINUE_CONTROL,
+    consume_pending_goal_continuation,
+    discard_goal_continuation_handoff,
+    discard_goal_continuation_rollback_receipt,
+    goal_continuation_attempt_owns_admission,
+    normalize_continuation_text,
+    pop_goal_continuation_handoff,
+    pop_goal_continuation_rollback_receipt,
+    reclaim_goal_continuation_receipt,
+    record_goal_continuation_stream,
+    restore_pending_goal_continuation,
+    retire_pending_goal_continuation,
+    session_has_registry_state,
+)
+
 from api.helpers import (
     require,
     bad,
@@ -3656,6 +3675,37 @@ from api.agent_health import (
 from api.gateway_chat import gateway_chat_config_status
 from api.request_diagnostics import RequestDiagnostics
 from api.system_health import build_system_health_payload
+
+
+class _GoalContinuationCommitFailed(Exception):
+    """A matched goal continuation could not be durably removed.
+
+    #7862 round 8 (CORE): ``consume_pending_goal_continuation`` answers
+    ``CONSUME_COMMIT_FAILED`` when the turn IS the continuation but the registry
+    replacement did not commit. That is not the same as "this turn is not the
+    continuation", and it must not be admitted: the turn would be spent while the
+    old registry bytes survive, so a restart restores a claimable record. Raising
+    this keeps the failure out of the generic ``except Exception`` that used to
+    swallow it into an ordinary-turn classification.
+    """
+
+    def __init__(self, session_id: str = ""):
+        super().__init__(f"goal continuation commit failed for {session_id!r}")
+        self.session_id = session_id
+
+
+class _GoalContinuationTokenUnmatched(_GoalContinuationCommitFailed):
+    """A request carried a continuation token that matches NO live intent.
+
+    #7862 re-gate round 15 (CORE finding 2): when a browser dispatch still
+    carries a ``goal_continue`` token but the intent is gone — consumed by
+    another process's admission, or already spent — launching it as an
+    ordinary turn is how a second ``goal_related=False`` worker appeared for
+    a continuation another process was already running. Refuse the start so
+    the caller can see the continuation is no longer pending; the same
+    rollback/compensation machinery as ``_GoalContinuationCommitFailed``
+    applies (nothing was consumed here, so the restore is a no-op).
+    """
 
 
 # ── Non-streaming custom-provider connection authority ───────────────────────
@@ -19540,6 +19590,27 @@ def handle_post(handler, parsed) -> bool:
                 except Exception:
                     logger.debug("Failed to unlink session file %s", p)
             sidecar_deleted = not p.exists()
+            # #6885 slice 2a: a deleted session must not leave stale durable
+            # intent that a later boot/repair would re-arm as a continuation.
+            # #7862 re-gate (2026-10-27, SILENT): the retirement's RETURN VALUE
+            # decides the delete's honesty — a False (snapshot not committed,
+            # e.g. ENOSPC) leaves the continuation prompt claimable on disk and
+            # a cold restore recovers the deleted intent, so the failure is
+            # surfaced like every other non-durable delete step.
+            # #7862 re-gate round 15 (should-fix): a session with NO record,
+            # handoff or receipt must not write an fsynced registry snapshot
+            # with a tombstone — the no-goal delete returns early and never
+            # touches the registry.
+            try:
+                if session_has_registry_state(sid):
+                    continuation_retired = retire_pending_goal_continuation(
+                        sid, reason="deleted"
+                    )
+                else:
+                    continuation_retired = True
+            except Exception:
+                continuation_retired = False
+                logger.debug("Failed to retire pending goal continuation for deleted session %s", sid)
             try:
                 draft_deleted = bool(_delete_session_draft(sid))
             except Exception:
@@ -19595,6 +19666,21 @@ def handle_post(handler, parsed) -> bool:
             response["draft_delete_failed"] = True
             response.update(
                 {"ok": False, "error": "Failed to delete session draft"}
+            )
+            return j(handler, response, status=500)
+        if not continuation_retired:
+            # #7862 re-gate (2026-10-27, SILENT): the delete is NOT durable
+            # while the continuation prompt stays claimable on disk.
+            response["continuation_retire_failed"] = True
+            response.update(
+                {
+                    "ok": False,
+                    "error": (
+                        "Failed to retire the pending goal continuation for the "
+                        "deleted session; it may resume after a restart. Retry "
+                        "the delete."
+                    ),
+                }
             )
             return j(handler, response, status=500)
         response["ok"] = True
@@ -27803,8 +27889,17 @@ def _start_regeneration_stream_locked(
     backend_is_gateway: bool,
     persisted_model=None,
     persisted_model_provider=None,
+    goal_continuation_attempt_id: str = "",
+    goal_continuation_admitted: bool = False,
 ):
-    """Commit a retained-row regeneration before releasing its real worker."""
+    """Commit a retained-row regeneration before releasing its real worker.
+
+    ``goal_continuation_admitted`` says the consume for this attempt COMMITTED,
+    so a durable admission handoff exists that this launch owns. Only then does
+    the gated worker's ownership revalidation mean anything: an ordinary
+    regeneration carries an attempt identity but never consumed an intent, and
+    there is no admission to lose (#7862 re-gate round 17, CORE finding 1).
+    """
     from api.session_ops import (
         RegenerationUnavailable,
         apply_regeneration_plan,
@@ -27972,10 +28067,72 @@ def _start_regeneration_stream_locked(
         worker_thread = threading.Thread(target=_gated_worker, daemon=True)
         worker_thread.start()
         thread_started = True
+        # #7862 re-gate round 3 (finding 2): the regeneration path never bound
+        # the admission's stream identity at all, so a launch whose discharge
+        # write failed had nothing to reconcile against — a restart restored
+        # the continuation and the admitted turn ran twice. Bind it here, while
+        # the gated worker is still parked at ``release_worker.wait()`` and
+        # BEFORE the worker is released, so the binding is durable before any
+        # execution can happen. A failed binding refuses the launch (the except
+        # below compensates the start and the caller restores the intent).
+        if goal_continuation_attempt_id and not record_goal_continuation_stream(
+            s.session_id, goal_continuation_attempt_id, stream_id
+        ):
+            logger.error(
+                "Session %s: the goal-continuation admission for attempt %s "
+                "launched a regeneration but its stream identity could not be "
+                "bound durably; refusing to release stream %s",
+                s.session_id,
+                goal_continuation_attempt_id,
+                stream_id,
+            )
+            raise _GoalContinuationCommitFailed(session_id=s.session_id)
         save_attempted = True
         s.save()
+        # The regeneration is accepted from here on: the stream exists and the
+        # turn has started, so a later failure must be reported as an
+        # interrupted-but-accepted turn (``_regeneration_accepted``) instead of
+        # being compensated back. This marker predates the ownership
+        # revalidation below and must stay before it — the revalidation
+        # explicitly clears it when it refuses the launch.
         accepted = True
         set_last_workspace(workspace, profile=getattr(s, "profile", None))
+        # #7862 re-gate round 17 (CORE finding 1): the binding above renewed
+        # the admission's ownership lease and then RELEASED its file
+        # transaction; everything between it and this point — the session save
+        # and the workspace work — ran with no ownership check, and the gated
+        # worker below executes the moment it is released. A peer can take the
+        # admission over inside that window, and elapsed age alone is not a
+        # fence through launch. Revalidate ownership against the durable state
+        # as the last step before the release, so a takeover refuses the
+        # launch HERE: the surrounding except compensates the start (worker
+        # aborted, registries released, regeneration state restored) and the
+        # caller rolls the intent back, instead of the route answering 200 and
+        # running a second goal worker for one intent. The check deliberately
+        # sits before the release rather than inside the parked worker: the
+        # route discharges the admission right after this function returns, so
+        # a worker-side check could not tell "our own launch discharged it"
+        # from "a peer took it over" without a race.
+        if (
+            goal_continuation_admitted
+            and goal_continuation_attempt_id
+            and not goal_continuation_attempt_owns_admission(
+                s.session_id, goal_continuation_attempt_id, stream_id
+            )
+        ):
+            logger.error(
+                "Session %s: the goal-continuation admission for attempt %s "
+                "was discharged or taken over while the regeneration was "
+                "being committed; refusing to release its worker",
+                s.session_id,
+                goal_continuation_attempt_id,
+            )
+            # The launch is refused, so this turn was NOT accepted: clear the
+            # marker again so the surrounding except compensates the start
+            # (worker aborted, registries released, regeneration state
+            # restored) instead of reporting an interrupted-but-accepted turn.
+            accepted = False
+            raise _GoalContinuationCommitFailed(session_id=s.session_id)
         release_worker.set()
     except Exception as exc:
         abort_worker.set()
@@ -28314,43 +28471,234 @@ def _start_chat_stream_for_session(
 
     consumed_goal_continuation = False
     consumed_bg_task_completion = False
-    # #1932: this session may have a pending goal continuation. The streaming
-    # hook sets PENDING_GOAL_CONTINUATION when goal_continue fires, so the next
-    # chat/start for this session is automatically treated as goal-related.
-    # #6885 + #7855: the marker is consumed ONLY when the request carries the
-    # continuation ID the server issued at goal_continue time — a genuine
-    # user/queued turn (no ID) keeps priority and leaves the marker for the
-    # browser's auto-dispatch, while an edited / combined / late-sent
-    # continuation still carries its ID and keeps the goal.
-    #
-    # #7855 rebase compat (#7249): the admission runs INSIDE the session lock
-    # via consume_continuation_markers(), not up front. Admission pops BOTH
-    # halves (marker + prompt record, api/goals.py), so a rejected start must
-    # restore both; rolling back the marker alone left the retry unmatchable
-    # (maintainer's #7862 repro: consume -> rollback -> retry consume False).
-    # The popped record therefore travels as a rollback receipt and
-    # restore_consumed_continuation_markers() re-arms the pair — unless a
-    # newer continuation was armed for this session meanwhile.
-    consumed_goal_continuation_receipt = None
+    # #7862 round 5: identify THIS start attempt so its rollback receipt is
+    # claimed (and discarded) by exactly this call, never by a neighbouring
+    # attempt for the same session. Generated lazily on first use so an
+    # ordinary turn never consumes the stream-id uuid budget.
+    goal_continuation_attempt_id: str | None = None
+
+    def _current_goal_continuation_attempt_id() -> str:
+        nonlocal goal_continuation_attempt_id
+        if goal_continuation_attempt_id is None:
+            goal_continuation_attempt_id = uuid.uuid4().hex
+        return goal_continuation_attempt_id
 
     def consume_continuation_markers() -> None:
-        nonlocal goal_related, consumed_goal_continuation, consumed_bg_task_completion
+        nonlocal goal_related, consumed_goal_continuation, consumed_bg_task_completion, goal_continuation_attempt_id
         nonlocal consumed_goal_continuation_receipt
+        # #1932 / #7862: consume a pending goal continuation, but ONLY when
+        # this turn actually IS the recorded continuation. The marker used
+        # to be spent by session id alone, which was safe only while it
+        # lived for the few seconds between goal_continue firing and the
+        # browser's automatic send. #7862 makes it durable, so it can come
+        # back at startup long after that browser is gone; retiring on the
+        # next message of any kind would swallow an unrelated turn and
+        # queue another automatic continuation on top of it. A non-matching
+        # send stays an ordinary turn and leaves the intent pending
+        # (bounded by sweep_expired_goal_continuations).
+        #
+        # Identity first: the browser carries the ``goal_continue`` token
+        # through the queued automatic continuation, so a `/use` skill
+        # directive wrapping the queued text can no longer break the match
+        # (round-3 core finding).
+        #
+        # #7862 round 11 (re-gate CORE): an explicit ``continue`` for a
+        # resumed goal is admitted on identity. ``/goal resume`` tells the
+        # user to "type continue", and that literal control is a new human
+        # turn the recorded prompt never matches, so without this admission
+        # the goal loop stopped after a resume. The store keeps the guard
+        # narrow (token required, literal control only, every durable
+        # outcome unchanged); this side only certifies that the session's
+        # goal really is active, which is what makes the control legitimate
+        # rather than a text-match bypass.
+        # #7862 re-gate (2026-10-27, CORE): consumption requires a NON-EMPTY
+        # RESOLVED continuation id. Native continuation prompts repeat, so a
+        # tokenless regenerate of that text used to text-match the record and
+        # spend the NEXT queued continuation (the reviewer's new path: the
+        # browser's regenerate posts no token, and the resolver answers ""
+        # for an explicit regenerate). The legacy key-omission shape is
+        # unaffected: a pre-upgrade tab that omits the key entirely is
+        # resolved server-side by
+        # ``_resolve_chat_start_goal_continuation_id`` (it peeks the
+        # session's pending id), so its request still carries a token here.
+        # A server-initiated turn (``start_session_turn``) never carries one
+        # and therefore never swallows a browser continuation by text.
+        # #7862 re-gate round 15 (CORE finding 2): the marker is the ONLY
+        # proof this token's intent is still claimable. When a request
+        # carries a non-empty continuation token but the session has NO
+        # pending marker, the intent was already consumed — by this very
+        # process's earlier dispatch, or by another process's admission
+        # (the two-worker replay). Launching it as an ordinary turn is the
+        # exact misclassification that produced the second
+        # ``goal_related=False`` worker, so REFUSE instead.
         if not goal_related and goal_continuation_id:
-            receipt = _consume_pending_goal_continuation(s.session_id, goal_continuation_id)
-            if receipt:
-                goal_related = True
-                consumed_goal_continuation = True
-                consumed_goal_continuation_receipt = receipt
+            if s.session_id not in PENDING_GOAL_CONTINUATION:
+                logger.warning(
+                    "Refusing chat start for session %s: the request carried "
+                    "a continuation token but no pending intent exists "
+                    "(consumed elsewhere or already spent)",
+                    s.session_id,
+                )
+                raise _GoalContinuationTokenUnmatched(session_id=s.session_id)
+            _explicit_continue = False
+            _goal_is_active = False
+            if normalize_continuation_text(msg) == _CONTINUE_CONTROL:
+                try:
+                    # #7862 re-gate round 3 (finding 1): certify the goal the
+                    # profile-scoped way. The previous check read
+                    # ``goal_state_snapshot`` and required a dict with
+                    # ``status == "active"``, but the native snapshot is a
+                    # ``GoalState`` object (``isinstance(snapshot, dict)`` is
+                    # False) and a beta-profile goal resolves to ``None``
+                    # without ``profile_home``. Either way the certification
+                    # failed, the literal ``continue`` after ``/goal resume``
+                    # launched with ``goal_related=false``, and the goal loop
+                    # stopped. ``has_active_goal()`` answers the same question
+                    # through the manager (native or fallback) under the
+                    # session's profile home.
+                    from api.goals import has_active_goal
+                    from api.profiles import get_hermes_home_for_profile
+
+                    _goal_home = get_hermes_home_for_profile(
+                        getattr(s, "profile", None)
+                    )
+                    _goal_is_active = bool(
+                        has_active_goal(s.session_id, profile_home=_goal_home)
+                    )
+                    _explicit_continue = _goal_is_active
+                except Exception:
+                    logger.debug(
+                        "Failed to read goal state for the continue admission "
+                        "(session %s)",
+                        s.session_id,
+                        exc_info=True,
+                    )
+            goal_continuation_attempt_id = _current_goal_continuation_attempt_id()
+            try:
+                _consume_outcome = consume_pending_goal_continuation(
+                    s.session_id,
+                    msg,
+                    goal_continuation_id,
+                    goal_continuation_attempt_id,
+                    explicit_continue=_explicit_continue,
+                    goal_active=_goal_is_active,
+                )
+                if _consume_outcome == CONSUME_COMMITTED:
+                    goal_related = True
+                    consumed_goal_continuation = True
+                    # #7862 round 7 (finding 3): this start is now admitted
+                    # and deliberately in flight between the consume and the
+                    # worker launch, so report it live. The receipt sweep must
+                    # not treat elapsed wall time as evidence that this attempt
+                    # ended: the route has no chat-start deadline, and a slow
+                    # registration callback or provider handshake can outlive
+                    # the TTL while the attempt is still running.
+                    reclaim_goal_continuation_receipt(
+                        s.session_id, _current_goal_continuation_attempt_id()
+                    )
+                    consumed_goal_continuation_receipt = (
+                        _current_goal_continuation_attempt_id()
+                    )
+                elif _consume_outcome == CONSUME_COMMIT_FAILED:
+                    # #7862 round 8 (CORE): the turn IS the continuation, but the
+                    # durable removal did not commit. Admitting it would spend
+                    # the turn while the registry bytes survive, so a restart
+                    # restores a claimable record after the turn was already
+                    # used. Refuse the admission instead of letting it fall
+                    # through as an ordinary turn.
+                    logger.error(
+                        "Refusing chat start for session %s: the goal "
+                        "continuation was matched but could not be durably "
+                        "removed (attempt %s)",
+                        s.session_id,
+                        _current_goal_continuation_attempt_id(),
+                    )
+                    raise _GoalContinuationCommitFailed(session_id=s.session_id)
+                elif _consume_outcome == CONSUME_NOT_MATCHING:
+                    # #7862 re-gate round 15 (CORE finding 2): the session
+                    # HAS a pending marker, but THIS token does not match its
+                    # live intent — the record was consumed by another
+                    # process's admission (or a newer generation replaced
+                    # it). The token claims continuation identity, so this is
+                    # not an ordinary turn: refusing prevents the duplicate
+                    # ``goal_related=False`` worker the reviewers replayed.
+                    logger.warning(
+                        "Refusing chat start for session %s: the request "
+                        "carried a continuation token that matches no live "
+                        "intent (attempt %s)",
+                        s.session_id,
+                        _current_goal_continuation_attempt_id(),
+                    )
+                    raise _GoalContinuationTokenUnmatched(session_id=s.session_id)
+            except _GoalContinuationCommitFailed:
+                raise
+            except Exception:
+                logger.debug(
+                    "Failed to consume pending goal continuation for session %s",
+                    s.session_id,
+                    exc_info=True,
+                )
+
+        # #7193: retire the bare BG-task marker ONLY when a consume actually
+        # runs (this used to sit eagerly at function scope, so a 409 early
+        # return discarded the marker with no restore — the master shape
+        # keeps it inside this closure).
         if s.session_id in PENDING_BG_TASK_COMPLETIONS:
             PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
             consumed_bg_task_completion = True
 
-    def restore_consumed_continuation_markers() -> None:
-        if consumed_goal_continuation:
-            from api.goals import restore_pending_goal_continuation
+    consumed_goal_continuation_receipt = None
 
-            restore_pending_goal_continuation(s.session_id, consumed_goal_continuation_receipt)
+    def restore_consumed_continuation_markers() -> None:
+        # #7249 (exp-v0.52.392) restored only the in-memory marker. Since
+        # #7862 a consume also deletes the durable record, so a marker-only
+        # rollback leaves the retry unmatched (the store deliberately refuses
+        # a bare marker) and the goal loop loses its continuation after a
+        # rejected start (stream registration / worker start failure, 409).
+        # Restore BOTH under the store lock, via the rollback receipt the
+        # matching consume left behind; the store compares generations so a
+        # newer intent armed in the meantime is never clobbered.
+        if consumed_goal_continuation:
+            receipt = pop_goal_continuation_rollback_receipt(
+                s.session_id, _current_goal_continuation_attempt_id()
+            )
+            # #7862 round 10 (finding 3): fall back to the durable handoff when
+            # the receipt is gone. The handoff is written in the same snapshot
+            # as the removal, so it survives everything the receipt survives and
+            # more — including the case where the receipt was swept because the
+            # attempt outlived the TTL without reclaiming. Before this, a
+            # missing receipt meant the rollback restored nothing, the retry ran
+            # as an ordinary turn, and the goal loop silently lost its
+            # continuation.
+            if receipt is None:
+                receipt = pop_goal_continuation_handoff(
+                    s.session_id, _current_goal_continuation_attempt_id()
+                )
+                if receipt is not None:
+                    logger.info(
+                        "Session %s: goal-continuation rollback fell back to the "
+                        "durable handoff for attempt %s",
+                        s.session_id,
+                        _current_goal_continuation_attempt_id(),
+                    )
+            if receipt is not None:
+                restore_pending_goal_continuation(s.session_id, receipt)
+            else:
+                # #7862 round 6: this start CONSUMED the durable record (the
+                # store deleted it, not just the marker), so "no receipt" means
+                # the receipt is gone -- evicted, or already claimed. The legacy
+                # marker-only fallback that used to live here is wrong after a
+                # store-backed consume: the store deliberately refuses to match
+                # a bare marker with no record, so re-adding the marker only
+                # resurrects a state the retry's consume will reject. The goal
+                # loop loses its continuation either way, but a silent bare
+                # marker also masks the defect; log it loudly instead.
+                logger.warning(
+                    "Session %s: goal-continuation rollback found no receipt for attempt %s after a store-backed consume",
+                    s.session_id,
+                    _current_goal_continuation_attempt_id(),
+                    exc_info=True,
+                )
         if consumed_bg_task_completion:
             PENDING_BG_TASK_COMPLETIONS.add(s.session_id)
 
@@ -28385,6 +28733,13 @@ def _start_chat_stream_for_session(
                 needs_stale_cleanup = False
                 if regeneration is not None:
                     consume_continuation_markers()
+                    # #7862 re-gate round 3 (finding 2): mint the attempt
+                    # identity BEFORE the regeneration launch and thread it
+                    # through, so the regeneration path can bind the admission's
+                    # stream identity durably before it releases its worker
+                    # (it previously bound nothing, despite the comment
+                    # claiming the regeneration stream's own launch did it).
+                    goal_continuation_attempt_id = _current_goal_continuation_attempt_id()
                     try:
                         regeneration_response = _start_regeneration_stream_locked(
                             s,
@@ -28400,6 +28755,8 @@ def _start_chat_stream_for_session(
                             source=source,
                             moa_config=moa_config,
                             backend_is_gateway=backend_is_gateway,
+                            goal_continuation_attempt_id=goal_continuation_attempt_id,
+                            goal_continuation_admitted=consumed_goal_continuation,
                         )
                     except Exception:
                         restore_consumed_continuation_markers()
@@ -28409,6 +28766,37 @@ def _start_chat_stream_for_session(
                         and int(regeneration_response.get("_status", 200) or 200) >= 400
                     ):
                         restore_consumed_continuation_markers()
+                    else:
+                        # #7862 round 5: regeneration launched, so this
+                        # attempt's receipt has no consumer -- same discard as
+                        # the worker-thread start path.
+                        discard_goal_continuation_rollback_receipt(
+                            s.session_id, _current_goal_continuation_attempt_id()
+                        )
+                        # #7862 round 7: the durable handoff is discharged by
+                        # the same outcome, so a later cold restore cannot
+                        # resurrect a continuation that already ran.
+                        # #7862 re-gate CORE (Oct 10): the outcome is CONSUMED
+                        # here too -- the reviewer read this same unchecked
+                        # settlement on the regeneration path. The stream
+                        # identity is bound INSIDE
+                        # ``_start_regeneration_stream_locked`` (round 3:
+                        # before its gated worker is released), so a failed
+                        # settlement stays reconcilable; report it instead of
+                        # acknowledging a clean response.
+                        _regen_handoff_settled = discard_goal_continuation_handoff(
+                            s.session_id, _current_goal_continuation_attempt_id()
+                        )
+                        if not _regen_handoff_settled:
+                            logger.error(
+                                "Session %s: the goal-continuation admission "
+                                "for attempt %s launched a regeneration but "
+                                "its durable discharge did not commit; "
+                                "recovery will reconcile against the recorded "
+                                "stream identity",
+                                s.session_id,
+                                _current_goal_continuation_attempt_id(),
+                            )
                     return regeneration_response
                 stream_id = uuid.uuid4().hex
                 from api.session_ops import snapshot_session_state
@@ -28523,7 +28911,73 @@ def _start_chat_stream_for_session(
                         kwargs=worker_kwargs,
                         daemon=True,
                     )
+                    # #7862 re-gate CORE (Oct 10, "failed durable discharge is
+                    # still ignored after launch"): bind the admission's stream
+                    # identity BEFORE the worker executes. This is the first
+                    # half of the reviewer's exact fix — persist the admission
+                    # with its attempt/stream identity, so recovery can
+                    # reconcile against it instead of restoring an admitted
+                    # turn as pending intent. The handoff already IS the durable
+                    # admission; the stream id is what says it LAUNCHED.
+                    #
+                    # #7862 re-gate round 3 (finding 2): the binding RESULT is
+                    # consumed, not dropped. An ENOSPC on the stream-identity
+                    # write used to fall through, the worker still launched
+                    # with a 200, and a restart restored the continuation —
+                    # so the admitted turn ran TWICE. A failure here means the
+                    # admission is not durably tied to this stream, so the
+                    # launch must be refused (the surrounding except compensates
+                    # the start and rolls the intent back for a retry).
+                    goal_continuation_attempt_id = _current_goal_continuation_attempt_id()
+                    if not record_goal_continuation_stream(
+                        s.session_id, goal_continuation_attempt_id, stream_id
+                    ):
+                        logger.error(
+                            "Session %s: the goal-continuation admission for "
+                            "attempt %s could not durably bind its stream "
+                            "identity; refusing to launch stream %s",
+                            s.session_id,
+                            goal_continuation_attempt_id,
+                            stream_id,
+                        )
+                        raise _GoalContinuationCommitFailed(session_id=s.session_id)
                     thr.start()
+                    # #7862 round 5: the launch SUCCEEDED, so this attempt can
+                    # no longer be rolled back and its receipt has no consumer.
+                    # Leaving it behind was the root cause of the maintainer's
+                    # eviction probe: every successful goal start leaked a
+                    # slot until unrelated traffic pushed an IN-FLIGHT
+                    # receipt out of the registry, whose rejected-start
+                    # rollback then degraded to a bare marker the store
+                    # refuses to match.
+                    # #7862 round 7: the launch SUCCEEDED, so this attempt's
+                    # durable handoff has no consumer either. Leaving it behind
+                    # would make a later cold restore resurrect a continuation
+                    # that already ran; discharge it exactly like the receipt.
+                    # #7862 re-gate CORE (Oct 10): the discharge's outcome is
+                    # CONSUMED now. A failed settlement after a live launch
+                    # must not be acknowledged as a clean 200: the stream is
+                    # running, so the admission is recorded with its stream id
+                    # above and a cold restore refuses to re-adopt it — but the
+                    # operator still needs to know the settlement did not land,
+                    # because a restart before the next successful discharge
+                    # leaves the reconciliation to that startup path.
+                    _handoff_settled = discard_goal_continuation_handoff(
+                        s.session_id, goal_continuation_attempt_id
+                    )
+                    discard_goal_continuation_rollback_receipt(
+                        s.session_id, goal_continuation_attempt_id
+                    )
+                    if not _handoff_settled:
+                        logger.error(
+                            "Session %s: the goal-continuation admission for "
+                            "attempt %s launched under stream %s but its durable "
+                            "discharge did not commit; recovery will reconcile "
+                            "against the recorded stream identity",
+                            s.session_id,
+                            _current_goal_continuation_attempt_id(),
+                            stream_id,
+                        )
                 except Exception as exc:
                     if backend_is_gateway and stream_id:
                         try:

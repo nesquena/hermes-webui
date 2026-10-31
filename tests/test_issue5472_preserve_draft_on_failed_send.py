@@ -95,9 +95,9 @@ def test_send_captures_immutable_snapshot_before_rewrites_and_upload():
 def test_error_branch_restores_original_snapshot_not_mutated_payload():
     start = MESSAGES_JS.find("S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});")
     assert start != -1, "the /api/chat/start error branch must still push an Error turn"
-    window = MESSAGES_JS[start:start + 1100]
+    window = MESSAGES_JS[start:start + 2500]
     assert (
-        "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _goalContinuationId);"
+        "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _resumeContinuationId||_goalContinuationId);"
         in window
     ), ("the send-error path must restore the ORIGINAL captured snapshot (not `text`) "
         "together with the invocation-bound continuation ID (#7855 round 6)")
@@ -163,7 +163,7 @@ def test_restore_persist_chains_after_the_clear_promise():
     assert "let _composerDraftClearPromise=null;" in MESSAGES_JS
     call = (
         "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, "
-        "_failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _goalContinuationId);"
+        "_failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _resumeContinuationId||_goalContinuationId);"
     )
     assert call in MESSAGES_JS, "send() must pass the clear promise into the restore helper"
 
