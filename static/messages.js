@@ -5,7 +5,7 @@ const _AGENT_COMMAND_ALIASES = {
   'credits': 'credits'
 };
 const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set([
-  'reload-mcp','reload-skills','codex-runtime','credits',
+  'reload-mcp','reload-skills','codex-runtime','credits','loop',
   'reload_mcp','reload_skills','codex_runtime','credits'
 ]);
 function _markSessionViewed(sid, messageCount) {
@@ -1635,6 +1635,19 @@ async function send(){
       // or queued as the literal text "/stop" (#6951).
       if(text.startsWith('/')&&!literalSlash){
         const _pc=typeof parseCommand==='function'&&parseCommand(text);
+        // Resolve registry metadata first so the advertised alias (/proactive) takes the /loop path.
+        const _pcMeta=_pc&&typeof getAgentCommandMetadata==='function'?await getAgentCommandMetadata(_pc.name):null;
+        if(_pc&&(_pcMeta&&_pcMeta.name||_pc.name)==='loop'&&typeof executeAgentCommand==='function'){
+          // /loop status|pause|stop must reach the loop while its own wakeup turn runs.
+          $('msg').value='';autoResize();
+          S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+          const _loopSid=S.session&&S.session.session_id,_loopMsgs=S.messages;  // the owning chat: a switch replaces S.messages
+          let _out;
+          try{_out=await executeAgentCommand(text,_pcMeta||{name:'loop'});}catch(e){_out='Agent command error: '+(e&&e.message||e);}
+          _loopMsgs.push({role:'assistant',content:String(_out||'(no output)'),_ts:Date.now()/1000});
+          if(S.messages===_loopMsgs&&(S.session&&S.session.session_id)===_loopSid&&typeof renderMessages==='function') renderMessages({preserveScroll:true});
+          return;
+        }
         if(_pc&&['steer','interrupt','queue','terminal','goal','yolo','stop'].includes(_pc.name)){
           const _bc=COMMANDS.find(c=>c.name===_pc.name);
           if(_bc){
