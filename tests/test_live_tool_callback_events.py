@@ -49,6 +49,8 @@ def test_tool_complete_callback_emits_existing_tool_complete_sse_event_with_tool
         "Tool completion SSE emission should be idempotent per callback id."
     )
     assert "result_snippet = _tool_result_snippet(function_result)" in block
+    assert "is_error = _canonical_tool_result_is_error(name, function_result)" in block
+    assert "'is_error': is_error" in block
     assert "_checkpoint_activity[0] += 1" in block
 
 
