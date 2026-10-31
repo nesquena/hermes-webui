@@ -110,6 +110,12 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "is_read_only",
     "gateway_routing",
     "last_used_model",
+    # #8447: the sanitized per-session failure state ("last turn failed at
+    # the provider"). Derived from the Agent's failed_turn boundary rows and
+    # persisted in the session metadata prefix, so the sidebar reads it
+    # without a transcript scan. Carries only sanitized fields — never the
+    # raw provider error text.
+    "failure_summary",
 }
 
 

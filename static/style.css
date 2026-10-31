@@ -1731,6 +1731,39 @@
     width:8px;
     height:8px;
   }
+  /* #8447: the "last turn failed" marker. It sits in the flex flow next to
+     the state indicator so it never overlaps the row's action menu, and it
+     uses --error for a non-retryable failure and --warning for a retryable
+     one so the two are distinguishable at a glance. */
+  .session-failure-indicator{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    flex-shrink:0;
+    width:14px;
+    height:14px;
+    margin-left:4px;
+    border-radius:50%;
+    font-size:10px;
+    font-weight:700;
+    line-height:1;
+    cursor:help;
+    user-select:none;
+  }
+  .session-failure-indicator.is-terminal{
+    color:var(--error);
+    background:color-mix(in srgb,var(--error) 16%,transparent);
+  }
+  .session-failure-indicator.is-retryable{
+    color:var(--warning);
+    background:color-mix(in srgb,var(--warning) 16%,transparent);
+  }
+  .session-failure-indicator.is-unknown{
+    /* #8447: unknown retryability stays neutral — nothing claims the
+       failure is terminal (or retryable) when the producer never said. */
+    color:var(--muted);
+    background:color-mix(in srgb,var(--muted) 16%,transparent);
+  }
   /* Timestamp lives in the flex flow of .session-title-row (not absolute) so
      the title's flex:1 bound stops at the timestamp's left edge and stops
      running underneath it. margin-left:auto pushes it to the row's right
