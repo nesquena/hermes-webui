@@ -33,6 +33,20 @@ _SESSIONS_CACHE_TTL_SECONDS = 2.5
 # still invalidate immediately. Keep this strictly greater than
 # `_streamingPollMs`/1000 (see tests/test_streaming_cache_ttl_vs_poll.py).
 _SESSIONS_CACHE_STREAMING_TTL_SECONDS = 45.0
+# Rebuild-rate floor (2026-10-28). The stamp above changes whenever ANY writer
+# touches state.db or the session index — a live agent session does that on every
+# message and tool call — so on a busy host the entry "changes" on nearly every
+# poll, and each change forces a FULL all_sessions() rebuild (it re-parses every
+# transcript in the store). Measured with three concurrent agent sessions: 50
+# rebuilds in 12 min, 847 s of total stall, worst single /api/sessions request
+# 60.6 s while the machine sat at load 14 (a warm rebuild costs ~1.2 s of parsing
+# and multiples of that under contention). Serving a payload at most this many
+# seconds old bounds the staleness a client can see and caps the rebuild RATE.
+# The runtime overlay (active stream, pending flags, sort order) is applied on
+# every response regardless of the cache, so only structural row data (title,
+# counts, membership) can be this stale; a settings write or a structural change
+# still invalidates through the separate invalidation stamp.
+_SESSIONS_CACHE_MIN_REFRESH_SECONDS = 10.0
 _SESSIONS_CACHE_MAX_ENTRIES = 64
 _SESSIONS_CACHE_WAIT_SECONDS = 0.25
 _SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
@@ -386,6 +400,12 @@ def _session_list_cache_get(
             return None, False
         ts, stamp, payload = entry
         if stamp != current_stamp:
+            # Rebuild-rate floor: while a writer keeps touching state.db/index the
+            # stamp differs on almost every poll. Inside the floor, serve what we
+            # have (reported as not-fresh) instead of paying another full rebuild.
+            if (now - ts) < _SESSIONS_CACHE_MIN_REFRESH_SECONDS:
+                _SESSIONS_CACHE.move_to_end(key)
+                return _session_list_cache_copy_payload(payload), False
             if allow_stale:
                 _SESSIONS_CACHE.move_to_end(key)
                 return _session_list_cache_copy_payload(payload), False
@@ -417,6 +437,11 @@ def _session_list_cache_stale_reason(key: tuple) -> str | None:
             return None
         ts, stamp, _payload = entry
         if stamp != current_stamp:
+            # Same rebuild-rate floor as _session_list_cache_get: reporting "source"
+            # inside the floor would send the caller into a rebuild this floor exists
+            # to prevent.
+            if (now - ts) < _SESSIONS_CACHE_MIN_REFRESH_SECONDS:
+                return None
             return "source"
         ttl = _SESSIONS_CACHE_TTL_SECONDS
         if _session_list_cache_streaming_freeze_marker() is not None:
