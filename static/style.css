@@ -1993,6 +1993,20 @@
   .agent-health-dismiss{flex-shrink:0;padding:6px 12px;border-radius:8px;border:1px solid color-mix(in srgb,var(--error) 45%,var(--surface));background:color-mix(in srgb,var(--error) 10%,var(--surface));color:var(--error);font-size:12px;font-weight:600;cursor:pointer;}
   .agent-health-dismiss:hover{background:color-mix(in srgb,var(--error) 18%,var(--surface));}
   .agent-health-actions{display:flex;gap:8px;flex-shrink:0;}
+  /* #8517: quiet, dismissible notice above the composer when this session's memory is off. */
+  .memory-off-notice{display:flex;align-items:center;gap:8px;margin:10px auto 0;max-width:var(--msg-max);width:calc(100% - 40px);box-sizing:border-box;padding:4px 4px 4px 12px;border:1px solid var(--border);border-radius:10px;background:var(--surface-subtle,var(--hover-bg));color:var(--muted);font-size:13px;line-height:1.4;}
+  .memory-off-notice[hidden]{display:none;}
+  .memory-off-notice-icon{flex:0 0 auto;width:14px;height:14px;}
+  .memory-off-notice-text{flex:1 1 auto;min-width:0;padding:4px 0;overflow-wrap:anywhere;}
+  .memory-off-notice-dismiss{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;padding:0;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer;}
+  .memory-off-notice-dismiss:hover{background:var(--hover-bg);color:var(--text);}
+  .memory-off-notice-dismiss:focus-visible{outline:2px solid var(--focus-ring-strong);outline-offset:2px;}
+  /* #8517: the composer's top fade only ever covers the notice when the notice is shown */
+  .memory-off-notice:not([hidden])+.composer-wrap::before{display:none;}
+  /* #8517: a composer flyout (queue, approval, clarify) rises over the notice and already reserves
+     its own space, so collapse the notice instead of keeping its band (a double blank above the card) */
+  .memory-off-notice:has(+ .composer-wrap :is(.queue-card,.approval-card,.clarify-card).visible){display:none;}
+  @media(max-width:700px),(pointer:coarse){.memory-off-notice-dismiss{width:44px;height:44px;}.memory-off-notice{width:calc(100% - 24px);}}
   .agent-health-restart{flex-shrink:0;padding:6px 12px;border-radius:8px;border:1px solid color-mix(in srgb,var(--accent) 55%,var(--surface));background:color-mix(in srgb,var(--accent) 15%,var(--surface));color:var(--accent);font-size:12px;font-weight:600;cursor:pointer;transition:background-color .15s;}
   .agent-health-restart:hover{background:color-mix(in srgb,var(--accent) 25%,var(--surface));}
   .agent-health-restart:disabled{opacity:0.5;cursor:not-allowed;}

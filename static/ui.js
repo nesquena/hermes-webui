@@ -13819,6 +13819,132 @@ function dismissReconnect() {
   clearInflight();
 }
 
+// ── #8517 memory-off notice ──
+// The server reports the memory status of the agent actually serving a session as
+// `memory_status` ({state:'ok'} or {state:'off',reason,scope}; codes only) in every
+// session payload it knows it for (GET /api/session, the `session` of stream `done`
+// and `apperror`, a compression continuation's own payload), and per turn as a stream
+// event for that session. The notice renders ONLY from the session on screen
+// (S.session.memory_status): there is no per-session client state and nothing to hand
+// over between sessions, so session switch, reload, continuation, redirect and
+// clearing the selected session all follow from the assignment of S.session below.
+// A dismissal is remembered per profile and reason (it applies to every conversation
+// of that profile); an explicit `ok` for the profile forgets its dismissals, so a
+// later recurrence is shown and announced again. No status (healthy sessions, older
+// servers): the element stays `hidden`, so normal sessions never see a layout change.
+const MEMORY_OFF_NOTICE_KEYS={
+  agent_outdated:'memory_off_agent_outdated',
+  agent_no_instance_claim:'memory_off_agent_no_instance_claim',
+  provider_shared_instance:'memory_off_provider_shared_instance',
+};
+const MEMORY_OFF_DISMISS_PREFIX='hermes-webui-memory-off-dismissed:';
+const _memoryOffAnnounced=new Set(); // `${profile}:${reason}` announced on this page
+function _memoryNoticeProfile(session){return String((session&&session.profile)||'default');}
+function _memoryOffDismissKey(profile,reason){return MEMORY_OFF_DISMISS_PREFIX+profile+':'+reason;}
+function _memoryOffDismissed(profile,reason){
+  try{return localStorage.getItem(_memoryOffDismissKey(profile,reason))==='1';}catch(_){return false;}
+}
+function _memoryOffReason(session){
+  const status=session&&session.memory_status;
+  if(!status||typeof status!=='object'||status.state!=='off') return '';
+  const reason=String(status.reason||'');
+  return Object.prototype.hasOwnProperty.call(MEMORY_OFF_NOTICE_KEYS,reason)?reason:'';
+}
+// The server says memory is on for this profile's agent: what was dismissed for the
+// profile is news again when it recurs.
+function _forgetMemoryOffDismissals(profile){
+  for(const reason of Object.keys(MEMORY_OFF_NOTICE_KEYS)){
+    try{localStorage.removeItem(_memoryOffDismissKey(profile,reason));}catch(_){}
+    _memoryOffAnnounced.delete(profile+':'+reason);
+  }
+}
+function syncMemoryOffNotice(){
+  const notice=$('memoryOffNotice');
+  const text=$('memoryOffNoticeText');
+  if(!notice||!text) return;
+  const session=(typeof S!=='undefined'&&S)?S.session:null;
+  const profile=_memoryNoticeProfile(session);
+  if(session&&session.memory_status&&session.memory_status.state==='ok') _forgetMemoryOffDismissals(profile);
+  const reason=_memoryOffReason(session);
+  if(!reason||_memoryOffDismissed(profile,reason)){
+    notice.hidden=true;
+    notice.dataset.reason='';
+    return;
+  }
+  const copy=t(MEMORY_OFF_NOTICE_KEYS[reason]);
+  if(text.textContent!==copy) text.textContent=copy;
+  notice.dataset.reason=reason;
+  const wasHidden=notice.hidden;
+  notice.hidden=false;
+  // Appearing (often mid-turn) shrinks the transcript viewport by the notice's height; keep a
+  // reader pinned to the tail pinned, gated like the chat-todos tray (the helper itself no-ops
+  // for a reader who scrolled away).
+  if(wasHidden&&!(typeof window!=='undefined'&&window._autoScrollFollow===false)&&typeof _repinMessagesAfterComposerResize==='function') _repinMessagesAfterComposerResize();
+  // A live region that was `hidden` is not reliably announced when it appears, so
+  // say it once per profile and reason through the shared polite announcer as well.
+  const announceKey=profile+':'+reason;
+  if(!_memoryOffAnnounced.has(announceKey)){
+    _memoryOffAnnounced.add(announceKey);
+    const announcer=$('a11yAnnouncer');
+    if(announcer) announcer.textContent=copy;
+  }
+}
+// A stream event about session `sid` (warning memory_off / memory_status ok). Only the
+// session on screen is updated; any other session gets its status from its own
+// payload when it is opened. Returns true when the session on screen was updated.
+function noteSessionMemoryStatus(sid,status){
+  if(typeof S==='undefined'||!S||!S.session||!sid||String(S.session.session_id||'')!==String(sid)) return false;
+  if(!status||typeof status!=='object') return false;
+  S.session.memory_status=status;
+  syncMemoryOffNotice();
+  return true;
+}
+function dismissMemoryOffNotice(){
+  const notice=$('memoryOffNotice');
+  const session=(typeof S!=='undefined'&&S)?S.session:null;
+  const reason=_memoryOffReason(session);
+  if(reason){try{localStorage.setItem(_memoryOffDismissKey(_memoryNoticeProfile(session),reason),'1');}catch(_){}}
+  if(notice){notice.hidden=true;notice.dataset.reason='';}
+  // The dismiss button disappears with the notice; keep focus somewhere useful.
+  const composer=$('msg');
+  if(composer&&typeof composer.focus==='function') composer.focus();
+}
+// Render from the session on screen: every assignment of S.session (load, switch,
+// reload, continuation, redirect, new chat, delete -> null) repaints the notice once,
+// after the assigning code has finished. A payload for the SAME session from an
+// endpoint that does not report memory (rename, toolsets, ...) keeps what the server
+// last said about that session; another session never inherits it.
+(function _renderMemoryOffNoticeFromSessionOnScreen(){
+  if(typeof S==='undefined'||!S) return;
+  const desc=Object.getOwnPropertyDescriptor(S,'session');
+  if(!desc||!desc.configurable||!('value' in desc)) return;
+  let current=desc.value;
+  let queued=false;
+  const later=typeof queueMicrotask==='function'?queueMicrotask:(fn=>Promise.resolve().then(fn));
+  Object.defineProperty(S,'session',{
+    configurable:true,
+    enumerable:true,
+    get(){return current;},
+    set(next){
+      if(next&&current&&next!==current&&typeof next==='object'&&!('memory_status' in next)
+        &&current.memory_status&&String(next.session_id||'')===String(current.session_id||'')){
+        next.memory_status=current.memory_status;
+      }
+      current=next;
+      if(queued) return;
+      queued=true;
+      later(()=>{queued=false;syncMemoryOffNotice();});
+    },
+  });
+})();
+if(typeof window!=='undefined'&&typeof window.addEventListener==='function'){
+  // Another tab dismissed (or an ok forgot) a notice: repaint now, not at the next sync.
+  window.addEventListener('storage',e=>{
+    if(e&&typeof e.key==='string'&&e.key.startsWith(MEMORY_OFF_DISMISS_PREFIX)) syncMemoryOffNotice();
+  });
+}
+// ── end #8517 memory-off notice ──
+
 // ── Live host resource health panel (#693) ──
 const SYSTEM_HEALTH_INTERVAL_MS=5000;
 let _systemHealthTimer=null;
