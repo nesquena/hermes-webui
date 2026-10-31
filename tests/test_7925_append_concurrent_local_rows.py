@@ -189,6 +189,8 @@ async function api(url) {
   }};
 }
 """
+        + _fn("_mergeSessionToolCards")
+        + "\n"
         + _fn("_syncToolCallsForLoadedMessages")
         + "\n"
         + _fn("_ensureMessagesLoaded")

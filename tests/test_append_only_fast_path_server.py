@@ -685,17 +685,23 @@ def test_prefix_fingerprint_exclusion_set_is_explicit_and_rendered_fields_covere
     This test enumerates that set (so a future rendered field is covered by
     default rather than missed) and pins the default-coverage property.
 
+    2026-10-31 finding 3 tightened the set: ``_active_turn_token`` is stripped
+    before delivery like the rest of the internal fields, but it is an INPUT to
+    the delivery (it decides the row's ``_active_turn_user`` marking), so it is
+    the one field that must stay INSIDE the digest.
+
     RED-before: _PREFIX_FP_EXCLUDED_FIELDS does not exist on the unmodified
     whitelist implementation.
     """
     from api.helpers import _PUBLIC_MESSAGE_INTERNAL_FIELDS
     from api.routes import _PREFIX_FP_EXCLUDED_FIELDS
 
-    # The exclusion set is exactly the fields stripped before delivery by
-    # _public_message_projection / scrub_internal_replay_fields: anything else
-    # on a row reaches the browser and must be covered by default.
+    # The exclusion set is the fields stripped before delivery by
+    # _public_message_projection / scrub_internal_replay_fields, MINUS the one
+    # field that is an input to the delivery rather than dead weight: anything
+    # else on a row reaches the browser and must be covered by default.
     assert frozenset(_PREFIX_FP_EXCLUDED_FIELDS) == frozenset(
-        _PUBLIC_MESSAGE_INTERNAL_FIELDS
+        _PUBLIC_MESSAGE_INTERNAL_FIELDS - {"_active_turn_token"}
     )
     for rendered in (
         "role",
@@ -710,6 +716,9 @@ def test_prefix_fingerprint_exclusion_set_is_explicit_and_rendered_fields_covere
         "ts",
         "_ts",
         "tool_call_id",
+        # finding 3: stripped before delivery, but it decides the delivered
+        # row's active-turn marking, so the digest must cover it.
+        "_active_turn_token",
     ):
         assert rendered not in _PREFIX_FP_EXCLUDED_FIELDS, rendered
 
@@ -1571,3 +1580,241 @@ def test_handler_focus_refresh_refuses_after_the_redaction_setting_flips(monkeyp
         "the authoritative full fetch delivered an unmasked credential with "
         "api_redact_enabled=True"
     )
+
+
+# ── 2026-10-31 re-gate, finding 1: ONE snapshot for projection + digest ─────
+# The mint re-read the out-of-row inputs (scene records, session tool cards,
+# the redaction setting, the active-turn token) AFTER the response rows had
+# already been projected from an earlier read. A save that lands in between —
+# the maintainer's repro: pause the GET after the response rows are projected,
+# save an anchor scene or edit a tool card, then let the mint run — published a
+# digest of the NEW inputs over the OLD rows, so every later reload accepted an
+# empty append and the stale content stayed indefinitely. The inputs are now
+# read ONCE per request and that single snapshot feeds the projection, the
+# digest and the cache-entry validation.
+
+
+def _full_transcript_get(routes):
+    """Master's bare full-transcript GET (no msg_limit, no expand_renderable)."""
+    import types
+
+    captured = {}
+    routes.j = lambda _h, payload, status=200, **_k: (
+        captured.__setitem__("payload", payload),
+        payload,
+    )[-1]
+    routes._handle_session_get(
+        None,
+        types.SimpleNamespace(
+            path="/api/session",
+            query="session_id=cont-child&messages=1&resolve_model=0",
+        ),
+    )
+    return captured["payload"]["session"]
+
+
+def _mid_request_save_seam(monkeypatch, routes, save):
+    """Install a save that lands between the projection and the mint.
+
+    ``routes._active_stream_ids`` is the one module-level call the GET makes
+    after it has hydrated the response rows and before it mints the digest
+    (routes.py: the hydration, then ``compact_session``, then ``prefix_fp``).
+    Wrapping it stands in for another thread committing a save while this GET
+    is in flight; the snapshot, the projection, the mint and the append
+    verifier are all production code.
+    """
+    real_active = routes._active_stream_ids
+
+    def _save_lands_mid_request():
+        save()
+        return real_active()
+
+    monkeypatch.setattr(routes, "_active_stream_ids", _save_lands_mid_request)
+
+
+def test_handler_mid_request_scene_save_cannot_publish_a_proof_of_new_inputs(
+    monkeypatch, tmp_path
+):
+    """Finding 1 end to end: a save that lands BETWEEN the projection of the
+    response rows and the digest mint must not publish a proof of the NEW
+    inputs over the OLD rows.
+
+    RED-before: the mint re-reads ``s.anchor_activity_scenes`` after the
+    hydration, so the published digest covers the saved scene while the
+    delivered rows do not carry it — the follow-up append is ACCEPTED with an
+    empty window and the worklog never reaches the open tab.
+    """
+    import api.models as models
+
+    sidecar = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"p{i}",
+         "timestamp": 1700000000 + i}
+        for i in range(601)
+    ]
+    state_db = sidecar + [_state_db_only_reply()]
+    routes, captured = _warm_cache_append_harness(monkeypatch, tmp_path, sidecar, state_db)
+    s = models.get_session("cont-child")
+    assert not getattr(s, "anchor_activity_scenes", None)  # scene-free session
+
+    _mid_request_save_seam(
+        monkeypatch,
+        routes,
+        lambda: setattr(s, "anchor_activity_scenes", {"index:151": _scene_record(151, "p151")}),
+    )
+
+    held = _full_transcript_get(routes)
+    held_fp = held.get("prefix_fp")
+    assert held_fp
+    # Premise: the response really carries the OLD content — the save landed
+    # after the rows were projected, so no worklog is on any delivered row.
+    assert not any(m.get("_anchor_activity_scene") for m in held.get("messages") or []), (
+        "the save landed before the projection — the repro needs the rows "
+        "projected from the pre-save inputs"
+    )
+
+    # The later reload proves the prefix it holds with that digest. Master's
+    # behaviour: the save happened, so the proof no longer describes the held
+    # rows and the authoritative full document (carrying the worklog) arrives.
+    session = _append_get(
+        routes,
+        msg_after=601,
+        anchor_row=_state_db_only_reply(),
+        prefix_fp=held_fp,
+    )
+    assert session.get("_append_only") is not True, (
+        "the mid-request save published a digest of the NEW inputs over the "
+        "OLD rows, so the empty append was accepted and the saved scene never "
+        "reaches the open tab (maintainer's finding 1 repro)"
+    )
+    assert session.get("message_count") == 602
+    delivered = session.get("messages") or []
+    assert len(delivered) == 602
+    assert any(m.get("_anchor_activity_scene") for m in delivered), (
+        "the authoritative full fetch must carry the saved worklog — the save "
+        "really landed, so the reload has to correct the held rows"
+    )
+
+
+def test_handler_mid_request_card_edit_cannot_publish_a_proof_of_new_inputs(
+    monkeypatch, tmp_path
+):
+    """Finding 1 end to end, tool-card half: a session-level card edited while
+    the GET is in flight must not be covered by the digest published with the
+    OLD card still on the delivered rows.
+
+    RED-before: the response carries the pre-edit card while the mint seeds
+    the edited one, so the follow-up append is ACCEPTED and the open tab keeps
+    the stale snippet forever.
+    """
+    sidecar = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"p{i}",
+         "timestamp": 1700000000 + i}
+        for i in range(601)
+    ]
+    state_db = sidecar + [_state_db_only_reply()]
+    routes, captured = _warm_cache_append_harness(monkeypatch, tmp_path, sidecar, state_db)
+    import api.models as models
+
+    s = models.get_session("cont-child")
+    # Row 590 is an assistant row inside the 30-row tail window this GET
+    # returns, so the delivered card list is observable on the response.
+    old_card = {"assistant_msg_idx": 590, "id": "t1", "tool_name": "Bash", "result": "old summary"}
+    new_card = {"assistant_msg_idx": 590, "id": "t1", "tool_name": "Bash", "result": "rewritten summary"}
+    s.tool_calls = [old_card]
+
+    _mid_request_save_seam(
+        monkeypatch, routes, lambda: setattr(s, "tool_calls", [new_card])
+    )
+
+    held = _full_transcript_get(routes)
+    held_fp = held.get("prefix_fp")
+    assert held_fp
+    # Premise: the response carries the OLD card — the edit landed after the
+    # card list was projected.
+    held_cards = held.get("tool_calls") or []
+    assert [c.get("result") for c in held_cards] == ["old summary"], held_cards
+
+    session = _append_get(
+        routes,
+        msg_after=601,
+        anchor_row=_state_db_only_reply(),
+        prefix_fp=held_fp,
+    )
+    assert session.get("_append_only") is not True, (
+        "the mid-request card edit published a digest of the NEW card over "
+        "the OLD one, so the empty append was accepted and the open tab keeps "
+        "the stale snippet (maintainer's finding 1 repro)"
+    )
+    cards = session.get("tool_calls") or []
+    assert [c.get("result") for c in cards] == ["rewritten summary"], cards
+
+
+# ── 2026-10-31 re-gate, finding 3: the per-row _active_turn_token ───────────
+# ``_PREFIX_FP_EXCLUDED_FIELDS`` was exactly ``_PUBLIC_MESSAGE_INTERNAL_FIELDS``
+# — the set ``_public_message_projection`` strips before delivery — so the
+# per-row ``_active_turn_token`` rode along in the exclusion. That field is an
+# INPUT to the delivery: ``redact_session_data`` marks a covered user row
+# ``_active_turn_user: true`` when its own token equals the session's active
+# token. Stamping only the row's token therefore changed the delivered row
+# while the proof stood still, and an empty append was accepted. The turn
+# lifecycle rarely produces that state (the token only lands on the tail user
+# row of the current turn), so this is a narrow case — but the field is now
+# covered by the digest instead of excluded.
+
+
+def test_prefix_fingerprint_covers_the_row_active_turn_token():
+    """Finding 3: the row's own ``_active_turn_token`` moves the digest, so a
+    stamp that changes the delivered row can no longer keep its proof.
+
+    RED-before: the field is inside the exclusion set, so the digest is
+    byte-identical before and after the stamp and the append is accepted.
+    """
+    from api.process_event_utils import build_active_turn_token, stamp_message_source
+
+    rows = _make_rows(602)
+    # The session's current turn is active, so its tail user row is delivered
+    # with ``_active_turn_user: true`` once it carries the token.
+    token = build_active_turn_token("stream-1", 123.0)
+    assert token
+    s = _FakeSession(generation=0, active_stream_id="stream-1", pending_started_at=123.0)
+    # The client's view was established while this turn was already active,
+    # so the session-level seed is unchanged by the stamp below.
+    held_fp = _display_prefix_fingerprint(rows, 602, active_turn_token=token)
+
+    stamped = [dict(r) for r in rows]
+    # The production settlement helper stamps ONLY the row's token (a ``webui``
+    # source leaves ``_source`` alone).
+    stamp_message_source(stamped[600], "webui", active_turn_token=token)
+    assert stamped[600].get("_active_turn_token") == token
+
+    # Premise: the stamp really changes what the browser receives for row 600.
+    marked = _public_message_projection(
+        stamped[600], _enabled=True, _active_turn_token=token
+    )
+    assert marked.get("_active_turn_user") is True, marked
+    assert (
+        _public_message_projection(rows[600], _enabled=True, _active_turn_token=token).get(
+            "_active_turn_user"
+        )
+        is None
+    )
+
+    assert _display_prefix_fingerprint(stamped, 602, active_turn_token=token) != held_fp, (
+        "stamping only the row's _active_turn_token changed the delivered row "
+        "but kept its proof — the digest excluded the very field that decides "
+        "the active-turn marking (maintainer's finding 3)"
+    )
+
+    anchor_fp = _append_anchor_fingerprint(
+        _public_message_projection(stamped[601], _enabled=True)
+    )
+    assert _append_fast_path_anchor(s, stamped, "601", anchor_fp, "0", held_fp) is None, (
+        "an empty append was accepted after the row's active-turn token was "
+        "stamped — the open tab keeps a row the server now renders differently"
+    )
+    # Control: the un-stamped document under the same active turn still proves
+    # itself, so the fix cannot over-refuse.
+    plain_anchor_fp = _append_anchor_fingerprint(
+        _public_message_projection(rows[601], _enabled=True)
+    )
+    assert _append_fast_path_anchor(s, rows, "601", plain_anchor_fp, "0", held_fp) == 601

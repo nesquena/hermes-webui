@@ -4394,6 +4394,55 @@ function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
   }
 }
 
+// #7925 re-gate (2026-10-31, finding 2): merge two session-level tool-card
+// lists that describe the same transcript at two different window offsets.
+// Cards are matched by tid (id fallback) and the INCOMING record wins on a
+// collision; the incoming cards are appended after the held ones so the list
+// order stays stable. `existingShift` / `incomingShift` rebase each side's
+// `assistant_msg_idx` into the combined view's coordinate space:
+//   * append path: the response window starts at `_messages_offset`, so its
+//     cards shift by (offset - _oldestIdx) and the held cards do not move;
+//   * prepend path: the held cards were relative to the pre-prepend view, so
+//     they shift by the prepended length while the page's cards (already
+//     relative to the new view's head) do not move.
+// A card whose `assistant_msg_idx` is not a finite number cannot be attributed
+// to a row, so it is carried through unshifted rather than dropped.
+function _mergeSessionToolCards(existingCards, incomingCards, existingShift, incomingShift){
+  const _existingShift=Number(existingShift)||0;
+  const _incomingShift=Number(incomingShift)||0;
+  const _keyOf=(tc)=>(tc&&typeof tc==='object')?(tc.tid!==undefined?tc.tid:tc.id):undefined;
+  const _rebased=(tc,shift)=>{
+    if(!tc||typeof tc!=='object') return tc;
+    const idx=Number(tc.assistant_msg_idx);
+    return Number.isFinite(idx)?Object.assign({},tc,{assistant_msg_idx:idx+shift}):Object.assign({},tc);
+  };
+  const merged=[];
+  const byKey=new Map();
+  for(const tc of (Array.isArray(existingCards)?existingCards:[])){
+    if(!tc||typeof tc!=='object') continue;
+    const card=_rebased(tc,_existingShift);
+    const key=_keyOf(card);
+    if(key!==undefined){
+      if(byKey.has(key)) continue;
+      byKey.set(key,card);
+    }
+    merged.push(card);
+  }
+  for(const tc of (Array.isArray(incomingCards)?incomingCards:[])){
+    if(!tc||typeof tc!=='object') continue;
+    const card=_rebased(tc,_incomingShift);
+    const key=_keyOf(card);
+    if(key!==undefined&&byKey.has(key)){
+      const at=merged.indexOf(byKey.get(key));
+      if(at>=0) merged[at]=Object.assign({},byKey.get(key),card);
+      continue;
+    }
+    if(key!==undefined) byKey.set(key,card);
+    merged.push(card);
+  }
+  return merged;
+}
+
 async function _ensureMessagesLoaded(sid, opts) {
   // `opts` is an explicit named parameter (vs loadSession's arguments[1]
   // pattern) because _ensureMessagesLoaded is a module-private helper: it is
@@ -4570,27 +4619,16 @@ async function _ensureMessagesLoaded(sid, opts) {
           ? _pendingSessionToolCalls
           : (Array.isArray(S.session.tool_calls) ? S.session.tool_calls : []);
         if (Array.isArray(data.session.tool_calls) && data.session.tool_calls.length) {
+          // The response window starts at `_messages_offset`, so its cards are
+          // relative to that window and must be rebased into the combined
+          // transcript's coordinate space; the held cards do not move.
           const _appendIdxShift = (Number(data.session._messages_offset) || 0) - _oldestIdx;
-          const _byTid = new Map();
-          for (const tc of _cards) {
-            if (tc && typeof tc === 'object') _byTid.set(tc.tid !== undefined ? tc.tid : tc.id, tc);
-          }
-          for (const tc of data.session.tool_calls) {
-            if (!tc || typeof tc !== 'object') continue;
-            const _idx = Number(tc.assistant_msg_idx);
-            const _rebased = Number.isFinite(_idx)
-              ? Object.assign({}, tc, {assistant_msg_idx: _idx + _appendIdxShift})
-              : Object.assign({}, tc);
-            const _key = _rebased.tid !== undefined ? _rebased.tid : _rebased.id;
-            if (_key !== undefined && _byTid.has(_key)) {
-              const _at = _cards.indexOf(_byTid.get(_key));
-              if (_at >= 0) _cards[_at] = Object.assign({}, _byTid.get(_key), _rebased);
-            } else {
-              _cards.push(_rebased);
-            }
-          }
+          S.session.tool_calls = _mergeSessionToolCards(
+            _cards, data.session.tool_calls, 0, _appendIdxShift
+          );
+        } else {
+          S.session.tool_calls = _cards;
         }
-        S.session.tool_calls = _cards;
       }
       _pendingSessionToolCalls = null;
       if (!(typeof INFLIGHT !== 'undefined' && INFLIGHT && INFLIGHT[sid])) {
@@ -5610,7 +5648,24 @@ async function _loadOlderMessages() {
       );
     }
     S.messages = nextMessages;
-    _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);
+    // #7925 re-gate (2026-10-31, finding 2): the prepend used to hand the sync
+    // ONLY the incoming page's cards, so every session-level card the held view
+    // already owned was dropped — and a later focus reload cannot repair it:
+    // an over-ceiling reload takes the append-only fast path, whose EMPTY
+    // window carries no cards (the server selects the returned rows' owners),
+    // so the merge is skipped and the dropped card stays missing where
+    // master's full reload delivers it. Keep the held cards, shift their owner
+    // indices by the prepended length (they are relative to the pre-prepend
+    // view), and merge the page's cards (already relative to the new view's
+    // head) before the sync.
+    const _prependedToolCalls = _mergeSessionToolCards(
+      S.session && S.session.tool_calls,
+      responseSession.tool_calls,
+      olderMsgs.length,
+      0
+    );
+    if (S.session) S.session.tool_calls = _prependedToolCalls;
+    _syncToolCallsForLoadedMessages(nextMessages, _prependedToolCalls);
     // #7882 (greptile round-4 P2): older rows prepended during an in-flight
     // send are server-known rows — advance the send's optimistic-count
     // baseline by exactly the prepended visible rows so the send's eventual

@@ -464,6 +464,19 @@ function api(url, opts) {{
 function $() {{ return null; }}
 function renderMessages() {{}}
 function _syncToolCallsForLoadedMessages() {{}}
+// #7925 re-gate (2026-10-31, finding 2): _loadOlderMessages now merges the
+// page's cards into the held ones before the sync; this harness stubs the
+// merge (it asserts row placement, not card content).
+function _mergeSessionToolCards(existing, incoming, existingShift, incomingShift) {{
+  const out = Array.isArray(existing) ? existing.slice() : [];
+  for (const tc of (Array.isArray(incoming) ? incoming : [])) {{
+    const idx = Number(tc && tc.assistant_msg_idx);
+    out.push(Number.isFinite(idx)
+      ? Object.assign({{}}, tc, {{assistant_msg_idx: idx + (Number(incomingShift) || 0)}})
+      : Object.assign({{}}, tc));
+  }}
+  return out;
+}}
 function _advanceVisibleBaselineForServerKnownRows() {{}}
 function _currentMessageRenderWindowSize() {{ return 50; }}
 function msgContent(m) {{ return String((m && m.content) || ''); }}

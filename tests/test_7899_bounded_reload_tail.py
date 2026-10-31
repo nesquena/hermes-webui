@@ -42,6 +42,7 @@ _HARNESS_FUNCTIONS = (
     "_messageReloadLimitForSession",
     "_appendAnchorRowFingerprint",
     "_syncToolCallsForLoadedMessages",
+    "_mergeSessionToolCards",
 )
 
 

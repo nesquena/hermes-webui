@@ -11219,13 +11219,24 @@ def _append_anchor_fingerprint(row) -> str:
 # anchor-activity scenes), and a scene save changed no row at all, so the
 # digest was blind to a rendered worklog. The list is now INVERTED: each row
 # is hashed as the browser receives it (the projected display row), minus this
-# explicit exclusion set. The set is exactly _PUBLIC_MESSAGE_INTERNAL_FIELDS —
-# the fields scrub_internal_replay_fields / _public_message_projection strip
+# explicit exclusion set. The set is _PUBLIC_MESSAGE_INTERNAL_FIELDS — the
+# fields scrub_internal_replay_fields / _public_message_projection strip
 # before delivery — so anything else on a row reaches the browser and is
 # covered by default: a new rendered field cannot be missed again.
 # tests/test_append_only_fast_path_server.py enumerates the set and pins the
 # default-coverage property.
-_PREFIX_FP_EXCLUDED_FIELDS = frozenset(_PUBLIC_MESSAGE_INTERNAL_FIELDS)
+#
+# The one exception (2026-10-31 re-gate, finding 3): ``_active_turn_token``
+# is stripped before delivery like the rest of the set, but it is an INPUT to
+# the delivery rather than dead weight — ``redact_session_data`` marks a
+# covered user row ``_active_turn_user: true`` when the row's own token equals
+# the session's active-turn token. Excluding it let a stamp that changes the
+# delivered row keep its proof, so an empty append was accepted. It therefore
+# stays INSIDE the digest (``_active_turn_user``, the derived delivery flag,
+# remains excluded).
+_PREFIX_FP_EXCLUDED_FIELDS = frozenset(
+    _PUBLIC_MESSAGE_INTERNAL_FIELDS - {"_active_turn_token"}
+)
 
 
 def _display_aux_fingerprint(value) -> "str | None":
@@ -11274,20 +11285,52 @@ def _session_active_turn_token(session):
     )
 
 
-def _display_prefix_fp_meta(session):
-    """The out-of-row inputs a memoized whole-document digest is guarded by.
+class _DisplayPrefixFpInputs:
+    """The out-of-row inputs a display response's rows and digest share.
 
-    Everything here can change what the browser receives for a covered row
-    without touching the merged document (2026-10-31 re-gate: the digest is
-    seeded with the same inputs, and the memo reuses a digest only while this
-    tuple matches). Kept in one place so the entry builder and the response
-    mint can never drift.
+    Read ONCE per request and then threaded through the whole response
+    (#7925 re-gate, 2026-10-31 finding 1). A save that lands mid-request used
+    to move these inputs BETWEEN the projection of the response rows and the
+    digest minted over them: the response carried the old rows under a proof
+    of the new inputs, so every later reload accepted an empty append and the
+    stale content stayed indefinitely. One snapshot now feeds the projection,
+    the digest and the display-cache entry's validation, so the proof always
+    describes exactly the rows this response delivers; a save that lands after
+    the read moves the NEXT request's digest and its append is refused.
     """
-    scenes = getattr(session, "anchor_activity_scenes", None) or None
-    tool_calls = getattr(session, "tool_calls", None) or None
-    return (
-        _display_aux_fingerprint(scenes) if scenes else None,
-        _display_aux_fingerprint(tool_calls) if tool_calls else None,
+
+    __slots__ = ("scenes", "tool_calls", "redact_enabled", "active_turn_token", "meta")
+
+    def __init__(self, scenes, tool_calls, redact_enabled, active_turn_token):
+        self.scenes = scenes
+        self.tool_calls = tool_calls
+        self.redact_enabled = bool(redact_enabled)
+        self.active_turn_token = active_turn_token
+        # The memo guard: cheap fingerprints of the two collection inputs
+        # (computed once here instead of once per consumer) plus the two
+        # scalar ones. This is the single definition of the guard tuple shape,
+        # so the entry builder and the response mint can never drift.
+        self.meta = (
+            _display_aux_fingerprint(scenes) if scenes else None,
+            _display_aux_fingerprint(tool_calls) if tool_calls else None,
+            self.redact_enabled,
+            active_turn_token,
+        )
+
+
+def _display_prefix_fp_inputs(session) -> "_DisplayPrefixFpInputs":
+    """Read the display digest's out-of-row inputs once (#7925 re-gate,
+    2026-10-31 finding 1).
+
+    ``anchor_activity_scenes`` and ``tool_calls`` are session state a writer
+    can replace in process (an anchor-scene save, a tool-card edit), and the
+    redaction setting / active-turn token are applied AFTER the projection.
+    Reading them once — before the response rows are projected — is what keeps
+    the minted digest and the delivered rows from drifting apart.
+    """
+    return _DisplayPrefixFpInputs(
+        getattr(session, "anchor_activity_scenes", None) or None,
+        getattr(session, "tool_calls", None) or None,
         _effective_redact_enabled(),
         _session_active_turn_token(session),
     )
@@ -11301,6 +11344,7 @@ def _display_prefix_fingerprint(
     tool_calls=None,
     redact_enabled=None,
     active_turn_token=None,
+    inputs=None,
 ) -> str:
     """Server-computed digest over rows ``[0, count)`` of a display document.
 
@@ -11346,7 +11390,17 @@ def _display_prefix_fingerprint(
     document (scenes/tool_calls/settings read off the same session object), so
     no browser-side re-derivation (and no JS/Python byte-parity constraint,
     unlike the single-row anchor digest) is required.
+
+    ``inputs`` (#7925 re-gate, 2026-10-31 finding 1): a request-scoped
+    ``_DisplayPrefixFpInputs`` snapshot. When given, its four fields REPLACE the
+    individual arguments, so every consumer of one request hashes the very
+    inputs the response rows were projected from.
     """
+    if inputs is not None:
+        scenes = inputs.scenes
+        tool_calls = inputs.tool_calls
+        redact_enabled = inputs.redact_enabled
+        active_turn_token = inputs.active_turn_token
     try:
         total = int(count)
     except (TypeError, ValueError):
@@ -11406,7 +11460,7 @@ def _display_prefix_fingerprint(
     return digest.hexdigest()
 
 
-def _build_prefix_fingerprint_entry(session, messages):
+def _build_prefix_fingerprint_entry(session, messages, *, inputs=None):
     """Digest value stored on a display-merge cache entry, with the inputs
     that can change rendered rows without touching the merged document
     (anchor scene records, session tool calls, the redaction setting, the
@@ -11419,29 +11473,27 @@ def _build_prefix_fingerprint_entry(session, messages):
     or when a post-mint input (the redaction setting, the active-turn token)
     moved; a persisted change invalidates the entry's key via the sidecar
     stat signature anyway.
+
+    ``inputs`` (2026-10-31 finding 1): the request's single snapshot. The
+    caller (the GET handler) reads it once, before it projects the response
+    rows, and hands the SAME object here and to the mint — otherwise a save
+    landing between the merge and the mint would publish a digest of inputs
+    the delivered rows were never projected from.
     """
     if not messages:
         return None
-    scenes = getattr(session, "anchor_activity_scenes", None) or None
-    tool_calls = getattr(session, "tool_calls", None) or None
-    meta = _display_prefix_fp_meta(session)
-    digest = _display_prefix_fingerprint(
-        messages,
-        len(messages),
-        scenes=scenes,
-        tool_calls=tool_calls,
-        redact_enabled=meta[2],
-        active_turn_token=meta[3],
-    )
+    if inputs is None:
+        inputs = _display_prefix_fp_inputs(session)
+    digest = _display_prefix_fingerprint(messages, len(messages), inputs=inputs)
     if not digest:
         return None
     return {
-        "meta": meta,
+        "meta": inputs.meta,
         "digest": digest,
     }
 
 
-def _mint_display_prefix_fingerprint(session, messages, count, cached):
+def _mint_display_prefix_fingerprint(session, messages, count, cached, *, inputs=None):
     """Mint the response's ``prefix_fp``, reusing the display-merge cache
     entry's digest when the document and every out-of-row input that shapes a
     covered row's delivered projection are unchanged (#7925 re-gate,
@@ -11454,27 +11506,27 @@ def _mint_display_prefix_fingerprint(session, messages, count, cached):
     of every display-cache-hit response: the merge cache is never probed for
     append requests (whose coverage can end mid-document) or msg_before
     paging.
+
+    ``inputs`` (2026-10-31 finding 1): the request's single out-of-row input
+    snapshot. Without it this function re-read the scene records, the session
+    tool cards, the redaction setting and the active-turn token AFTER the
+    response rows had already been projected, so a save landing in between
+    published a digest of the new inputs over the old rows — and every later
+    reload accepted an empty append. The GET handler now reads the snapshot
+    once (before the projection) and passes it here.
     """
-    scenes = getattr(session, "anchor_activity_scenes", None) or None
-    tool_calls = getattr(session, "tool_calls", None) or None
-    meta = _display_prefix_fp_meta(session)
+    if inputs is None:
+        inputs = _display_prefix_fp_inputs(session)
     if cached and count == len(messages):
         entry = cached[0] if isinstance(cached, list) and cached else None
-        if isinstance(entry, dict) and entry.get("meta") == meta:
+        if isinstance(entry, dict) and entry.get("meta") == inputs.meta:
             digest = entry.get("digest")
             if isinstance(digest, str) and digest:
                 return digest
-    return _display_prefix_fingerprint(
-        messages,
-        count,
-        scenes=scenes,
-        tool_calls=tool_calls,
-        redact_enabled=meta[2],
-        active_turn_token=meta[3],
-    )
+    return _display_prefix_fingerprint(messages, count, inputs=inputs)
 
 
-def _append_fast_path_anchor(s, all_messages, msg_after_raw, anchor_fp_raw, generation_raw, prefix_fp_raw=None) -> "int | None":
+def _append_fast_path_anchor(s, all_messages, msg_after_raw, anchor_fp_raw, generation_raw, prefix_fp_raw=None, *, inputs=None) -> "int | None":
     """Validate an append-only fast-path request.
 
     Returns the validated anchor index (the client's last rendered absolute
@@ -11502,6 +11554,10 @@ def _append_fast_path_anchor(s, all_messages, msg_after_raw, anchor_fp_raw, gene
        active-turn token) — the digest covers each row as the browser
        receives it, hydrated scenes included. A missing digest fails closed —
        an older client loses only the fast path.
+
+    ``inputs`` (2026-10-31 finding 1): the GET handler's single out-of-row
+    input snapshot, so this verification and the response's mint hash the very
+    same inputs the delivered rows were projected from.
     """
     try:
         after_idx = int(msg_after_raw)
@@ -11523,22 +11579,20 @@ def _append_fast_path_anchor(s, all_messages, msg_after_raw, anchor_fp_raw, gene
         return None
     if not prefix_fp_raw:
         return None
-    from api.config import load_settings
     from api.helpers import _public_message_projection
-    _redact_enabled = bool(load_settings().get("api_redact_enabled", True))
+    if inputs is None:
+        inputs = _display_prefix_fp_inputs(s)
+    _redact_enabled = inputs.redact_enabled
     projected = _public_message_projection(anchor_row, _enabled=_redact_enabled)
     if _append_anchor_fingerprint(projected) != str(anchor_fp_raw):
         return None
     if _display_prefix_fingerprint(
         all_messages,
         after_idx + 1,
-        scenes=getattr(s, "anchor_activity_scenes", None) or None,
-        tool_calls=getattr(s, "tool_calls", None) or None,
         # The same out-of-row inputs the mint seeds with (2026-10-31 re-gate),
         # read off the same session object, so a settings flip or a turn
         # boundary between the client's view and this request refuses.
-        redact_enabled=_redact_enabled,
-        active_turn_token=_session_active_turn_token(s),
+        inputs=inputs,
     ) != str(prefix_fp_raw):
         return None
     return after_idx
@@ -11770,6 +11824,7 @@ def _limited_webui_messages_for_display_with_sidecar(
     msg_before=None,
     owner_positions=None,
     _prefix_fp_out=None,
+    inputs=None,
 ) -> list:
     sidecar_owners = dict(owner_positions or {})
     if sidecar_messages is None:
@@ -11918,7 +11973,7 @@ def _limited_webui_messages_for_display_with_sidecar(
         # the scene/tool-call meta so an in-process scene change cannot reuse
         # a pre-save digest, and invalidated with the entry's key by any
         # sidecar write (scene saves persist through the sidecar).
-        prefix_fp_entry = _build_prefix_fingerprint_entry(session, merged)
+        prefix_fp_entry = _build_prefix_fingerprint_entry(session, merged, inputs=inputs)
         # #7925 re-gate (2026-10-30, cold double-hash): the entry's digest
         # covers the WHOLE merged document, and the response mint wants the
         # digest over [0, count) with count = the window's coverage end. Those
@@ -16522,6 +16577,16 @@ def _handle_session_get(handler, parsed) -> bool:
         _display_owner_positions = ({} if load_messages and _cancelled_journal_turn_owner(
             getattr(s, "messages", None) or [], include_live_partial=True
         ) else None)
+        # #7925 re-gate (2026-10-31, finding 1): read the out-of-row inputs
+        # that shape the delivered rows ONCE, before anything is projected, and
+        # thread this single snapshot through the merge (its memoized digest),
+        # the scene hydration, the session card list, the append-anchor
+        # verification and the response mint. Reading them per consumer let a
+        # save that landed mid-request (an anchor-scene save, a tool-card edit)
+        # move the inputs between the projection and the digest, so the
+        # response carried the old rows under a proof of the new inputs and
+        # every later reload accepted an empty append.
+        _display_fp_inputs = _display_prefix_fp_inputs(s) if load_messages else None
         if is_messaging_session:
             cli_messages = get_cli_session_messages(sid)
         elif load_messages:
@@ -16659,8 +16724,12 @@ def _handle_session_get(handler, parsed) -> bool:
                         # #7925 re-gate (2026-10-30, cold double-hash): hand
                         # the digest the merge just computed to the response
                         # mint, so a cold load does not hash the document a
-                        # second time.
+                        # second time. #7925 re-gate (2026-10-31, finding 1):
+                        # the entry is built from the SAME input snapshot the
+                        # response mint will use, so a save landing between the
+                        # merge and the mint cannot desynchronize them.
                         _prefix_fp_out=_prefix_fp_out,
+                        inputs=_display_fp_inputs,
                     )
             else:
                 state_db_messages = _suppress_native_image_display_mirrors(
@@ -16737,7 +16806,9 @@ def _handle_session_get(handler, parsed) -> bool:
         else:
             _summary_message_count = None
             _summary_last_message_at = None
-        _display_tool_calls = getattr(s, "tool_calls", []) if load_messages else []
+        _display_tool_calls = (
+            (_display_fp_inputs.tool_calls or []) if load_messages else []
+        )
         if _display_owner_positions is not None:
             # #7925 re-gate (2026-10-27 review): an append request needs the
             # exact owner positions computed from the full merged document,
@@ -16767,6 +16838,11 @@ def _handle_session_get(handler, parsed) -> bool:
                     _anchor_fp,
                     _transcript_generation,
                     _prefix_fp,
+                    # 2026-10-31 finding 1: the request's single input
+                    # snapshot — the same one the mint below hashes with, so
+                    # the verification and the published proof cannot
+                    # disagree about which inputs shaped the delivered rows.
+                    inputs=_display_fp_inputs,
                 )
                 if _append_mode_anchor is not None:
                     _window_limit = msg_limit if msg_limit is not None else _MAX_MSG_LIMIT
@@ -16783,7 +16859,11 @@ def _handle_session_get(handler, parsed) -> bool:
                 _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
             _truncated_msgs = _hydrate_anchor_activity_scenes(
                 _truncated_msgs,
-                getattr(s, "anchor_activity_scenes", None),
+                # 2026-10-31 finding 1: hydrate from the request's single input
+                # snapshot, never a fresh read — the digest minted below hashes
+                # these very inputs, so the proof always describes the rows
+                # this response delivers.
+                _display_fp_inputs.scenes if _display_fp_inputs else None,
                 message_offset=_messages_offset,
                 tool_calls=_display_tool_calls,
             )
@@ -17013,6 +17093,11 @@ def _handle_session_get(handler, parsed) -> bool:
                 _all_msgs,
                 _messages_offset + len(_truncated_msgs),
                 _prefix_fp_out,
+                # 2026-10-31 finding 1: mint from the SAME out-of-row input
+                # snapshot the rows above were projected with, so the published
+                # proof can never describe inputs the delivered rows do not
+                # carry.
+                inputs=_display_fp_inputs,
             )
         _t4 = _time.monotonic()
         if _diag: _diag.stage("t4_after_compact_and_merge")
