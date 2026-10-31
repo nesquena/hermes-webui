@@ -22,7 +22,8 @@ def browser():
 
 @pytest.mark.parametrize("width", [320, 375, 390, 430, 640, 900, 1440])
 @pytest.mark.parametrize("dark", [False, True])
-def test_source_badge_leaves_room_for_title_and_touch_controls(browser, width, dark):
+@pytest.mark.parametrize("profile_label", ["", "default", "Long profile name"])
+def test_source_badge_leaves_room_for_title_and_touch_controls(browser, width, dark, profile_label):
     html = (ROOT / "static/index.html").read_text(encoding="utf-8")
     header = re.search(r'<header class="app-titlebar"[\s\S]*?</header>', html).group()
     source = (ROOT / "static/panels.js").read_text(encoding="utf-8")
@@ -41,10 +42,16 @@ def test_source_badge_leaves_room_for_title_and_touch_controls(browser, width, d
         page.add_style_tag(content=(ROOT / "static/style.css").read_text(encoding="utf-8"))
         page.evaluate("dark => document.documentElement.classList.toggle('dark', dark)", dark)
         page.add_script_tag(content="""
-const S={session:{title:'Example conversation',model:'example'},messages:[]};
+const S={session:{title:'Example conversation',model:'example'},messages:Array(123).fill({role:'user'})};
 const _currentPanel='chat',_renamingAppTitlebar=false;
 const t=key=>key;
+let profileClicks=0;
+const toggleProfileDropdown=()=>{profileClicks++};
 """ + sync)
+        page.evaluate("""label => {
+            document.getElementById('titlebarProfileBtn').style.display=label?'':'none';
+            document.getElementById('titlebarProfileLabel').textContent=label;
+        }""", profile_label)
         for label in ("Desktop", "Telegram", "Other client", "A very long source label"):
             page.evaluate("""label => {
                 S.session.source_label=label;
@@ -55,7 +62,7 @@ const t=key=>key;
                 const title=document.getElementById('appTitlebarTitle');
                 const badge=document.querySelector('#appTitlebarSub .topbar-source-badge');
                 const rect=el=>{const r=el.getBoundingClientRect();return {x:r.x,y:r.y,right:r.right,bottom:r.bottom,width:r.width,height:r.height}};
-                return {title:rect(title),badge:rect(badge),subtitle:rect(document.getElementById('appTitlebarSub')),header:rect(document.querySelector('.app-titlebar')),
+                return {title:rect(title),badge:rect(badge),subtitle:rect(document.getElementById('appTitlebarSub')),header:rect(document.querySelector('.app-titlebar')),profile:rect(document.getElementById('titlebarProfileBtn')),
                     controls:['btnHamburger','btnTitlebarNewChat','btnReload'].map(id=>rect(document.getElementById(id)))};
             }""")
             assert metrics["title"]["width"] >= 72, (width, label, metrics)
@@ -65,13 +72,27 @@ const t=key=>key;
                 assert metrics["badge"]["y"] >= metrics["title"]["bottom"] - 1
                 assert metrics["badge"]["width"] >= 72
                 assert metrics["badge"]["right"] <= metrics["subtitle"]["right"] + 1
+                assert metrics["badge"]["right"] <= metrics["controls"][1]["x"]
+                if profile_label:
+                    assert metrics["profile"]["width"] >= 44 and metrics["profile"]["height"] >= 44
+                    assert metrics["profile"]["right"] <= metrics["controls"][0]["x"]
+                    assert not page.locator('#titlebarProfileLabel').is_visible()
+                    before_clicks = page.evaluate("profileClicks")
+                    page.get_by_role('button', name='Switch profile', exact=True).tap(timeout=5000)
+                    assert page.evaluate("profileClicks") == before_clicks + 1
                 for control in metrics["controls"]:
                     assert control["width"] >= 44 and control["height"] >= 44
                     assert control["x"] >= 0 and control["right"] <= width
                 page.locator('#appTitlebarTitle').tap(timeout=5000)
                 assert page.locator('.app-titlebar-title-popover').inner_text(timeout=5000) == 'Example conversation'
+            elif profile_label:
+                assert page.locator('#titlebarProfileLabel').is_visible()
         page.evaluate("() => {S.session.source_label='WebUI';delete S.session.chat_read_only_reason;syncAppTitlebar()}")
         assert page.locator('.topbar-source-badge').count() == 0
         assert page.locator('.app-titlebar-inner').evaluate("el => getComputedStyle(el).display") == 'flex'
+        if profile_label:
+            assert page.locator('#titlebarProfileLabel').is_visible()
+        else:
+            assert not page.locator('#titlebarProfileBtn').is_visible()
     finally:
         page.close()

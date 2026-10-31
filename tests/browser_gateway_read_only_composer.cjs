@@ -41,6 +41,8 @@ function extract(source, name) {
           {name:'cron',source:'Cron',locale:'en',destination:'',help:false},
           {name:'subagent',source:'Subagent',locale:'en',destination:'',help:false},
           {name:'original-client',source:'Other client',locale:'en',destination:'the original client',help:true},
+          {name:'profile-default',source:'Desktop',locale:'en',destination:'Desktop',help:true,profile:'default'},
+          {name:'profile-long',source:'Desktop',locale:'en',destination:'Desktop',help:true,profile:'Long profile name'},
         ]) {
           const page = await browser.newPage({viewport:{width, height:700}, isMobile:width<=640, hasTouch:width<=640});
           await page.route('**/*', route => route.abort());
@@ -70,6 +72,11 @@ function extract(source, name) {
           `});
           await page.evaluate(scenario => {
             setLocale(scenario.locale);applyLocaleToDOM();
+            if(scenario.profile){
+              $('titlebarProfileBtn').style.display='';
+              $('titlebarProfileLabel').textContent=scenario.profile;
+              S.messages=Array(123).fill({role:'user'});
+            }
             S.session={title:'Example conversation',model:'example',source_label:scenario.source,
               chat_read_only_reason:'Read-only in WebUI.'+(scenario.destination ? ` Continue in ${scenario.destination}.` : ''),
               chat_read_only_can_connect:scenario.help};
@@ -88,6 +95,7 @@ function extract(source, name) {
               text:$('composerChatReadOnlyReason').textContent,
               titleBadge:document.querySelector('#appTitlebarSub .topbar-source-badge').textContent,
               headerBadge:document.querySelector('#topbarMeta .topbar-source-badge').textContent,
+              profileWidth:$('titlebarProfileBtn').getBoundingClientRect().width,
               titleWidth:$('appTitlebarTitle').getBoundingClientRect().width};
           });
           assert.ok(metrics.fits);
@@ -99,6 +107,7 @@ function extract(source, name) {
             assert.equal(metrics.titleBadge, scenario.source+' · read-only');
             assert.equal(metrics.headerBadge, scenario.source+' · read-only');
             assert.ok(metrics.titleWidth>=72, JSON.stringify({width,theme,...metrics}));
+            if(scenario.profile&&width<=640) assert.equal(metrics.profileWidth,44);
             assert.equal(await page.locator('#composerChatReadOnlyNotice').isHidden(), !scenario.destination);
             assert.equal(await page.locator('#btnSend').getAttribute('title'),
               'Read-only in WebUI.'+(scenario.destination ? ` Continue in ${scenario.destination}.` : ''));

@@ -3345,6 +3345,9 @@
     .app-titlebar-inner:has(.topbar-source-badge) .app-titlebar-sub{grid-column:1 / -1;justify-self:center;display:flex;align-items:center;gap:4px;min-width:0;max-width:100%;box-sizing:border-box;}
     .app-titlebar-sub .topbar-source-badge{display:block;flex:0 1 auto;min-width:0;margin-left:0;box-sizing:border-box;overflow:hidden;text-overflow:ellipsis;}
     .app-titlebar:has(.topbar-source-badge) .app-titlebar-spacer{display:none;}
+    /* Keep the optional profile control from crowding the conversation title. */
+    .app-titlebar:has(.topbar-source-badge) .app-titlebar-profile{width:44px;height:44px;padding:0;justify-content:center;}
+    .app-titlebar:has(.topbar-source-badge) .app-titlebar-profile-label{display:none;}
     .app-titlebar-title.long-pressing{opacity:.6;transition:opacity .1s;}
     .system-health-panel.insights-card{gap:10px;padding:12px;}
     .system-health-head{align-items:flex-start;}
