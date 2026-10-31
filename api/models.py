@@ -2090,7 +2090,14 @@ class Session:
             'share_token', 'share_created_at',
             'gateway_run', 'delegation_reservation', 'delegation_cutoff_ts',
         ]
-        guarded_messages, exact_replay_rows_removed = _deduplicate_exact_stable_messages(self.messages)
+        # IMPORTANT: local compatibility override. Keep this call at the save
+        # boundary across upstream updates; see api/session_image_persistence_override.py
+        # and its regression test before modifying/removing it. Model-facing image
+        # bytes may be huge, but durable WebUI session JSON must remain bounded.
+        from api.session_image_persistence_override import compact_persisted_image_parts
+        guarded_messages = copy.deepcopy(self.messages)
+        compact_persisted_image_parts(guarded_messages)
+        guarded_messages, exact_replay_rows_removed = _deduplicate_exact_stable_messages(guarded_messages)
         if exact_replay_rows_removed:
             logger.warning(
                 "Removed %d exact stable replay messages from persisted snapshot for session %s",
