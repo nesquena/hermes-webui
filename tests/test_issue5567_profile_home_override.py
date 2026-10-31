@@ -286,7 +286,7 @@ def test_run_agent_streaming_installs_and_resets_profile_home_override(tmp_path,
     monkeypatch.setattr(
         _streaming,
         "resolve_model_provider",
-        lambda model_with_provider_context, explicitly_picked=None: (model_with_provider_context, None, None),
+        lambda model_with_provider_context, explicitly_picked=None, session_provider=None: (model_with_provider_context, None, None),
     )
     monkeypatch.setattr(_streaming, "_runtime_preferred_base_url", lambda rt, provider, configured_base_url: configured_base_url)
     import api.profiles as profiles_api
@@ -462,7 +462,7 @@ def test_run_agent_streaming_falls_back_to_skill_module_patch_for_static_modules
     monkeypatch.setattr(
         _streaming,
         "resolve_model_provider",
-        lambda model_with_provider_context, explicitly_picked=None: (model_with_provider_context, None, None),
+        lambda model_with_provider_context, explicitly_picked=None, session_provider=None: (model_with_provider_context, None, None),
     )
     monkeypatch.setattr(_streaming, "_runtime_preferred_base_url", lambda rt, provider, configured_base_url: configured_base_url)
     import api.profiles as profiles_api
