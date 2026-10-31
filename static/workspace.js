@@ -178,7 +178,7 @@ function _escapeGrantStore(){
 }
 
 function _normalizeWorkspaceRelPath(path){
-  let raw = String(path || '').trim().replace(/\\/g, '/');
+  let raw = String(path || '').replace(/\\/g, '/');
   if(!raw || raw === '.') return '.';
   if(raw.startsWith('/')) return '';
   const parts = [];
@@ -440,7 +440,7 @@ const ARTIFACT_MUTATION_TOOLS = new Set(['write_file','patch','edit_file','creat
 function _normalizeArtifactPath(path){
   if(!path) return '';
   path = String(path).trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'');
-  if(!path || path.length > 240 || path.includes('://')) return '';
+  if(!path || path.length > 240 || path.includes('://') || path.includes('\0')) return '';
   // Canonicalize workspace-relative prefixes so a file-tree open ("foo.md") and a
   // tool arg recorded as "./foo.md" or "~/foo.md" compare equal for mutation
   // tracking; otherwise an agent edit via a ./-prefixed path leaves the open
@@ -452,12 +452,114 @@ function _normalizeArtifactPath(path){
   return path;
 }
 
+function _sanitizeArtifactPath(path, explicit=false){
+  if(!path) return '';
+  path = explicit ? String(path) : String(path).trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'');
+  if(!path.trim() || (!explicit && path.length > 240) || path.includes('://') || path.includes('\0')) return '';
+  if(ARTIFACT_IGNORE_RE.test(path) || (!explicit && !/[./]/.test(path))) return '';
+  return path;
+}
+
+function _normalizeExplicitArtifactPath(path){
+  if(path === null || path === undefined) return '';
+  const raw = String(path);
+  if(!raw.trim() || raw.includes('://') || raw.includes('\0')) return '';
+  return raw.replace(/\\/g,'/');
+}
+
+function _classifyArtifactPath(path, workspace){
+  const raw = _normalizeExplicitArtifactPath(path);
+  const displayPath = raw;
+  const blocked = kind => ({kind, displayPath, dedupeKey:displayPath, openPath:null});
+  if(!raw) return blocked('unsupported');
+  const normalized = raw.replace(/^~\//,'');
+  let ws = typeof workspace === 'string' && workspace.trim() ? workspace.replace(/\\/g,'/') : '';
+  const workspaceRoot = ws === '/' || /^[A-Za-z]:\/$/.test(ws);
+  if(!workspaceRoot) ws = ws.replace(/\/+$/,'');
+  const normalizeSegments = segments => {
+    const result = [];
+    for(const segment of segments){
+      if(segment === '.' || segment === '') continue;
+      if(segment === '..'){
+        if(!result.length) return null;
+        result.pop();
+      }else result.push(segment);
+    }
+    return result;
+  };
+  const pathIsUNC = normalized.startsWith('//');
+  const workspaceIsUNC = ws.startsWith('//');
+  if(normalized.startsWith('///') || ws.startsWith('///')) return blocked('unsupported');
+  if(/^[A-Za-z]:[^/]/.test(normalized)) return blocked('unsupported');
+  const pathIsWindows = /^[A-Za-z]:\//.test(normalized) || pathIsUNC;
+  const workspaceIsWindows = /^[A-Za-z]:\//.test(ws) || workspaceIsUNC;
+  const absolute = pathIsWindows || normalized.startsWith('/');
+  if(!absolute){
+    const segments = normalizeSegments(normalized.split('/'));
+    if(!segments) return blocked('unsupported');
+    const relative = segments.join('/') || '.';
+    return {
+      kind:'workspace-relative',
+      displayPath:normalized,
+      dedupeKey:workspaceIsWindows ? relative.toLowerCase() : relative,
+      openPath:relative,
+    };
+  }
+  if(pathIsUNC !== workspaceIsUNC) return blocked(ws ? 'outside' : 'unsupported');
+  if(!ws) return blocked('unsupported');
+  if(pathIsWindows !== workspaceIsWindows) return blocked('outside');
+  if(!(workspaceIsWindows || ws.startsWith('/'))) return blocked('outside');
+  const split = value => {
+    if(value.startsWith('//')) return {drive:'', rawSegments:value.slice(2).split('/'), segments:null};
+    const match = value.match(/^([A-Za-z]:)?\/(.*)$/);
+    const rawSegments = (match ? match[2] : value).split('/');
+    return {
+      drive:match&&match[1] ? match[1].toLowerCase() : '',
+      rawSegments,
+      segments:normalizeSegments(rawSegments),
+    };
+  };
+  const pathParts = split(normalized);
+  const workspaceParts = split(ws);
+  const fold = value => pathIsWindows ? value.toLowerCase() : value;
+  if(pathIsUNC){
+    const uncParts = parts => {
+      const segments = parts.rawSegments.filter(Boolean);
+      return {anchor:segments.slice(0,2), suffix:segments.slice(2)};
+    };
+    const pathUNC = uncParts(pathParts);
+    const workspaceUNC = uncParts(workspaceParts);
+    const invalidAnchor = anchor => anchor.length !== 2 || anchor.some(segment=>segment === '.' || segment === '..');
+    if(invalidAnchor(pathUNC.anchor) || invalidAnchor(workspaceUNC.anchor)) return blocked('unsupported');
+    if(pathUNC.anchor.some((segment,index)=>fold(segment) !== fold(workspaceUNC.anchor[index]))) return blocked('outside');
+    const pathSuffix = normalizeSegments(pathUNC.suffix);
+    const workspaceSuffix = normalizeSegments(workspaceUNC.suffix);
+    if(!pathSuffix || !workspaceSuffix) return blocked('outside');
+    pathParts.segments = pathUNC.anchor.concat(pathSuffix);
+    workspaceParts.segments = workspaceUNC.anchor.concat(workspaceSuffix);
+  }
+  if(!pathParts.segments || !workspaceParts.segments) return blocked('outside');
+  if(fold(pathParts.drive) !== fold(workspaceParts.drive) || pathParts.segments.length < workspaceParts.segments.length) return blocked('outside');
+  for(let i=0;i<workspaceParts.segments.length;i++){
+    if(fold(pathParts.segments[i]) !== fold(workspaceParts.segments[i])) return blocked('outside');
+  }
+  const suffix = pathParts.segments.slice(workspaceParts.segments.length).join('/');
+  const displaySuffix = suffix + (suffix && normalized.endsWith('/') ? '/' : '');
+  const containedDisplayPath = displaySuffix || '.';
+  const openPath = suffix.split('/').filter(Boolean).join('/') || '.';
+  return {kind:'workspace-contained', displayPath:containedDisplayPath, dedupeKey:pathIsWindows ? openPath.toLowerCase() : openPath, openPath};
+}
+
+function _classifyArtifactCandidate(path, workspace){
+  return _classifyArtifactPath(path, workspace);
+}
+
 function _artifactCandidatesFromText(text){
   if(!text || typeof text !== 'string') return [];
   const out = [];
   const seen = new Set();
   const add = (path) => {
-    path = _normalizeArtifactPath(path);
+    path = (typeof _sanitizeArtifactPath === 'function' ? _sanitizeArtifactPath : _normalizeArtifactPath)(path);
     if(!path || seen.has(path)) return;
     seen.add(path); out.push({path, kind:'diff'});
   };
@@ -481,7 +583,7 @@ function _artifactCandidatesFromToolCall(tc){
   const result = tc.result || tc.output || tc.snippet || '';
   const out = [];
   const add = (path, source=name || 'tool') => {
-    path = _normalizeArtifactPath(path);
+    path = (typeof _sanitizeArtifactPath === 'function' ? _sanitizeArtifactPath : _normalizeArtifactPath)(path, true);
     if(path) out.push({path, kind:source});
   };
   if(ARTIFACT_MUTATION_TOOLS.has(name) && args && typeof args === 'object'){
@@ -537,9 +639,14 @@ function collectSessionArtifacts(){
   const items = [];
   const seen = new Set();
   const push = (path, source) => {
-    path = _normalizeArtifactPath(path);
-    if(!path || seen.has(path)) return;
-    seen.add(path); items.push({path, source});
+    path = (typeof _sanitizeArtifactPath === 'function' ? _sanitizeArtifactPath : _normalizeArtifactPath)(path, true);
+    if(!path) return;
+    const classification = typeof _classifyArtifactCandidate === 'function'
+      ? _classifyArtifactCandidate(path, S.session && S.session.workspace)
+      : null;
+    const dedupeKey = classification && classification.dedupeKey || path;
+    if(seen.has(dedupeKey)) return;
+    seen.add(dedupeKey); items.push({path, source, classification});
   };
   // Source 1: session-level tool call summaries (may be empty when messages
   // carry their own tool metadata — see _syncToolCallsForLoadedMessages).
@@ -595,13 +702,7 @@ function renderSessionArtifacts(){
     root.innerHTML = '<div class="workspace-artifact-empty">No artifacts detected yet. Files created or edited during this session will appear here.</div>';
     return;
   }
-  // Strip workspace prefix for display so long absolute paths don't clutter the list.
   const ws = S.session && S.session.workspace;
-  const normWs = ws ? ws.replace(/\/+$/,'') + '/' : '';
-  const displayPath = (p) => {
-    if(normWs && p.startsWith(normWs)) return p.slice(normWs.length);
-    return p;
-  };
   const splitArtifactDisplayPath = (path) => {
     const slash = path.lastIndexOf('/');
     if(slash < 0) return {name: path, head: '', tail: ''};
@@ -614,14 +715,23 @@ function renderSessionArtifacts(){
     };
   };
   root.innerHTML = items.map(item => {
-    const path = displayPath(item.path);
+    const classification = item.classification || _classifyArtifactCandidate(item.path, ws);
+    const path = classification.displayPath || item.path;
     const parts = splitArtifactDisplayPath(path);
+    if(/^[A-Za-z]:[\\/]/.test(item.path)){
+      parts.head = parts.head.replace(/\//g,'\\');
+      parts.tail = parts.tail.replace(/\//g,'\\');
+    }
     const directory = (parts.head || parts.tail)
       ? `<div class="workspace-artifact-directory"><span class="workspace-artifact-directory-head">${esc(parts.head)}</span><span class="workspace-artifact-directory-tail">${esc(parts.tail)}</span></div>`
       : '';
     const source = item.source ? esc(item.source) : esc(t('workspace_artifact_source_session') || 'session');
     const sourceAttrs = item.source ? '' : ' data-i18n="workspace_artifact_source_session"';
-    return `<button type="button" class="workspace-artifact-item" title="${esc(path)}" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-filename">${esc(parts.name)}</div>${directory}<div class="workspace-artifact-meta"${sourceAttrs}>${source}</div></button>`;
+    if(classification.kind === 'workspace-relative' || classification.kind === 'workspace-contained'){
+      return `<button type="button" class="workspace-artifact-item" title="${esc(path)}" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-filename">${esc(parts.name)}</div>${directory}<div class="workspace-artifact-meta"${sourceAttrs}>${source}</div></button>`;
+    }
+    const explanationKey = classification.kind === 'unsupported' ? 'workspace_artifact_unsupported' : 'workspace_artifact_outside_workspace';
+    return `<div class="workspace-artifact-item workspace-artifact-item-display-only" title="${esc(path)}"><div class="workspace-artifact-filename">${esc(parts.name)}</div>${directory}<div class="workspace-artifact-meta"${sourceAttrs}>${source}</div><div class="workspace-artifact-explanation" data-i18n="${explanationKey}">${esc(t(explanationKey))}</div></div>`;
   }).join('');
 }
 
@@ -835,7 +945,6 @@ async function openArtifactPath(path){
   if(!path) return false;
   // typeof guard: harnesses that extract this function alone keep working.
   const clickGen=typeof _artifactClickGen==='number'?++_artifactClickGen:null;
-  switchWorkspacePanelTab('files');
   // Capture the dismissal generation before any await. If the user dismisses the
   // panel while the existence check or the read is in flight, that newer intent
   // must win: promoting the panel afterwards would erase it and force the panel
@@ -844,18 +953,21 @@ async function openArtifactPath(path){
   const _dismissalUnchanged=()=>dismissGen===null
     ||typeof _workspacePanelDismissGen==='undefined'
     ||_workspacePanelDismissGen===dismissGen;
-  // Normalize backslash separators to '/' first — Windows absolute paths
-  // (e.g. "D:\workspace\dir\file") otherwise break prefix-strip and the
-  // /api/list existence check (which splits on '/').
-  let rel = String(path).replace(/\\/g,'/').replace(/^~\//,'').replace(/^(?:\.\/)+/,'');
-  // Strip workspace prefix so /api/list receives a workspace-relative path.
-  const ws = (S.session && S.session.workspace || '').replace(/\\/g,'/');
-  if(ws){
-    const normWs = ws.replace(/\/+$/,'') + '/';
-    if(rel.startsWith(normWs)) rel = rel.slice(normWs.length);
-    else if(rel === ws.replace(/\/+$/,'')) rel = '.';
+  const classification = typeof _classifyArtifactPath === 'function'
+    ? _classifyArtifactPath(path, S.session && S.session.workspace)
+    : (() => {
+      let openPath=String(path).replace(/\\/g,'/').replace(/^~\//,'').replace(/^(?:\.\/)+/,'');
+      const ws=String(S.session && S.session.workspace || '').replace(/\\/g,'/').replace(/\/+$/,'');
+      if(ws && openPath.indexOf(ws + '/') === 0) openPath=openPath.slice(ws.length + 1);
+      else if(ws && openPath===ws) openPath='.';
+      return {kind:'workspace-relative', openPath:openPath || '.'};
+    })();
+  if(classification.kind !== 'workspace-relative' && classification.kind !== 'workspace-contained'){
+    setStatus(t(classification.kind === 'unsupported' ? 'workspace_artifact_unsupported' : 'workspace_artifact_outside_workspace'));
+    return false;
   }
-  if(!rel) rel = '.';
+  const rel = classification.openPath || '.';
+  switchWorkspacePanelTab('files');
   // #6710 (Greptile P1 on the release PR): the existence check is a network
   // await too. A session switch, a newer file open or a cleared preview while it
   // is in flight must retire this artifact click; otherwise openFile(rel) would
