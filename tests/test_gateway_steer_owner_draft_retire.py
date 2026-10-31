@@ -31,7 +31,7 @@ def _run(scenario):
         _slice(ses, 'function _setNewSessionPending(', '// #2971 (Greptile P1'),
         _slice(cmd, 'let _steerUploadCache = null;', 'function _steerFilesSignature('),
         _slice(cmd, 'function _steerFallbackIsDeadRun(', 'function _steerSetComposerStatusForOwner('),
-        _slice(cmd, 'function _steerRestoreText(', 'function _steerIndicatorText('),
+        _slice(cmd, 'function _steerRestoreText(', 'async function _steerPersistDraftForOwner('),
         _slice(cmd, 'async function _steerPersistDraftForOwner(', '// #5459 gate'),
         _slice(cmd, 'async function _trySteer(', 'async function cmdTitle('),
     ]
