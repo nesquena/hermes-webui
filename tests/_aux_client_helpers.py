@@ -1,38 +1,64 @@
 """Shared scaffolding for the auxiliary title-generation test suites.
 
-``test_title_aux_routing.py`` and ``test_2235_initial_aux_title.py`` both need
-``agent.auxiliary_client`` importable so ``api.streaming`` can be patched
-against it. Both used to install synthetic modules at import time with
-``sys.modules.setdefault`` and never remove them, so whichever ran first left
-the stub in place for the rest of the process and the next file to import
-``agent.context_compressor`` got the stub instead of the real module (#6630).
-
-Scope the install to the test that needs it and let ``mock.patch.dict`` own the
-restore: it snapshots the mapping and puts it back on exit, so a key that was
-absent is deleted, a key that was present is restored by identity, and a key
-holding ``None`` stays ``None``. ``tests/test_4413_seed_provider_models.py``
-already stubs ``sys.modules`` this way, including the ``None`` case.
-
-One constraint that comes with it: ``patch.dict`` restores by clearing the
-mapping and replacing it wholesale, so any module first imported inside the
-scope is evicted on exit and re-imported later as a new object. That is
-harmless for these suites, which import everything they touch at collection
-time, but it is the thing to check before reusing this helper around code
-that imports lazily.
+``test_title_aux_routing.py`` and ``test_2235_initial_aux_title.py`` need
+``agent.auxiliary_client`` available while they patch provider calls. Keep that
+temporary import scoped to each test and restore the complete ``agent.*``
+module graph, including parent-package child bindings, when the test ends.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+import importlib
 import sys
 import types
 from unittest import mock
 
 
-def auxiliary_client_modules():
-    """Context manager installing stub ``agent`` / ``agent.auxiliary_client``.
+def _snapshot_agent_modules():
+    return {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "agent" or name.startswith("agent.")
+    }
 
-    The stubs are fresh objects owned by this helper, so the ``auxiliary_client``
-    attribute is set on our own module and no pre-existing ``agent`` module is
-    mutated. Restoration is therefore entirely ``patch.dict``'s job.
+
+def _clear_agent_modules():
+    for name in list(sys.modules):
+        if name == "agent" or name.startswith("agent."):
+            sys.modules.pop(name, None)
+
+
+def _restore_agent_modules(snapshot):
+    _clear_agent_modules()
+    sys.modules.update(snapshot)
+
+    for name, module in snapshot.items():
+        if "." not in name:
+            continue
+        parent_name, child_name = name.rsplit(".", 1)
+        parent = sys.modules.get(parent_name)
+        if isinstance(parent, types.ModuleType):
+            setattr(parent, child_name, module)
+
+
+@contextmanager
+def isolated_agent_modules():
+    """Restore the full ``agent.*`` module graph after a temporary import."""
+    snapshot = _snapshot_agent_modules()
+    _clear_agent_modules()
+    try:
+        yield
+    finally:
+        _restore_agent_modules(snapshot)
+
+
+@contextmanager
+def auxiliary_client_modules():
+    """Provide auxiliary-client modules in a temporary, restorable Agent graph.
+
+    Reuse the real Agent package and auxiliary client when they are importable.
+    The whole ``agent.*`` module graph is restored afterward, including direct
+    child bindings on the parent package.
 
     ``agent.portal_tags`` is stubbed with a real ``ContextVar`` behind the same
     set/reset/get surface as the Agent runtime (tokens are truthy objects, and
@@ -42,37 +68,51 @@ def auxiliary_client_modules():
     """
     import contextvars as _contextvars
 
-    agent_stub = types.ModuleType("agent")
-    auxiliary_client_stub = types.ModuleType("agent.auxiliary_client")
-    portal_tags_stub = types.ModuleType("agent.portal_tags")
-    agent_stub.auxiliary_client = auxiliary_client_stub
-    portal_state = {"set_calls": [], "reset_calls": []}
-    _conversation_cv = _contextvars.ContextVar("webui_test_conversation_id", default=None)
+    with isolated_agent_modules():
+        try:
+            agent_pkg = importlib.import_module("agent")
+        except ModuleNotFoundError as exc:
+            if exc.name != "agent":
+                raise
+            agent_pkg = types.ModuleType("agent")
+            agent_pkg.__path__ = []
+            sys.modules["agent"] = agent_pkg
 
-    def _set_conversation_context(conversation_id):
-        portal_state["set_calls"].append(conversation_id)
-        return _conversation_cv.set(conversation_id or None)
+        try:
+            auxiliary_client = importlib.import_module("agent.auxiliary_client")
+        except ModuleNotFoundError:
+            # The Agent source may be visible without its optional runtime
+            # dependencies in this test interpreter. Those tests only need the
+            # import seam, so use a stub while restoring the original graph.
+            auxiliary_client = types.ModuleType("agent.auxiliary_client")
+            if not hasattr(agent_pkg, "__path__"):
+                agent_pkg.__path__ = []
+            sys.modules["agent.auxiliary_client"] = auxiliary_client
+            agent_pkg.auxiliary_client = auxiliary_client
 
-    def _reset_conversation_context(token):
-        portal_state["reset_calls"].append(token)
-        _conversation_cv.reset(token)
+        portal_tags_stub = types.ModuleType("agent.portal_tags")
+        portal_state = {"set_calls": [], "reset_calls": []}
+        _conversation_cv = _contextvars.ContextVar("webui_test_conversation_id", default=None)
 
-    def _get_conversation_context():
-        return _conversation_cv.get()
+        def _set_conversation_context(conversation_id):
+            portal_state["set_calls"].append(conversation_id)
+            return _conversation_cv.set(conversation_id or None)
 
-    portal_tags_stub.set_conversation_context = _set_conversation_context
-    portal_tags_stub.reset_conversation_context = _reset_conversation_context
-    portal_tags_stub.get_conversation_context = _get_conversation_context
-    portal_tags_stub._portal_state = portal_state
-    agent_stub.portal_tags = portal_tags_stub
-    return mock.patch.dict(
-        sys.modules,
-        {
-            "agent": agent_stub,
-            "agent.auxiliary_client": auxiliary_client_stub,
-            "agent.portal_tags": portal_tags_stub,
-        },
-    )
+        def _reset_conversation_context(token):
+            portal_state["reset_calls"].append(token)
+            _conversation_cv.reset(token)
+
+        def _get_conversation_context():
+            return _conversation_cv.get()
+
+        portal_tags_stub.set_conversation_context = _set_conversation_context
+        portal_tags_stub.reset_conversation_context = _reset_conversation_context
+        portal_tags_stub.get_conversation_context = _get_conversation_context
+        portal_tags_stub._portal_state = portal_state
+        sys.modules["agent.portal_tags"] = portal_tags_stub
+        agent_pkg.portal_tags = portal_tags_stub
+
+        yield
 
 
 def patch_tg_config(config_dict):

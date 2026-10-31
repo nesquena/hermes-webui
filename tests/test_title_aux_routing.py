@@ -42,14 +42,25 @@ class TestAuxiliaryClientModuleRestore(unittest.TestCase):
     def test_prior_modules_restored_by_identity(self):
         prior_agent = types.ModuleType("agent")
         prior_aux = types.ModuleType("agent.auxiliary_client")
+        prior_metadata = types.ModuleType("agent.model_metadata")
         prior_agent.auxiliary_client = prior_aux
-        with patch.dict(sys.modules, {"agent": prior_agent, "agent.auxiliary_client": prior_aux}):
+        prior_agent.model_metadata = prior_metadata
+        with patch.dict(
+            sys.modules,
+            {
+                "agent": prior_agent,
+                "agent.auxiliary_client": prior_aux,
+                "agent.model_metadata": prior_metadata,
+            },
+        ):
             with auxiliary_client_modules():
                 self.assertIsNot(sys.modules["agent"], prior_agent)
                 self.assertIsNot(sys.modules["agent.auxiliary_client"], prior_aux)
             self.assertIs(sys.modules["agent"], prior_agent)
             self.assertIs(sys.modules["agent.auxiliary_client"], prior_aux)
+            self.assertIs(sys.modules["agent.model_metadata"], prior_metadata)
             self.assertIs(prior_agent.auxiliary_client, prior_aux)
+            self.assertIs(prior_agent.model_metadata, prior_metadata)
 
     def test_absent_keys_removed(self):
         with patch.dict(sys.modules):

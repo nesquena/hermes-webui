@@ -23,6 +23,7 @@ import traceback
 import unicodedata
 import copy
 import inspect
+from urllib.parse import urlsplit
 from pathlib import Path
 from typing import Optional
 
@@ -464,6 +465,57 @@ _STREAMING_CRONJOB_WRAPPER_WARNED = False
 # ``cronjob_manage``. Older builds still register the old name, so resolve and
 # wrap every name that exists rather than one hardcoded name (#8189).
 _STREAMING_CRONJOB_TOOL_NAMES = ("cronjob_manage", "cronjob")
+_GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = False
+_GEMINI_REQUEST_BOUNDARY_WRAPPER_LOCK = threading.Lock()
+_GEMINI_REQUEST_BOUNDARY_MARKER = "_webui_gemini_request_boundary"
+
+
+class _GeminiRequestBoundaryMessage(dict):
+    def copy(self):
+        copied = dict(self)
+        copied[_GEMINI_REQUEST_BOUNDARY_MARKER] = True
+        return copied
+
+
+def _strip_materialized_gemini_request_boundary_marker(message):
+    if not isinstance(message, dict):
+        return message
+    cleaned = dict(message)
+    cleaned.pop(_GEMINI_REQUEST_BOUNDARY_MARKER, None)
+    return cleaned
+
+
+def _normalize_canonical_gemini_request_boundary_message(message):
+    if not isinstance(message, dict):
+        return message
+    if type(message) is dict and _GEMINI_REQUEST_BOUNDARY_MARKER not in message:
+        return message
+    return _strip_materialized_gemini_request_boundary_marker(message)
+
+
+def _clear_materialized_gemini_request_boundary_markers(messages):
+    if not isinstance(messages, list):
+        return
+    for idx, message in enumerate(messages):
+        normalized = _normalize_canonical_gemini_request_boundary_message(message)
+        if normalized is not message:
+            messages[idx] = normalized
+
+
+def _sanitize_materialized_gemini_request_boundary_history(messages):
+    _clear_materialized_gemini_request_boundary_markers(messages)
+    return messages
+
+
+def _replace_message_with_boundary_marker(messages, idx):
+    if not isinstance(messages, list) or not (0 <= idx < len(messages)):
+        return
+    message = messages[idx]
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return
+    messages[idx] = _GeminiRequestBoundaryMessage(
+        _strip_materialized_gemini_request_boundary_marker(message)
+    )
 
 
 def _stream_writeback_diag_threshold_seconds(environ=None):
@@ -676,6 +728,224 @@ def _supports_kwarg(func, kwarg_name: str) -> bool:
     except Exception:
         return True
 
+
+
+def _tool_call_has_google_thought_signature(tool_call) -> bool:
+    """Return True when a tool call already carries Gemini thought-signature metadata."""
+    if not isinstance(tool_call, dict):
+        return False
+    for candidate in (
+        tool_call,
+        tool_call.get('function'),
+        tool_call.get('extra_content'),
+        (tool_call.get('extra_content') or {}).get('google'),
+    ):
+        if not isinstance(candidate, dict):
+            continue
+        for key in ('thought_signature', 'thoughtSignature'):
+            if str(candidate.get(key) or '').strip():
+                return True
+    return False
+
+
+def _assistant_message_has_visible_content(message) -> bool:
+    content = message.get('content') if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, str) and part.strip():
+                return True
+            if isinstance(part, dict):
+                for key in ('text', 'content'):
+                    value = part.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return True
+        return False
+    return bool(content)
+
+
+def _request_targets_google_gemini_three(
+    model,
+    *,
+    base_url=None,
+    provider_profile=None,
+) -> bool:
+    model_lower = str(model or '').strip().lower()
+    if 'gemini-3' not in model_lower:
+        return False
+    try:
+        hostname = (urlsplit(str(base_url or '').strip()).hostname or '').lower()
+    except ValueError:
+        hostname = ''
+    if hostname == 'generativelanguage.googleapis.com':
+        return True
+    if provider_profile is None:
+        return False
+    provider_id = str(
+        getattr(provider_profile, 'provider_id', None)
+        or getattr(provider_profile, 'id', None)
+        or getattr(provider_profile, 'name', None)
+        or ''
+    ).strip().lower()
+    return provider_id in {'google', 'gemini'}
+
+
+def _repair_google_gemini_current_turn_tool_state_for_request(
+    messages,
+    *,
+    model,
+    base_url=None,
+    provider_profile=None,
+):
+    """Return a request-only copy with Gemini-unsafe current-turn tool state removed.
+
+    This repair runs at the outbound request boundary, not on canonical session
+    history. Gemini 3 only requires current-turn tool-call replay to carry
+    thought signatures, and Hermes-native parallel groups sign only the first
+    call in the assistant message. So keep whole groups whose first call is
+    signed, and drop whole current-turn groups whose first call is unsigned.
+    """
+    if not isinstance(messages, list):
+        return messages
+
+    boundary_indexes = []
+    marker_found = False
+    marker_free_messages = []
+    for idx, message in enumerate(messages):
+        if not isinstance(message, dict) or _GEMINI_REQUEST_BOUNDARY_MARKER not in message:
+            marker_free_messages.append(message)
+            continue
+        marker_found = True
+        marker_free = dict(message)
+        marker = marker_free.pop(_GEMINI_REQUEST_BOUNDARY_MARKER)
+        marker_free_messages.append(marker_free)
+        if marker is True and marker_free.get('role') == 'user':
+            boundary_indexes.append(idx)
+
+    if not boundary_indexes:
+        return marker_free_messages if marker_found else messages
+
+    if not _request_targets_google_gemini_three(
+        model,
+        base_url=base_url,
+        provider_profile=provider_profile,
+    ):
+        return marker_free_messages
+
+    if len(boundary_indexes) != 1:
+        return marker_free_messages
+
+    replay_turn_user_index = boundary_indexes[0]
+    if replay_turn_user_index == len(marker_free_messages) - 1:
+        return marker_free_messages
+
+    drop_assistant_indexes = set()
+    dropped_tool_call_ids: set[str] = set()
+    for idx in range(replay_turn_user_index + 1, len(messages)):
+        msg = marker_free_messages[idx]
+        if not isinstance(msg, dict) or msg.get('role') != 'assistant':
+            continue
+        tool_calls = msg.get('tool_calls')
+        if not isinstance(tool_calls, list) or not tool_calls:
+            continue
+        if _tool_call_has_google_thought_signature(tool_calls[0]):
+            continue
+        drop_assistant_indexes.add(idx)
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            tool_id = tool_call.get('id') or tool_call.get('call_id') or ''
+            if tool_id:
+                dropped_tool_call_ids.add(str(tool_id))
+
+    if not drop_assistant_indexes and not dropped_tool_call_ids:
+        return marker_free_messages
+
+    repaired = []
+    for idx, msg in enumerate(marker_free_messages):
+        if idx <= replay_turn_user_index or not isinstance(msg, dict):
+            repaired.append(msg)
+            continue
+        if msg.get('role') == 'tool':
+            tool_call_id = str(msg.get('tool_call_id') or '').strip()
+            if tool_call_id and tool_call_id in dropped_tool_call_ids:
+                continue
+            repaired.append(msg)
+            continue
+        if idx in drop_assistant_indexes:
+            patched = dict(msg)
+            patched.pop('tool_calls', None)
+            if not _assistant_message_has_visible_content(patched):
+                continue
+            repaired.append(patched)
+            continue
+        repaired.append(msg)
+    return repaired
+
+
+def _install_gemini_request_boundary_wrapper() -> None:
+    """Patch the Agent request boundary and chat-completions transport."""
+    global _GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED
+    with _GEMINI_REQUEST_BOUNDARY_WRAPPER_LOCK:
+        try:
+            from agent import conversation_loop, turn_context
+
+            current_build_turn_context = conversation_loop.build_turn_context
+            if not getattr(current_build_turn_context, "_webui_gemini_request_boundary_wrapper", False):
+                original_build_turn_context = current_build_turn_context
+
+                def _wrapped_build_turn_context(*args, **kwargs):
+                    ctx = original_build_turn_context(*args, **kwargs)
+                    idx = getattr(ctx, "current_turn_user_idx", -1)
+                    messages = getattr(ctx, "messages", None)
+                    if isinstance(messages, list):
+                        _clear_materialized_gemini_request_boundary_markers(messages)
+                        _replace_message_with_boundary_marker(messages, idx)
+                    return ctx
+
+                _wrapped_build_turn_context.__dict__["_webui_gemini_request_boundary_wrapper"] = True
+                _wrapped_build_turn_context.__dict__["_webui_original_build_turn_context"] = original_build_turn_context
+                conversation_loop.build_turn_context = _wrapped_build_turn_context
+
+            current_reanchor = turn_context.reanchor_current_turn_user_idx
+            if not getattr(current_reanchor, "_webui_gemini_request_boundary_wrapper", False):
+                original_reanchor = current_reanchor
+
+                def _wrapped_reanchor(messages, user_message):
+                    idx = original_reanchor(messages, user_message)
+                    if isinstance(messages, list):
+                        _clear_materialized_gemini_request_boundary_markers(messages)
+                        _replace_message_with_boundary_marker(messages, idx)
+                    return idx
+
+                _wrapped_reanchor.__dict__["_webui_gemini_request_boundary_wrapper"] = True
+                _wrapped_reanchor.__dict__["_webui_original_reanchor"] = original_reanchor
+                turn_context.reanchor_current_turn_user_idx = _wrapped_reanchor
+        except Exception:
+            logger.debug("gemini request-boundary wrapper: Agent hooks unavailable", exc_info=True)
+
+        try:
+            from agent.transports.chat_completions import ChatCompletionsTransport
+
+            current_build_kwargs = ChatCompletionsTransport.build_kwargs
+            if not getattr(current_build_kwargs, "_webui_gemini_request_boundary_wrapper", False):
+
+                def _wrapped_build_kwargs(self, model, messages, tools=None, **params):
+                    repaired_messages = _repair_google_gemini_current_turn_tool_state_for_request(
+                        messages,
+                        model=model,
+                        base_url=params.get('base_url'),
+                        provider_profile=params.get('provider_profile'),
+                    )
+                    return current_build_kwargs(self, model, repaired_messages, tools, **params)
+
+                _wrapped_build_kwargs.__dict__["_webui_gemini_request_boundary_wrapper"] = True
+                _wrapped_build_kwargs.__dict__["_webui_original_build_kwargs"] = current_build_kwargs
+                ChatCompletionsTransport.build_kwargs = _wrapped_build_kwargs
+        except Exception:
+            logger.debug("gemini request-boundary wrapper: transport unavailable", exc_info=True)
+        _GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED = True
 
 
 _PERSISTENT_MEMORY_FILES = (
@@ -8179,10 +8449,12 @@ def _sanitize_messages_for_api(
             continue
         if msg.get('role') == 'assistant':
             for tc in msg.get('tool_calls') or []:
-                if isinstance(tc, dict):
-                    tid = tc.get('id') or tc.get('call_id') or ''
-                    if tid:
-                        valid_tool_call_ids.add(tid)
+                if not isinstance(tc, dict):
+                    continue
+                tid = tc.get('id') or tc.get('call_id') or ''
+                if not tid:
+                    continue
+                valid_tool_call_ids.add(tid)
 
     # Second pass: build the sanitized list, dropping orphaned tool messages.
     clean = []
@@ -14776,7 +15048,6 @@ def _run_agent_streaming(
         ensure_agent_runtime_current()
         _prewarm_skill_tool_modules()
         _install_streaming_cronjob_profile_wrapper()
-
         # Full-turn serialization is only needed for static/legacy skill-module
         # resolution, where process-global skill-module globals are still used.
         # Dynamic-capable modules continue concurrent execution.
@@ -14801,6 +15072,7 @@ def _run_agent_streaming(
                 _SKILL_HOME_MODULE_PATCH_LOCK.acquire()
                 _acquired_streaming_skill_home_patch_lock = True
 
+        _install_gemini_request_boundary_wrapper()
         # Still set process-level env as fallback for tools that bypass thread-local
         # Acquire lock only for the env mutation, then release before the agent runs.
         # The finally block re-acquires to restore — keeping critical sections short
@@ -16570,6 +16842,9 @@ def _run_agent_streaming(
                     _result_messages = result.get('messages')
                     if _result_messages is None:
                         _result_messages = _previous_context_messages
+                    _result_messages = _sanitize_materialized_gemini_request_boundary_history(
+                        _result_messages
+                    )
                     _result_messages = _drop_synthetic_max_iteration_summary_requests(
                         _result_messages,
                         enabled=_tool_limit_reached,
@@ -16618,6 +16893,10 @@ def _run_agent_streaming(
                         _active_turn_identity,
                         _run_conversation_projected_history,
                         compression_authorized=_compressed_this_turn,
+                    )
+                    s.messages = _sanitize_materialized_gemini_request_boundary_history(s.messages)
+                    s.context_messages = _sanitize_materialized_gemini_request_boundary_history(
+                        s.context_messages
                     )
                 # Strip XML tool-call blocks from assistant message content.
                 # DeepSeek and some other providers emit <function_calls>...</function_calls>
@@ -17078,6 +17357,9 @@ def _run_agent_streaming(
                                 _result_messages = result.get('messages')
                                 if _result_messages is None:
                                     _result_messages = _previous_context_messages
+                                _result_messages = _sanitize_materialized_gemini_request_boundary_history(
+                                    _result_messages
+                                )
                                 _result_messages = _drop_synthetic_max_iteration_summary_requests(
                                     _result_messages,
                                     enabled=_agent_result_tool_limit_reached(result),
@@ -17104,6 +17386,10 @@ def _run_agent_streaming(
                                     compression_authorized=_producer_committed_compression(
                                         agent, session_id
                                     ),
+                                )
+                                s.messages = _sanitize_materialized_gemini_request_boundary_history(s.messages)
+                                s.context_messages = _sanitize_materialized_gemini_request_boundary_history(
+                                    s.context_messages
                                 )
                                 # normal post-result persistence path by
                                 # leaving _assistant_added truthy (set below).
@@ -17281,6 +17567,9 @@ def _run_agent_streaming(
                             "(active engine: %s)",
                             type(getattr(agent, 'context_compressor', None)).__name__,
                         )
+                    s.context_messages = _sanitize_materialized_gemini_request_boundary_history(
+                        s.context_messages
+                    )
                     s.post_compression_context_tokens_estimate = _estimate_post_compression_context_tokens(
                         agent,
                         s.context_messages,
@@ -18591,6 +18880,9 @@ def _run_agent_streaming(
                                     _result_messages = _heal_result.get('messages')
                                     if _result_messages is None:
                                         _result_messages = _previous_context_messages
+                                    _result_messages = _sanitize_materialized_gemini_request_boundary_history(
+                                        _result_messages
+                                    )
                                     _result_messages = _settle_result_messages(
                                         s,
                                         _previous_messages,
@@ -18615,6 +18907,12 @@ def _run_agent_streaming(
                                         compression_authorized=_producer_committed_compression(
                                             _heal_agent, session_id
                                         ),
+                                    )
+                                    s.messages = _sanitize_materialized_gemini_request_boundary_history(
+                                        s.messages
+                                    )
+                                    s.context_messages = _sanitize_materialized_gemini_request_boundary_history(
+                                        s.context_messages
                                     )
                                     # Terminal self-heal success must finalize the
                                     # turn exactly once: clear the pending markers
