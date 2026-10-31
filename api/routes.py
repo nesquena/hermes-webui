@@ -13568,6 +13568,16 @@ _LOGIN_LOCALE = {
         "invalid_pw": "M\u1eadt kh\u1ea9u kh\u00f4ng h\u1ee3p l\u1ec7",
         "conn_failed": "K\u1ebft n\u1ed1i th\u1ea5t b\u1ea1i",
     },
+    "ca": {
+        "lang": "ca-ES",
+        "title": "Inicia la sessi\u00f3",
+        "subtitle": "Introdueix la teva contrasenya per continuar",
+        "placeholder": "Contrasenya",
+        "btn": "Inicia la sessi\u00f3",
+        "invalid_pw": "Contrasenya incorrecta",
+        "conn_failed": "Ha fallat la connexi\u00f3",
+    },
+
     "cs": {
         "lang": "cs-CZ",
         "title": "P\u0159ihl\u00e1sit se",
