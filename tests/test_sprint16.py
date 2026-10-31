@@ -6,6 +6,7 @@ import html as _html
 import pathlib
 import re
 import urllib.request
+import uuid
 
 from tests._pytest_port import BASE
 REPO_ROOT = pathlib.Path(__file__).parent.parent
@@ -24,18 +25,52 @@ def esc(s):
 
 
 SAFE_TAGS = re.compile(
-    r"^<\/?(strong|em|code|pre|h[1-6]|ul|ol|li|table|thead|tbody|tr|th|td"
+    r"^<\/?(strong|em|del|code|pre|h[1-6]|ul|ol|li|table|thead|tbody|tr|th|td"
     r"|hr|blockquote|p|br|a|div)([\s>]|$)",
     re.I,
 )
-SAFE_INLINE = re.compile(r"^<\/?(strong|em|code|a)([\s>]|$)", re.I)
+SAFE_INLINE = re.compile(r"^<\/?(strong|em|del|code|a)([\s>]|$)", re.I)
+
+
+def _stash_emphasis_tags(text, stash, token):
+    """Stash emphasis tags / already-escaped entities so the later italic and
+    strikethrough passes do not esc() them a second time.
+
+    Mirror of the inlineMd()/renderMd() guard in static/ui.js (PR #8235): the
+    bold pass emits <strong>, and the italic pass then esc()'d it into literal
+    ``&lt;strong&gt;``; an already-escaped ``&#x27;`` became ``&amp;#x27;``.
+    Only bare tags/entities are stashed (never their content) so nested
+    emphasis such as ``**a *b* c**`` still renders. The token carries a random
+    prefix because renderMd() does not strip NUL bytes from its input, and
+    ``\\x00B`` is already owned by the autolink stash in ui.js.
+    """
+    def repl(m):
+        stash.append(m.group())
+        return token + str(len(stash) - 1) + "\x00"
+
+    return re.sub(r"</?(?:strong|em|del)>|&(?:amp|lt|gt|quot|#39|#x27);", repl, text)
+
+
+def _restore_emphasis_tags(text, stash, token):
+    return re.sub(
+        re.escape(token) + r"(\d+)\x00",
+        lambda m: stash[int(m.group(1))],
+        text,
+    )
 
 
 def inline_md(t):
     """Mirror of inlineMd() in ui.js — for use inside list items / blockquotes."""
     t = re.sub(r"\*\*\*(.+?)\*\*\*", lambda m: "<strong><em>" + esc(m.group(1)) + "</em></strong>", t)
     t = re.sub(r"\*\*(.+?)\*\*",     lambda m: "<strong>" + esc(m.group(1)) + "</strong>", t)
+    # Protect the tags/entities emitted so far from the italic pass's esc().
+    _tag_stash, _tk = [], "\x00I" + uuid.uuid4().hex[:6] + "_"
+    t = _stash_emphasis_tags(t, _tag_stash, _tk)
     t = re.sub(r"\*([^*\n]+)\*",     lambda m: "<em>" + esc(m.group(1)) + "</em>", t)
+    # The italic pass just emitted <em>/</em>; protect those from strikethrough.
+    t = _stash_emphasis_tags(t, _tag_stash, _tk)
+    t = re.sub(r"~~(.+?)~~",         lambda m: "<del>" + esc(m.group(1)) + "</del>", t)
+    t = _restore_emphasis_tags(t, _tag_stash, _tk)
     t = re.sub(r"`([^`\n]+)`",        lambda m: "<code>" + esc(m.group(1)) + "</code>", t)
     t = re.sub(
         r"\[([^\]]+)\]\((https?://[^\)]+)\)",
@@ -88,7 +123,14 @@ def render_md(raw):
     # Inline formatting (top-level, outside list items)
     s = re.sub(r"\*\*\*(.+?)\*\*\*", lambda m: "<strong><em>" + esc(m.group(1)) + "</em></strong>", s)
     s = re.sub(r"\*\*(.+?)\*\*",     lambda m: "<strong>" + esc(m.group(1)) + "</strong>", s)
+    # Protect the tags/entities emitted so far from the italic/strikethrough
+    # passes' esc() (PR #8235). Same guard as inline_md() above.
+    _tag_stash, _tk = [], "\x00I" + uuid.uuid4().hex[:6] + "_"
+    s = _stash_emphasis_tags(s, _tag_stash, _tk)
     s = re.sub(r"\*([^*\n]+)\*",     lambda m: "<em>" + esc(m.group(1)) + "</em>", s)
+    s = _stash_emphasis_tags(s, _tag_stash, _tk)
+    s = re.sub(r"~~(.+?)~~",         lambda m: "<del>" + esc(m.group(1)) + "</del>", s)
+    s = _restore_emphasis_tags(s, _tag_stash, _tk)
 
     # Block elements using inlineMd for their content
     s = re.sub(r"^### (.+)$", lambda m: "<h3>" + inline_md(m.group(1)) + "</h3>", s, flags=re.M)
@@ -167,6 +209,49 @@ def render_md(raw):
         return "<p>" + p.replace("\n", "<br>") + "</p>"
     s = "\n".join(wrap(p) for p in parts)
     return s
+
+
+# ── Nested emphasis must not be double-escaped (PR #8235) ────────────────────
+
+def test_render_md_bold_inside_italic_not_double_escaped(cleanup_test_sessions):
+    """*a **b** c* — the bold pass emits <strong>, and the italic pass used to
+    esc() it into a literal &lt;strong&gt; visible to the user."""
+    out = render_md("*a **b** c*")
+    assert "<em>a <strong>b</strong> c</em>" in out, out
+    assert "&lt;strong&gt;" not in out, out
+
+
+def test_render_md_apostrophe_inside_nested_bold_not_double_escaped(cleanup_test_sessions):
+    """An already-escaped apostrophe used to become &amp;#x27; when the italic
+    pass escaped the surrounding bold span a second time."""
+    out = render_md("*a **it's** b*")
+    assert "<strong>it&#x27;s</strong>" in out or "<strong>it&#39;s</strong>" in out, out
+    assert "&amp;#x27;" not in out and "&amp;#39;" not in out, out
+
+
+def test_render_md_blockquoted_italic_quote_with_bold_phrase(cleanup_test_sessions):
+    """The originally reported shape: a quoted, italicised sentence with a bold
+    phrase inside it, inside a blockquote."""
+    src = '> *"I wouldn\'t recommend **setting alerts** on this data."*'
+    out = render_md(src)
+    assert "<blockquote>" in out, out
+    assert "<strong>setting alerts</strong>" in out, out
+    assert "&lt;strong&gt;" not in out, out
+
+
+def test_inline_md_bold_inside_italic_not_double_escaped(cleanup_test_sessions):
+    """Same guard inside inlineMd(), used for list items / headings / table cells."""
+    out = inline_md("*a **b** c*")
+    assert "<em>a <strong>b</strong> c</em>" in out, out
+    assert "&lt;strong&gt;" not in out, out
+
+
+def test_inline_md_italic_inside_strikethrough_not_double_escaped(cleanup_test_sessions):
+    """~~*a*~~ — the italic pass emits <em> AFTER the first stash; those tags
+    must be protected from the strikethrough pass too."""
+    out = inline_md("~~*a*~~")
+    assert "<del><em>a</em></del>" in out, out
+    assert "&lt;em&gt;" not in out, out
 
 
 # ── Static analysis: verify key structures exist in ui.js ────────────────────
