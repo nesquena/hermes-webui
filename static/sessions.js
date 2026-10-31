@@ -4751,8 +4751,17 @@ function _mergePendingSessionMessage(session,messages){
     const misplacedIdx=liveAssistantIdx>=0?messages.findIndex((m,idx)=>
       idx>liveAssistantIdx&&m&&m.role==='user'&&_sameTranscriptMessage(m,pendingMsg)
     ):-1;
-    const withoutMisplaced=misplacedIdx>=0?messages.filter((_m,idx)=>idx!==misplacedIdx):messages;
-    const ownedIdx=_currentTurnInsertIndex(withoutMisplaced,ownershipStart);
+    // A display-only copy an earlier pass already placed (repeated recovery:
+    // a failed message fetch re-merges over the same array) is reused exactly
+    // as the windowed branch reuses it. When the persisted turn row's text
+    // differs from pending_user_message, the tail-duplicate check above cannot
+    // see that copy, so without this every pass stacked another prompt (#8696).
+    const existingIdx=misplacedIdx<0&&typeof _existingRecoveredPromptIndex==='function'
+      ?_existingRecoveredPromptIndex(messages,pendingMsg)
+      :-1;
+    const skipIdx=misplacedIdx>=0?misplacedIdx:existingIdx;
+    const withoutSkipped=skipIdx>=0?messages.filter((_m,idx)=>idx!==skipIdx):messages;
+    const ownedIdx=_currentTurnInsertIndex(withoutSkipped,ownershipStart);
     if(ownedIdx>=0){
       if(misplacedIdx>=0){
         const [misplacedUser]=messages.splice(misplacedIdx,1);
@@ -4763,6 +4772,12 @@ function _mergePendingSessionMessage(session,messages){
         if(typeof getPendingSessionMessage==='function') getPendingSessionMessage(session,[misplacedUser]);
         messages.splice(ownedIdx,0,
           typeof _markRecoveredPromptRow==='function'?_markRecoveredPromptRow(misplacedUser):misplacedUser);
+        return true;
+      }
+      if(existingIdx>=0){
+        if(existingIdx===ownedIdx) return false;
+        const [row]=messages.splice(existingIdx,1);
+        messages.splice(ownedIdx,0,typeof _markRecoveredPromptRow==='function'?_markRecoveredPromptRow(row):row);
         return true;
       }
       messages.splice(ownedIdx,0,
