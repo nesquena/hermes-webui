@@ -13927,6 +13927,24 @@ def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
             rt['is_anthropic_oauth'] = getattr(agent, '_is_anthropic_oauth')
 
 
+def _apply_turn_user_identity(agent_kwargs, agent_params, agent, user):
+    """Stamp the WebUI's trusted-auth user onto this turn's agent.
+
+    A fresh agent receives the identity through its constructor kwargs (when the
+    installed Agent supports the identity params); a cached agent is re-stamped
+    so a shared session's current speaker is always the sender. ``user=None``
+    (trusted auth off, or a server-initiated turn) leaves everything alone.
+    """
+    if not user:
+        return
+    if agent_kwargs is not None and 'user_id' in agent_params:
+        agent_kwargs['user_id'] = user
+        agent_kwargs['user_name'] = user
+    if agent is not None and hasattr(agent, '_user_id'):
+        agent._user_id = user
+        agent._user_name = user
+
+
 def _run_agent_streaming(
     session_id,
     msg_text,
@@ -13939,11 +13957,16 @@ def _run_agent_streaming(
     model_provider=None,
     goal_related=False,
     moa_config=None,
+    user=None,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
     When ephemeral=True, session mutations are skipped — used by /btw to get
     a streaming answer without persisting to the parent session.
+
+    ``user`` is the trusted-auth username for this turn (WebUI). It is stored
+    on the agent as the gateway identity (``_user_id``/``_user_name``) so
+    ``pre_llm_call`` hooks can attribute the turn to the person who sent it.
     """
     _turn_route_model = model
     _turn_route_provider = model_provider
@@ -15843,6 +15866,9 @@ def _run_agent_streaming(
                 tool_progress_callback=on_tool,
                 clarify_callback=_clarify_callback,
             )
+            # The WebUI's trusted-auth user for this turn. The agent stores it
+            # as _user_id/_user_name; pre_llm_call receives it as sender_id.
+            _apply_turn_user_identity(_agent_kwargs, _agent_params, None, user)
             # reasoning_config has been an AIAgent param for several releases,
             # but guard defensively to avoid TypeError on an older agent build.
             if 'reasoning_config' in _agent_params and _reasoning_config is not None:
@@ -16373,6 +16399,13 @@ def _run_agent_streaming(
             # rejection/rebuild so rejected text cannot claim a returned row.
             _active_turn_identity['trusted_agent_input_text'] = _agent_msg_text
             _result_partial_pre_call_context = list(_previous_context_messages)
+            # A cached agent keeps the identity of the turn that created it;
+            # re-stamp it for this turn so a shared session's speaker is always
+            # the current sender (the per-session lock serializes turns).
+            try:
+                _apply_turn_user_identity(None, _agent_params, agent, user)
+            except Exception:
+                logger.debug('[webui] could not set the turn user identity', exc_info=True)
             if not _agent_can_invoke(agent):
                 with _agent_lock:
                     _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
