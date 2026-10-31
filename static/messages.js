@@ -9752,7 +9752,7 @@ function _ensureClarifyCardDom() {
       <div class="clarify-question" id="clarifyQuestion"></div>
       <div class="clarify-choices" id="clarifyChoices"></div>
       <div class="clarify-response">
-        <input class="clarify-input" id="clarifyInput" type="text" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')" data-i18n-placeholder="clarify_input_placeholder" placeholder="Type your response…">
+        <textarea class="clarify-input" id="clarifyInput" rows="1" autocomplete="off" data-1p-ignore data-lpignore="true" data-form-type="other" spellcheck="false" data-i18n-placeholder="clarify_input_placeholder" placeholder="Type your response…"></textarea>
         <button class="clarify-submit" id="clarifySubmit" data-i18n="clarify_send">Send</button>
       </div>
       <div class="clarify-hint" id="clarifyHint" data-i18n="clarify_hint">Please choose one option, or type your own response below.</div>
@@ -9792,12 +9792,32 @@ function _syncClarifyTranscriptSpace(card, opts) {
   const messages = $("messages");
   if (!messages) return;
   const wasNearBottom = _clarifyMessagesNearBottom(messages);
+  // #7616: growing the free-text field must not yank a reader who has scrolled
+  // away back to the bottom. `wasNearBottom` is sampled BEFORE the resize is
+  // applied, so a user who scrolls up inside the settle window (the 420 ms
+  // timer below) is still carrying a stale "they were at the bottom" answer and
+  // gets re-pinned. Capture the scroll-input generation now and require it to be
+  // unchanged at settle time, alongside the live unpinned flag. The reservation
+  // is still updated unconditionally — only the scroll is conditional.
+  const scheduledGeneration = (typeof _messageScrollInputGeneration === "number")
+    ? _messageScrollInputGeneration
+    : null;
+  const stillEligibleToScroll = () => {
+    if (typeof _messageScrollInputGeneration === "number" && scheduledGeneration !== null
+        && _messageScrollInputGeneration !== scheduledGeneration) {
+      return false; // the reader moved between scheduling and settling
+    }
+    if (typeof _messageUserUnpinned !== "undefined" && _messageUserUnpinned) {
+      return false; // the reader has explicitly scrolled up
+    }
+    return true;
+  };
   if (!card || !card.classList.contains("visible")) {
     messages.classList.remove("clarify-open");
     messages.classList.remove("clarify-collapsed");
     messages.style.removeProperty("--clarify-card-height");
     messages.style.removeProperty("--clarify-dock-height");
-    if (wasNearBottom && typeof scrollToBottom === "function" && typeof requestAnimationFrame === "function") {
+    if (wasNearBottom && stillEligibleToScroll() && typeof scrollToBottom === "function" && typeof requestAnimationFrame === "function") {
       requestAnimationFrame(scrollToBottom);
     }
     return;
@@ -9812,11 +9832,75 @@ function _syncClarifyTranscriptSpace(card, opts) {
     if (h > 0) {
       messages.style.setProperty(collapsed ? "--clarify-dock-height" : "--clarify-card-height", Math.ceil(h + 24) + "px");
     }
-    if (wasNearBottom && typeof scrollToBottom === "function") scrollToBottom();
+    if (wasNearBottom && stillEligibleToScroll() && typeof scrollToBottom === "function") scrollToBottom();
   };
   if (opts.immediate) measure();
   if (typeof requestAnimationFrame === "function") requestAnimationFrame(measure);
   setTimeout(measure, 420);
+}
+
+// #7616: the clarify card's free-text field is a <textarea> so a long or
+// multiline answer actually fits. It used to be a single-line <input> that was
+// also marked `readonly` until focus — a password-manager opt-out hack that
+// made click-drag selection and Ctrl/Cmd+A impossible, which is what made
+// replacing existing text with a long answer unusable.
+//
+// Grow the field with its content up to a bounded cap; past the cap it scrolls
+// inside the field instead of pushing the card past the viewport.
+const CLARIFY_INPUT_MAX_HEIGHT = 160;
+const CLARIFY_INPUT_MIN_HEIGHT = 42;
+
+// A collapsed card hides `.clarify-response` with `display:none`
+// (style.css `.clarify-card.collapsed .clarify-response`), so the textarea
+// inside it has no layout box and `scrollHeight` reads 0. Writing the 42px
+// floor from that measurement is destructive: it silently discards the height a
+// long answer already grew the field to. Only a DOM that can positively report
+// "laid out" is asked; a harness without getClientRects is assumed visible so
+// this stays a no-op outside a browser.
+function _clarifyFieldIsHidden(input) {
+  if (!input) return true;
+  if (typeof input.getClientRects === "function") return input.getClientRects().length === 0;
+  return false;
+}
+
+function _autoResizeClarifyInput() {
+  const input = $("clarifyInput");
+  if (!input) return;
+  // #7616 gate: never measure a hidden field. Defer to the expand path, which
+  // re-measures once the layout box is back.
+  if (_clarifyFieldIsHidden(input)) {
+    input.dataset.clarifyRemeasure = "1";
+    return;
+  }
+  delete input.dataset.clarifyRemeasure;
+  const previous = input.style.height;
+  input.style.height = "auto";
+  // +2 absorbs the textarea's inner border so a single line does not clip.
+  const content = input.scrollHeight + 2;
+  const next = Math.max(CLARIFY_INPUT_MIN_HEIGHT, Math.min(content, CLARIFY_INPUT_MAX_HEIGHT)) + "px";
+  input.style.height = next;
+  input.style.overflowY = content > CLARIFY_INPUT_MAX_HEIGHT ? "auto" : "hidden";
+  // #7616 gate: typing changed the effective height, so the transcript
+  // reservation must follow it now. Without this the card keeps a stale
+  // `--clarify-card-height` until some later poll or window resize happens to
+  // repair it, and the absolute-positioned card grows over the transcript.
+  // `_syncClarifyTranscriptSpace` measures immediately, on the next frame and
+  // once settled, which covers both the height transition and the shrink case.
+  if (next !== previous) {
+    const card = $("clarifyCard");
+    if (card && card.classList.contains("visible")) {
+      _syncClarifyTranscriptSpace(card, {immediate: true});
+    }
+  }
+}
+
+// Bind once per element rather than on every showClarifyCard() poll — the
+// poll re-renders repeatedly and addEventListener would stack duplicates.
+function _bindClarifyInputAutoResize() {
+  const input = $("clarifyInput");
+  if (!input || input.dataset.autoResizeBound === "1") return;
+  input.dataset.autoResizeBound = "1";
+  input.addEventListener("input", _autoResizeClarifyInput);
 }
 
 function _ensureClarifyResizeListener() {
@@ -9825,6 +9909,15 @@ function _ensureClarifyResizeListener() {
   window.addEventListener("resize", () => {
     const card = $("clarifyCard");
     if (card && card.classList.contains("visible")) {
+      // #7616: a resize (window drag, phone rotation) changes the column width,
+      // so the draft re-wraps and the height/overflow computed for the old
+      // width go stale — a draft that used to fit then wraps past the field and
+      // stays clipped until the user types again. Re-measure FIRST: it resyncs
+      // the reservation itself whenever the effective height actually changed,
+      // and the explicit sync below covers the width-only case where the card
+      // box moved but the field height did not. Measuring a collapsed (hidden)
+      // field is a no-op by design — it defers instead of clobbering.
+      _autoResizeClarifyInput();
       _syncClarifyTranscriptSpace(card, {immediate: true});
     }
   }, {passive: true});
@@ -9836,6 +9929,15 @@ function toggleClarifyCardCollapsed(forceCollapsed) {
   const collapsed = typeof forceCollapsed === "boolean" ? forceCollapsed : !card.classList.contains("collapsed");
   card.classList.toggle("collapsed", collapsed);
   _syncClarifyCollapseButton(card);
+  // #7616 gate: expanding restores the field's layout box, so re-measure the
+  // height the answer grew to BEFORE reserving transcript space. A same-prompt
+  // poll while collapsed used to write the 42px floor (scrollHeight 0 from the
+  // hidden row), and nothing here ever remeasured — so the long field came back
+  // one line tall with its draft intact. Reading the rects after the class
+  // change forces the reflow that makes the measurement valid again.
+  if (!collapsed) {
+    _autoResizeClarifyInput();
+  }
   _syncClarifyTranscriptSpace(card, {immediate: true});
 }
 
@@ -9961,6 +10063,9 @@ function hideClarifyCard(force=false, reason="dismissed") {
   $("clarifyInput").value = "";
   $("clarifyInput").disabled = false;
   $("clarifyInput").onkeydown = null;
+  // #7616: collapse the grown height so the next prompt starts one line tall
+  // instead of inheriting this answer's box size.
+  _autoResizeClarifyInput();
   const submit = $("clarifySubmit");
   if (submit) { submit.disabled = false; submit.classList.remove("loading"); }
 }
@@ -10064,13 +10169,28 @@ function showClarifyCard(pending) {
   if (input) {
     if (!sameClarify) input.value = '';
     input.disabled = false;
-    input.removeAttribute('readonly');
+    _bindClarifyInputAutoResize();
+    // #7616: Enter keeps sending (existing behavior); Shift+Enter is the
+    // newline path the now-multiline field needs. Re-measure on a timer so the
+    // box grows with the newline the browser inserts.
     input.onkeydown = (e) => {
-      if (e.key === 'Enter') {
+      // #7616: an Enter that is committing an IME composition is not a send.
+      // Chromium's IMEs report key:"Process", but WebKit — including the macOS
+      // app's WKWebView — delivers key:"Enter" with isComposing:true, so
+      // confirming a Japanese or Chinese word would submit a half-typed answer.
+      // keyCode 229 is the legacy signal for the same case. The composer already
+      // carries this guard; the clarify field did not.
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Enter' && e.shiftKey) {
+        setTimeout(_autoResizeClarifyInput, 0);
+        return;
+      }
+      if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         respondClarify();
       }
     };
+    _autoResizeClarifyInput();
   }
   if (typeof lockComposerForClarify === "function") {
     lockComposerForClarify(question ? `Clarification needed: ${question}` : "Clarification needed");
@@ -10079,6 +10199,14 @@ function showClarifyCard(pending) {
   _ensureClarifyResizeListener();
   _setPromptFlyoutHidden(card, false);
   card.classList.add("visible");
+  // #7616: the resize above ran while the flyout was still hidden, so the gate
+  // in `_autoResizeClarifyInput` deferred it and parked a `clarifyRemeasure`
+  // marker instead of measuring. The layout box only comes back here, so drain
+  // the marker now — otherwise a fresh prompt inherits the previous answer's
+  // tall empty field until some later resize or poll happens to repair it.
+  if (input && input.dataset.clarifyRemeasure === "1") {
+    _autoResizeClarifyInput();
+  }
   _syncClarifyCollapseButton(card);
   _syncClarifyTranscriptSpace(card, {immediate: true});
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
