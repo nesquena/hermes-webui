@@ -11347,6 +11347,9 @@ function _getExplicitBusyCommandAction(text){
 }
 
 function getComposerPrimaryAction(){
+  if(S.session&&S.session.chat_read_only_reason){
+    return S.busy&&S.activeStreamId?'stop':'disabled';
+  }
   const msg=$('msg');
   const hasContent=_composerHasContent();
   const locked=!!(msg&&msg.disabled);
@@ -11416,6 +11419,21 @@ function _setComposerPrimaryButtonIcon(btn,action){
 }
 
 function updateSendBtn(){
+  const chatReadOnlyReason=(S.session&&S.session.chat_read_only_reason)||'';
+  const chatReadOnlyNotice=$('composerChatReadOnlyReason');
+  if(chatReadOnlyNotice){
+    chatReadOnlyNotice.textContent=chatReadOnlyReason;
+    chatReadOnlyNotice.hidden=!chatReadOnlyReason;
+  }
+  const chatInput=$('msg');
+  if(chatInput){
+    chatInput.readOnly=!!chatReadOnlyReason;
+    const descriptionIds=new Set((chatInput.getAttribute('aria-describedby')||'').split(/\s+/).filter(Boolean));
+    if(chatReadOnlyReason) descriptionIds.add('composerChatReadOnlyReason');
+    else descriptionIds.delete('composerChatReadOnlyReason');
+    if(descriptionIds.size) chatInput.setAttribute('aria-describedby',[...descriptionIds].join(' '));
+    else chatInput.removeAttribute('aria-describedby');
+  }
   const btn=$('btnSend');
   if(!btn){
     if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
@@ -11431,7 +11449,8 @@ function updateSendBtn(){
   let _btnTitle;
   if(action==='disabled'){
     const _dmsg=$('msg');
-    if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
+    if(chatReadOnlyReason) _btnTitle=chatReadOnlyReason;
+    else if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
     else _btnTitle=_tt('composer_disabled_empty','Type a message to send');
   }else if(action==='queue'&&typeof isCompressionUiRunning==='function'&&isCompressionUiRunning()){
     _btnTitle=_tt('composer_compression_will_queue','Type a message — it will queue and send after compression');

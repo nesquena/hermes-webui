@@ -377,7 +377,8 @@ def _strip_compact_echo_suffix(value: str, suffix: str) -> tuple[str, bool]:
 def _redacted_session_payload_with_full_messages(session, *, tool_calls=None) -> dict | None:
     """Best-effort terminal SSE session payload for already-persisted state."""
     try:
-        return redact_session_data(
+        from api.helpers import public_session_projection
+        return public_session_projection(
             _session_payload_with_full_messages(session, tool_calls=tool_calls)
         )
     except Exception:

@@ -2917,6 +2917,8 @@
   .composer-mobile-context-action.ctx-high .composer-mobile-config-value{color:var(--error);}
   .composer-mobile-context-action.ctx-high .composer-mobile-context-compress{border-color:var(--error);color:var(--error);}
   .composer-right{display:flex;gap:8px;align-items:center;flex-shrink:0;}
+  .composer-chat-read-only{font-size:12px;line-height:1.5;color:var(--muted);padding:0 12px 8px;overflow-wrap:anywhere;}
+  .composer-chat-read-only[hidden]{display:none;}
   .composer-status{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px;}
   /* Context usage indicator */
   .ctx-indicator-wrap{position:relative;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;}

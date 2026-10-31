@@ -298,6 +298,85 @@ HERMES_WEBUI_GATEWAY_USE_RUNS_API=true \
 
 Use this when the connected gateway advertises approval support and you want tool approval cards to appear in WebUI. Without `HERMES_WEBUI_GATEWAY_USE_RUNS_API=true`, gateway chat stays on the legacy chat-completions transport and approval-capable commands can remain pending in the agent without a WebUI approval card.
 
+**Conversations created by other clients:**
+
+The Gateway REST API refuses Desktop, CLI/TUI and messaging conversations with
+`permission_denied`; reading or importing them does not authorize a REST turn.
+By default, Gateway mode shows an explanation and a read-only composer for these
+conversations. HTTP refusals also retain bounded, credential-redacted details,
+including structured error codes, in the browser and saved error message.
+
+This also covers the default chat-completions mode, with the Runs API off.
+In an isolated check of upstream WebUI `516321171c74`, CLI, TUI and Desktop
+follow-ups first returned HTTP 200, then failed with `permission_denied`.
+None of those turns reached the original Agent conversation history. This PR
+explains the restriction before sending instead. New WebUI conversations
+continued normally on both versions. The check covered four profiles with a
+real Gateway and saved database history, using made-up conversations and model
+replies; it does not establish behavior for every older Gateway version.
+
+For a **local Gateway**, opt in to its existing authenticated session protocol
+in each participating profile's `config.yaml`:
+
+```yaml
+webui_chat_backend: gateway
+webui_gateway_session_transport: local
+```
+
+WebUI must run as an authorized local native client with access to that profile's
+Agent home and private bootstrap endpoint (Unix socket or Windows named pipe).
+The installed Agent must provide canonical sessions, native bootstrap tickets,
+and durable `prompt.submit` / `prompt.receipt`; this integration was tested with
+Agent commit `a480a27e76dcad8da7665408e54c6ec270c10f14` locally and
+`v0.22.5-desktop` with the Linux container helper. A REST API key or a shared
+source/state volume alone is insufficient. Separate Linux containers can use the
+[private session socket helper](gateway-session-containers.md). Remote-only REST
+deployments remain read-only for these sessions. WebUI discovers an already
+running Gateway; it does not start one.
+
+For eligible Desktop, CLI/TUI and messaging sessions, text follow-ups then resume
+the **same conversation** through native authorization. The Gateway owns admission,
+model/tool configuration, execution and history. WebUI translates its events and
+controls into the existing browser stream and approval/clarification cards. Stop
+targets only the WebUI admission or its execution generation. The existing WebUI
+session-YOLO switch answers individual approvals while enabled; it does not change
+the Gateway's own persisted YOLO setting.
+
+The pending WebUI sidecar stores the exact submission and stable input ID before
+sending. After a connection loss or WebUI restart, retrying that ID recovers the
+original admission and durable result. Reopening a disconnected conversation
+recovers it; do not resend a message whose outcome is unknown. Transcript rows
+come from the Gateway display projection, including their native row identities.
+Authorization refusals never fall back to REST or an in-process agent, change a
+source label, or create a fork. A moved/compressed session must be opened at its
+continuation before submitting.
+
+For a compressed messaging conversation, the displayed transcript ID can differ
+from the Gateway's execution owner. WebUI accepts that mapping only when the
+owning profile's read-only `state.db` confirms the messaging compression lineage
+and the displayed segment is its current tip. It saves the canonical owner with
+the stable input ID and uses it for submissions, controls, events and recovery;
+browser state and clarification cards retain the displayed ID. An uncertain
+admission never moves to another owner, even if compression advances again.
+Missing, unrelated, cross-profile or explicitly closed lineage is refused.
+
+This opt-in currently supports text continuation, ordinary tool approvals,
+clarification questions, Stop and Steer. Attachments and regeneration are refused;
+model/tool/workspace settings and Desktop-specific bridges remain owned by the
+original Gateway session. The in-process backend and API-owned conversations keep
+their existing paths. Remove the setting to restore the external-session
+read-only composer; let any pending Gateway turn settle first.
+Native-session model/provider changes are also refused at the model-picker save
+endpoint, before altering the WebUI sidecar. An unchanged selection is allowed.
+External conversations retain their owning profile even when their WebUI sidecar
+has no messages; a cross-profile chat request returns 403 before placeholder
+retagging. Only empty, unpinned WebUI placeholders can change owner this way.
+Gateway clarification answers are accepted only after an `ok` or `resolved`
+acknowledgement. Expired, already-resolved, missing or unknown acknowledgements
+return 409 without settling the local mirror. A successful acknowledgement still
+succeeds if a settlement event already removed that mirror. Withdrawal events
+retire only the corresponding clarification cards.
+
 On the runs API path the turn is executed by the Gateway, so restarting WebUI does not stop it. WebUI stores the Gateway `run_id` on the pending turn (and submits it with an `Idempotency-Key` so the Gateway keeps a durable run record). On startup, WebUI reattaches to every such run by polling `GET /v1/runs/{run_id}` until it settles, then writes the real final answer into the session instead of a "Response interrupted" marker. Stop still cancels a reattached run, and a pending approval is shown again. Token-by-token output from before the restart is not replayed; the reattached turn shows only the final answer. If the Gateway no longer knows the run (for example, it restarted too and the run was interrupted), the turn ends with an error message instead. The legacy chat-completions transport cannot reattach: its turn ends when the WebUI process that holds the HTTP stream exits.
 
 On the runs API path WebUI sends the session's earlier user and assistant turns to the Gateway as the run's `conversation_history`. Some transcript rows are shown in the conversation but not sent; they are the kinds of row the in-process backend also leaves out: error messages (a provider error, or the "Task cancelled." marker); a turn that left no visible text, such as one stopped while the model was still reasoning or calling a tool, or a reply that carried only reasoning; and a prompt that WebUI restored into the transcript after its turn was interrupted, unless the next row sent is its answer and it follows an assistant turn or opens the history, where it is the question that answer replies to. Where a stopped turn left a partial answer in the transcript, that text is sent, so the model can continue from it. An interrupted turn is reconciled into the model-facing context at the moment of cancellation — the prompt and the partial text the browser saw — whether the cancel came from WebUI's Stop or the Gateway itself, and the next turn's `conversation_history` carries that snapshot. When a stopped turn is regenerated instead, the retained prompt is sent once (as the new run's `input`, not duplicated in the history) and the writeback saves a single user row for it.
@@ -305,6 +384,8 @@ On the runs API path WebUI sends the session's earlier user and assistant turns 
 Live runs-API turns are also guarded while they stream. Each events connection carries a ~120s watchdog budget: a stream that delivers nothing but keepalives for that long is treated as stalled (keepalives are liveness, not progress), and the same budget bounds the per-read wait so a byte-silent connection surfaces within roughly one interval instead of pinning the configured 600s read timeout. When the watchdog trips, or the stream drops, the durable run status (`GET /v1/runs/{run_id}`) is the success arbiter: terminal status finalizes the turn (a non-empty durable output wins over the streamed text; with an empty output the already-streamed partial is kept), a still-running status reconnects the events stream from the last seen event, and `waiting_for_approval` surfaces the pending approval card from the status payload. A durable-status 404 gets a small immediate re-probe grace and then fails the turn closed rather than spinning. When the durable status resolves cancelled or interrupted, the streamed partial answer is persisted into the session before the browser-facing cancel event is emitted.
 
 Async `delegate_task` results on the Gateway backend are persisted by the Gateway as delivery rows in the profile's `state.db`; it starts no turn itself. WebUI runs a background poller (thread `hermes-webui-gateway-deleg-wakeup`, every 5 s) that wakes the idle WebUI session owning each new row, for every profile whose chat backend is the Gateway. It needs a Hermes Agent with the delivery reserve/commit/release API ([NousResearch/hermes-agent#125451](https://github.com/NousResearch/hermes-agent/pull/125451)); on older Agents it logs one line at startup and stays off, and results reach the agent on the user's next turn instead. Profiles on the in-process backend are not scanned; the backend is read from each profile's own `config.yaml` and `.env`. With `HERMES_WEBUI_RUNTIME_ADAPTER=runner-local` the poller wakes nothing (runner turns carry no lease back), and results reach the agent on the next turn. The poller leases the rows and starts a turn with a fixed prompt on the session profile's own Gateway; each result is copied once into the session's model context (shown as a wakeup notice, not a user message) in the same save that admits that turn, so a turn that loses the session to a user's message publishes nothing. The lease is committed only by that turn, once its Gateway accepts the run, and released if the turn ends before then; a commit that fails is retried by the next poll, and a WebUI restart in between either reattaches the run and commits, or lets the lease expire (120 s) so the next poll retries. A wake that is refused (for example a busy session or paused credentials) or never accepted by the Gateway is retried with exponential back-off up to 5 minutes. Rows older than 6 hours at startup are left for the next user turn. Results are never woken back in after the user clears or truncates the conversation (rows written before the clear are retired, including a clear that lands while the wake is being admitted), nor after an Agent rewind removed them from history (`active = 0`).
+
+Native-session approvals use the existing session connection and its receipt/generation checks. They never fall back to a REST run or query REST pending controls; a rejected or disconnected native answer leaves the card pending.
 
 WebUI answers a Runs API approval with the Gateway's fenced body: `request_id`, `execution_generation`, and `choice`. The prompt identity and the integer generation come from the Gateway's own `approval.request` payload, or — for a card rebuilt from durable run status — from that run's pending controls (`GET /v1/runs/{run_id}`) when the card is published, never at click time: a card that carries no generation still answers immediately with the legacy body. A choice the prompt does not offer is refused locally. An answer the Gateway reports as `approval_not_pending` is verified against the run's pending controls: an unreadable or ambiguous projection keeps the card and reports the error, and only a projection that shows this card's own prompt gone settles the card as already answered. A prompt re-published at a new generation replaces its card instead of being deduped away.
 

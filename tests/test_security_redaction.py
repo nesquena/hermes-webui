@@ -503,15 +503,15 @@ def _create_session_with_credentials() -> str:
     return sid
 
 
-def test_api_session_redacts_messages():
-    """GET /api/session route must call redact_session_data() before returning."""
-    import inspect
-    import api.routes as routes
-    src = inspect.getsource(routes._handle_session_get)
-    # Verify redact_session_data is applied to the session payload
-    assert "redact_session_data" in src, (
-        "api/routes.py GET /api/session handler must call redact_session_data() on the response"
-    )
+@_needs_server
+def test_api_session_redacts_messages(test_server):
+    """GET /api/session must redact its actual public payload, including messages."""
+    sid = _create_session_with_credentials()
+    session = _get(f"/api/session?session_id={sid}")["session"]
+    assert session["session_id"] == sid
+    assert any("my PAT is" in message.get("content", "") for message in session["messages"])
+    assert any("sk key is" in message.get("content", "") for message in session["messages"])
+    _assert_no_plaintext_credentials(json.dumps(session), "GET /api/session")
 
 
 def test_api_session_redacts_title():
