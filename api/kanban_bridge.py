@@ -415,8 +415,12 @@ def _patch_task(conn, task_id: str, body: dict):
     # A combined assignee+review patch must capture the current implementer
     # before request_review reassigns the card to the reviewer. Defer the
     # assignee write until after the verb runs (dashboard plugin parity).
+    # Key presence, not value, decides deferral: an omitted assignee means
+    # "leave the card alone", while an explicit null/"" means "clear after
+    # the handoff" and must not erase the implementer before request_review
+    # records it.
     requested_status = str(body.get("status") or "").strip().lower()
-    review_assignee_deferred = requested_status == "review" and body.get("assignee") is not None
+    review_assignee_deferred = requested_status == "review" and "assignee" in body
     if "assignee" in body and not review_assignee_deferred:
         if not kb.assign_task(conn, task_id, body.get("assignee") or None):
             raise LookupError("task not found")
@@ -492,8 +496,8 @@ def _patch_task(conn, task_id: str, body: dict):
                 f"cannot request review from status: {current.status if current else 'missing'}"
             )
         if review_assignee_deferred and not reviewer:
-            # Explicit clear (assignee: "") while requesting review: unassign
-            # after the handoff has captured the implementer.
+            # Explicit clear (assignee: null or "") while requesting review:
+            # unassign after the handoff has captured the implementer.
             if not kb.assign_task(conn, task_id, None):
                 raise LookupError("task not found")
     elif status in ("triage", "todo"):
@@ -736,6 +740,7 @@ def _bulk_tasks_payload(body: dict, *, board=None):
         raise ValueError("ids is required")
     results = []
     kb = _kb()
+    has_assignee = "assignee" in body
     with _conn(board=board) as conn:
         for task_id in ids:
             entry = {"id": task_id, "ok": True}
@@ -744,12 +749,22 @@ def _bulk_tasks_payload(body: dict, *, board=None):
                     entry.update(ok=False, error="not found")
                     results.append(entry)
                     continue
+                assignee_in_patch = False
                 if body.get("archive"):
                     if not kb.archive_task(conn, task_id):
                         entry.update(ok=False, error="archive refused")
                 elif body.get("status") is not None:
-                    _patch_task(conn, task_id, {"status": body.get("status")})
-                if body.get("assignee") is not None:
+                    # Carry the assignee through the status transition so bulk
+                    # and single PATCH share one handoff path. Review needs
+                    # this: _patch_task defers the assignee write until after
+                    # request_review captures the implementer, which a
+                    # separate assign_task call cannot reproduce.
+                    patch_body = {"status": body.get("status")}
+                    if has_assignee:
+                        patch_body["assignee"] = body.get("assignee")
+                        assignee_in_patch = True
+                    _patch_task(conn, task_id, patch_body)
+                if has_assignee and not assignee_in_patch:
                     if not kb.assign_task(conn, task_id, body.get("assignee") or None):
                         entry.update(ok=False, error="assign refused")
                 if body.get("priority") is not None:
