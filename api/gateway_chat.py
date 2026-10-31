@@ -3179,6 +3179,7 @@ def _run_gateway_chat_streaming(
                 _normalize_prefill_messages_before_user_turn,
                 _public_prefill_context_status,
                 _webui_ephemeral_system_prompt,
+                _webui_session_personality_prompt,
             )
 
             prefill_context = _load_webui_prefill_context(cfg)
@@ -3187,8 +3188,12 @@ def _run_gateway_chat_streaming(
             # the ephemeral system prompt rather than a prefill `user` message.
             # The gateway-backed path must build the SAME system prompt so that
             # context is not silently dropped on Gateway-routed WebUI chats.
+            # #8641: that includes the session's explicitly selected personality
+            # (same resolver the embedded worker uses) -- it used to be hard-coded
+            # to None here, so a personality picked in the browser never reached
+            # a Gateway-routed turn.
             _gateway_system_prompt = _webui_ephemeral_system_prompt(
-                None,
+                _webui_session_personality_prompt(s, config_data=cfg),
                 surface_context={
                     "source": "webui",
                     "session_id": session_id,
