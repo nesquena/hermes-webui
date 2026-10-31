@@ -9500,6 +9500,20 @@ def _resolve_compatible_session_model_state(
 
             return model, requested_provider, False
 
+    # hwc: chat-start-timeout — slash ids on an openrouter, custom, or empty
+    # profile are native model ids. Return before the live catalog, which can
+    # take over 100s when OpenRouter is cold. An omitted profile stays on the
+    # catalog so an active-provider repair can still run.
+    if model and "/" in model and profile_provider is not None:
+        _slash_bare, _slash_explicit = _split_provider_qualified_model(model)
+        _slash_profile = str(profile_provider).strip().lower()
+        if (
+            not _slash_explicit
+            and _slash_profile in {"openrouter", "custom", ""}
+            and _slash_bare
+        ):
+            return model, profile_provider, False
+
     # Default (human chat/start) path calls get_available_models() with NO
     # kwargs so it stays signature-compatible with the many tests that stub
     # get_available_models as a zero-arg callable. Only the server-side wakeup
