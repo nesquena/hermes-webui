@@ -178,6 +178,15 @@ jobs:
         # the gate looked there it skipped on every run.
         run: python3 scripts/scope_undef_gate.py --require-eslint
 
+      # hermes-agent source-tree coupling ratchet (#2491). The audit enumerates
+      # today's residual coupling; this gate fails only if a change ADDS a new
+      # coupling site. Findings are keyed path::anchor (never line numbers), so
+      # edits that merely shift imports are not false positives, and REMOVING
+      # coupling never blocks a PR — record progress deliberately with --update.
+      - name: Agent-source dependency gate (#2491)
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python3 scripts/agent_source_dependency_gate.py
+
   test:
     needs: changes
     # Belt-and-suspenders: run even if `changes` errored/was skipped. A required job
