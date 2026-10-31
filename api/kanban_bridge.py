@@ -11,10 +11,10 @@ Supported operations:
 - Comments and worker dispatch integration
 
 Status transitions are routed through the Agent's own verbs (``complete_task``,
-``block_task``, ``archive_task``, ``schedule_task``, ``unblock_task``). The
-full column/status flow — including how tasks enter and leave ``scheduled``
-and the parent re-gating on the way back to ``ready`` — is documented in
-``docs/kanban.md``.
+``block_task``, ``archive_task``, ``schedule_task``, ``request_review``,
+``unblock_task``). The full column/status flow — including how tasks enter and
+leave ``scheduled``, how they enter ``review``, and the parent re-gating on the
+way back to ``ready`` — is documented in ``docs/kanban.md``.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from api.agent_compat import agent_attr
 from api.helpers import bad, j
 from api.workspace import resolve_trusted_workspace
 
-BOARD_COLUMNS = ["triage", "todo", "scheduled", "ready", "running", "blocked", "done"]
+BOARD_COLUMNS = ["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done"]
 _TASK_PREFIX = "/api/kanban/tasks/"
 
 
@@ -412,7 +412,12 @@ def _patch_task(conn, task_id: str, body: dict):
         if hasattr(kb, "_append_event"):
             kb._append_event(conn, task_id, "updated", {"fields": list(updates), "source": "webui"})
 
-    if "assignee" in body:
+    # A combined assignee+review patch must capture the current implementer
+    # before request_review reassigns the card to the reviewer. Defer the
+    # assignee write until after the verb runs (dashboard plugin parity).
+    requested_status = str(body.get("status") or "").strip().lower()
+    review_assignee_deferred = requested_status == "review" and body.get("assignee") is not None
+    if "assignee" in body and not review_assignee_deferred:
         if not kb.assign_task(conn, task_id, body.get("assignee") or None):
             raise LookupError("task not found")
 
@@ -464,6 +469,33 @@ def _patch_task(conn, task_id: str, body: dict):
         reason = body.get("reason") or None
         if not kb.schedule_task(conn, task_id, reason=reason):
             raise ValueError(f"cannot schedule task from status: {current.status}")
+    elif status == "review":
+        # Review is a handoff, not a plain status flip: request_review records
+        # the implementer/reviewer provenance, emits review_requested, and
+        # clears any live claim with force=True (a dashboard action is a human
+        # override, same contract as the Agent dashboard plugin). Accepts
+        # running/ready only; anything else is refused below with a 400.
+        if not hasattr(kb, "request_review"):
+            raise RuntimeError("review requires a newer Hermes Agent")
+        reviewer = body.get("assignee") or None
+        ok = kb.request_review(
+            conn,
+            task_id,
+            summary=body.get("summary"),
+            metadata=body.get("metadata"),
+            reviewer=reviewer,
+            force=True,
+        )
+        if not ok:
+            current = kb.get_task(conn, task_id)
+            raise ValueError(
+                f"cannot request review from status: {current.status if current else 'missing'}"
+            )
+        if review_assignee_deferred and not reviewer:
+            # Explicit clear (assignee: "") while requesting review: unassign
+            # after the handoff has captured the implementer.
+            if not kb.assign_task(conn, task_id, None):
+                raise LookupError("task not found")
     elif status in ("triage", "todo"):
         # Direct status write for drag-drop moves between non-running,
         # non-terminal columns. Uses the claim-aware helper that nulls out
