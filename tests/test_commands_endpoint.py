@@ -1,6 +1,7 @@
 """Tests for GET /api/commands -- exposes hermes-agent COMMAND_REGISTRY."""
 import io
 import json
+import pathlib
 import urllib.error
 import urllib.request
 import threading
@@ -99,6 +100,75 @@ def _install_fake_account_usage(monkeypatch, *, view=None, exc=None):
     monkeypatch.setitem(sys.modules, "agent", agent_pkg)
     monkeypatch.setitem(sys.modules, "agent.account_usage", account_usage)
     return account_usage
+
+
+_FAKE_MEMORY_STORE = object()  # sentinel: proves _run_memory_write_approval_command passes
+                                # load_on_disk_store()'s *return value* through, not the function
+
+
+def _install_fake_write_approval(monkeypatch, *, result="ok", raise_exc=None):
+    """Fake hermes_cli.write_approval_commands + tools.write_approval (+ tools.memory_tool's
+    load_on_disk_store, for the /memory path), recording every handle_pending_subcommand call.
+    Mirrors _install_fake_codex_runtime_switch's __path__ restore for hermes_cli (a real
+    package elsewhere in this suite) and _install_fake_mcp_tool's plain replacement for
+    `tools` (never real here)."""
+    import sys
+
+    calls = []
+
+    tools_pkg = ModuleType("tools")
+    tools_pkg.__path__ = []
+    write_approval = ModuleType("tools.write_approval")
+    write_approval_any = cast(Any, write_approval)
+    write_approval_any.SKILLS = "skills"
+    write_approval_any.MEMORY = "memory"
+    memory_tool = ModuleType("tools.memory_tool")
+    cast(Any, memory_tool).load_on_disk_store = lambda: _FAKE_MEMORY_STORE
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    monkeypatch.setitem(sys.modules, "tools.write_approval", write_approval)
+    monkeypatch.setitem(sys.modules, "tools.memory_tool", memory_tool)
+
+    hermes_cli_pkg = sys.modules.get("hermes_cli") or ModuleType("hermes_cli")
+    monkeypatch.setattr(hermes_cli_pkg, "__path__", [], raising=False)
+    write_approval_commands = ModuleType("hermes_cli.write_approval_commands")
+
+    def handle_pending_subcommand(subsystem, args, *, memory_store=None, set_mode_fn=None):
+        calls.append((subsystem, list(args), memory_store, set_mode_fn))
+        if raise_exc is not None:
+            raise raise_exc
+        return result
+
+    write_approval_commands_any = cast(Any, write_approval_commands)
+    write_approval_commands_any.handle_pending_subcommand = handle_pending_subcommand
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.write_approval_commands", write_approval_commands)
+    # Unit dispatch tests provide the complete Agent seam, including a successful
+    # profile binding. Dedicated binding tests override this to record/fail it.
+    from contextlib import nullcontext
+    import os
+    from pathlib import Path
+    from api import profiles
+
+    # The general test fixture symlinks HERMES_HOME/skills to installed skills;
+    # that intentionally escapes the fake profile root and must fail the real
+    # containment guard. Dispatch-only tests use a private in-state root instead.
+    profile_home = Path(os.environ["HERMES_WEBUI_TEST_STATE_DIR"]) / "write-approval-profile"
+    (profile_home / "skills").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _name: profile_home)
+    for module_name in profiles._SKILL_HOME_MODULES:
+        skill_module = ModuleType(module_name)
+        skill_module_any = cast(Any, skill_module)
+        skill_module_any.HERMES_HOME = profile_home
+        skill_module_any.SKILLS_DIR = profile_home / "skills"
+        skill_module_any._SKILLS_DIR_AT_IMPORT = profile_home / "skills"
+        skill_module_any._skills_dir = lambda module=skill_module_any: module.SKILLS_DIR
+        monkeypatch.setitem(sys.modules, module_name, skill_module)
+
+    monkeypatch.setattr(
+        profiles, "profile_env_for_active_request_readonly",
+        lambda *_args, **_kwargs: nullcontext(True),
+    )
+    return calls
 
 
 def _get(path):
@@ -382,6 +452,540 @@ def test_codex_runtime_invalid_argument_returns_switch_message(monkeypatch):
 
     assert output == "bad arg: nope"
     assert calls == [("parse_args", "nope")]
+
+
+def test_skills_pending_dispatches_to_write_approval_handler(monkeypatch):
+    """`/skills pending` must reach the shared write-approval store, not the local
+    skill search -- this is the gap Greptile flagged as still-missing after the
+    return-false-only fix on PR #7623 (embedded WebUI sessions never routed slash
+    commands anywhere; /api/chat/start hands raw text straight to
+    AIAgent.run_conversation)."""
+    calls = _install_fake_write_approval(monkeypatch, result="No pending skills writes.")
+
+    from api.commands import execute_agent_command
+
+    output = execute_agent_command('/skills pending')
+
+    assert output == "No pending skills writes."
+    assert len(calls) == 1
+    subsystem, args, memory_store, set_mode_fn = calls[0]
+    assert subsystem == "skills"
+    assert args == ["pending"]
+    assert memory_store is None
+    assert callable(set_mode_fn)
+
+
+@pytest.mark.parametrize("subcommand", [
+    "pending", "approve", "apply", "reject", "deny", "drop", "diff", "approval", "mode",
+])
+def test_skills_write_approval_all_aliases_dispatch(monkeypatch, subcommand):
+    """Every alias the agent's handler accepts must reach it -- 'completes the
+    class' the same way the merged alias-expansion commit did for the browser-side
+    shadow check, now for the backend dispatch side too."""
+    calls = _install_fake_write_approval(monkeypatch, result="handled")
+
+    from api.commands import execute_agent_command
+
+    output = execute_agent_command(f'/skills {subcommand} abc123')
+
+    assert output == "handled"
+    assert calls[0][1] == [subcommand, "abc123"]
+
+
+def test_skills_write_approval_runs_inside_active_profile_context(monkeypatch):
+    """write_approval.py resolves the skill store via the legacy get_hermes_home() path
+    (process env / TLS), not anything webui-request-scoped -- without wrapping the call
+    in _bundle_profile_context, a browser that has selected a non-root profile would
+    silently read/write the WRONG profile's pending skill writes. Proves the ENTER/CALL/
+    EXIT ordering (the call happens strictly inside the context), not just that the
+    context manager was constructed somewhere."""
+    from contextlib import contextmanager
+
+    order = []
+    calls = _install_fake_write_approval(monkeypatch, result="ok")
+
+    @contextmanager
+    def fake_profile_context(purpose, *, require_skill_paths=False):
+        order.append(("enter", purpose))
+        yield
+        order.append(("exit", purpose))
+
+    import api.commands as commands_mod
+    monkeypatch.setattr(commands_mod, "_write_approval_profile_context", fake_profile_context)
+    orig_len = len(calls)
+
+    import sys
+    write_approval_commands = sys.modules["hermes_cli.write_approval_commands"]
+    orig_handler = write_approval_commands.handle_pending_subcommand
+
+    def recording_handler(*a, **k):
+        order.append(("call", a[0]))
+        return orig_handler(*a, **k)
+
+    monkeypatch.setattr(write_approval_commands, "handle_pending_subcommand", recording_handler)
+
+    from api.commands import execute_agent_command
+    output = execute_agent_command('/skills pending')
+
+    assert output == "ok"
+    assert len(calls) == orig_len + 1
+    assert order == [("enter", "/api/commands/exec:skills"), ("call", "skills"),
+                      ("exit", "/api/commands/exec:skills")], order
+
+
+def test_memory_write_approval_runs_inside_active_profile_context(monkeypatch):
+    """Same as the /skills version above, for /memory -- both load_on_disk_store() and
+    handle_pending_subcommand() must run inside the active-profile context, since the
+    memory store path is resolved the same legacy, non-request-scoped way."""
+    from contextlib import contextmanager
+
+    order = []
+    calls = _install_fake_write_approval(monkeypatch, result="ok")
+
+    @contextmanager
+    def fake_profile_context(purpose, *, require_skill_paths=False):
+        order.append(("enter", purpose))
+        yield
+        order.append(("exit", purpose))
+
+    import api.commands as commands_mod
+    monkeypatch.setattr(commands_mod, "_write_approval_profile_context", fake_profile_context)
+
+    import sys
+    write_approval_commands = sys.modules["hermes_cli.write_approval_commands"]
+    orig_handler = write_approval_commands.handle_pending_subcommand
+
+    def recording_handler(*a, **k):
+        order.append(("call_handler", a[0]))
+        return orig_handler(*a, **k)
+
+    monkeypatch.setattr(write_approval_commands, "handle_pending_subcommand", recording_handler)
+
+    memory_tool = sys.modules["tools.memory_tool"]
+    orig_load = memory_tool.load_on_disk_store
+
+    def recording_load():
+        order.append(("call_load_store", None))
+        return orig_load()
+
+    monkeypatch.setattr(memory_tool, "load_on_disk_store", recording_load)
+
+    from api.commands import execute_agent_command
+    output = execute_agent_command('/memory pending')
+
+    assert output == "ok"
+    assert len(calls) == 1
+    assert order == [
+        ("enter", "/api/commands/exec:memory"),
+        ("call_load_store", None),
+        ("call_handler", "memory"),
+        ("exit", "/api/commands/exec:memory"),
+    ], order
+
+
+def test_write_approval_commands_bind_root_profile_and_keep_all_reads_inside_scope(monkeypatch):
+    """Both approval commands must bind the root and keep Agent reads in scope."""
+    from contextlib import contextmanager
+
+    from api import profiles
+
+    calls = _install_fake_write_approval(monkeypatch, result="ok")
+    events = []
+
+    @contextmanager
+    def fake_readonly_scope(purpose, logger_override=None, *, include_root=False):
+        events.append(("enter", purpose, include_root))
+        yield True
+        events.append(("exit", purpose, include_root))
+
+    monkeypatch.setattr(profiles, "profile_env_for_active_request_readonly", fake_readonly_scope)
+
+    import sys
+    write_approval_commands = sys.modules["hermes_cli.write_approval_commands"]
+    original_handler = write_approval_commands.handle_pending_subcommand
+
+    def recording_handler(*args, **kwargs):
+        events.append(("handler", args[0]))
+        return original_handler(*args, **kwargs)
+
+    monkeypatch.setattr(write_approval_commands, "handle_pending_subcommand", recording_handler)
+    memory_tool = sys.modules["tools.memory_tool"]
+    monkeypatch.setattr(
+        memory_tool,
+        "load_on_disk_store",
+        lambda: events.append(("load_store", None)) or _FAKE_MEMORY_STORE,
+    )
+
+    from api.commands import execute_agent_command
+
+    assert execute_agent_command("/skills pending") == "ok"
+    assert execute_agent_command("/memory pending") == "ok"
+    assert events == [
+        ("enter", "/api/commands/exec:skills", True),
+        ("handler", "skills"),
+        ("exit", "/api/commands/exec:skills", True),
+        ("enter", "/api/commands/exec:memory", True),
+        ("load_store", None),
+        ("handler", "memory"),
+        ("exit", "/api/commands/exec:memory", True),
+    ]
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("command", ["/skills pending", "/memory pending"])
+def test_write_approval_commands_fail_closed_when_profile_binding_fails(monkeypatch, command):
+    """A failed readonly profile binding must not expose or mutate a pending store."""
+    from contextlib import contextmanager
+
+    from api import profiles
+
+    calls = _install_fake_write_approval(monkeypatch, result="must not run")
+
+    @contextmanager
+    def fake_readonly_scope(*_args, **_kwargs):
+        yield False
+
+    monkeypatch.setattr(profiles, "profile_env_for_active_request_readonly", fake_readonly_scope)
+
+    from api.commands import execute_agent_command
+
+    with pytest.raises(RuntimeError, match="profile"):
+        execute_agent_command(command)
+    assert calls == []
+
+
+def test_memory_pending_dispatches_to_write_approval_handler(monkeypatch):
+    """`/memory pending` must reach the shared write-approval store via
+    /api/commands/exec, same gap as /skills had -- /memory has no `cli_only` flag
+    and isn't in messages.js' _AGENT_COMMANDS_RUN_ON_WEBUI allowlist by default
+    either, so it fell through to plain chat text with no local feature even
+    shadowing it (unlike /skills, which at least had a wrong-but-visible answer)."""
+    calls = _install_fake_write_approval(monkeypatch, result="No pending memory writes.")
+
+    from api.commands import execute_agent_command
+
+    output = execute_agent_command('/memory pending')
+
+    assert output == "No pending memory writes."
+    assert len(calls) == 1
+    subsystem, args, memory_store, set_mode_fn = calls[0]
+    assert subsystem == "memory"
+    assert args == ["pending"]
+    assert memory_store is _FAKE_MEMORY_STORE, \
+        "must pass load_on_disk_store()'s object through, not None (unlike /skills)"
+    assert callable(set_mode_fn)
+
+
+@pytest.mark.parametrize("subcommand", [
+    "pending", "approve", "apply", "reject", "deny", "drop", "approval", "mode",
+])
+def test_memory_write_approval_all_aliases_dispatch(monkeypatch, subcommand):
+    """Every alias the agent's handler accepts must reach it. No `diff` here --
+    memory entries are small enough to review inline, so the shared dispatcher
+    never defines one for the memory subsystem (matches gateway's own /memory)."""
+    calls = _install_fake_write_approval(monkeypatch, result="handled")
+
+    from api.commands import execute_agent_command
+
+    output = execute_agent_command(f'/memory {subcommand} abc123')
+
+    assert output == "handled"
+    assert calls[0][1] == [subcommand, "abc123"]
+
+
+def test_memory_bare_command_reaches_handler(monkeypatch):
+    """A bare `/memory` (no args) must reach the handler too -- it shows gate
+    status + the pending list, exactly like gateway's own /memory. Unlike
+    /skills, there is no competing local feature to protect, so /memory has no
+    reserved-subcommand allowlist to gate a bare call out of."""
+    calls = _install_fake_write_approval(monkeypatch, result="memory.write_approval = off\n\nNo pending memory writes.")
+
+    from api.commands import execute_agent_command
+
+    output = execute_agent_command('/memory')
+
+    assert "write_approval" in output
+    assert calls[0][1] == []
+
+
+def test_memory_write_approval_runtime_unavailable_is_generic_error(monkeypatch):
+    """Mirrors the /skills case: an unimportable write-approval runtime must fail
+    as a sanitized RuntimeError (500), not an unhandled ImportError traceback."""
+    import sys
+
+    monkeypatch.delitem(sys.modules, "hermes_cli.write_approval_commands", raising=False)
+    monkeypatch.delitem(sys.modules, "tools.write_approval", raising=False)
+    monkeypatch.delitem(sys.modules, "tools.memory_tool", raising=False)
+
+    import builtins
+    real_import = builtins.__import__
+
+    def _no_write_approval(name, *a, **k):
+        if name in ("hermes_cli.write_approval_commands", "tools.write_approval",
+                    "tools.memory_tool", "tools"):
+            raise ImportError(f"no module named {name}")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_write_approval)
+
+    from api.commands import execute_agent_command
+
+    with pytest.raises(RuntimeError):
+        execute_agent_command('/memory pending')
+
+
+def test_memory_approval_toggle_uses_its_own_config_namespace(tmp_path):
+    """`_write_approval_setter` is shared between /skills and /memory -- prove
+    'memory' writes under its OWN top-level config key, not 'skills' (a copy-paste
+    subsystem-string bug here would silently cross-wire the two gates)."""
+    from api import config as webui_config
+    from api.commands import _write_approval_setter
+
+    config_data = {}
+    orig_get_path = webui_config._get_config_path
+    orig_load = webui_config._load_yaml_config_file_raw
+    orig_save = webui_config._save_yaml_config_file
+    orig_reload = webui_config.reload_config
+    try:
+        webui_config._get_config_path = lambda: tmp_path / "config.yaml"
+        webui_config._load_yaml_config_file_raw = lambda path: config_data
+        webui_config._save_yaml_config_file = lambda path, data: None
+        webui_config.reload_config = lambda: None
+
+        _write_approval_setter('memory')(True)
+    finally:
+        webui_config._get_config_path = orig_get_path
+        webui_config._load_yaml_config_file_raw = orig_load
+        webui_config._save_yaml_config_file = orig_save
+        webui_config.reload_config = orig_reload
+
+    assert config_data == {"memory": {"write_approval": True}}
+    assert "skills" not in config_data
+
+
+def test_skills_plain_query_not_routed_to_write_approval(monkeypatch):
+    """A bare `/skills` or a real search query must NEVER reach write-approval --
+    it stays a KeyError so execute_agent_command's caller falls through to the
+    normal allowlist-miss handling (and the WebUI keeps doing its local search)."""
+
+    def _boom(*a, **k):
+        raise AssertionError("write-approval must not be touched for a plain search")
+
+    import sys
+    tools_pkg = ModuleType("tools")
+    tools_pkg.__path__ = []
+    write_approval = ModuleType("tools.write_approval")
+    cast(Any, write_approval).SKILLS = "skills"
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    monkeypatch.setitem(sys.modules, "tools.write_approval", write_approval)
+    hermes_cli_pkg = sys.modules.get("hermes_cli") or ModuleType("hermes_cli")
+    monkeypatch.setattr(hermes_cli_pkg, "__path__", [], raising=False)
+    write_approval_commands = ModuleType("hermes_cli.write_approval_commands")
+    cast(Any, write_approval_commands).handle_pending_subcommand = _boom
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.write_approval_commands", write_approval_commands)
+
+    from api.commands import execute_agent_command
+
+    with pytest.raises(KeyError):
+        execute_agent_command('/skills executive-triage')
+    with pytest.raises(KeyError):
+        execute_agent_command('/skills')
+
+
+def test_skills_write_approval_runtime_unavailable_is_generic_error(monkeypatch):
+    """If hermes-agent's write-approval modules can't be imported, the endpoint must
+    fail with a sanitized RuntimeError (500), not an unhandled ImportError leaking
+    a traceback -- matching every other agent-runtime dependency in this file."""
+    import sys
+
+    monkeypatch.delitem(sys.modules, "hermes_cli.write_approval_commands", raising=False)
+    monkeypatch.delitem(sys.modules, "tools.write_approval", raising=False)
+
+    import builtins
+    real_import = builtins.__import__
+
+    def _no_write_approval(name, *a, **k):
+        if name in ("hermes_cli.write_approval_commands", "tools.write_approval", "tools"):
+            raise ImportError(f"no module named {name}")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_write_approval)
+
+    from api.commands import execute_agent_command
+
+    with pytest.raises(RuntimeError):
+        execute_agent_command('/skills pending')
+
+
+@pytest.mark.parametrize("subsystem", ["skills", "memory"])
+def test_approval_toggle_preserves_env_var_placeholders_in_config(tmp_path, monkeypatch, subsystem):
+    """Toggling the gate must not bake resolved secrets into config.yaml.
+
+    `_load_yaml_config_file()` expands `${VAR}` references; writing that result
+    back replaced every placeholder with its live value on disk (and froze env-var
+    rotation). The toggle must read the RAW file. This test uses the real loader
+    and saver -- no mocks of either -- so it fails if the wrong loader is used."""
+    from api import config as webui_config
+    from api.commands import _write_approval_setter
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "providers:\n"
+        "  main:\n"
+        "    api_key: ${GATE_ROTATING_TOKEN}\n"
+        f"{subsystem}:\n"
+        "  write_approval: false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GATE_ROTATING_TOKEN", "token-v1")
+    monkeypatch.setattr(webui_config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(webui_config, "reload_config", lambda: None)
+
+    _write_approval_setter(subsystem)(True)
+
+    on_disk = config_path.read_text(encoding="utf-8")
+    assert "${GATE_ROTATING_TOKEN}" in on_disk
+    assert "token-v1" not in on_disk
+    assert webui_config._load_yaml_config_file_raw(config_path)[subsystem]["write_approval"] is True
+
+
+def test_skills_approval_toggle_persists_via_webui_config(tmp_path):
+    """`/skills approval on|off`'s set_mode_fn must persist through the webui's own
+    config module (there is no gateway session to route the gateway-side
+    persistence through), reading the RAW file (not `get_config()`, which may hand
+    back a merged-with-defaults snapshot that must never be written back)."""
+    from api import config as webui_config
+    from api.commands import _write_approval_setter
+
+    config_data = {"skills": {"write_approval": False}}
+    saved = []
+    reloaded = []
+
+    orig_get_path = webui_config._get_config_path
+    orig_load = webui_config._load_yaml_config_file_raw
+    orig_save = webui_config._save_yaml_config_file
+    orig_reload = webui_config.reload_config
+    try:
+        webui_config._get_config_path = lambda: tmp_path / "config.yaml"
+        webui_config._load_yaml_config_file_raw = lambda path: config_data
+        webui_config._save_yaml_config_file = lambda path, data: saved.append((path, data.copy()))
+        webui_config.reload_config = lambda: reloaded.append(True)
+
+        _write_approval_setter('skills')(True)
+    finally:
+        webui_config._get_config_path = orig_get_path
+        webui_config._load_yaml_config_file_raw = orig_load
+        webui_config._save_yaml_config_file = orig_save
+        webui_config.reload_config = orig_reload
+
+    assert config_data["skills"]["write_approval"] is True
+    assert saved == [(tmp_path / "config.yaml", {"skills": {"write_approval": True}})]
+    assert reloaded == [True]
+
+
+def test_skills_approval_toggle_serializes_under_shared_cfg_lock(monkeypatch):
+    """Two concurrent `/skills approval` calls must not interleave their
+    read-modify-write of config.yaml -- the exact race Greptile flagged (a
+    concurrent config writer saving between this read and this write, discarding
+    that other update). Uses the REAL `_cfg_lock`, not a mock of it."""
+    from api import config as webui_config
+    from api.commands import _write_approval_setter
+
+    state = {"active": 0, "max_active": 0}
+    track_lock = threading.Lock()
+
+    def _load(path):
+        with track_lock:
+            state["active"] += 1
+            if state["active"] > state["max_active"]:
+                state["max_active"] = state["active"]
+        time.sleep(0.12)
+        with track_lock:
+            state["active"] -= 1
+        return {}
+
+    monkeypatch.setattr(webui_config, "_get_config_path", lambda: pathlib.Path("/tmp/fake.yaml"))
+    monkeypatch.setattr(webui_config, "_load_yaml_config_file_raw", _load)
+    monkeypatch.setattr(webui_config, "_save_yaml_config_file", lambda path, data: None)
+    monkeypatch.setattr(webui_config, "reload_config", lambda: None)
+
+    setter = _write_approval_setter('skills')
+    errors = []
+
+    def _call(enabled):
+        try:
+            setter(enabled)
+        except Exception as exc:
+            errors.append(exc)
+
+    t1 = threading.Thread(target=_call, args=(True,))
+    t2 = threading.Thread(target=_call, args=(False,))
+    t1.start()
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    assert not t1.is_alive() and not t2.is_alive()
+    assert not errors
+    assert state["max_active"] == 1, "the shared _cfg_lock must serialize concurrent read-modify-writes"
+
+
+def test_skills_approval_toggle_reloads_after_releasing_lock(monkeypatch):
+    """`reload_config()` must run AFTER `_cfg_lock` is released, not while held --
+    the real `reload_config()` acquires that same non-reentrant lock internally, so
+    calling it from inside the `with` block would deadlock. Fakes reload_config to
+    itself contend for the real lock with a short timeout, proving it isn't already
+    held when reload_config runs."""
+    from api import config as webui_config
+    from api.commands import _write_approval_setter
+
+    monkeypatch.setattr(webui_config, "_get_config_path", lambda: pathlib.Path("/tmp/fake.yaml"))
+    monkeypatch.setattr(webui_config, "_load_yaml_config_file_raw", lambda path: {})
+    monkeypatch.setattr(webui_config, "_save_yaml_config_file", lambda path, data: None)
+
+    acquired = webui_config._cfg_lock.acquire(blocking=False)
+    assert acquired, "test setup: _cfg_lock must be free before the call"
+    webui_config._cfg_lock.release()
+
+    reload_acquired = []
+
+    def _fake_reload():
+        got = webui_config._cfg_lock.acquire(timeout=1)
+        reload_acquired.append(got)
+        if got:
+            webui_config._cfg_lock.release()
+
+    monkeypatch.setattr(webui_config, "reload_config", _fake_reload)
+
+    _write_approval_setter('skills')(True)
+
+    assert reload_acquired == [True], (
+        "reload_config() could not acquire _cfg_lock -- it is still held, "
+        "meaning reload_config() is being called INSIDE the locked block (deadlock risk)")
+
+
+def test_commands_exec_routes_skills_pending_over_http():
+    """Full HTTP round trip through the real server: `/skills pending` must reach the
+    write-approval dispatcher, not be rejected as an unsupported command.
+
+    Deliberately NOT gated on `requires_agent_modules`: CI has no hermes-agent installed, so a
+    skip there would make this test collect-and-pass while asserting nothing (the exact failure
+    mode of a silently-skipping suite). Both environments prove the request was ROUTED:
+      * agent present  -> 200 with the real pending listing;
+      * agent absent   -> 500 with the dispatcher's own generic 'runtime unavailable' error
+        (raised only AFTER the allowlist + dispatch accepted the command).
+    A regression in the allowlist or dispatch wiring yields 404 (KeyError -> unsupported), which
+    fails both branches. The handler's behavior against a fake agent is covered in-process by
+    test_skills_pending_dispatches_to_write_approval_handler."""
+    status, body = _post('/api/commands/exec', {'command': '/skills pending'})
+    assert status != 404, f"/skills was rejected as an unsupported command: {body}"
+    if status == 200:
+        assert isinstance(body.get('output'), str) and body['output'].strip()
+        assert 'not a supported' not in body['output'].lower()
+    else:
+        assert status == 500, (status, body)
+        assert body == {'error': 'Skill write-approval runtime unavailable'}, body
 
 
 def test_reload_mcp_error_is_generic(monkeypatch):

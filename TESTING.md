@@ -2472,6 +2472,8 @@ same `HERMES_HOME` (when applicable) and verify identical effect.
 - [ ] `/model <name>` — switches model dropdown.
 - [ ] `/personality` — lists personalities; `/personality <name>` switches.
 - [ ] `/skills [query]` — lists matching skills.
+- [ ] `/skills pending|approve <id>|apply <id>|reject <id>|deny <id>|drop <id>|diff <id>|approval on|off|mode` — reserved subcommand names (see `SKILLS_AGENT_SUBCOMMANDS` in `static/commands.js`); these do NOT run the local skill search. They dispatch through `/api/commands/exec` (`api/commands.py:_run_skills_write_approval_command`) to hermes-agent's shared write-approval store (`tools/write_approval.py`) — the same store `/memory pending` and the interactive CLI's `/skills pending` read from. Verify: with `skills.write_approval` on and a staged skill write present, `/skills pending` in WebUI lists it (not a "Skills matching..." search result) and `/skills approve <id>` applies it.
+- [ ] Approval profile isolation — in disposable root/named-profile homes, keep a named-profile Agent worker alive while issuing root `/skills pending`, `/skills reject <id>`, `/memory pending`, and `/memory reject <id>`. Results and changes must belong only to the request's root profile, not the worker's mirrored process environment. If profile binding fails, the handler must not run. Memory-store loading must happen inside the same binding as the handler.
 - [ ] `/theme <name>` — switches webui theme.
 - [ ] `/workspace <name>` — switches workspace.
 
