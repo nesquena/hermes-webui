@@ -137,6 +137,7 @@ def _run_send_js(*, command, status, adapter_status=None, hook_result=None, hook
           console,
           window: {{
             __HERMES_WEBUI_DESKTOP_COMPANION_STATUS__: {json.dumps(adapter_status)},
+            __HERMES_CONFIG__: {{interceptSlashCommands: true}},
             addEventListener(){{}},
             requestAnimationFrame(cb){{ return 1; }},
           }},

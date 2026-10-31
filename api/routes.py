@@ -16535,6 +16535,10 @@ def handle_get(handler, parsed) -> bool:
                     "__CSP_IMG_EXTRA_JSON__",
                     json.dumps(csp_img_extra_sources(extra_img_src)).replace("<", "\\u003c"),
                 )
+                .replace(
+                    "__INTERCEPT_SLASH_COMMANDS_JSON__",
+                    json.dumps(bool(load_settings().get("intercept_slash_commands", False))),
+                )
             )
             return t(
                 handler,
@@ -29907,7 +29911,10 @@ def _handle_chat_start(handler, body, diag=None):
             msg = None
             attachments = None
         diag.stage("normalize_message") if diag else None
-        msg = str(msg if msg is not None else body.get("message", "")).strip()
+        raw_msg = str(msg if msg is not None else body.get("message", ""))
+        # Agent-native slash commands are protocol input, so preserve their
+        # arguments byte-for-byte instead of applying WebUI's legacy trim.
+        msg = raw_msg if raw_msg.startswith("/") else raw_msg.strip()
         if not msg:
             return bad(handler, "message is required")
         diag.stage("normalize_attachments") if diag else None

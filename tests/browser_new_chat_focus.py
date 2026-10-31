@@ -10,8 +10,8 @@ WHY THIS EXISTS
   only after the first one's `/api/sessions` and `/api/projects` reads finish.
   On a long session list that held the composer for seconds.
 
-WHAT IT CHECKS, for the button, Cmd/Ctrl+K, the /new command, and sending the
-first message with no conversation open
+WHAT IT CHECKS, for the button, Cmd/Ctrl+K, the legacy opt-in /new command, and
+sending the first message with no conversation open
   - with every `/api/sessions` response held, the composer is focused (for /new,
     its toast is shown; for the first message, `POST /api/chat/start` is sent)
     and the new conversation is current;
@@ -226,6 +226,9 @@ def main():
         "HERMES_HOME": state_dir,
         "HERMES_BASE_HOME": state_dir,
         "HERMES_WEBUI_SKIP_ONBOARDING": "1",
+        # This gate owns the legacy local /new path. Production defaults to
+        # forwarding slash-prefixed text to Hermes Agent instead.
+        "HERMES_WEBUI_INTERCEPT_SLASH_COMMANDS": "1",
         "HERMES_WEBUI_AGENT_DIR": os.path.join(state_dir, "no-agent"),
     })
 

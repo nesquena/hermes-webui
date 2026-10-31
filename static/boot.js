@@ -2988,7 +2988,7 @@ $('msg').addEventListener('input',()=>{
   // The user edited the text, so an earlier pick/Escape no longer holds the list closed (#8050).
   if(typeof clearSlashDropdownDismissed==='function') clearSlashDropdownDismissed();
   const _slashIdx=typeof _activeSlashCommandOffset==='function'?_activeSlashCommandOffset(text):-1;
-  if(_slashIdx>=0&&text.indexOf('\n')===-1){
+  if(webuiSlashCommandInterceptionEnabled()&&_slashIdx>=0&&text.indexOf('\n')===-1){
     if(typeof getSlashAutocompleteMatches==='function'){
       getSlashAutocompleteMatches(text).then(matches=>{
         if(($('msg').value||'')!==text) return;

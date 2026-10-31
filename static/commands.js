@@ -2,9 +2,15 @@ const _WEBUI_DISPATCHABLE_AGENT_COMMANDS = new Set([
   'reload-mcp','reload-skills','codex-runtime','credits',
   'moa','sessions','resume','pet'
 ]);
+
+function webuiSlashCommandInterceptionEnabled(){
+  if(typeof window==='undefined') return true;
+  const config=window.__HERMES_CONFIG__;
+  return !!(config&&config.interceptSlashCommands===true);
+}
 // ── Slash commands ──────────────────────────────────────────────────────────
-// Built-in commands intercepted before send(). Each command runs locally
-// (no round-trip to the agent) and shows feedback via toast or local message.
+// Legacy built-in commands, enabled only when the deployment explicitly opts
+// into WebUI interception. Otherwise slash-prefixed text is ordinary agent input.
 
 const COMMANDS=[
   // noEcho:true = action-only commands that don't produce a chat response.
@@ -643,6 +649,7 @@ function _parseSlashAutocomplete(text){
 }
 
 async function getSlashAutocompleteMatches(text){
+  if(!webuiSlashCommandInterceptionEnabled()) return [];
   const parsed=_parseSlashAutocomplete(text);
   if(!parsed) return [];
   if(parsed.kind==='commands') return getMatchingCommands(parsed.query);
