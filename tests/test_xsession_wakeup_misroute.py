@@ -239,11 +239,12 @@ def test_resolve_wakeup_target_passthrough_when_consistent():
     ) == sid
 
 
-def test_resolve_wakeup_target_passthrough_when_owner_unknown():
+def test_resolve_wakeup_target_fails_closed_when_owner_unknown():
     """If the spawn owner is indeterminate (no env-immune field, e.g. a
-    cron/CLI process sharing the registry, or a pre-Option 1 spawn), the resolver
-    must fall through to the session_key-resolved sid UNCHANGED — never
-    suppress a wakeup on uncertainty (Option Z must keep working)."""
+    cron/CLI process sharing the registry, or a pre-Option 1 spawn), the
+    session_key-resolved sid is NOT ownership proof: the resolver fails closed
+    and returns "" so the caller parks the completion (#6752 owner decision,
+    superseding the earlier pass-through policy)."""
     bp = importlib.import_module("api.background_process")
 
     sid = "session-unknown-owner"
@@ -251,12 +252,12 @@ def test_resolve_wakeup_target_passthrough_when_owner_unknown():
         process_id="proc_cron",
         session_key_resolved_sid=sid,
         proc_session=_fake_ps(session_key=sid, spawn_session_id=""),
-    ) == sid
+    ) == ""
     assert bp._resolve_wakeup_target(
         process_id="proc_cron",
         session_key_resolved_sid=sid,
         proc_session=None,
-    ) == sid
+    ) == ""
 
 
 # ---------------------------------------------------------------------------
@@ -277,13 +278,14 @@ def test_resolve_completion_target_prefers_origin_ui_session_id():
     ) == SESS_A
 
 
-def test_resolve_completion_target_fallback_without_origin():
+def test_resolve_completion_target_fails_closed_without_origin():
+    """No origin_ui_session_id -> no owner -> "" (no session-key fallback, #6752)."""
     bp = importlib.import_module("api.background_process")
     sid = "legacy-only"
     assert bp._resolve_completion_target(
         session_key_resolved_sid=sid,
         origin_ui_session_id="",
-    ) == sid
+    ) == ""
 
 
 def test_env_immune_owner_prefers_origin_ui_session_id():

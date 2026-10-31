@@ -11,6 +11,7 @@ plus pure-function tests for the SessionChannel class and reaper logic.
 
 from __future__ import annotations
 
+import queue
 import time
 from pathlib import Path
 
@@ -312,6 +313,7 @@ def test_emit_when_idle_between_turns_session_channel_delivers():
             "type": "completion",
             "session_id": "proc-99",
             "session_key": sid,
+            "origin_ui_session_id": sid,
             "command": "sleep 1",
             "exit_code": 0,
             "output": "ok",
@@ -360,6 +362,7 @@ def test_emit_during_busy_turn_dual_emits_to_both():
             "type": "completion",
             "session_id": "proc-busy-1",
             "session_key": sid,
+            "origin_ui_session_id": sid,
             "command": "sleep 1",
             "exit_code": 0,
             "output": "ok",
@@ -597,8 +600,25 @@ def test_real_completion_event_shape_routes_to_session_channel():
     process_registry.completion_queue.put(evt)
 
     drained = process_registry.completion_queue.get(timeout=2.0)
+    from api import process_event_utils as peu
+
+    peu._reset_parked_ownerless_completions_for_tests()
     try:
-        bp._process_one(drained)
+        # #6752: the current Agent ProcessSession carries the spawn-time
+        # session_key but NO immutable owner. The recovered key is used only
+        # as an unverified hint — the completion is parked, never emitted to
+        # the key-mapped session.
+        bp._process_one(dict(drained))
+        with pytest.raises(queue.Empty):
+            q.get(timeout=0.3)
+        parked = peu.list_parked_ownerless_completions()
+        assert [p["delivery_id"] for p in parked] == [proc_id]
+        assert parked[0]["unverified_session_hint"] == webui_sid
+
+        # A producer that stamps the immutable spawn owner on the
+        # ProcessSession routes through the same recovery path.
+        finished.origin_ui_session_id = webui_sid
+        bp._process_one(dict(drained))
         event_name, data = q.get(timeout=2.0)
         assert event_name == "bg_task_complete"
         assert data["session_id"] == webui_sid
@@ -625,6 +645,7 @@ def test_real_completion_event_shape_routes_to_session_channel():
             process_registry._finished.pop(proc_id, None)
         cfg.PENDING_BG_TASK_COMPLETIONS.discard(webui_sid)
         cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(webui_sid, None)
+        peu._reset_parked_ownerless_completions_for_tests()
 
 
 # ===========================================================================
@@ -681,6 +702,7 @@ def test_server_side_wakeup_when_idle_no_tab(monkeypatch):
             "type": "completion",
             "session_id": proc_id,
             "session_key": sid,
+            "origin_ui_session_id": sid,
             "command": "sleep 8",
             "exit_code": 0,
             "output": "done",
@@ -723,6 +745,7 @@ def test_server_side_wakeup_deferred_when_turn_active(monkeypatch):
             "type": "completion",
             "session_id": proc_id,
             "session_key": sid,
+            "origin_ui_session_id": sid,
             "command": "sleep 8",
             "exit_code": 0,
             "output": "done",
@@ -761,6 +784,7 @@ def test_wakeup_dedupe_once_per_process(monkeypatch):
             "type": "completion",
             "session_id": proc_id,
             "session_key": sid,
+            "origin_ui_session_id": sid,
             "command": "sleep 8",
             "exit_code": 0,
             "output": "done",
@@ -800,6 +824,7 @@ def test_open_tab_sees_live_stream(monkeypatch):
             "type": "completion",
             "session_id": proc_id,
             "session_key": sid,
+            "origin_ui_session_id": sid,
             "command": "sleep 8",
             "exit_code": 0,
             "output": "done",
