@@ -21664,7 +21664,48 @@ function _parseProcessWakeupBody(text){
   if(m) return {type:'completion',taskId:m[1],exitCode:m[2],command:m[3],output:m[4],pattern:null};
   m=s.match(/^\[IMPORTANT: Background process ([^\n]*?) matched watch pattern "(.*)"\.\nCommand: ([^\n]*)\nMatched output:\n([\s\S]*)\]$/);
   if(m) return {type:'watch_match',taskId:m[1],pattern:m[2],command:m[3],output:m[4],exitCode:null};
+  const deleg=_parseAsyncDelegationBody(s);
+  if(deleg) return deleg;
   return null;
+}
+// #7361: async-delegation envelopes. Three formatter-owned headers
+// (tools/process_registry_notifications.py): a single completion, a batch
+// unit, and the early per-task failure notice. Only the HEADER is matched
+// here — status is derived from the formatter's own structural markers below,
+// never from subagent-authored prose, so goal/summary text cannot forge an
+// outcome (#7361 review: status aggregation must fail closed).
+const _ASYNC_DELEGATION_HEADER_RE=/^\[ASYNC DELEGATION (?:BATCH )?COMPLETE — ([^\]\n]+)\]|^\[ASYNC DELEGATION TASK FAILED — ([^,\]\n]+), task (\d+)\/(\d+)\]/;
+function _parseAsyncDelegationBody(s){
+  const head=s.match(_ASYNC_DELEGATION_HEADER_RE);
+  if(!head) return null;
+  const isFailure=head[2]!=null;
+  const delegId=String(isFailure?head[2]:head[1]||'').trim();
+  if(!delegId) return null;
+  const isBatch=!isFailure&&/^\[ASYNC DELEGATION BATCH COMPLETE — /.test(s);
+  // Formatter-owned per-task markers: "--- ✓ TASK 1/3: goal  (status=completed, ...) ---"
+  const taskRe=/^---\s*(✓|✗|⚠)\s*TASK\s+(\d+)\/(\d+)(?::[^\n]*?)?\s*\(status=([^,\)\n]*)/gm;
+  const tasks=[];
+  let tm;
+  while((tm=taskRe.exec(s))!==null){
+    tasks.push({icon:tm[1],index:Number(tm[2]),total:Number(tm[3]),status:String(tm[4]||'').trim()});
+  }
+  let status;
+  if(isFailure) status='fail';
+  else if(!tasks.length) status='neutral';          // unknown grammar → neutral chip, never "ok"
+  else if(tasks.every(x=>x.icon==='✓')) status='ok';
+  else if(tasks.every(x=>x.icon==='✗')) status='fail';
+  else status='partial';
+  return {
+    type:'async_delegation',
+    taskId:delegId,
+    exitCode:null,
+    pattern:null,
+    asyncBatch:isBatch||isFailure||tasks.length>1,
+    asyncStatus:status,
+    asyncTasks:tasks.length,
+    asyncDone:tasks.filter(x=>x.icon==='✓').length,
+    output:null,
+  };
 }
 // Server-stamped _wakeup_meta (authoritative when present) merged over the
 // client parse; the output section only ever comes from the parse because the
@@ -21684,6 +21725,10 @@ function _processWakeupInfo(m, text){
     exitCode:pick('exit_code','exitCode'),
     pattern:pick('pattern','pattern'),
     output:parsed?parsed.output:null,
+    asyncBatch:parsed?!!parsed.asyncBatch:false,
+    asyncStatus:parsed?parsed.asyncStatus:null,
+    asyncTasks:parsed?parsed.asyncTasks:0,
+    asyncDone:parsed?parsed.asyncDone:0,
   };
 }
 function _processWakeupCardHtml(info, rawText, extras){
@@ -21695,6 +21740,18 @@ function _processWakeupCardHtml(info, rawText, extras){
   let chip;
   if(isWatch){
     chip=`<span class="process-wakeup-chip watch" title="${esc(t('process_wakeup_matched'))}">${li('eye',11)}<code title="${esc(String(info.pattern||''))}">${esc(String(info.pattern||''))}</code></span>`;
+  }else if(info.type==='async_delegation'){
+    // #7361: status comes from the formatter's structural markers, fail-closed
+    // to neutral — never from goal/summary prose, which a subagent authors.
+    const st=String(info.asyncStatus||'neutral');
+    const cls=(st==='ok')?'ok':(st==='fail')?'fail':'neutral';
+    const icon=(st==='ok')?li('check',11):(st==='fail')?li('x',11):(st==='partial')?li('alert-triangle',11):'';
+    const label=(st==='ok')?t('process_wakeup_async_ok')
+      :(st==='fail')?t('process_wakeup_async_fail')
+      :(st==='partial')?t('process_wakeup_async_partial')
+      :t('process_wakeup_async_complete');
+    const counts=(info.asyncTasks>0)?` ${esc(String(info.asyncDone))}/${esc(String(info.asyncTasks))}`:'';
+    chip=`<span class="process-wakeup-chip ${cls}">${icon}<span>${esc(label)}${counts}</span></span>`;
   }else{
     const cls=exitOk?'ok':(exitKnown?'fail':'neutral');
     const icon=exitOk?li('check',11):(exitKnown?li('x',11):'');

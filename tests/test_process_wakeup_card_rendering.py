@@ -61,6 +61,14 @@ function t(key, ...args){
   return out;
 }
 
+// #7361 adds an async-delegation grammar to _parseProcessWakeupBody; its
+// header regex and helper must be in scope for the extracted bodies to run.
+const reStart = src.indexOf('const _ASYNC_DELEGATION_HEADER_RE=');
+const reEnd = src.indexOf('\n', reStart);
+var _ASYNC_DELEGATION_HEADER_RE = eval(
+  '(' + src.slice(reStart + 'const _ASYNC_DELEGATION_HEADER_RE='.length, reEnd).replace(/;$/, '') + ')'
+);
+eval(extractFunc('_parseAsyncDelegationBody'));
 eval(extractFunc('_parseProcessWakeupBody'));
 eval(extractFunc('_processWakeupInfo'));
 eval(extractFunc('_processWakeupCardHtml'));
