@@ -40,6 +40,7 @@ _SESSIONS_HELPERS = (
     "_existingRecoveredPromptIndex",
     "_recoveredPromptIdentityMatch",
     "_isRecoveredPromptTwin",
+    "_recoveredPromptCopyForTurn",
     "_mergePendingSessionMessage",
 )
 _UI_PRODUCER = (
@@ -227,5 +228,74 @@ process.stdout.write(JSON.stringify({merged,earlierIdx:messages.indexOf(earlier)
         ("repeat", True),
         ("repeat [bundle command]", False),
         ("progress", False),
+        ("partial", False),
+    ]
+
+
+def test_a_stale_public_active_turn_marker_does_not_make_an_earlier_copy_reusable():
+    """Gate round 2 (ae93b3c57): a display-only copy from an earlier turn that still carries the public
+    `_active_turn_user` marker was accepted as this turn's copy and moved. Ownership is the turn the copy was
+    recovered for, never the public marker."""
+    result = _run(
+        """
+const session={session_id:'s1',active_stream_id:'stream-2',pending_started_at:100,
+  pending_user_message:'repeat',pending_attachments:[{path:'b.png'}]};
+S.session=session;
+const earlier=_markRecoveredPromptRow({role:'user',content:'repeat',_ts:50,_active_turn_user:true,
+  attachments:[{path:'a.png'}]});
+const messages=[
+  earlier,
+  {role:'assistant',content:'earlier answer',_ts:51},
+  {role:'user',content:'/bundle foo',_ts:100},
+  {role:'assistant',content:'progress',_ts:101},
+  {role:'assistant',content:'partial',_live:true},
+];
+const merged=[];
+for(let pass=0;pass<3;pass++) merged.push(_mergePendingSessionMessage(session,messages));
+const current=messages.filter(m=>m!==earlier&&m.role==='user'&&m.content==='repeat');
+process.stdout.write(JSON.stringify({merged,earlierIdx:messages.indexOf(earlier),earlierTs:earlier._ts,
+  earlierAttachments:earlier.attachments,currentCount:current.length,currentTs:current[0]&&current[0]._ts,
+  currentAttachments:current[0]&&current[0].attachments}));
+"""
+    )
+    assert result["merged"] == [True, False, False], result
+    assert result["earlierIdx"] == 0 and result["earlierTs"] == 50
+    assert result["earlierAttachments"] == [{"path": "a.png"}]
+    assert result["currentCount"] == 1
+    assert result["currentTs"] == 100 and result["currentAttachments"] == [{"path": "b.png"}]
+
+
+def test_a_misplaced_prompt_whose_timestamp_trails_the_turn_start_is_reused_after_the_repair():
+    """Gate round 2 (ae93b3c57): the #6419 repair moves a misplaced row that keeps its own `_ts` (100) while the
+    turn started at 100.25. The next pass did not recognise it and added a second copy ([1, 2, 2]). The repair now
+    records the turn it recovered the row for, so later passes reuse it."""
+    result = _run(
+        """
+const session={session_id:'s1',active_stream_id:'stream-1',pending_started_at:100.25,
+  pending_user_message:'repeat'};
+S.session=session;
+const misplaced={role:'user',content:'repeat',_ts:100,_pending:true};
+const messages=[
+  {role:'user',content:'resolved bundle text',_ts:100.25},
+  {role:'tool',content:'ran',_ts:101},
+  {role:'assistant',content:'partial',_live:true},
+  misplaced,
+];
+const merged=[]; const counts=[];
+for(let pass=0;pass<3;pass++){
+  merged.push(_mergePendingSessionMessage(session,messages));
+  counts.push(messages.filter(m=>m.role==='user'&&m.content==='repeat').length);
+}
+process.stdout.write(JSON.stringify({merged,counts,first:messages[0]===misplaced,ts:misplaced._ts,
+  rows:view(messages)}));
+"""
+    )
+    assert result["counts"] == [1, 1, 1], result
+    assert result["merged"] == [True, False, False]
+    assert result["first"] is True and result["ts"] == 100, "the moved row keeps its own timestamp"
+    assert [(r["content"], r["displayOnly"]) for r in result["rows"]] == [
+        ("repeat", True),
+        ("resolved bundle text", False),
+        ("ran", False),
         ("partial", False),
     ]

@@ -4656,6 +4656,26 @@ function _isRecoveredPromptTwin(candidate,recoveredRow){
     && _recoveredPromptIdentityMatch(candidate,recoveredRow);
 }
 
+// Is `row` the display-only copy recovered for THE turn starting at
+// `turnStart`? The owner stamp `_recoveredTurnStart` (set by the full-load
+// branch of _mergePendingSessionMessage) decides when present, so a moved
+// row whose own `_ts` trails the turn start still counts. Without a stamp,
+// only the row's timestamp at the turn start counts (a copy the producer
+// built for this turn). Text alone and the public `_active_turn_user` marker
+// never prove ownership: an earlier turn can carry either (#8696 gates).
+function _recoveredPromptCopyForTurn(row,pendingMsg,turnStart){
+  if(!row||!row._displayOnlyRow||String(row.role||'')!=='user') return false;
+  const start=Number(turnStart);
+  if(!Number.isFinite(start)||start<=0) return false;
+  if(row!==pendingMsg&&!_sameTranscriptMessage(row,pendingMsg)) return false;
+  const owner=Number(row._recoveredTurnStart);
+  if(row._recoveredTurnStart!==undefined&&row._recoveredTurnStart!==null&&Number.isFinite(owner)){
+    return Math.abs(owner-start)<=_RECOVERED_PROMPT_TS_EPSILON;
+  }
+  const ts=_messageTimestampValue(row);
+  return ts!==null&&Math.abs(ts-start)<=_RECOVERED_PROMPT_TS_EPSILON;
+}
+
 // Same prompt recovered twice (repeated merge on refresh/reconnect): reuse the
 // row already in the array instead of stacking a second copy above it.
 function _existingRecoveredPromptIndex(messages,pendingMsg){
@@ -4756,12 +4776,12 @@ function _mergePendingSessionMessage(session,messages){
     // array) is reused instead of stacking another one. When the persisted
     // turn row's text differs from pending_user_message, the tail-duplicate
     // check above cannot see that copy, so without this every pass stacked
-    // another prompt (#8696). Reuse needs turn identity, not text alone
-    // (_isRecoveredPromptTwin: the turn-start timestamp or server token): an
-    // earlier turn's display-only row that repeats the text keeps its own
-    // turn, timestamp and attachments.
-    const existingIdx=misplacedIdx<0&&typeof _isRecoveredPromptTwin==='function'
-      ?messages.findIndex(m=>m&&m._displayOnlyRow&&_isRecoveredPromptTwin(m,pendingMsg))
+    // another prompt (#8696). Reuse is by the turn the copy was recovered FOR
+    // (`_recoveredTurnStart`, stamped below), never by text alone or a public
+    // `_active_turn_user` marker: an earlier turn's display-only row that
+    // repeats the text keeps its own turn, timestamp and attachments.
+    const existingIdx=misplacedIdx<0
+      ?messages.findIndex(m=>_recoveredPromptCopyForTurn(m,pendingMsg,ownershipStart))
       :-1;
     const skipIdx=misplacedIdx>=0?misplacedIdx:existingIdx;
     const withoutSkipped=skipIdx>=0?messages.filter((_m,idx)=>idx!==skipIdx):messages;
@@ -4774,16 +4794,22 @@ function _mergePendingSessionMessage(session,messages){
         // windowed branch does: an unpersisted prompt placed in front of saved
         // rows must not shift the saved-row indices edit/fork rely on.
         if(typeof getPendingSessionMessage==='function') getPendingSessionMessage(session,[misplacedUser]);
+        // The moved row keeps its own `_ts` (it can trail the turn start); the
+        // owner stamp lets the next pass reuse it instead of adding a copy.
+        misplacedUser._recoveredTurnStart=ownershipStart;
         messages.splice(ownedIdx,0,
           typeof _markRecoveredPromptRow==='function'?_markRecoveredPromptRow(misplacedUser):misplacedUser);
         return true;
       }
       if(existingIdx>=0){
+        const row=messages[existingIdx];
+        row._recoveredTurnStart=ownershipStart;
         if(existingIdx===ownedIdx) return false;
-        const [row]=messages.splice(existingIdx,1);
+        messages.splice(existingIdx,1);
         messages.splice(ownedIdx,0,typeof _markRecoveredPromptRow==='function'?_markRecoveredPromptRow(row):row);
         return true;
       }
+      pendingMsg._recoveredTurnStart=ownershipStart;
       messages.splice(ownedIdx,0,
         typeof _markRecoveredPromptRow==='function'?_markRecoveredPromptRow(pendingMsg):pendingMsg);
       return true;
