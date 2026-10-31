@@ -2158,6 +2158,18 @@ class Session:
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
+        # Durable contract for BOTH histories: `messages` is the display
+        # transcript, `context_messages` is the provider replay prefix. Neither
+        # may persist inline image bytes. The provider replay is bounded to a
+        # marker (the same policy upstream applies to completed tool images),
+        # and the live objects stay untouched so the next model call still sees
+        # real bytes. Attachment availability after reload comes from the
+        # unchanged `attachments` field plus the files in the session inbox --
+        # the renderer never drew inline user image parts (static/ui.js:20548).
+        from api.session_image_persistence_override import compact_persisted_image_parts
+        persisted_context = copy.deepcopy(getattr(self, 'context_messages', None) or [])
+        compact_persisted_image_parts(persisted_context)
+        extra['context_messages'] = persisted_context
         payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
         try:
             payload.encode('utf-8')

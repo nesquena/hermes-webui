@@ -28,28 +28,55 @@ PERSISTENCE_OVERRIDE_VERSION = "1.0.0"
 _MARKER = {"type": "text", "text": "[image attachment]"}
 
 
+def _url_value(part: dict):
+    """Return the part's image URL whether it is nested or a bare string."""
+    image_url = part.get("image_url")
+    if isinstance(image_url, dict):
+        return image_url.get("url")
+    return image_url
+
+
+def _is_inline_image_part(part) -> bool:
+    """True only for parts that carry inline base64 image bytes.
+
+    Accepted shapes: an OpenAI/Responses ``image_url``/``input_image`` part whose
+    URL is a ``data:image/...`` URL (nested object or bare string), and an
+    Anthropic ``image`` part with ``source.type == "base64"``. Remote references,
+    placeholder URLs, and malformed parts are deliberately out of contract and
+    are left byte-identical.
+    """
+    if not isinstance(part, dict):
+        return False
+    part_type = part.get("type")
+    if not isinstance(part_type, str) or part_type not in _IMAGE_TYPES:
+        return False
+    url = _url_value(part)
+    if isinstance(url, str) and url.lower().startswith("data:image/"):
+        return True
+    source = part.get("source")
+    if isinstance(source, dict) and source.get("type") == "base64":
+        data = source.get("data")
+        return isinstance(data, str) and bool(data)
+    return False
+
+
 def compact_persisted_image_parts(messages) -> int:
-    """Replace image content parts in owned persisted rows with markers."""
+    """Replace inline image bytes in a persisted projection with markers.
+
+    Callers pass a projection they own (a save-time snapshot or a deep copy),
+    never the live provider payload.
+    """
     changed = 0
     for message in messages or ():
-        message_changed = False
         if not isinstance(message, dict):
             continue
         content = message.get("content")
         if not isinstance(content, list):
             continue
         projected = []
+        message_changed = False
         for part in content:
-            image_url = part.get("image_url") if isinstance(part, dict) else None
-            image_value = image_url.get("url") if isinstance(image_url, dict) else image_url
-            is_inline_image = (
-                isinstance(part, dict)
-                and isinstance(part.get("type"), str)
-                and part.get("type") in _IMAGE_TYPES
-                and isinstance(image_value, str)
-                and image_value.lower().startswith("data:image/")
-            )
-            if is_inline_image:
+            if _is_inline_image_part(part):
                 projected.append(dict(_MARKER))
                 changed += 1
                 message_changed = True
@@ -58,3 +85,4 @@ def compact_persisted_image_parts(messages) -> int:
         if message_changed:
             message["content"] = projected
     return changed
+
