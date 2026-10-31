@@ -741,6 +741,14 @@ def _bulk_tasks_payload(body: dict, *, board=None):
     results = []
     kb = _kb()
     has_assignee = "assignee" in body
+    # Only the Review handoff needs the combined assignee+status payload:
+    # _patch_task defers that write until request_review captures the
+    # implementer. Every other status keeps the long-standing bulk ordering
+    # (status transition first, assign afterwards) so a rejected status never
+    # reassigns the card and a claimed running card is released before the
+    # assignee write hits the native claim fence.
+    requested_status = str(body.get("status") or "").strip().lower()
+    review_assignee_in_patch = has_assignee and requested_status == "review"
     with _conn(board=board) as conn:
         for task_id in ids:
             entry = {"id": task_id, "ok": True}
@@ -758,9 +766,10 @@ def _bulk_tasks_payload(body: dict, *, board=None):
                     # and single PATCH share one handoff path. Review needs
                     # this: _patch_task defers the assignee write until after
                     # request_review captures the implementer, which a
-                    # separate assign_task call cannot reproduce.
+                    # separate assign_task call cannot reproduce. Other
+                    # statuses must not combine the fields (see above).
                     patch_body = {"status": body.get("status")}
-                    if has_assignee:
+                    if review_assignee_in_patch:
                         patch_body["assignee"] = body.get("assignee")
                         assignee_in_patch = True
                     _patch_task(conn, task_id, patch_body)
