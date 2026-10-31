@@ -217,6 +217,34 @@ class FakeKanbanDB:
         self._event(task_id, "scheduled", {"reason": reason})
         return True
 
+    def request_review(self, conn, task_id, *, summary=None, metadata=None, reviewer=None,
+                       expected_run_id=None, force=False, with_reason=False):
+        """Mirror the Agent's ``running``/``ready`` -> ``review`` verb.
+
+        Records the implementer before ``reviewer`` reassigns the task, so the
+        review handoff keeps the same provenance the dashboard plugin relies on.
+        """
+        task = self.get_task(conn, task_id)
+
+        def _ret(ok, reason=None):
+            return (ok, reason) if with_reason else ok
+
+        if not task:
+            return _ret(False, "task not found")
+        if task.status not in ("running", "ready"):
+            return _ret(False, "task is not in running/ready")
+        implementer = task.assignee if task.assignee != reviewer else None
+        task.status = "review"
+        if reviewer is not None:
+            task.assignee = reviewer
+        self._event(task_id, "review_requested", {
+            "summary": summary,
+            "metadata": metadata,
+            "implementer": implementer,
+            "reviewer": reviewer,
+        })
+        return _ret(True)
+
     def unblock_task(self, conn, task_id):
         task = self.get_task(conn, task_id)
         if not task:
@@ -1349,7 +1377,7 @@ def test_issue7900_scheduled_column_and_status(monkeypatch):
     bridge = _load_bridge(monkeypatch)
     assert "scheduled" in bridge.BOARD_COLUMNS
     assert bridge.BOARD_COLUMNS == [
-        "triage", "todo", "scheduled", "ready", "running", "blocked", "done"
+        "triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done"
     ]
     assert bridge._validate_status("scheduled") == "scheduled"
 
@@ -1439,6 +1467,105 @@ def test_issue7900_schedule_task_raises_when_agent_lacks_schedule_task(monkeypat
     with pytest.raises(RuntimeError, match="scheduling requires a newer Hermes Agent"):
         with bridge._conn() as conn:
             bridge._patch_task(conn, "t_todo2", {"status": "scheduled"})
+
+
+def test_review_column_and_status(monkeypatch):
+    """A review card must render in its own Review column, between Blocked and Done.
+
+    Regression: ``BOARD_COLUMNS`` omitted ``review``, so the board payload never
+    built that column and review cards silently vanished from the board.
+    """
+    bridge = _load_bridge(monkeypatch)
+    assert "review" in bridge.BOARD_COLUMNS
+    assert bridge.BOARD_COLUMNS == [
+        "triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done"
+    ]
+    assert bridge._validate_status("review") == "review"
+
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    fake_kanban.tasks.append(FakeTask("t_review", "Awaiting review", "review", "alice"))
+
+    data = bridge._board_payload(_parsed())
+    names = [column["name"] for column in data["columns"]]
+    assert names.index("review") == names.index("blocked") + 1
+    review_col = next((c for c in data["columns"] if c["name"] == "review"), None)
+    assert review_col is not None, "review column missing from board payload"
+    assert "t_review" in {task["id"] for task in review_col["tasks"]}
+
+
+def test_review_drop_routes_through_request_review(monkeypatch):
+    """Dragging a card into Review must use the Agent's request_review verb.
+
+    Never a raw status write: the review handoff carries implementer/reviewer
+    provenance and a ``review_requested`` event, and reassigning the reviewer
+    must happen after the implementer is captured (dashboard plugin parity).
+    """
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    task = FakeTask("t_ready_review", "Ready for review", "ready", "alice")
+    fake_kanban.tasks.append(task)
+
+    calls = []
+    orig_request_review = fake_kanban.request_review
+
+    def _tracking_request_review(conn, task_id, **kwargs):
+        calls.append((task_id, kwargs))
+        return orig_request_review(conn, task_id, **kwargs)
+
+    monkeypatch.setattr(fake_kanban, "request_review", _tracking_request_review)
+    direct_writes = []
+    monkeypatch.setattr(
+        bridge, "_set_status_direct", lambda *args, **kwargs: direct_writes.append(args) or True
+    )
+
+    with bridge._conn() as conn:
+        bridge._patch_task(
+            conn,
+            "t_ready_review",
+            {"status": "review", "summary": "Please review", "assignee": "bob"},
+        )
+
+    assert direct_writes == [], "review entry must never fall back to a raw status write"
+    assert calls == [(
+        "t_ready_review",
+        {"summary": "Please review", "metadata": None, "reviewer": "bob", "force": True},
+    )]
+    assert task.status == "review"
+    assert task.assignee == "bob", "an explicit reviewer must reassign the card"
+
+    review_event = next(e for e in fake_kanban.events if e.kind == "review_requested")
+    assert review_event.payload["implementer"] == "alice"
+    assert review_event.payload["reviewer"] == "bob"
+
+
+def test_review_refused_from_todo_reports_actionable_error(monkeypatch):
+    """The Agent only accepts running/ready -> review; a refused move is a ValueError (HTTP 400)."""
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    task = FakeTask("t_todo_review", "Not started", "todo", "alice")
+    fake_kanban.tasks.append(task)
+
+    import pytest
+    with pytest.raises(ValueError, match="cannot request review from status: todo"):
+        with bridge._conn() as conn:
+            bridge._patch_task(conn, "t_todo_review", {"status": "review"})
+    assert task.status == "todo"
+
+
+def test_review_raises_when_agent_lacks_request_review(monkeypatch):
+    """An Agent without request_review must fail closed instead of writing status directly."""
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    task = FakeTask("t_ready_review2", "Ready for review", "ready", "alice")
+    fake_kanban.tasks.append(task)
+
+    monkeypatch.delattr(fake_kanban.__class__, "request_review", raising=False)
+
+    import pytest
+    with pytest.raises(RuntimeError, match="review requires a newer Hermes Agent"):
+        with bridge._conn() as conn:
+            bridge._patch_task(conn, "t_ready_review2", {"status": "review"})
+    assert task.status == "ready", "a missing Agent verb must not mutate the card"
 
 
 

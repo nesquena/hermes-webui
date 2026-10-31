@@ -11,7 +11,7 @@ write `_set_status_direct()` (`api/kanban_bridge.py:281`) still covers `triage`,
 `BOARD_COLUMNS` (`api/kanban_bridge.py:32`) fixes the board order:
 
 ```
-triage → todo → scheduled → ready → running → blocked → done
+triage → todo → scheduled → ready → running → blocked → review → done
 ```
 
 `archived` is also accepted as a status by `_validate_status`
@@ -28,8 +28,8 @@ because the dispatcher/`claim_task` protocol owns `claim_lock`,
 | Surface | Location | Statuses offered |
 | --- | --- | --- |
 | Drag a card between columns (desktop only — HTML5 drag, no touch drag) | `static/panels.js` | any column |
-| Detail-view status buttons (the touch path: phone/tablet) | `static/panels.js:3868` | triage, todo, scheduled, ready, blocked, done, archived, plus Block / Unblock |
-| Sidebar bulk status select | `static/index.html:237` | scheduled, ready, blocked, done, archived |
+| Detail-view status buttons (the touch path: phone/tablet) | `static/panels.js:3868` | triage, todo, scheduled, ready, blocked, review, done, archived, plus Block / Unblock |
+| Sidebar bulk status select | `static/index.html:237` | scheduled, ready, blocked, review, done, archived |
 | Task editor modal | `static/panels.js:3484` | triage, todo, ready |
 | Dispatcher (claim) | Hermes Agent | ready → running |
 
@@ -90,3 +90,32 @@ Changing status on a Scheduled card from the modal is therefore explicit: the
 payload carries `status` only when the user picked a value different from the
 displayed default, and that value still goes through `_patch_task()` and the
 Agent's verb for the target status.
+
+## Review
+
+A Review card is a finished implementer handoff waiting for a reviewer. It
+renders in its own column between Blocked and Done and is never entered with a
+raw status write.
+
+### Entering Review
+
+`PATCH /api/kanban/tasks/<id>` with `{"status": "review"}` — what the
+detail-view Review button, the bulk select and a drag onto the Review column
+send. The `review` branch (`api/kanban_bridge.py:472`) then:
+
+1. raises `review requires a newer Hermes Agent` when the installed Agent
+   exposes no `request_review` — HTTP 409, with **no** mutation, so an Agent
+   that cannot hand off to review never falls back to a direct status write;
+2. delegates to `kb.request_review(conn, task_id, summary=..., metadata=...,
+   reviewer=..., force=True)`, the Agent's own handoff verb. It accepts
+   `running` / `ready` → `review`, records the implementer before reassigning
+   the reviewer, emits `review_requested`, and clears a live claim because a
+   dashboard action is an explicit human override. Any other source status is
+   refused with HTTP 400 `cannot request review from status: <status>`;
+3. when the same PATCH carries `assignee`, the assignee write is deferred
+   until after `request_review` so the event keeps the original implementer
+   (the Agent dashboard plugin orders the two the same way). An explicit empty
+   assignee clears the reviewer after the handoff is recorded.
+
+The task editor modal keeps its triage/todo/ready status list: entering Review
+is implementer scope, not an edit-field concern.
