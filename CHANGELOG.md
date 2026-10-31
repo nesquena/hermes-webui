@@ -75,6 +75,8 @@
 
 ### Fixed
 
+- **Reasoning effort is remembered per chat (#2697).** The reasoning chip now restores each conversation's own effort: chat A on High and chat B on Low stay that way across switching and reload, while a pick still sets the profile default for new chats. Overlapping saves can no longer roll back an accepted pick, an unreadable session file fails closed instead of being treated as empty, CLI chats keep their source, and the effort now reaches a Hermes Gateway in the request options it reads (previously only the top-level key was sent, which the Gateway ignored). Salvage of #7881 by @Notaloop763, thanks for the original work. (#8253)
+
 - **Internal (test reliability): the gateway routing footer test runs its node harness from a file.** It passed its whole script (about 128 KB, mostly the real `renderMessages()`) to node as one command-line argument, only about 2.5 KB under Linux's 128 KiB per-argument limit, so a routine change to `renderMessages()` would have made the file fail with "Argument list too long" instead of testing anything. The script now goes through a temporary file; the same code runs and no assertion changed. Thanks @happy5318. (#8659)
 
 - **Custom providers configured in the Agent's native `providers:` mapping show up in WebUI.** WebUI only read the legacy `custom_providers:` list, so a native-only setup had no provider cards, no model group and no live fallback. Native entries now appear in Settings > Providers and the model picker under their own route ID (renaming the label no longer changes it), and two routes that share one gateway URL keep their own key and context instead of borrowing each other's. Thanks @Jmars321. (#8448, closes #8428)
