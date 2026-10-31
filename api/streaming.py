@@ -19422,6 +19422,32 @@ def _cancel_stream_impl(
         if live_tools is not STREAM_LIVE_TOOL_CALLS:
             _cancel_tool_calls = live_tools.get(stream_id, [])
 
+    # Gateway runs: retire the run's approval cards BEFORE the interrupted turn is
+    # saved and reported. The stream worker can stay blocked on the Gateway
+    # socket long after this returns, and until its teardown an Allow click was
+    # still relayed and resumed a run WebUI had already recorded as stopped. The
+    # cancel flag is set above (so a card the worker publishes from now on is
+    # retired by the worker itself) and STREAMS_LOCK is released. No approval
+    # lock is taken: Stop never waits on a relay's POST. Any click that starts
+    # after this returns gets 409 without reaching the Gateway; a relay that
+    # had already validated its card still sends its one POST. Best-effort and
+    # never raises into cancel. Local runs skip this.
+    if (
+        _cancel_session_id
+        and isinstance(active_run_entry, dict)
+        and str(active_run_entry.get("backend") or "") == "gateway"
+    ):
+        try:
+            from api.gateway_chat import settle_gateway_stream_approvals
+
+            settle_gateway_stream_approvals(
+                _cancel_session_id,
+                stream_id,
+                reason="Gateway run was cancelled before approval resolution",
+            )
+        except Exception:
+            logger.debug("Failed to retire gateway approvals on cancel for %s", stream_id, exc_info=True)
+
     # Session cleanup outside STREAMS_LOCK to preserve lock ordering.
     # Acquire the per-session _agent_lock too, mirroring every other session
     # writer (streaming success/error paths, periodic checkpoint, POST endpoints)

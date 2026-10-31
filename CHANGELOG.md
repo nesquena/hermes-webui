@@ -5,6 +5,8 @@
 
 ### Added
 
+- **Usage quotas for OpenCode Go and Command Code.** Settings > Providers shows their usage, limits and reset times on the quota card, read from each provider's usage API (sanitized to the card's existing window format), and reports a definitive failure, such as an invalid key, instead of the credential pool. Thanks @droopanu. (#7883)
+
 - **Opt-in Screen reader mode, enabled for the terminal.** A Settings toggle (also found by Settings search) makes the terminal readable by screen readers. Off by default. Thanks @grzezlo. (#8305)
 
 - **A read-only endpoint reports a session's background delegations.** `GET /api/session/delegations?session_id=...` returns how many delegated tasks are still running and how many have finished but not yet been delivered, so a client can warn before switching away. It reads counts only (no prompts or results), stays inside the session's own profile, and answers `unknown` rather than zero when the ledger can't be read. Thanks @happy5318. (Refs #8019)
@@ -70,6 +72,8 @@
   exactly as before. Thanks @ybai08. (#8138, fixes #8126)
 
 ### Fixed
+
+- **Stopping a Gateway run now retires its approval cards before WebUI reports the run stopped.** With a Hermes Gateway on the default chat stream, a pending approval card stayed clickable after Stop (and after WebUI's own settle on shutdown or update) until the Gateway connection closed, and an Allow click in that window let the Agent run a command WebUI had already recorded as stopped. Stop and the server settle now retire the run's cards first, a card arriving during the stop is never left clickable, and a later click gets a clear 409 without reaching the Gateway. Stop never waits on an approval in flight. (#8634)
 
 - **A stopped local Gateway behind a loopback URL now says how to get its controls back.** When WebUI monitors this machine's Gateway through a loopback URL (for example `HERMES_WEBUI_GATEWAY_BASE_URL=http://127.0.0.1:8642`) but has not yet seen it running for the active profile, for instance after upgrading while it was stopped, the Gateway card no longer claims it is "managed outside WebUI". It says WebUI hasn't confirmed the Gateway runs on this machine and shows the exact one-time start command (`hermes gateway start`, or `hermes --profile <name> gateway start` for a named profile); after that start WebUI offers Start, Stop and Restart as usual. Who may start, stop or restart a Gateway is unchanged. (#8633, follow-up to #8484 / #8391)
 

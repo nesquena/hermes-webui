@@ -5619,6 +5619,7 @@ main.main > #mainPlugin{display:none;}
 .provider-quota-details{display:flex;flex-wrap:wrap;gap:6px;width:100%;}
 .provider-quota-details span{font-size:11px;line-height:1.35;color:var(--muted);border:1px solid var(--border);border-radius:999px;background:var(--sidebar);padding:4px 8px;}
 .provider-quota-message{font-size:12px;color:var(--muted);line-height:1.45;}
+.provider-quota-body>.provider-quota-message{width:100%;}
 .provider-quota-pool{width:100%;min-width:0;border:1px solid var(--border);border-radius:10px;background:var(--sidebar);overflow:hidden;}
 .provider-quota-pool summary{display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer;list-style:none;padding:9px 10px;font-size:12px;color:var(--text);font-weight:650;}
 .provider-quota-pool summary::-webkit-details-marker{display:none;}
@@ -5634,7 +5635,7 @@ main.main > #mainPlugin{display:none;}
 .provider-quota-pool-row-head strong{font-size:10px;text-transform:capitalize;border-radius:999px;padding:2px 7px;background:var(--accent-bg);color:var(--accent-text);white-space:nowrap;}
 .provider-quota-pool-row-available .provider-quota-pool-row-head strong{background:rgba(34,197,94,.12);color:#16a34a;}
 :root.dark .provider-quota-pool-row-available .provider-quota-pool-row-head strong{background:rgba(34,197,94,.16);color:#4ade80;}
-.provider-quota-pool-row-exhausted .provider-quota-pool-row-head strong{background:rgba(234,179,8,.12);color:var(--warning);}
+.provider-quota-pool-row-exhausted .provider-quota-pool-row-head strong{background:rgba(234,179,8,.12);color:color-mix(in srgb,var(--warning) 55%,var(--text));}
 .provider-quota-pool-windows{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:6px;}
 .provider-quota-pool-window{min-width:0;border:1px solid var(--border);border-radius:7px;background:var(--sidebar);padding:7px 8px;}
 .provider-quota-pool-window span{display:block;font-size:10.5px;color:var(--muted);margin-bottom:2px;}
@@ -5645,8 +5646,13 @@ main.main > #mainPlugin{display:none;}
 .provider-quota-pool-details span{font-size:10.5px;line-height:1.3;color:var(--muted);border:1px solid var(--border);border-radius:999px;background:var(--sidebar);padding:3px 7px;}
 .provider-quota-card-available .provider-quota-badge{background:rgba(34,197,94,.12);color:#16a34a;}
 :root.dark .provider-quota-card-available .provider-quota-badge{background:rgba(34,197,94,.16);color:#4ade80;}
-.provider-quota-card-no_key .provider-quota-badge,.provider-quota-card-unsupported .provider-quota-badge{background:rgba(234,179,8,.12);color:var(--warning);}
+/* Warning badges share the message's hue, pulled toward the text colour: pure --warning on its own
+   12% pill is ~2.4:1 on the default light theme. */
+.provider-quota-card-no_key .provider-quota-badge,.provider-quota-card-unsupported .provider-quota-badge,.provider-quota-card-unavailable .provider-quota-badge{background:rgba(234,179,8,.12);color:color-mix(in srgb,var(--warning) 55%,var(--text));}
 .provider-quota-card-invalid_key .provider-quota-badge{background:color-mix(in srgb,var(--error) 12%,transparent);color:var(--error);}
+.provider-quota-card-invalid_key .provider-quota-body>.provider-quota-message{color:var(--error);}
+/* Body copy, not a badge: pull the warning hue toward the text colour so a light card keeps readable contrast. */
+.provider-quota-card-unavailable:not(.provider-quota-card-neutral) .provider-quota-body>.provider-quota-message{color:color-mix(in srgb,var(--warning) 55%,var(--text));}
 @media (max-width: 520px){
   .provider-quota-card{padding:12px;}
   .provider-quota-header{flex-wrap:wrap;}
