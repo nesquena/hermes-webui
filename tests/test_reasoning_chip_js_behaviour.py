@@ -375,8 +375,8 @@ class TestSupportsThinkingToggleVisibility:
 # (off). The earlier round-2 fix kept the chip visible but the only rendered
 # option was "None" — so a user could turn thinking OFF but never back ON.
 # These tests drive the actual _applyReasoningOptions against a simulated
-# dropdown containing all 8 options from static/index.html (Default/none/
-# minimal/low/medium/high/xhigh/max) and pin which are visible per tier.
+# dropdown containing all 9 options from static/index.html (Default/none/
+# minimal/low/medium/high/xhigh/max/ultra) and pin which are visible per tier.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -419,14 +419,17 @@ function makeEl() {
 }
 
 // Options mirror static/index.html's composerReasoningDropdown exactly.
-const options = ['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map(makeOption);
+const options = ['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].map(makeOption);
 const optionEls = options;
 
 const els = {
   composerReasoningWrap: makeEl(),
   composerReasoningLabel: makeEl(),
   composerReasoningChip: makeEl(),
-  composerReasoningDropdown: { querySelectorAll(sel){ return sel === '.reasoning-option' ? optionEls : []; } },
+  composerReasoningDropdown: {
+    querySelectorAll(sel){ return sel === '.reasoning-option' ? optionEls : []; },
+    appendChild(el){ optionEls.push(el); },
+  },
 };
 els.composerReasoningWrap.style.display = 'none';
 
@@ -461,11 +464,15 @@ eval(extractFunc('_applyReasoningOptions'));
 eval(extractFunc('_applyReasoningChip'));
 
 const input = JSON.parse(process.argv[3]);
+// Apply twice: routine syncTopbar re-applies the chip state, and dynamic row
+// creation must be idempotent across re-renders (no duplicate options).
+_applyReasoningChip(input.effort, input.meta);
 _applyReasoningChip(input.effort, input.meta);
 const visible = optionEls
   .filter(o => o.style.display !== 'none')
   .map(o => o.dataset.effort === '' ? 'Default' : o.dataset.effort);
-process.stdout.write(JSON.stringify({visible: visible}));
+const rows = optionEls.map(o => ({ effort: o.dataset.effort, label: o.textContent }));
+process.stdout.write(JSON.stringify({visible: visible, rows: rows}));
 """
 
 
@@ -541,3 +548,81 @@ class TestTwoStateToggleControl:
                 f"step {i}: both Default and None must remain visible throughout "
                 f"the round trip; got {v}"
             )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The effort ladder is agent-owned (api/config.py sources it from
+# hermes_constants), so supported_efforts can carry levels that ship no static
+# row in static/index.html — the agent added 'ultra' above 'max', and a future
+# release can grow it again. The dropdown must render missing levels without a
+# WebUI release, label them, and not duplicate them across re-renders.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _driver_options_result(driver_options_path, effort, meta):
+    """Full driver output: visible labels plus every rendered row."""
+    import json as _json
+    payload = _json.dumps({"effort": effort, "meta": meta})
+    result = subprocess.run(
+        [NODE, driver_options_path, str(UI_JS_PATH), payload],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"node options driver failed: {result.stderr}")
+    return _json.loads(result.stdout)
+
+
+class TestAgentLadderRowRendering:
+
+    def test_shipped_ultra_row_visible_when_supported(self, driver_options_path):
+        """The 'ultra' row shipped in static/index.html shows once the
+        agent-sourced supported_efforts includes it (the user-reported bug:
+        ultra existed in Hermes Agent but never appeared here)."""
+        visible = _visible_options(
+            driver_options_path,
+            "ultra",
+            {"supported_efforts": ["minimal", "low", "medium", "high", "xhigh",
+                                    "max", "ultra"],
+             "supports_thinking_toggle": True},
+        )
+        assert "ultra" in visible, (
+            f"ultra must be visible when the agent advertises it; got {visible}"
+        )
+
+    def test_unknown_supported_level_gets_a_rendered_row(
+        self, driver_options_path
+    ):
+        """A future agent level with no static row (simulated with 'hyper')
+        is rendered and visible, with a title-case label."""
+        out = _driver_options_result(
+            driver_options_path,
+            "hyper",
+            {"supported_efforts": ["minimal", "low", "medium", "high", "xhigh",
+                                    "max", "ultra", "hyper"],
+             "supports_thinking_toggle": True},
+        )
+        assert "hyper" in out["visible"], (
+            f"unknown-but-supported level must get a row; got {out['visible']}"
+        )
+        hyper_rows = [r for r in out["rows"] if r["effort"] == "hyper"]
+        assert len(hyper_rows) == 1, (
+            "re-render must be idempotent — exactly one row per level; "
+            f"got {hyper_rows!r}"
+        )
+        assert hyper_rows[0]["label"] == "Hyper", (
+            f"created row label must use the chip label formatter; "
+            f"got {hyper_rows[0]['label']!r}"
+        )
+
+    def test_unsupported_level_stays_hidden(self, driver_options_path):
+        """A shipped row is still hidden when the route caps below it — the
+        dynamic render path must not defeat the supported-set filtering."""
+        visible = _visible_options(
+            driver_options_path,
+            "max",
+            {"supported_efforts": ["minimal", "low", "medium", "high", "xhigh"],
+             "supports_thinking_toggle": True},
+        )
+        assert "ultra" not in visible and "max" not in visible, (
+            f"levels above the supported ceiling must stay hidden; got {visible}"
+        )

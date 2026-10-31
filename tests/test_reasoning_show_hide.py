@@ -315,7 +315,7 @@ class TestReasoningCommand:
         m = re.search(r'function cmdReasoning\(.*?\n\}', src, re.DOTALL)
         assert m
         fn = m.group(0)
-        for level in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'):
+        for level in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'):
             assert f"'{level}'" in fn, (
                 f"cmdReasoning must accept '{level}' (CLI parity with "
                 f"hermes_constants.parse_reasoning_effort)"
@@ -328,7 +328,7 @@ class TestReasoningCommand:
         assert m, "reasoning COMMANDS entry not found"
         entry = m.group(0)
         for suggestion in (
-            'show', 'hide', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'
+            'show', 'hide', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'
         ):
             assert f"'{suggestion}'" in entry, (
                 f"reasoning subArgs must include '{suggestion}' for CLI parity"
@@ -357,13 +357,26 @@ class TestReasoningConfigHelpers:
         assert parse_reasoning_effort('  HIGH  ') == {'enabled': True, 'effort': 'high'}
 
     def test_valid_reasoning_efforts_matches_hermes_constants(self):
-        """Ensure our mirror stays in sync with hermes_constants."""
+        """The ladder is agent-owned: sourced from hermes_constants when the
+        agent tree is importable, and the standalone fallback must not lag the
+        agent's published ceiling. (The old hand-maintained 6-level mirror is
+        what let the WebUI dropdown fall behind the agent's 'ultra' release.)"""
         from api.config import VALID_REASONING_EFFORTS
-        # Snapshot-style assertion: if hermes_constants adds a level, this
-        # test will fail fast so we know to update WebUI too.
-        assert VALID_REASONING_EFFORTS == (
-            'minimal', 'low', 'medium', 'high', 'xhigh', 'max'
+        assert 'ultra' in VALID_REASONING_EFFORTS, (
+            "WebUI ladder must reach the agent's current ceiling ('ultra')"
         )
+        assert set(('minimal', 'low', 'medium', 'high', 'xhigh', 'max')).issubset(
+            VALID_REASONING_EFFORTS
+        )
+        try:
+            from hermes_constants import VALID_REASONING_EFFORTS as _agent_ladder
+        except Exception:
+            _agent_ladder = None
+        if _agent_ladder is not None:
+            assert VALID_REASONING_EFFORTS == _agent_ladder, (
+                "With the agent tree importable the WebUI ladder must be the "
+                "agent's exact tuple (single source of truth)"
+            )
 
     def test_set_reasoning_effort_persists_to_config_yaml(self, tmp_path, monkeypatch):
         """set_reasoning_effort writes agent.reasoning_effort to the active
