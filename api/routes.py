@@ -2489,6 +2489,9 @@ _OPENAI_COMPAT_ENDPOINTS = {
 _LIVE_MODELS_CACHE_TTL = 60.0
 _LIVE_MODELS_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 _LIVE_MODELS_CACHE_LOCK = threading.RLock()
+# #6919: bumped by POST /api/models/refresh; responses that captured an older
+# generation must not repopulate the cache with pre-refresh bytes.
+_LIVE_MODELS_CACHE_GENERATION = 0
 
 
 def _active_profile_for_live_models_cache() -> str:
@@ -2526,9 +2529,64 @@ def _set_cached_live_models(key: tuple[str, str], payload: dict) -> None:
         _LIVE_MODELS_CACHE[key] = (time.monotonic(), copy.deepcopy(payload))
 
 
+def _publish_live_models(key: tuple[str, str], payload: dict, expected_generation: int) -> bool:
+    """Fence-and-publish a live-models payload atomically (#6919).
+
+    The expected-generation comparison and the cache publication share one
+    ``_LIVE_MODELS_CACHE_LOCK`` hold. With separate acquisitions a refresh
+    can land between a worker's generation check and its cache write, after
+    which the worker repopulates the just-evicted entry with pre-refresh
+    bytes. Returns True when the payload was published.
+
+    Provider work and JSON response I/O stay outside this helper. The lock
+    is an RLock, so the nested ``_live_models_generation()`` and
+    ``_set_cached_live_models()`` calls re-enter the same hold.
+    """
+    with _LIVE_MODELS_CACHE_LOCK:
+        if _live_models_generation() != expected_generation:
+            return False
+        _set_cached_live_models(key, payload)
+        return True
+
+
 def _clear_live_models_cache() -> None:
     with _LIVE_MODELS_CACHE_LOCK:
         _LIVE_MODELS_CACHE.clear()
+
+
+def _invalidate_live_models_cache(provider: str) -> None:
+    """Evict the live-models entry for the active profile + provider (#6919)."""
+    key = _live_models_cache_key(provider)
+    with _LIVE_MODELS_CACHE_LOCK:
+        _LIVE_MODELS_CACHE.pop(key, None)
+
+
+def _invalidate_live_models_cache_and_bump(provider: str) -> int:
+    """Evict a provider's live-models entry and advance the cache generation
+    in ONE critical section (#6919).
+
+    Separate eviction/bump acquisitions leave a pop-to-bump interval where
+    an in-flight worker that already passed its generation check can
+    publish, resurrecting the entry the refresh just evicted. The lock is
+    an RLock, so the nested calls re-enter the same hold.
+    """
+    with _LIVE_MODELS_CACHE_LOCK:
+        _invalidate_live_models_cache(provider)
+        return _bump_live_models_generation()
+
+
+def _live_models_generation() -> int:
+    with _LIVE_MODELS_CACHE_LOCK:
+        return _LIVE_MODELS_CACHE_GENERATION
+
+
+def _bump_live_models_generation() -> int:
+    """Fence in-flight live-model responses: a response started before a
+    refresh must not write its stale payload back into the cache."""
+    global _LIVE_MODELS_CACHE_GENERATION
+    with _LIVE_MODELS_CACHE_LOCK:
+        _LIVE_MODELS_CACHE_GENERATION += 1
+        return _LIVE_MODELS_CACHE_GENERATION
 
 
 from api import route_session_list_cache as _route_session_list_cache
@@ -18836,6 +18894,11 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "provider is required")
         from api.config import invalidate_provider_models_cache
         invalidate_provider_models_cache(provider_id)
+        # #6919: also evict the live-models cache (normalized key) and fence
+        # in-flight responses against repopulation — eviction and generation
+        # advance share one critical section.
+        from api.config import _resolve_provider_alias
+        _invalidate_live_models_cache_and_bump(_resolve_provider_alias(provider_id))
         return j(handler, {"ok": True, "provider": provider_id})
 
     if parsed.path == "/api/reasoning":
@@ -25821,12 +25884,18 @@ def _handle_live_models(handler, parsed):
             return j(handler, {"provider": provider, "models": [], "count": 0})
 
         cache_key = _live_models_cache_key(provider)
+        generation = _live_models_generation()
         cached = _get_cached_live_models(cache_key)
         if cached is not None:
             return j(handler, cached)
 
         def _finish(payload: dict):
-            _set_cached_live_models(cache_key, payload)
+            # #6919 generation fence: a response that started before a
+            # models refresh must not repopulate the cache with stale
+            # bytes. The comparison and the cache write share one lock
+            # hold (_publish_live_models); the JSON response stays
+            # outside the critical section.
+            _publish_live_models(cache_key, payload, generation)
             return j(handler, payload)
 
         # Delegate to the agent's live-fetch + fallback resolver.
