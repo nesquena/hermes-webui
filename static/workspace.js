@@ -719,13 +719,20 @@ async function _workspaceProbeFile(path){
     //   404 — the file is gone
     //   403 — the escape grant is gone (the user cannot open it either, so
     //         "file open failed" is the honest answer)
-    // A timeout is NOT proof of absence: per #6710, a slow answer must not be
-    // reported as "the file is missing", so it stays inconclusive and the open
-    // proceeds. Anything else is re-raised so the caller reports it as
-    // not-openable rather than inventing a "missing" verdict.
+    // A timeout is not proof of absence either (#6710: a slow answer must not
+    // be reported as a missing file), but it is not proof of presence. Answering
+    // "exists" here let openArtifactPath() fall through into openFile(), whose
+    // follow-up routes were unscoped — and /api/file/raw answers an absent
+    // workspace path from the session's attachment inbox, so one artifact click
+    // downloaded an upload as if it were a workspace file. An inconclusive check
+    // therefore fails closed. The artifact open ALSO carries the workspace scope
+    // into every follow-up route (see openFile), so a slow answer can still open
+    // a file that really is in the workspace once the check is conclusive.
+    // Anything else is re-raised so the caller reports it as not-openable
+    // rather than inventing a "missing" verdict.
     const status=err&&err.status;
     if(status===404) return false;
-    if(err&&(err.timeout===true||err.name==='TimeoutError')) return true;
+    if(err&&(err.timeout===true||err.name==='TimeoutError')) return false;
     throw err;
   }
 }
@@ -983,7 +990,15 @@ async function openArtifactPath(path){
   // Only a literal `true` counts as a preview. A download-only artifact (e.g.
   // .zip) or an unreadable file reports false, and must fail closed rather than
   // being read as a reveal.
-  const opened = await openFile(rel);
+  //
+  // #8421 (gate certificate 2): the artifact click is the one open that must
+  // stay workspace-scoped, so it asks openFile() for the scope and every raw
+  // URL / download below is answered by the workspace alone. Without it a
+  // timed-out existence check fell through to the unscoped routes, and
+  // /api/file/raw served the session's attachment inbox for a path the
+  // workspace does not have. Other callers of openFile() pass no scope and keep
+  // the attachment fallback.
+  const opened = await openFile(rel,{workspaceOnly:true});
   if(opened !== true){
     // Nothing was previewed (read failed or the file was downloaded instead).
     // Leave the dismissal flag untouched and do not promote the panel.
@@ -1567,11 +1582,20 @@ async function openFile(path, opts={}){
   const ext=fileExt(path);
   const bustCache=!!(opts&&opts.bustCache);
   const forceRichMarkdown=!!(opts&&opts.forceRichMarkdown);
+  // #8421 (gate certificate 2): an artifact open must stay workspace-scoped all
+  // the way down. /api/file/raw falls back to the session's attachment inbox
+  // when the workspace path is absent, so an unscoped follow-up would serve the
+  // upload for a path the workspace does not have — which is how a timed-out
+  // existence check turned one artifact click into a download of a chat upload.
+  // openArtifactPath() passes this; every other caller leaves it unset and keeps
+  // the attachment fallback. The `read` route needs no flag: the server resolves
+  // it from the workspace alone and never consults the inbox.
+  const workspaceOnly=!!(opts&&opts.workspaceOnly);
   const cacheBust=bustCache?`&_=${Date.now()}`:'';
 
   // Binary/download-only formats: trigger browser download, don't preview
   if(DOWNLOAD_EXTS.has(ext)){
-    downloadFile(path);
+    downloadFile(path,{workspaceOnly});
     return false;   // nothing was previewed — the caller must not treat this as a reveal
   }
 
@@ -1595,7 +1619,7 @@ async function openFile(path, opts={}){
   if(IMAGE_EXTS.has(ext)){
     // Image: load via raw endpoint, show as <img>
     showPreview('image');
-    const url=_workspaceRouteForPath(path, 'raw') + cacheBust;
+    const url=_workspaceRouteForPath(path, 'raw', {workspaceOnly}) + cacheBust;
     const img=$('previewImg');
     img.alt=path;
     // #6710: assigning src only STARTS the request. Report the real outcome so
@@ -1611,7 +1635,7 @@ async function openFile(path, opts={}){
   } else if(AUDIO_EXTS.has(ext)||VIDEO_EXTS.has(ext)){
     const mode=VIDEO_EXTS.has(ext)?'video':'audio';
     showPreview(mode);
-    const url=_workspaceRouteForPath(path, 'raw', {inline:true}) + cacheBust;
+    const url=_workspaceRouteForPath(path, 'raw', {inline:true,workspaceOnly}) + cacheBust;
     const wrap=$('previewMediaWrap');
     if(wrap){
       const html=(typeof _mediaPlayerHtml==='function')
@@ -1629,7 +1653,7 @@ async function openFile(path, opts={}){
     }
   } else if(PDF_EXTS.has(ext)){
     showPreview('pdf');
-    const url=_workspaceRouteForPath(path, 'raw', {inline:true}) + cacheBust;
+    const url=_workspaceRouteForPath(path, 'raw', {inline:true,workspaceOnly}) + cacheBust;
     const frame=$('previewPdfFrame');
     if(frame){
       // #6710: an iframe that cannot fetch its document still fires `load`
@@ -1681,7 +1705,7 @@ async function openFile(path, opts={}){
     // or reading other origin data. If a stricter mode is needed, remove
     // allow-scripts (or add sandbox="") to disable all JS execution.
     showPreview('html');
-    const url=_workspaceRouteForPath(path, 'raw', {inline:true}) + cacheBust;
+    const url=_workspaceRouteForPath(path, 'raw', {inline:true,workspaceOnly}) + cacheBust;
     const iframe=$('previewHtmlIframe');
     if(iframe){
       // #6710: same iframe limitation as the PDF branch — a failed document
@@ -1699,13 +1723,13 @@ async function openFile(path, opts={}){
       const data=await api(_workspaceRouteForPath(path, 'read'));
       if(!_previewOpenOwned(_openGen,_openSid,_openWsGen)) return false;
       if(data.binary){
-        downloadFile(path);
+        downloadFile(path,{workspaceOnly});
         return false;   // downloaded, nothing previewed
       }
       if(renderCsvPreviewContent(path, data.content)) return true;
       renderCodePreviewContent(path, data.content);
     }catch(e){
-      downloadFile(path);
+      downloadFile(path,{workspaceOnly});
       return false;   // downloaded, nothing previewed
     }
   } else {
@@ -1715,7 +1739,7 @@ async function openFile(path, opts={}){
       if(!_previewOpenOwned(_openGen,_openSid,_openWsGen)) return false;
       if(data.binary){
         // Server flagged this as binary content
-        downloadFile(path);
+        downloadFile(path,{workspaceOnly});
         return false;   // downloaded, nothing previewed
       }
       if(data.preview_kind==='office'){
@@ -1735,17 +1759,21 @@ async function openFile(path, opts={}){
         return false;
       }
       // If it's a 400/too-large error, offer download instead
-      downloadFile(path);
+      downloadFile(path,{workspaceOnly});
       return false;   // downloaded, nothing previewed
     }
   }
   return true;
 }
 
-function downloadFile(path){
+function downloadFile(path, opts={}){
   if(!S.session)return;
-  // Trigger browser download via the raw file endpoint with content-disposition attachment
-  const url=_workspaceRouteForPath(path, 'raw', {download:true});
+  // Trigger browser download via the raw file endpoint with content-disposition attachment.
+  // `workspaceOnly` keeps an artifact-open download inside the workspace: without
+  // it the raw route falls back to the session's attachment inbox and would hand
+  // back an upload for a path the workspace does not have. Callers that want the
+  // fallback (ordinary attachment links) simply pass nothing.
+  const url=_workspaceRouteForPath(path, 'raw', {download:true,workspaceOnly:!!(opts&&opts.workspaceOnly)});
   const filename=path.split('/').pop();
   const a=document.createElement('a');
   a.href=url;a.download=filename;

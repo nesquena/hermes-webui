@@ -23,6 +23,16 @@ every other caller, and escape-granted paths keep ``/api/escape/file/raw``
 The server-side pagination for #6645 (#6685, #6687) is a separate, larger
 change; this probe deliberately does not depend on any pagination metadata, so
 it stays correct on its own and remains a valid fallback once pagination lands.
+
+An inconclusive probe must not be read as permission to open. ``api()`` times
+out after 30 s, and a timeout is not evidence either way — but the follow-up
+routes in ``openFile()`` were unscoped, so "proceed" meant the server answered
+from the session's upload inbox and the browser downloaded an upload as if it
+were a workspace file. The artifact-open chain therefore fails closed on a
+timeout *and* carries the workspace scope through ``openFile()`` into every
+raw preview URL and ``downloadFile()``, so the follow-up stays workspace-scoped
+no matter how the check concluded. Other callers of ``openFile()`` pass no
+scope and keep the attachment fallback.
 """
 
 import json
@@ -87,10 +97,16 @@ def test_probe_uses_the_raw_route_not_the_size_capped_read_route():
     # A resolved response is not proof of existence: only an explicit 2xx is.
     assert re.search(r"status\s*>=\s*200", probe), "probe must require a 2xx status"
     assert re.search(r"status\s*<\s*300", probe), "probe must reject non-2xx statuses"
-    # #6710: a timeout is not evidence of absence — it must not become a hard
-    # "missing" verdict (which the caller renders as "file open failed").
+    # A timeout is inconclusive, so it must never be reported as proof of
+    # existence: #8421 (gate certificate 2) — answering "exists" let the
+    # artifact open fall through into unscoped routes, and /api/file/raw then
+    # served the session's attachment inbox for a path the workspace does not
+    # have. The branch therefore fails closed.
     assert re.search(r"timeout\s*===\s*true", probe), "probe must treat a timeout as inconclusive"
     assert re.search(r"name\s*===\s*'TimeoutError'", probe)
+    timeout_branch = probe[probe.index("err.timeout===true"):]
+    timeout_branch = timeout_branch[: timeout_branch.index("throw err")]
+    assert "return true" not in timeout_branch, timeout_branch
     # The body is dropped so a large file is not buffered for an existence check.
     assert "statusOnly:true" in probe
 
@@ -186,9 +202,11 @@ def test_browser_existence_logic_behaviour():
          is. This mirrors the upstream contract in
          tests/test_issue6867_artifacts_settled_recovery.py, where a missing
          artifact path must stay blocked.
-      7. the probe TIMES OUT -> NOT reported as missing. Per #6710, only a
-         confirmed HTTP answer proves absence; a timeout means the server is
-         slow, not that the file was deleted.
+      7. the probe TIMES OUT -> fails closed. Per #6710 a timeout is not
+         evidence of absence, but #8421 (gate certificate 2) showed it is not
+         evidence of presence either: answering "exists" let the artifact open
+         fall through to unscoped routes, and /api/file/raw served the
+         session's attachment inbox for a path the workspace does not have.
       8. an escape-granted path keeps /api/escape/file/raw (and its token),
          without the workspace-only flag
       9. a name that exists only in the attachment inbox -> false, because the
@@ -401,3 +419,182 @@ def test_cjk_file_past_the_list_cap_is_still_probeable():
 
     row = _probe_live(sid, workspace, [f"crowded/{cjk_name}"])[f"crowded/{cjk_name}"]
     assert row["exists"] is True, row
+
+
+# ── the timeout fall-through (gate RED certificate #2) ──────────────────────
+# `_workspaceProbeFile()` used to answer "exists" when `api()` timed out, so
+# `openArtifactPath()` fell through into `openFile()` — and every follow-up
+# route there was UNSCOPED. `/api/file/raw` falls back to the requesting
+# session's upload inbox when the workspace path is absent, so the read's
+# download fallback (and the image/audio/video/PDF/HTML preview URLs) answered
+# from the inbox: one artifact click downloaded a session upload as if it were
+# a workspace file. The gate measured it with a real server, a real upload and
+# a held `workspace_only=1` request, so the browser's unmodified 30 s `api()`
+# deadline fired while every other request was answered normally.
+#
+# `tests/_workspace_probe_timeout_open_driver.js` replays that reproduction and
+# drives the SHIPPED openArtifactPath()/openFile()/downloadFile():
+#   * `--mock` injects the timeout at the api() seam (fast, deterministic);
+#   * `--live` holds the probe request in fetch so the shipped api() hits its
+#     own 30 s deadline against the real server.
+
+
+def _run_timeout_open_driver(mode: str, *extra: str) -> dict[str, dict]:
+    """Run the artifact-open driver and index its rows by scenario name."""
+    if shutil.which("node") is None:
+        pytest.skip("node is unavailable on this host")
+    driver = ROOT / "tests" / "_workspace_probe_timeout_open_driver.js"
+    result = subprocess.run(
+        ["node", str(driver), str(ROOT / "static" / "workspace.js"), mode, *extra],
+        capture_output=True,
+        text=True,
+        env=_node_env(),
+        timeout=240,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    rows: dict[str, dict] = {}
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        row = json.loads(line)
+        rows[row["scenario"]] = row
+    assert rows, result.stdout
+    return rows
+
+
+def test_probe_timeout_never_reaches_the_attachment_inbox():
+    """A forced probe timeout must not read, preview or download the inbox.
+
+    The probe is held past the 30 s `api()` deadline for a path that exists
+    only in the session's upload inbox. Whatever the existence check answers,
+    the click must not produce an unscoped `/api/file/raw` request — that route
+    is the one the server answers from the inbox.
+    """
+    rows = _run_timeout_open_driver("--mock")
+
+    for name in (
+        "timeout-inbox-only-txt",   # read route -> download fallback
+        "timeout-inbox-only-png",   # image preview URL
+        "timeout-inbox-only-zip",   # download-only extension
+        "timeout-inbox-only-mp3",   # audio preview URL
+        "timeout-inbox-only-pdf",   # PDF reachability probe + frame URL
+    ):
+        row = rows[name]
+        assert row["error"] is None, row
+        # The reproduction is only meaningful if the probe really ran and was
+        # workspace-scoped — otherwise the click never had a timeout to survive.
+        assert row["workspaceOnlyUrls"], row
+        # The whole point of the fix: an inconclusive check must not lead to an
+        # unscoped read, preview or download.
+        assert row["unscopedRaw"] == [], row
+        assert row["downloads"] == [], row
+        # The click fails closed instead of guessing that the file is there.
+        assert row["opened"] is False, row
+        assert row["statuses"] == ["file_open_failed"], row
+
+    # No over-blocking: a conclusive probe still opens the workspace file and
+    # previews the workspace bytes.
+    ok = rows["probe-200-workspace-txt"]
+    assert ok["opened"] is True, ok
+    assert ok["rendered"] and ok["rendered"][0]["content"] == "WORKSPACE-BYTES", ok
+    assert ok["unscopedRaw"] == [] and ok["downloads"] == [], ok
+
+    # Every raw URL the artifact open builds is workspace-scoped, previews
+    # included, and the download-only branch downloads through the scoped URL.
+    png = rows["probe-200-workspace-png"]
+    assert png["opened"] is True and png["previewUrls"], png
+    assert all("workspace_only=1" in url for url in png["previewUrls"]), png
+    assert png["unscopedRaw"] == [], png
+
+    zipped = rows["probe-200-workspace-zip"]
+    assert zipped["opened"] is False and len(zipped["downloads"]) == 1, zipped
+    assert "workspace_only=1" in zipped["downloads"][0]["href"], zipped
+    assert zipped["unscopedRaw"] == [], zipped
+
+    # Escape-granted paths keep `/api/escape/file/raw` + token and gain no flag
+    # (that route has no inbox fallback and stays authoritative).
+    for name in ("escape-grant-txt", "escape-grant-png"):
+        row = rows[name]
+        assert row["opened"] is True, row
+        assert row["escapeUrls"], row
+        assert row["workspaceOnlyUrls"] == [], row
+        assert row["unscopedRaw"] == [], row
+
+    # Any OTHER caller of openFile() keeps the default attachment fallback:
+    # its raw URLs and downloads stay unscoped, exactly as before.
+    for name in ("other-caller-openFile-txt", "other-caller-openFile-png"):
+        row = rows[name]
+        assert row["unscopedRaw"], row
+        assert row["workspaceOnlyUrls"] == [], row
+
+
+def test_probe_timeout_never_reaches_the_attachment_inbox_live():
+    """Same reproduction end to end: the SHIPPED api() hits its own deadline.
+
+    A real session, a real multipart upload of ``note.txt``, no ``note.txt`` in
+    the workspace, and a fetch that holds only the ``workspace_only=1``
+    request. Everything else reaches the real server, so the 30 s deadline is
+    the shipped one and the 404s are the server's.
+    """
+    workspace = _workspace_case_dir("timeout-inbox-only-live")
+    sid = _new_session(workspace)
+    payload, status = _upload(sid, "note.txt", b"INBOX-ONLY")
+    assert status == 200, payload
+    assert not (workspace / "note.txt").exists()
+    (workspace / "real.txt").write_bytes(b"WORKSPACE-REAL")
+
+    rows = _run_timeout_open_driver("--live", BASE, sid, str(workspace))
+
+    row = rows["timeout-inbox-only-txt"]
+    # The held probe really did time out through the shipped api(): its own
+    # deadline fired, which is what surfaces the timeout toast.
+    assert any("timed out" in str(t).lower() for t in row["toasts"]), row["toasts"]
+    assert row["error"] is None, row
+    assert row["unscopedRaw"] == [], row
+    assert row["downloads"] == [], row
+    assert row["opened"] is False, row
+
+    # Control on the same server with nothing held: a real workspace file still
+    # opens and serves the workspace bytes, not the inbox copy.
+    ok = rows["probe-200-workspace-txt"]
+    assert ok["opened"] is True, ok
+    assert ok["rendered"] and ok["rendered"][0]["content"] == "WORKSPACE-REAL", ok
+    assert ok["unscopedRaw"] == [] and ok["downloads"] == [], ok
+
+
+def test_open_file_threads_the_workspace_scope_into_every_raw_route():
+    """The artifact-open chain must stay workspace-scoped end to end.
+
+    Scoping only the existence probe leaves every follow-up route unscoped:
+    the read's download fallback and the image/audio/video/PDF/HTML previews
+    all build `/api/file/raw`, the one route with an inbox fallback. The scope
+    the artifact click asks for must reach each of them, and `downloadFile()`
+    must forward it into its own URL.
+    """
+    source = WORKSPACE_JS
+    open_fn = source[source.index("async function openFile(") :]
+    open_fn = open_fn[: open_fn.index("\n}\n")]
+    dl_fn = source[source.index("function downloadFile(") :]
+    dl_fn = dl_fn[: dl_fn.index("\n}\n")]
+    art_fn = source[source.index("async function openArtifactPath(") :]
+    art_fn = art_fn[: art_fn.index("\n}\n")]
+
+    raw_calls = re.findall(r"_workspaceRouteForPath\([^;]*?'raw'[^;]*?\)", open_fn)
+    assert raw_calls, "openFile() must build its raw routes through _workspaceRouteForPath"
+    for call in raw_calls:
+        assert "workspaceOnly" in call, call
+
+    dl_calls = re.findall(r"downloadFile\([^)]*\)", open_fn)
+    assert dl_calls, "openFile() must route its download fallbacks through downloadFile()"
+    for call in dl_calls:
+        assert "workspaceOnly" in call, call
+
+    dl_route = re.search(r"_workspaceRouteForPath\([^;]*?'raw'[^;]*?\)", dl_fn)
+    assert dl_route, dl_fn
+    assert "opts.workspaceOnly" in dl_route.group(0), dl_route.group(0)
+
+    # The artifact click is the one caller that asks for the scope. Passing
+    # nothing (the default) is what keeps the attachment fallback for every
+    # other caller, so this call site must be explicit.
+    assert re.search(r"openFile\(rel,\s*\{\s*workspaceOnly:\s*true\s*\}\)", art_fn)

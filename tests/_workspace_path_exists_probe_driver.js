@@ -181,10 +181,16 @@ function check(label, cond, extra) {
   check('does NOT claim the file exists', r === false, `got ${r}`);
   check('the probe was still attempted', apiCalls.length >= 2, `api calls: ${apiCalls.length}`);
 
-  // ── Branch 7: the probe TIMES OUT → must NOT be reported as missing.
-  // #6710: only a confirmed HTTP answer proves absence. A timeout means the
-  // server is slow, not that the file was deleted — reporting "file open
-  // failed" here would tell the user a file is gone when it is not.
+  // ── Branch 7: the probe TIMES OUT → the open fails closed ───────────────
+  // #6710 wanted a slow answer not to be reported as a missing file, so the
+  // probe used to answer "exists" and let the open proceed. #8421 (gate
+  // certificate 2) priced that: the follow-up routes in openFile() were
+  // unscoped, so proceeding let /api/file/raw answer from the session's
+  // attachment inbox and one artifact click downloaded an upload as a workspace
+  // file. A timeout is not proof of presence, so the check now fails closed —
+  // and the artifact open additionally carries the workspace scope into every
+  // follow-up route, so the open still succeeds for a file that really is in
+  // the workspace once the check IS conclusive.
   console.log('\nBranch 7: probe times out');
   apiCalls = [];
   apiImpl = async (url) => {
@@ -195,7 +201,7 @@ function check(label, cond, extra) {
     throw err;
   };
   r = await _workspacePathExists('slow.md');
-  check('is NOT reported as missing', r === true, `got ${r}`);
+  check('fails closed instead of guessing the file is there', r === false, `got ${r}`);
   check('the probe was attempted', apiCalls.length >= 2, `api calls: ${apiCalls.length}`);
 
   // ── Branch 8: escape-granted paths keep the escape route ─────────────
