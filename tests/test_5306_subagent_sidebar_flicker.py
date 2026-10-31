@@ -99,6 +99,9 @@ eval(extractFunc('_sidebarRowHasVisibleMessages'));
 eval(extractFunc('_isDelegatedSubagentRow'));
 eval(extractFunc('_sidebarProjectResolver'));
 eval(extractFunc('_sidebarRowsById'));
+eval(extractFunc('_isDelegatedSubagentChild'));
+eval(extractFunc('_sidebarSameProfileForLineage'));
+eval(extractFunc('_sidebarDisplayBucketIsCli'));
 eval(extractFunc('_partitionSidebarSessionRows'));
 eval(extractFunc('_scopedSidebarReferenceRows'));
 eval(extractFunc('_renderSidebarRowsFromRawSessions'));
@@ -483,9 +486,12 @@ console.log(JSON.stringify({ search: render('zebra'), idle: render('') }));
 
 @pytest.mark.parametrize("parent_source", ["cli", "tui", "acp"])
 def test_5305_subagent_of_cli_parent_stays_reachable_in_all_profiles(parent_source):
-    """All-profiles payloads carry no cross-surface flag. The partition puts a
-    CLI/TUI parent in the CLI bucket and its subagent in the WebUI bucket, so the
-    child can never attach there and must stay an openable orphan row."""
+    """All-profiles payloads carry no cross-surface flag, so the child's bucket is
+    DERIVED from its parent's (#8141): a CLI/TUI/ACP parent is filed in the CLI
+    bucket and its parent-owned delegated child travels WITH it, attaching under
+    the parent instead of landing in the WebUI bucket where it inflated the badge
+    but never rendered. The row stays openable either way -- it is no longer an
+    orphan, it is a child row of the CLI session that owns it."""
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = _preamble(js) + f"""
 global._activeProject = null;
@@ -506,8 +512,9 @@ for (const tab of ['webui', 'cli']) {{
 console.log(JSON.stringify(out));
 """
     out = json.loads(_run_node(source))
-    assert out["webui"] == [{"sid": "sub", "orphan": True, "kids": []}]
-    assert out["cli"] == [{"sid": "cli_parent", "orphan": False, "kids": []}]
+    # #8141: the derived bucket puts BOTH rows in the CLI tab, child under parent.
+    assert out["cli"] == [{"sid": "cli_parent", "orphan": False, "kids": ["sub"]}], out
+    assert out["webui"] == [], out
 
 
 @pytest.mark.parametrize("parent", [
@@ -520,7 +527,8 @@ def test_5305_subagent_of_cli_bucket_parent_with_non_literal_source_stays_reacha
     """The partition files the parent in the CLI bucket via its normalized row metadata
     (is_cli_session / session_source), so the attach step must classify the SAME row, not a
     synthetic ``{raw_source: parent_source}``; otherwise the child is suppressed in the WebUI
-    tab and absent from the CLI tab, i.e. unreachable."""
+    tab and absent from the CLI tab, i.e. unreachable. With #8141 the derived bucket
+    now attaches the child to that same CLI row instead of leaving it an orphan."""
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = _preamble(js) + f"""
 global._activeProject = null;
@@ -542,8 +550,8 @@ for (const tab of ['webui', 'cli']) {{
 console.log(JSON.stringify(out));
 """
     out = json.loads(_run_node(source))
-    assert out["cli"] == [{"sid": "p", "orphan": False, "kids": []}]
-    assert out["webui"] == [{"sid": "sub", "orphan": True, "kids": []}]
+    assert out["cli"] == [{"sid": "p", "orphan": False, "kids": ["sub"]}], out
+    assert out["webui"] == [], out
 
 
 def test_5305_flagless_subagent_of_zero_message_webui_parent_in_payload_is_suppressed():
@@ -725,8 +733,10 @@ console.log(JSON.stringify(out));
 @pytest.mark.parametrize("parent_source", ["desktop", "webui"])
 def test_5305_source_scoped_webui_payload_keeps_subagent_of_cli_tab_parent(monkeypatch, parent_source):
     """Re-gate: each tab is fetched alone (sidebar_source=webui|cli). An imported Desktop parent is
-    CLI-tab (is_cli_session) so the WebUI payload holds only its child; the server stamps
-    parent_is_cli_session so the child stays openable. A WebUI parent filtered out still suppresses."""
+    CLI-tab (is_cli_session) and, since #8141, its parent-owned delegated child is bucketed with
+    it — so the child now ships in the CLI payload (where the parent is) instead of the WebUI
+    payload, and the server still stamps parent_is_cli_session for a WebUI-side arrival. A WebUI
+    parent filtered out still suppresses."""
     import api.routes as routes
 
     desktop = parent_source == "desktop"
@@ -748,15 +758,28 @@ def test_5305_source_scoped_webui_payload_keeps_subagent_of_cli_tab_parent(monke
     monkeypatch.setattr(routes, "get_cli_sessions", lambda source_filter=None, all_profiles=False: [])
     monkeypatch.setattr(routes, "_reconcile_stale_stream_state_for_session_rows", lambda _s: False)
     monkeypatch.setattr(routes, "_prune_orphaned_webui_zero_message_sessions", lambda rows, **_k: rows)
-    payload = routes._build_session_list_cache_payload(
-        active_profile="default", all_profiles=False, show_cli_sessions=True,
-        show_previous_messaging_sessions=False, show_cron_sessions=False, sidebar_source="webui",
-    )
-    rows = routes._session_list_payload_to_response(payload)["sessions"]
+
+    def _payload(sidebar_source):
+        return routes._session_list_payload_to_response(
+            routes._build_session_list_cache_payload(
+                active_profile="default", all_profiles=False, show_cli_sessions=True,
+                show_previous_messaging_sessions=False, show_cron_sessions=False,
+                sidebar_source=sidebar_source,
+            )
+        )["sessions"]
+
     if desktop:
-        assert [r["session_id"] for r in rows] == ["sub"], rows
-        assert rows[0]["parent_is_cli_session"] is True
+        # #8141: the child is bucketed with its CLI parent, so the tab that holds
+        # the parent is the tab that holds the child.
+        webui_rows = _payload("webui")
+        cli_rows = _payload("cli")
+        assert [r["session_id"] for r in webui_rows] == [], webui_rows
+        assert sorted(r["session_id"] for r in cli_rows) == ["p", "sub"], cli_rows
+        sub_row = next(r for r in cli_rows if r["session_id"] == "sub")
+        assert sub_row["parent_is_cli_session"] is True, sub_row
+        rows = cli_rows
     else:
+        rows = _payload("webui")
         assert rows[next(i for i, r in enumerate(rows) if r["session_id"] == "sub")]["parent_is_cli_session"] is False
         rows = [r for r in rows if r["session_id"] == "sub"]
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
@@ -764,14 +787,18 @@ def test_5305_source_scoped_webui_payload_keeps_subagent_of_cli_tab_parent(monke
 global._activeProject = null;
 global._showArchived = false;
 global.window = {{ _showCliSessions: true }};
-global._sessionSourceFilter = 'webui';
+global._sessionSourceFilter = 'cli';
 const allMatched = {json.dumps(rows, default=str)};
 const part = _partitionSidebarSessionRows(allMatched, null);
-const rows = _renderSidebarRowsFromRawSessions(part.sessionsRaw, part.webuiReferenceRaw, part.rowsById);
-console.log(JSON.stringify(rows.map(r=>({{sid:r.session_id, orphan:!!r._orphan_child_session}}))));
+const rows = _renderSidebarRowsFromRawSessions(part.sessionsRaw, part.cliReferenceRaw, part.rowsById);
+console.log(JSON.stringify(rows.map(r=>({{sid:r.session_id, orphan:!!r._orphan_child_session, kids:(r._child_sessions||[]).map(c=>c.session_id)}}))));
 """
     out = json.loads(_run_node(source))
-    assert out == ([{"sid": "sub", "orphan": True}] if desktop else []), out
+    if desktop:
+        # The child attaches under its CLI parent in the client projection too.
+        assert out == [{"sid": "p", "orphan": False, "kids": ["sub"]}], out
+    else:
+        assert out == [], out
 
 
 @pytest.mark.parametrize("parent_source,expect", [("desktop", [{"sid": "sub", "orphan": True}]), ("cron", [])])
@@ -828,8 +855,9 @@ def _sids(tab):
 
 
 def test_5305_nested_leaf_under_orphaned_subagent_of_cli_parent_stays_reachable():
-    """D(CLI) -> O -> L: O orphans in the WebUI tab, so L must not be suppressed on the
-    strength of O sharing its bucket; L is reachable in exactly one tab."""
+    """D(CLI) -> O -> L: the whole chain travels with D's derived CLI bucket (#8141),
+    so every link attaches under its owner in the CLI tab and nothing is suppressed
+    on the strength of a bucket mismatch. L is reachable in exactly one tab."""
     rows = [
         {"session_id": "D", "title": "CLI run", "session_source": "cli", "raw_source": "cli", "source_tag": "cli",
          "is_cli_session": True, "profile": "a", "message_count": 5, "updated_at": 100, "last_message_at": 100},
@@ -837,8 +865,14 @@ def test_5305_nested_leaf_under_orphaned_subagent_of_cli_parent_stays_reachable(
         _sub("L", "O", "subagent", updated_at=102),
     ]
     out = _render_tabs(json.dumps(rows))
+    # The chain resolves end to end: all three rows in the CLI tab, nested.
+    assert out["cli"] == [
+        {"sid": "D", "orphan": False},
+        {"sid": "O", "orphan": False},
+        {"sid": "L", "orphan": False},
+    ], out
+    assert out["webui"] == [], out
     assert _sids(out["webui"]).count("L") + _sids(out["cli"]).count("L") == 1, out
-    assert {"sid": "L", "orphan": True} in out["webui"], out
 
 
 def test_5305_nested_chain_under_project_filtered_webui_parent_follows_parent():
@@ -924,7 +958,11 @@ def test_5305_leaf_of_compressed_subagent_parent_resolves_in_all_profiles_payloa
         r.setdefault("profile", "a")
     out = _render_tabs(json.dumps(rows, default=str))
     assert _sids(out["webui"]).count("L") + _sids(out["cli"]).count("L") == 1, out
-    assert {"sid": "O_tip", "orphan": True} in out["webui"], out
+    # W is a CLI session, so O_tip (its subagent) travels into the CLI tab with it
+    # (#8141); L names the pre-compression segment O_old, which is absent from the
+    # payload and carries no tip hint, so its lineage cannot be resolved and it stays
+    # an openable orphan in the WebUI tab -- reachable, not suppressed.
+    assert {"sid": "O_tip", "orphan": False} in out["cli"], out
     assert {"sid": "L", "orphan": True} in out["webui"], out
 
 
