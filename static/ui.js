@@ -27200,8 +27200,11 @@ function renderTray(){ // non-media files use paperclip chip
       chip.innerHTML=`${li('paperclip',12)} ${esc(f.name)} <button title="${t('remove_title')}">${li('x',12)}</button>`;
     }
     chip.querySelector('button').onclick=()=>{
-      // Revoke blob URL to avoid memory leak before removing
+      // Revoke blob URL to avoid memory leak before removing.
+      // Drop this File's upload result too, so a removed chip does not pin it.
       if(chip.dataset.blobUrl) URL.revokeObjectURL(chip.dataset.blobUrl);
+      if(typeof _forgetUploadedFile==='function')_forgetUploadedFile(f);
+      if(typeof _forgetDepartingUploadDraftHoldingFile==='function')_forgetDepartingUploadDraftHoldingFile(S.session&&S.session.session_id,f);
       S.pendingFiles.splice(i,1);renderTray();
     };
     tray.appendChild(chip);
@@ -27302,6 +27305,7 @@ async function uploadPendingFiles(options={}){
   const sessionId=String(opts.sessionId||(S.session&&S.session.session_id)||'');
   if(!pendingFiles.length||!sessionId)return[];
   const clearPending=!(opts&&opts.clearPending===false);
+  const onFileUploaded=typeof opts.onFileUploaded==='function'?opts.onFileUploaded:null;
   const names=[];let failures=0;
   _uploadPendingFilesUpdateProgress(sessionId,0);
   const total=pendingFiles.length;
@@ -27319,10 +27323,14 @@ async function uploadPendingFiles(options={}){
       const data=await res.json();
       if(data.error)throw new Error(data.error);
       if(isArchive){
-        names.push({name: data.dest, path: data.dest, extracted: data.extracted});
+        const uploadedArchive={name: data.dest, path: data.dest, extracted: data.extracted};
+        names.push(uploadedArchive);
+        if(onFileUploaded)onFileUploaded(f,uploadedArchive);
         if(typeof loadDir==='function'&&_uploadPendingFilesCurrentSession(sessionId))loadDir(S.currentDir||'.');
       }else{
-        names.push({name: data.filename, path: data.path, mime: data.mime, size: data.size, is_image: !!data.is_image});
+        const uploadedFile={name: data.filename, path: data.path, mime: data.mime, size: data.size, is_image: !!data.is_image};
+        names.push(uploadedFile);
+        if(onFileUploaded)onFileUploaded(f,uploadedFile);
       }
     }catch(e){failures++;setStatus(`\u274c ${t('upload_failed')}${f.name} \u2014 ${e.message}`);}
     _uploadPendingFilesUpdateProgress(sessionId,Math.round((i+1)/total*100));
