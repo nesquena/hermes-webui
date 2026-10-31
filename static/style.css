@@ -6654,6 +6654,14 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
 .msg-row[data-role="assistant"]:hover .msg-foot-with-usage .msg-actions {
   opacity: 1;
 }
+/* Touch devices cannot hover: keep the timestamp and actions of a footer that
+   carries usage or a model label visible there (#8287 UX gate). */
+@media (hover: none), (max-width: 640px) {
+  .msg-foot-with-usage .msg-time,
+  .msg-foot-with-usage .msg-actions {
+    opacity: 1;
+  }
+}
 
 /* Hide footer while editing to keep the edit bar the only footer-level affordance */
 .msg-row[data-editing="1"] .msg-foot { display: none; }
