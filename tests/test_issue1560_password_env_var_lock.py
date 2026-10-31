@@ -107,7 +107,7 @@ def test_panels_js_hides_disable_auth_button_when_env_locked():
 # ── i18n: keys present in all 10 locales (static/i18n.js) ──────────────────
 
 
-LOCALES = ['en', 'it', 'ja', 'ru', 'es', 'de', 'zh', 'zh-Hant', 'pt', 'ko']
+LOCALES = ['en', 'it', 'ja', 'ru', 'es', 'de', 'zh', 'zh-Hant', 'pt', 'ko', 'th']
 
 
 def _split_locales(i18n_src):
