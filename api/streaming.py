@@ -11213,6 +11213,29 @@ def _dedupe_replayed_context_messages(
                 _append_rows = (
                     _strip_replayed_prefix(previous_context, _head) + _tail
                 )
+            # #6310 (nesquena-hermes 2026-08-14 contract, acceptance slice
+            # 2026-10-31): the proven suffix is this turn's own output, and
+            # the display merge normalizes a stale-merged current row inside
+            # the SAME slice through ``_strip_stale_user_merge_from_messages``
+            # (#4089 funnels both merges through that one rule). Appending
+            # the suffix VERBATIM here persisted the Agent's
+            # ``<stale>\n\n<current>`` repair row into ``context_messages``
+            # while the visible transcript showed the clean prompt: the two
+            # surfaces no longer retained the same current-row identity, and
+            # every later settle carried the merged pollution as historical
+            # context (the model-facing rows diverged from what the user saw
+            # answered). Run the one shared repair rule on the rows about to
+            # be appended, scoped exactly like the display merge — new-turn
+            # rows only, so already-committed history is never rewritten.
+            # The repaired row is a deep copy that keeps the result-owned
+            # integer id, so context and display share one id for it.
+            if msg_text and previous_user_tail:
+                _append_rows = _strip_stale_user_merge_from_messages(
+                    _append_rows,
+                    msg_text,
+                    previous_user_tail,
+                    previous_context=previous_context,
+                )
             _protected = {
                 _message_replay_key(_row)
                 for _row in _append_rows
