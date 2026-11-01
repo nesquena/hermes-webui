@@ -113,9 +113,14 @@ def test_exact_issue_shape_is_visible_without_mutation(monkeypatch, native_confi
 
 
 @pytest.mark.parametrize("legacy", [None, {}, "bad", [], [None, 3]])
-def test_explicit_empty_or_malformed_legacy_does_not_enable_native(legacy, native_config):
+def test_empty_or_malformed_legacy_has_no_winners_and_keeps_native(legacy, native_config):
+    """#8685: an empty or malformed legacy list has no legacy entries to win, so native
+    providers stay readable exactly as with no legacy key. v0.52.544's catalog and routing
+    showed and routed them, and the Agent scans ``providers:`` before the legacy list."""
+    without = config._custom_provider_entries(copy.deepcopy(native_config))
+    assert [config._custom_provider_slug_from_name(e["name"]) for e in without] == [PID]
     native_config["custom_providers"] = legacy
-    assert config._custom_provider_entries(native_config) == []
+    assert config._custom_provider_entries(native_config) == without
 
 
 def test_mixed_legacy_wins_by_identity_but_unrelated_native_survives(native_config):
@@ -476,14 +481,28 @@ def test_malformed_native_store_is_empty(native):
     assert config._custom_provider_entries({"providers": native}) == []
 
 
+def _consumer_views(monkeypatch, data):
+    bind(monkeypatch, data)
+    config.invalidate_models_cache()
+    views = {
+        "cards": [(c["id"], c.get("display_name"), c.get("has_key")) for c in custom_cards()],
+        "live": sorted(m["id"] for m in live()["models"]),
+    }
+    for name, catalog in (("cold", config._static_models_catalog_without_live_probes()),
+                          ("refreshed", config.get_available_models(force_refresh=True))):
+        groups = [g for g in catalog["groups"] if g["provider_id"] == PID]
+        views[name] = [(g["provider"], [m["id"] for m in g["models"]]) for g in groups]
+    return views
+
+
 @pytest.mark.parametrize("legacy", [[], None, "malformed"])
-def test_legacy_suppression_is_consistent_across_read_consumers(monkeypatch, native_config, legacy):
+def test_empty_legacy_shows_native_consistently_across_read_consumers(monkeypatch, native_config, legacy):
+    """#8685: cards, live models and both catalogs see the native provider exactly as with no legacy key."""
+    without = _consumer_views(monkeypatch, copy.deepcopy(native_config))
+    assert len(without["cards"]) == 1
+    assert len(without["cold"]) == len(without["refreshed"]) == 1
     native_config["custom_providers"] = legacy
-    bind(monkeypatch, native_config)
-    assert not custom_cards()
-    assert live()["models"] == []
-    for catalog in (config._static_models_catalog_without_live_probes(), config.get_available_models(force_refresh=True)):
-        assert not any(g["provider_id"] == PID for g in catalog["groups"])
+    assert _consumer_views(monkeypatch, native_config) == without
 
 
 def test_same_display_label_does_not_merge_distinct_identities(native_config):
@@ -853,7 +872,9 @@ def test_only_configured_preserves_nonactive_native_group(
     before = copy.deepcopy(data)
     bind(monkeypatch, data)
     assert config.resolve_model_provider("@openai:gpt-5.4") == ("gpt-5.4", "openai", None)
-    visible = state in {"native", "mixed"}
+    # #8685: an empty or malformed legacy list has no legacy winners, so the native
+    # group stays visible as in the "native" state (v0.52.544 showed it too).
+    visible = state != "disabled"
     assert len(custom_cards()) == int(visible)
     for catalog in (config._static_models_catalog_without_live_probes(), config.get_available_models(force_refresh=True)):
         ids = [g["provider_id"] for g in catalog["groups"]]
@@ -867,8 +888,7 @@ def test_only_configured_preserves_nonactive_native_group(
         with pytest.raises(config.CustomProviderRouteError):
             routes._resolve_agent_connection_bundle(PID, "synthetic-ambient", "https://ambient.invalid/v1", {})
     else:
-        # Explicit legacy suppression is a presentation rule, not a rewrite of
-        # the raw runtime selector. Mixed legacy still owns the complete bundle.
+        # Mixed legacy still owns the complete bundle; otherwise the native record does.
         bundle = config.resolve_custom_provider_bundle(PID)
         assert (bundle["base_url"], bundle["api_key"]) == (owned_url, owned_key)
         runtime = routes._resolve_agent_connection_bundle(PID, "synthetic-ambient", "https://ambient.invalid/v1", {})
@@ -1124,11 +1144,11 @@ def test_underscore_and_hyphen_native_owners_stay_distinct(monkeypatch, outbound
 
 
 @pytest.mark.parametrize("legacy", [[], None, "bad"])
-def test_suppressed_read_view_keeps_the_owned_record_credential_and_context(monkeypatch, legacy):
-    """An empty/malformed legacy list hides native rows from the read view, but
-    the keyed ``providers['custom:<slug>']`` record still owns the route: its key
-    clears a paused wakeup after an exhausted pool key, and its context window
-    and key reach the context lookup (#8448 release gate; master resolved both)."""
+def test_empty_legacy_read_view_keeps_the_owned_record_credential_and_context(monkeypatch, legacy):
+    """With an empty/malformed legacy list the keyed ``providers['custom:<slug>']`` record
+    is in the read view (#8685) and owns the route: its key clears a paused wakeup after an
+    exhausted pool key, and its context window and key reach the context lookup (#8448
+    release gate; master resolved both)."""
     owned = "custom:owned"
     data = {
         "model": {"provider": "openai", "default": "other"},
@@ -1150,7 +1170,7 @@ def test_suppressed_read_view_keeps_the_owned_record_credential_and_context(monk
         lambda pid: [dict(exhausted)] if pid == owned else [],
     )
     config.invalidate_credential_pool_cache(owned)
-    assert config._custom_provider_entries(data) == []
+    assert [config._custom_provider_slug_from_name(e["name"]) for e in config._custom_provider_entries(data)] == [owned]
 
     assert providers._get_provider_api_key(owned) == "fixture-replacement"
     assert providers.provider_has_usable_credential(owned)

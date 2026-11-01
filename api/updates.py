@@ -174,17 +174,7 @@ def _apply_fetch_failure_message(fetch_out: str, network_message: str) -> str:
     return f'fetch failed: {detail}'
 
 
-def _restart_blocker_snapshot() -> dict:
-    """Return the WebUI-owned chat work that should block a self-restart.
-
-    A Gateway run is excluded only once its resumable run identity is saved
-    (#7293): it runs inside the Hermes Gateway, survives a WebUI restart and is
-    reattached afterwards. Legacy Gateway relays and Gateway launches still
-    awaiting that handoff are counted (see run_drain.webui_owned_active_runs).
-    """
-    from api import run_drain
-
-    runs = run_drain.webui_owned_active_runs()
+def _blocker_snapshot_from_runs(runs: list[dict]) -> dict:
     stream_ids = [r['stream_id'] for r in runs if r.get('registered_stream')]
     run_ids = [r['stream_id'] for r in runs]
     return {
@@ -196,6 +186,20 @@ def _restart_blocker_snapshot() -> dict:
     }
 
 
+def _restart_blocker_snapshot() -> dict:
+    """Return the WebUI-owned chat work that should block a self-restart.
+
+    A Gateway run is excluded only once its resumable run identity is saved
+    (#7293): it runs inside the Hermes Gateway, survives a WebUI restart and is
+    reattached afterwards. Legacy Gateway relays and Gateway launches still
+    awaiting that handoff are counted (see run_drain.webui_owned_active_runs).
+    An update of the Agent counts those runs too (``_update_blocker_snapshot``).
+    """
+    from api import run_drain
+
+    return _blocker_snapshot_from_runs(run_drain.webui_owned_active_runs())
+
+
 def _active_stream_count() -> int:
     """Return the current in-memory chat stream count.
 
@@ -203,6 +207,26 @@ def _active_stream_count() -> int:
     ``_restart_blocker_snapshot()`` so detached worker runs also block updates.
     """
     return int(_restart_blocker_snapshot().get('active_streams') or 0)
+
+
+def _update_blocker_snapshot(target: str) -> dict:
+    """Return the chat work that should block an update of ``target`` (#8660).
+
+    ``_restart_blocker_snapshot`` leaves out Gateway runs whose resumable run
+    identity is saved, because they survive a WebUI restart. An Agent update
+    also cycles the Gateway that executes them
+    (``_ensure_gateway_restart_for_agent_update``), which ends them, so for
+    ``target == 'agent'`` every live run blocks, as every active run did
+    before #7293. That is one pass over the registries with no durability
+    check (``run_drain.all_active_runs``), so no run can be counted twice or
+    missed while its durable mark changes. A WebUI-only update keeps the
+    #7293 exemption.
+    """
+    if target != 'agent':
+        return _restart_blocker_snapshot()
+    from api import run_drain
+
+    return _blocker_snapshot_from_runs(run_drain.all_active_runs())
 
 
 def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict:
@@ -503,7 +527,7 @@ def _run_fenced_update(target: str, force_active_runs: bool, run) -> dict:
     """
     from api import run_drain
 
-    blocker_snapshot = _restart_blocker_snapshot()
+    blocker_snapshot = _update_blocker_snapshot(target)
     if blocker_snapshot.get('restart_blocked') and not force_active_runs:
         return _restart_blocked_response(target, blocker_snapshot)
 
@@ -512,7 +536,7 @@ def _run_fenced_update(target: str, force_active_runs: bool, run) -> dict:
     try:
         token = run_drain.hold_run_admission(f'update:{target}', force=bool(force_active_runs))
         try:
-            blocker_snapshot = _restart_blocker_snapshot()
+            blocker_snapshot = _update_blocker_snapshot(target)
             if blocker_snapshot.get('restart_blocked'):
                 if not force_active_runs:
                     return _restart_blocked_response(target, blocker_snapshot)
