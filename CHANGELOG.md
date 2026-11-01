@@ -79,6 +79,8 @@
 
 ### Fixed
 
+- **The model picker's Fallback badge marks only the configured model.** When a fallback was a provider-qualified id such as `codex/gpt-6.1-sol`, every sibling from the same provider that shared the model name (`any/gpt-6.1-sol`, `auto/gpt-6.1-sol`, …) also showed "Fallback N", and one of them could take the configured model's place in the Configured section. The badge lookup now strips only the row's own provider prefix, so vendor namespaces stay part of the model's identity. A provider-qualified id typed through Custom model ID keeps its Primary or Fallback badge. Thanks @henricop, and @joyoner for the report. (#8730, fixes #8725)
+
 - **The #4856 mobile-transcript guards no longer break when unrelated CSS is added to the mobile stylesheet block.** Both guards looked for the mobile `.messages-inner` rule in a fixed number of characters after the start of the `@media(max-width:640px)` block (8,000 and 12,000). Adding about 1,200 characters of rules earlier in that block made the first one fail although the rule was unchanged. They now read the whole block with a shared scanner (`tests/_css_blocks.py`) that skips braces in comments, strings, escapes and unquoted `url()`, and they still fail if `overflow-x:hidden` returns, `overflow-y:auto` is added, or the rule leaves the mobile block. Test-only; no runtime change. (#8710)
 
 - **The Gateway Status card shows a single separator after "Last active".** Most translations of the label already end in a colon, and the card added another, so it read "Last active: : <date>". The card now keeps the colon the translation chose (a full-width "：" in Chinese, " : " in French) and adds ": " only to a label without one. (#8635, closes #8621, thanks @happy5318)
