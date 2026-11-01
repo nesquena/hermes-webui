@@ -30,9 +30,16 @@ multi-line docstring still reads as a one-line summary in the panel.
 
 ## What the panel shows
 
-Each row carries the script name, its size, its last-modified time, and the
-description extracted from its leading text. Clicking a row opens the script
-in a read-only viewer.
+Each row carries the script name and the description extracted from its
+leading text. The panel is a listing: it has no viewer, and scripts are edited
+on the server. `/api/scripts/list` also returns each script's size and
+last-modified time, and `/api/scripts/raw` serves a script's content, for
+clients that want them.
+
+Hardlinked files (link count above one) are not listed or served, the same
+rule as the wiki browser. A listing walks at most 10,000 directory entries and
+describes at most 1,000 scripts; a listing cut short is flagged
+`"truncated": true`.
 
 A profile with no `scripts/` directory and a profile with an empty one are
 different states: the panel says which one it is rather than showing an
