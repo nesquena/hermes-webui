@@ -28327,6 +28327,32 @@ def _start_regeneration_stream_locked(
             "goal_related": goal_related,
         }
         worker_kwargs["regeneration"] = True
+        # #7170: same dispatch-time session-profile config snapshot as the
+        # normal /api/chat/start path — the detached gateway worker must not
+        # resolve config on its own thread (ambient profile leak).
+        from api.gateway_chat import (
+            _gateway_session_api_key,
+            _gateway_session_base_url,
+            _gateway_session_env,
+            _gateway_session_owner_cfg,
+        )
+
+        worker_kwargs["session_cfg"] = _gateway_session_owner_cfg(s)
+        # #7170 round-2 finding 1: capture the session-owning profile's
+        # Gateway API key + base URL on this same request thread, exactly like
+        # the normal /api/chat/start dispatch. Without the capture this launch
+        # site falls back to the AMBIENT env pair inside the worker — on a
+        # keyed Gateway (launcher-provided key in the process env) that either
+        # fails auth or sends the wrong credential to the wrong endpoint.
+        worker_kwargs["session_api_key"] = _gateway_session_api_key(s)
+        worker_kwargs["session_base_url"] = _gateway_session_base_url(s)
+        # #7170 round-10 P1: capture the session-owning profile's environ so
+        # scoped capability probes inside the worker (the LM Studio reasoning
+        # probe's ``LM_API_KEY``, read via the thread-local env) find the
+        # session profile's own credential instead of probing keyless (401)
+        # on the worker thread — same isolation contract as the api_key /
+        # base_url captures above.
+        worker_kwargs["session_env"] = _gateway_session_env(s)
     else:
         worker_kwargs = _local_agent_worker_kwargs(
             model_provider=model_provider,
@@ -28990,6 +29016,58 @@ def _start_chat_stream_for_session(
                         from api.gateway_chat import _mark_gateway_run_starting
 
                         _mark_gateway_run_starting(stream_id)
+                        # #7170: capture the session-owning profile's config
+                        # snapshot at dispatch time (the request thread) and hand
+                        # it to the detached gateway worker, which uses it for
+                        # per-model reasoning override selection and
+                        # model-capability coercion. The worker cannot resolve
+                        # config itself — a detached thread has no per-request
+                        # profile context and would read the process-global
+                        # profile instead.
+                        from api.gateway_chat import (
+                            _gateway_session_api_key,
+                            _gateway_session_base_url,
+                            _gateway_session_env,
+                            _gateway_session_owner_cfg,
+                        )
+
+                        worker_kwargs["session_cfg"] = _gateway_session_owner_cfg(s)
+                        # #7170 round-7 P1: capture the session-owning profile's
+                        # Gateway API key on this same request thread.
+                        # ``_gateway_api_key()`` reads ``os.environ``, which holds
+                        # the AMBIENT process-active profile's key — pairing that
+                        # with the session's gateway URL either fails auth or sends
+                        # the wrong credential to the wrong endpoint. The worker
+                        # prefers the captured value and only falls back to the env
+                        # read for legacy direct callers. A failure here lands in
+                        # the surrounding launch try/except, which already runs the
+                        # same cleanup contract as a thread-start failure.
+                        worker_kwargs["session_api_key"] = _gateway_session_api_key(s)
+                        # #7170 round-7 follow-up (greptile 2026-09-26 P1
+                        # "Gateway key crosses endpoints"): capture the
+                        # session-owning profile's Gateway base URL on this same
+                        # request thread. ``_gateway_base_url`` reads
+                        # ``os.environ`` first, which holds the AMBIENT
+                        # process-active profile's
+                        # ``HERMES_WEBUI_GATEWAY_BASE_URL`` — pairing that with the
+                        # session's captured API key either fails auth or sends the
+                        # session profile's bearer token to the wrong gateway. The
+                        # worker prefers the captured ``session_base_url`` and only
+                        # falls back to ``_gateway_base_url(cfg)`` for legacy
+                        # direct callers.
+                        worker_kwargs["session_base_url"] = _gateway_session_base_url(s)
+                        # #7170 round-10 P1: capture the session-owning profile's
+                        # environ on this same request thread so scoped capability
+                        # probes inside the worker (the LM Studio reasoning
+                        # probe's ``LM_API_KEY``, read via the thread-local env)
+                        # find the session profile's own credential. The worker
+                        # thread has no thread-local env of its own and would
+                        # otherwise probe keyless (401) and fail the capability
+                        # check. Built exactly like the api_key/base_url capture
+                        # (ambient loaded-profile keys stripped, session profile's
+                        # filtered runtime env overlaid), so profile isolation
+                        # holds — A's key is never given to B.
+                        worker_kwargs["session_env"] = _gateway_session_env(s)
                     thr = threading.Thread(
                         target=worker_target,
                         args=(s.session_id, msg, model, workspace, stream_id, attachments),

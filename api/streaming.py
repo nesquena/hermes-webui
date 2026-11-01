@@ -64,6 +64,10 @@ from api.config import (
     warm_models_catalog_provenance_if_cold,
     load_settings,
     parse_reasoning_effort,
+    configured_reasoning_effort_for_model,
+    # The shared resolver delegates model-specific clamping to
+    # coerce_reasoning_effort_for_model; keep that contract visible here for
+    # the WebUI wiring check and future readers.
     resolve_session_reasoning_effort,
     effective_session_reasoning_effort,
     _main_model_request_overrides,
@@ -15934,13 +15938,25 @@ def _run_agent_streaming(
                     )
                 except Exception:
                     logger.warning("isolated reasoning config read failed; using session config", exc_info=True)
-                _effort = resolve_session_reasoning_effort(
-                    _cfg,
-                    session_effort=_session_effort,
-                    model_id=resolved_model,
-                    provider_id=resolved_provider,
-                    base_url=resolved_base_url,
-                )
+                if _session_effort is None:
+                    # No session-owned effort (a legacy chat, or a profile that
+                    # configures none): the per-model agent.reasoning_overrides
+                    # entry still wins over the global agent.reasoning_effort
+                    # here (#7170), then the model-capability clamp applies.
+                    _effort = configured_reasoning_effort_for_model(
+                        _cfg,
+                        model_id=resolved_model,
+                        provider_id=resolved_provider,
+                        base_url=resolved_base_url,
+                    )
+                else:
+                    _effort = resolve_session_reasoning_effort(
+                        _cfg,
+                        session_effort=_session_effort,
+                        model_id=resolved_model,
+                        provider_id=resolved_provider,
+                        base_url=resolved_base_url,
+                    )
                 _reasoning_config = parse_reasoning_effort(_effort)
             except Exception:
                 _reasoning_config = None
