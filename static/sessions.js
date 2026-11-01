@@ -11564,8 +11564,12 @@ function renderSessionListFromCache(){
     if(s.done_at!==null&&s.done_at!==undefined&&s.done_at!==''){
       const doneEl=document.createElement('span');
       doneEl.className='session-done-badge';
+      // A glyph, not the localised word: the pill spent horizontal room in the
+      // title row on a state that reads at a glance anyway. The label survives
+      // as aria-label and the timestamp as tooltip, so meaning is not lost.
       const doneLabel=t('session_done_badge');
-      doneEl.textContent=doneLabel;
+      doneEl.textContent='✓';
+      doneEl.setAttribute('aria-label',doneLabel);
       const doneMs=Number(s.done_at)*1000;
       doneEl.title=t('session_done_tooltip', _formatRelativeSessionTime(doneMs));
       titleRow.appendChild(doneEl);

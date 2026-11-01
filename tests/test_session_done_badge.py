@@ -57,6 +57,7 @@ class FakeEl {{
     this.children = [];
   }}
   appendChild(child) {{ this.children.push(child); return child; }}
+  setAttribute(name, value) {{ this[name] = value; this.attrs = Object.assign(this.attrs || {{}}, {{ [name]: value }}); }}
 }}
 const document = {{ createElement: (tag) => new FakeEl(tag) }};
 function t(key, ...args) {{
@@ -82,6 +83,7 @@ for (const s of {json.dumps(rows)}) {{
     className: c.className,
     textContent: c.textContent,
     title: c.title,
+    ariaLabel: c.attrs ? c.attrs['aria-label'] : undefined,
   }})) }});
 }}
 console.log(JSON.stringify(out));
@@ -98,7 +100,9 @@ def test_row_with_done_at_renders_the_badge():
     assert len(out[0]["children"]) == 1, out
     badge = out[0]["children"][0]
     assert badge["className"] == "session-done-badge"
-    assert badge["textContent"] == "Done"
+    # A glyph in the row; the localised word survives as the accessible name.
+    assert badge["textContent"] == "✓"
+    assert badge["ariaLabel"] == "Done"
     assert badge["title"] == "Marked done 2h ago"
     assert out[0]["isDone"] is True
 
