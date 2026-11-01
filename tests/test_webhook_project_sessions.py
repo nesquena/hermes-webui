@@ -108,9 +108,9 @@ def test_webhook_rows_get_webhook_project_id(monkeypatch, tmp_path):
     db.write_text("", encoding="utf-8")
 
     monkeypatch.setattr(models, "read_importable_agent_session_rows", lambda *_a, **_kw: [_agent_row()])
-    monkeypatch.setattr(models, "get_last_workspace", lambda: tmp_path)
-    monkeypatch.setattr(models, "ensure_cron_project", lambda: "cron-project-id")
-    monkeypatch.setattr(models, "ensure_webhook_project", lambda: "webhook-project-id", raising=False)
+    monkeypatch.setattr(models, "get_last_workspace", lambda profile=None: tmp_path)
+    monkeypatch.setattr(models, "ensure_cron_project", lambda **_kw: "cron-project-id")
+    monkeypatch.setattr(models, "ensure_webhook_project", lambda **_kw: "webhook-project-id", raising=False)
     monkeypatch.setattr(models.Session, "load_metadata_only", lambda _sid: None)
 
     rows = models._load_cli_sessions_uncached(tmp_path, db, _cli_profile=None, cron_project_limit=False)
@@ -137,9 +137,9 @@ def test_webhook_second_pass_keeps_older_project_rows_available(monkeypatch, tmp
         return []
 
     monkeypatch.setattr(models, "read_importable_agent_session_rows", fake_read_rows)
-    monkeypatch.setattr(models, "get_last_workspace", lambda: tmp_path)
-    monkeypatch.setattr(models, "ensure_cron_project", lambda: "cron-project-id")
-    monkeypatch.setattr(models, "ensure_webhook_project", lambda: "webhook-project-id", raising=False)
+    monkeypatch.setattr(models, "get_last_workspace", lambda profile=None: tmp_path)
+    monkeypatch.setattr(models, "ensure_cron_project", lambda **_kw: "cron-project-id")
+    monkeypatch.setattr(models, "ensure_webhook_project", lambda **_kw: "webhook-project-id", raising=False)
     monkeypatch.setattr(models.Session, "load_metadata_only", lambda _sid: None)
 
     rows = models._load_cli_sessions_uncached(tmp_path, db, _cli_profile=None, cron_project_limit=False)

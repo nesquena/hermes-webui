@@ -6,6 +6,8 @@ import time
 import unittest.mock
 from pathlib import Path
 
+import pytest
+
 import api.models as models
 from api.agent_sessions import (
     is_cli_session_row,
@@ -149,7 +151,9 @@ def _make_desktop_stub_db(path: Path, *, include_role: bool) -> None:
             title TEXT,
             model TEXT,
             started_at REAL NOT NULL,
-            message_count INTEGER DEFAULT 0
+            message_count INTEGER DEFAULT 0,
+            ended_at REAL,
+            end_reason TEXT
         );
         CREATE INDEX idx_sessions_started ON sessions(started_at);
         CREATE TABLE messages (
@@ -165,10 +169,10 @@ def _make_desktop_stub_db(path: Path, *, include_role: bool) -> None:
     conn.execute(
         """
         INSERT INTO sessions
-        (id, source, title, model, started_at, message_count)
-        VALUES ('desktop-stub', 'desktop', 'Connection stub', 'test-model', ?, 2)
+        (id, source, title, model, started_at, message_count, ended_at, end_reason)
+        VALUES ('desktop-stub', 'desktop', 'Connection stub', 'test-model', ?, 4, ?, 'client_disconnect')
         """,
-        (started,),
+        (started, started + 1),
     )
     if include_role:
         conn.executemany(
@@ -176,6 +180,8 @@ def _make_desktop_stub_db(path: Path, *, include_role: bool) -> None:
             [
                 ("stub-assistant", "assistant", "hello", started),
                 ("stub-tool", "tool", "result", started + 0.1),
+                ("stub-assistant-2", "assistant", "follow-up", started + 0.2),
+                ("stub-tool-2", "tool", "result", started + 0.3),
             ],
         )
     else:
@@ -184,6 +190,8 @@ def _make_desktop_stub_db(path: Path, *, include_role: bool) -> None:
             [
                 ("stub-message-1", "assistant-shaped legacy row", started),
                 ("stub-message-2", "tool-shaped legacy row", started + 0.1),
+                ("stub-message-3", "legacy follow-up", started + 0.2),
+                ("stub-message-4", "legacy response", started + 0.3),
             ],
         )
     conn.commit()
@@ -205,12 +213,40 @@ def test_role_aware_state_db_hides_desktop_stub_without_user_turn(tmp_path):
     assert not any(item["session_id"] == "desktop-stub" for item in results)
 
 
-def test_legacy_state_db_without_message_roles_fails_closed_for_desktop(tmp_path):
+def test_legacy_state_db_without_message_roles_keeps_desktop_history(tmp_path):
     results = _load_desktop_stub(tmp_path, include_role=False)
-    assert not any(item["session_id"] == "desktop-stub" for item in results)
+    assert any(item["session_id"] == "desktop-stub" for item in results)
 
 
-def test_legacy_state_db_without_messages_table_fails_closed_for_desktop(tmp_path):
+@pytest.mark.parametrize(
+    ("first_role", "visible"), [(None, True), ("assistant", False), ("USER", True)]
+)
+def test_desktop_role_fallback_is_per_session(tmp_path, first_role, visible):
+    db = tmp_path / "state.db"
+    _make_desktop_stub_db(db, include_role=True)
+    with sqlite3.connect(db) as conn:
+        # A legacy history must not make a neighboring known-role stub visible.
+        conn.execute(
+            "INSERT INTO sessions SELECT 'known-stub', source, title, model, "
+            "started_at, message_count, ended_at, end_reason FROM sessions"
+        )
+        conn.execute(
+            "INSERT INTO messages SELECT 'known-' || id, 'known-stub', role, "
+            "content, timestamp FROM messages"
+        )
+        conn.execute("UPDATE messages SET role = NULL WHERE session_id = 'desktop-stub'")
+        conn.execute("UPDATE messages SET role = ? WHERE id = 'stub-assistant'", (first_role,))
+    with (
+        unittest.mock.patch("api.models.get_claude_code_sessions", return_value=[]),
+        unittest.mock.patch("api.models.ensure_cron_project", return_value="cron-project-id"),
+    ):
+        results = models._load_cli_sessions_uncached(tmp_path, db, None)
+    assert any(item["session_id"] == "desktop-stub" for item in results) is visible
+    assert not any(item["session_id"] == "known-stub" for item in results)
+
+
+@pytest.mark.parametrize("message_count", [0, 2])
+def test_legacy_state_db_without_messages_table_uses_message_count(tmp_path, message_count):
     db = tmp_path / "state.db"
     conn = sqlite3.connect(str(db))
     conn.executescript(
@@ -230,9 +266,9 @@ def test_legacy_state_db_without_messages_table_fails_closed_for_desktop(tmp_pat
         """
         INSERT INTO sessions
         (id, source, title, model, started_at, message_count)
-        VALUES ('desktop-stub', 'desktop', 'Connection stub', 'test-model', ?, 2)
+        VALUES ('desktop-stub', 'desktop', 'Connection stub', 'test-model', ?, ?)
         """,
-        (time.time(),),
+        (time.time(), message_count),
     )
     conn.commit()
     conn.close()
@@ -243,7 +279,7 @@ def test_legacy_state_db_without_messages_table_fails_closed_for_desktop(tmp_pat
     ):
         results = models._load_cli_sessions_uncached(tmp_path, db, None)
 
-    assert not any(item["session_id"] == "desktop-stub" for item in results)
+    assert any(item["session_id"] == "desktop-stub" for item in results) is (message_count > 0)
 
 
 def test_sessions_js_classifies_raw_desktop_payload_as_interactive():

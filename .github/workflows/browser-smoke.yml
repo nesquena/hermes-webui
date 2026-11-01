@@ -21,6 +21,16 @@ on:
   push:
     branches: [master]
 
+# One run per pull request per workflow: a new push to a PR cancels this workflow's run for
+# the superseded head, queued or in progress, so a burst of PR updates does not hold every
+# later run in the shared runner queue. Only a PR run's FIRST attempt joins the PR group: a
+# re-run keeps its original (possibly superseded) head and must never cancel or replace the
+# latest head's run. Re-runs, pushes to master, tag pushes and manual dispatches get a unique
+# group (the run id), so they are never cancelled or held back.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.run_attempt == '1' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == '1' }}
+
 jobs:
   changes:
     runs-on: ubuntu-latest
@@ -90,7 +100,16 @@ jobs:
     # so this required context can never wedge; step guards degrade to full smoke.
     if: ${{ always() }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Sized for the slow-mirror case, not the median. `playwright install --with-deps`
+    # runs apt-get on every job (setup-python's pip cache does not cover it). Usually
+    # that takes ~25 s, but some runners get an Ubuntu mirror serving ~25-65 kB/s
+    # (slowest completed fetch: 16.8 MB in 9 min 25 s, 29.8 kB/s, job 119972540773),
+    # and the install step then takes 7-10 minutes. On 2026-10-22 the old 10-minute
+    # limit cut about 7% of this required check's jobs, some inside the install step
+    # and the rest in the gates that followed an install of 7 to 9.3 minutes (census
+    # in PR #8494). 30 minutes leaves room for the ~3.5 min of gates after a ~26 MB
+    # fetch at rates down to about 17 kB/s.
+    timeout-minutes: 30
     steps:
       - name: Docs-only short-circuit
         if: needs.changes.outputs.docs_only == 'true'
@@ -120,3 +139,27 @@ jobs:
       - name: Run browser smoke
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_smoke.py
+
+      - name: Run new-chat focus gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_new_chat_focus.py
+
+      - name: Run project-picker keyboard gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_project_picker_keyboard.py
+
+      - name: Run approval Enter-shortcut gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_approval_enter_shortcut.py
+
+      - name: Run session-row activation gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_session_row_activation.py
+
+      - name: Run file-tree keyboard gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_file_tree_keyboard.py
+
+      - name: Run terminal screen-reader-mode gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_terminal_screen_reader_mode.py

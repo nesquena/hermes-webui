@@ -79,6 +79,8 @@ function extractFunc(name){
 // ── module-scope state the extracted functions close over ──
 let _clarifyPendingBySession = new Map();
 let _approvalPendingBySession = new Map();
+let _clarifyPromptGenerationBySession = new Map();
+let _approvalPromptGenerationBySession = new Map();
 let _clarifySessionId = null;
 let _approvalSessionId = null;
 let S = { session: null };
@@ -109,6 +111,10 @@ function hideApprovalCard(force){
 
 // ── real functions under test ──
 eval(extractFunc('_promptActiveSessionId'));
+eval(extractFunc('_clarifyPromptGeneration'));
+eval(extractFunc('_bumpClarifyPromptGeneration'));
+eval(extractFunc('_approvalPromptGeneration'));
+eval(extractFunc('_bumpApprovalPromptGeneration'));
 eval(extractFunc('_clarifyPromptBelongsToActiveSession'));
 eval(extractFunc('_rememberClarifyPending'));
 eval(extractFunc('_clearClarifyPendingForSession'));

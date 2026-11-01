@@ -1,5 +1,88 @@
 # Hermes Web UI: Browser Testing Plan
 
+## Desktop session sidebar compatibility (#7415)
+
+Run `./scripts/test.sh -q tests/test_desktop_session_sidebar_visibility.py`.
+The suite uses disposable SQLite databases and executes the shipped browser
+classifier in Node. It covers Desktop source normalization, ended histories,
+known assistant/tool-only stubs, missing role columns, per-session NULL roles,
+and the message-count fallback when no messages table exists.
+
+For a manual cross-client check, create a conversation in Hermes Desktop and
+open WebUI on the same profile. The interactive session list should show the
+conversation with a `Desktop` source label. Empty sessions and sessions with
+known roles but no user turn stay hidden. Legacy Desktop histories with positive
+message counts remain visible when role metadata is absent or entirely NULL;
+that fallback does not prove their messages contain a user turn. This is a
+read-side projection change, not a database migration or live-streaming change.
+
+## User-bounded legacy tool anchors (#8427)
+
+Run `./scripts/test.sh -q -rs tests/test_issue8427_tool_anchor_user_boundary.py`.
+The dependency-free helper cases execute the real `ui.js` functions in Node;
+missing Node is reported as a skip. If `jsdom` is already installed (or available
+through `NODE_PATH`), six additional cases exercise the real settled renderer
+across all three activity modes with Thinking on/off. They check three synthetic
+turns, all legacy tool metadata sources, final prose, tool ownership, collapsed
+Worklogs, and re-rendering. Missing jsdom skips only those six cases. No new npm
+install is required for the helper checks:
+
+```bash
+node tests/fixtures/issue8427_tool_anchor.cjs helpers
+node tests/fixtures/issue8427_tool_anchor.cjs renderer compact_worklog true
+```
+
+For native-browser visibility evidence, serve a disposable checkout on a fresh
+localhost origin, not a running WebUI, and open
+`/tests/fixtures/issue8427_tool_anchor.html`. For example:
+`python3 -m http.server 8789 --bind 127.0.0.1` from the checkout root. Use a fresh
+browser profile. Repeat at desktop and narrow widths with
+`?mode=compact_worklog&thinking=true`, `transparent_stream`, and
+`hide_all_activity`, with `thinking=true` and `false`. The page sets
+`document.documentElement.dataset.result` to `PASS` or `FAIL` and reports the
+stage/result in its header. All three final answers must remain ordinary visible
+prose after explicitly expanding, collapsing, and re-rendering activity. The native
+browser fixture clicks the actual disclosure summaries; the Node driver calls
+those same handlers directly because jsdom does not execute inline listeners.
+The page records the actual viewport dimensions for screenshot evidence. These
+checks do not certify OS-level pointer delivery. The helper may borrow visible prose
+across tool rows only within the same user turn; its own prose/reasoning owner
+still wins.
+
+This portable fixture loads production JS/CSS without `boot.js`, uses synthetic
+in-memory state and a minimal transcript shell, and disables `fetch`; it does not
+exercise API loading, live streaming, persisted preferences, or provider behavior.
+The Node driver additionally stubs layout observers, animation frames, and scroll
+APIs; jsdom assertions are not real-browser evidence. For staged screenshots,
+`issue8427.prepare(mode, showThinking)`, `issue8427.render()`,
+`issue8427.expand(true)`, `issue8427.collapse(true)`, and
+`issue8427.render(true)` expose the same flow.
+
+## Project-picker deferred repaint handoff regression
+
+Expand a parent with fork-child menus, open a picker, defer a list repaint,
+then reopen the parent's action menu. Its own dots must receive active/ARIA
+state and Escape focus, never the child's. On touch layouts, long-press must
+retain the rebuilt row as its anchor through release. Repeat for a fork child
+and the connected topbar title.
+
+## Project-picker gesture deferral and context-point menus
+
+While the picker is open, a choice refresh that arrives between `pointerdown`
+and `pointerup` is deferred: the pressed row and the picker's place survive
+until the gesture settles, so the tap's click — dispatched in a later task than
+`pointerup` on touch — still selects the pressed project. The deferred refresh
+applies right after that click; a gesture that ends without one (pointercancel,
+a release outside the picker) applies it after a short grace period.
+
+A menu or picker anchored on a zero-sized trigger (the ⋮ trigger hidden on
+touch-primary layouts, a repainted trigger) borrows the visible row's geometry;
+when the interaction recorded a context point, it opens like an OS context
+menu — left edge at the pointer, shifted left only to stay inside the viewport.
+`tests/test_project_picker_viewport_position.py` pins both rules in the Node
+fixture; `tests/browser_project_picker_keyboard.py` covers the keyboard, mouse
+and touch flows in real Chromium.
+
 > This document is for manual browser testing by you or by a Claude browser agent.
 > It covers user-facing features of the UI across current releases.
 > Each section is written as a step-by-step test procedure with expected outcomes.
@@ -14,6 +97,50 @@
 > Local regression focus: verify that a previously closed workspace panel stays visually closed from first paint through boot completion on desktop refresh; there should be no brief open-then-close flash.
 
 ---
+
+## Cancelled-journal recovery combinations
+
+Run `./scripts/test.sh tests/test_cancel_recovery_properties.py tests/test_cancel_restart_journal_recovery.py`.
+Use isolated `HERMES_HOME`, `HERMES_BASE_HOME`, `HERMES_CONFIG_PATH`, and
+`HERMES_WEBUI_STATE_DIR` directories. Seed `782920261003` selects 128 of 768
+lifecycle combinations and covers all 156 pairwise axis combinations. The tests
+exercise the real eager/deferred checkpoint, Stop, journal, restart, cold/cached
+load, and next-send history builders. They preserve native image and tool payloads,
+reject ambiguous or malformed ownership, and check rollback and repeated-load
+idempotence, with capacity cases up to 17 hooks and 64 tool cards. This coverage
+does not certify external provider execution or filesystem crash durability.
+
+Run `./scripts/test.sh tests/test_cancelled_history_real_producers.py` for independent Agent-flush versus WebUI-settlement clocks, later Gateway turns after a live Stop, legacy integer/fractional Stop owners, and tool-card owners on cold/cached paginated HTTP reads. A terminal Stop excludes only its proved raw execution block, including when it retained live partial output; proved later Gateway exchanges remain in display and next-send history. Ambiguous clock/content occurrences still prevent prefix restoration. Sidecar-only Stop tool-card regressions repeat full, tail, and earlier-page reads through the production handler and real HTTP for missing SQLite, empty SQLite, and native-image mirror rows fully filtered from display. Owners use exact saved message objects, including distinct assistants with identical prose; invisible and missing owners remain excluded, and saved card metadata stays unchanged. Snapshot-parent/non-cumulative child Stop coverage runs in a separate HTTP server process to exercise lineage cache store/hit paths and repeated full, tail, earlier and owner-absent pages, with missing, empty and nonempty SQLite. Cache row copies retain independently stored exact-owner provenance; reconciliation composes that map before pagination without mutating saved indices. The worker stubs write real SQLite rows and exercise production worker/HTTP paths; they do not certify a real provider call.
+
+## Context replay matching
+
+Run `./scripts/test.sh -q tests/test_context_replay_scaling.py tests/test_large_replay_settlement.py tests/test_issue1217_transcript_compaction.py tests/test_stale_user_context_contamination.py tests/test_context_message_stable_ids.py tests/test_issue6751_api_content_agent_replay.py`.
+The context suite compares serialized output against the former greedy algorithm
+over seeded adversarial sequences, checks summary identity boundaries and all
+three reconciliation branches, and counts normalization/key comparisons for
+disjoint, periodic and near-miss sequences. Operation budgets, not wall-clock
+thresholds, are the regression gate. Benchmark no-overlap histories separately
+from correctness checks; include the shared helper and its reconciliation caller,
+and report row count, interpreter and base revision with timings. Use synthetic
+rows or isolated copies, never production session state.
+
+## Session-scoped media authorization
+
+Run `./scripts/test.sh tests/test_media_inline.py tests/test_media_session_preview_auth.py`.
+For files outside global media roots, only exact `MEDIA:` paths emitted by
+`assistant` or `tool` messages can grant access through the owning session.
+User, system, developer, unknown, blank, null, and missing roles must not grant
+access. The route-level role matrix covers CSV, diff, patch, Excalidraw, and
+HTML; no-session requests stay denied. The new text-artifact types remain
+download-only with `nosniff`, even when `inline=1` is requested. Hard-denied
+state and secret paths stay denied regardless of message role or session token.
+
+Run `./scripts/test.sh tests/test_media_preview_session_lifetime.py` for lazy
+preview identity across a session switch. CSV, Excalidraw, PDF, and HTML action
+and fallback URLs retain the session and snapshot captured for their fetch,
+including requests started without a session. The Node harness executes the
+real loaders with deferred responses and PDF-ready/timeout callbacks; it does
+not certify browser rendering or real CDN availability.
 
 ## Static JS runtime lint (brick-class regression guard)
 
@@ -35,6 +162,80 @@ npm run lint:runtime
 # or directly:
 npx eslint --no-config-lookup -c eslint.runtime-guard.config.mjs "static/**/*.js"
 ```
+
+## Assignment redaction preconditions
+
+Run `./scripts/test.sh tests/test_redaction_assignment_preconditions.py tests/test_security_redaction.py tests/test_issue5204_redactor_memoization_contract.py tests/test_redact_large_string_cache.py`.
+The assignment patterns require a literal `=`. The focused regression counts
+their calls through the actual redactor, including large URL-bearing text that
+passes the public-text prefilter, and checks masking and occurrence-aware code
+literal restoration. The agent compatibility cases use synthetic modern and
+legacy redactors; they do not certify an installed Agent registry. The fallback
+checks the post-credential-pass text, while literal restoration checks the
+original input. Other credential passes remain active without `=`. Cache policy,
+runtime pattern registration, and public API redaction settings are unchanged.
+Call counts prove omitted impossible scans, not latency, RSS, or responsiveness.
+
+Run `./scripts/test.sh tests/test_redaction_benchmark_statistics.py` for the
+benchmark's statistical regression. It executes the real benchmark entry point
+with deterministic clocks and synthetic redactors, then checks that console and
+JSON speedups both use the median of per-pair ratios. Its fixed samples make this
+measure differ from the ratio of timing medians; it does not test wall-time speed.
+
+Run a synthetic, uncached direct-function comparison against an explicit Git base:
+
+```bash
+.venv/bin/python scripts/benchmark_redaction_assignments.py \
+  --base-ref bfe40ffba8a09b6342189cd50c55535220a30d48 \
+  --agent-dir /path/to/hermes-agent --rounds 12 --output benchmark.json
+```
+
+Example measured on October 13, 2026, Python 3.11.15 / Linux x86_64, AMD EPYC
+9754 host, with actual Agent redactor source byte-identical to official commit
+`3f2abce7f468cf194bb7f9ff9c6a033b075d834c`. Two
+separate 12-round runs, one untimed warmup per version/shape, alternating
+base/candidate order. Input generation and function construction are excluded
+from timing. The raw paired wall/CPU samples are in
+[`scripts/redaction_assignment_benchmark_samples.csv`](scripts/redaction_assignment_benchmark_samples.csv).
+
+| Synthetic input | Base wall median (ms) | Candidate wall median (ms) | Median paired speedup |
+|---|---:|---:|---:|
+| uppercase_url_64k_no_equals | 210.533 | 20.152 | 10.30x |
+| uppercase_url_256k_no_equals | 878.037 | 76.576 | 10.95x |
+| ordinary_url_64k_no_equals | 23.679 | 20.062 | 1.18x |
+| uppercase_url_64k_has_equals | 323.537 | 341.480 | 1.00x |
+| ordinary_url_64k_equals_first | 26.771 | 26.792 | 1.00x |
+| ordinary_url_64k_equals_last | 26.581 | 26.461 | 1.01x |
+| small_url_1k_no_equals | 0.376 | 0.316 | 1.19x |
+| small_assignment | 0.046 | 0.046 | 1.00x |
+
+Each row contains 24 pairs. Paired speedup is the median of each pair's
+base/candidate ratio, not the ratio of the two pooled medians. The host is shared:
+for the equals-containing uppercase case the separate run ratios changed
+direction; 12 pairs favored each version, and median paired delta was +0.068ms.
+No stable benefit is claimed for that case. All timed outputs matched; two
+seeded 500-case differential batches also matched. These synthetic shapes
+establish mechanism and input-dependent function cost, not production input
+frequency, request p95, RSS, browser responsiveness or a resolved incident.
+Large strings remain uncached; no Agent redaction pass is bypassed.
+
+## Native raster redaction boundary
+
+Run `./scripts/test.sh tests/test_mpf_jpeg_redaction.py tests/test_raster_data_uri_redaction.py tests/test_security_redaction.py`.
+Native `messages[*].content[*].image_url.url` raster data may bypass text
+credential scanning only after complete container validation. MPF JPEGs require
+an APP2 MP Index with bounded TIFF entries, contiguous declared JPEG extents,
+and a complete SOF/scan/EOI sequence in each image. Gaps, overlaps, malformed
+frames, and trailing bytes fall back to text redaction. Image-shaped tool
+metadata does not acquire this exemption. This is structural validation, not
+pixel decoding or secret detection inside image metadata/pixels.
+
+`tests/fixtures/multipicture.jpg` contains two Pillow-generated 8x8 solid-color
+frames (red and blue), not private photographs; generation instructions live in
+`tests/test_mpf_jpeg_redaction.py`. The tests cover both TIFF byte orders and
+credential text appended after the final EOI. Helper timing improvements do
+not by themselves prove browser or shared-server responsiveness; verify those
+separately with a real conversation and concurrent requests.
 
 ## Python lint gate (ruff) — forward-looking, new-code-only
 
@@ -91,6 +292,195 @@ environment before launching the server, needs no secrets, and does not drive a
 real model (it verifies the app *loads and initializes* cleanly — the brick class
 that breaks the page for everyone).
 
+The same job then runs `tests/browser_new_chat_focus.py`, on the same agent-free
+setup: with every `/api/sessions` response held, New Chat, Cmd/Ctrl+K and the
+typed `/new` command must focus the composer (and `/new` show its toast), and
+the first message typed with no conversation open must be sent; each reads the
+session list once before that, and shows the new row once the list is released
+(#7936, #7996, #8004). Run it locally with `python tests/browser_new_chat_focus.py`.
+
+It also runs `tests/browser_project_picker_keyboard.py`, which imports two
+conversations and creates three projects through the API and then drives both
+"Move to project" pickers. The single-conversation picker is opened from the ⋮
+menu with the keyboard: its rows must be buttons in a named menu, focus must
+open on the conversation's current project, ArrowDown/ArrowUp must wrap and
+Home/End jump, Tab must close it, Escape must close it and return focus to the
+conversation's ⋮ trigger (also after a sidebar repaint replaced that trigger,
+after a right-click open, and for a parent row whose expanded fork has a
+trigger of its own), and Enter, Space and a click must each send the move. The
+batch picker must open on its first row and return focus to the selection
+bar's Move button. "No project" and "+ New project" must follow the interface
+language; in a touch context, with the drawer open, every row must be at least
+44px tall, and so must every row of the ⋮ menu that opens the picker, which on
+a phone on its side must stay on the screen, scroll to its last row, and reveal
+the row a key moves focus to. That last part is checked with the menu opened by
+the script's own call and keys sent by the browser, and on two paths of real
+input: a right click on the row followed by End and the screen turned from
+390x844 to 844x390 (a viewport resize, not a rotated device), after which the
+row that has focus must still be inside the menu's box; and a touch (browser
+touch events) held on the row until the menu opens and lifted beside it, after
+which focus must still be in the menu and End must reach its last row without
+scrolling the conversation list; and a touch held on a row in the middle of the
+screen, where the menu opens over the finger (390x844 and 844x390, and a fork's
+row at 844x390), and lifted there, after which no menu row may have been
+clicked, no request sent, the menu must still be open with focus in it, and a
+tap on a menu row or on the fork must then work; and, at 1280x800 with the
+mouse as the main pointer and touch events as well (a touch laptop, the only
+place a row's ⋮ button and touch meet), a long press on a conversation and on
+a fork, Escape, the mouse resting on the row, and then a tap on the row's ⋮
+button, which must open the menu. Three more paths of real input follow: at
+1440x900 a right click on a row and then keys only, where Tab from the first
+row must reach the second (and focus the script then blurs must come back to
+it), End the last, and three Tabs from there must leave the menu and reach a
+control of the page, with the menu still open and Escape closing it; a pen (the
+browser's pen pointer, which sends pointer events and a click and no touch
+events) held on a conversation at 390x844 and on a fork at 844x390 where the
+menu opens over it, and lifted, after which the menu must still be open with
+focus in it, no menu row clicked and no request sent, and the next pen tap must
+run the menu row it lands on, or open the fork, while a pen pressed on a fork
+at 390x844, dragged off it at once and lifted on another row must neither click
+nor open the fork, and a pen pressed on a conversation or a fork, moved off its
+row in one step and lifted before the long press is due, must get no ⋮ menu
+afterwards, and a finger or a pen held on a conversation or a fork at 844x390
+until the menu opens, then dragged right, left or up and lifted, must send no
+request (a swipe to the right archives, one to the left asks to delete), leave
+no row drawn swiped or dragged, open no dialog, and leave the menu open on the
+row that was pressed; and one conversation's picker left open while another
+row's ⋮ menu is opened, by a long press at 390x844 and by a right click at
+1440x900, after which the picker must be gone and Escape must leave neither
+open. A hardware keyboard on a phone, a real rotation, a real finger and a real
+stylus are not checked. In a long list the focused row must be inside
+the picker's box, or, in the batch picker, scrolled onto the screen by the
+conversation list. With a mouse on the light theme, a keyboard-focused row's
+ring must be the skin's `--accent-text` at 3:1 or more against the picker
+(checked for the single picker, on a project row and on "+ New project", which
+must be drawn at full opacity while it has focus, on the default skin and on
+the three skins with the palest accents, Terracotta, Sienna and Neon Paint, and
+for the batch picker's first row on the default skin; other skins are not
+checked), a row under the pointer must show the skin's hover wash, and
+"+ New project" must keep its accent tint; the dark theme must keep the ring,
+the wash and the 70% "+ New project" it had.
+With forty more conversations and fifteen projects, a mouse wheel over the open
+batch picker must still scroll the conversation list, and on four phone sizes
+every row of the single picker must be tappable wherever in the list it was
+opened, with the batch picker scrolling inside its cap; on the two landscape
+sizes the same must hold from a parent conversation whose open forks make its
+row taller than the room beside it. A list the screen has room for must show
+whole without scrolling: below its anchor, else above it, else slid up over it
+from the bottom of the screen; and an open picker must follow a shorter window
+or a turned tablet, also after a sidebar repaint, keep the row the keyboard is
+on inside its box when the resize caps its height, and close, without handing
+focus back, when the resize hides the sidebar it was opened from: a phone
+turned either way, or a window narrowed until the sidebar collapses or becomes
+a closed drawer (#8044). Run it locally with
+`python tests/browser_project_picker_keyboard.py`; add `--screenshots DIR` to
+write the open picker at 390x844, 820x1180, 844x390 and 1440x900.
+
+Last, it runs `tests/browser_session_row_activation.py`, which imports three
+conversations and opens them from the sidebar without a pointer press. Tab
+from the conversation filter must reach a conversation title, every row title
+must be a native button, with `aria-current="page"` on the open
+conversation's title. Mouse events without pointer events (how Firefox performs
+a screen reader's activate command, e.g. NVDA in browse mode), a bare
+`element.click()`, and Enter on the focused title must each open the
+conversation. A sidebar repaint restores the same previously focused title;
+it must not steal focus from the composer or another control. After Enter opens a
+conversation, focus must be on that row's rebuilt title, so the next Tab reaches
+its ⋮ trigger; Enter on one title and then another before the first has loaded
+must leave focus on the second (open) conversation's title, never the first; on
+a phone, focus must not stay inside the closed drawer. A mouse
+press on a title must not park focus there (a refresh deferred while the user
+interacts must apply once the mouse leaves), and double-click must still rename.
+Dragging from a title onto the row's ⋮ trigger must not open the conversation.
+A held (auto-repeated) Enter must not open it again, Enter on a title must not answer a visible tool
+approval card (the document-level "Enter = Allow once" shortcut), and a
+right-click on a row must not swallow the next keyboard activation. A real
+mouse click and a touch tap must still open it exactly once, and a mouse drag
+along a row must not open it. Mixed input, in Chromium touch contexts at
+1440x1000 and 390x844 with touches sent through the native input pipeline: after
+a short horizontal swipe (no compatibility click) the first Enter, or a screen
+reader's activate command, about 200 ms later must open another conversation,
+and so must Enter right after a tap or a mouse click. Enter on the row's
+⋮ trigger must open its menu, not the conversation; and in selection mode the
+title must not be a link. A click or tap on another title during a rename must
+commit and end the rename; with the name unchanged, the tap must not also open
+the other conversation (as on master). Clicking a title during a project rename
+must save the project name, and on the 1440x1000 touch run a tap on a title must
+move focus out of the focused search box. A long press must open the row's
+action menu with focus on its first item, and releasing the finger must leave
+focus there. The checks run in Chromium, and also in Firefox and
+WebKit when their Playwright builds are installed and launch
+(`python -m playwright install --with-deps firefox webkit`); a missing or
+unlaunchable engine is reported as skipped.
+Run it locally with `python tests/browser_session_row_activation.py`.
+After that, it runs `tests/browser_terminal_screen_reader_mode.py`, which opens the
+composer terminal in a temp workspace (a real local shell) and toggles the
+"Screen reader mode" checkbox in Settings > Preferences. With the preference
+off the terminal must have no xterm.js accessibility tree; checking the box
+must add the tree to the same open terminal, including output printed before
+the switch; unchecking it must remove the tree again; and after a reload with
+the preference on, a new terminal must start with the tree. It uses Firefox
+too when its Playwright build is installed. The page loads xterm.js from
+cdn.jsdelivr.net, so the gate needs network access. Run it locally with
+`python tests/browser_terminal_screen_reader_mode.py`. Manual check with a
+screen reader (for example NVDA + Firefox): with the preference on, typed
+input and new terminal output are read, and the visible rows can be read in
+browse mode. Known limitation (xterm.js 5.3, upstream issue #3679): with the
+mode on, xterm ignores input events that arrive without a keydown, so text from
+dictation, some IMEs and Android soft keyboards may not reach the shell. Real
+key presses work in both modes.
+
+It then runs `tests/browser_file_tree_keyboard.py`, which starts the server with
+a temporary default workspace and drives the Files tab from the keyboard in
+Chromium, and in Firefox when Playwright's build is installed. The container
+must be `role="tree"` with a name, every row a `treeitem` with `aria-level`,
+folders with `aria-expanded` and files without it, names reading "x folder",
+"y file, 1.5k" (name first, then the kind and the size column's text) or
+"z symlink"
+(a symlink also describes its target), and the arrow
+glyph and icon hidden from screen readers. The tree must be a single Tab stop: Tab reaches one row and the next
+Tab leaves the tree, and the delete buttons are out of the Tab order, named
+"Delete <entry>". The workspace has enough files for the tree to scroll: the
+scrolling container must not be a Tab stop of its own (Firefox made it one),
+and with focus on the container itself an arrow key must move to the tab-stop
+row and Home/End to the ends; Enter there must enter the tree too, never
+answer a visible tool approval card (with nothing focused, Enter still does).
+A mouse click on blank tree space focuses the container, and an arrow key then
+enters the tree. An auto-repeated Enter or Space on a row must not open or
+toggle it. The focused row must keep a solid outline under
+forced colors. Up/Down, Home and End move between rows without wrapping; Right
+expands a folder and then enters it; Left goes to the parent and collapses;
+focus stays on the toggled folder across the re-render, and a second Right
+while a slow listing loads must not collapse the folder again. An empty folder
+shows an inert placeholder row that keeps focus across a re-render. Enter on a
+file opens its preview exactly once and Space toggles a folder. A background
+re-render must keep the tab stop and never move focus; the end-of-turn
+`loadDir('.')`, which renders once without folder listings and again with
+them, must leave focus on a nested row it was on, while a key pressed between
+the two renders wins. Folder listings in these refresh checks wait on
+deterministic barriers (a wrapped `fetch`) instead of timers. The carried
+position must survive a folder listing that renders the tree in between, and
+must give way to any action on the row the partial render fell back to: moving
+off it and back, Right to expand it, a click on it, or its context menu. Keys
+the tree ignores (Ctrl alone, PageDown, a page shortcut) do not count. Focus that left the
+tree in the gap (Shift+Tab, or moved directly) is not taken back, but the tab
+stop still returns to the nested row. With two overlapping refreshes, in either
+completion order, the first one that shows the row again restores it once.
+That also holds when the newer refresh's partial render has lost the fallback
+row too, and when the first refresh to complete failed to load its listing. A
+refresh that is abandoned (the tree generation moved on), or that refreshes a
+new tree generation, never carries the old tree's position. When a row and both its neighbours disappear (its folder
+collapsed), focus goes to the nearest folder above it. A mouse click on a row makes
+it the tab stop. Delete on a row asks for confirmation: cancelling keeps the
+file with focus back on the row, confirming removes it and moves focus to the
+next row, also for two deletes in a row while a folder is expanded. Keys typed into the inline rename input (Home, End, arrows, Space,
+Enter) must stay in the input; Enter there renames without opening anything
+and leaves focus on the renamed row. When the tree empties (an empty folder),
+focus moves to the Files tab and the container drops its tree role and name.
+Run it locally with
+`python tests/browser_file_tree_keyboard.py`; add `--screenshots DIR` to write
+the Files tab with keyboard focus on a row at 1440x900 and 390x844.
+
 ## Public conversation lifecycle gate
 
 `tests/browser_conversation_lifecycle.py` adds a public deterministic
@@ -136,12 +526,72 @@ HISTORICAL_HYDRATION_TEST_BITE=break-tool-link \
   python tests/browser_historical_transcript_hydration.py
 ```
 
-The dedicated `Conversation lifecycle (informational)` workflow runs the current
-proof rows (`normal`, `terminal-error`, and `historical-transcript-hydration`) and
-stays non-blocking while the public
-matrix expands to additional behavior rows. The maintainer's private QA harness
-remains broader; later public slices will add session switching, reconnect/replay,
-cancellation, compression, and recovery.
+The dedicated `Conversation lifecycle (informational)` workflow keeps the existing
+proof rows (`normal`, `terminal-error`, and `historical-transcript-hydration`)
+non-blocking while the public matrix expands. The Chromium
+`reconnect-scene-redraw` row does **not** allow failures: it exercises the real
+`loadSession` reconnect path and fails the workflow on a regression. Required
+merge checks remain a maintainer-controlled repository setting.
+The maintainer's private QA harness remains broader; later public slices will
+add cancellation, compression, and recovery coverage.
+
+### Approval first-click gate
+
+`tests/browser_approval_first_click.py` covers the approval card's transport-id
+identity (#7091). It drives the real `showApprovalForSession`, `respondApproval`,
+and `dismissApprovalCard` in Chromium against a real WebUI server on isolated
+state, and seeds approvals through the loopback-only
+`/api/approval/inject_test` hook:
+
+- S1: a stale transport id on the rendered card still resolves on the first click.
+- S2: a queued successor A to B never inherits A's click; B needs a fresh click.
+- S3: dismiss with a stale id re-renders the head first and does not resurrect it.
+- S4: a successor that never rendered must produce no `/api/approval/respond`
+  request at all.
+- S5: two queued approvals with identical content (same command, description and
+  patterns, different `request_id`) are still distinct identities: clicking A
+  posts nothing, B stays pending, and only a fresh click resolves B. Identical
+  content alone must never let a click answer the approval the user never saw.
+
+```bash
+pip install -r requirements.txt playwright
+python -m playwright install chromium
+python tests/browser_approval_first_click.py
+```
+
+Set `APPROVAL_ARTIFACT_DIR` to keep the screenshots and server log. The
+`approval-first-click` row in the conversation lifecycle workflow is blocking,
+so a regression in the response-id reconciliation fails CI instead of being
+swallowed.
+
+The same identity rules are pinned headlessly in
+`tests/test_gateway_yolo_webui_compat.py`: an entry with no `request_id` and no
+producer token fails closed when the head's transport id differs (no respond
+POST), still answers when the transport id matches (the server-minted id is its
+own proof, so the card cannot re-render forever), and the id-equality
+short-circuit still respects the post-await session fence for both respond and
+dismiss.
+
+### Active-session reconnect redraw gate
+
+`tests/browser_reconnect_scene_redraw.py` is an opt-in deterministic browser
+gate for reconnecting to a running session with a large Anchor activity scene.
+It uses an isolated temporary server/home and fixture SSE events—no agent,
+provider credentials, or production state. By default it checks Chromium and
+WebKit, desktop and 390px viewports, and all three activity display modes:
+
+```bash
+pip install playwright
+python -m playwright install chromium webkit
+python tests/browser_reconnect_scene_redraw.py
+```
+
+`TOOL_COUNT`, `BROWSERS`, and `MODES` narrow the matrix. `MEASURE_BASELINE=1`
+records an unoptimized baseline without enforcing the redraw ceiling;
+`METRICS_FILE` saves JSON metrics and `SCREENSHOT_DIR` saves generated-fixture
+screenshots. This gate tests page reconstruction, journal-cursor resume, and
+subsequent fixture SSE updates. It does not test a real provider/network or PWA
+service-worker cache behavior.
 
 ### Streaming reader intent
 
@@ -150,6 +600,23 @@ read earlier content, including a small scroll gesture immediately after a live
 render. Subsequent streamed content must not pull the reader back to the bottom.
 Use the jump-to-latest control to resume following the live tail; after that,
 new streamed content should remain visible at the bottom.
+
+The authoritative behavior contract — including the input-tail re-pinning rules
+(scrolling back down to the tail you were aiming at re-pins immediately, even
+while the stream keeps growing) and the transcript's overscroll suppression —
+lives in
+[`docs/architecture/transcript-auto-follow-scroll.md`](docs/architecture/transcript-auto-follow-scroll.md).
+Verify it per that document's manual checklist across wide desktop, ordinary
+laptop width, and narrow/mobile viewport widths (touch: swipe up releases
+follow, swipe back down to the tail re-pins, and no bottom-edge vibration is
+visible while pinned during streaming), matching the responsive-state
+expectations in [`docs/UIUX-GUIDE.md`](docs/UIUX-GUIDE.md).
+
+Automated regression coverage for this section:
+`tests/test_fast_stream_shrink_clamp_unpin.py`,
+`tests/test_issue5637_stale_anchor_guard.py` (the `test_live_render_queue_*`
+ownership tests), `tests/test_2111_ios_pwa_bottom_scroll_stutter.py`, and
+`tests/test_mobile_layout.py` (the `.messages` overscroll suppression).
 
 
 `tests/test_static_js_runtime_lint.py` runs this automatically when eslint is present
@@ -317,6 +784,52 @@ EXPECT:
   - The dropdown updates to "Gemini 2.5 Pro"
   - Switching away and back to the conversation restores the same model in the footer selector
 FAIL: Dropdown shows the wrong active model after a session switch, or sending uses a stale model.
+
+### T3.2a: Reasoning Effort Reflects Active Conversation
+SETUP: Two sessions using the same reasoning-capable model.
+STEPS:
+  1. In session A, select Low reasoning effort.
+  2. In session B, select High reasoning effort.
+  3. Switch A → B → A using the sidebar.
+  4. Repeat at desktop width and at a narrow/mobile width using the mobile composer configuration action.
+  5. Reload the page on each session and send a turn.
+EXPECT:
+  - The reasoning chip/action reads Low in session A and High in session B after every switch and reload.
+  - The next turn in each session uses that session's restored effort.
+  - The model chip remains unchanged when both sessions use the same model.
+FAIL: The reasoning control keeps the previously viewed session's value, resets after reload, or the next turn uses a stale effort.
+
+Repeat with different models: use a fast model with High/XHigh/Max in session A
+and a flagship model with Low in session B, selecting efforts supported by each
+model. Both the model and reasoning controls must restore together on desktop
+and narrow/mobile after A → B → A and reload. Capture before/after screenshots
+of both sessions for PR review.
+
+Configuration regressions are covered by `tests/test_session_reasoning_effort.py`:
+new-session model/effort defaults honor an external `HERMES_CONFIG_PATH` for root.
+With request-local context set to a named profile, a root/external config override
+must not replace that profile's model or effort; an override inside its own home
+still applies. Gateway legacy and runs API requests use the named session
+profile's reasoning default when no stored override exists. An explicit session
+override wins over both the named and process/root profile values. With distinct
+root/named Gateway URLs and keys, the initial request's URL, Authorization header,
+and retained stream endpoint must all belong to the session's profile, matching
+the endpoint used for reattachment, Stop, and approval replies while the stream
+holds it. (Once that entry is cleaned up, Stop and approval fall back to the
+ambient endpoint, as on master.)
+
+Same-chat ordering is covered by `tests/test_reasoning_effort_save_race.py` too:
+pick High then Low in one chat with the first save delayed. Low must not be sent
+until High settles, and the chip must end on Low. If the newest save fails, the
+chip must re-read the stored value.
+
+Delayed-save regressions are covered by `tests/test_reasoning_effort_save_race.py`.
+With a throttled connection, change A's effort through the dropdown or
+`/reasoning high`, then switch to B before the save returns. B must keep its own
+effort after the response and routine topbar sync; returning to A must fetch its
+saved effort. Repeat on desktop and mobile, and with a model, provider, or profile
+change while the save is pending. A save in an unchanged context must still update
+both desktop and mobile labels, even if an older reasoning GET returns afterward.
 
 ### T3.3: Context Badge Shares Footer Space Cleanly
 SETUP: Active session with at least one completed response.
@@ -1874,16 +2387,43 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 
 ### Sprint 14: Visual Polish + Workspace Ops
 - Create a mermaid code block in a response. Verify diagram renders inline.
+- Send the same prompt twice so two replies contain an identical mermaid block. Verify both diagrams render
+  (neither falls back to a `mermaid` code block), on desktop and at phone width, and again after a page reload.
 - Message timestamps visible next to role labels (hover for full date).
 - Double-click a file in workspace panel to rename. Enter saves, Escape cancels.
 - Create a folder via folder icon in workspace header.
 - Add `#tag` to session title. Verify tag chip appears in sidebar. Click to filter.
+  - At 390px with touch input, the first tap filters without opening the conversation
+    or moving the chip as the timestamp changes. Verify long-press still opens actions.
+  - With a conversation's project picker open, click a tag on another conversation.
+    The picker closes and the tag filter repaints immediately without opening that conversation.
+  - Open the project context menu or composer model menu, then click a conversation
+    title: the menu closes and the conversation opens once. Also check Enter/Space,
+    J/K navigation, input-field protection, desktop hover, and keyboard focus.
 - Archive a session. Verify it disappears. Toggle "Show archived" to see it.
 
 ### Sprint 15: Session Projects
 - Click "+" in project bar to create a project. Type name, Enter.
 - Click a project chip to filter sessions.
-- Hover a session → click folder icon → assign to project via picker.
+- Session ⋮ menu → Move to project (long-press the row on touch) → assign via picker.
+- With a long project list, verify the picker stays within the visible viewport
+  at desktop and narrow widths; `+ New project` stays pinned at the bottom edge
+  while the list scrolls inside the picker.
+- Keep the picker open while resizing the window or changing the mobile visual
+  viewport (keyboard/browser chrome/zoom). Verify both horizontal edges and the
+  height cap follow the visible area, including nonzero viewport offsets.
+- Scroll the session list while the picker is open: it must follow its row,
+  then close when the trigger leaves the list's visible rectangle. Scrolling
+  inside the picker must keep it open and preserve access to the final item.
+- Re-render/remove the owning row without resizing or scrolling: the picker
+  must close immediately. Selection, outside click, and opening a replacement
+  must also release its listeners, observer, and queued animation frame.
+- Automated geometry/lifecycle regression:
+  `./scripts/test.sh tests/test_project_picker_viewport_position.py -q`.
+- While the picker is open, trigger a list refresh between press and release
+  (another conversation's pin or title update): the tap/click must still move
+  the session to the pressed project. A remote rename must also paint
+  immediately while the list is hovered or focused, with the picker kept.
 - Verify colored left border appears on assigned session.
 - Double-click project chip to rename. Right-click to delete.
 - Code blocks have a "Copy" button. Click → "Copied!" feedback.
@@ -1941,6 +2481,12 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 - Attach a file with no text → send button appears.
 - Send message → button disappears after textarea clears.
 - While agent is responding → send button hidden.
+
+### Touch attachment chooser
+- On a touch phone or tablet, Attach opens Take photo and Choose files with icons in portrait and landscape.
+- Tab out of the chooser, tap outside it, or press Escape to dismiss it. Selecting either option returns focus to Attach.
+- On a desktop or a tablet with a fine pointer, Attach opens the file picker directly and has no menu ARIA attributes.
+- Run `./scripts/test.sh tests/test_issue6942_mobile_camera_choice.py tests/test_issue6942_mobile_camera_choice_render.py -q` for the focused keyboard, capability, and localized render matrix.
 
 ### Sprint 21: Mobile Responsive + Docker
 - Open on mobile viewport (<640px): hamburger icon visible in topbar.
@@ -2009,3 +2555,22 @@ Bridged CLI sessions:
 *Regression gate: tests/test_regressions.py*
 *Run: ./scripts/test.sh*
 *Source: <repo>/*
+
+### Media preview access errors (#7254)
+
+Verify CSV, PDF and HTML previews at desktop and 390px widths, including light
+theme. HTTP 401/403/404 must show the escaped filename and localized error in
+`diff-inline-error` without a download link. Network/format failures keep their
+format-specific fallback and download link. A 401 directs the user to reload.
+
+### MEDIA boundary regression checks (#6923)
+
+- Bare local paths and remote path-only URLs preserve every trailing byte,
+  including `.`, `,`, `;`, `:`, `!`, and `?`; those bytes are ambiguous and
+  may be part of the actual filename or URL. Punctuation detaches only when a
+  matching Markdown or quote wrapper proves that it is outside the token.
+- Query and fragment values retain all punctuation, including punctuation-only values.
+- Render `MEDIA:_`, `MEDIA:__`, and `MEDIA:*`: these are local filenames.
+  Matching empty wrappers such as `**MEDIA:**` must remain prose.
+- Recheck settled and safe/fade streaming output across callback boundaries.
+  Automated coverage: renderer behavior, MEDIA consumer parity, and SMD stream tests.

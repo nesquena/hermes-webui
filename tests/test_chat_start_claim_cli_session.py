@@ -151,9 +151,9 @@ def test_chat_start_no_longer_bare_404_on_keyerror():
 def test_get_session_route_uses_shared_synthesiser():
     """The GET KeyError path must also delegate to the same helper."""
     src = ROUTES_PY.read_text(encoding="utf-8")
-    # Find the /api/session GET block (not /api/sessions).
+    # Find the /api/session GET handler (extracted to _handle_session_get).
     block = re.search(
-        r'if parsed\.path == "/api/session":.*?return j\(handler, \{"session": public_session_projection\(sess\)\}\)',
+        r'def _handle_session_get\(.*?return j\(handler, \{"session": public_session_projection\(sess\)\}\)',
         src,
         re.DOTALL,
     )
@@ -185,7 +185,7 @@ def test_get_session_preserves_cli_read_only_flag():
     sets to True for BOTH the explicit AND the source-refused
     refusal paths."""
     block = re.search(
-        r'if parsed\.path == "/api/session":.*?return j\(handler, \{"session": public_session_projection\(sess\)\}\)\)?',
+        r'def _handle_session_get\(.*?return j\(handler, \{"session": public_session_projection\(sess\)\}\)\)?',
         ROUTES_PY.read_text(encoding="utf-8"),
         re.DOTALL,
     )
@@ -533,7 +533,7 @@ def test_helper_uses_get_last_workspace_when_cwd_missing(
     # No CLI metadata; state.db cwd is empty; fall through to the helper's
     # last-resort workspace lookup.
     monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata",
-                        lambda _sid: {})
+                        lambda _sid, **_kw: {})
     fallback_workspace = tmp_path / "fallback-ws"
     fallback_workspace.mkdir()
     # The helper does ``from api.workspace import get_last_workspace`` inside
@@ -680,7 +680,7 @@ def test_helper_uses_state_db_source_when_cli_meta_empty(
     )
     # Empty cli_meta (the typical case for TUI)
     monkeypatch.setattr(
-        routes_module, "_lookup_cli_session_metadata", lambda _sid: {},
+        routes_module, "_lookup_cli_session_metadata", lambda _sid, **_kw: {},
     )
     sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
     assert reason == "materialized", (
@@ -715,7 +715,7 @@ def test_helper_refuses_claude_code_via_state_db_source(
         title="Claude Code", source="claude_code", cwd="/root",
     )
     monkeypatch.setattr(
-        routes_module, "_lookup_cli_session_metadata", lambda _sid: {},
+        routes_module, "_lookup_cli_session_metadata", lambda _sid, **_kw: {},
     )
     sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
     assert reason == "not_claimable"
@@ -1040,7 +1040,7 @@ def test_helper_refuses_cron_via_state_db_source(
         title="Cron", source="cron", cwd="/root",
     )
     monkeypatch.setattr(
-        routes_module, "_lookup_cli_session_metadata", lambda _sid: {},
+        routes_module, "_lookup_cli_session_metadata", lambda _sid, **_kw: {},
     )
     sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
     assert reason == "not_claimable", (
@@ -1059,7 +1059,7 @@ def test_branch_from_cron_state_db_returns_writable_fork_without_source_sidecar(
         isolated_state_db["db"], SID, message_count=2,
         title="Cron job", source="cron", cwd="/root",
     )
-    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid, **_kw: {})
     monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes_module, "_guard_request_session_visibility", lambda *args, **kwargs: True)
     handler = _FakePostHandler({"session_id": SID}, path="/api/session/branch")
@@ -1137,7 +1137,7 @@ def test_branch_from_claimable_tui_still_creates_fork(
         isolated_state_db["db"], SID, message_count=3,
         title="TUI chat", source="tui", cwd="/root",
     )
-    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid, **_kw: {})
     monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes_module, "_guard_request_session_visibility", lambda *args, **kwargs: True)
     sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
@@ -1161,7 +1161,7 @@ def test_chat_start_still_refuses_cron_state_db_source(
         isolated_state_db["db"], SID, message_count=1,
         title="Cron job", source="cron", cwd="/root",
     )
-    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid, **_kw: {})
     monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes_module, "_guard_request_session_visibility", lambda *args, **kwargs: True)
     handler = _FakePostHandler({"session_id": SID}, path="/api/chat/start")
@@ -1272,7 +1272,7 @@ def test_helper_refuses_gateway_via_state_db_source(
         title="Gateway", source="gateway", cwd="/root",
     )
     monkeypatch.setattr(
-        routes_module, "_lookup_cli_session_metadata", lambda _sid: {},
+        routes_module, "_lookup_cli_session_metadata", lambda _sid, **_kw: {},
     )
     sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
     assert reason == "not_claimable"
@@ -1305,3 +1305,24 @@ def test_helper_denylist_includes_gateway_and_unknown():
             f"runs CLI-owned; gateway/unknown were added in the "
             f"residual #4911 review gap"
         )
+
+
+def test_helper_keeps_state_db_source_on_schema_without_parent_session_id(
+    routes_module, monkeypatch, isolated_state_db
+):
+    """An older state.db without sessions.parent_session_id must still classify a
+    cron session read-only from state.db.source, with its title and model."""
+    SID = "20260610_cron_old_schema"
+    db = isolated_state_db["db"]
+    _make_state_db(db, SID, message_count=2, title="Nightly cron", model="cron-model",
+                   source="cron", cwd="/root")
+    conn = sqlite3.connect(str(db))
+    conn.execute("ALTER TABLE sessions DROP COLUMN parent_session_id")
+    conn.commit()
+    assert "parent_session_id" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
+    conn.close()
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
+    assert reason != "materialized", reason
+    assert sess is not None and sess.read_only is True
+    assert (sess.source_tag, sess.title, sess.model) == ("cron", "Nightly cron", "cron-model")

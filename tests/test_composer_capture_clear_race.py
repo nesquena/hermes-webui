@@ -87,6 +87,28 @@ def test_reentrancy_guard_reads_live_composer():
     )
 
 
+def test_reentrancy_guard_never_reads_a_shared_continuation_slot():
+    """#7855 round 6 CORE: the re-entrant branch is a GENUINE user turn, so it may
+    only use its own token. Reading the in-flight send's slot made that turn
+    queue FIRST with the parked continuation's ID and consume its pending record."""
+    body = _function_body(MESSAGES_JS, "send")
+    guard_idx = body.index("if (_sendInProgress) {")
+    guard_block = body[guard_idx : body.index("_sendInProgress = true;", guard_idx)]
+    assert "_sendInProgressGoalContinuationId" not in MESSAGES_JS, (
+        "the shared in-flight continuation slot must be gone — it is what let a "
+        "genuine re-entrant turn steal the parked continuation's ID"
+    )
+    # Round 6 SHOULD-FIX: the guard also resolves a restored-draft token, but
+    # only one bound to the exact text being sent — never another invocation's.
+    assert "_requeueContId=_goalContinuationId" in guard_block, (
+        "the re-entrant guard must seed the requeue token from its own argument"
+    )
+    assert "_takeRestoredDraftGoalContinuationId(_text)" in guard_block, (
+        "a restored continuation re-entered mid-send must resolve its token "
+        "inside the guard, or it is queued without one"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Behavioral test — run the REAL re-entrancy guard against a cleared composer
 # ---------------------------------------------------------------------------
@@ -120,6 +142,9 @@ def _run_reentrant_guard_in_node(composer_value: str):
         pytest.skip("node not available")
 
     helper = _function_body(MESSAGES_JS, "_composerTextWithPendingSelections")
+    # #7855: the re-entrancy guard re-reads the in-flight send's continuation
+    # token through this real helper, so the harness must run the real one.
+    id_helper = _function_body(MESSAGES_JS, "_normalizeGoalContinuationId")
     guard = _extract_reentrancy_guard()
 
     harness = textwrap.dedent(
@@ -134,9 +159,16 @@ def _run_reentrant_guard_in_node(composer_value: str):
         // Real helper the guard uses to read the live composer.
         function _composerTextWithPendingSelections(){%(helper)s}
 
+        // Real normalizer the guard uses for the in-flight continuation token.
+        function _normalizeGoalContinuationId(id){%(id_helper)s}
+
         // Minimal in-flight state: a send is already running for sid-1.
         let _sendInProgress = true;
         let _sendInProgressSid = 'sid-1';
+        // #7855 (round 6): the re-entrant guard only ever reads THIS invocation's
+        // token (there is no shared in-flight slot), so the harness supplies the
+        // binding send() would have snapshotted from its own argument.
+        let _goalContinuationId = '';
         const S = { session: { session_id: 'sid-1' }, pendingFiles: [], activeProfile: 'default' };
 
         // Stubs the guard branch touches.
@@ -158,6 +190,7 @@ def _run_reentrant_guard_in_node(composer_value: str):
     ) % {
         "composer_value": json.dumps(composer_value),
         "helper": helper,
+        "id_helper": id_helper,
         "guard": guard,
     }
 

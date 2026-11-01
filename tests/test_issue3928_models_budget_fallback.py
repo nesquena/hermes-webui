@@ -136,16 +136,12 @@ def _build_stale_disk_cache_payload() -> dict:
         "aliases": {
             "chat": "ollama-cloud/chat-1",
         },
-        # Current schema (so the stale-cache loader's schema guard accepts it),
-        # but a deliberately stale _webui_version + fingerprint so the STRICT
-        # loader rejects it — this is exactly the "recoverable stale cache" case.
+        # Current schema and sources, but a stale _webui_version so the STRICT loader
+        # rejects it: the "recoverable stale cache" case. A source-fingerprint
+        # mismatch is a wrong catalog and is covered by the rejection test below.
         "_schema_version": cfg._MODELS_CACHE_SCHEMA_VERSION,
         "_webui_version": "v999",
-        "_source_fingerprint": {
-            "catalog": "stale",
-            "config_yaml": {"size": 42},
-            "auth_json": {"size": 7},
-        },
+        "_source_fingerprint": cfg._models_cache_source_fingerprint(),
     }
 
 
@@ -394,6 +390,19 @@ def test_load_stale_models_cache_from_disk_rejects_cross_schema(
     picker and serving it could surface a broken catalog."""
     payload = _build_stale_disk_cache_payload()
     payload["_schema_version"] = cfg._MODELS_CACHE_SCHEMA_VERSION + 1
+    models_cache_path = isolate_models_catalog_state["models_cache_path"]
+    monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: models_cache_path)
+    models_cache_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert cfg._load_stale_models_cache_from_disk() is None
+
+
+def test_load_stale_models_cache_from_disk_rejects_source_fingerprint_mismatch(
+    monkeypatch,
+    isolate_models_catalog_state,
+):
+    payload = _build_stale_disk_cache_payload()
+    payload["_source_fingerprint"] = "other-sources"
     models_cache_path = isolate_models_catalog_state["models_cache_path"]
     monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: models_cache_path)
     models_cache_path.write_text(json.dumps(payload), encoding="utf-8")

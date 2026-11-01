@@ -172,10 +172,51 @@ class TestProfileCookieHelpers:
         """Cookie value must pass _PROFILE_ID_RE fullmatch — rejects traversal/injection."""
         from api.helpers import get_profile_cookie
         monkeypatch.setattr('api.auth.is_auth_enabled', lambda: False)
-        for bad in ('../etc', 'a/b', 'name;DROP', 'WithCaps', 'has space', '.hidden'):
+        # 'name;DROP' is deliberately NOT here: under per-cookie parsing its value is `name`
+        # (a valid id) — RFC 6265 makes `;` a cookie separator, never part of the value.
+        # See test_get_profile_cookie_splits_on_semicolon below.
+        for bad in ('../etc', 'a/b', 'WithCaps', 'has space', '.hidden'):
             handler = MagicMock()
             handler.headers.get = lambda k, d='', v=bad: f'hermes_profile={v}' if k == 'Cookie' else d
             assert get_profile_cookie(handler) is None, f"{bad!r} should be rejected"
+
+    def test_get_profile_cookie_splits_on_semicolon(self, monkeypatch):
+        """RFC 6265: `;` always starts a new cookie, so `name;DROP` is the value `name`
+        (a valid profile id). The old None came from the whole-header parse discarding
+        everything after the malformed tail — the behaviour this change removes."""
+        from api.helpers import get_profile_cookie
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: False)
+        handler = MagicMock()
+        handler.headers.get = lambda k, d='': 'hermes_profile=name;DROP' if k == 'Cookie' else d
+        assert get_profile_cookie(handler) == 'name'
+
+    def test_get_profile_cookie_survives_foreign_cookie_first(self, monkeypatch):
+        """A junk cookie with illegal octets ahead of ours must not hide the profile."""
+        from api.helpers import get_profile_cookie
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: False)
+        handler = MagicMock()
+        handler.headers.get = (
+            lambda k, d='': '__sec_id={"username":"","type":"email"}; hermes_profile=beta'
+            if k == 'Cookie' else d
+        )
+        assert get_profile_cookie(handler) == 'beta'
+
+    def test_get_profile_cookie_authenticated_with_foreign_cookie_first(self, monkeypatch):
+        """The reported case: auth on, junk cookie first — the signed profile must still
+        resolve (it silently fell back to 'default' before)."""
+        from api.helpers import get_profile_cookie
+        monkeypatch.setattr('api.auth.is_auth_enabled', lambda: True)
+        monkeypatch.setattr('api.auth.parse_cookie', lambda h: 'sess')
+        monkeypatch.setattr(
+            'api.auth.verify_profile_cookie_value',
+            lambda raw, session: raw[:-4] if isinstance(raw, str) and raw.endswith('.sig') else None,
+        )
+        handler = MagicMock()
+        handler.headers.get = (
+            lambda k, d='': '__sec_id={"username":""}; hermes_profile=beta.sig'
+            if k == 'Cookie' else d
+        )
+        assert get_profile_cookie(handler) == 'beta'
 
     def test_get_profile_cookie_ignores_malformed_header(self):
         from api.helpers import get_profile_cookie

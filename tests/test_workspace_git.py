@@ -240,6 +240,82 @@ def test_git_status_ignores_filemode_only_noise(tmp_path):
     assert status["noise_filtering"]["active"] is True
 
 
+def _stale_index_repo(tmp_path):
+    """A stale index: a real edit, a same-content touch, a CRLF-only change."""
+    import os
+
+    repo = _init_repo(tmp_path / "repo")
+    for name in ("edited.txt", "touched.txt", "crlf.txt"):
+        (repo / name).write_text("one\n", encoding="utf-8", newline="\n")
+    _commit_all(repo)
+    (repo / "edited.txt").write_text("one\ntwo\n", encoding="utf-8", newline="\n")
+    (repo / "crlf.txt").write_text("one\n", encoding="utf-8", newline="\r\n")
+    for name in ("edited.txt", "touched.txt", "crlf.txt"):
+        path = repo / name
+        later = path.stat().st_mtime + 120
+        os.utime(path, (later, later))
+    return repo
+
+
+def test_full_panel_status_does_not_rewrite_a_stale_index(tmp_path, monkeypatch):
+    """The panel's diff reads must not refresh the index either (#8520).
+
+    `git diff` refreshes a stale index on its own and ignores
+    GIT_OPTIONAL_LOCKS, so a diff killed at its timeout could leave
+    .git/index.lock behind just like status could.
+    """
+    from api.workspace_git import git_diff, git_status
+
+    monkeypatch.setenv("GIT_OPTIONAL_LOCKS", "1")
+    repo = _stale_index_repo(tmp_path)
+    index = repo / ".git" / "index"
+    before = index.read_bytes()
+
+    status = git_status(repo)
+    diff = git_diff(repo, "edited.txt", "unstaged")
+
+    by_path = {item["path"]: item for item in status["files"]}
+    assert set(by_path) == {"edited.txt"}
+    assert by_path["edited.txt"]["unstaged"] is True
+    assert (by_path["edited.txt"]["additions"], by_path["edited.txt"]["deletions"]) == (1, 0)
+    assert status["noise_filtering"]["crlf_only"] == 1
+    assert "+two" in diff["diff"]
+    assert index.read_bytes() == before
+    assert not (repo / ".git" / "index.lock").exists()
+
+
+def test_full_panel_status_reads_past_a_held_index_lock(tmp_path, monkeypatch):
+    """A lock held by a writer (or left by a killed one) is not ours to touch."""
+    from api.workspace_git import git_status
+
+    monkeypatch.setenv("GIT_OPTIONAL_LOCKS", "1")
+    repo = _stale_index_repo(tmp_path)
+    lock = repo / ".git" / "index.lock"
+    lock.write_bytes(b"held by someone else")
+
+    status = git_status(repo)
+
+    assert {item["path"] for item in status["files"]} == {"edited.txt"}
+    assert lock.read_bytes() == b"held by someone else"
+
+
+def test_writes_still_take_the_index_lock(tmp_path, monkeypatch):
+    """Only reads skip the refresh; stage keeps Git's normal locking."""
+    from api.workspace_git import GitWorkspaceError, git_stage
+
+    monkeypatch.setenv("GIT_OPTIONAL_LOCKS", "1")
+    repo = _stale_index_repo(tmp_path)
+    lock = repo / ".git" / "index.lock"
+    lock.write_bytes(b"")
+
+    with pytest.raises(GitWorkspaceError):
+        git_stage(repo, ["edited.txt"])
+
+    lock.unlink()
+    staged = git_stage(repo, ["edited.txt"])
+    assert staged["totals"]["staged"] == 1
+
+
 def test_git_status_scopes_nested_workspace_to_that_directory(tmp_path):
     from api.workspace_git import git_status
 
@@ -340,6 +416,34 @@ def test_git_diff_skips_repo_local_clean_filter_without_destructive_mode(tmp_pat
 
     assert "+two" in diff["diff"]
     assert not marker.exists()
+
+
+def test_status_check_does_not_take_the_index_lock(tmp_path, monkeypatch):
+    """A background status check must not rewrite the index (#8520).
+
+    Rewriting needs .git/index.lock, and a status killed at its timeout
+    could leave that lock behind.
+    """
+    import os
+
+    from api.workspace_git import _dirty_worktree, resolve_git_context
+
+    # Pin the parent setting on, so the test can't pass just because the
+    # runner already has optional locks turned off.
+    monkeypatch.setenv("GIT_OPTIONAL_LOCKS", "1")
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    # Same content, newer mtime: plain `git status` would refresh and
+    # rewrite the index here.
+    tracked = repo / "tracked.txt"
+    later = tracked.stat().st_mtime + 120
+    os.utime(tracked, (later, later))
+    index = repo / ".git" / "index"
+    before = index.read_bytes()
+
+    assert _dirty_worktree(resolve_git_context(repo)) is False
+    assert index.read_bytes() == before
 
 
 def test_git_status_reports_untracked_files_inside_directories(tmp_path):
@@ -2221,8 +2325,10 @@ def test_git_env_scrub_removes_redirecting_vars_and_preserves_temp_index(monkeyp
 
     monkeypatch.setenv("GIT_DIR", "/tmp/evil-git-dir")
     monkeypatch.setenv("GIT_WORK_TREE", "/tmp/evil-work-tree")
+    monkeypatch.setenv("GIT_CONFIG", "/tmp/evil-repo-config")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/tmp/evil-config")
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/tmp/evil-system-config")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.sshCommand")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", "ssh -i /tmp/evil-key")
@@ -2231,14 +2337,18 @@ def test_git_env_scrub_removes_redirecting_vars_and_preserves_temp_index(monkeyp
     monkeypatch.setenv("SSH_ASKPASS", "/tmp/evil-ssh-askpass")
     monkeypatch.setenv("GIT_SSH", "/tmp/evil-ssh")
     monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -i /tmp/evil-key")
+    monkeypatch.setenv("GIT_PROXY_COMMAND", "/tmp/evil-proxy")
     monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/trusted-agent.sock")
 
     env = _clean_git_env({"GIT_INDEX_FILE": "/tmp/hermes-index"})
 
     assert "GIT_DIR" not in env
     assert "GIT_WORK_TREE" not in env
+    assert "GIT_CONFIG" not in env
     assert "GIT_CONFIG_GLOBAL" not in env
     assert "GIT_CONFIG_SYSTEM" not in env
+    assert "GIT_CONFIG_NOSYSTEM" not in env
     assert "GIT_CONFIG_COUNT" not in env
     assert "GIT_CONFIG_KEY_0" not in env
     assert "GIT_CONFIG_VALUE_0" not in env
@@ -2247,7 +2357,9 @@ def test_git_env_scrub_removes_redirecting_vars_and_preserves_temp_index(monkeyp
     assert "SSH_ASKPASS" not in env
     assert "GIT_SSH" not in env
     assert "GIT_SSH_COMMAND" not in env
+    assert "GIT_PROXY_COMMAND" not in env
     assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["SSH_AUTH_SOCK"] == "/tmp/trusted-agent.sock"
     assert env["GIT_INDEX_FILE"] == "/tmp/hermes-index"
 
 

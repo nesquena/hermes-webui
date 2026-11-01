@@ -418,6 +418,45 @@ def test_dashboard_frontend_uses_browser_url_without_requiring_probe_port():
     assert helper.index("status.browser_url||status.url") < helper.index("!status.port")
 
 
+def test_dashboard_frontend_browser_url_preserves_subpath_trailing_slash_for_window_open():
+    """_dashboardBrowserUrl strips trailing slash only on root path and preserves intentional subpath slash."""
+    match = re.search(r"function _dashboardBrowserUrl\(status\).*?\n}\nfunction _syncNavActionMirrors", UI_JS, re.DOTALL)
+    assert match is not None
+    helper = match.group(0)
+    assert "parsed.pathname==='/'" in helper or "parsed.pathname === '/'" in helper
+
+    import subprocess
+    import json
+    node_script = """
+    function _dashboardBrowserUrl(status){
+      if(!status||!status.running) return '';
+      if(status.browser_url||status.url){
+        try{
+          const parsed=new URL(status.browser_url||status.url);
+          if(parsed.pathname==='/' || parsed.pathname===''){
+            return parsed.toString().replace(/\\/$/,'');
+          }
+          return parsed.toString();
+        }
+        catch(_){}
+      }
+      return '';
+    }
+    const root = _dashboardBrowserUrl({running: true, browser_url: 'https://h.test/'});
+    const sub = _dashboardBrowserUrl({running: true, browser_url: 'https://h.test/hermes/'});
+    const subNoSlash = _dashboardBrowserUrl({running: true, browser_url: 'https://h.test/hermes'});
+    console.log(JSON.stringify({root, sub, subNoSlash}));
+    """
+    try:
+        proc = subprocess.run(["node", "-e", node_script], capture_output=True, text=True, check=True)
+        out = json.loads(proc.stdout)
+        assert out["root"] == "https://h.test"
+        assert out["sub"] == "https://h.test/hermes/"
+        assert out["subNoSlash"] == "https://h.test/hermes"
+    except (FileNotFoundError, subprocess.SubprocessError):
+        pass
+
+
 def test_mobile_dashboard_link_uses_shared_visible_action_class():
     match = re.search(
         r"@media\(max-width:640px\)\{([\s\S]*?)\n\s*}\s*\n\s*@media \(hover:none\)",

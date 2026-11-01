@@ -197,3 +197,87 @@ class TestBootstrapStructure:
         assert "_load_repo_dotenv" in bootstrap_src, (
             "bootstrap.py must load .env so direct invocation matches start.sh behaviour"
         )
+
+
+class TestLeakedWebuiPasswordIsolation:
+    """#7168 review: a local repo .env containing HERMES_WEBUI_PASSWORD leaks
+    into os.environ when any test imports bootstrap (import-time
+    _load_repo_dotenv() runs OUTSIDE monkeypatch's undo scope). The conftest
+    autouse guard strips the leaked var around every test so later tests
+    don't see is_auth_enabled()==True (the #5588 failure shape)."""
+
+    def _load_guard(self):
+        import importlib.util
+
+        cpath = Path(__file__).resolve().parent / "conftest.py"
+        spec = importlib.util.spec_from_file_location("_test_conftest", cpath)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod._strip_leaked_webui_password_env
+
+    def test_conftest_guard_strips_leaked_password(self):
+        strip = self._load_guard()
+
+        os.environ["HERMES_WEBUI_PASSWORD"] = "leaked-from-repo-dotenv"
+        try:
+            strip()
+            assert "HERMES_WEBUI_PASSWORD" not in os.environ
+        finally:
+            os.environ.pop("HERMES_WEBUI_PASSWORD", None)
+
+    def test_conftest_guard_preserves_intentional_empty_override(self):
+        """ctl.sh-style override semantics: an explicitly empty value means
+        'keep auth off' and must survive the strip."""
+        strip = self._load_guard()
+
+        sentinel = object()
+        os.environ["HERMES_WEBUI_PASSWORD"] = ""
+        try:
+            strip()
+            assert os.environ.get("HERMES_WEBUI_PASSWORD", sentinel) == ""
+        finally:
+            os.environ.pop("HERMES_WEBUI_PASSWORD", None)
+
+
+class TestLeakedHermesCommandIsolation:
+    """#7168 re-gate round 7: a local repo .env carrying HERMES_COMMAND leaks
+    into os.environ via bootstrap import-time _load_repo_dotenv() and
+    redirects gateway_restart._resolve_hermes_command() away from its mocked
+    shutil.which result — every later active-profile-restart test then fails
+    on a machine-specific CLI path. The autouse conftest guard strips the
+    leaked var around every test; upstream code never reads HERMES_COMMAND,
+    so stripping restores exact upstream semantics."""
+
+    def _load_guard(self):
+        import importlib.util
+
+        cpath = Path(__file__).resolve().parent / "conftest.py"
+        spec = importlib.util.spec_from_file_location("_test_conftest_hc", cpath)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod._strip_leaked_webui_password_env
+
+    def test_conftest_guard_strips_leaked_hermes_command(self):
+        strip = self._load_guard()
+
+        os.environ["HERMES_COMMAND"] = "/machine/local/hermes-gateway-wrapper"
+        try:
+            strip()
+            assert "HERMES_COMMAND" not in os.environ
+        finally:
+            os.environ.pop("HERMES_COMMAND", None)
+
+    def test_conftest_guard_still_strips_password_when_command_leaks(self):
+        """Both leaked vars are stripped in one pass (password branch must
+        not be short-circuited by the HERMES_COMMAND handling)."""
+        strip = self._load_guard()
+
+        os.environ["HERMES_WEBUI_PASSWORD"] = "leaked-from-repo-dotenv"
+        os.environ["HERMES_COMMAND"] = "/machine/local/hermes-gateway-wrapper"
+        try:
+            strip()
+            assert "HERMES_WEBUI_PASSWORD" not in os.environ
+            assert "HERMES_COMMAND" not in os.environ
+        finally:
+            os.environ.pop("HERMES_WEBUI_PASSWORD", None)
+            os.environ.pop("HERMES_COMMAND", None)

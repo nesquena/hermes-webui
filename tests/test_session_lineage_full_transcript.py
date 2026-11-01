@@ -32,7 +32,7 @@ def test_session_endpoint_merges_sidecar_and_lineage_messages_for_cli_sessions(m
 
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: DummySession())
     monkeypatch.setattr(routes, "_clear_stale_stream_state", lambda s: None)
-    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda sid: {"session_source": "messaging"})
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda sid, **_kw: {"session_source": "messaging"})
     monkeypatch.setattr(routes, "_is_messaging_session_record", lambda s: True)
     monkeypatch.setattr(
         routes,
@@ -94,7 +94,7 @@ def test_session_endpoint_preserves_distinct_messages_with_different_ids(monkeyp
 
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: DummySession())
     monkeypatch.setattr(routes, "_clear_stale_stream_state", lambda s: None)
-    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda sid: {"session_source": "messaging"})
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda sid, **_kw: {"session_source": "messaging"})
     monkeypatch.setattr(routes, "_is_messaging_session_record", lambda s: True)
     monkeypatch.setattr(
         routes,
@@ -224,7 +224,7 @@ def test_webui_continuation_session_opens_with_snapshot_parent_messages(monkeypa
     captured = {}
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: child)
     monkeypatch.setattr(routes, "_clear_stale_stream_state", lambda s: None)
-    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda sid: {})
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda sid, **_kw: {})
     monkeypatch.setattr(routes, "_is_messaging_session_record", lambda s: False)
     monkeypatch.setattr(routes, "get_state_db_session_messages", lambda sid, profile=None, since_timestamp=None, include_inactive=False, limit=None: [])
     monkeypatch.setattr(routes.Session, "load", lambda sid: parent if sid == "parent-webui" else None)

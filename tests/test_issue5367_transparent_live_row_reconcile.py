@@ -308,11 +308,21 @@ eval(extractFunc('_transparentLiveRowInteractiveState'));
 eval(extractFunc('_rehydrateTransparentLiveRow'));
 eval(extractFunc('_refreshTransparentThinkingLiveRow'));
 eval(extractFunc('_bindTransparentFadeCleanup'));
+// `_appendTransparentFadeText` now delegates its insertion point to
+// `_transparentFadeAppendTarget`, so the extraction harness must provide it
+// (and the block-tag set it consults) or the extracted function throws.
+global._TRANSPARENT_FADE_BLOCK_TAGS = new Set([
+  'P','DIV','H1','H2','H3','H4','H5','H6','BLOCKQUOTE','LI','UL','OL','PRE','TABLE',
+]);
+eval(extractFunc('_transparentFadeAppendTarget'));
 eval(extractFunc('_appendTransparentFadeText'));
 eval(extractFunc('_refreshTransparentFadeProseRow'));
 eval(extractFunc('_refreshTransparentLiveRow'));
 eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
 eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
+document.documentElement = document.documentElement || Object.create(null);
+eval(extractFunc('_anchorSceneToolRenderSignature'));
+eval(extractFunc('_anchorSceneDataRowKey'));
 eval(extractFunc('_renderLiveAnchorActivitySceneTransparent'));
 
 const firstScene = {{
@@ -1268,6 +1278,9 @@ eval(extractFunc('_rehydrateTransparentLiveRow'));
 eval(extractFunc('_refreshTransparentThinkingLiveRow'));
 eval(extractFunc('_refreshTransparentLiveRow'));
 eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
+document.documentElement = document.documentElement || Object.create(null);
+eval(extractFunc('_anchorSceneToolRenderSignature'));
+eval(extractFunc('_anchorSceneDataRowKey'));
 eval(extractFunc('_renderLiveAnchorActivitySceneTransparent'));
 
 const firstScene = { version:'activity_scene_v1', activity_rows:[{ row_id:'row-tool', role:'tool', source_event_type:'tool_delta', toolName:'old_tool' }] };
@@ -1606,6 +1619,9 @@ eval(extractFunc('_rehydrateTransparentLiveRow'));
 eval(extractFunc('_refreshTransparentThinkingLiveRow'));
 eval(extractFunc('_refreshTransparentLiveRow'));
 eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
+document.documentElement = document.documentElement || Object.create(null);
+eval(extractFunc('_anchorSceneToolRenderSignature'));
+eval(extractFunc('_anchorSceneDataRowKey'));
 eval(extractFunc('_renderLiveAnchorActivitySceneTransparent'));
 global._copyEventToClipboard = (row) => {{
   const tc = row && row._tcData || {{}};

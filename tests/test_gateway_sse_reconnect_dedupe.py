@@ -42,7 +42,7 @@ def test_gateway_sse_dedupes_reconnect_snapshot_before_refresh():
     assert "function _gatewaySessionSnapshotKey" in src
     assert "function _isDuplicateGatewaySessionSnapshot" in src
     assert "if(!_isDuplicateGatewaySessionSnapshot(data.sessions))" in handler
-    assert "renderSessionList({deferWhileInteracting:true}); // re-fetch and re-render" in handler
+    assert "_refreshSidebarForBackgroundChurn(); // re-fetch and re-render" in handler
 
 
 def test_gateway_probe_reattaches_sse_after_profile_switch_restart():
