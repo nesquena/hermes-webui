@@ -19,6 +19,7 @@
 
 import io
 import json
+import threading
 import urllib.parse
 from collections import OrderedDict
 
@@ -142,33 +143,34 @@ def test_update_session_share_fields_reports_a_missing_sidecar(isolated_state):
     ) is False
 
 
-def test_update_session_share_fields_retries_when_a_writer_lands_first(
-    isolated_state, monkeypatch
-):
-    """A save that lands while the patch is being built must not be reverted."""
+def test_update_session_share_fields_holds_the_persistence_lock(isolated_state):
+    """The patch runs under the same per-session lock ``Session.save()`` takes,
+    so a concurrent save cannot slip between its read and its replace and be
+    silently reverted (#8399 review)."""
     import api.models as models
 
     sid = _make_session()
-    real_fsync = models.os.fsync
-    state = {"fired": False}
+    lock = models._session_persist_lock(sid)
+    done = threading.Event()
 
-    def fsync_wrapper(fd):
-        if not state["fired"]:
-            state["fired"] = True
-            # Lands after the patch read the sidecar, before it compares bytes.
-            _concurrent_write(sid)
-        return real_fsync(fd)
+    def _patch():
+        models.update_session_share_fields(
+            sid, share_token="tok-3", share_created_at=7.0
+        )
+        done.set()
 
-    monkeypatch.setattr(models.os, "fsync", fsync_wrapper)
-
-    assert models.update_session_share_fields(
-        sid, share_token="tok-2", share_created_at=9.0
-    ) is True
+    with lock:
+        writer = threading.Thread(target=_patch)
+        writer.start()
+        assert not done.wait(0.3), (
+            "the share patch ran while another holder owned the persistence lock"
+        )
+    writer.join(10)
+    assert done.is_set()
 
     stored = _sidecar(sid)
-    assert stored["title"] == "NEW TITLE"
-    assert len(stored["messages"]) == 3
-    assert stored["share_token"] == "tok-2"
+    assert stored["share_token"] == "tok-3"
+    assert stored["share_created_at"] == 7.0
 
 
 def test_create_keeps_a_write_that_lands_after_the_final_reload(

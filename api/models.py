@@ -8135,15 +8135,11 @@ class WorkspaceBindingPersistenceError(ValueError):
 
 _EXPECTED_WORKSPACE_UNSET = object()
 
-_SHARE_FIELD_WRITE_ATTEMPTS = 5
-
-
 def update_session_share_fields(
     session_id: str,
     *,
     share_token,
     share_created_at,
-    attempts: int = _SHARE_FIELD_WRITE_ATTEMPTS,
 ) -> bool:
     """Atomically replace only the share fields of a session sidecar.
 
@@ -8153,17 +8149,19 @@ def update_session_share_fields(
     was built from, so a writer that finished while the share handler waited, or
     between its last read and its save, is reverted (#8255 review, third round).
 
-    This patches the two share keys into the bytes on disk and replaces the
-    sidecar only if the file still holds the bytes it was built from. The extra
-    read immediately before the replace is the ordering primitive: a writer that
-    saved while the patch was being built owns the newest conversation state, so
-    the loop re-reads its bytes and patches those instead of reverting them.
+    The patch runs under ``_session_persist_lock(sid)``, the same reentrant lock
+    every ``Session.save()`` of this session holds across its own
+    read-construct-replace, and which ``_write_persisted_reasoning_effort``
+    already uses as its precedent (#8253). Holding it across this
+    read-patch-replace is what makes a concurrent save either land before the
+    read (and be carried into the patched bytes) or after the replace (and win);
+    without it a save could slip between the final read and the replace and be
+    silently reverted (#8399 review).
 
-    A lock was considered and rejected: ``test_issue765_streaming_persistence``
-    requires two saves of the SAME session to reach ``os.replace`` concurrently,
-    so nothing may hold a lock across the writers' replace. Writers publish
-    through unique temp files, so the worst case here is a retry, never a torn
-    file.
+    The sidebar index is refreshed from the patched payload the way ``save()``
+    documents: a sidecar share token the index does not carry leaves
+    ``/api/sessions/search`` returning the previous state, so the UI either
+    loses the copy/revoke controls or keeps a dead link (#8399 review).
 
     Returns False only when the sidecar does not exist, so the caller can
     materialize one from its own copy. Unreadable sidecars and I/O errors raise,
@@ -8173,7 +8171,7 @@ def update_session_share_fields(
     if not sid or not is_safe_session_id(sid):
         return False
     path = SESSION_DIR / f"{sid}.json"
-    for _ in range(max(1, attempts)):
+    with _session_persist_lock(sid):
         try:
             original = path.read_bytes()
         except FileNotFoundError:
@@ -8198,23 +8196,29 @@ def update_session_share_fields(
                 handle.write(body)
                 handle.flush()
                 os.fsync(handle.fileno())
-            # Compare-and-swap: if a writer replaced the sidecar while this patch
-            # was built, its bytes win and the patch is rebuilt on top of them.
-            if path.read_bytes() != original:
-                continue
-            _replace_session_sidecar(tmp, path, sid)
-            return True
+            with _INDEX_WRITE_LOCK:
+                _replace_session_sidecar(tmp, path, sid)
+                try:
+                    # Built from the sidecar just written, never from a possibly
+                    # stale live object (same ordered publish as save()).
+                    index_session = Session(**dict(payload))
+                    index_session._metadata_message_count = len(
+                        index_session.messages or []
+                    )
+                    _write_session_index(updates=[index_session])
+                except Exception:
+                    logger.warning(
+                        "session %s: share fields persisted but the sidebar index "
+                        "write failed; the index will be rebuilt on the next save",
+                        sid,
+                        exc_info=True,
+                    )
         finally:
             try:
                 tmp.unlink(missing_ok=True)
             except Exception:
                 pass
-    # Never fall back to a whole-session save here: the caller's copy is the
-    # state this helper exists to avoid writing back. Failing the request is
-    # the honest outcome.
-    raise RuntimeError(
-        f"Could not persist share fields for session {sid!r} after {attempts} attempts"
-    )
+    return True
 
 
 def persist_recovered_workspace_binding(

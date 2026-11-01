@@ -7024,16 +7024,23 @@ def _persist_share_fields(sid: str, session, *, share_token, share_created_at) -
     place instead. ``session`` is saved only when no sidecar exists yet (a pure
     external session), where there is no persisted conversation to revert
     (#8255 review, third round).
+
+    The whole check-and-write runs under the session's persistence lock, so the
+    "no sidecar yet" decision cannot go stale: a save that lands between the
+    check and the fallback would otherwise be reverted by the whole-object save
+    that follows it (#8399 review). The lock is reentrant, so the patch helper
+    and ``save()`` re-entering it is expected.
     """
-    if _update_session_share_fields(
-        sid,
-        share_token=share_token,
-        share_created_at=share_created_at,
-    ):
-        return
-    session.share_token = share_token
-    session.share_created_at = share_created_at
-    session.save(touch_updated_at=False)
+    with _session_persist_lock(sid):
+        if _update_session_share_fields(
+            sid,
+            share_token=share_token,
+            share_created_at=share_created_at,
+        ):
+            return
+        session.share_token = share_token
+        session.share_created_at = share_created_at
+        session.save(touch_updated_at=False)
 
 
 def _reconcile_stale_stream_state_for_session_rows(session_rows) -> bool:
