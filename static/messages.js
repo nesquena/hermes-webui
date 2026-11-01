@@ -1757,6 +1757,11 @@ async function send(){
   }
   let _slashDisplayTextOverride=null;
   let _pendingMoaConfig=null;
+  // #8717: the session and composer text that issued a slash command,
+  // captured before the metadata awaits in the intercept below. Composer
+  // writes after those awaits go through
+  // _setComposerAfterCliOnlyExplainer(value,_slashOwner).
+  const _slashOwner={sid:S.session&&S.session.session_id||null,text};
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
   // commands so chat order is correct: some handlers (e.g. cmdHelp) push
@@ -1764,10 +1769,6 @@ async function send(){
   // would be [assistant, user] and the chat would show the response above
   // the user's own input — reverse chronological order (#840 ordering bug).
   if(text.startsWith('/')&&!S.pendingFiles.length&&!literalSlash){
-    // #8717: the session and composer text that issued this command, captured
-    // before the metadata awaits below. Composer writes after those awaits go
-    // through _setComposerAfterCliOnlyExplainer(value,_slashOwner).
-    const _slashOwner={sid:S.session&&S.session.session_id||null,text};
     const _parsedCmd=parseCommand(text);
     const _cmd=_parsedCmd?COMMANDS.find(c=>c.name===_parsedCmd.name):null;
     if(_cmd){
@@ -1981,8 +1982,8 @@ async function send(){
       // Only a command-shaped first token is guarded. Built-in, skill and
       // bundle names match [a-z0-9][a-z0-9_-]*, as does every plugin command
       // seen on a current install (the Agent does not validate plugin names).
-      // Anything else, such as the path in `/tmp/example.js explain`, is
-      // ordinary text and is sent as it was before this guard existed (#8717).
+      // Any other first token, such as the path in `/tmp/example.js explain`,
+      // is ordinary text and is sent as it was before this guard existed (#8717).
       const _commandShapedSlashName=/^[a-z0-9][a-z0-9_-]*$/.test(String(_parsedCmd.name||''));
       const _skillCmd =
         _registryUnavailable && _commandShapedSlashName && !_bundleCmd && _agentCmdName !== 'moa'
