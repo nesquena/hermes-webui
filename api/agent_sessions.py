@@ -209,8 +209,9 @@ def _effective_source_sql(columns: set[str]) -> str:
     acp) as ``source='local'`` and keeps the real surface in
     ``created_source``. Read such a row as its ``created_source`` so it gets
     the same label, bucket and filters as before that storage change (#8674).
-    Older databases, rows without ``created_source`` and every other source
-    are unchanged.
+    Only the surfaces WebUI already files as CLI-family (acp, cli, tui) are
+    mapped. Desktop/gui, unknown or missing ``created_source``, older
+    databases and every other source are unchanged.
     """
     if 'source' not in columns:
         return "NULL"
@@ -218,7 +219,7 @@ def _effective_source_sql(columns: set[str]) -> str:
         return "s.source"
     return (
         "(CASE WHEN LOWER(TRIM(COALESCE(s.source, ''))) = 'local' "
-        "AND TRIM(COALESCE(s.created_source, '')) != '' "
+        "AND LOWER(TRIM(COALESCE(s.created_source, ''))) IN ('acp', 'cli', 'tui') "
         "THEN LOWER(TRIM(s.created_source)) ELSE s.source END)"
     )
 

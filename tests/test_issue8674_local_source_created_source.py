@@ -104,8 +104,11 @@ def test_local_cli_and_acp_sessions_keep_their_surface(tmp_path):
 def test_local_without_created_source_and_old_schema_are_unchanged(tmp_path):
     rows = _sidebar(tmp_path, [
         {'id': 'local-unknown', 'source': 'local', 'created_source': None, 'title': 'Who made me'},
+        {'id': 'local-gui', 'source': 'local', 'created_source': 'gui', 'title': 'Desktop chat'},
     ])
     assert rows['local-unknown']['session_source'] == 'other'
+    # Desktop keeps today's behaviour; only CLI-family surfaces are mapped.
+    assert rows['local-gui']['source_label'] == rows['local-unknown']['source_label']
 
     old = tmp_path / 'old'
     old.mkdir()
@@ -118,10 +121,10 @@ def test_source_filters_use_the_created_source(tmp_path):
     db = tmp_path / 'state.db'
     _make_state_db(db, [
         {'id': 'local-tui', 'source': 'local', 'created_source': 'tui'},
-        {'id': 'local-webui', 'source': 'local', 'created_source': 'webui'},
+        {'id': 'local-cli', 'source': 'local', 'created_source': 'cli'},
         {'id': 'telegram', 'source': 'telegram'},
     ])
     tui_only = read_importable_agent_session_rows(db, include_sources=('tui',))
     assert [r['id'] for r in tui_only] == ['local-tui']
-    default = read_importable_agent_session_rows(db)
-    assert {r['id'] for r in default} == {'local-tui', 'telegram'}
+    excluded = read_importable_agent_session_rows(db, exclude_sources=('cron', 'webui', 'tui'))
+    assert {r['id'] for r in excluded} == {'local-cli', 'telegram'}
