@@ -27,7 +27,10 @@ from urllib.parse import urlparse
 from api.agent_health import get_active_profile_gateway_running_pid
 from api.gateway_restart import restart_active_profile_gateway
 from api.profiles import get_active_profile_name
-from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
+from api.config import REPO_ROOT
+# Restart safety now reads run state through api.run_drain (#7293); these names
+# stay importable here because existing tests patch ``api.updates.STREAMS``.
+from api.config import STREAMS, STREAMS_LOCK  # noqa: F401
 from api.subprocess_utils import (
     clean_git_env,
     noninteractive_git_env,
@@ -171,29 +174,30 @@ def _apply_fetch_failure_message(fetch_out: str, network_message: str) -> str:
     return f'fetch failed: {detail}'
 
 
-def _restart_blocker_snapshot() -> dict:
-    """Return active chat work that should block a self-restart."""
-    with STREAMS_LOCK:
-        stream_ids = [str(k) for k in STREAMS.keys()]
-    run_ids: list[str] = []
-    try:
-        from api import config as _config
-        active_runs = getattr(_config, 'ACTIVE_RUNS', {})
-        active_runs_lock = getattr(_config, 'ACTIVE_RUNS_LOCK', None)
-        if active_runs_lock is not None:
-            with active_runs_lock:
-                run_ids = [str(k) for k in active_runs.keys()]
-        else:
-            run_ids = [str(k) for k in active_runs.keys()]
-    except Exception:
-        run_ids = []
+def _blocker_snapshot_from_runs(runs: list[dict]) -> dict:
+    stream_ids = [r['stream_id'] for r in runs if r.get('registered_stream')]
+    run_ids = [r['stream_id'] for r in runs]
     return {
         'active_streams': len(stream_ids),
         'active_runs': len(run_ids),
         'blocking_stream_ids': stream_ids[:10],
         'blocking_run_ids': run_ids[:10],
-        'restart_blocked': bool(stream_ids or run_ids),
+        'restart_blocked': bool(run_ids),
     }
+
+
+def _restart_blocker_snapshot() -> dict:
+    """Return the WebUI-owned chat work that should block a self-restart.
+
+    A Gateway run is excluded only once its resumable run identity is saved
+    (#7293): it runs inside the Hermes Gateway, survives a WebUI restart and is
+    reattached afterwards. Legacy Gateway relays and Gateway launches still
+    awaiting that handoff are counted (see run_drain.webui_owned_active_runs).
+    An update of the Agent counts those runs too (``_update_blocker_snapshot``).
+    """
+    from api import run_drain
+
+    return _blocker_snapshot_from_runs(run_drain.webui_owned_active_runs())
 
 
 def _active_stream_count() -> int:
@@ -205,31 +209,51 @@ def _active_stream_count() -> int:
     return int(_restart_blocker_snapshot().get('active_streams') or 0)
 
 
+def _update_blocker_snapshot(target: str) -> dict:
+    """Return the chat work that should block an update of ``target`` (#8660).
+
+    ``_restart_blocker_snapshot`` leaves out Gateway runs whose resumable run
+    identity is saved, because they survive a WebUI restart. An Agent update
+    also cycles the Gateway that executes them
+    (``_ensure_gateway_restart_for_agent_update``), which ends them, so for
+    ``target == 'agent'`` every live run blocks, as every active run did
+    before #7293. That is one pass over the registries with no durability
+    check (``run_drain.all_active_runs``), so no run can be counted twice or
+    missed while its durable mark changes. A WebUI-only update keeps the
+    #7293 exemption.
+    """
+    if target != 'agent':
+        return _restart_blocker_snapshot()
+    from api import run_drain
+
+    return _blocker_snapshot_from_runs(run_drain.all_active_runs())
+
+
 def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict:
     if isinstance(blocker_snapshot, int):
         blocker_snapshot = {
             'active_streams': blocker_snapshot,
-            'active_runs': 0,
+            'active_runs': blocker_snapshot,
             'blocking_stream_ids': [],
             'blocking_run_ids': [],
             'restart_blocked': bool(blocker_snapshot),
         }
     active_streams = int(blocker_snapshot.get('active_streams') or 0)
-    active_runs = int(blocker_snapshot.get('active_runs') or 0)
-    parts = []
-    if active_streams:
-        parts.append(f"{active_streams} active chat stream{'s' if active_streams != 1 else ''}")
-    if active_runs:
-        parts.append(f"{active_runs} active agent run{'s' if active_runs != 1 else ''}")
-    detail = ' and '.join(parts) or 'active chat work'
+    active_runs = int(blocker_snapshot.get('active_runs') or 0) or active_streams
+    detail = f"{active_runs} WebUI agent run{'s are' if active_runs != 1 else ' is'} active"
     return {
         'ok': False,
         'message': (
-            f'Cannot update {target} while {detail} is running. '
-            'Wait for the response to finish, then retry the update.'
+            f'Cannot update {target} while {detail}. '
+            'Wait for the response to finish and retry, or force the update '
+            'to interrupt the active run' + ('s' if active_runs != 1 else '') + '.'
         ),
         'target': target,
         'restart_blocked': True,
+        # #7293: the refusal is the default, not a dead end. The client may
+        # re-send the request with force_active_runs=true after an explicit
+        # confirmation; the forced restart settles the runs as interrupted.
+        'force_available': True,
         'active_streams': active_streams,
         'active_runs': active_runs,
         'blocking_stream_ids': blocker_snapshot.get('blocking_stream_ids') or [],
@@ -237,23 +261,32 @@ def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict
     }
 
 
-def _wait_until_restart_safe(poll_seconds: float = 2.0, max_wait_seconds: float = 300.0) -> dict:
-    """Wait for active work to finish before self-reexec.
+def _wait_until_restart_safe(poll_seconds: float = 2.0, max_wait_seconds: float | None = None) -> dict:
+    """Wait (bounded) for WebUI-owned work to finish before self-reexec.
 
-    Bounded by ``max_wait_seconds`` so a long-running (or stuck/orphaned) agent
-    run can't soft-jam the self-update indefinitely. If the deadline is reached
-    while work is still in flight, the snapshot is returned with
-    ``wait_timed_out=True`` so the caller can proceed with the re-exec anyway
-    (preserving the pre-#3105 "execv preempts in-flight work" fallback) rather
-    than holding ``_apply_lock`` for the run's full lifetime.
+    Run admission is fenced while an update is applied and stays closed until
+    the restart, so normally nothing is active here. A forced restart does not
+    wait at all. Otherwise the wait is bounded by ``max_wait_seconds``
+    (default: the shutdown drain budget, ``HERMES_WEBUI_SHUTDOWN_DRAIN_SECONDS``);
+    on timeout the snapshot carries ``wait_timed_out=True`` and the caller
+    settles the remaining runs as interrupted before re-exec (#7293) instead of
+    letting ``execv`` drop them silently.
     """
+    from api import run_drain
+
     snapshot = _restart_blocker_snapshot()
+    if snapshot.get('restart_blocked') and run_drain.restart_force_requested():
+        snapshot = dict(snapshot)
+        snapshot['forced'] = True
+        return snapshot
+    if max_wait_seconds is None:
+        max_wait_seconds = run_drain.shutdown_drain_budget_seconds()
     deadline = time.monotonic() + max(0.0, max_wait_seconds)
     while snapshot.get('restart_blocked'):
         if time.monotonic() >= deadline:
             logger.warning(
                 "restart-safety wait exceeded %.0fs with work still in flight (%s); "
-                "proceeding with re-exec anyway",
+                "settling it as interrupted before re-exec",
                 max_wait_seconds, snapshot,
             )
             snapshot = dict(snapshot)
@@ -402,7 +435,7 @@ def _inventory_locks(path: Path) -> dict:
     return out
 
 
-def apply_clear_lock(target: str) -> dict:
+def apply_clear_lock(target: str, *, force_active_runs: bool = False) -> dict:
     """Manual-instruction lock recovery for ``target``.
 
     v2.2: NEVER removes a lock file. Strategy:
@@ -421,63 +454,100 @@ def apply_clear_lock(target: str) -> dict:
         (now that the lock is gone) will take the success branch and
         re-run the normal apply.
     """
-    blocker_snapshot = _restart_blocker_snapshot()
-    if blocker_snapshot.get('restart_blocked'):
+    return _run_fenced_update(
+        target, force_active_runs, lambda: _apply_clear_lock_inner(target)
+    )
+
+
+def _apply_clear_lock_inner(target: str) -> dict:
+    """Body of ``apply_clear_lock``; runs under ``_apply_lock`` + the admission fence."""
+    if target == 'webui':
+        path = REPO_ROOT
+    elif target == 'agent':
+        path = _AGENT_DIR
+    else:
+        return {'ok': False, 'message': f'Unknown target: {target}'}
+
+    if path is None or not (path / '.git').exists():
+        return {'ok': False, 'message': 'Not a git repository'}
+
+    inv = _inventory_locks(path)
+    manual_command = f"rm -f {inv['well_known_lock_path']}"
+
+    if not inv['well_known_lock_present']:
+        # Lock is gone. Run the normal non-destructive update flow and
+        # annotate the response with what we found for the user's
+        # records. Pass the configured channel through — otherwise an
+        # experimental-channel WebUI lock-recovery retry silently falls back
+        # to stable (Codex gate: _apply_update_inner defaults to stable).
+        with _cache_lock:
+            _update_cache['checked_at'] = 0
+        retry_result = _apply_update_inner(target, _read_update_channel())
+        retry_result = dict(retry_result)
+        retry_result['lock_recovery'] = {
+            'action': 'no-lock-found',
+            'manual_command': manual_command,
+            'other_locks': inv['other_locks'],
+        }
+        return retry_result
+
+    # Lock is present. The server cannot prove it's safe to delete;
+    # the only safe path is to ask the operator.
+    message = (
+        'A git lock file (.git/index.lock) is present. The server does '
+        'not delete locks automatically -- git uses O_CREAT|O_EXCL '
+        'locking, which cannot be detected with advisory probes. To '
+        'recover: confirm no other git process is running against '
+        f'this checkout, then run: {manual_command}  '
+        'Click "Retry update" once you have removed it.'
+    )
+    return {
+        'ok': False,
+        'message': message,
+        'lock_held': True,
+        'target': target,
+        'manual_command': manual_command,
+        'well_known_lock_path': inv['well_known_lock_path'],
+        'other_locks': inv['other_locks'],
+    }
+
+
+def _run_fenced_update(target: str, force_active_runs: bool, run) -> dict:
+    """Refuse / fence / re-check wrapper shared by every update entry point (#7293).
+
+    1. Refuse by default while WebUI-owned runs are active (``force_available``
+       tells the client an explicit force exists).
+    2. Take ``_apply_lock`` and close run admission for the whole update, so no
+       run can start between the safety check and the re-exec.
+    3. Re-check after fencing: a run admitted just before the fence closed must
+       still refuse an unforced update.
+    4. Release the hold on the way out. A scheduled restart keeps admission
+       closed on its own (``run_drain.mark_restart_pending``) until the process
+       is replaced; a failed update reopens it.
+    """
+    from api import run_drain
+
+    blocker_snapshot = _update_blocker_snapshot(target)
+    if blocker_snapshot.get('restart_blocked') and not force_active_runs:
         return _restart_blocked_response(target, blocker_snapshot)
 
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
-
     try:
-        if target == 'webui':
-            path = REPO_ROOT
-        elif target == 'agent':
-            path = _AGENT_DIR
-        else:
-            return {'ok': False, 'message': f'Unknown target: {target}'}
-
-        if path is None or not (path / '.git').exists():
-            return {'ok': False, 'message': 'Not a git repository'}
-
-        inv = _inventory_locks(path)
-        manual_command = f"rm -f {inv['well_known_lock_path']}"
-
-        if not inv['well_known_lock_present']:
-            # Lock is gone. Run the normal non-destructive update flow and
-            # annotate the response with what we found for the user's
-            # records. Pass the configured channel through — otherwise an
-            # experimental-channel WebUI lock-recovery retry silently falls back
-            # to stable (Codex gate: _apply_update_inner defaults to stable).
-            with _cache_lock:
-                _update_cache['checked_at'] = 0
-            retry_result = _apply_update_inner(target, _read_update_channel())
-            retry_result = dict(retry_result)
-            retry_result['lock_recovery'] = {
-                'action': 'no-lock-found',
-                'manual_command': manual_command,
-                'other_locks': inv['other_locks'],
-            }
-            return retry_result
-
-        # Lock is present. The server cannot prove it's safe to delete;
-        # the only safe path is to ask the operator.
-        message = (
-            'A git lock file (.git/index.lock) is present. The server does '
-            'not delete locks automatically -- git uses O_CREAT|O_EXCL '
-            'locking, which cannot be detected with advisory probes. To '
-            'recover: confirm no other git process is running against '
-            f'this checkout, then run: {manual_command}  '
-            'Click "Retry update" once you have removed it.'
-        )
-        return {
-            'ok': False,
-            'message': message,
-            'lock_held': True,
-            'target': target,
-            'manual_command': manual_command,
-            'well_known_lock_path': inv['well_known_lock_path'],
-            'other_locks': inv['other_locks'],
-        }
+        token = run_drain.hold_run_admission(f'update:{target}', force=bool(force_active_runs))
+        try:
+            blocker_snapshot = _update_blocker_snapshot(target)
+            if blocker_snapshot.get('restart_blocked'):
+                if not force_active_runs:
+                    return _restart_blocked_response(target, blocker_snapshot)
+                logger.warning(
+                    "Forced %s update with %s active WebUI run(s); they will be "
+                    "settled as interrupted before the restart",
+                    target, blocker_snapshot.get('active_runs'),
+                )
+            return run()
+        finally:
+            run_drain.release_run_admission_hold(token)
     finally:
         _apply_lock.release()
 
@@ -795,6 +865,67 @@ _CHANNEL_TAG_GLOBS = {
     'stable': 'v*',
     'experimental': 'exp-v*',
 }
+# Stable release tags are pure dotted versions (``v0.21.6``, legacy
+# ``v2026.5.29.2`` with its 4th component). The ``v*`` glob also matches
+# build-metadata prereleases (``v0.21.6+canary.20261010T070026Z``) which are
+# NOT published releases — _release_tags filters them out of the stable list.
+_STABLE_RELEASE_TAG_RE = re.compile(r'^v\d+(?:\.\d+)+$')
+# The major-version SERIES a stable tag belongs to (``v0.52.114`` -> ``v0``,
+# legacy ``v2026.9.24`` -> ``v2026``). The Agent repo renamed its stable series
+# from ``v2026.9.x`` to ``v0.21.x`` in Oct 2026, so ordering has to rank the
+# current series above the legacy one and VERSIONS inside a series by number.
+_STABLE_SERIES_RE = re.compile(r'^(v\d+)\.')
+
+
+def _stable_series(tag: str) -> str:
+    """Return the major-version series of a stable release tag."""
+    match = _STABLE_SERIES_RE.match(tag)
+    return match.group(1) if match else tag
+
+
+def _release_version_key(tag: str):
+    """Numeric version tuple of a release tag (``v0.52.114`` -> ``(0, 52, 114)``).
+
+    Compare NUMERICALLY, not lexically: ``v0.52.5`` must outrank ``v0.52.2``
+    and ``v0.52.114`` must outrank ``v0.52.5``.
+    """
+    return tuple(int(part) for part in tag[1:].split('.'))
+
+
+def _order_stable_tags(tags):
+    """Group stable release tags by series and order each group by DESCENDING
+    NUMERIC VERSION.
+
+    Series order is fixed, not date-based: the legacy CalVer series ``v2026``
+    ranks below every other series, and the others rank by major number,
+    highest first. That is what fixes the rename from ``v2026.9.x`` to
+    ``v0.21.x``: name order ranked the LEGACY series first, resolving "latest"
+    to an ancestor of HEAD and firing the branch-comparison fallback.
+
+    The order is the same whatever order ``tags`` arrive in, so it carries none
+    of the creation-date hazards:
+
+    * ``git`` breaks creatordate TIES by refname ascending, so two releases
+      tagged in the same second would list the OLDER one first and the update
+      check would report ``behind=0`` on an install that is one release behind;
+    * creatordate is the tagger date for an ANNOTATED tag but the COMMIT date
+      for a lightweight one, so a mixed pair could rank an older release ahead
+      of a newer one even without a tie.
+
+    ``v2026`` is named explicitly because it is the only legacy series that
+    exists; a future series rename would need a new rule here.
+    """
+    por_grupo = {}
+    for tag in tags:
+        serie = _stable_series(tag)
+        if serie not in por_grupo:
+            por_grupo[serie] = []
+        por_grupo[serie].append(tag)
+    ordenados = []
+    for serie in sorted(por_grupo, key=lambda s: (s != 'v2026', int(s[1:]) if s[1:].isdigit() else -1), reverse=True):
+        ordenados.extend(sorted(por_grupo[serie], key=_release_version_key, reverse=True))
+    return ordenados
+
 
 
 def _normalize_channel(channel) -> str:
@@ -807,6 +938,72 @@ def _normalize_channel(channel) -> str:
 def _channel_tag_glob(channel) -> str:
     """Return the ``git tag --list`` glob for the given channel."""
     return _CHANNEL_TAG_GLOBS[_normalize_channel(channel)]
+
+
+# ``git describe`` must skip the same non-release tags _release_tags drops from
+# the stable list. A build-metadata canary (``v0.22.5+canary.1``) or a ``-``
+# prerelease on the SAME commit as a stable release would otherwise describe as
+# the installed tag, fall outside the filtered list, and send both the check and
+# the apply to the branch head (untagged development code) on an up-to-date
+# install.
+_STABLE_DESCRIBE_EXCLUDES = ('--exclude', 'v*+*', '--exclude', 'v*-*')
+
+
+def _channel_describe_filter(channel, *, stable_filter: bool = True) -> list:
+    """``--match``/``--exclude`` arguments that limit ``git describe`` to the
+    channel's release tags (the tags ``_release_tags`` can list).
+
+    On the stable channel the prerelease excludes apply only under the stable
+    filter policy (``_stable_filter_for_tags``, #8684)."""
+    args = ['--match', _channel_tag_glob(channel)]
+    if _normalize_channel(channel) == 'stable' and stable_filter:
+        args.extend(_STABLE_DESCRIBE_EXCLUDES)
+    return args
+
+
+def _stable_filter_for_tags(tags) -> bool:
+    """The stable filter policy implied by one ``_release_tags`` snapshot.
+
+    ``_release_tags`` lists only stable releases when the repo has one, and
+    only prereleases when it has none, so the snapshot itself says which
+    policy produced it. Every later describe/count/past-tag call in the same
+    check or apply must use this policy rather than re-reading the refs: a
+    concurrent fetch that publishes the first stable release mid-operation
+    would otherwise switch the excludes on between calls, lose the installed
+    canary, and send the apply to the branch tip (#8684 gate). An empty
+    snapshot keeps the #8147 filter.
+    """
+    return not tags or any(_STABLE_RELEASE_TAG_RE.match(t) for t in tags)
+
+
+def _describe_filter_for(path, channel, stable_filter=None) -> list:
+    """Describe filter for ``path``; ``stable_filter=None`` reads the policy from the repo."""
+    if _normalize_channel(channel) != 'stable':
+        return _channel_describe_filter(channel)
+    if stable_filter is None:
+        stable_filter = _repo_has_stable_release(path)
+    return _channel_describe_filter(channel, stable_filter=stable_filter)
+
+
+def _repo_has_stable_release(path) -> bool:
+    """Return True when ``path`` has at least one stable release tag (``v0.52.1``).
+
+    The stable channel leaves prerelease tags (``v0.22.5+canary.1``, ``-rc.1``)
+    out of its release list, its ``describe`` and its ahead-count, so that a
+    canary never outranks the release it precedes (#8147). That filter only
+    makes sense when a stable release exists to fall back on. In a checkout
+    whose tags are ALL prereleases (a mirror or fork that publishes only
+    canaries), filtering leaves no release at all; the check then fell through
+    to the branch comparison and the apply moved the install to the untagged
+    branch tip (#8684). Without a stable release, the stable channel therefore
+    keeps v0.52.544's unfiltered behaviour: the channel's tags in version order,
+    so the installed canary stays current and a newer published canary is
+    still offered. A git failure keeps the filter (the #8147 behaviour).
+    """
+    out, ok = _run_git(['tag', '--list', _channel_tag_glob('stable'), '--sort=-creatordate'], path)
+    if not ok:
+        return True
+    return any(_STABLE_RELEASE_TAG_RE.match(line.strip()) for line in (out or '').splitlines())
 
 
 def _read_update_channel() -> str:
@@ -859,15 +1056,58 @@ def channel_version_badge(channel=None) -> str:
 
 
 def _release_tags(path, channel=DEFAULT_UPDATE_CHANNEL):
-    """Return the channel's release tags newest-first, in version-sort order."""
+    """Return the channel's release tags newest-first.
+
+    **Experimental** tags stay in plain name order (``--sort=-v:refname``):
+    they are a single series that has never been renamed, so numeric name order
+    IS release order.
+
+    **Stable** tags are ordered by SERIES (current above legacy) and then by
+    NUMERIC VERSION inside each series (see ``_order_stable_tags``), because:
+
+    * the Agent repo renamed its stable series from ``v2026.9.x`` to
+      ``v0.21.x`` (Oct 2026) and name order ranks ``v2026.9.24`` above
+      ``v0.21.6`` (2026 > 0). The "latest" tag then resolves to an ANCESTOR of
+      HEAD, the release check bails out (HEAD contains the advertised tag), and
+      the check falls through to the branch-comparison fallback — advertising
+      hundreds of untagged master commits to an install that is already on the
+      latest stable release;
+    * pure creation-date order has two defects of its own: ``git`` breaks
+      creatordate ties by refname ASCENDING (two releases tagged in the same
+      second rank the OLDER one first, hiding a real update), and creatordate
+      is the tagger date for annotated tags but the commit date for lightweight
+      ones (a mixed pair can rank an older release above a newer one).
+
+    Build-metadata prerelease tags (``v0.21.6+canary.*``, ``rc.*``,
+    ``abandoned-*``) are excluded from the stable channel: they are not
+    published releases and would otherwise outrank the release itself.
+    """
     glob = _channel_tag_glob(channel)
-    out, ok = _run_git(['tag', '--list', glob, '--sort=-v:refname'], path)
+    if _normalize_channel(channel) != 'stable':
+        out, ok = _run_git(['tag', '--list', glob, '--sort=-v:refname'], path)
+        if not (ok and out):
+            return []
+        return [line.strip() for line in out.splitlines() if line.strip()]
+    out, ok = _run_git(['tag', '--list', glob, '--sort=-creatordate'], path)
     if not (ok and out):
         return []
-    return [line.strip() for line in out.splitlines() if line.strip()]
+    tags = [line.strip() for line in out.splitlines() if line.strip()]
+    releases = [t for t in tags if _STABLE_RELEASE_TAG_RE.match(t)]
+    if not releases:
+        # No stable release at all, only prereleases (#8684): keep v0.52.544's
+        # unfiltered version-order list rather than an empty one, which would
+        # send the check and the apply to the untagged branch tip. Order the
+        # SAME tag set the first read saw: a stable release fetched between the
+        # two reads must not join a prerelease-policy snapshot.
+        seen = set(tags)
+        out, ok = _run_git(['tag', '--list', glob, '--sort=-v:refname'], path)
+        if not (ok and out):
+            return []
+        return [t for t in (line.strip() for line in out.splitlines()) if t and t in seen]
+    return _order_stable_tags(releases)
 
 
-def _current_release_tag(path, channel=DEFAULT_UPDATE_CHANNEL):
+def _current_release_tag(path, channel=DEFAULT_UPDATE_CHANNEL, *, stable_filter=None):
     """Return the latest channel release tag reachable from HEAD, if one exists.
 
     MUST filter by the channel glob (``--match``): a commit tagged BOTH
@@ -876,7 +1116,7 @@ def _current_release_tag(path, channel=DEFAULT_UPDATE_CHANNEL):
     math resolve to the experimental tag and fall through to the branch firehose.
     """
     out, ok = _run_git(
-        ['describe', '--tags', '--abbrev=0', '--match', _channel_tag_glob(channel)],
+        ['describe', '--tags', '--abbrev=0', *_describe_filter_for(path, channel, stable_filter)],
         path,
     )
     return out if ok and out else None
@@ -891,7 +1131,7 @@ def _release_gap(tags, current, latest):
     return 1
 
 
-def _count_channel_tags_ahead(path, channel=DEFAULT_UPDATE_CHANNEL):
+def _count_channel_tags_ahead(path, channel=DEFAULT_UPDATE_CHANNEL, *, stable_filter=None):
     """Count channel release tags strictly ahead of HEAD (fast-forwardable).
 
     Used only when NO channel tag is reachable behind HEAD — the channel-scoped
@@ -908,7 +1148,14 @@ def _count_channel_tags_ahead(path, channel=DEFAULT_UPDATE_CHANNEL):
     )
     if not (ok and out):
         return 0
-    return sum(1 for line in out.splitlines() if line.strip())
+    tags = [line.strip() for line in out.splitlines() if line.strip()]
+    if _normalize_channel(channel) == 'stable' and (
+        stable_filter if stable_filter is not None else _repo_has_stable_release(path)
+    ):
+        # Count releases, not the prerelease tags _release_tags drops. With no
+        # stable release at all, _release_tags lists the prereleases (#8684).
+        tags = [t for t in tags if _STABLE_RELEASE_TAG_RE.match(t)]
+    return len(tags)
 
 
 def _release_tag_sort_key(tag):
@@ -1085,7 +1332,7 @@ def _check_webui_published_release_update(channel=DEFAULT_UPDATE_CHANNEL):
     }
 
 
-def _head_is_past_latest_tag(path, current_tag, channel=DEFAULT_UPDATE_CHANNEL):
+def _head_is_past_latest_tag(path, current_tag, channel=DEFAULT_UPDATE_CHANNEL, *, stable_filter=None):
     """Return True when HEAD has moved past the latest reachable channel tag.
 
     `git describe --tags --always --match <glob>` returns the bare tag name
@@ -1101,7 +1348,7 @@ def _head_is_past_latest_tag(path, current_tag, channel=DEFAULT_UPDATE_CHANNEL):
     if not current_tag:
         return False
     full_desc, ok = _run_git(
-        ['describe', '--tags', '--always', '--match', _channel_tag_glob(channel)],
+        ['describe', '--tags', '--always', *_describe_filter_for(path, channel, stable_filter)],
         path,
     )
     return bool(ok and full_desc and full_desc != current_tag)
@@ -1160,7 +1407,9 @@ def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None)
     tags = _release_tags(path, channel)
     if tags:
         latest_tag = tags[0]
-        current_tag = _current_release_tag(path, channel)
+        # One filter policy for the whole selection, taken from this snapshot (#8684 gate).
+        stable_filter = _stable_filter_for_tags(tags)
+        current_tag = _current_release_tag(path, channel, stable_filter=stable_filter)
         behind = _release_gap(tags, current_tag, latest_tag)
         # Mirror the check side exactly: fall through to the branch comparison
         # whenever the checkout has already moved past the release tag that the
@@ -1171,7 +1420,7 @@ def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None)
         # or fail fast-forward; branch comparison is the truthful update path.
         # Short-circuit `or` preserves the original minimal git-call pattern.
         if (
-            (behind == 0 and _head_is_past_latest_tag(path, current_tag, channel))
+            (behind == 0 and _head_is_past_latest_tag(path, current_tag, channel, stable_filter=stable_filter))
             or (behind > 0 and _head_contains_ref(path, latest_tag))
             or (behind > 0 and not _can_fast_forward_to(path, latest_tag))
         ):
@@ -1229,7 +1478,9 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
         return None
 
     latest_tag = tags[0]
-    current_tag = _current_release_tag(path, channel)
+    # One filter policy for the whole check, taken from this snapshot (#8684 gate).
+    stable_filter = _stable_filter_for_tags(tags)
+    current_tag = _current_release_tag(path, channel, stable_filter=stable_filter)
     behind = _release_gap(tags, current_tag, latest_tag)
 
     # When NO channel tag is reachable behind HEAD, _current_release_tag returns
@@ -1246,7 +1497,7 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     # tag; may be refined below in the no-channel-tag-behind-HEAD fallback).
     current_sha_ref = current_tag
     if current_tag is None:
-        ahead = _count_channel_tags_ahead(path, channel)
+        ahead = _count_channel_tags_ahead(path, channel, stable_filter=stable_filter)
         if ahead > 0:
             behind = ahead
         # Scope the installed-version fallback to the WebUI repo only.
@@ -1267,6 +1518,20 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
             )
             exact_tag = (exact_tag or '').strip()
             current_sha_ref = exact_tag if ok and exact_tag else None
+        elif _normalize_channel(channel) == 'stable':
+            # The stable describe skips prereleases, so an install whose only
+            # reachable ``v*`` tag is a canary (e.g. a shallow clone of a canary
+            # build) has no release behind HEAD. That tag is still the installed
+            # version and a real ref for the compare link: show it, but never use
+            # it for release selection.
+            raw_tag, ok = _run_git(
+                ['describe', '--tags', '--abbrev=0', '--match', _channel_tag_glob(channel)],
+                path,
+            )
+            raw_tag = (raw_tag or '').strip()
+            if ok and raw_tag:
+                current_version_display = raw_tag
+                current_sha_ref = raw_tag
 
     # If behind == 0 but HEAD has moved past the tag (e.g. the agent repo
     # keeps committing to master between tagged releases), the release check
@@ -1281,7 +1546,7 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     # origin/master (the firehose). Report up-to-date. The AGENT repo and the
     # experimental channel keep the historical fall-through.
     suppress_stable_fallthrough = (channel == 'stable' and name == 'webui')
-    if behind == 0 and _head_is_past_latest_tag(path, current_tag, channel):
+    if behind == 0 and _head_is_past_latest_tag(path, current_tag, channel, stable_filter=stable_filter):
         if suppress_stable_fallthrough:
             return _channel_up_to_date_info(path, name, channel, current_tag, latest_tag)
         return None
@@ -1601,7 +1866,7 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     _tag_info = None
     if _tags:
         _latest = _tags[0]
-        _current = _current_release_tag(path, channel)
+        _current = _current_release_tag(path, channel, stable_filter=_stable_filter_for_tags(_tags))
         _tag_info = {'latest_tag': _latest, 'current_tag': _current}
 
     branch_info = _check_repo_branch(path, name, fetch=False)
@@ -2073,7 +2338,23 @@ def _schedule_restart(delay: float = 2.0) -> None:
     import os
     import sys
 
+    from api import run_drain
+
+    # #7293: run admission stays closed from now until the process image is
+    # replaced, so no run can start that the restart would drop. If the
+    # restart never replaces the process, the epoch reopens admission below.
+    restart_epoch = run_drain.mark_restart_pending()
+
     def _do():
+        try:
+            _do_restart()
+        finally:
+            # Reaching here means this process was NOT replaced (spawn failure,
+            # an execv that returned under test, an unexpected error). Reopen
+            # admission so the server does not stay closed forever.
+            run_drain.abandon_restart_pending(restart_epoch)
+
+    def _do_restart():
         import time
         time.sleep(delay)
         # Hold _apply_lock through os.execv so no new update can start between
@@ -2086,6 +2367,16 @@ def _schedule_restart(delay: float = 2.0) -> None:
         # released atomically by the kernel.
         with _apply_lock:
             _wait_until_restart_safe()
+            # #7293: whatever is still running here (a forced update, or a
+            # safety wait that timed out) is settled durably as interrupted
+            # BEFORE the image is replaced, instead of being dropped by execv.
+            # A no-op when nothing is active. Gateway runs are never touched.
+            settled = run_drain.settle_webui_owned_runs(run_drain.RESTART_SETTLE_REASON)
+            if settled.get('settled') or settled.get('pending'):
+                logger.warning(
+                    "restart: settled %d WebUI run(s) as interrupted before re-exec (unsettled: %s)",
+                    len(settled.get('settled') or []), settled.get('pending') or [],
+                )
             # Purge bytecode caches so the new process imports from
             # current source.  Without this, Python may serve stale .pyc
             # files whose mtime matches the just-pulled .py files,
@@ -2139,7 +2430,13 @@ def _schedule_restart(delay: float = 2.0) -> None:
                 # Last-resort: let the process supervisor restart us.
                 _windows_restart_exit(0)
 
-    threading.Thread(target=_do, daemon=True).start()
+    try:
+        threading.Thread(target=_do, daemon=True).start()
+    except BaseException:
+        # Only the restart thread reopens admission; one that never started
+        # would leave every chat start refused for the life of the process.
+        run_drain.abandon_restart_pending(restart_epoch)
+        raise
 
 
 def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
@@ -2155,6 +2452,17 @@ def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
     restart_result = restart_active_profile_gateway(profile=target_profile)
     status = str(restart_result.get("status") or "")
     if status in {"completed", "in_progress"}:
+        return True, restart_result
+    if status == "external":
+        # The monitored Gateway is managed outside WebUI (#8391). The Agent
+        # checkout update itself succeeded; the shared helper launched nothing,
+        # and the response reports ``gateway_restart: "external"`` rather than
+        # claiming the external runtime restarted. No retry: retrying cannot
+        # change ownership.
+        logger.info(
+            "Agent updated; gateway restart skipped because the monitored Gateway "
+            "is managed outside WebUI"
+        )
         return True, restart_result
     if status != "failed":
         return False, restart_result
@@ -2245,7 +2553,7 @@ def _discard_local_changes(path: Path, reset_ref: str) -> bool:
     return ok
 
 
-def apply_force_update(target: str, channel=None) -> dict:
+def apply_force_update(target: str, channel=None, *, force_active_runs: bool = False) -> dict:
     """Discard local changes for the requested update target.
 
     Unlike apply_update() which requires a clean working tree and refuses
@@ -2266,132 +2574,127 @@ def apply_force_update(target: str, channel=None) -> dict:
     if channel is None:
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
-    blocker_snapshot = _restart_blocker_snapshot()
-    if blocker_snapshot.get('restart_blocked'):
-        return _restart_blocked_response(target, blocker_snapshot)
+    return _run_fenced_update(
+        target, force_active_runs, lambda: _apply_force_update_inner(target, channel)
+    )
 
-    if not _apply_lock.acquire(blocking=False):
-        return {'ok': False, 'message': 'Update already in progress'}
-    try:
-        if target == 'webui':
-            path = REPO_ROOT
-        elif target == 'agent':
-            path = _AGENT_DIR
-            # Channel is WebUI-only — the Agent always uses the default channel.
-            channel = DEFAULT_UPDATE_CHANNEL
-        else:
-            return {'ok': False, 'message': f'Unknown target: {target}'}
 
-        if path is None or not (path / '.git').exists():
-            return {'ok': False, 'message': 'Not a git repository'}
+def _apply_force_update_inner(target: str, channel) -> dict:
+    """Body of ``apply_force_update``; runs under ``_apply_lock`` + the admission fence."""
+    if target == 'webui':
+        path = REPO_ROOT
+    elif target == 'agent':
+        path = _AGENT_DIR
+        # Channel is WebUI-only — the Agent always uses the default channel.
+        channel = DEFAULT_UPDATE_CHANNEL
+    else:
+        return {'ok': False, 'message': f'Unknown target: {target}'}
 
-        # NOTE: v2 of PR #5688 removed the prior stale-lock cleanup loop from
-        # this entry point. The mtime-based heuristic was empirically proven
-        # unsafe (a live `git add` was shown to hold .git/index.lock past 31 s
-        # with unchanged mtime) and unconditional pre-cleanup clobbered locks
-        # for force-update retries that had nothing to do with a lock error.
-        # Lock cleanup is now ONLY performed by the explicit
-        # /api/updates/clear_lock endpoint, where the user has opted in to
-        # a non-destructive retry.
+    if path is None or not (path / '.git').exists():
+        return {'ok': False, 'message': 'Not a git repository'}
 
-        # --force so a remote re-tag (e.g. squash-merge that re-points an
-        # existing release tag) doesn't jam the apply path with "would clobber
-        # existing tag". See #2756.
-        fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
-        if not fetch_ok:
-            return {
-                'ok': False,
-                'message': _apply_fetch_failure_message(
-                    fetch_out,
-                    'Could not reach the remote repository. Check your connection.',
-                ),
-            }
+    # NOTE: v2 of PR #5688 removed the prior stale-lock cleanup loop from
+    # this entry point. The mtime-based heuristic was empirically proven
+    # unsafe (a live `git add` was shown to hold .git/index.lock past 31 s
+    # with unchanged mtime) and unconditional pre-cleanup clobbered locks
+    # for force-update retries that had nothing to do with a lock error.
+    # Lock cleanup is now ONLY performed by the explicit
+    # /api/updates/clear_lock endpoint, where the user has opted in to
+    # a non-destructive retry.
 
-        compare_ref = _select_apply_compare_ref(path, channel, target)
-        # Stable channel, already up to date on the promoted subset: nothing to
-        # force to. Do NOT fall back to origin/master (firehose). See
-        # _select_apply_compare_ref channel semantics.
-        if compare_ref is None:
-            dirty_state = None
-            if target == 'webui' and channel == 'stable':
-                dirty_state = _probe_dirty(path, timeout=_FORCE_DIRTY_PROBE_TIMEOUT)
-            if dirty_state is True:
-                compare_ref = 'HEAD'
-            else:
-                return {
-                    'ok': True,
-                    'message': f'{target} is already up to date on the {channel} channel.',
-                    'target': target,
-                    'up_to_date': True,
-                    'channel': channel,
-                }
-
-        # Rewind guard (Codex CORE #3): refuse to reset --hard onto a ref that
-        # is an ANCESTOR of HEAD — that would downgrade the checkout. This is the
-        # switch-back-to-stable-while-ahead case. A ref that is a descendant of
-        # HEAD (normal update / opt-in to experimental) fast-forwards fine and is
-        # allowed. Refs on a divergent line (neither ancestor nor descendant) are
-        # the legitimate force-update case (conflict/diverged recovery) and are
-        # also allowed — the guard fires ONLY on a pure-ancestor rewind.
-        if _head_contains_ref(path, compare_ref) and not _can_fast_forward_to(path, compare_ref):
-            return {
-                'ok': False,
-                'message': (
-                    f'{target} is already ahead of the {channel} channel '
-                    f'({compare_ref}); refusing to rewind the checkout. '
-                    'Switching to a slower channel keeps your current version '
-                    'until that channel catches up.'
-                ),
-                'target': target,
-                'channel': channel,
-                'refused_rewind': True,
-            }
-        if not _discard_local_changes(path, compare_ref):
-            return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
-
-        with _cache_lock:
-            _update_cache['checked_at'] = 0
-
-        if target == 'agent':
-            gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
-            if not gateway_ok:
-                return {
-                    'ok': False,
-                    'message': _agent_gateway_restart_failure_message(target, gateway_result),
-                    'target': target,
-                    'gateway_restart': gateway_result.get('status'),
-                }
-
-        _schedule_restart()
-
-        response = {
-            'ok': True,
-            'message': f'{target} force-updated to {compare_ref}',
-            'target': target,
-            'restart_scheduled': True,
+    # --force so a remote re-tag (e.g. squash-merge that re-points an
+    # existing release tag) doesn't jam the apply path with "would clobber
+    # existing tag". See #2756.
+    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags', '--force'], path, timeout=15)
+    if not fetch_ok:
+        return {
+            'ok': False,
+            'message': _apply_fetch_failure_message(
+                fetch_out,
+                'Could not reach the remote repository. Check your connection.',
+            ),
         }
-        if target == 'agent':
-            response['gateway_restart'] = gateway_result.get('status')
-        return response
-    finally:
-        _apply_lock.release()
+
+    compare_ref = _select_apply_compare_ref(path, channel, target)
+    # Stable channel, already up to date on the promoted subset: nothing to
+    # force to. Do NOT fall back to origin/master (firehose). See
+    # _select_apply_compare_ref channel semantics.
+    if compare_ref is None:
+        dirty_state = None
+        if target == 'webui' and channel == 'stable':
+            dirty_state = _probe_dirty(path, timeout=_FORCE_DIRTY_PROBE_TIMEOUT)
+        if dirty_state is True:
+            compare_ref = 'HEAD'
+        else:
+            return {
+                'ok': True,
+                'message': f'{target} is already up to date on the {channel} channel.',
+                'target': target,
+                'up_to_date': True,
+                'channel': channel,
+            }
+
+    # Rewind guard (Codex CORE #3): refuse to reset --hard onto a ref that
+    # is an ANCESTOR of HEAD — that would downgrade the checkout. This is the
+    # switch-back-to-stable-while-ahead case. A ref that is a descendant of
+    # HEAD (normal update / opt-in to experimental) fast-forwards fine and is
+    # allowed. Refs on a divergent line (neither ancestor nor descendant) are
+    # the legitimate force-update case (conflict/diverged recovery) and are
+    # also allowed — the guard fires ONLY on a pure-ancestor rewind.
+    if _head_contains_ref(path, compare_ref) and not _can_fast_forward_to(path, compare_ref):
+        return {
+            'ok': False,
+            'message': (
+                f'{target} is already ahead of the {channel} channel '
+                f'({compare_ref}); refusing to rewind the checkout. '
+                'Switching to a slower channel keeps your current version '
+                'until that channel catches up.'
+            ),
+            'target': target,
+            'channel': channel,
+            'refused_rewind': True,
+        }
+    if not _discard_local_changes(path, compare_ref):
+        return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
+
+    with _cache_lock:
+        _update_cache['checked_at'] = 0
+
+    if target == 'agent':
+        gateway_ok, gateway_result = _ensure_gateway_restart_for_agent_update()
+        if not gateway_ok:
+            return {
+                'ok': False,
+                'message': _agent_gateway_restart_failure_message(target, gateway_result),
+                'target': target,
+                'gateway_restart': gateway_result.get('status'),
+            }
+
+    _schedule_restart()
+
+    response = {
+        'ok': True,
+        'message': f'{target} force-updated to {compare_ref}',
+        'target': target,
+        'restart_scheduled': True,
+    }
+    if target == 'agent':
+        response['gateway_restart'] = gateway_result.get('status')
+    return response
 
 
-def apply_update(target, channel=None):
-    """Stash, pull --ff-only, pop for the given target repo."""
+def apply_update(target, channel=None, *, force_active_runs: bool = False):
+    """Stash, pull --ff-only, pop for the given target repo.
+
+    Refuses while WebUI-owned runs are active unless ``force_active_runs``
+    (#7293); see ``_run_fenced_update``.
+    """
     if channel is None:
         channel = _read_update_channel()
     channel = _normalize_channel(channel)
-    blocker_snapshot = _restart_blocker_snapshot()
-    if blocker_snapshot.get('restart_blocked'):
-        return _restart_blocked_response(target, blocker_snapshot)
-
-    if not _apply_lock.acquire(blocking=False):
-        return {'ok': False, 'message': 'Update already in progress'}
-    try:
-        return _apply_update_inner(target, channel)
-    finally:
-        _apply_lock.release()
+    return _run_fenced_update(
+        target, force_active_runs, lambda: _apply_update_inner(target, channel)
+    )
 
 
 def _restore_stash_after_pull_failure(

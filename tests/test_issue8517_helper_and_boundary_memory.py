@@ -218,10 +218,20 @@ class OwnerCheckedManager:
 
     def on_session_end(self, messages):
         if self.always_refuse.get("on"):
-            logging.getLogger("agent.memory_caller_scope").warning(
-                "Memory %s refused (%s): %s", "hook on_session_end",
-                "memory_caller_profile_unresolved", "test refusal",
-            )
+            # The Agent refuses a hook only through agent/memory_caller_scope._refuse
+            # (looked up at call time), where WebUI notices it (#8613); agent-free,
+            # the same refusal log line.
+            try:
+                from agent import memory_caller_scope as mcs  # noqa: PLC0415
+            except Exception:
+                mcs = None
+            if callable(getattr(mcs, "_refuse", None)):
+                mcs._refuse("hook on_session_end", "test refusal", None, None, False)
+            else:
+                logging.getLogger("agent.memory_caller_scope").warning(
+                    "Memory %s refused (%s): %s", "hook on_session_end",
+                    "memory_caller_profile_unresolved", "test refusal",
+                )
             return
         if _caller_scope(self._bound_scope, "hook on_session_end") is None:
             return

@@ -119,12 +119,18 @@ def test_legacy_loop_resets_sse_event_after_approval():
     loop = _extract_legacy_sse_loop()
     approval_idx = loop.find('"hermes.approval.request"')
     assert approval_idx >= 0
-    # Window sized to cover the approval handling block including the run_id
-    # recording added in the #4549 follow-up (reset lands ~1360 chars in).
-    block_after = loop[approval_idx:approval_idx + 1500]
+    # Window sized to cover the whole approval handling block: the run_id
+    # recording (#4549 follow-up) and the creation-time identity decision
+    # (#8579) both live inside it, and the reset must still land before the
+    # next event branch so an approval cannot bleed into tool progress.
+    block_after = loop[approval_idx:approval_idx + 2600]
     assert 'sse_event = "message"' in block_after, (
         "Must reset sse_event to 'message' after approval handling to prevent bleed"
     )
+    # The reset must be the approval branch's own, not a later branch's.
+    assert block_after.index('sse_event = "message"') < block_after.find(
+        'if sse_event == "hermes.tool.progress":'
+    ), "the approval branch must reset sse_event before the next event branch"
 
 
 def test_approval_event_mapping_complete_payload():

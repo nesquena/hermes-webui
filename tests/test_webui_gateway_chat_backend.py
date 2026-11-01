@@ -421,6 +421,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert '"stream": true' in captured["body"]
     payload = json.loads(captured["body"])
     assert payload["reasoning_effort"] == "high"
+    assert payload["model_options"] == {"reasoning": {"enabled": True, "effort": "high"}}
     assert payload["model"] == "alias-target-model"
     assert payload["provider"] == "openai-codex"
     assert "ambient-provider-key" not in captured["body"]
