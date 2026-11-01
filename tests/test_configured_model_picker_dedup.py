@@ -388,6 +388,7 @@ function _deduplicateModelPickerOptions() { return 0; }
 
 for (const name of [
   '_normalizeConfiguredModelKey',
+  '_configuredModelIdentity',
   '_getConfiguredModelBadge',
   '_providerFromModelValue',
   '_readModelOverflowData',
