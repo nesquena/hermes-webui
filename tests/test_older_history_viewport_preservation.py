@@ -36,7 +36,9 @@ def test_loading_older_messages_preserves_viewport_without_bottom_snap():
     # A connected node can belong to a different transcript subtree after a
     # staged replacement; only an owner inside this target may restore scroll.
     assert "anchor.node&&target.contains(anchor.node)?anchor.node:null" in restore
-    assert "Number(node.dataset.sessionMsgIdx)===anchor.sessionIndex" in restore
+    assert "if(anchor.sessionIndex!=null&&Number.isSafeInteger(anchor.sessionIndex)){" in restore
+    assert "if(node.dataset.displayOnly==='1') return false;" in restore
+    assert "return _idx===anchor.sessionIndex;" in restore
     assert "row.getBoundingClientRect().top-container.getBoundingClientRect().top-anchor.offset" in restore
     assert "container.scrollTop+=delta" in restore
     assert "container.scrollTop = newScrollH - prevScrollH" not in body
