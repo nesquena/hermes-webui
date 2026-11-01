@@ -11045,20 +11045,15 @@ function renderSessionListFromCache(){
         if(openOpts&&openOpts.newTab) return _openSessionUrlInNewTab(childSession.session_id, childSession, {exact:true});
         await _openSidebarSession(childSession, {skipLineageResolve:true});
       };
+      // Title and time are separate spans so a long title ellipsizes without hiding the time.
       const childLabelFor=(child)=>{
         const childTitle=_nestedChildTitle(child)||'Untitled child session';
-        const parentNote=child._parent_segment_title?` via ${child._parent_segment_title}`:'';
-        return `-> ${childTitle}${parentNote}`;
-      };
-      // Title and time are separate spans so a long title ellipsizes without hiding the time.
-      const setChildLabel=(el, child)=>{
-        const label=document.createElement('span');
+        const label=document.createElement('span'), time=document.createElement('span');
         label.className='session-child-label';
-        label.textContent=childLabelFor(child);
-        const time=document.createElement('span');
+        label.textContent=`-> ${childTitle}${child._parent_segment_title?` via ${child._parent_segment_title}`:''}`;
         time.className='session-child-time';
         time.textContent=` - ${_formatRelativeSessionTime(_sessionTimestampMs(child))}`;
-        el.replaceChildren(label,time);
+        return [label,time];
       };
       const installForkChildSwipe=(rowEl, childSession, actionsEl)=>{
         let _pointerDownX=0;
@@ -11294,7 +11289,7 @@ function renderSessionListFromCache(){
           const mainBtn=document.createElement('button');
           mainBtn.type='button';
           mainBtn.className='session-child-session-main'+(childIsActive?' active':'');
-          setChildLabel(mainBtn,child);
+          mainBtn.replaceChildren(...childLabelFor(child));
           mainBtn.title='Open forked session';
           mainBtn.onclick=async(e)=>{
             if(row._skipNextChildOpen){
@@ -11309,7 +11304,7 @@ function renderSessionListFromCache(){
           };
           _wireSessionNewTabListeners(mainBtn, ()=>child.session_id, ()=>child, {exact:true});
           row._startRename=_buildSessionRenameStarter(child, mainBtn, ()=>{
-            setChildLabel(mainBtn,child);
+            mainBtn.replaceChildren(...childLabelFor(child));
           });
           row.appendChild(mainBtn);
           const state=document.createElement('span');
@@ -11369,7 +11364,7 @@ function renderSessionListFromCache(){
         const row=document.createElement('button');
         row.type='button';
         row.className='session-child-session'+(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'');
-        setChildLabel(row,child);
+        row.replaceChildren(...childLabelFor(child));
         row.title='Open child session';
         row.onclick=async(e)=>{
           e.stopPropagation();
