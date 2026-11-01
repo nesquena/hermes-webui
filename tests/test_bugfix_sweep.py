@@ -309,6 +309,170 @@ def test_read_body_accepts_trailer_fields():
     assert handler.close_connection is False
 
 
+def test_read_body_accepts_bws_before_chunk_extension():
+    from api.helpers import read_body
+
+    # RFC 9112 §7.1.1: chunk-ext = *( BWS ";" BWS chunk-ext-name ... ), so SP/HTAB
+    # before the ";" is valid framing and must not be rejected.
+    for size_line in (b"8 ;foo=bar\r\n", b"8\t; foo = bar\r\n", b"8 ;foo\r\n"):
+        handler = SimpleNamespace(
+            headers=_Headers({"Transfer-Encoding": "chunked"}),
+            rfile=io.BytesIO(size_line + b'{"a": 1}\r\n0\r\n\r\n'),
+            close_connection=False,
+        )
+
+        assert read_body(handler) == {"a": 1}
+        assert handler.close_connection is False
+
+
+def test_read_body_accepts_quoted_chunk_extension_value():
+    from api.helpers import read_body
+
+    chunked = b'8;foo="bar baz"\r\n{"a": 1}\r\n0;end=1\r\n\r\n'
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(chunked),
+        close_connection=False,
+    )
+
+    assert read_body(handler) == {"a": 1}
+    assert handler.close_connection is False
+
+
+def test_read_body_rejects_malformed_chunk_extension():
+    from api.helpers import read_body
+
+    # An extension is framing, not free text: a control byte, an empty name, or a
+    # value-less "=" must reject and close rather than be skipped over, because a
+    # stricter intermediary could read the same size line differently.
+    for size_line in (b"2;\x00\r\n", b"2;\r\n", b"2;=x\r\n", b"2;na\x00me=x\r\n", b"2;foo=\r\n", b"2;foo=bar bax\r\n"):
+        handler = SimpleNamespace(
+            headers=_Headers({"Transfer-Encoding": "chunked"}),
+            rfile=io.BytesIO(size_line + b"{}\r\n0\r\n\r\n"),
+            close_connection=False,
+        )
+
+        with pytest.raises(ValueError, match="Malformed chunk size line"):
+            read_body(handler)
+        assert handler.close_connection is True
+
+
+def test_read_body_accepts_trailer_with_empty_value():
+    from api.helpers import read_body
+
+    chunked = b'2\r\n{}\r\n0\r\nX-Empty:\r\nFoo: bar\r\n\r\n'
+    handler = SimpleNamespace(
+        headers=_Headers({"Transfer-Encoding": "chunked"}),
+        rfile=io.BytesIO(chunked),
+        close_connection=False,
+    )
+
+    assert read_body(handler) == {}
+    assert handler.close_connection is False
+
+
+def test_read_body_rejects_whitespace_before_trailer_colon():
+    from api.helpers import read_body
+
+    # RFC 9112 §5.1: no whitespace is allowed between field-name and ":". A line
+    # that a proxy might read as a different field must reject and close.
+    for trailer in (b"X-Bad : ok\r\n", b"X-Bad\t: ok\r\n", b"Foo\t: bar\r\n"):
+        handler = SimpleNamespace(
+            headers=_Headers({"Transfer-Encoding": "chunked"}),
+            rfile=io.BytesIO(b'2\r\n{}\r\n0\r\n' + trailer + b"\r\n"),
+            close_connection=False,
+        )
+
+        with pytest.raises(ValueError, match="Invalid trailer field line"):
+            read_body(handler)
+        assert handler.close_connection is True
+
+
+def _raw_chunked_post(body: bytes, *, connection_close: bool = False):
+    """Serve one raw request through a real ThreadingHTTPServer.
+
+    Mirrors api/routes.py: a read_body() ValueError becomes a 400 through bad(),
+    and only a body that decodes cleanly reaches the route. Returns
+    (response_bytes, state, closed) where ``closed`` reports whether the server
+    ended the connection after responding.
+    """
+    import socket
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from api.helpers import bad, j, read_body
+
+    state = {"routed": False}
+
+    class _Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):  # noqa: N802 - http.server API
+            try:
+                parsed = read_body(self)
+            except ValueError as exc:
+                bad(self, str(exc), status=400)
+                return
+            state["routed"] = True
+            j(self, {"ok": True, "body": parsed})
+
+        def log_message(self, format, *args):  # noqa: A002 - http.server API
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.handle_request, daemon=True)
+    thread.start()
+    sock = socket.create_connection(("127.0.0.1", server.server_address[1]), timeout=10)
+    closed = False
+    received = []
+    try:
+        sock.sendall(
+            b"POST /api/auth/login HTTP/1.1\r\nHost: test\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            + (b"Connection: close\r\n" if connection_close else b"")
+            + b"\r\n"
+            + body
+        )
+        while True:
+            try:
+                data = sock.recv(65536)
+            except socket.timeout:
+                break
+            if not data:
+                closed = True
+                break
+            received.append(data)
+    finally:
+        sock.close()
+        server.server_close()
+    return b"".join(received), state, closed
+
+
+def test_real_handler_rejects_trailer_with_whitespace_before_colon():
+    # End to end on a real HTTP/1.1 handler: the request must 400, must never
+    # reach the login route, and the connection must end so a smuggled follow-up
+    # request cannot be parsed as its own request.
+    for trailer in (b"X-Bad : ok\r\n", b"X-Bad\t: ok\r\n"):
+        response, state, closed = _raw_chunked_post(b'2\r\n{}\r\n0\r\n' + trailer + b"\r\n")
+
+        assert response.startswith(b"HTTP/1.1 400"), response[:120]
+        assert b"Invalid trailer field line" in response
+        assert state["routed"] is False
+        assert closed is True
+
+
+def test_real_handler_serves_valid_chunked_body_with_extension():
+    # The strictness above must not reject valid framing: BWS before an extension
+    # and a well-formed trailer still reach the route on a real handler.
+    response, state, closed = _raw_chunked_post(
+        b'2 ;foo="bar baz"\r\n{}\r\n0\r\nFoo: bar\r\n\r\n', connection_close=True
+    )
+
+    assert response.startswith(b"HTTP/1.1 200"), response[:120]
+    assert state["routed"] is True
+    assert closed is True
+
+
 def _real_http_headers(pairs):
     """Build a genuine http.client.HTTPMessage (what http.server hands the
     handler) so get_all() repeated-header semantics are exercised for real."""
