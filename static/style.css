@@ -6245,8 +6245,16 @@ main.main > #mainPlugin{display:none;}
 .saved-prompt-row{display:flex;align-items:center;gap:6px;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:13px;}
 .saved-prompt-row:hover{background:var(--hover-bg);}
 .saved-prompt-label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);}
-.saved-prompt-delete{flex-shrink:0;background:none;border:none;cursor:pointer;color:var(--muted);padding:2px;border-radius:4px;display:flex;align-items:center;justify-content:center;}
+.saved-prompt-delete{position:relative;flex-shrink:0;background:none;border:none;cursor:pointer;color:var(--muted);padding:8px;border-radius:6px;display:flex;align-items:center;justify-content:center;}
 .saved-prompt-delete:hover{color:var(--danger,#f56565);background:rgba(245,101,101,.12);}
+/* #7644: keep the 12px icon but give the control a 44x44 hit area (padding box
+   28px + an 8px halo each side) so the two-step delete is hard to mis-click. */
+.saved-prompt-delete::after{content:'';position:absolute;inset:-8px;}
+.saved-prompt-delete:focus-visible::after{box-shadow:0 0 0 2px var(--accent-bg-strong);border-radius:8px;}
+.saved-prompt-delete.is-armed{color:#fff;background:var(--danger,#e53e3e);animation:saved-prompt-delete-arm .15s ease-out;}
+.saved-prompt-delete.is-armed:hover{color:#fff;background:var(--danger,#e53e3e);opacity:.9;}
+@keyframes saved-prompt-delete-arm{from{transform:scale(.9);}to{transform:scale(1);}}
+@media (prefers-reduced-motion:reduce){.saved-prompt-delete.is-armed{animation:none;}}
 .saved-prompt-add-row{padding:6px 4px 2px;border-top:1px solid var(--border);margin-top:4px;}
 .saved-prompt-save-btn{width:100%;padding:6px 10px;border-radius:6px;background:var(--accent-bg);border:1px solid var(--accent-bg-strong);color:var(--accent-text);font-size:12px;font-weight:600;cursor:pointer;text-align:center;}
 .saved-prompt-save-btn:hover{background:var(--accent-bg-strong);}

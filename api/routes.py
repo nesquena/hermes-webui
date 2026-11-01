@@ -15889,18 +15889,171 @@ def _saved_prompts_path() -> "Path":
 
 def _load_saved_prompts() -> list:
     p = _saved_prompts_path()
-    if not p.exists():
-        return []
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return []
+    # #7644: a torn/corrupt primary must not present as "you have no prompts" —
+    # fall back to the previous known-good generation kept alongside it.
+    for candidate in (p, Path(str(p) + ".bak")):
+        if not candidate.exists():
+            continue
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, list):
+            return data
+    return []
+
+
+class SavedPromptPersistenceError(RuntimeError):
+    """The saved-prompt generation could not be published.
+
+    Raised *before* the live primary is touched when the recovery generation
+    cannot be published, so a route can return an observable error instead of
+    answering 200 over a mutation that never happened. The recovery copy and
+    the primary are two separate publications of two separate files, not one
+    atomic transaction; a failure of either one leaves the previous generation
+    readable as the primary.
+    """
+
+
+def _saved_prompt_alias_direction(primary: Path, backup: Path) -> str:
+    """Classify how ``primary`` and ``backup`` are aliased to each other.
+
+    Returns ``"forward"`` when the primary's referent chain runs *through* the
+    backup entry (``primary -> backup``, possibly chained), ``"reverse"`` when
+    only the backup points at the primary, and ``"none"`` when the two entries
+    are independent.
+
+    Direction is read from the link targets themselves (``os.readlink``) rather
+    than from full resolution: two paths resolving to the same file says which
+    bytes are shared, not which entry's removal would break the other. Only the
+    forward direction is unsafe — replacing the *backup* entry leaves the
+    primary's link and referent untouched, while replacing the entry the primary
+    resolves through strands it.
+    """
+    if not primary.is_symlink():
+        return "none"
+    seen: set[Path] = set()
+    current = primary
+    # Walk the primary's referent chain. `resolve()` would collapse the whole
+    # chain to one path and lose which entry actually carries the link, which is
+    # exactly the distinction this needs.
+    for _ in range(_MAX_SYMLINK_CHAIN):
+        try:
+            target = os.readlink(current)
+        except OSError:
+            return "none"
+        nxt = Path(target) if os.path.isabs(target) else current.parent / target
+        nxt = Path(os.path.normpath(str(nxt)))
+        if nxt == backup:
+            return "forward"
+        if nxt in seen or not nxt.is_symlink():
+            return "none"
+        seen.add(nxt)
+        current = nxt
+    return "none"
+
+
+_MAX_SYMLINK_CHAIN = 32
+
+
+def _saved_prompt_backup_entry_is_publishable(backup: Path) -> bool:
+    """Whether the recovery entry can be replaced by a staged file.
+
+    The staged temp is written *beside* the entry, so a structural problem with
+    the entry itself — most importantly a directory parked at the backup path —
+    only surfaces at the publication boundary, by which point the primary has
+    already been replaced. Refusing that topology up front keeps the retained
+    guarantee that an unusable recovery copy stops the destructive mutation
+    before the primary is touched.
+
+    A symlink is always publishable: ``os.replace`` replaces the link entry
+    itself rather than writing through it.
+    """
+    return not (backup.is_dir() and not backup.is_symlink())
 
 
 def _save_saved_prompts(prompts: list) -> None:
+    from api.paths import (
+        _atomic_write_text,
+        _discard_staged_write,
+        _publish_staged_write,
+        _stage_atomic_write,
+    )
+
     p = _saved_prompts_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(prompts, ensure_ascii=False, indent=2), encoding="utf-8")
+    # #7644: serialize the whole payload first, so neither publication below
+    # can start from a payload that fails to encode.
+    payload = json.dumps(prompts, ensure_ascii=False, indent=2)
+    backup = Path(str(p) + ".bak")
+    # A primary resolving onto its own recovery path makes the two generations
+    # one file: replacing the backup would strand the primary's referent, and
+    # the replacement below would be published through it into the recovery
+    # path. Refuse that topology before anything is mutated. A backup that only
+    # points at the primary is the safe direction — its entry can be replaced
+    # without touching the primary's link or referent — so it is not refused.
+    if _saved_prompt_alias_direction(p, backup) == "forward":
+        raise SavedPromptPersistenceError(
+            "saved_prompts.json symlinks onto its own backup; refusing to publish"
+        )
+    # Only a primary that still parses as a prompt list is worth preserving, so
+    # a torn file can never overwrite the one known-good backup generation.
+    try:
+        current = p.read_text(encoding="utf-8")
+        known_good = isinstance(json.loads(current), list)
+    except (OSError, ValueError):
+        current = None
+        known_good = False
+    staged: str | None = None
+    if known_good:
+        # An entry that cannot be replaced by a staged file has to be refused
+        # now, not at the publication boundary below — by then the primary has
+        # already been replaced and the refusal would be too late to protect it.
+        if not _saved_prompt_backup_entry_is_publishable(backup):
+            raise SavedPromptPersistenceError(
+                "saved_prompts.json.bak cannot be replaced; refusing to publish"
+            )
+        # Stage the recovery generation FIRST, without touching the existing
+        # backup entry: the pre-existing `.bak` must survive every failure up
+        # to the publication boundary below, so a failed save can never cost the
+        # only recoverable generation. The primary is untouched here, so it
+        # still holds its own mode, owner, links and metadata.
+        try:
+            primary_stat = os.stat(p)
+            staged = _stage_atomic_write(
+                backup,
+                current,
+                # Carry the primary's owner AND group, not just its mode: a
+                # 0660 primary shared with a restricted group must not publish
+                # a copy the process's default group can read.
+                mode=_stat.S_IMODE(primary_stat.st_mode),
+                owner=(primary_stat.st_uid, primary_stat.st_gid),
+            )
+        except OSError as exc:
+            # Preparation failure: the destructive mutation must not run with
+            # no recoverable copy left behind.
+            raise SavedPromptPersistenceError(
+                f"saved-prompt recovery copy could not be published: {exc}"
+            ) from exc
+    try:
+        # The primary is replaced in place by the shared writer. If this fails,
+        # the previous generation is still the primary and still the backup.
+        _atomic_write_text(p, payload)
+    except BaseException:
+        if staged is not None:
+            _discard_staged_write(staged)
+        raise
+    if staged is not None:
+        # Publication boundary: the new recovery generation is complete and
+        # fsynced, so the old entry can now be replaced in one step. A failure
+        # here still leaves the previous generation readable as the primary.
+        try:
+            _publish_staged_write(staged, backup)
+        except OSError as exc:
+            _discard_staged_write(staged)
+            raise SavedPromptPersistenceError(
+                f"saved-prompt recovery copy could not be published: {exc}"
+            ) from exc
 
 
 # In-process cache for the app-shell template. The `/`, `/index.html`, and
@@ -18615,7 +18768,12 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "saved prompts limit reached (max 200)")
         new_prompt = {"id": uuid.uuid4().hex[:12], "label": label or text[:60], "text": text, "created_at": time.time()}
         prompts.append(new_prompt)
-        _save_saved_prompts(prompts)
+        try:
+            _save_saved_prompts(prompts)
+        except SavedPromptPersistenceError as exc:
+            # The recovery copy could not be published, so nothing was written:
+            # say so instead of handing back a prompt that was never stored.
+            return j(handler, {"error": str(exc)}, status=500)
         return j(handler, {"ok": True, "prompt": new_prompt})
 
     if parsed.path == "/api/share/create":
@@ -22269,8 +22427,18 @@ def handle_delete(handler, parsed) -> bool:
         pid = str(body.get("id") or "").strip()
         if not pid:
             return bad(handler, "id is required")
-        prompts = [p for p in _load_saved_prompts() if p.get("id") != pid]
-        _save_saved_prompts(prompts)
+        prompts = _load_saved_prompts()
+        if not any(str(row.get("id") or "") == pid for row in prompts):
+            # Idempotent success, published nowhere: the request helper may
+            # transparently replay a DELETE after a network error, and saving
+            # the unchanged list here would rotate the known-good recovery
+            # copy down to [] — erasing the only recoverable generation with
+            # a repeat of a deletion that already happened.
+            return j(handler, {"ok": True})
+        try:
+            _save_saved_prompts([row for row in prompts if row.get("id") != pid])
+        except SavedPromptPersistenceError as exc:
+            return j(handler, {"error": str(exc)}, status=500)
         return j(handler, {"ok": True})
 
     if parsed.path.startswith("/api/kanban/"):

@@ -110,7 +110,9 @@ def _require_writable_target(write_path: Path) -> os.stat_result | None:
         os.close(probe_fd)
 
 
-def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+def _atomic_write_text(
+    path: Path, text: str, *, encoding: str = "utf-8", mode: int | None = None
+) -> None:
     """Atomically replace *path* with *text*.
 
     Writes to a temp file in the same directory, flushes + ``os.fsync``, then
@@ -154,6 +156,11 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
     semantics is impossible. Other ``PermissionError``s still propagate.
     Successful renames fsync the parent directory where supported.
 
+    ``mode`` pins the published file's permission bits instead of inheriting
+    them from the target or, for a new file, from the process umask. It is
+    applied to the temp descriptor before any bytes are written, so private
+    content is never staged under a looser mode.
+
     The caller is responsible for ensuring ``path.parent`` exists.
     """
     path = Path(path)
@@ -163,7 +170,10 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
         existing_stat = os.stat(write_path)
     except FileNotFoundError:
         existing_stat = None
-    mode = stat.S_IMODE(existing_stat.st_mode) if existing_stat else None
+    existing_mode = stat.S_IMODE(existing_stat.st_mode) if existing_stat else None
+    # An explicit mode is the caller's instruction, so it wins over whatever
+    # the current target happens to carry.
+    target_mode = mode if mode is not None else existing_mode
 
     def _verify_symlink_target() -> None:
         if symlink_target is not None and path.resolve(strict=False) != symlink_target:
@@ -199,10 +209,12 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
         probed_stat = _require_writable_target(write_path)
         if probed_stat is not None and stat.S_ISREG(probed_stat.st_mode):
             existing_stat = probed_stat
-            mode = stat.S_IMODE(existing_stat.st_mode)
+            if mode is None:
+                target_mode = stat.S_IMODE(existing_stat.st_mode)
         else:
             existing_stat = probed_stat
-            mode = None
+            if mode is None:
+                target_mode = None
         if existing_stat is not None and (
             existing_stat.st_nlink > 1 or _has_extended_attributes(write_path)
         ):
@@ -236,10 +248,10 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
                 os.unlink(tmp)
                 _write_in_place()
                 return
-        if mode is not None and hasattr(os, "fchmod"):
-            os.fchmod(fd, mode)
-        elif mode is not None:
-            os.chmod(tmp, mode)
+        if target_mode is not None and hasattr(os, "fchmod"):
+            os.fchmod(fd, target_mode)
+        elif target_mode is not None:
+            os.chmod(tmp, target_mode)
         f = os.fdopen(fd, "w", encoding=encoding)
         owns_fd = False
         with f:
@@ -260,6 +272,103 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
         except OSError:
             pass
         raise
+
+
+def _stage_atomic_write(
+    path: Path,
+    text: str,
+    *,
+    encoding: str = "utf-8",
+    mode: int | None = None,
+    owner: tuple[int, int] | None = None,
+) -> str:
+    """Write *text* into a fsynced temp file beside *path* and return its path.
+
+    The split half of :func:`_atomic_write_text`: everything up to, but not
+    including, the ``os.replace`` that publishes the result. Callers that must
+    not disturb a pre-existing target until a replacement is completely staged
+    (a backup beside a live primary, say) use this and then
+    :func:`_publish_staged_write` at their own publication boundary.
+
+    ``mode`` pins the staged file's permission bits and ``owner`` its
+    uid/gid; both are applied to the temp descriptor *before* any bytes are
+    written to it, so private content is never staged under a looser mode and
+    never under a group other than the one the source authorized. Ownership is
+    applied before the mode because ``fchown`` clears setuid/setgid bits.
+
+    The caller owns the returned temp file and must either publish it or
+    :func:`_discard_staged_write` it.
+    """
+    path = Path(path)
+    # Always stage on a fresh inode: the caller's target may be a symlink or an
+    # extra hard link belonging to somebody else, and this must never write
+    # through it.
+    fd, tmp = _create_atomic_temp_file(path, existing=False)
+    owns_fd = True
+    try:
+        if owner is not None and hasattr(os, "fchown"):
+            try:
+                os.fchown(fd, owner[0], owner[1])
+            except (OSError, NotImplementedError) as exc:
+                unsupported_ownership_errnos = {
+                    errno.EINVAL,
+                    errno.ENOSYS,
+                    errno.ENOTSUP,
+                }
+                if (
+                    isinstance(exc, OSError)
+                    and not isinstance(exc, PermissionError)
+                    and exc.errno not in unsupported_ownership_errnos
+                ):
+                    raise
+                # The owner cannot be transferred (typically a non-root process
+                # facing a file it does not own). Keep the staged copy at least
+                # as private as the source instead of leaving it readable to
+                # this process's own uid/gid, which is what the kernel would
+                # otherwise grant.
+                mode = (mode if mode is not None else 0o600) & ~0o077
+        if mode is not None and hasattr(os, "fchmod"):
+            os.fchmod(fd, mode)
+        elif mode is not None:
+            os.chmod(tmp, mode)
+        f = os.fdopen(fd, "w", encoding=encoding)
+        owns_fd = False
+        with f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+    except BaseException:
+        if owns_fd:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return tmp
+
+
+def _publish_staged_write(staged: str, path: Path) -> None:
+    """Atomically move a temp from :func:`_stage_atomic_write` onto *path*.
+
+    Replaces the target's directory entry in one step, so the pre-existing
+    entry stays readable until this instant — there is no window in which a
+    caller has destroyed a recovery generation it was about to replace.
+    """
+    path = Path(path)
+    os.replace(staged, path)
+    _fsync_directory(path.parent)
+
+
+def _discard_staged_write(staged: str) -> None:
+    """Drop a temp this process owns, without touching any published entry."""
+    try:
+        os.unlink(staged)
+    except OSError:
+        pass
 
 
 def _hermes_home_has_webui_state(base: Path) -> bool:
