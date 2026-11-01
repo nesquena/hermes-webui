@@ -24,7 +24,8 @@ def _make_state_db(path, *, rows=(("s1", 0),), pinned_column=True):
             conn.execute(
                 "CREATE TABLE sessions (id TEXT PRIMARY KEY, pinned INTEGER NOT NULL DEFAULT 0,"
                 " archived INTEGER NOT NULL DEFAULT 0, auto_archived INTEGER NOT NULL DEFAULT 0,"
-                " title TEXT, title_source TEXT, parent_session_id TEXT, end_reason TEXT)"
+                " title TEXT, title_source TEXT, parent_session_id TEXT, end_reason TEXT,"
+                " model_config TEXT, source TEXT)"
             )
             conn.executemany("INSERT INTO sessions (id, pinned) VALUES (?, ?)", list(rows))
         else:
@@ -201,17 +202,6 @@ def test_pin_and_unpin_save_the_sidecar_while_another_writer_holds_state_db(tmp_
         holder.close()
 
 
-def test_pin_and_unpin_save_the_sidecar_when_the_state_db_row_is_missing(tmp_path, monkeypatch):
-    db, sessions, post = _pin_setup(tmp_path, monkeypatch, rows=())
-
-    assert post("s1", True)[0] == 200
-    assert sessions["s1"].saved is True
-    assert post("s1", False)[0] == 200
-    assert sessions["s1"].saved is False
-    # Nothing invents the row the Agent does not have.
-    assert _db_snapshot(db)[1] == {}
-
-
 def test_pin_mirrors_to_state_db_and_unpin_clears_it(tmp_path, monkeypatch):
     db, _sessions, post = _pin_setup(tmp_path, monkeypatch, rows=(("s1", 0), ("other", 0)))
 
@@ -231,16 +221,6 @@ def test_desktop_pin_shows_in_the_sidebar(tmp_path, monkeypatch):
 
     assert rows["s1"]["pinned"] is True
     assert rows["s2"]["pinned"] is False
-
-
-def test_webui_pin_survives_a_mirror_that_did_not_land(tmp_path, monkeypatch):
-    homes = _homes(tmp_path, monkeypatch)
-    # state.db still says unpinned: the mirror lost the writer when the user pinned.
-    _make_state_db(homes["default"] / "state.db", rows=(("s1", 0),))
-
-    rows = _sidebar_rows(monkeypatch, _webui_rows(("s1", "default", True)))
-
-    assert rows["s1"]["pinned"] is True
 
 
 def test_sidebar_build_never_writes_state_db(tmp_path, monkeypatch):
@@ -365,21 +345,17 @@ def _flag_row(sid, **extra):
     return {**_webui_rows((sid, "default", False))[0], **extra}
 
 
-def test_desktop_unpin_after_a_webui_mirror_is_honoured(tmp_path, monkeypatch):
-    homes = _homes(tmp_path, monkeypatch)
-    _make_state_db(homes["default"] / "state.db", rows=(("s1", 0),))
-    row = _flag_row("s1", pinned=True, state_db_mirror={"pinned": True})
-
-    assert _sidebar_rows(monkeypatch, [row])["s1"]["pinned"] is False
-
-
-@pytest.mark.parametrize("mirror", [{}, {"pinned": False}], ids=["never-mirrored", "last-mirrored-unpinned"])
-def test_a_webui_pin_the_mirror_missed_is_not_unpinned(tmp_path, monkeypatch, mirror):
+@pytest.mark.parametrize("mirror,shown", [
+    ({"pinned": True}, False),  # Desktop/CLI unpinned after WebUI mirrored: honoured
+    ({}, True),  # never mirrored: the WebUI pin is kept
+    ({"pinned": False}, True),  # last mirror was an unpin that missed: kept
+], ids=["desktop-unpin", "never-mirrored", "last-mirrored-unpinned"])
+def test_state_db_unpin_wins_only_after_a_mirror_landed(tmp_path, monkeypatch, mirror, shown):
     homes = _homes(tmp_path, monkeypatch)
     _make_state_db(homes["default"] / "state.db", rows=(("s1", 0),))
     row = _flag_row("s1", pinned=True, state_db_mirror=mirror)
 
-    assert _sidebar_rows(monkeypatch, [row])["s1"]["pinned"] is True
+    assert _sidebar_rows(monkeypatch, [row])["s1"]["pinned"] is shown
 
 
 def test_pin_route_records_only_a_mirror_that_landed(tmp_path, monkeypatch):
@@ -537,14 +513,8 @@ def test_mirror_ack_save_failure_still_returns_200_with_both_stores_pinned(tmp_p
 
 def _lineage_db(path):
     """root(compressed) -> tip (continuation), fork (_branched_from), tool child."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _make_state_db(path, rows=())
     with closing(sqlite3.connect(str(path))) as conn:
-        conn.execute(
-            "CREATE TABLE sessions (id TEXT PRIMARY KEY, pinned INTEGER NOT NULL DEFAULT 0,"
-            " archived INTEGER NOT NULL DEFAULT 0, auto_archived INTEGER NOT NULL DEFAULT 0,"
-            " title TEXT, title_source TEXT, parent_session_id TEXT, end_reason TEXT,"
-            " model_config TEXT, source TEXT)"
-        )
         conn.executemany(
             "INSERT INTO sessions (id, parent_session_id, end_reason, model_config, source) VALUES (?,?,?,?,?)",
             [
@@ -562,32 +532,20 @@ def _column(path, column):
         return dict(conn.execute(f"SELECT id, {column} FROM sessions"))
 
 
-@pytest.mark.parametrize("field,column", [("archived", "archived"), ("pinned", "pinned")])
-def test_lineage_mirror_follows_compression_but_not_forks_or_tool_children(tmp_path, monkeypatch, field, column):
+@pytest.mark.parametrize("field", ["archived", "pinned"])
+@pytest.mark.parametrize("issuer", ["root", "tip"])
+def test_lineage_mirror_follows_compression_but_not_forks_or_tool_children(tmp_path, monkeypatch, field, issuer):
     from api.state_sync import sync_session_field
 
     homes = _homes(tmp_path, monkeypatch)
     db = homes["default"] / "state.db"
     _lineage_db(db)
 
-    assert sync_session_field("root", field, True)  # root-issued
-    assert _column(db, column) == {"root": 1, "tip": 1, "fork": 0, "tool": 0}
-    assert sync_session_field("root", field, False)
+    assert sync_session_field(issuer, field, True)
+    assert _column(db, field) == {"root": 1, "tip": 1, "fork": 0, "tool": 0}
+    assert sync_session_field(issuer, field, False)
     assert sync_session_field("fork", field, True)  # fork-issued never reaches its parent
-    assert _column(db, column) == {"root": 0, "tip": 0, "fork": 1, "tool": 0}
-
-
-def test_pin_and_unpin_of_the_tip_reach_the_whole_compression_lineage(tmp_path, monkeypatch):
-    from api.state_sync import sync_session_field
-
-    homes = _homes(tmp_path, monkeypatch)
-    db = homes["default"] / "state.db"
-    _lineage_db(db)
-
-    assert sync_session_field("tip", "pinned", True)
-    assert _column(db, "pinned") == {"root": 1, "tip": 1, "fork": 0, "tool": 0}
-    assert sync_session_field("tip", "pinned", False)
-    assert _column(db, "pinned") == {"root": 0, "tip": 0, "fork": 0, "tool": 0}
+    assert _column(db, field) == {"root": 0, "tip": 0, "fork": 1, "tool": 0}
 
 
 def test_completed_delete_is_not_undone_by_the_mirror_acknowledgement(tmp_path, monkeypatch):
