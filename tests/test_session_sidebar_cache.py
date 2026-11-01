@@ -211,12 +211,10 @@ def test_session_list_cache_source_changed_owner_rebuilds_while_follower_reuses_
     routes._session_list_cache_set(key, _session_cache_payload("stale"))
     with routes._SESSIONS_CACHE_LOCK:
         ts, stamp, payload = routes._SESSIONS_CACHE[key]
-        # Age the entry PAST the rebuild-rate floor, not just past the TTL: inside
-        # `_SESSIONS_CACHE_MIN_REFRESH_SECONDS` a changed source stamp is held by
-        # design (see test_session_list_cache_rate_floor_holds_rebuilds), so an
-        # entry aged only past the TTL would be served as-is and never rebuild.
+        # The "changed" stamp below has no recognisable row content, so the
+        # rebuild-rate floor never holds it: the entry only has to be past the TTL.
         routes._SESSIONS_CACHE[key] = (
-            ts - routes._SESSIONS_CACHE_MIN_REFRESH_SECONDS - 1.0,
+            ts - routes._SESSIONS_CACHE_TTL_SECONDS - 1.0,
             stamp,
             payload,
         )
@@ -293,12 +291,30 @@ def test_session_list_cache_rate_floor_holds_rebuilds(monkeypatch):
         show_previous_messaging_sessions=False,
         show_cron_sessions=False,
     )
-    routes._session_list_cache_set(key, _session_cache_payload("initial"))
     # A live session writes to state.db right after the entry was stored: the
-    # stamp then differs on every poll while the entry is milliseconds old.
+    # STAT components then differ on every poll while the committed row content
+    # does not. Only this shape — an 8-tuple with a stable fingerprint — may be
+    # held; see `_session_list_cache_stamp_row_content`.
+    stat = {"generation": 0}
+    stable_row_content = ("fp-unchanged", None)
+
+    def _changing_stat_stamp(_key):
+        stat["generation"] += 1
+        return (
+            (stat["generation"], 1),
+            (stat["generation"], 2),
+            (stat["generation"], 3),
+            (stat["generation"], 4),
+            (stat["generation"], 5),
+            stable_row_content[0],
+            stable_row_content[1],
+            0,
+        )
+
     monkeypatch.setattr(
-        routes, "_session_list_cache_source_stamp", lambda _key: ("changing",)
+        routes, "_session_list_cache_source_stamp", _changing_stat_stamp
     )
+    routes._session_list_cache_set(key, _session_cache_payload("initial"))
 
     built = []
 
@@ -334,6 +350,54 @@ def test_session_list_cache_rate_floor_holds_rebuilds(monkeypatch):
     renamed = routes._get_cached_session_list_payload(key=key, builder=builder)
     assert renamed == _session_cache_payload("fresh-2")
     assert len(built) == 2
+
+
+def test_session_list_cache_rate_floor_never_holds_a_committed_message(monkeypatch):
+    """A settled row must reconcile on the next request, not after the floor.
+
+    The reconciliation contract (`test_webui_state_db_reconciliation.py`) says an
+    external writer — the official Desktop App continuing a WebUI-origin session,
+    a CLI turn — is visible immediately. The floor only ever applies while the
+    committed row content is unchanged, so a fingerprint move rebuilds at once.
+    """
+    key = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    rows = {"fingerprint": "rows-2"}
+
+    def _stamp(_key):
+        return (
+            (1, 1),
+            (1, 2),
+            (1, 3),
+            (1, 4),
+            (1, 5),
+            rows["fingerprint"],
+            None,
+            0,
+        )
+
+    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", _stamp)
+    routes._session_list_cache_set(key, _session_cache_payload("two"))
+
+    # Two messages settle in state.db a millisecond later; the entry is far inside
+    # the floor, so only the row-content check can let it through.
+    rows["fingerprint"] = "rows-4"
+    built = []
+
+    def builder():
+        built.append(1)
+        return _session_cache_payload("four")
+
+    diag = _StageRecorder()
+    payload = routes._get_cached_session_list_payload(key=key, builder=builder, diag=diag)
+    assert payload == _session_cache_payload("four")
+    assert built == [1], "committed rows must not wait for the rebuild-rate floor"
+    assert "session_list_cache_rate_floor_hold" not in diag.stages
 
 
 def test_session_list_cache_owner_returns_stale_and_rebuilds_in_background(monkeypatch):

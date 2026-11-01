@@ -397,6 +397,30 @@ def _session_list_cache_key(
     )
 
 
+# Positions in the idle source stamp (an 8-tuple, see
+# `_session_list_cache_source_stamp`) whose movement means COMMITTED ROWS changed
+# rather than a file merely being touched: the content fingerprint and the
+# all-profiles stamp. The stat components (state.db, its WAL, gateway metadata,
+# the session index) can move without any new row.
+_STAMP_ROW_CONTENT_INDEXES = (5, 6)
+
+
+def _session_list_cache_stamp_row_content(stamp):
+    """Return the row-bearing part of a source stamp, or ``None`` when unknown.
+
+    The rebuild-rate floor may only hold an entry whose ROW CONTENT is provably
+    unchanged: a settled message landing in state.db — the official Desktop App
+    continuing a WebUI-origin session, a CLI turn — has to be visible on the very
+    next request. That is the reconciliation contract pinned by
+    ``tests/test_webui_state_db_reconciliation.py``, not an optional freshness
+    window. ``None`` (the streaming freeze marker's shorter tuple, or a stubbed
+    stamp) is unknown, and unknown never holds.
+    """
+    if not isinstance(stamp, tuple) or len(stamp) != 8:
+        return None
+    return tuple(stamp[index] for index in _STAMP_ROW_CONTENT_INDEXES)
+
+
 def _session_list_cache_probe(
     key: tuple,
     allow_stale: bool = False,
@@ -426,8 +450,16 @@ def _session_list_cache_probe(
         if stamp != current_stamp:
             # Rebuild-rate floor: while a writer keeps touching state.db/index the
             # stamp differs on almost every poll. Inside the floor, serve what we
-            # have instead of paying another full rebuild.
-            if (now - ts) < _SESSIONS_CACHE_MIN_REFRESH_SECONDS:
+            # have instead of paying another full rebuild — but only when the ROW
+            # CONTENT is provably unchanged. A committed message (Desktop app,
+            # CLI turn) breaks the reconciliation contract if it waits for the
+            # floor, so row-content movement always rebuilds now.
+            row_content = _session_list_cache_stamp_row_content(stamp)
+            if (
+                row_content is not None
+                and row_content == _session_list_cache_stamp_row_content(current_stamp)
+                and (now - ts) < _SESSIONS_CACHE_MIN_REFRESH_SECONDS
+            ):
                 _SESSIONS_CACHE.move_to_end(key)
                 return _session_list_cache_copy_payload(payload), _SESSION_LIST_CACHE_HELD
             if allow_stale:
