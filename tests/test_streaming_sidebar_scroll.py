@@ -43,7 +43,8 @@ def test_scroll_if_pinned_skips_during_recent_non_message_scroll():
 
     settle = _extract_fn(UI_JS, "_settleMessageScrollToBottom")
     assert "_setMessageScrollToBottom();" in settle
-    assert "_recentNonMessageScrollIntent()" in settle
+    assert "_bottomFollowOwnsReader(el)" in settle
+    assert "_recentNonMessageScrollIntent()" in _extract_fn(UI_JS, "_bottomFollowOwnsReader")
 
 
 def test_session_list_has_its_own_scroll_boundary():

@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from playwright.sync_api import sync_playwright
 
+from _browser_engines import resolved_engines
 from browser_conversation_lifecycle import _start_webui_server, _terminate_process
 
 ROOT = Path(os.environ.get('WEBUI_TEST_ROOT', Path(__file__).resolve().parent.parent))
@@ -76,8 +77,12 @@ def main():
         proc, log, _, base = _start_webui_server(ROOT, env, state)
         results = []
         try:
+            engines = resolved_engines()
+            if not engines:
+                raise SystemExit('no launchable Playwright engine (checked chromium, webkit); '
+                                 'install one or set BROWSERS to force a specific engine')
             with sync_playwright() as pw:
-                for engine in os.environ.get('BROWSERS','chromium,webkit').split(','):
+                for engine in engines:
                     browser = getattr(pw,engine).launch(headless=True)
                     try:
                         for mode in os.environ.get('MODES','compact_worklog,transparent_stream,hide_all_activity').split(','):
