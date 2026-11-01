@@ -314,6 +314,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 ### Slash commands
 - Type `/` in the composer for autocomplete dropdown
 - Plain skills match case-insensitive keywords in their name or description; built-in, agent/plugin, and bundle commands keep prefix matching and take precedence over a same-slug skill
+- Skills registered by an enabled Hermes Agent plugin (e.g. `obra/superpowers`) are listed by their qualified `plugin:skill` name, tagged with the plugin namespace in the dropdown; sending `/plugin:skill` loads that skill's content into the current turn (anything typed after the command is kept as the instruction), the same way `/use <skill>` does
 - Built-in: `/help`, `/clear`, `/compress [focus topic]`, `/compact` (alias), `/model <name>`, `/workspace <name>`, `/new`, `/usage`, `/theme`
 - Arrow keys navigate, Tab/Enter select, Escape closes
 - Unrecognized commands pass through to the agent
@@ -382,7 +383,7 @@ before the session's named-profile Gateway ownership is known.
 ### Panels
 - **Chat** -- session list, search, pin, archive, projects, new conversation
 - **Tasks** -- view, create, edit, run, pause/resume, delete cron jobs; run history; completion alerts
-- **Skills** -- list all skills by category, search, preview, create/edit/delete; linked files viewer
+- **Skills** -- list all skills by category, search, preview, create/edit/delete; linked files viewer. Plugin-registered skills are listed alongside directory skills with their qualified `plugin:skill` name and can be enabled/disabled from the same toggle (the disabled state is written to the active profile, which the agent honors)
 - **Memory** -- view and edit MEMORY.md and USER.md inline
 - **Profiles** -- create, switch, delete agent profiles; clone config
 - **Todos** -- live task list from the current session; hidden while the in-chat task list toggle is on, which also disables the workspace-panel Todos tab
