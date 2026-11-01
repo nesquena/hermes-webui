@@ -11335,6 +11335,66 @@ function _stripAttachedFilesMarkerForDisplay(text){
   return String(text||'').replace(/\n\n\[Attached files: [^\]]+\]$/,'').trim();
 }
 
+// ── Mid-turn Steer rows ─────────────────────────────────────────────────────
+// Hermes Agent persists a consumed /steer as its own typed row
+// ({role:'user', display_kind:'steer'}) right after the tool result where the
+// model received it. The row is display-only here: identity comes from the
+// Agent's typed discriminator, never from content sniffing, so a user who
+// pastes marker-like text into an ordinary message keeps an ordinary bubble.
+const _STEER_OOB_OPEN_RE=/^\s*\[OUT-OF-BAND\s+USER\s+MESSAGE(?:\s*(?:—|-)[^\]\n]*)?\]\s*\n/i;
+const _STEER_OOB_CLOSE_RE=/\n\s*\[\/OUT-OF-BAND\s+USER\s+MESSAGE\]\s*$/i;
+const _STEER_OOB_ANY_OPEN_RE=/\[OUT-OF-BAND\s+USER\s+MESSAGE(?:\s*(?:—|-)[^\]\n]*)?\]/gi;
+const _STEER_OOB_ANY_CLOSE_RE=/\[\/OUT-OF-BAND\s+USER\s+MESSAGE\]/gi;
+// Exact suffix composed by _steerTextWithPendingFiles (static/commands.js).
+const _STEER_ATTACH_NOTE_RE=/(?:^|\n\n)\[Attached files for this steer: ([^\]\n]+)\]\nUse the file tools\/read_file to inspect these documents if needed\.\s*$/;
+
+function _isSteerDisplayMessage(m){
+  return !!(m&&m.role==='user'&&m.display_kind==='steer');
+}
+
+// Split a steer row's stored content into the user's text and attachment
+// paths. Unwraps exactly one well-formed outer control frame (the Agent's
+// model-facing wrapper can still be on disk for rows persisted before the
+// WebUI scrub ran); anything else is left byte-for-byte as user text.
+function _steerDisplayParts(content){
+  let text=String(content||'');
+  const opens=text.match(_STEER_OOB_ANY_OPEN_RE)||[];
+  const closes=text.match(_STEER_OOB_ANY_CLOSE_RE)||[];
+  // Match the backend's exactly-one-frame rule. Ambiguous authored text is
+  // displayed intact, including any suffix that might otherwise look generated.
+  if(opens.length||closes.length){
+    const open=text.match(_STEER_OOB_OPEN_RE);
+    if(opens.length!==1||closes.length!==1||!open||!_STEER_OOB_CLOSE_RE.test(text)){
+      return {text,files:[]};
+    }
+    text=text.slice(open[0].length).replace(_STEER_OOB_CLOSE_RE,'');
+  }
+  let files=[];
+  const note=text.match(_STEER_ATTACH_NOTE_RE);
+  if(note){
+    files=note[1].split(',').map(p=>p.trim()).filter(Boolean);
+    text=text.slice(0,note.index);
+  }
+  return {text:text.trim(),files};
+}
+
+function _steerRowInnerHtml(text, files, footHtml, sid){
+  let filesHtml='';
+  if(files&&files.length){
+    filesHtml=`<div class="msg-files">${files.map(file=>{
+      const path=typeof file==='string'?file:String((file&&file.path)||'');
+      if(!path)return '';
+      const fname=path.split('/').pop()||path;
+      const label=typeof file==='string'?fname:String(file.name||fname);
+      const fileUrl='api/file/raw?session_id='+encodeURIComponent(sid||'')+'&path='+encodeURIComponent(fname);
+      return _renderAttachmentHtml(label,fileUrl);
+    }).join('')}</div>`;
+  }
+  const label=`<div class="steer-row-label">${li('arrow-right',12)}<span>${esc(t('steer_row_label'))}</span></div>`;
+  const body=text?`<div class="msg-body">${_getCachedRender(text,true)}</div>`:'';
+  return `${label}${filesHtml}${body}${footHtml||''}`;
+}
+
 function setStatus(t){
   if(!t)return;
   showToast(t, 4000);
@@ -22075,6 +22135,7 @@ function renderMessages(options){
   // connected and the streamed text visible. Only for the streaming session's own
   // live turn; never affects settled transcripts.
   let _preservedLiveTurn=null;
+  let _preservedLiveSteer=null;
   if(sid&&INFLIGHT[sid]){
     const _lt=document.getElementById('liveAssistantTurn');
     if(_lt&&(!_lt.dataset||!_lt.dataset.sessionId||_lt.dataset.sessionId===sid)){
@@ -22111,6 +22172,13 @@ function renderMessages(options){
       const _paneSettled=S.busy===false && !S.activeStreamId;
       if(S.activeStreamId || (_hasLiveAssistantProjection && !_paneSettled)){
         _preservedLiveTurn=_lt;
+        // #8559 review item 3: the live Steer row is a direct child of inner
+        // (commands.js _showSteerIndicator appends it after the live turn),
+        // so the same wipe that orphans the live turn also orphans it.
+        // Capture it under this same proven-live ownership guard so a
+        // mid-stream rebuild can re-attach it.
+        const _steerHost=document.getElementById('msgInner');
+        _preservedLiveSteer=_steerHost?_steerHost.querySelector('[data-live-steer="1"]'):null;
       }
     }
   }
@@ -22295,7 +22363,7 @@ function renderMessages(options){
   if(preWindowInsertion.taskOwnerNode) preservedCompressionTaskOwnerNode=preWindowInsertion.taskOwnerNode;
   let lastUserRawIdx=-1;
   for(let i=visWithIdx.length-1;i>=0;i--){
-    if(visWithIdx[i].m&&visWithIdx[i].m.role==='user'){
+    if(visWithIdx[i].m&&visWithIdx[i].m.role==='user'&&!_isSteerDisplayMessage(visWithIdx[i].m)){
       lastUserRawIdx=visWithIdx[i].rawIdx;
       break;
     }
@@ -22336,7 +22404,8 @@ function renderMessages(options){
   const renderableRawIdxs=new Set(visWithIdx.map(e=>e.rawIdx));
   for(const entry of visWithIdx){
     const role=entry&&entry.m&&entry.m.role;
-    if(role==='user') lastQuestionRawIdx=entry.rawIdx;
+    // A mid-turn Steer is guidance inside the prompt's turn, not a new question.
+    if(role==='user'&&!_isSteerDisplayMessage(entry.m)) lastQuestionRawIdx=entry.rawIdx;
     else if(role==='assistant'&&renderedRawIdxs.has(entry.rawIdx)) questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
   }
   const assistantRawIdxByQuestionRawIdx=new Map();
@@ -22621,6 +22690,35 @@ function renderMessages(options){
     const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}${extensionActionsSlot}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
+      continue;
+    }
+
+    if(_isSteerDisplayMessage(m)){
+      // Persisted mid-turn Steer: a user-authored control boundary rendered in
+      // place (after the tool result that delivered it). Same lifecycle as the
+      // process-wakeup row: it closes the current assistant container so the
+      // continuation renders below it, and carries no edit/retry actions.
+      currentAssistantTurn=null;
+      let row=_msgNodeRecycleEnabled?_recycleStash.get(rawIdx):null;
+      if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
+      const steerParts=_steerDisplayParts(msgContent(m));
+      const steerFootHtml=`<div class="msg-foot">${timeHtml}<span class="msg-actions">${copyBtn}</span></div>`;
+      const nextRowHtml=_steerRowInnerHtml(steerParts.text, steerParts.files, steerFootHtml, (S.session&&S.session.session_id)||'');
+      if(!row) row=document.createElement('div');
+      row.className='msg-row steer-row';
+      row.id=_userMessageDomId(rawIdx);
+      row.dataset.msgIdx=rawIdx;
+      row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+      row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
+      row.dataset.role='steer';
+      delete row.dataset.editing;
+      if(row.dataset.rawText!==steerParts.text||row._steerRenderedHtml!==nextRowHtml){
+        row.dataset.rawText=steerParts.text;
+        row._steerRenderedHtml=nextRowHtml;
+        row.innerHTML=nextRowHtml;
+      }
+      inner.appendChild(row);
+      userRows.set(rawIdx, row);
       continue;
     }
 
@@ -23706,6 +23804,17 @@ function renderMessages(options){
           inner.appendChild(_preservedLiveTurn);
         }
       }
+    }
+    // #8559 review item 3: a live Steer row captured above must survive the
+    // rebuild. Re-attach at the end of inner — its correct position after the
+    // (possibly restored) live turn. Owner-walk guard keeps this idempotent
+    // when the rebuild path left the row attached (render-cache hit).
+    if(_preservedLiveSteer){
+      let _steerStillOwned=false;
+      for(let _n=_preservedLiveSteer;_n;_n=_n.parentElement){
+        if(_n===inner){_steerStillOwned=true;break;}
+      }
+      if(!_steerStillOwned) inner.appendChild(_preservedLiveSteer);
     }
   }
   // Fail-safe invariant (#3875): a settled assistant turn must never render with

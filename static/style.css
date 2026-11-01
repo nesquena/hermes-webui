@@ -2490,8 +2490,21 @@
   .msg-row{padding:10px 0;}
   .msg-row+.msg-row{border-top:none;}
   /* Steer indicator: transient banner below messages, removed on renderMessages rebuild */
-  .steer-indicator{display:flex;align-items:baseline;gap:8px;padding:10px 0;opacity:.65;font-style:italic;color:var(--accent-text);}
-  .steer-indicator .steer-body{white-space:pre-wrap;word-break:break-word;}
+  /* Mid-turn Steer row (persisted display_kind=steer and its live placeholder):
+     a user-authored bubble rendered in place inside the turn, labelled so it
+     reads as guidance rather than a new prompt. */
+  .msg-row.steer-row{align-self:flex-end;max-width:60%;display:flex;flex-direction:column;align-items:flex-end;padding:6px 0;}
+  .steer-row .steer-row-label{display:flex;align-items:center;gap:5px;margin:0 2px 4px;font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--accent-text);}
+  .steer-row .steer-row-label svg{width:12px;height:12px;flex:0 0 auto;}
+  .steer-row .msg-body{background:var(--user-bubble-bg);border:1px solid var(--user-bubble-border);border-right:3px solid var(--accent-bg-strong);border-radius:14px;padding:8px 13px;margin-left:0;max-width:none;color:var(--user-bubble-text);overflow-wrap:anywhere;}
+  .steer-row .msg-body code{color:var(--user-bubble-text);background:rgba(0,0,0,.1);}
+  .steer-row .msg-body a{color:var(--user-bubble-text);text-decoration:underline;}
+  .steer-row .msg-files{padding-left:0;margin-left:0;justify-content:flex-end;}
+  .steer-row .msg-foot{padding-left:0;justify-content:flex-end;}
+  .steer-row-live .msg-body{opacity:.8;}
+  .assistant-turn-blocks>.steer-row{margin-left:auto;}
+  @media(max-width:900px){.msg-row.steer-row{max-width:78%;}}
+  @media(max-width:600px){.msg-row.steer-row{max-width:90%;}}
   .steer-badge{display:inline-block;font-size:10px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--accent-text);background:var(--accent-bg);border:1px solid var(--accent-bg-strong);border-radius:4px;padding:1px 6px;vertical-align:middle;line-height:1.6;font-style:normal;flex-shrink:0;}
   /* Steer recovery bar: dismissible after failure, same lifecycle as steer-indicator */
   .steer-recovery{display:flex;align-items:center;gap:0.5rem;padding:0.5rem 0.75rem;margin:0.25rem 0;border-radius:var(--radius-md);background:var(--surface-subtle);font-size:0.85rem}

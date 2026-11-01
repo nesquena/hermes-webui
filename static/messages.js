@@ -7142,6 +7142,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           showToast(t('steer_leftover_queued'),3000);
         }
         if(typeof _steerReconcileLeftover==='function') _steerReconcileLeftover(sid,txt);
+        // Not consumed mid-run: it becomes the next turn's user message, so the
+        // in-turn live Steer row would misplace it. Owner-gated (#8559 review
+        // item 4): with two runs going, session A's leftover must not clear
+        // session B's live row when the pane currently shows B.
+        if(typeof _clearLiveSteerRows==='function'&&typeof _steerOwnerIsCurrent==='function'&&_steerOwnerIsCurrent(sid)){
+          _clearLiveSteerRows();
+        }
       }catch(_){}
     });
 

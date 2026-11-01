@@ -1652,24 +1652,40 @@ function _steerFailureMessageKey(fallback) {
     ? key : 'steer_fail_unknown';
 }
 
-function _showSteerIndicator(text){
+// Live (not-yet-settled) Steer row. Rendered with the same markup as the
+// persisted display_kind=steer row, placed inside the live assistant turn so
+// it sits where the guidance entered the run instead of trailing the stream.
+// It is browser-only and retired on terminal settlement; the Agent's persisted
+// row replaces it when the session reloads its settled messages.
+function _showSteerIndicator(text, files){
   const inner=document.getElementById('msgInner');
   if(!inner) return;
-  // Remove any existing steer indicator
-  const old=inner.querySelector('.steer-indicator');
-  if(old) old.remove();
+  const body=String(text||'').trim();
+  const uploaded=(Array.isArray(files)?files:[])
+    .map(f=>typeof f==='string'?{path:f,name:f}:f)
+    .filter(f=>f&&f.path&&String(f.path).trim());
+  if(!body&&!uploaded.length) return;
   const el=document.createElement('div');
-  el.className='steer-indicator';
-  const badge=document.createElement('span');
-  badge.className='steer-badge';
-  badge.textContent='Steer';
-  const body=document.createElement('span');
-  body.className='steer-body';
-  body.textContent=text.length>120?text.slice(0,117)+'…':text;
-  el.appendChild(badge);
-  el.appendChild(body);
+  el.className='msg-row steer-row steer-row-live';
+  el.dataset.role='steer';
+  el.dataset.liveSteer='1';
+  el.dataset.rawText=body;
+  const sid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||'';
+  el.innerHTML=(typeof _steerRowInnerHtml==='function')
+    ? _steerRowInnerHtml(body,uploaded,'',sid)
+    : `<div class="msg-body">${esc(body)}</div>`;
+  // #8559 review item 2: append to msgInner itself, AFTER the live assistant
+  // turn. Inside .assistant-turn-blocks the scene reconciliation owns row
+  // order and moves its managed rows past the live Steer row, pushing the
+  // earlier prose/activity BELOW it; master keeps them above.
   inner.appendChild(el);
   if(typeof scrollToBottom==='function') scrollToBottom();
+}
+
+function _clearLiveSteerRows(){
+  const inner=document.getElementById('msgInner');
+  if(!inner) return;
+  for(const el of inner.querySelectorAll('[data-live-steer="1"]')) el.remove();
 }
 
 function _showSteerRecovery(msg, explicitSteer, fallback) {
@@ -1731,8 +1747,18 @@ function _steerUploadedAttachmentPaths(uploaded){
   return uploaded.map(u=>{
     if(!u)return'';
     if(typeof u==='string')return u;
-    return u.path||u.name||u.filename||'';
+    // A staged/original name is not proof that a file was stored there.
+    return u.path||'';
   }).map(v=>String(v||'').trim()).filter(Boolean);
+}
+
+function _steerUploadedAttachmentFiles(uploaded){
+  if(!Array.isArray(uploaded))return[];
+  return uploaded.map(u=>{
+    const path=typeof u==='string'?u:u&&u.path;
+    if(!path||!String(path).trim())return null;
+    return {path:String(path).trim(),name:String((u&&u.name)||String(path).split('/').pop()||path)};
+  }).filter(Boolean);
 }
 
 function _steerOwnerIsCurrent(ownerSid){
@@ -1782,16 +1808,6 @@ function _steerRestoreText(originalMsg, explicitSteer){
   return explicitSteer?`/steer ${originalMsg}`:originalMsg;
 }
 
-function _steerIndicatorText(originalMsg, filesSnapshot){
-  const text=String(originalMsg||'').trim();
-  if(text)return text;
-  const names=(Array.isArray(filesSnapshot)?filesSnapshot:[])
-    .map(f=>f&&(f.name||f.filename||f.path||''))
-    .map(v=>String(v||'').trim())
-    .filter(Boolean);
-  return names.length?`Attached files: ${names.join(', ')}`:'Attached files';
-}
-
 async function _steerPersistDraftForOwner(ownerSid, originalMsg, explicitSteer, filesSnapshot){
   if(!ownerSid||typeof _saveComposerDraftNow!=='function') return false;
   const persistedText = _steerRestoreText(originalMsg,explicitSteer);
@@ -1812,7 +1828,7 @@ async function _steerPersistDraftForOwner(ownerSid, originalMsg, explicitSteer, 
 // RETRY reuses the uploaded paths instead of re-uploading the same File objects.
 // Keyed by ownerSid; invalidated when the staged file set changes or on accepted
 // steer (see _steerUploadCacheMatches / clearing below).
-let _steerUploadCache = null; // { sid, sig, paths }
+let _steerUploadCache = null; // { sid, sig, paths, files }
 // Gateway steers whose outcome is unknown, by owner session, so a later
 // pending_steer_leftover carrying this submission can mark them delivered.
 // owned = the exact draft {text, files} this steer restored for its owner.
@@ -1924,6 +1940,7 @@ function _steerDraftRevision(sid){
 // this, so an undelivered settled record can never reconcile. Drop it.
 function _steerSettleTerminal(sid){
   _steerAcceptedBySid.delete(sid);
+  if(typeof _clearLiveSteerRows==="function"&&_steerOwnerIsCurrent(sid)) _clearLiveSteerRows();
   for(const entry of [...(_steerUncertainBySid.get(sid)||[])]){
     if(entry.settled)_steerUncertainDrop(sid,entry);
     else entry.ended=true;
@@ -1996,7 +2013,7 @@ function _steerFilesSignature(files){
   }catch(_){return String(Date.now());}
 }
 
-async function _steerTextWithPendingFiles(msg, ownerSid, filesSnapshot){
+async function _steerTextWithPendingFiles(msg, ownerSid, filesSnapshot, captureUploadedPaths){
   const base=String(msg||'').trim();
   const pendingFiles=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
   if(!pendingFiles.length)return base;
@@ -2005,8 +2022,10 @@ async function _steerTextWithPendingFiles(msg, ownerSid, filesSnapshot){
   // Reuse a prior successful upload for the same session + identical staged file
   // set (a steer that failed and is being retried) — don't upload twice.
   let paths=null;
+  let previewFiles=[];
   if(_steerUploadCache&&_steerUploadCache.sid===ownerSid&&_steerUploadCache.sig===sig&&Array.isArray(_steerUploadCache.paths)&&_steerUploadCache.paths.length){
     paths=_steerUploadCache.paths;
+    previewFiles=Array.isArray(_steerUploadCache.files)?_steerUploadCache.files:paths.map(path=>({path,name:String(path).split('/').pop()}));
   }else{
     _steerSetComposerStatusForOwner(ownerSid,t('uploading')||'Uploading…');
     let uploaded=[];
@@ -2018,9 +2037,13 @@ async function _steerTextWithPendingFiles(msg, ownerSid, filesSnapshot){
       _steerSetComposerStatusForOwner(ownerSid,'');
     }
     paths=_steerUploadedAttachmentPaths(uploaded);
-    if(paths.length) _steerUploadCache={sid:ownerSid,sig,paths};
+    previewFiles=_steerUploadedAttachmentFiles(uploaded);
+    if(paths.length) _steerUploadCache={sid:ownerSid,sig,paths,files:previewFiles};
   }
   if(!paths||!paths.length)return base;
+  // Snapshot successful request-owned identities before acceptance clears the
+  // retry cache. Partial uploads contribute only successfully stored files.
+  if(typeof captureUploadedPaths==='function')captureUploadedPaths(previewFiles.map(f=>({...f})));
   const note=`[Attached files for this steer: ${paths.join(', ')}]\nUse the file tools/read_file to inspect these documents if needed.`;
   return base?`${base}\n\n${note}`:note;
 }
@@ -2037,8 +2060,9 @@ async function _trySteer(msg, explicitSteer){
     : {model:(typeof S!=='undefined'&&S.session&&S.session.model)||'',model_provider:(typeof S!=='undefined'&&S.session&&S.session.model_provider)||''};
   if(!ownerSid){showToast(t('no_active_session'));return false;}
   let steerText=originalMsg;
+  let steerUploadedPaths=[];
   try{
-    steerText=await _steerTextWithPendingFiles(originalMsg,ownerSid,pendingFilesSnapshot);
+    steerText=await _steerTextWithPendingFiles(originalMsg,ownerSid,pendingFilesSnapshot,paths=>{steerUploadedPaths=paths;});
   }catch(e){
     if(_steerOwnerIsCurrent(ownerSid)){
       const inp=$('msg');
@@ -2127,7 +2151,7 @@ async function _trySteer(msg, explicitSteer){
         const _remaining=S.pendingFiles.filter(f=>!_delivered.has(f));
         if(_remaining.length!==S.pendingFiles.length){S.pendingFiles=_remaining;if(typeof renderTray==='function')renderTray();}
       }
-      _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
+      _showSteerIndicator(originalMsg,steerUploadedPaths);
     }
     showToast(t('cmd_steer_delivered'),2500);
     return true;

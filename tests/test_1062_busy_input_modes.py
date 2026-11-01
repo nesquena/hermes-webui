@@ -366,10 +366,12 @@ class TestSendBusyBranchDispatch:
         upload/API await."""
         try_body = _source_between(COMMANDS_JS, "async function _steerTextWithPendingFiles(", "\nasync function cmdTitle")
         # (1) upload cache keyed by session + file signature, reused on retry,
-        # invalidated on delivery.
+        # invalidated on delivery. The cache also carries the request-owned
+        # uploaded descriptors (files:previewFiles) so a retry reuses the
+        # stored destinations (#8559 round 2).
         assert "_steerUploadCache" in try_body
         assert "_steerFilesSignature(" in try_body
-        assert "_steerUploadCache={sid:ownerSid,sig,paths}" in try_body
+        assert "_steerUploadCache={sid:ownerSid,sig,paths,files:previewFiles}" in try_body
         assert "_steerUploadCache=null" in try_body
         # (2) identity-based removal of only the delivered snapshot.
         assert "_delivered=new Set(pendingFilesSnapshot)" in try_body
