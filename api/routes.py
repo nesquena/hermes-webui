@@ -2594,6 +2594,7 @@ _SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION = (
     _route_session_list_cache._SESSIONS_CACHE_PROFILE_INVALIDATION_VERSION
 )
 _SESSIONS_CACHE_STALE_WAIT_SECONDS = _route_session_list_cache._SESSIONS_CACHE_STALE_WAIT_SECONDS
+_SESSIONS_CACHE_MIN_REFRESH_SECONDS = _route_session_list_cache._SESSIONS_CACHE_MIN_REFRESH_SECONDS
 _SESSIONS_CACHE_STREAMING_TTL_SECONDS = (
     _route_session_list_cache._SESSIONS_CACHE_STREAMING_TTL_SECONDS
 )
@@ -2604,6 +2605,12 @@ _session_list_cache_clear = _route_session_list_cache._session_list_cache_clear
 _session_list_cache_claim_rebuild = _route_session_list_cache._session_list_cache_claim_rebuild
 _session_list_cache_done = _route_session_list_cache._session_list_cache_done
 _session_list_cache_get = _route_session_list_cache._session_list_cache_get
+_SESSION_LIST_CACHE_MISSING = _route_session_list_cache._SESSION_LIST_CACHE_MISSING
+_SESSION_LIST_CACHE_FRESH = _route_session_list_cache._SESSION_LIST_CACHE_FRESH
+_SESSION_LIST_CACHE_HELD = _route_session_list_cache._SESSION_LIST_CACHE_HELD
+_SESSION_LIST_CACHE_STALE_SOURCE = _route_session_list_cache._SESSION_LIST_CACHE_STALE_SOURCE
+_SESSION_LIST_CACHE_STALE_AGE = _route_session_list_cache._SESSION_LIST_CACHE_STALE_AGE
+_session_list_cache_probe = _route_session_list_cache._session_list_cache_probe
 _session_list_cache_invalidation_stamp = _route_session_list_cache._session_list_cache_invalidation_stamp
 _route_session_list_cache_key = _route_session_list_cache._session_list_cache_key
 _session_list_cache_overlay_runtime_rows = _route_session_list_cache._session_list_cache_overlay_runtime_rows
@@ -3471,8 +3478,8 @@ def _get_cached_session_list_payload(
         except Exception:
             pass
 
-    cached, is_fresh = _session_list_cache_get(key, allow_stale=True)
-    if cached is not None and is_fresh:
+    cached, cache_status = _session_list_cache_probe(key, allow_stale=True)
+    if cache_status == _SESSION_LIST_CACHE_FRESH:
         if diag is not None:
             try:
                 diag.stage("session_list_cache_hit")
@@ -3480,8 +3487,30 @@ def _get_cached_session_list_payload(
                 pass
         return cached
 
-    stale = cached  # now actually a stale payload when one exists, else None
-    stale_reason = _session_list_cache_stale_reason(key) if stale is not None else None
+    if cache_status == _SESSION_LIST_CACHE_HELD:
+        # Explicit consumer contract for the rebuild-rate floor: the entry is
+        # inside `_SESSIONS_CACHE_MIN_REFRESH_SECONDS`, so serve it and return
+        # WITHOUT claiming an owner. Treating a held hit as "stale, rebuild in the
+        # background" is what made the floor a no-op here: singleflight caps
+        # concurrent rebuilds, not consecutive ones, so every poll still started a
+        # full rebuild. Explicit invalidation (rename/delete/settings) clears the
+        # entry outright, so those never take this branch.
+        if diag is not None:
+            try:
+                diag.stage("session_list_cache_rate_floor_hold")
+            except Exception:
+                pass
+        return cached
+
+    stale = cached  # a stale payload when one exists, else None
+    stale_reason = (
+        cache_status
+        if cache_status in (
+            _SESSION_LIST_CACHE_STALE_AGE,
+            _SESSION_LIST_CACHE_STALE_SOURCE,
+        )
+        else None
+    )
     if stale is not None and stale_reason != "source":
         event, is_owner = _session_list_cache_claim_rebuild(key)
         if is_owner:

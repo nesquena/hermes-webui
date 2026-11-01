@@ -10336,6 +10336,42 @@ def _callable_accepts_keyword(callable_obj, keyword: str) -> bool:
     )
 
 
+class _ContentFingerprintUnreadable:
+    """Sentinel: the fingerprint read for one table FAILED (lock/timeout).
+
+    Distinct from SQLite's own ``NULL`` for an empty table: an unreadable read
+    says nothing about the contents, and a cache that cannot tell the two apart
+    treats two unreadable stamps as "unchanged". Consumers must gate any
+    equality-based reuse on ``_content_fingerprint_readable``. (#8694)
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "<content-fingerprint-unreadable>"
+
+
+_CONTENT_FINGERPRINT_UNREADABLE = _ContentFingerprintUnreadable()
+
+
+def _content_fingerprint_readable(fingerprint) -> bool:
+    """True when ``fingerprint`` was actually READ, i.e. is safe to compare.
+
+    ``None`` is this module's total-failure value (no DB, unopenable, outer
+    exception) and ``_CONTENT_FINGERPRINT_UNREADABLE`` marks a failed per-table
+    read. Both mean "contents unknown" and must never authorize a caller to
+    conclude "unchanged". A readable fingerprint may still contain ``None`` for a
+    table that is genuinely empty — that is a real observation, not a failure.
+    """
+    if fingerprint is None or fingerprint is _CONTENT_FINGERPRINT_UNREADABLE:
+        return False
+    if isinstance(fingerprint, (tuple, list)):
+        if not fingerprint:
+            return False
+        return all(part is not _CONTENT_FINGERPRINT_UNREADABLE for part in fingerprint)
+    return True
+
+
 def _sqlite_content_fingerprint(db_path: Path):
     """Return a commit-reliable content fingerprint for a state.db.
 
@@ -10394,7 +10430,9 @@ def _sqlite_content_fingerprint(db_path: Path):
                     ).fetchone()
                     parts.append(row[0] if row else None)
                 except Exception:
-                    parts.append(None)
+                    # A failed read is NOT "no rows": mark it unreadable so a
+                    # consumer never treats two unknown stamps as unchanged.
+                    parts.append(_CONTENT_FINGERPRINT_UNREADABLE)
             return tuple(parts)
         finally:
             try:

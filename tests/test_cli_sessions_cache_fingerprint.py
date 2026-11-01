@@ -78,9 +78,13 @@ def test_content_fingerprint_detects_message_only_change():
 
 def test_content_fingerprint_safe_on_missing_or_empty_db():
     """The fingerprint must not raise on a missing path or a db without the
-    expected tables — it returns None / zeroed parts so the stat fallback applies.
+    expected tables — it degrades to the stat fallback instead of blocking.
     """
-    from api.models import _sqlite_content_fingerprint
+    from api.models import (
+        _CONTENT_FINGERPRINT_UNREADABLE,
+        _content_fingerprint_readable,
+        _sqlite_content_fingerprint,
+    )
 
     assert _sqlite_content_fingerprint(Path("/nonexistent/state.db")) is None
 
@@ -90,7 +94,20 @@ def test_content_fingerprint_safe_on_missing_or_empty_db():
     conn.execute("CREATE TABLE unrelated(x)")
     conn.commit()
     conn.close()
-    # No sessions/messages tables → None parts (MAX(rowid) on a missing table),
-    # no exception. Shape is a 2-tuple of (sessions_max_rowid, messages_max_rowid).
+    # Missing sessions/messages tables make MAX(rowid) FAIL — that is an unknown
+    # content read, not an empty one, so each part carries the unreadable
+    # sentinel and callers must not compare the stamp as "unchanged". (#8694)
     fp = _sqlite_content_fingerprint(p)
-    assert fp == (None, None)
+    assert fp == (_CONTENT_FINGERPRINT_UNREADABLE, _CONTENT_FINGERPRINT_UNREADABLE)
+    assert _content_fingerprint_readable(fp) is False
+
+    # The tables EXIST and are empty: NULL rowid is a real observation, readable.
+    q = Path(d) / "tables.db"
+    conn = sqlite3.connect(str(q))
+    conn.execute("CREATE TABLE sessions (id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY)")
+    conn.commit()
+    conn.close()
+    empty_fp = _sqlite_content_fingerprint(q)
+    assert empty_fp == (None, None)
+    assert _content_fingerprint_readable(empty_fp) is True

@@ -31,6 +31,24 @@ def _function_body(src: str, name: str) -> str:
     raise AssertionError(f"{name} function body not terminated")
 
 
+def _constant_declaration(src: str, name: str) -> str:
+    """Return the source declaration of a module-level constant.
+
+    These harnesses extract single functions out of `sessions.js` and run them in
+    a bare node context, so any module constant a function closes over has to
+    travel with it — otherwise node fails with `ReferenceError`, which says
+    nothing about the browser bundle (where the constant is declared). Reading the
+    declaration out of the real source keeps the harness honest: renaming or
+    dropping the constant fails here instead of silently changing the timing the
+    assertion below relies on.
+    """
+    m = re.search(
+        rf"^(?:const|let|var)\s+{re.escape(name)}\s*=\s*[^;\n]+;", src, re.MULTILINE
+    )
+    assert m, f"{name} declaration not found"
+    return m.group(0)
+
+
 def _run_node(script: str) -> dict:
     result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
     if result.returncode != 0:
@@ -174,6 +192,7 @@ def test_session_events_refresh_forces_hidden_sidebar_render_from_event_path():
     )
     functions = "\n\n".join(
         [
+            _constant_declaration(SESSIONS_JS, "_SESSION_EVENTS_REFRESH_COALESCE_MS"),
             merge_body,
             _function_body(SESSIONS_JS, "_refreshSidebarForBackgroundChurn"),
             _function_body(SESSIONS_JS, "refreshSessionList"),
@@ -217,14 +236,17 @@ def test_session_events_refresh_forces_hidden_sidebar_render_from_event_path():
 def test_session_list_external_refresh_forced_resume_survives_hidden_inflight_refresh():
     """Queued resume refreshes must keep `force:true` even after a hidden invalidation."""
     functions = "\n\n".join(
-        _function_body(SESSIONS_JS, name)
-        for name in (
-            "_mergeSessionListRefreshOptions",
-            "_refreshSidebarForBackgroundChurn",
-            "refreshSessionList",
-            "_scheduleSessionEventsRefresh",
-            "_refreshSessionListAfterSidebarResume",
-        )
+        [_constant_declaration(SESSIONS_JS, "_SESSION_EVENTS_REFRESH_COALESCE_MS")]
+        + [
+            _function_body(SESSIONS_JS, name)
+            for name in (
+                "_mergeSessionListRefreshOptions",
+                "_refreshSidebarForBackgroundChurn",
+                "refreshSessionList",
+                "_scheduleSessionEventsRefresh",
+                "_refreshSessionListAfterSidebarResume",
+            )
+        ]
     )
     script = textwrap.dedent(
         f"""
@@ -280,13 +302,16 @@ def test_session_list_external_refresh_forced_resume_survives_hidden_inflight_re
 def test_session_events_refresh_timer_merges_pending_force_and_active_options():
     """The debounce window must not drop force or active-refresh intent."""
     functions = "\n\n".join(
-        _function_body(SESSIONS_JS, name)
-        for name in (
-            "_mergeSessionListRefreshOptions",
-            "_refreshSidebarForBackgroundChurn",
-            "refreshSessionList",
-            "_scheduleSessionEventsRefresh",
-        )
+        [_constant_declaration(SESSIONS_JS, "_SESSION_EVENTS_REFRESH_COALESCE_MS")]
+        + [
+            _function_body(SESSIONS_JS, name)
+            for name in (
+                "_mergeSessionListRefreshOptions",
+                "_refreshSidebarForBackgroundChurn",
+                "refreshSessionList",
+                "_scheduleSessionEventsRefresh",
+            )
+        ]
     )
     script = textwrap.dedent(
         f"""

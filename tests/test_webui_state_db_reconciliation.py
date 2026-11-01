@@ -609,6 +609,128 @@ def test_api_sessions_overlays_webui_state_db_summary_after_desktop_append(monke
     assert row["updated_at"] == 1003.0
 
 
+def test_api_sessions_reconciles_a_committed_append_under_transient_fingerprint_locks(monkeypatch, tmp_path):
+    """Lock -> real producer -> committed append -> immediate handler/consumer.
+
+    The reviewed defect: two UNREADABLE content fingerprints compare equal, so the
+    ten-second rebuild-rate floor held a cached sidebar across an append that had
+    really been committed (a Desktop/CLI continuation). The unit coverage in
+    ``tests/test_session_sidebar_cache.py`` proves the real locked producer and the
+    cache consumer separately; this test joins them end to end, because only the
+    join shows the floor suppressing the file-stat reconciliation.
+
+    A real rollback-journal EXCLUSIVE lock is held around the real
+    ``_sqlite_content_fingerprint`` read and released before the rebuild runs. Two
+    rows are then committed, and the IMMEDIATE next
+    ``/api/sessions?sidebar_source=webui`` request must show them.
+    """
+    import sqlite3
+
+    import api.models as models
+    import api.routes as routes
+
+    sid = "webui_transient_lock_reconcile"
+    sidecar_messages = [
+        {"role": "user", "content": "cached user", "timestamp": 1000.0},
+        {"role": "assistant", "content": "cached assistant", "timestamp": 1001.0},
+    ]
+    _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+    db_path = tmp_path / "state.db"
+    _make_state_db(db_path, sid, list(sidecar_messages))
+    monkeypatch.setattr(routes, "load_settings", lambda: {"show_cli_sessions": False})
+    routes._clear_session_list_cache()
+
+    real_fingerprint = models._sqlite_content_fingerprint
+    state = {"lock_open": False, "locked_reads": 0}
+    produced_under_lock = []
+    builder_saw_open_lock = []
+
+    def _fingerprint_under_writer_lock(path):
+        """Run the real producer while a real writer lock is held.
+
+        The wrapper is a scheduling device only: it returns the production value
+        unchanged, so readability is judged on what production actually returned.
+        """
+        writer = sqlite3.connect(path, isolation_level=None)
+        try:
+            writer.execute("PRAGMA journal_mode=DELETE")
+            writer.execute("BEGIN EXCLUSIVE")
+            state["lock_open"] = True
+            state["locked_reads"] += 1
+            try:
+                value = real_fingerprint(path)
+            finally:
+                writer.execute("ROLLBACK")
+                state["lock_open"] = False
+        finally:
+            writer.close()
+        produced_under_lock.append(value)
+        return value
+
+    monkeypatch.setattr(models, "_sqlite_content_fingerprint", _fingerprint_under_writer_lock)
+
+    real_builder = routes._build_session_list_cache_payload
+
+    def _tracked_builder(*args, **kwargs):
+        # A lock still open here would serialize the expensive rebuild behind the
+        # external writer; the request path must never do that.
+        builder_saw_open_lock.append(state["lock_open"])
+        return real_builder(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "_build_session_list_cache_payload", _tracked_builder)
+
+    first = _GetHandler("/api/sessions?sidebar_source=webui")
+    routes.handle_get(first, urlparse(first.path))
+    assert first.status == 200
+    first_row = next(row for row in first.response_json["sessions"] if row["session_id"] == sid)
+    assert first_row["message_count"] == 2
+
+    assert state["locked_reads"] >= 1, "the schedule must really hold a writer lock during the read"
+    assert produced_under_lock, "the real fingerprint producer must have run under the lock"
+    # Readability of the producer's own return value, checked outside the
+    # consumer's catch boundaries: a locked read is UNREADABLE, never an equal
+    # "unchanged" pair of Nones.
+    assert all(
+        models._content_fingerprint_readable(value) is False for value in produced_under_lock
+    ), f"a locked fingerprint read must be unreadable, got {produced_under_lock!r}"
+
+    before = db_path.stat()
+    _append_state_db_rows(
+        db_path,
+        sid,
+        [
+            {"role": "user", "content": "desktop user", "timestamp": 1002.0},
+            {"role": "assistant", "content": "desktop assistant", "timestamp": 1003.0},
+        ],
+    )
+    after = db_path.stat()
+    assert (after.st_mtime_ns, after.st_size) != (before.st_mtime_ns, before.st_size), (
+        "the committed append must have changed the state.db file stat the stamp reads"
+    )
+
+    # Immediate next request: the same transient-lock schedule repeats on its
+    # fingerprint read, so only the unreadable-fingerprint guard can let the
+    # committed rows through instead of the floor holding the cached entry.
+    second = _GetHandler("/api/sessions?sidebar_source=webui")
+    routes.handle_get(second, urlparse(second.path))
+    assert second.status == 200
+    row = next(row for row in second.response_json["sessions"] if row["session_id"] == sid)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        direct_count, direct_tail = conn.execute(
+            "SELECT COUNT(*), MAX(timestamp) FROM messages WHERE session_id = ?", (sid,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row["message_count"] == direct_count == 4
+    assert row["last_message_at"] == direct_tail == 1003.0
+    assert row["updated_at"] == 1003.0
+    assert len(builder_saw_open_lock) >= 2, "the append must have been rebuilt, not held"
+    assert not any(builder_saw_open_lock), "rebuilds must run with the writer lock released"
+
+
 def test_api_session_full_load_does_not_duplicate_state_db_prefix(monkeypatch, tmp_path):
     import api.routes as routes
 
