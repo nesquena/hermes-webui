@@ -23,6 +23,7 @@ import traceback
 import unicodedata
 import copy
 import inspect
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Optional
 
@@ -67,6 +68,8 @@ from api.config import (
     # The shared resolver delegates model-specific clamping to
     # coerce_reasoning_effort_for_model; keep that contract visible here for
     # the WebUI wiring check and future readers.
+    resolve_session_reasoning_effort,
+    effective_session_reasoning_effort,
     _main_model_request_overrides,
     PROCESS_SESSION_INDEX, PROCESS_SESSION_INDEX_LOCK,
 )
@@ -89,6 +92,8 @@ from api.memory_profile_scope import (
     agent_has_memory,
     call_as_session_owner,
     construct_profile_scoped_agent,
+    memory_status_event,
+    session_memory_status,
     session_profile_home_or_empty,
     turn_memory_reason,
 )
@@ -192,6 +197,16 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
         'message_count': len(messages),
     }
     attach_todo_state(raw, messages)
+    # #8517 notice: the memory status of the agent serving THIS session (after a
+    # compression, the continuation and the cached agent moved to it). Omitted when
+    # unknown; codes only.
+    try:
+        _memory_status = session_memory_status(getattr(session, 'session_id', ''), session=session)
+    except Exception:
+        _memory_status = None
+        logger.debug('[webui] #8517: memory status unavailable for the session payload', exc_info=True)
+    if _memory_status:
+        raw['memory_status'] = _memory_status
     if tool_calls is not None:
         raw['tool_calls'] = tool_calls
     try:
@@ -218,6 +233,70 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
     except Exception:
         raw.pop('regeneration_revision', None)
     return raw
+
+
+def _successful_skill_view_name(tool_name, function_result) -> str | None:
+    """Return the canonical name from a successful structured skill_view."""
+    if tool_name != "skill_view":
+        return None
+    result = function_result
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(result, Mapping) or result.get("success") is not True:
+        return None
+    if result.get("error"):
+        return None
+    name = result.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    return name
+
+
+def _record_streaming_skill_usage(
+    session_id,
+    tool_name,
+    function_result,
+    *,
+    stream_id,
+    skill_provenance_generation,
+    ephemeral=False,
+) -> bool:
+    """Persist a successful skill_view result for the live session owner."""
+    if ephemeral or not stream_id or skill_provenance_generation is None:
+        return False
+    name = _successful_skill_view_name(tool_name, function_result)
+    if name is None:
+        return False
+    sid = str(session_id or "").strip()
+    if not sid:
+        return False
+    with _get_session_agent_lock(sid):
+        try:
+            current_session = get_session(sid)
+        except Exception:
+            return False
+        if current_session is None or str(getattr(current_session, "session_id", "")) != sid:
+            return False
+        if stream_id and not _stream_writeback_is_current(current_session, stream_id):
+            return False
+        if (
+            getattr(current_session, "skill_provenance_generation", 0)
+            != skill_provenance_generation
+        ):
+            return False
+        if getattr(current_session, "read_only", False):
+            return False
+        try:
+            if not current_session.record_skill_usage(name):
+                return False
+            current_session.save(touch_updated_at=False, skip_index=True)
+        except Exception:
+            logger.debug("Failed to persist streaming skill usage for %s", sid, exc_info=True)
+            return False
+    return True
 
 
 def _compact_for_echo_compare(value: str) -> str:
@@ -393,6 +472,24 @@ def _ephemeral_session_payload(session_id: str, messages) -> dict:
     return redact_session_data(
         {'session_id': session_id, 'messages': messages if isinstance(messages, list) else []}
     )
+
+
+def _put_session_memory_status(put, session_id: str, stream_id: str, profile_home: str) -> None:
+    """#8517 notice: send the UI the memory status of the agent now serving
+    ``session_id`` (``warning``/``memory_off`` or ``memory_status``/``ok``; nothing when
+    unknown). Called after an agent is registered for the turn, including each
+    credential self-heal replacement, outside the registry locks. A one-turn
+    memoryless agent is never cached, so it never changes the reported status."""
+    try:
+        event = memory_status_event(
+            session_memory_status(session_id, profile_home),
+            session_id=session_id, stream_id=stream_id,
+        )
+    except Exception:
+        logger.debug('[webui] #8517: memory status unavailable for session %s', session_id, exc_info=True)
+        return
+    if event is not None:
+        put(*event)
 
 
 def _cancel_event_payload(
@@ -3799,6 +3896,74 @@ def _capture_turn_served_model(s, agent) -> str | None:
     return _used_model
 
 
+def _active_turn_checkpoint_index(messages, identity) -> int | None:
+    """Index of this turn's checkpoint user row in the settled display.
+
+    The token is captured by ``_active_turn_authority`` before pending fields
+    are cleared, and settlement stamps it on the user row. A count of pre-run
+    assistants is not a boundary: history recovery can insert older assistant
+    rows the count never saw. The last matching row wins, matching the
+    reversed lookup in ``_active_turn_authority``.
+    """
+    token = identity.get('token') if isinstance(identity, dict) else None
+    if not token:
+        return None
+    found = None
+    for idx, message in enumerate(messages or []):
+        if (
+            isinstance(message, dict)
+            and message.get('role') == 'user'
+            and message.get('_active_turn_token') == token
+        ):
+            found = idx
+    return found
+
+
+def _turn_prior_assistant_count(messages, previous_messages, active_turn_identity) -> int:
+    """Assistant messages that belong to turns earlier than the active one.
+
+    Shared boundary for reasoning settlement and the routing backfill: the
+    checkpoint user row ``_active_turn_authority`` captured before pending
+    fields were cleared. Assistants before that row are a previous turn.
+
+    Without a checkpoint there is no boundary worth trusting, so the pre-run
+    ``previous_messages`` snapshot decides — both callers use this one rule so
+    they cannot drift apart.
+    """
+    checkpoint_at = _active_turn_checkpoint_index(messages, active_turn_identity)
+    source = (
+        (messages or [])[:checkpoint_at]
+        if checkpoint_at is not None
+        else (previous_messages or [])
+    )
+    return sum(
+        1 for m in source if isinstance(m, dict) and m.get('role') == 'assistant'
+    )
+
+
+def _backfill_turn_gateway_routing(messages, *, routing, active_turn_identity):
+    """Label every assistant message of a finished turn with the turn routing.
+
+    The finalize loop stamps ``_gatewayRouting`` on the turn's last assistant
+    message only, so mid-turn answers render without a model after reload.
+    Backfill the rest of the turn here. Rows that already carry routing (the
+    authoritative final answer, or an older answer recovered from context)
+    keep it. Assistants before the checkpoint user row are a previous turn.
+    Without a checkpoint the backfill does nothing: guessing from a pre-run
+    count is what wrote the current model onto recovered history.
+    """
+    if not messages or not routing:
+        return
+    checkpoint_at = _active_turn_checkpoint_index(messages, active_turn_identity)
+    if checkpoint_at is None:
+        return
+    for msg in messages[checkpoint_at + 1:]:
+        if not (isinstance(msg, dict) and msg.get('role') == 'assistant'):
+            continue
+        if not msg.get('_gatewayRouting'):
+            msg['_gatewayRouting'] = routing
+
+
 def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str) -> dict:
     """Build thread-local agent env with per-run values overriding profile defaults.
 
@@ -4883,7 +5048,7 @@ def _stream_reasoning_owner(msg, is_last, positional_idx, tool_call_segments, op
 
 def _settle_turn_reasoning(s, _previous_messages, _reasoning_segments,
                            tool_call_segments=None, open_segment=None, interim_segments=None,
-                           tool_start_order=None):
+                           tool_start_order=None, *, active_turn_identity=None):
     """Persist per-step reasoning on this turn's assistant messages in ``s.messages``.
 
     Contract (docs/sse-streams.md, "Reasoning settlement"): non-empty agent
@@ -4902,10 +5067,8 @@ def _settle_turn_reasoning(s, _previous_messages, _reasoning_segments,
     tool_call_segments = {k: list(v) for k, v in (tool_call_segments or {}).items()}
     interim_segments = list(interim_segments or [])
     _positional = not tool_call_segments and not interim_segments
-    _prev_asst = sum(
-        1 for m in (_previous_messages or [])
-        if isinstance(m, dict) and m.get('role') == 'assistant'
-    )
+    # Same boundary as the routing backfill: checkpoint row, else pre-run snapshot.
+    _prev_asst = _turn_prior_assistant_count(s.messages, _previous_messages, active_turn_identity)
     _total_asst = sum(1 for m in s.messages if isinstance(m, dict) and m.get('role') == 'assistant')
     _asst_count = 0
     _step_ids = _turn_step_tool_call_ids(s.messages, _prev_asst, list(tool_start_order or []))
@@ -13971,6 +14134,7 @@ def _run_agent_streaming(
     # once. Sentinel: None=not computed, 0=not applicable/failed, >0=real cap.
     _real_ctx_cache = [None]
     _live_usage_session_cache = [None]
+    _stream_clear_generation = None
 
     def _current_live_usage_session():
         return _live_usage_session_snapshot(
@@ -14545,6 +14709,9 @@ def _run_agent_streaming(
         # session lock before dispatch, so a mismatch here means a newer picker
         # write won the race and must not be clobbered by the worker thread.
         with _agent_lock:
+            _skill_provenance_generation = getattr(
+                s, "skill_provenance_generation", 0,
+            )
             _last_persisted_model = getattr(s, "model", None)
             _last_persisted_provider = getattr(s, "model_provider", None)
             if _last_persisted_provider is not None:
@@ -15445,6 +15612,17 @@ def _run_agent_streaming(
                     put('metering', _tool_stats)
                 except Exception:
                     logger.debug('Failed to update live prompt estimate on tool completion', exc_info=True)
+                try:
+                    _record_streaming_skill_usage(
+                        getattr(s, "session_id", None) or session_id,
+                        name,
+                        function_result,
+                        stream_id=stream_id,
+                        skill_provenance_generation=_skill_provenance_generation,
+                        ephemeral=ephemeral,
+                    )
+                except Exception:
+                    logger.debug('Failed to persist streaming skill usage', exc_info=True)
 
             _AIAgent = _get_ai_agent()
             if _AIAgent is None:
@@ -15633,6 +15811,7 @@ def _run_agent_streaming(
 
             # Per-session toolset override (#493): if the session has
             # enabled_toolsets set, use that instead of the global config.
+            _session_meta = None
             try:
                 from api.models import Session, SESSION_DIR
                 _session_path = SESSION_DIR / f"{session_id}.json"
@@ -15744,17 +15923,40 @@ def _run_agent_streaming(
             except Exception:
                 _max_tokens_cfg = None
 
-            # CLI-parity reasoning effort: read agent.reasoning_effort from the
-            # active profile's config.yaml (the same key the CLI writes via
-            # `/reasoning <level>`) and hand the parsed dict to AIAgent.  When
-            # the key is absent or invalid, pass None → agent uses its default.
+            # Prefer the session-owned effort so switching conversations restores
+            # the same runtime setting shown by the composer. Legacy sessions
+            # without that metadata continue to inherit the profile/CLI value,
+            # read from the same isolated session-profile config as the chip
+            # and the Gateway worker (_cfg stays ambient-aware for toolsets).
+            # The live session `s` is what POST /api/reasoning mutates and what
+            # the Gateway worker reads.
             try:
-                _effort = configured_reasoning_effort_for_model(
-                    _cfg,
-                    model_id=resolved_model,
-                    provider_id=resolved_provider,
-                    base_url=resolved_base_url,
-                )
+                _session_effort = getattr(s, 'reasoning_effort', None)
+                try:
+                    _session_effort = effective_session_reasoning_effort(
+                        _session_effort, _profile_home,
+                    )
+                except Exception:
+                    logger.warning("isolated reasoning config read failed; using session config", exc_info=True)
+                if _session_effort is None:
+                    # No session-owned effort (a legacy chat, or a profile that
+                    # configures none): the per-model agent.reasoning_overrides
+                    # entry still wins over the global agent.reasoning_effort
+                    # here (#7170), then the model-capability clamp applies.
+                    _effort = configured_reasoning_effort_for_model(
+                        _cfg,
+                        model_id=resolved_model,
+                        provider_id=resolved_provider,
+                        base_url=resolved_base_url,
+                    )
+                else:
+                    _effort = resolve_session_reasoning_effort(
+                        _cfg,
+                        session_effort=_session_effort,
+                        model_id=resolved_model,
+                        provider_id=resolved_provider,
+                        base_url=resolved_base_url,
+                    )
                 _reasoning_config = parse_reasoning_effort(_effort)
             except Exception:
                 _reasoning_config = None
@@ -15972,6 +16174,8 @@ def _run_agent_streaming(
                     _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
                 put('cancel', _cancel_event_payload('Cancelled by user'))
                 return
+            if not ephemeral:
+                _put_session_memory_status(put, session_id, stream_id, _profile_home)
 
             # Cache publication is already fenced with Stop above. Keep LRU
             # eviction and any memory-provider close outside the stream lock.
@@ -16835,6 +17039,9 @@ def _run_agent_streaming(
                                 _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
                                 put('cancel', _cancel_event_payload('Cancelled by user'))
                                 return
+                            if not ephemeral:
+                                # #8517 notice: the replacement now serves the session.
+                                _put_session_memory_status(put, session_id, stream_id, _profile_home)
                             # Retry the conversation once with fresh credentials
                             _self_healed = True
                             _token_sent = False
@@ -16902,7 +17109,12 @@ def _run_agent_streaming(
                                 _heal_projected_history = _agent_replay_settle_projection(
                                     _heal_kwargs.get("conversation_history") or []
                                 )
-                                _heal_result = agent.run_conversation(**_heal_kwargs)
+                                # Skill completion callbacks persist through this same lock.
+                                _agent_lock.release()
+                                try:
+                                    _heal_result = agent.run_conversation(**_heal_kwargs)
+                                finally:
+                                    _agent_lock.acquire()
                                 _remember_pending_steer_result(_heal_result)
                                 _active_turn_identity = _resolve_active_turn_authority(
                                     _active_turn_identity,
@@ -16927,11 +17139,11 @@ def _run_agent_streaming(
                                 )
                                 _heal_ok = False
                             if cancel_event.is_set():
-                                # This retry runs under _agent_lock, so a Stop or a
-                                # server settle (#7293) could only publish its cancel
-                                # and interrupt it; the turn's terminal state is
-                                # written here. Finalize it as cancelled, keeping the
-                                # streamed partial, never as an auth failure.
+                                # A Stop or a server settle (#7293) during the retry
+                                # publishes its cancel and interrupts it; the turn's
+                                # terminal state is written here. Finalize it as
+                                # cancelled, keeping the streamed partial, never as
+                                # an auth failure.
                                 _finalize_cancelled_turn(
                                     s, ephemeral=ephemeral, stream_id=stream_id,
                                     preserve_partials=True,
@@ -16950,6 +17162,13 @@ def _run_agent_streaming(
                                     except Exception:
                                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                                 put('cancel', _worker_cancel_event_payload(stream_id))
+                                return
+                            if not _stream_writeback_is_current(s, stream_id):
+                                logger.info(
+                                    "Skipping stale credential self-heal result for session %s stream %s",
+                                    getattr(s, 'session_id', session_id),
+                                    stream_id,
+                                )
                                 return
                             if _heal_ok and _heal_result is not None:
                                 # Retry succeeded — replace result and skip error
@@ -17327,6 +17546,7 @@ def _run_agent_streaming(
                     s, _previous_messages, _reasoning_segments,
                     _tool_call_reasoning_idx, _unbound_reasoning_idx[0], _interim_reasoning_idx,
                     _tool_start_order,
+                    active_turn_identity=_active_turn_identity,
                 )
                 try:
                     _turn_duration_seconds = max(0.0, time.time() - float(_turn_started_at))
@@ -17384,7 +17604,18 @@ def _run_agent_streaming(
                     _history.append(_gateway_routing)
                     s.gateway_routing_history = _history[-50:]
                 if s.messages:
-                    for _dm in reversed(s.messages):
+                    _checkpoint_at = _active_turn_checkpoint_index(
+                        s.messages, _active_turn_identity
+                    )
+                    # With a checkpoint, only this turn's tail is eligible. The
+                    # last assistant of the whole transcript can be an older
+                    # answer that recovery inserted after the pre-run snapshot.
+                    _label_rows = (
+                        s.messages[_checkpoint_at + 1:]
+                        if _checkpoint_at is not None
+                        else s.messages
+                    )
+                    for _dm in reversed(_label_rows):
                         if isinstance(_dm, dict) and _dm.get('role') == 'assistant':
                             _dm['_turnDuration'] = round(_turn_duration_seconds, 3)
                             if _turn_tps is not None:
@@ -17419,6 +17650,12 @@ def _run_agent_streaming(
                                     'cache_hit_percent': turn_cache_hit_percent,
                                 }
                             break
+                    if _checkpoint_at is not None:
+                        _backfill_turn_gateway_routing(
+                            s.messages,
+                            routing=_gateway_routing,
+                            active_turn_identity=_active_turn_identity,
+                        )
                 # Persist context window data on the session so the context-ring
                 # indicator survives a page reload (#1318). Must run BEFORE
                 # s.save() for the same reason as the reasoning trace above.
@@ -18357,6 +18594,9 @@ def _run_agent_streaming(
                             _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
                         put('cancel', _cancel_event_payload('Cancelled by user'))
                         return
+                    if not ephemeral:
+                        # #8517 notice: the replacement now serves the session.
+                        _put_session_memory_status(put, session_id, stream_id, _profile_home)
                     # Retry the conversation
                     _token_sent = False
                     try:
@@ -19422,6 +19662,32 @@ def _cancel_stream_impl(
         live_tools = getattr(_live_config, 'STREAM_LIVE_TOOL_CALLS', STREAM_LIVE_TOOL_CALLS)
         if live_tools is not STREAM_LIVE_TOOL_CALLS:
             _cancel_tool_calls = live_tools.get(stream_id, [])
+
+    # Gateway runs: retire the run's approval cards BEFORE the interrupted turn is
+    # saved and reported. The stream worker can stay blocked on the Gateway
+    # socket long after this returns, and until its teardown an Allow click was
+    # still relayed and resumed a run WebUI had already recorded as stopped. The
+    # cancel flag is set above (so a card the worker publishes from now on is
+    # retired by the worker itself) and STREAMS_LOCK is released. No approval
+    # lock is taken: Stop never waits on a relay's POST. Any click that starts
+    # after this returns gets 409 without reaching the Gateway; a relay that
+    # had already validated its card still sends its one POST. Best-effort and
+    # never raises into cancel. Local runs skip this.
+    if (
+        _cancel_session_id
+        and isinstance(active_run_entry, dict)
+        and str(active_run_entry.get("backend") or "") == "gateway"
+    ):
+        try:
+            from api.gateway_chat import settle_gateway_stream_approvals
+
+            settle_gateway_stream_approvals(
+                _cancel_session_id,
+                stream_id,
+                reason="Gateway run was cancelled before approval resolution",
+            )
+        except Exception:
+            logger.debug("Failed to retire gateway approvals on cancel for %s", stream_id, exc_info=True)
 
     # Session cleanup outside STREAMS_LOCK to preserve lock ordering.
     # Acquire the per-session _agent_lock too, mirroring every other session

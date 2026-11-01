@@ -1305,3 +1305,24 @@ def test_helper_denylist_includes_gateway_and_unknown():
             f"runs CLI-owned; gateway/unknown were added in the "
             f"residual #4911 review gap"
         )
+
+
+def test_helper_keeps_state_db_source_on_schema_without_parent_session_id(
+    routes_module, monkeypatch, isolated_state_db
+):
+    """An older state.db without sessions.parent_session_id must still classify a
+    cron session read-only from state.db.source, with its title and model."""
+    SID = "20260610_cron_old_schema"
+    db = isolated_state_db["db"]
+    _make_state_db(db, SID, message_count=2, title="Nightly cron", model="cron-model",
+                   source="cron", cwd="/root")
+    conn = sqlite3.connect(str(db))
+    conn.execute("ALTER TABLE sessions DROP COLUMN parent_session_id")
+    conn.commit()
+    assert "parent_session_id" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
+    conn.close()
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    sess, reason = routes_module._claim_or_synthesize_cli_session(SID)
+    assert reason != "materialized", reason
+    assert sess is not None and sess.read_only is True
+    assert (sess.source_tag, sess.title, sess.model) == ("cron", "Nightly cron", "cron-model")
