@@ -12,6 +12,10 @@ from api import clarify, config, gateway_sessions as sessions, models, profiles,
 
 @pytest.fixture
 def native_home(tmp_path, monkeypatch):
+    # Each owner's transport lives in its own config.yaml. tests/conftest.py exports an external
+    # HERMES_CONFIG_PATH, which is root's config by the established rule, so clear it here (as owner_profiles in
+    # test_issue8453_native_authority.py does).
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
     for name in ("default", "work", "josue", "tomo", "tristan"):
         home = tmp_path / name
         home.mkdir()
