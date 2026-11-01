@@ -22,6 +22,15 @@ from api.onboarding import (
     _build_setup_catalog,
     apply_onboarding_setup,
 )
+from unittest import mock
+
+
+@pytest.fixture(autouse=True)
+def _restore_process_env():
+    """apply_onboarding_setup() exports the provider key into os.environ; put the
+    environment back so later tests in this process do not inherit a provider key."""
+    with mock.patch.dict(os.environ):
+        yield
 
 
 # ── Backend: provider catalog structure ──────────────────────────────────

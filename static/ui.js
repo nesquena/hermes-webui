@@ -14799,8 +14799,9 @@ function _activeRunsUpdateText(key,count,fallback){
 // runs are active (restart_blocked + force_available). Offer one explicit,
 // confirmed override that re-sends the same request with
 // force_active_runs:true; the server then saves those runs as interrupted
-// before it restarts. Gateway runs that a restart can reattach are not counted
-// and keep running in the Gateway.
+// before it restarts. For a WebUI update, Gateway runs that a restart can
+// reattach are not counted and keep running in the Gateway. An Agent update
+// cycles the Gateway, so it counts them too (#8660).
 function _renderActiveRunsForceOffer(target,res,resend){
   const errEl=$('updateError');
   if(!errEl||typeof resend!=='function') return;
@@ -15836,6 +15837,27 @@ function _worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, visi
   const thinkingText=_assistantReasoningPayloadText(m);
   const visibleTexts=Array.isArray(turnVisibleContents)?turnVisibleContents:[];
   return _stripVisibleAssistantEchoFromThinking(thinkingText, visibleContent, turnFinalVisibleContent, ...visibleTexts);
+}
+// A delegated subagent's whole task is one turn; split its worklog at each interim text.
+function _isDelegatedSubagentTranscript(){
+  return !S.busy&&!!S.session&&_isDelegatedSubagentRow(S.session);
+}
+function _worklogGroupKey(anchorRow, anchorTurn, placedAfterAnchor){
+  if(!_isDelegatedSubagentTranscript()) return anchorTurn;
+  if(placedAfterAnchor) return anchorRow;
+  for(let el=anchorRow.previousElementSibling;el;el=el.previousElementSibling){
+    if(el.classList&&el.classList.contains('assistant-segment')&&!el.classList.contains('assistant-segment-worklog-source')) return el;
+  }
+  return anchorTurn;
+}
+// Only the subagent's last turn opens: while it runs, or after it ended with no answer.
+function _subagentOpenWorklogTurn(inner){
+  if(!_isDelegatedSubagentTranscript()) return null;
+  const turns=inner.querySelectorAll('.assistant-turn'), lastTurn=turns[turns.length-1]||null;
+  if(!lastTurn||S.session.active===true) return lastTurn;
+  const last=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role!=='tool').pop();
+  const answered=!!last&&last.role==='assistant'&&!(Array.isArray(last.tool_calls)&&last.tool_calls.length)&&!!String(msgContent(last)||'').trim();
+  return answered?null:lastTurn;
 }
 function _worklogDetailsExpandedDefault(){
   return window._worklogDetailsExpandedByDefault===true;
@@ -17277,6 +17299,8 @@ function _toggleActivityGroup(summary){
   // #5839: materialize deferred settled rows on first expand (lazy render).
   if(!collapsed) _materializeDeferredWorklogRows(group);
   _writeActivityDisclosureState(group.getAttribute('data-activity-disclosure-key'), !collapsed);
+  // The cached transcript HTML predates this click; drop it so a switch-back rebuilds.
+  if(typeof S!=='undefined'&&S.session&&S.session.session_id&&typeof _sessionHtmlCache!=='undefined') _sessionHtmlCache.delete(S.session.session_id);
   if(typeof _onLiveActivityToggle==='function') _onLiveActivityToggle(group);
 }
 function _toggleToolWorklogGroup(summary){
@@ -19534,6 +19558,7 @@ function ensureActivityGroup(inner, opts){
     else if(live && _liveActivityUserExpanded === false) collapsed=true;
     if(live && savedState==='open') collapsed=false;
     else if(live && savedState==='closed') collapsed=true;
+    else if(opts.honourSavedDisclosure===true && savedState) collapsed=savedState==='closed';
     group.className='agent-activity-group tool-worklog-group activity'+(collapsed?' tool-call-group-collapsed':'');
     group.setAttribute('data-tool-call-group','1');
     group.setAttribute('data-agent-activity-group','1');
@@ -20706,7 +20731,7 @@ function _messageRenderCacheSignature(){
     _addBoundedHash(add, tc.args||{});
   });
   if(S.session){
-    add(S.session.message_count);add(S.session.updated_at);add(S.session.compression_anchor_visible_idx);
+    add(S.session.message_count);add(S.session.updated_at);add(S.session.active);add(S.session.compression_anchor_visible_idx);
     _addBoundedHash(add, S.session.compression_anchor_message_key||null);
     add(S.session.compression_anchor_summary||'');
   }
@@ -23217,6 +23242,7 @@ function renderMessages(options){
     };
     const durationAssignedTurns = new Set();
     const activityByTurn = new Map();
+    let subagentOpenTurn;
     const activityOrder = [];
     const ensureActivityBucket=(key,aIdx,segmentSeq,burstId)=>{
       if(!byActivity.has(key)){
@@ -23298,13 +23324,16 @@ function renderMessages(options){
         // value) so the append path can use the ownership fact the group
         // construction already uses.
         const anchorIsWorklogSource=anchorRow.classList&&anchorRow.classList.contains('assistant-segment-worklog-source');
-        let state=activityByTurn.get(anchorTurn);
+        const groupKey=_worklogGroupKey(anchorRow,anchorTurn,!anchorIsWorklogSource&&!thinkingText);
+        let state=activityByTurn.get(groupKey);
+        if(subagentOpenTurn===undefined) subagentOpenTurn=_subagentOpenWorklogTurn(inner);
         if(!state){
           const includeTurnDuration=!durationAssignedTurns.has(anchorTurn);
           if(includeTurnDuration) durationAssignedTurns.add(anchorTurn);
           const activityKey=`assistant:${aIdx}`;
           const group=ensureActivityGroup(anchorParent,{
-            collapsed:true,
+            collapsed:!subagentOpenTurn||anchorTurn!==subagentOpenTurn,
+            honourSavedDisclosure:_isDelegatedSubagentTranscript(),
             anchor:anchorRow,
             beforeAnchor:!!thinkingText&&!anchorIsWorklogSource,
             syncAnchorReason:anchorIsWorklogSource,
@@ -23317,7 +23346,7 @@ function renderMessages(options){
           if(!list) continue;
           list.innerHTML='';
           state={group,cards:[],seenReasons:new Set(),seenTools:new Set()};
-          activityByTurn.set(anchorTurn,state);
+          activityByTurn.set(groupKey,state);
         }
         state.cards.push(...cards);
         _appendWorklogStep(state.group, anchorRow, cards, thinkingText, {
@@ -23336,7 +23365,13 @@ function renderMessages(options){
           seenTools:state.seenTools,
         });
       }
+      // The running subagent's newest worklog is live work: label it Running, not Processed.
+      let runningGroup=null;
+      if(subagentOpenTurn&&S.session.active===true)
+        activityByTurn.forEach(s=>{ if(s.group.closest('.assistant-turn')===subagentOpenTurn) runningGroup=s.group; });
       activityByTurn.forEach(state=>{
+        if(state.group===runningGroup) state.group.setAttribute('data-subagent-running','1');
+        else state.group.removeAttribute('data-subagent-running');
         _syncToolCallGroupSummary(state.group);
       });
     }else{
@@ -23762,6 +23797,9 @@ function renderMessages(options){
           _materializeDeferredWorklogRows(group);
         }
         if(!(group.textContent||'').trim()) continue; // empty group can't help
+        // A delegated transcript's collapsed chip stays collapsed (it keeps the turn non-blank).
+        if(typeof _isDelegatedSubagentTranscript==='function'&&_isDelegatedSubagentTranscript()&&
+           typeof _readActivityDisclosureState==='function'&&_readActivityDisclosureState(group.getAttribute('data-activity-disclosure-key'))==='closed'){revealed=true;continue;}
         if(group.classList.contains('tool-call-group-collapsed')){
           group.classList.remove('tool-call-group-collapsed');
           group.classList.add('open');
@@ -24004,8 +24042,20 @@ function _toolTargetLabel(tc){
   else if(kind==='memory') raw=a.target||a.name||a.action||'';
   else if(kind==='read'||kind==='write') raw=a.path||a.file_path||a.file||a.target||a.name||'';
   else if(kind==='search'||kind==='web') raw=a.query||a.pattern||a.url||a.uri||'';
+  else if(kind==='delegate') raw=_toolDelegateTargetLabel(tc,a);
   else raw=a.cmd||a.command||a.path||a.file_path||a.file||a.uri||a.url||a.query||a.pattern||a.dir||a.task||a.name||'';
   return _redactToolTargetLabel(_decodeToolLabelEntities(String(raw).split('\n')[0].trim()));
+}
+// delegate_task names its work in goal or a tasks batch; saved args may be a truncated string, so the result's count wins.
+function _toolDelegateTargetLabel(tc,a){
+  if(a.action&&a.action!=='spawn') return `subagents (${a.action})`;
+  const counted=String(tc&&tc.snippet||'').match(/"count"\s*:\s*(\d+)/);
+  let tasks=a.tasks;
+  const n=counted?+counted[1]:Array.isArray(tasks)?tasks.length:(String(tasks||'').match(/['"]goal['"]\s*:/g)||[]).length;
+  if(n>1) return `${n} subagents`;
+  if(Array.isArray(tasks)) tasks=tasks[0]&&tasks[0].goal;
+  else if(typeof tasks==='string') tasks=(tasks.match(/['"]goal['"]\s*:\s*['"]([^'"]+)/)||[])[1];
+  return tasks||a.goal||a.task||'';
 }
 function _toolReadRangeLabel(tc){
   const name=String(tc&&tc.name||'').toLowerCase().replace(/[^a-z0-9]+/g,'_');
@@ -24537,6 +24587,8 @@ function _syncToolCallGroupSummary(group){
         ? _activityProcessedElapsedLabel(group)
         : _activitySettledProcessedLabel(group);
       label.textContent=processedLabel||t('processed_elapsed','');
+      // A running subagent's open worklog is live work, not processed work.
+      if(group.getAttribute('data-subagent-running')==='1') label.textContent=t('gateway_running_label');
     }else{
       const rows=Array.from(group.querySelectorAll('.tool-card-row'));
       // Prefer the live _tcData classification; fall back to the durable data-*
