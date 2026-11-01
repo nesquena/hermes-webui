@@ -115,7 +115,7 @@ def test_session_save_writes_compact_copy_without_mutating_model_payload(session
     session.save(touch_updated_at=False)
 
     persisted = json.loads((session_dir / "save-boundary.json").read_text())
-    assert PERSISTENCE_OVERRIDE_VERSION == "1.0.0"
+    assert PERSISTENCE_OVERRIDE_VERSION == "1.1.0"
     assert "data:image" not in json.dumps(persisted["messages"])
     assert source[0]["content"][0]["image_url"]["url"] == huge
     assert session.messages == source
@@ -230,3 +230,63 @@ def test_cold_reload_keeps_attachment_availability_and_bounded_bytes(session_dir
     assert (inbox / "notes.jpg").is_file()
     assert "data:image" not in json.dumps(reloaded.messages)
     assert "data:image" not in json.dumps(reloaded.context_messages)
+
+
+def test_distinct_image_rows_survive_repeated_cold_save_and_load(session_dir):
+    """Projection must not erase the only content difference between two rows.
+
+    The dedup guard fingerprints the whole row. If the projection collapses two
+    rows with different image bytes to identical markers, the *next* save after
+    a cold load reads them as exact replays and deletes one. A bounded digest of
+    the dropped payload keeps them distinguishable across cycles.
+    """
+    identity = {"role": "user", "id": "cycle-event-1", "timestamp": 20.5}
+    first = {**identity, "content": [_openai_part(_data_url(b"first-image"))]}
+    second = {**identity, "content": [_openai_part(_data_url(b"second-image"))]}
+    session = Session(session_id="cycle-distinct", messages=[first, second])
+
+    for cycle in range(3):
+        session.save(touch_updated_at=False)
+        persisted = json.loads((session_dir / "cycle-distinct.json").read_text())
+        assert len(persisted["messages"]) == 2, f"row lost on cycle {cycle}"
+        assert persisted["message_count"] == 2
+        assert "data:image" not in json.dumps(persisted)
+        for row in persisted["messages"]:
+            digest = row.get("_image_payload_digest")
+            assert isinstance(digest, str) and 0 < len(digest) <= 40
+        assert persisted["messages"][0]["_image_payload_digest"] != \
+            persisted["messages"][1]["_image_payload_digest"]
+        session = Session.load("cycle-distinct")
+        assert len(session.messages) == 2
+
+
+def test_exact_duplicate_image_rows_stay_collapsed_across_cycles(session_dir):
+    row = {"role": "user", "id": "cycle-event-2", "timestamp": 21.5,
+           "content": [_openai_part(_data_url(b"same-image"))]}
+    session = Session(session_id="cycle-duplicate", messages=[row, json.loads(json.dumps(row))])
+
+    for cycle in range(3):
+        session.save(touch_updated_at=False)
+        persisted = json.loads((session_dir / "cycle-duplicate.json").read_text())
+        assert len(persisted["messages"]) == 1, f"duplicate survived on cycle {cycle}"
+        session = Session.load("cycle-duplicate")
+
+
+def test_provider_replay_rows_are_not_stamped_with_transcript_provenance(session_dir):
+    """`_image_payload_digest` is a transcript-only key.
+
+    Persisted `context_messages` are replayed to strict provider schemas; an
+    unknown message key there could be rejected upstream. The discriminator is
+    only needed where the lossless dedup guard runs (the display transcript).
+    """
+    huge = _data_url(b"A" * 500_000)
+    row = {"role": "user", "id": "prov-1", "timestamp": 30.5, "content": [_openai_part(huge)]}
+    session = Session(session_id="prov-shape", messages=[row],
+                      context_messages=[json.loads(json.dumps(row))])
+
+    session.save(touch_updated_at=False)
+
+    persisted = json.loads((session_dir / "prov-shape.json").read_text())
+    assert "_image_payload_digest" in persisted["messages"][0]
+    assert all("_image_payload_digest" not in m for m in persisted["context_messages"])
+    assert "data:image" not in json.dumps(persisted["context_messages"])

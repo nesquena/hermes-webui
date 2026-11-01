@@ -2168,7 +2168,9 @@ class Session:
         # the renderer never drew inline user image parts (static/ui.js:20548).
         from api.session_image_persistence_override import compact_persisted_image_parts
         persisted_context = copy.deepcopy(getattr(self, 'context_messages', None) or [])
-        compact_persisted_image_parts(persisted_context)
+        # No digest stamp: context rows are provider-replay shapes. Only the
+        # display transcript is deduplicated, so only it needs the discriminator.
+        compact_persisted_image_parts(persisted_context, stamp_digest=False)
         extra['context_messages'] = persisted_context
         payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
         try:
