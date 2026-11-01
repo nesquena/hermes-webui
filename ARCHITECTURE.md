@@ -1148,6 +1148,30 @@ Default toolset list (hardcoded fallback):
 The web UI always runs with the full CLI toolset. There is no per-session toolset
 restriction from the UI yet (see ROADMAP.md Wave 4 for the plan).
 
+### 8.1 `${VAR}` references: raw writes, bound reads (#8032, #8129)
+
+`config.yaml` may hold `${VAR}` / `${env:VAR}` references to secrets (API keys,
+base URLs, MCP headers). Two rules keep them references:
+
+- **Writes go through the raw document.** A config writer loads the raw YAML
+  (`_load_yaml_config_file_raw`), changes the keys it owns and saves that. It
+  never saves a dict that came from the env-expanding reader, or a resolved
+  secret ends up on disk in place of its reference. Re-submitting a displayed
+  (resolved) value unchanged keeps the reference; a changed value is written as
+  given.
+- **Reads of a profile's raw document expand under that profile's binding.**
+  Use `api.profiles.load_profile_config()` / `expand_profile_config()`. A named
+  profile resolves against its own `.env` only. Root resolves against the
+  launch-time snapshot `api.paths.STARTUP_ENV` under root's own `.env`, without
+  the values a shell launcher sourced from a named launch home's `.env`
+  (`_INITIAL_HERMES_HOME_DOTENV`). It never reads the live `os.environ`, which
+  streaming turns and background workers overwrite with their own profile's
+  values. A reference the binding cannot resolve stays literal and reads as
+  absent.
+
+`tests/test_issue8032_profile_env_binding.py` fails on any new raw config load
+in `api/` that is not an allowlisted writer or loader internal.
+
 ---
 
 ## 9. Known Bugs and Technical Debt Summary
