@@ -316,11 +316,10 @@ def test_loop_js_wiring_is_session_scoped_and_chat_bound():
     body = body[:body.index("\n}\n")]
     assert "/^\\/?loop(\\s|$)/i.test(transportCommand)?{command:transportCommand,session_id:" in body and ":{command:transportCommand})" in body
     busy = _src("static/messages.js")
-    busy = busy[busy.index("const _pcMeta="):busy.index("const defaultMessageMode=")]
-    busy = busy[:busy.index("return;")]
-    assert "executeAgentCommand(text,_pcMeta||{name:'loop'})" in busy and "_loopMsgs=S.messages" in busy
-    # The advertised alias (/proactive) resolves through the registry before the busy check.
-    assert "getAgentCommandMetadata(_pc.name)" in busy and "(_pcMeta&&_pcMeta.name||_pc.name)==='loop'" in busy
+    busy = busy[busy.index("const _ownSid="):busy.index("const defaultMessageMode=")]
+    assert "executeAgentCommand(text,_pcCmd||{name:'loop'})" in busy and "_ownMsgs=S.messages" in busy
+    # The advertised alias (/proactive) resolves through the registry (envelope .command) before the busy check.
+    assert "getAgentCommandMetadata(_pc.name)" in busy and "(_pcCmd&&_pcCmd.name||_pc.name)==='loop'" in busy
     assert '("/loop", "loop", "/proactive", "proactive")' in _src("api/routes.py")  # raw /api/commands/exec too
-    assert "_loopMsgs.push({role:'assistant'" in busy and "S.messages.push({role:'assistant'" not in busy
-    assert "S.messages===_loopMsgs&&(S.session&&S.session.session_id)===_loopSid" in busy
+    assert "_ownMsgs.push({role:'assistant'" in busy and "S.messages.push({role:'assistant'" not in busy
+    assert "S.messages===_ownMsgs&&(S.session&&S.session.session_id)===_ownSid" in busy
