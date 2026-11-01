@@ -598,7 +598,16 @@ def test_pointer_focus_does_not_leave_keyboard_hover_chrome_stuck_in_browser():
     assert keyboard_state["actionsPointerEvents"] == "auto"
     assert keyboard_state["timestampVisible"] is False
     assert keyboard_state["attentionVisible"] is False
-    assert keyboard_state["paddingRight"] == "40px"
+    # Keyboard focus reveals the same button as hover, so it must not grant the
+    # lane either: the timestamp's hidden box holds it. The row keeps its
+    # resting padding, otherwise the chips and done marker jump on Tab.
+    resting = next(
+        state["restingPaddingRight"]
+        for state in pointer_states
+        if state["skin"] == "terracotta" and state["dark"] is True
+    )
+    assert keyboard_state["paddingRight"] == resting
+    assert keyboard_state["paddingRight"] != "40px"
     assert "inset" in keyboard_state["focusShadow"]
     assert re.search(r"\b2px\b", keyboard_state["focusShadow"])
 

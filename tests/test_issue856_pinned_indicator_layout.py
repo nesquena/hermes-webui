@@ -86,19 +86,15 @@ def test_timestamp_hidden_when_attention_state_is_present():
     assert "ts.textContent=hasAttentionState?'':_formatRelativeSessionTime(tsMs);" in SESSIONS_JS
     assert ".session-time.is-hidden{display:none;}" in STYLE_CSS
     # padding-right was 86px when the timestamp was position:absolute. Now that
-    # the timestamp lives in the flex flow of .session-title-row, the rest
-    # state needs no right reservation; hover/streaming/unread/menu-open/
-    # keyboard focus all expand to 40px to make room for the absolute action
-    # button + attention indicator.
+    # the timestamp lives in the flex flow of .session-title-row, only rows
+    # whose timestamp is replaced by a state indicator need a reservation, and
+    # it is held by a class rule rather than by hover/focus/menu-open: those
+    # states reveal the action button over the timestamp's own box (hidden with
+    # visibility), so the row never reflows under the pointer.
     assert ".session-item{padding:8px 8px;" in STYLE_CSS
-    # PR #1110: :hover removed from the COMBINED padding-right rule (touch layout-shift fix).
-    # Instead, hover padding is restored via @media (hover:hover) which only applies to
-    # devices with a real hover capability (mouse). Touch/iPad devices satisfy hover:none
-    # and skip that block, preventing the layout-reflow mid-tap bug.
-    assert ".session-item.streaming,.session-item.unread,.session-item.needs-attention,.session-item:has(:focus-visible),.session-item.menu-open{padding-right:40px;}" in STYLE_CSS
-    # Desktop hover padding restored via media query (mouse devices only)
-    assert "@media (hover:hover)" in STYLE_CSS
-    assert ".session-item:hover{padding-right:40px;}" in STYLE_CSS
+    assert ".session-item.streaming,.session-item.unread,.session-item.needs-attention{padding-right:40px;}" in STYLE_CSS
+    # No pointer state may change the row's padding (layout-shift regression).
+    assert ".session-item:hover{padding-right:40px;}" not in STYLE_CSS
     assert ".session-item{min-height:44px;padding:10px 40px 10px 12px;}" in STYLE_CSS
     # Timestamp now uses margin-left:auto inside the flex row instead of
     # absolute positioning. This stops the title's flex:1 bound from running

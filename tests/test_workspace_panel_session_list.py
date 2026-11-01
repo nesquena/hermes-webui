@@ -251,25 +251,20 @@ class TestProjectDotPlacement:
         # footprint (26px + 6px gap ≈ 32px, rounded to 40px) needs reservation.
         assert ".session-item{min-height:44px;padding:10px 40px 10px 12px;}" in STYLE_CSS
 
-    def test_session_item_expands_padding_on_hover_and_attention(self):
-        """PR #1110: Touch layout-shift fix — :hover removed from the COMBINED
-        padding-right selector. Touch devices (iPad, phone) see hover:none so
-        they skip the @media (hover:hover) block below. Mouse devices see
-        hover:hover and get the padding-right on hover.
-        streaming/unread/needs-attention/keyboard-focus/menu-open expand to 40px for all devices."""
-        # Touch-safe combined rule (no :hover in this one)
+    def test_session_item_reserves_the_action_lane_without_a_hover_reflow(self):
+        """The action button's lane is reserved by row state, never by a pointer
+        state: a :hover/:focus/menu-open padding change reflowed the row and
+        slid the chips and done marker sideways under the pointer."""
+        # Touch-safe combined rule (no :hover, no focus, no menu-open in it)
         sel = (
             ".session-item.streaming,.session-item.unread,"
-            ".session-item.needs-attention,"
-            ".session-item:has(:focus-visible),"
-            ".session-item.menu-open"
+            ".session-item.needs-attention"
         )
         idx = STYLE_CSS.find(sel)
         assert idx >= 0, (
-            "Combined streaming/unread/keyboard-focus/menu-open padding rule not found"
+            "State rows (which have no timestamp) must reserve the 40px lane"
         )
         rule = STYLE_CSS[idx: STYLE_CSS.find("}", idx)]
         assert "padding-right:40px" in rule
-        # Desktop hover padding restored via @media (hover:hover) — mouse devices only
-        assert "@media (hover:hover)" in STYLE_CSS
-        assert ".session-item:hover{padding-right:40px;}" in STYLE_CSS
+        # No pointer state may reintroduce the padding jump.
+        assert ".session-item:hover{padding-right:40px;}" not in STYLE_CSS
