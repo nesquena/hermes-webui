@@ -7032,15 +7032,46 @@ def _persist_share_fields(sid: str, session, *, share_token, share_created_at) -
     and ``save()`` re-entering it is expected.
     """
     with _session_persist_lock(sid):
-        if _update_session_share_fields(
+        if not _update_session_share_fields(
             sid,
             share_token=share_token,
             share_created_at=share_created_at,
         ):
-            return
-        session.share_token = share_token
-        session.share_created_at = share_created_at
-        session.save(touch_updated_at=False)
+            session.share_token = share_token
+            session.share_created_at = share_created_at
+            session.save(touch_updated_at=False)
+        # Still under the persistence lock, so no save can land between the
+        # patch and this step (#8399 review, release fold).
+        _commit_share_fields_to_cached_session(
+            sid, share_token=share_token, share_created_at=share_created_at,
+        )
+
+
+def _commit_share_fields_to_cached_session(sid: str, *, share_token, share_created_at) -> None:
+    """Set the resident session's share pair AND its stale-save baseline to the
+    pair that was just persisted. The caller holds ``_session_persist_lock(sid)``.
+
+    The pre-save mirror moves only the fields. A resident save in the
+    mirror/patch window is then back at its baseline and adopts the pre-patch
+    pair from disk, so the cached copy kept serving a revoked token. Moving the
+    fields again without the baseline is worse: a copy that a writer reloaded
+    in that window (a rename, say) would carry the new pair as its own change,
+    and after an eviction and a newer share its delayed save would write the old
+    token over the new one, leaving a link that revoke cannot reach. Fields and
+    baseline therefore move together, and only once the pair is on disk
+    (#8399 review, release fold).
+    """
+    try:
+        with LOCK:
+            cached = SESSIONS.get(sid)
+            if cached is None:
+                return
+            cached.share_token = share_token
+            cached.share_created_at = share_created_at
+            cached._share_token_saved = share_token
+            cached._share_created_at_saved = share_created_at
+    except Exception:
+        logger.debug("Failed to commit share fields to cached session %s", sid, exc_info=True)
 
 
 def _reconcile_stale_stream_state_for_session_rows(session_rows) -> bool:
@@ -18836,12 +18867,6 @@ def handle_post(handler, parsed) -> bool:
                 share_token=share_meta["share_token"],
                 share_created_at=share_meta["share_created_at"],
             )
-            # Mirror again now the patch is on disk (#8399 review, release
-            # fold): a resident save landing between the first mirror and the
-            # patch adopts the pre-patch pair from disk under the stale-save
-            # baseline, so the cached copy would serve the old pair until its
-            # next save.
-            _mirror_share_fields_to_cached_session(sid, persisted_session)
         finally:
             share_lock.release()
         _publish_session_list_changed(
@@ -18939,12 +18964,6 @@ def handle_post(handler, parsed) -> bool:
                 share_token=None,
                 share_created_at=None,
             )
-            # Mirror again now the patch is on disk (#8399 review, release
-            # fold): a resident save landing between the first mirror and the
-            # patch adopts the revoked token from disk under the stale-save
-            # baseline, and /api/session would keep reporting the dead link
-            # until that copy's next save.
-            _mirror_share_fields_to_cached_session(sid, target_session)
         finally:
             share_lock.release()
         _publish_session_list_changed(

@@ -1,12 +1,15 @@
 """#8399 review, release fold: no dead token on the resident copy after a revoke.
 
 The revoke handler mirrors ``share_token=None`` onto the resident session, then
-patches the sidecar. A resident that has not saved since the create's mirror is
-back at its stale-save baseline after that first mirror, so a save landing
-between the mirror and the patch counts as "unchanged" and adopts the on-disk
-pair, which still names the revoked token. Disk ends correct (the patch runs
-after), but the cached object and ``/api/session`` kept reporting the dead link
-until that copy's next save. The handlers now mirror again after the patch.
+patches the sidecar. When the resident's stale-save baseline equalled the
+mirrored value, a save landing between the mirror and the patch counted as
+"unchanged" and adopted the on-disk pair, which still named the revoked token.
+Disk ended correct (the patch runs after), but the cached object and
+``/api/session`` kept reporting the dead link until that copy's next save.
+``_persist_share_fields`` now commits the pair to the resident copy (fields and
+baseline together, under the persistence lock) once it is on disk; the
+delayed-rename case that rules out moving the fields alone is in
+tests/test_issue8399_delayed_rename_after_share.py.
 """
 
 from __future__ import annotations
@@ -69,28 +72,27 @@ def test_resident_saved_between_mirror_and_patch_does_not_keep_the_revoked_token
     status, body = _post("/api/share/create", {"session_id": sid})
     assert status == 200, body
     token = body["share"]["token"]
-    assert resident.share_token == token  # the create's mirror reached the resident copy
-    assert getattr(resident, "_share_token_saved", None) is None  # it has not saved since
+    assert resident.share_token == token  # the create reached the resident copy
 
     real_persist = routes._persist_share_fields
     landed = {}
 
     def _save_in_the_window(sid_, session_, *, share_token, share_created_at):
         if share_token is None and not landed:
-            # The revoke's first mirror has run (None == the resident's baseline):
-            # a resident save lands before the sidecar patch.
+            # The revoke's first mirror has run; a resident save lands before the
+            # sidecar patch. Without the committed baseline this save adopted the
+            # on-disk (revoked) token.
             assert resident.share_token is None
             resident.messages = [*resident.messages, {"role": "assistant", "content": "ck", "partial": True}]
             resident.save(touch_updated_at=False, skip_index=skip_index)
-            landed["token_after_save"] = resident.share_token
+            landed["saved"] = True
         return real_persist(sid_, session_, share_token=share_token, share_created_at=share_created_at)
 
     monkeypatch.setattr(routes, "_persist_share_fields", _save_in_the_window)
 
     status, body = _post("/api/share/revoke", {"session_id": sid})
     assert status == 200, body
-    # The interleaving really happened: the window save adopted the on-disk token.
-    assert landed.get("token_after_save") == token
+    assert landed.get("saved"), "the window save never ran"
     assert shares.load_share(token) is None
     assert _sidecar_token(sid) is None
     with models.LOCK:
@@ -98,3 +100,7 @@ def test_resident_saved_between_mirror_and_patch_does_not_keep_the_revoked_token
     assert cached is resident
     assert cached.share_token is None, "the resident copy still reports the revoked link"
     assert cached.share_created_at is None
+    # The baseline moved with the fields, so the next save keeps the cleared pair.
+    resident.messages = [*resident.messages, {"role": "user", "content": "next"}]
+    resident.save(touch_updated_at=False)
+    assert resident.share_token is None and _sidecar_token(sid) is None
