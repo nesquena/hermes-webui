@@ -4777,7 +4777,7 @@ function _mergePendingSessionMessage(session,messages){
     // array) is reused instead of stacking another one. When the persisted
     // turn row's text differs from pending_user_message, the tail-duplicate
     // check above cannot see that copy, so without this every pass stacked
-    // another prompt (#8696). Reuse is by the turn the copy was recovered FOR
+    // another copy of the prompt, see #8696. Reuse is by the turn the copy was recovered FOR
     // (`_recoveredTurnStart`, stamped below), never by text alone or a public
     // `_active_turn_user` marker: an earlier turn's display-only row that
     // repeats the text keeps its own turn, timestamp and attachments.
