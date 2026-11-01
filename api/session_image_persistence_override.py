@@ -28,11 +28,12 @@ without it so strict provider schemas never gain an unknown key.
 from __future__ import annotations
 
 import hashlib
+import json
 
 _IMAGE_TYPES = {"image", "image_url", "input_image"}
 # Pinned independently of upstream WebUI releases. Bump only with a regression
 # test and an explicit compatibility review.
-PERSISTENCE_OVERRIDE_VERSION = "1.1.0"
+PERSISTENCE_OVERRIDE_VERSION = "1.2.0"
 _MARKER = {"type": "text", "text": "[image attachment]"}
 # Bounded provenance for the bytes the marker replaced. The replay guard
 # fingerprints the WHOLE row, so two rows that differ only by image bytes must
@@ -91,6 +92,48 @@ def _is_inline_image_part(part) -> bool:
     return _inline_image_payload(part) is not None
 
 
+def _project_parts(content, digest):
+    """Return (projected_parts, removed_payloads) for one content array."""
+    projected = []
+    removed = []
+    for part in content:
+        payload = _inline_image_payload(part)
+        if payload is None:
+            projected.append(part)
+            continue
+        digest.update(payload.encode("utf-8", "surrogatepass"))
+        digest.update(b"\x00")
+        projected.append(dict(_MARKER))
+        removed.append(payload)
+    return projected, removed
+
+
+def _project_api_content(raw, digest):
+    """Project the per-message ``api_content`` sidecar, which can duplicate the bytes.
+
+    ``api_content`` is the provider-shaped mirror of ``content`` kept on agent
+    rows. Compacting only ``content`` left a full base64 copy of every image in
+    the persisted JSON, so the save boundary must project both. Returns the new
+    JSON string, or None when the value is not a JSON part list or holds no
+    inline bytes (an untouched sidecar must stay byte-identical).
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    stripped = raw.lstrip()
+    if not stripped.startswith("["):
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(parsed, list):
+        return None
+    projected, removed = _project_parts(parsed, digest)
+    if not removed:
+        return None
+    return json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+
+
 def compact_persisted_image_parts(messages, *, stamp_digest: bool = True) -> int:
     """Replace inline image bytes in a persisted projection with markers.
 
@@ -107,29 +150,27 @@ def compact_persisted_image_parts(messages, *, stamp_digest: bool = True) -> int
     for message in messages or ():
         if not isinstance(message, dict):
             continue
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        projected = []
-        message_changed = False
         digest = hashlib.sha256()
-        for part in content:
-            payload = _inline_image_payload(part)
-            if payload is not None:
-                digest.update(payload.encode("utf-8", "surrogatepass"))
-                digest.update(b"\x00")
-                projected.append(dict(_MARKER))
-                changed += 1
+        message_changed = False
+        content = message.get("content")
+        if isinstance(content, list):
+            projected, removed = _project_parts(content, digest)
+            if removed:
+                message["content"] = projected
+                changed += len(removed)
                 message_changed = True
-            else:
-                projected.append(part)
-        if message_changed:
-            message["content"] = projected
-            if stamp_digest:
-                # Content-equality discriminator that survives the projection.
-                # The marker alone is identical for every image, so without this
-                # the next save's lossless dedup would see two originally
-                # distinct rows as exact replays and drop one.
-                message[_DIGEST_FIELD] = digest.hexdigest()[:_DIGEST_CHARS]
+        # The provider-shaped mirror duplicates the same bytes; leaving it alone
+        # would persist a full base64 copy per image row.
+        projected_api_content = _project_api_content(message.get("api_content"), digest)
+        if projected_api_content is not None:
+            message["api_content"] = projected_api_content
+            changed += 1
+            message_changed = True
+        if message_changed and stamp_digest:
+            # Content-equality discriminator that survives the projection. The
+            # marker alone is identical for every image, so without this the
+            # next save's lossless dedup would see two originally distinct rows
+            # as exact replays and drop one.
+            message[_DIGEST_FIELD] = digest.hexdigest()[:_DIGEST_CHARS]
     return changed
 

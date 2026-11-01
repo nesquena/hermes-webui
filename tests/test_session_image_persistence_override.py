@@ -115,7 +115,7 @@ def test_session_save_writes_compact_copy_without_mutating_model_payload(session
     session.save(touch_updated_at=False)
 
     persisted = json.loads((session_dir / "save-boundary.json").read_text())
-    assert PERSISTENCE_OVERRIDE_VERSION == "1.1.0"
+    assert PERSISTENCE_OVERRIDE_VERSION == "1.2.0"
     assert "data:image" not in json.dumps(persisted["messages"])
     assert source[0]["content"][0]["image_url"]["url"] == huge
     assert session.messages == source
@@ -290,3 +290,41 @@ def test_provider_replay_rows_are_not_stamped_with_transcript_provenance(session
     assert "_image_payload_digest" in persisted["messages"][0]
     assert all("_image_payload_digest" not in m for m in persisted["context_messages"])
     assert "data:image" not in json.dumps(persisted["context_messages"])
+
+
+def test_api_content_sidecar_is_projected_too(session_dir):
+    """The provider mirror duplicates the bytes; compaction must cover both."""
+    import base64 as _b64
+
+    raw = _b64.b64encode(b"\xff\xd8\xff\xe0" + b"X" * 200_000).decode()
+    content = [
+        {"type": "text", "text": "what is this"},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + raw}},
+    ]
+    api_content = json.dumps(content)
+    row = {"role": "user", "content": content, "api_content": api_content}
+    session = Session(session_id="apic", messages=[row],
+                      context_messages=[json.loads(json.dumps(row))])
+
+    session.save(touch_updated_at=False)
+
+    text = (session_dir / "apic.json").read_text()
+    assert "data:image" not in text, "api_content mirror leaked inline bytes"
+    persisted = json.loads(text)
+    for message in (persisted["messages"][0], persisted["context_messages"][0]):
+        mirror = json.loads(message["api_content"])
+        assert mirror[0] == {"type": "text", "text": "what is this"}
+        assert mirror[1] == {"type": "text", "text": "[image attachment]"}
+    # The live row keeps its provider-shaped mirror for the next model call.
+    assert json.loads(session.messages[0]["api_content"])[1]["image_url"]["url"].startswith("data:image/jpeg")
+
+
+def test_non_image_api_content_is_left_byte_identical(session_dir):
+    mirror = json.dumps([{"type": "text", "text": "plain"}, {"type": "text", "text": "tail"}])
+    row = {"role": "user", "content": [{"type": "text", "text": "hi"}], "api_content": mirror}
+    session = Session(session_id="apic-plain", messages=[row])
+
+    session.save(touch_updated_at=False)
+
+    persisted = json.loads((session_dir / "apic-plain.json").read_text())
+    assert persisted["messages"][0]["api_content"] == mirror
