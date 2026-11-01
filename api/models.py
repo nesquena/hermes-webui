@@ -139,8 +139,11 @@ BACKGROUND_CLI_SOURCES = ("cron", "webhook", "kanban")
 # Desktop/TUI/CLI conversations out of the window (#8265). Unlike the background
 # sources they keep normal project chips, so a project-assigned one-shot run is
 # still recovered by the assigned pass, and an explicitly requested one resolves
-# through get_cli_session_by_id().
-INTERACTIVE_WINDOW_EXCLUDED_CLI_SOURCES = BACKGROUND_CLI_SOURCES + ("oneshot",)
+# through get_cli_session_by_id(). `--source tool` sessions get the same
+# treatment: Hermes Agent tags third-party integration runs that way so they stay
+# out of user session lists, and a script driving one per batch can create
+# thousands of them.
+INTERACTIVE_WINDOW_EXCLUDED_CLI_SOURCES = BACKGROUND_CLI_SOURCES + ("oneshot", "tool")
 _CLI_SESSIONS_CACHE_TTL_SECONDS = 5.0
 # While a turn is actively streaming, hold the CLI/cron projection longer than
 # one poll interval (mirrors the route-level #4808 hold-down). The frontend
@@ -10864,7 +10867,7 @@ def _load_cli_sessions_uncached(
         # reads this line as source text. Must stay equal to
         # INTERACTIVE_WINDOW_EXCLUDED_CLI_SOURCES (pinned by
         # test_background_source_exclusion_literal_matches_the_constant).
-        exclude_sources=("cron", "webhook", "kanban", "oneshot") if source_filter is None else None,
+        exclude_sources=("cron", "webhook", "kanban", "oneshot", "tool") if source_filter is None else None,
         include_sources=None if source_filter is None else (source_filter,),
         **({'session_ids': session_ids} if session_ids is not None else {}),
     )
@@ -10880,8 +10883,8 @@ def _load_cli_sessions_uncached(
         # raw row, so compression segments cannot consume either budget.
         # The assigned recovery pass skips only the true background sources, so
         # a one-shot run filed under a project stays reachable from its chip.
-        # The unassigned refill skips one-shot runs too: refilling the window
-        # with them would undo #8265.
+        # The unassigned refill skips one-shot and tool runs too: refilling the
+        # window with them would undo #8265.
         interactive_excluded = BACKGROUND_CLI_SOURCES
         unassigned_refill_excluded = INTERACTIVE_WINDOW_EXCLUDED_CLI_SOURCES
         first_pass_count = len(state_rows)
