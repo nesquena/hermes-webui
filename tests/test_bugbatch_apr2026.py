@@ -157,21 +157,27 @@ def test_567_compose_mentions_macos_uid():
     )
 
 
-# ── #590: transcription spinner already present ───────────────────────────────
+# ── #590: the in-flight indicator is painted before the request ──────────────
 
 def test_590_transcribing_status_shown_before_fetch():
-    """boot.js: setComposerStatus('Transcribing…') must fire before the fetch call."""
+    """boot.js: the strip's 'Transcribing…' paint must fire before the fetch call.
+
+    The readout moved out of the footer status line and out of the mic button
+    into the composer strip (#micStatus); the #590 contract — the user sees
+    progress immediately on stop, before the request can take time — is the
+    same, so this follows the paint to its new home.
+    """
     transcribe_fn_start = BOOT_JS.find("async function _transcribeBlob(")
     assert transcribe_fn_start != -1, "_transcribeBlob not found in boot.js"
-    fn_body = BOOT_JS[transcribe_fn_start:transcribe_fn_start + 600]
-    status_pos = fn_body.find("setComposerStatus('Transcribing")
+    fn_body = BOOT_JS[transcribe_fn_start:transcribe_fn_start + 2500]
+    status_pos = fn_body.find("_micPaint('think')")
     fetch_pos  = fn_body.find("await fetch(")
     assert status_pos != -1, (
-        "setComposerStatus('Transcribing…') must be called before the fetch in _transcribeBlob"
+        "_micPaint('think') must be called before the fetch in _transcribeBlob"
     )
     assert fetch_pos != -1, "await fetch not found in _transcribeBlob"
     assert status_pos < fetch_pos, (
-        "setComposerStatus('Transcribing…') must appear before 'await fetch' "
+        "_micPaint('think') must appear before 'await fetch' "
         "so the UI shows a spinner immediately on stop (#590)"
     )
 

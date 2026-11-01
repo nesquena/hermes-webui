@@ -1,8 +1,10 @@
 """Behavioural regression for #8563: a silent clip must not drop a queued send.
 
 The server-STT path answers HTTP 200 with an empty transcript when the recorded
-audio carried no speech. That must show the "no speech" toast ONLY when there is
-nothing to send: if the user clicked Send while recording (an unambiguous send
+audio carried no speech. That must reach the composer strip as its own timed
+"no speech" outcome — never as a toast, which repeated the sentence and covered
+the header on a phone — and it must suppress the outcome entirely when there is
+something to send: if the user clicked Send while recording (an unambiguous send
 intent) and the composer still holds a draft, the draft must go out.
 
 Rather than regex the source, this drives the ACTUAL `_transcribeBlob` and
@@ -59,6 +61,14 @@ global.document = { addEventListener: () => {}, visibilityState: 'visible' };
 let SpeechRecognition = function () {};
 let recognition = null;
 let _forceMediaRecorder = false;
+let _micTranscribeSeq = 0;
+// `_transcribeBlob` reads the hold times of the dictation strip outcomes; the
+// driver must provide every constant the shipped function references, or a
+// failure path dies with a ReferenceError that has nothing to do with the fix.
+const _MIC_EMPTY_MS = 2500;
+const _MIC_FAILED_MS = 4000;
+const paints = [];
+function _micPaint(state) { paints.push(state === undefined ? null : state); }
 const _micForceMediaRecorderKey = 'mic_force_mediarecorder';
 let ta = { value: input.composerText || '' };
 const toasts = [];
@@ -98,6 +108,7 @@ const blob = { type: 'audio/webm', size: 1024 };
   const out = {
     sendCalls: sendCalls,
     toasts: toasts,
+    paints: paints,
     taValue: ta.value,
     pendingSendAfter: !!window._micPendingSend,
     statuses: statuses,
@@ -149,16 +160,22 @@ class TestSilentClipWithQueuedSend:
 
 
 class TestSilentClipWithoutAnythingToSend:
-    def test_toast_is_shown_and_nothing_is_sent(self, driver_path):
+    def test_outcome_is_painted_on_the_strip_and_nothing_is_sent(self, driver_path):
         out = _run(driver_path, composer_text="", pending_send=False)
         assert out["sendCalls"] == 0
-        assert out["toasts"] == ["mic_no_speech"]
+        # The strip carries "No speech detected. Try again." on its own; the
+        # toast that repeated it is gone.
+        assert out["toasts"] == [], "the empty path must not toast"
+        assert out["paints"] == ["think", "empty"], (
+            "silence must still settle the strip to its timed empty outcome"
+        )
 
     def test_pending_send_with_empty_composer_does_not_send(self, driver_path):
         # Send clicked while recording but nothing to send: no empty turn.
         out = _run(driver_path, composer_text="   ", pending_send=True)
         assert out["sendCalls"] == 0
-        assert out["toasts"] == ["mic_no_speech"]
+        assert out["toasts"] == []
+        assert out["paints"] == ["think", "empty"]
         assert out["pendingSendAfter"] is False
 
 
@@ -177,7 +194,8 @@ class TestSilentClipWithQueuedSendAndNoText:
         assert "mic_no_speech" not in out["toasts"]
         assert out["pendingSendAfter"] is False
 
-    def test_staged_file_without_queued_send_only_toasts(self, driver_path):
+    def test_staged_file_without_queued_send_only_paints(self, driver_path):
         out = _run(driver_path, composer_text="", pending_send=False, pending_files=1)
         assert out["sendCalls"] == 0
-        assert out["toasts"] == ["mic_no_speech"]
+        assert out["toasts"] == []
+        assert out["paints"] == ["think", "empty"]

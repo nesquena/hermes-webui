@@ -1195,7 +1195,6 @@ function _micToastKeyForRecognitionError(error){
   const btn=$('btnMic');
   const status=$('micStatus');
   const ta=$('msg');
-  const statusText=status?status.querySelector('.status-text'):null;
   btn.style.display=''; // Show button — browser supports speech recognition or recording fallback
 
   let recognition=null;
@@ -1237,17 +1236,200 @@ function _micToastKeyForRecognitionError(error){
     window._micActive=on;
     btn.classList.toggle('recording',on);
     // Active-state title flips so the tooltip is honest about what
-    // pressing the button will do (#1488).
+    // pressing the button will do (#1488). The icon and this red state are
+    // all the button carries now; the readout lives in the strip.
     _setButtonTooltipAndKey(btn, on ? (_rawAudioMode ? 'voice_recording_active' : 'voice_dictate_active') : (_rawAudioMode ? 'voice_send_raw' : 'voice_dictate'));
-    status.style.display=on?'':'none';
-    if(statusText) statusText.textContent=on?'Listening':'Listening';
     if(!on){ _finalText=''; _prefix=''; }
+    // Opening a capture takes the strip from any transcription still in
+    // flight: a late failure of that request must not settle the new
+    // recorder's readout or stop its timer.
+    if(on){ ++_micTranscribeSeq; _micPaint('rec'); _micStartElapsed(); }
+    else{ _micPaint(null); _micStopMeter(); _micSpokeAt=0; }
   }
 
   function _updateMicTooltip(){
     if(!window._micActive){
       _setButtonTooltipAndKey(btn, _rawAudioMode ? 'voice_send_raw' : 'voice_dictate');
     }
+  }
+
+  // ── Dictation readout ─────────────────────────────────────────────────
+  // Every dictation state is rendered in the composer's existing recording
+  // strip (#micStatus), not inside the mic button: with the workspace pane
+  // open the desktop footer squeezes that button to 25 px, so a readout there
+  // wrapped onto two lines, and forcing one line would widen the button enough
+  // for _fitComposerFooter() to flip the whole footer into icon mode.
+  //
+  //   recording    dot + m:ss + level bar
+  //   in flight    spinner + "Transcribing…"
+  //   settled      a short outcome (word count / no speech / failure), then hid
+  //
+  // One writer, driven by the capture's own lifecycle (start / onstop /
+  // settle), never by polling the DOM. The label is the only announced node
+  // (the strip is an aria-live region); the dot, spinner, timer and bar are
+  // aria-hidden, so the once-per-second timer never speaks.
+  const _MIC_READY_MS=3000;      // how long the word count stays after a transcript lands
+  const _MIC_EMPTY_MS=2500;      // how long "no speech" stays when nothing was heard
+  const _MIC_FAILED_MS=4000;     // how long a failed transcription stays
+  // A request that never settles (hung server, dropped connection) must not
+  // leave "Transcribing…" on screen forever. This is well past the local
+  // Whisper time of a long clip (a 150 s capture takes ~150 s), so it only
+  // fires on a genuinely stuck request; a late transcript still commits and
+  // still paints its own outcome, because the request keeps ownership.
+  const _MIC_THINK_MAX_MS=180000;
+  // Opt-in: manual capture is the default (the mic records until the user
+  // stops it). Silence auto-stop is a preference that starts OFF.
+  const _MIC_AUTOSTOP_KEY='hermes-mic-auto-stop';
+  const _MIC_SILENCE_MS=1600;    // silence after speech that ends an opt-in capture
+  const _MIC_LEVEL_GAIN=6;       // rms -> bar scale
+  const micTextEl=status?status.querySelector('.mic-status-text'):null;
+  const micTimerEl=status?status.querySelector('.mic-timer'):null;
+  const micLevelEl=status?status.querySelector('.mic-level'):null;
+  // A frozen page (bfcache) cannot keep a capture or a request alive, so a
+  // restored document must not show a readout that stopped ticking. The
+  // boot-level pageshow handler (#822/#1045) owns the bfcache restore and calls
+  // this hook, so boot.js keeps exactly one pageshow listener.
+  window._micResetOnRestore=()=>{ try{ _micPaint(null); _micStopMeter(); }catch(_){} };
+
+  let _micElapsedTimer=null;
+  let _micStateTimer=null;
+  let _micMeterCtx=null;
+  let _micMeterRaf=0;
+  let _micSpokeAt=0;
+  // Bumped by every server-STT request and by every capture that starts. A
+  // settling paint is only allowed while it still owns the strip: a newer
+  // capture (or a newer request) may have repainted it already.
+  let _micTranscribeSeq=0;
+
+  function _micStateClear(){
+    if(_micStateTimer){clearTimeout(_micStateTimer);_micStateTimer=null;}
+  }
+
+  // state: null | 'rec' | 'think' | 'done' | 'empty' | 'failed'. `count` is the
+  // word count of a committed transcript; `holdMs` how long a settled outcome
+  // stays before the strip hides itself.
+  function _micPaint(state,count,holdMs){
+    _micStateClear();
+    if(!status) return;
+    if(state!=='rec') _micStopElapsed();
+    for(const cls of ['is-rec','is-think','is-done','is-empty','is-failed']){
+      status.classList.toggle(cls,cls==='is-'+state);
+    }
+    if(!state){
+      status.style.display='none';
+      status.removeAttribute('data-state');
+      if(micTextEl) micTextEl.textContent='';
+      if(micTimerEl) micTimerEl.textContent='';
+      if(micLevelEl) micLevelEl.style.setProperty('--mic-level','0');
+      return;
+    }
+    status.style.display='';
+    status.setAttribute('data-state',state);
+    if(micTextEl) micTextEl.textContent=_micStateLabel(state,count);
+    if(state!=='rec'){
+      if(micTimerEl) micTimerEl.textContent='';
+      if(micLevelEl) micLevelEl.style.setProperty('--mic-level','0');
+    }
+    if(holdMs){
+      _micStateTimer=setTimeout(()=>{_micStateTimer=null;_micPaint(null);},holdMs);
+    }else if(state==='think'){
+      _micStateTimer=setTimeout(()=>{_micStateTimer=null;_micPaint(null);},_MIC_THINK_MAX_MS);
+    }
+  }
+
+  // Every label is a translation key: the old word-count tick ("12p") told the
+  // user nothing because nothing explained the suffix.
+  function _micStateLabel(state,count){
+    if(state==='rec') return t('voice_listening');
+    if(state==='think') return t('voice_transcribing');
+    if(state==='done') return t(count===1?'voice_word_added':'voice_words_added',count||0);
+    if(state==='empty') return t('mic_no_speech');
+    if(state==='failed') return t('voice_transcribe_failed');
+    return '';
+  }
+
+  function _micStartElapsed(){
+    _micStopElapsed();
+    const startedAt=Date.now();
+    const tick=()=>{
+      const secs=Math.max(0,Math.floor((Date.now()-startedAt)/1000));
+      const next=Math.floor(secs/60)+':'+String(secs%60).padStart(2,'0');
+      if(micTimerEl&&micTimerEl.textContent!==next) micTimerEl.textContent=next;
+    };
+    tick();
+    _micElapsedTimer=setInterval(tick,250);
+  }
+
+  function _micStopElapsed(){
+    if(_micElapsedTimer){clearInterval(_micElapsedTimer);_micElapsedTimer=null;}
+  }
+
+  function _micStopMeter(){
+    if(_micMeterRaf){cancelAnimationFrame(_micMeterRaf);_micMeterRaf=0;}
+    if(_micMeterCtx){
+      try{_micMeterCtx.close();}catch(err){/* already closed */}
+      _micMeterCtx=null;
+    }
+    if(micLevelEl) micLevelEl.style.setProperty('--mic-level','0');
+  }
+
+  // Read at fire time, so a Settings → Sound toggle applies to the next
+  // capture without a reload. Absent key = OFF (opt-in, Settings-backed:
+  // `mic_auto_stop`, mirrored to hermes-mic-auto-stop by
+  // _mirrorSpeechSettingsFromServer).
+  function _micAutoStopEnabled(){
+    try{return localStorage.getItem(_MIC_AUTOSTOP_KEY)==='true';}catch(_){return false;}
+  }
+
+  // Level meter + silence auto-stop, run on the capture's OWN stream (no second
+  // getUserMedia). Peak is a bar under the icon; the analyser also ends the
+  // capture after _MIC_SILENCE_MS of silence once speech was heard, because a
+  // dictation that keeps recording into an empty room is the failure this fixes.
+  function _micStartMeter(stream){
+    _micStopMeter();
+    const Ctx=window.AudioContext||window.webkitAudioContext;
+    if(!Ctx) return;
+    try{ _micMeterCtx=new Ctx(); }catch(err){ return; }
+    let analyser;
+    try{
+      const source=_micMeterCtx.createMediaStreamSource(stream);
+      analyser=_micMeterCtx.createAnalyser();
+      analyser.fftSize=1024;
+      source.connect(analyser);
+    }catch(err){ _micStopMeter(); return; }
+    const buf=new Uint8Array(analyser.fftSize);
+    let noiseFloor=0.01;
+    let silenceSince=0;
+    const tick=()=>{
+      _micMeterRaf=requestAnimationFrame(tick);
+      analyser.getByteTimeDomainData(buf);
+      let sum=0;
+      for(let i=0;i<buf.length;i++){const v=(buf[i]-128)/128;sum+=v*v;}
+      const rms=Math.sqrt(sum/buf.length);
+      if(micLevelEl) micLevelEl.style.setProperty('--mic-level',Math.min(1,rms*_MIC_LEVEL_GAIN).toFixed(2));
+      const threshold=Math.max(0.012,noiseFloor*2.5);
+      if(rms>threshold){
+        _micSpokeAt=Date.now();
+        silenceSince=0;
+        noiseFloor=Math.min(noiseFloor,rms*0.5);
+      }else{
+        noiseFloor=noiseFloor*0.98+rms*0.02;
+        if(!_micSpokeAt) return;
+        if(!silenceSince) silenceSince=Date.now();
+        else if(Date.now()-silenceSince>_MIC_SILENCE_MS
+                &&Date.now()-_micSpokeAt>_MIC_SILENCE_MS
+                &&_micAutoStopEnabled()){
+          silenceSince=0;
+          _stopMic();
+        }
+      }
+    };
+    _micMeterRaf=requestAnimationFrame(tick);
+  }
+
+  function _micWordCount(text){
+    const clean=(text||'').trim();
+    return clean?clean.split(/\s+/).length:0;
   }
 
   function _applyRawAudioModePreference(enabled){
@@ -1287,9 +1469,13 @@ function _micToastKeyForRecognitionError(error){
     }
   }
 
-  function _commitTranscript(text, prefixOverride){
+  function _commitTranscript(text, prefixOverride, ownsButton){
     // `prefixOverride` is the composer content captured at recording start,
     // passed only by the async server-STT path (recorder.onstop → _transcribeBlob).
+    // `ownsButton` is that same path's ownership predicate: the settled feedback
+    // paint is the button's, not the request's. A later capture may already be
+    // recording, and its label and elapsed clock must survive an older request's
+    // ✓ Np — the transcript itself is committed either way.
     // The sync browser-SR path doesn't call this function — it commits inline
     // in sr.onend using _prefix directly.
     //
@@ -1322,6 +1508,14 @@ function _micToastKeyForRecognitionError(error){
     }
     ta.value=committed;
     autoResize();
+    // Outcome in the strip: the word count when text landed, "no speech" when
+    // the capture heard nothing. Held briefly — the composer is the lasting
+    // evidence, this is only the "it worked" tick. Gated on ownership: a capture
+    // that started while this request was pending owns the readout and the clock.
+    if(!ownsButton||ownsButton()){
+      if(clean){ _micPaint('done',_micWordCount(clean),_MIC_READY_MS); }
+      else{ _micPaint('empty',0,_MIC_EMPTY_MS); }
+    }
     if(window._micPendingSend){
       window._micPendingSend=false;
       send();
@@ -1340,13 +1534,27 @@ function _micToastKeyForRecognitionError(error){
     return !!(SpeechRecognition&&_getMicForceMediaRecorderStored()!=='1');
   }
 
-  async function _transcribeBlob(blob, prefixSnapshot){
+  async function _transcribeBlob(blob, prefixSnapshot, isCurrentCapture=true){
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const form=new FormData();
     form.append('file',new File([blob],`voice-input.${ext}`,{type:blob.type||`audio/${ext}`}));
-    // Snapshot is passed in from the recorder.onstop handler — taken there
-    // BEFORE _setRecording(false) clears _prefix (async server STT path).
-    setComposerStatus('Transcribing…');
+    // The strip turns into "Transcribing…" as soon as the clip is handed over,
+    // before the ownership bookkeeping below, so the user sees it immediately
+    // on stop. This is the only place that writes the in-flight state — the old
+    // footer status line is retired so there is one label, not two.
+    if(isCurrentCapture){
+      _micPaint('think');
+    }
+    // Snapshot from onstop, before _setRecording(false) clears _prefix.
+    //
+    // `isCurrentCapture` is the recorder's own verdict from onstop: a superseded
+    // recorder whose `stop` fires late must still commit its transcript (the
+    // words are the user's) but must not take the readout from the capture that
+    // replaced it — the newer capture owns the label and the clock.
+    const seq=isCurrentCapture?++_micTranscribeSeq:_micTranscribeSeq;
+    // Only the owning request settles 'think'; a stuck one is retired by the
+    // _MIC_THINK_MAX_MS bound armed in _micPaint.
+    const ownsButton=isCurrentCapture?()=>seq===_micTranscribeSeq:()=>false;
     try{
       const res=await fetch('api/transcribe',{method:'POST',body:form});
       const data=await res.json().catch(()=>({}));
@@ -1365,30 +1573,41 @@ function _micToastKeyForRecognitionError(error){
         // A Send click while recording is an unambiguous send intent (same rule
         // as the raw-audio path): honour it whenever the composer has anything
         // send() would accept (text, staged files or selected context), instead
-        // of dropping the queued send and leaving the draft behind. The
-        // "no speech" toast is only for the case where there is nothing to send.
+        // of dropping the queued send and leaving the draft behind.
         if(window._micPendingSend&&_composerHasContent()){
-          _commitTranscript('', prefixSnapshot);
+          _commitTranscript('', prefixSnapshot, ownsButton);
           return;
         }
         window._micPendingSend=false;
-        showToast(t('mic_no_speech'));
+        // A 200 with nothing heard is a settlement, not a request still in
+        // flight: this exit has to retire 'think' exactly like
+        // _commitTranscript's empty case does — the same timed outcome, gated on
+        // ownership so a newer capture keeps its readout. The strip's own
+        // "No speech detected. Try again." is the announcement; a toast on top
+        // of it repeated the sentence and covered the header on a phone. A
+        // superseded request is the exception: it must not paint over the newer
+        // capture's strip, and with no strip of its own nothing would tell the
+        // user its take came back empty, so the toast is all that case has.
+        if(ownsButton()) _micPaint('empty',0,_MIC_EMPTY_MS);
+        else showToast(t('mic_no_speech'));
         return;
       }
-      _commitTranscript(transcript, prefixSnapshot);
+      _commitTranscript(transcript, prefixSnapshot, ownsButton);
     }catch(err){
+      // Every failure is an outcome, never a silent return: a strip left on
+      // "Transcribing…" is the bug this class of change must not reintroduce.
       if(_isServerSttUnavailable(err)&&_allowBrowserSttFallback()){
         window._micPendingSend=false;
         _setMicForceMediaRecorder('0');
         _forceMediaRecorder=false;
         recognition=_ensureSpeechRecognition();
+        if(ownsButton()) _micPaint('failed',0,_MIC_FAILED_MS);
         showToast(err.message||t('mic_network'));
         return;
       }
       window._micPendingSend=false;
+      if(ownsButton()) _micPaint('failed',0,_MIC_FAILED_MS);
       showToast(err.message||t('mic_network'));
-    }finally{
-      setComposerStatus('');
     }
   }
 
@@ -1734,7 +1953,7 @@ function _micToastKeyForRecognitionError(error){
           if(captureMode==='media-raw'){
             await _sendRawAudio(blob);
           }else{
-            await _transcribeBlob(blob, prefixSnapshot);
+            await _transcribeBlob(blob, prefixSnapshot, isCurrentCapture);
           }
         }
         else if(window._micPendingSend){
@@ -1745,6 +1964,8 @@ function _micToastKeyForRecognitionError(error){
       _activeCaptureMode=captureMode;
       mediaRecorder=recorder;
       recorder.start();
+      // Same stream the recorder owns — the meter never opens a second capture.
+      _micStartMeter(captureStream);
       _setRecording(true);
     }catch(err){
       if(startSeq!==_micStartSeq) return;
@@ -4004,6 +4225,7 @@ function _mirrorSpeechSettingsFromServer(s){
     voice_continuous:false,
     voice_silence_ms:1800,
     raw_audio_mode:false,
+    mic_auto_stop:false,
   };
   const cachedValue=(storageKey)=>{
     try{return localStorage.getItem(storageKey);}catch(_){return null;}
@@ -4030,6 +4252,7 @@ function _mirrorSpeechSettingsFromServer(s){
     ['tts_auto_read','hermes-tts-auto-read'],
     ['voice_mode_button','hermes-voice-mode-button'],
     ['voice_continuous','hermes-voice-continuous'],
+    ['mic_auto_stop','hermes-mic-auto-stop'],
   ];
   boolKeys.forEach(([settingKey,storageKey])=>{
     if(hasServerValue(settingKey)){
@@ -4732,6 +4955,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
 // chrome aren't left in the stale bfcache snapshot.
 window.addEventListener('pageshow', async (event) => {
   if (!event.persisted) return;  // fresh loads are handled by the IIFE above
+  // Drop a dictation readout that froze with the page. The mic setup lives in
+  // its own IIFE and exposes the reset, so this handler stays the only owner
+  // of the bfcache restore.
+  if (typeof window._micResetOnRestore === 'function') { try { window._micResetOnRestore(); } catch (_) {} }
   _syncKeyboardBottomInset();
   const _srch = document.getElementById('sessionSearch');
   if (_srch) _srch.value = '';

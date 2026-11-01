@@ -632,7 +632,7 @@
           <span id="dropHintText">Drop files to attach</span>
         </div>
         <div class="attach-tray" id="attachTray"></div>
-        <div class="mic-status" id="micStatus" style="display:none"><span class="mic-dot"></span> <span data-i18n="voice_listening">Listening…</span></div>
+        <div class="mic-status" id="micStatus" style="display:none"><span class="mic-dot" aria-hidden="true"></span><span class="mic-spinner" aria-hidden="true"></span><span class="mic-status-text" aria-live="polite" aria-atomic="true">Listening…</span><span class="mic-timer" aria-hidden="true"></span><span class="mic-level" aria-hidden="true"><span class="mic-level-fill"></span></span></div>
         <div class="voice-mode-bar" id="voiceModeBar" style="display:none">
           <span class="voice-mode-indicator" id="voiceModeIndicator"></span>
           <span class="voice-mode-label" id="voiceModeLabel"></span>
@@ -1306,6 +1306,14 @@
                 <span data-i18n="settings_label_raw_audio">Send raw audio instead of transcribing</span>
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_raw_audio">Record and send the original audio file to the agent instead of converting it to text first. The agent can then transcribe it or process the raw audio (emotion, background noise, custom STT). Like Telegram's voice message behavior.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsMicAutoStop" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_mic_autostop">Stop dictation automatically after silence</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_mic_autostop">When on, dictation stops 1.6 s after you finish speaking.</div>
+              <div id="settingsMicAutoStopNote" role="status" aria-live="polite" style="font-size:11px;color:var(--error);margin-top:4px" hidden><span id="settingsMicAutoStopNoteSavedOn" data-i18n="settings_mic_autostop_storage_saved_on" hidden>You turned it on, but this browser can't store the setting, so auto-stop stays off here.</span><span id="settingsMicAutoStopNoteSavedOff" data-i18n="settings_mic_autostop_storage_saved_off" hidden>You turned it off, but this browser can't store the setting, so auto-stop stays on here.</span></div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">

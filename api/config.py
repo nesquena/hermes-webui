@@ -13934,6 +13934,7 @@ _SETTINGS_DEFAULTS = {
     "voice_continuous": False,
     "voice_silence_ms": 1800,
     "raw_audio_mode": False,
+    "mic_auto_stop": False,  # opt-in: end a dictation capture 1.6s after speech stops (default = manual stop)
     "theme": "dark",  # light | dark | system
     "skin": "default",  # accent color skin: default | ares | mono | graphite | slate | poseidon | sisyphus | charizard | sienna | catppuccin | nous
     "font_size": "default",  # small | default | large | xlarge
@@ -14019,6 +14020,7 @@ _SETTINGS_SPEECH_KEYS = {
     "voice_continuous",
     "voice_silence_ms",
     "raw_audio_mode",
+    "mic_auto_stop",
 }
 _SETTINGS_PERSISTED_SPEECH_KEYS_FIELD = "persisted_speech_keys"
 _SETTINGS_LEGACY_DROP_KEYS = {
@@ -14311,6 +14313,7 @@ _SETTINGS_BOOL_KEYS = {
     "voice_mode_button",
     "voice_continuous",
     "raw_audio_mode",
+    "mic_auto_stop",
     "sound_enabled",
     "rtl",
     "notifications_enabled",
