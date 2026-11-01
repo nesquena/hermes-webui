@@ -5,6 +5,8 @@
 
 ### Added
 
+- **Tasks has a read-only Scripts tab.** Next to Jobs, a Scripts tab lists the active profile's `scripts/` folder (the scripts cron jobs can run) with each file's size, age and the description from its leading comment. The tab only lists (there is no viewer yet; to view or edit a script, open the file on the server); a read-only `GET /api/scripts/raw` returns one file's text for a later viewer. Reads stay inside that folder (no symlinks out, size-capped), a platform that cannot open the folder safely says so instead of showing an empty list, and the tab hides "New job" since it cannot create anything. Thanks @happy5318. (#7685, for #2316)
+
 - **The workspace Artifacts panel shows which skills each conversation used.** A new "Skills used" section lists every skill the session loaded and how many times, counted from successful skill loads (the Agent's `skill_view`, `/use` and bundle commands) and kept per session and profile. Files and skills sit in their own collapsible sections ("Files changed N", "Skills used N"), and the Artifacts badge counts both. Thanks @rodboev. (#6693, for #6593)
 
 - **A notice shows when memory is off for the agent serving the chat.** When memory can't be kept inside one profile, the Agent runs with memory (or just its external provider) switched off, and before this the only trace was a server log line. A dismissible notice above the composer now says which case applies (an Agent too old to scope memory per profile, an Agent that can't claim a provider per profile, or a provider already used by another profile) and how to turn memory back on. Healthy and read-only sessions show nothing. (#8652, refs #8517)
@@ -76,6 +78,16 @@
   exactly as before. Thanks @ybai08. (#8138, fixes #8126)
 
 ### Fixed
+
+- **The #4856 mobile-transcript guards no longer break when unrelated CSS is added to the mobile stylesheet block.** Both guards looked for the mobile `.messages-inner` rule in a fixed number of characters after the start of the `@media(max-width:640px)` block (8,000 and 12,000). Adding about 1,200 characters of rules earlier in that block made the first one fail although the rule was unchanged. They now read the whole block with a shared scanner (`tests/_css_blocks.py`) that skips braces in comments, strings, escapes and unquoted `url()`, and they still fail if `overflow-x:hidden` returns, `overflow-y:auto` is added, or the rule leaves the mobile block. Test-only; no runtime change. (#8710)
+
+- **The Gateway Status card shows a single separator after "Last active".** Most translations of the label already end in a colon, and the card added another, so it read "Last active: : <date>". The card now keeps the colon the translation chose (a full-width "：" in Chinese, " : " in French) and adds ": " only to a label without one. (#8635, closes #8621, thanks @happy5318)
+
+- **The stable channel keeps v0.52.544's update target when a checkout has no stable release.** Since exp-v0.52.596, a checkout whose tags are all prereleases (for example `v0.22.5+canary.N`) had no release at all on the stable channel, so an Agent update could apply `origin/main` and a WebUI check could treat the branch tip as the target. The prerelease filter now applies only when the repository has at least one stable release tag, and each check or apply reads the tag list once and uses that one snapshot throughout. (#8686, fixes #8684)
+
+- **CI passes again on GitHub's Ubuntu 26.04 runners.** Two TLS health-probe tests failed on every `ubuntu-26.04` job (GitHub is moving `ubuntu-latest` there) and passed on 24.04. The tests' fake `/health` server sent its body without a `Content-Length`, so the body ended when the connection closed. Python closes TLS connections without a `close_notify`, and the newer curl on 26.04 rejects a body that ends that way. The fake server now frames its body the way the real `/health` does. The launcher's probe and the real server were never affected. Test-only change. (#8702)
+
+- **Native custom providers route as they did on v0.52.544 again.** Since exp-v0.52.597, a native `providers['custom:openai']` record took over bare `openai` turns while Settings still showed `openai` active, and an empty or malformed `custom_providers` list (the Agent writes `custom_providers: []` after removing the last entry) hid every native provider and sent its models to built-in `openai` with no endpoint. A bare built-in id is again claimed only by a legacy `custom_providers` entry of that name, and an empty legacy list no longer hides native providers. A non-string `model` value (for example a hand-edited `model: 42`) no longer breaks resolution of unrelated providers. (#8689, fixes #8685)
 
 - **Your prompt stays at the top of its turn while a short session is still running.** When a young conversation loaded in one page (no older history to page in) while a reply was in progress, the turn's progress narration and tool rows could render above your own prompt. The prompt is now placed by the turn's server start time, the same rule longer conversations already used, so it sits in front of everything that turn produced and never above the previous turn's rows. (#8632, thanks @happy5318)
 
@@ -422,6 +434,10 @@
 - **Documented the gateway approval-runs API opt-in.** `docs/advanced-chat-setup.md` and `docs/docker.md` now explain how to enable and use the gateway approval-runs API. Thanks @rodboev. (#5549, #5269)
 
 ### Changed
+
+- **Slash menu polish.** `/pet` shows its argument hint, every command row uses the same `<required>` / `[optional]` argument notation, and typing a hidden registry command such as `/agents` gets the CLI-only explainer instead of being sent to the model as plain text. `/help` shows every option of a usage hint. Thanks @happy5318. (#7683, fixes #7675)
+
+- **A running subagent's transcript shows its live work.** Opening a delegated subagent while it runs used to show one collapsed, empty "Processed" chip that never updated until a reload. Its last turn now opens with every step's thinking and tool cards, the newest step reads "Running", the page follows the running child, and the steps settle to the usual collapsed chips when it finishes. The parent's delegate card is named by the subagent's goal. Thanks @carlotestor. (#7885)
 
 - **German: 208 strings that still showed English are translated.** MCP (37), Settings and composer (116) and slash commands (55). Thanks @solarmaster961. (#8291, #8292, #8293)
 

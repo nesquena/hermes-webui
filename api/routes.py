@@ -10623,9 +10623,13 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
             import sqlite3 as _sqlite
             with closing(_sqlite.connect(str(db_path))) as _conn:
                 _conn.row_factory = _sqlite.Row
+                # Older state.db schemas lack parent_session_id; select NULL there
+                # so the source/title/model classification still resolves.
+                _cols = {r[1] for r in _conn.execute("PRAGMA table_info(sessions)")}
+                _parent = "parent_session_id" if "parent_session_id" in _cols else "NULL AS parent_session_id"
                 _row = _conn.execute(
-                    "SELECT source, title, model, cwd, started_at, ended_at "
-                    "FROM sessions WHERE id = ?", (sid,)
+                    "SELECT source, title, model, cwd, started_at, ended_at, "
+                    f"{_parent} FROM sessions WHERE id = ?", (sid,)
                 ).fetchone()
                 if _row is not None:
                     state_db_row = dict(_row)
@@ -10690,11 +10694,16 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
         # keeps narrow. Every other non-claimable foreign source keeps the
         # CLI classification so its source badge renders.
         _sa_child = _is_subagent_child_session_id(sid)
-        return (
-            build_session(sid, cli_meta, msgs, read_only_flag=True,
-                          is_cli_flag=not _sa_child),
-            "not_claimable",
-        )
+        session = build_session(sid, cli_meta, msgs, read_only_flag=True,
+                                is_cli_flag=not _sa_child)
+        if _sa_child and state_db_row:
+            # Delegated child lineage and lifecycle come from its state.db row;
+            # ended_at is set by the delegate runner when the child finishes.
+            parent_sid = str(state_db_row.get("parent_session_id") or "").strip()
+            session.parent_session_id = parent_sid or None
+            session.relationship_type = "child_session" if parent_sid else None
+            session.active = state_db_row["ended_at"] is None
+        return session, "not_claimable"
     return build_session(sid, cli_meta, msgs, read_only_flag=False), "materialized"
 
 
@@ -16604,6 +16613,9 @@ def _handle_session_get(handler, parsed) -> bool:
             "messages": msgs,
             "tool_calls": [],
         }
+        for _key in ("parent_session_id", "relationship_type", "active"):
+            if getattr(synth, _key, None) is not None:
+                sess[_key] = getattr(synth, _key)
         attach_todo_state(sess, msgs)
         sess = _merge_cli_sidebar_metadata(sess, cli_meta)
         return j(handler, {"session": public_session_projection(sess)})
@@ -17791,6 +17803,33 @@ def handle_get(handler, parsed) -> bool:
             "active_profile": active_profile,
             "other_profile_count": hidden_other_count,
         })
+
+    # #2316: Scripts subtab -- list and read-only view of the profile's
+    # ~/.hermes/scripts/ directory. Read-only is the first slice; edit
+    # from WebUI is intentionally out of scope.
+    if parsed.path == "/api/scripts/list":
+        from api.scripts_panel import list_scripts
+        return j(handler, list_scripts())
+
+    if parsed.path == "/api/scripts/raw":
+        qs = parse_qs(parsed.query or "")
+        name = (qs.get("name") or [None])[0]
+        if not name:
+            return bad(handler, "name query parameter is required", 400)
+        from api.scripts_panel import read_script
+        result = read_script(name)
+        if result is None:
+            return bad(handler, "script not found", 404)
+        # #7685 re-gate: a failed read is not a success. A 200 here made an
+        # unreadable script look like an empty one in the panel, which keys its
+        # error state off the status.
+        if result.get("error"):
+            return bad(
+                handler,
+                result.get("detail") or result["error"],
+                500,
+            )
+        return j(handler, result)
 
     # #7295/#6753: cron reads use the per-thread store scope (lock-free on
     # Agents with cron.jobs.use_cron_store) so a long in-process cron job that
