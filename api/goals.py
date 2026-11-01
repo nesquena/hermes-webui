@@ -1269,15 +1269,22 @@ def retire_continuation_for_sealed_parent(session_id: str) -> None:
     clear_pending_goal_continuation(sid)
     target = tip or sid
     try:
-        mgr = _manager(target, profile_home=profile_home)
-        if mgr is not None and mgr.is_active():
-            child = f" Continue in session {tip}." if tip else ""
-            mgr.pause(
-                reason=(
-                    f"session {sid} was compressed; its pending goal continuation was "
-                    f"stopped.{child} Use /goal resume to continue."
+        from api.config import _get_session_agent_lock
+
+        # /goal clear|pause|resume mutate the goal under this same per-session lock.
+        # Load -> is_active -> pause must be one critical section: the manager caches
+        # native state at load, so a clear that lands between the read and the save
+        # would be overwritten by a stale "paused" write.
+        with _get_session_agent_lock(target):
+            mgr = _manager(target, profile_home=profile_home)
+            if mgr is not None and mgr.is_active():
+                child = f" Continue in session {tip}." if tip else ""
+                mgr.pause(
+                    reason=(
+                        f"session {sid} was compressed; its pending goal continuation was "
+                        f"stopped.{child} Use /goal resume to continue."
+                    )
                 )
-            )
     except Exception:
         logger.warning("could not record stopped goal continuation for session=%s", sid, exc_info=True)
 

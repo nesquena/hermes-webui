@@ -1715,3 +1715,89 @@ def test_sealed_parent_retirement_leaves_visible_stopped_outcome(monkeypatch):
     assert managers == ["sid-child"]
     assert len(paused) == 1
     assert "compressed" in paused[0] and "sid-parent" in paused[0] and "sid-child" in paused[0]
+
+
+@pytest.mark.parametrize("has_tip", [True, False])
+def test_sealed_parent_retirement_cannot_overwrite_concurrent_goal_clear(
+    monkeypatch, tmp_path, has_tip
+):
+    """Review 5711530615: load -> is_active -> pause must be one critical section with /goal clear.
+
+    The manager caches goal state when it is loaded, so a /goal clear that lands after the
+    retirement's active read must not be overwritten by a stale ``paused`` save
+    (active -> cleared -> paused). Real threads and the real ``_handle_goal_command``.
+    """
+    import threading
+
+    from api import compression_continuation
+
+    target = "sid-child" if has_tip else "sid-parent"
+    session, holder, _kick = _goal_command_env(monkeypatch, tmp_path, target)
+    parent = _sess(session_id="sid-parent", profile="default")
+    monkeypatch.setattr(models, "get_session", lambda _sid, *a, **k: parent)
+    monkeypatch.setattr(
+        compression_continuation,
+        "durable_compression_continuation",
+        lambda _s: (True, "sid-child") if has_tip else (False, None),
+    )
+    read_active = threading.Event()
+    release = threading.Event()
+    paused_reasons = []
+
+    class CachingManager:
+        """Like the native store: state is read once at load and written back whole on save."""
+
+        def __init__(self, session_id, default_max_turns=20):
+            self.session_id = session_id
+            st = holder["state"]
+            self._snap = None if st is None else SimpleNamespace(**vars_of(st))
+
+        def is_active(self):
+            active = self._snap is not None and self._snap.status == "active"
+            if active and threading.current_thread().name == "retirement":
+                read_active.set()
+                release.wait(timeout=5)
+            return active
+
+        def has_goal(self):
+            return holder["state"] is not None
+
+        @property
+        def state(self):
+            return holder["state"]
+
+        def pause(self, reason="user-paused"):
+            self._snap.status = "paused"
+            self._snap.paused_reason = reason
+            holder["state"] = self._snap
+            paused_reasons.append(reason)
+
+        def clear(self):
+            holder["state"] = None
+
+    def vars_of(st):
+        return {k: getattr(st, k) for k in dir(st) if not k.startswith("_") and not callable(getattr(st, k))}
+
+    monkeypatch.setattr(webui_goals, "GoalManager", CachingManager)
+    retirement = threading.Thread(
+        target=webui_goals.retire_continuation_for_sealed_parent,
+        args=("sid-parent",),
+        name="retirement",
+    )
+    retirement.start()
+    assert read_active.wait(timeout=5), "retirement never read the goal as active"
+    clear_result = {}
+    clearer = threading.Thread(
+        target=lambda: clear_result.update(
+            routes._handle_goal_command(object(), {"session_id": target, "args": "clear"})
+        ),
+        name="clearer",
+    )
+    clearer.start()
+    clearer.join(timeout=0.5)  # fixed code: blocked on the goal-control lock; old code: done
+    release.set()
+    retirement.join(timeout=5)
+    clearer.join(timeout=5)
+    assert not retirement.is_alive() and not clearer.is_alive()
+    assert clear_result["status"] == 200
+    assert holder["state"] is None, "stale retirement pause resurrected a cleared goal"

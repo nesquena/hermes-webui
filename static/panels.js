@@ -7522,6 +7522,7 @@ async function switchToProfile(name) {
     sessionInProgress = true;
   }
   const _workspaceVisibleAtStart = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
+  let _reasoningSwitchHeld = false;
   // Stale-snapshot guard ownership for THIS switch: armed the instant
   // S.activeProfile changes (see below), handed to the settings reconciliation
   // on success, released in `finally` on every other exit. The counter arms are
@@ -7555,6 +7556,11 @@ async function switchToProfile(name) {
     // red error while the real switch completes and renders. The catch block below is
     // the single source of truth for switch failure and is gated on _switchGen, so the
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
+    // Effort saves queued in the previous profile must go out under its cookie.
+    if (typeof _beginReasoningProfileSwitch === 'function') {
+      _reasoningSwitchHeld = true;
+      await _beginReasoningProfileSwitch();
+    }
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
     if (_switchGen !== _profileSwitchGeneration) return false;
     // A retained empty-composer pick belongs to the old profile's providers; keeping it
@@ -7800,6 +7806,7 @@ async function switchToProfile(name) {
     }
     return false;
   } finally {
+    if (_reasoningSwitchHeld) _endReasoningProfileSwitch();
     // Always remove loading indicator regardless of success or failure
     if (_switchGen === _profileSwitchGeneration && _chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
     if (_switchGen === _profileSwitchGeneration && _titlebarBtn) { _titlebarBtn.classList.remove('switching'); _titlebarBtn.disabled = false; }
@@ -11963,6 +11970,8 @@ function _buildProviderQuotaCard(status){
   const card=document.createElement('div');
   const state=(status.status||'unavailable').replace(/[^a-z0-9_-]/gi,'').toLowerCase()||'unavailable';
   card.className='provider-quota-card provider-quota-card-'+state;
+  // No provider configured is a neutral state, not a failure: keep its message muted.
+  if(!status.provider) card.classList.add('provider-quota-card-neutral');
   const accountLimits=status.account_limits||null;
   const providerBase=status.display_name||status.provider||t('provider_quota_active_provider');
   const provider=(accountLimits&&accountLimits.plan)?`${providerBase} · ${accountLimits.plan}`:providerBase;
@@ -11970,7 +11979,9 @@ function _buildProviderQuotaCard(status){
   let body='';
   if(accountLimits&&(status.status==='available'||accountLimits.pool)){
     const windows=Array.isArray(accountLimits.windows)?accountLimits.windows:[];
-    const details=Array.isArray(accountLimits.details)&&!accountLimits.pool?accountLimits.details:[];
+    // A pool snapshot's own details only repeat the breakdown below; usage-API details
+    // (e.g. credit balance) are the account's and stay visible next to the pool.
+    const details=Array.isArray(accountLimits.details)&&(!accountLimits.pool||accountLimits.source==='usage_api')?accountLimits.details:[];
     const windowHtml=windows.map(w=>{
       const used=_formatProviderQuotaPercent(w&&w.used_percent);
       const reset=_formatProviderQuotaReset(w&&w.reset_at);
@@ -11991,6 +12002,9 @@ function _buildProviderQuotaCard(status){
     const poolHtml=_buildProviderQuotaPoolBreakdown(accountLimits);
     body=windowHtml+detailHtml+poolHtml;
     if(!body) body=`<div class="provider-quota-message">${esc(status.message||t('provider_quota_account_limits_loaded'))}</div>`;
+    // A pool breakdown shown next to a failure reflects locally recorded credential
+    // state, not the failed check: keep the failure message visible above it.
+    else if(status.status!=='available'&&status.message) body=`<div class="provider-quota-message">${esc(status.message)}</div>`+body;
   }else if(status.status==='available'&&quota){
     body=`
       <div class="provider-quota-metric"><span>${esc(t('provider_quota_metric_remaining'))}</span><strong>${esc(_formatProviderQuotaMoney(quota.limit_remaining))}</strong></div>
@@ -14265,7 +14279,43 @@ function _gatewayActionButton(action){
   const labels={start:t('gateway_start'),stop:t('gateway_stop'),restart:t('gateway_restart')};
   return `<button class="sm-btn gateway-action-btn" data-gateway-action="${esc(action)}" onclick="_gatewayAction(${jsArg(action)})" ${_gatewayActionInFlight?'disabled':''} style="padding:5px 10px;font-size:12px">${esc(labels[action]||action)}</button>`;
 }
+function _gatewayLockNote(kind,bodyHtml){
+  const icon=typeof li==='function'?`<span style="display:inline-flex;flex-shrink:0;margin-top:2px">${li('lock',12)}</span>`:'';
+  return `<div class="gateway-external-note" data-gateway-note="${esc(kind)}" style="display:flex;align-items:flex-start;gap:6px;margin-top:10px;font-size:12px;line-height:1.45;color:var(--muted)">${icon}<span>${bodyHtml}</span></div>`;
+}
+function _gatewayLocalUnprovenNoteHtml(lifecycle){
+  // The exact one-time start command comes from the server (it adds
+  // `--profile <name>` for a named profile, like the Start button does).
+  // Escape the whole translation first, then put the escaped command, wrapped
+  // in inline code, at the locale's {cmd} placeholder. Only static markup and
+  // escaped text are added after esc(), so the note stays XSS-safe.
+  const raw=lifecycle&&lifecycle.start_command;
+  const command=(typeof raw==='string'&&raw.trim())?raw:'hermes gateway start';
+  const codeStyle='font-family:var(--font-mono,monospace);font-size:11px;background:var(--code-bg);padding:1px 5px;border-radius:4px;white-space:pre-wrap;overflow-wrap:anywhere';
+  // Keep each `--flag` whole when the chip wraps: a break inside `--profile`
+  // left a bare `--` at the line end, which reads as the end-of-options marker.
+  // The pattern only matches `--` plus letters/hyphens in the already escaped
+  // text, so it cannot touch an entity or markup.
+  const cmdHtml=esc(command).replace(/(^|\s)(--[a-z][a-z-]*)/g,'$1<span style="white-space:nowrap">$2</span>');
+  return esc(t('gateway_local_unproven')).split('{cmd}').join(`<code style="${codeStyle}">${cmdHtml}</code>`);
+}
 function _gatewayActionControls(r){
+  // Lifecycle actions drive the LOCAL `hermes gateway` CLI. Offer them only when
+  // the server proved that CLI controls the Gateway shown here (#8391); a remote
+  // or unproven Gateway stays read-only. Missing capability fails closed.
+  const lifecycle=(r&&r.lifecycle&&typeof r.lifecycle==='object')?r.lifecycle:null;
+  const managed=!!(lifecycle&&lifecycle.managed===true);
+  if(!managed){
+    // A loopback Gateway WebUI has not yet seen running for this profile, and
+    // that is not running now: most likely this machine's own Gateway, stopped
+    // since before the upgrade. Point at the one-time CLI start that proves it.
+    // A RUNNING unproven loopback Gateway (e.g. a Docker port map) really is
+    // managed elsewhere, so it keeps the external note.
+    if(lifecycle&&lifecycle.reason==='local_gateway_unproven'&&!(r&&r.running)){
+      return _gatewayLockNote('local_unproven',_gatewayLocalUnprovenNoteHtml(lifecycle));
+    }
+    return _gatewayLockNote('external',esc(t('gateway_external_managed')));
+  }
   const actions=(r&&r.running)?['stop','restart']:['start'];
   return `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px">${actions.map(_gatewayActionButton).join('')}</div>`;
 }
@@ -14294,7 +14344,16 @@ function _renderGatewayStatus(r){
       return `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;background:var(--code-bg);border:1px solid var(--border2);border-radius:12px;font-size:12px;font-weight:500">${icon} ${esc(p.label)}</span>`;
     }).join(' ');
   }
-  const lastActive=r.last_active?`<span style="font-size:11px;color:var(--muted)">${esc(t('gateway_last_active'))}: ${esc(new Date(r.last_active).toLocaleString())}</span>`:'';
+  // #8621: the card shows one separator, and it is the one the translator
+  // chose. A label that already ends in a colon keeps it -- a full-width "：",
+  // or a French " : " -- and only a label with no colon gets the template's
+  // ": ". An ASCII colon is followed by a space, a full-width one is not.
+  const _laLabel=t('gateway_last_active');
+  const _laSep=/([：:])\s*$/u.exec(_laLabel);
+  const _laText=_laSep
+    ? _laLabel.slice(0,_laSep.index)+_laSep[1]+(_laSep[1]===':'?' ':'')
+    : _laLabel+': ';
+  const lastActive=r.last_active?`<span style="font-size:11px;color:var(--muted)">${esc(_laText)}${esc(new Date(r.last_active).toLocaleString())}</span>`:'';
   const sessionInfo=r.session_count?`<span style="font-size:11px;color:var(--muted)">${r.session_count} ${esc(r.session_count!==1?t('gateway_sessions'):t('gateway_session'))}</span>`:'';
   card.innerHTML=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></span><span style="font-size:13px;font-weight:500;color:#22c55e">${esc(t('gateway_running'))}</span></div>${badges?`<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${badges}</div>`:''}<div style="display:flex;gap:12px">${sessionInfo}${lastActive}</div>${_gatewayActionControls(r)}`;
 }
