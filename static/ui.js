@@ -6091,12 +6091,15 @@ function _getConfiguredModelBadge(modelId,badgeMap,providerId){
   const provider=String(providerId||'').toLowerCase();
   const exact=map[modelId];
   if(exact && (!provider || !exact.provider || String(exact.provider).toLowerCase()===provider)) return exact;
-  const targetIdentity=_configuredModelIdentity(modelId,provider);
   const matches=[];
   for(const [candidate,badge] of Object.entries(map)){
     const badgeProvider=String(badge&&badge.provider||'').toLowerCase();
     if(provider&&badgeProvider&&badgeProvider!==provider) continue;
-    if(_configuredModelIdentity(candidate,badgeProvider||provider)===targetIdentity) matches.push(badge);
+    // Strip the same provider wrapper from both sides. A typed custom id such
+    // as 'openai/gpt-4o' reaches here with no row provider, so the badge's
+    // provider decides which wrapper is routing syntax.
+    const identityProvider=provider||badgeProvider;
+    if(_configuredModelIdentity(candidate,identityProvider)===_configuredModelIdentity(modelId,identityProvider)) matches.push(badge);
   }
   if(!matches.length) return null;
   if(provider){

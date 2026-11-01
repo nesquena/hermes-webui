@@ -86,3 +86,20 @@ assert.strictEqual(
 assert.strictEqual(_getConfiguredModelBadge('gpt-4o',map,'other'),other);
 """
     )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_typed_provider_qualified_id_without_row_provider_keeps_its_badge() -> None:
+    # A model typed through "Custom model ID" reaches the lookup with no row
+    # provider; the badge's own provider must still strip its wrapper.
+    _run_node(
+        """
+const primary={role:'primary',label:'Primary',provider:'openai'};
+const fallback={role:'fallback',label:'Fallback 2',provider:'magpie'};
+const map={'gpt-4o':primary,'@magpie:codex/gpt-6.1-sol':fallback,'codex/gpt-6.1-sol':fallback};
+assert.strictEqual(_getConfiguredModelBadge('openai/gpt-4o',map,''),primary);
+assert.strictEqual(_getConfiguredModelBadge('OPENAI/GPT-4O',map,''),primary);
+assert.strictEqual(_getConfiguredModelBadge('magpie/codex/gpt-6.1-sol',map,''),fallback);
+assert.strictEqual(_getConfiguredModelBadge('any/gpt-6.1-sol',map,'magpie'),null);
+"""
+    )
