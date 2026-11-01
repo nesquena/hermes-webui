@@ -20,7 +20,6 @@ import os
 import re
 import stat as stat_module
 from pathlib import Path
-from typing import Iterable
 
 # Python module docstring triple-quote. Matched with ``.match`` against text
 # whose leading whitespace was stripped ONCE by the caller: a leading ``\s*``
@@ -223,6 +222,73 @@ def _open_script_for_read(base: Path, name: str) -> tuple[int, os.stat_result] |
             _close_quietly(file_fd)
 
 
+def _still_sole_link(base: Path, name: str, fd: int) -> bool:
+    """Re-check containment AFTER the read, before anything is published.
+
+    The pre-open check in ``_open_script_for_read`` is a snapshot: a writer
+    that links an outside file in as ``scripts/name`` and unlinks that entry
+    between our ``open`` and ``fstat`` leaves the opened inode at link count 1,
+    so its outside contents passed (#8723 gate). After the read we require:
+
+    * the opened inode has exactly one link (0 means it was unlinked), and
+    * ``name`` in the scripts directory still names that same inode, with no
+      symlink followed.
+
+    Together these mean the inode's only name is the scripts entry, at the
+    moment of the check. Threat boundary: two syscalls cannot be made atomic,
+    so a concurrent writer with the SAME OS identity can still race between
+    them. Such a writer can read the file directly and could also move it
+    into scripts/, so this narrows the window rather than establishing a
+    boundary against it. Any error fails closed.
+    """
+    if os.stat not in os.supports_dir_fd or os.stat not in os.supports_follow_symlinks:
+        return False
+    base_fd = -1
+    try:
+        fst = os.fstat(fd)
+        if fst.st_nlink != 1:
+            return False
+        base_fd = os.open(base, _base_open_flags())
+        est = os.stat(name, dir_fd=base_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    finally:
+        if base_fd >= 0:
+            _close_quietly(base_fd)
+    return (
+        stat_module.S_ISREG(est.st_mode)
+        and est.st_dev == fst.st_dev
+        and est.st_ino == fst.st_ino
+    )
+
+
+def _bounded_script_names(base: Path, limit: int) -> tuple[list[str], bool]:
+    """Names of ``.py``/``.sh`` entries among at most ``limit`` directory entries.
+
+    ``Path.iterdir()`` is ``os.listdir()``, which materialises the whole
+    directory before yielding anything, so a cap applied to its output bounds
+    nothing (#8723 gate). ``os.scandir`` reads lazily; this consumes at most
+    ``limit`` entries plus one lookahead and reports whether it stopped early.
+    Permission and missing-directory errors fail closed as an empty listing,
+    as before.
+    """
+    names: list[str] = []
+    truncated = False
+    try:
+        with os.scandir(base) as it:
+            walked = 0
+            for entry in it:
+                walked += 1
+                if walked > limit:
+                    truncated = True
+                    break
+                if Path(entry.name).suffix.lower() in _SCRIPT_EXTS:
+                    names.append(entry.name)
+    except (PermissionError, FileNotFoundError, NotADirectoryError):
+        return [], False
+    return names, truncated
+
+
 def _close_quietly(fd: int) -> None:
     if fd is None or fd < 0:
         return
@@ -386,16 +452,8 @@ def list_scripts() -> dict:
             # name order, so a listing cut short by the script cap shows the
             # same first scripts every time rather than whatever order the
             # directory happened to return.
-            candidates: list[Path] = []
-            walked = 0
-            for entry in _safe_iterdir(base):
-                walked += 1
-                if walked > _MAX_LIST_ENTRIES:
-                    truncated = True
-                    break
-                if entry.suffix.lower() in _SCRIPT_EXTS:
-                    candidates.append(entry)
-            candidates.sort(key=lambda e: e.name.lower())
+            names, truncated = _bounded_script_names(base, _MAX_LIST_ENTRIES)
+            candidates = sorted((base / n for n in names), key=lambda e: e.name.lower())
             if len(candidates) > _MAX_LISTED_SCRIPTS:
                 truncated = True
                 candidates = candidates[:_MAX_LISTED_SCRIPTS]
@@ -409,6 +467,8 @@ def list_scripts() -> dict:
                 fd, st = acquired
                 try:
                     raw = _read_bounded(fd, 4096).content
+                    if not _still_sole_link(base, entry.name, fd):
+                        continue
                     out.append(
                         {
                             "name": entry.name,
@@ -452,12 +512,18 @@ def read_script(name: str) -> dict | None:
     try:
         if st.st_size > _MAX_SCRIPT_BYTES:
             # Refuse to inline a multi-hundred-KiB script in the panel.
+            if not _still_sole_link(base, name, fd):
+                return None
             return {
                 "name": name,
                 "too_large": True,
                 "size": st.st_size,
             }
         res = _read_bounded(fd, _MAX_SCRIPT_BYTES)
+        # Nothing read from the descriptor is published until the entry is
+        # proven to still be this file's only name (#8723 gate).
+        if not _still_sole_link(base, name, fd):
+            return None
         if not res.ok:
             # A read that raised must surface as an error, not as an empty
             # "complete" script (#7685 finding 3).
@@ -482,11 +548,3 @@ def read_script(name: str) -> dict | None:
         }
     finally:
         _close_quietly(fd)
-
-
-def _safe_iterdir(base: Path) -> Iterable[Path]:
-    """Generator wrapper that fail-closes on permission errors."""
-    try:
-        yield from base.iterdir()
-    except (PermissionError, FileNotFoundError, NotADirectoryError):
-        return

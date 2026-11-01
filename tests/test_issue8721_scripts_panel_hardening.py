@@ -158,3 +158,122 @@ def test_exactly_the_script_cap_is_not_truncated(scripts, monkeypatch):
     listing = sp.list_scripts()
     assert len(listing["scripts"]) == 3
     assert listing["truncated"] is False
+
+
+# ── #8723 gate: post-read containment and lazy enumeration ────────────────
+
+
+class _OsProxy:
+    """Stand-in for ``api.scripts_panel.os`` that runs ``hook`` right after the
+    leaf open of ``target`` succeeds: the interleaving the gate used, where the
+    entry changes between ``open`` and ``fstat``."""
+
+    def __init__(self, target, hook):
+        self._target = target
+        self._hook = hook
+        self._fired = False
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+    def open(self, path, flags, *args, **kwargs):
+        fd = os.open(path, flags, *args, **kwargs)
+        if path == self._target and "dir_fd" in kwargs and not self._fired:
+            self._fired = True
+            self._hook()
+        return fd
+
+
+def _plant_outside_link(scripts, tmp_path):
+    secret = tmp_path / "other-profile.env"
+    secret.write_text('"""OTHER PROFILE SECRET"""\nKEY=abc\n')
+    os.link(secret, scripts / "s.py")
+    return secret
+
+
+@pytest.mark.skipif(not hasattr(os, "link"), reason="no hardlink support")
+def test_entry_unlinked_after_open_is_not_served(scripts, tmp_path, monkeypatch):
+    """Gate repro: link an outside file in, unlink the scripts entry after open.
+    The opened inode then has link count 1, but its only name is outside."""
+    _plant_outside_link(scripts, tmp_path)
+    monkeypatch.setattr(sp, "os", _OsProxy("s.py", lambda: (scripts / "s.py").unlink()))
+    assert sp.read_script("s.py") is None
+
+
+@pytest.mark.skipif(not hasattr(os, "link"), reason="no hardlink support")
+def test_entry_unlinked_after_open_is_not_listed(scripts, tmp_path, monkeypatch):
+    _plant_outside_link(scripts, tmp_path)
+    monkeypatch.setattr(sp, "os", _OsProxy("s.py", lambda: (scripts / "s.py").unlink()))
+    listing = sp.list_scripts()
+    assert listing["scripts"] == [], listing
+
+
+@pytest.mark.skipif(not hasattr(os, "link"), reason="no hardlink support")
+def test_entry_replaced_after_open_is_not_served(scripts, tmp_path, monkeypatch):
+    """The entry is swapped for a different single-link file after open; the
+    opened (outside) inode is no longer what the scripts entry names."""
+    _plant_outside_link(scripts, tmp_path)
+
+    def swap():
+        (scripts / "s.py").unlink()
+        (scripts / "s.py").write_text('"""decoy"""\n')
+
+    monkeypatch.setattr(sp, "os", _OsProxy("s.py", swap))
+    assert sp.read_script("s.py") is None
+
+
+def test_file_unlinked_entirely_after_open_is_not_served(scripts, monkeypatch):
+    """Link count 0 (the only name removed after open) is refused too."""
+    (scripts / "gone.py").write_text('"""gone"""\n')
+    monkeypatch.setattr(sp, "os", _OsProxy("gone.py", lambda: (scripts / "gone.py").unlink()))
+    assert sp.read_script("gone.py") is None
+
+
+def test_ordinary_scripts_still_pass_the_post_read_check(scripts):
+    (scripts / "ok.py").write_text('"""Fine."""\n')
+    (scripts / "big.sh").write_bytes(b"#" * (sp._MAX_SCRIPT_BYTES + 1))
+    served = sp.read_script("ok.py")
+    assert served is not None and served["content"] == '"""Fine."""\n'
+    large = sp.read_script("big.sh")
+    assert large is not None and large["too_large"] is True
+    assert [s["name"] for s in sp.list_scripts()["scripts"]] == ["big.sh", "ok.py"]
+
+
+def test_listing_does_not_materialise_the_whole_directory(scripts, monkeypatch):
+    """Gate repro: Path.iterdir() is os.listdir(), so the entry cap bounded
+    nothing. Enumeration must be lazy and stop at the cap plus one lookahead."""
+    for i in range(60):
+        (scripts / f"n{i:02d}.txt").write_text("x")
+    monkeypatch.setattr(sp, "_MAX_LIST_ENTRIES", 10)
+    consumed = []
+    real_scandir = os.scandir
+
+    class _Counting:
+        def __init__(self, path):
+            self._cm = real_scandir(path)
+
+        def __enter__(self):
+            self._it = self._cm.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._cm.__exit__(*exc)
+
+        def __iter__(self):
+            for entry in self._it:
+                consumed.append(entry.name)
+                yield entry
+
+    def _no_listdir(*_a, **_k):
+        raise AssertionError("os.listdir materialises the whole directory")
+
+    proxy = _OsProxy(None, lambda: None)
+    proxy.scandir = _Counting
+    monkeypatch.setattr(sp, "os", proxy)
+    # pathlib calls os.listdir through its own module reference, so patch the
+    # real module too: any listdir-based walk fails this test.
+    monkeypatch.setattr(os, "listdir", _no_listdir)
+    listing = sp.list_scripts()
+    assert consumed, "enumeration must go through os.scandir"
+    assert listing["truncated"] is True
+    assert len(consumed) <= 11, len(consumed)
