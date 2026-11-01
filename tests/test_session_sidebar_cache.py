@@ -552,6 +552,69 @@ def test_session_list_cache_rate_floor_holds_through_an_all_profiles_fingerprint
     assert built == [1]
 
 
+def test_session_list_cache_rate_floor_declines_an_empty_profile_set(monkeypatch):
+    """An all-profiles key with NO profile fingerprint evidence may not hold.
+
+    ``_all_profiles_cli_contexts`` degrades to an empty context list when it
+    cannot resolve a single profile home (its ``api.profiles`` import fails) —
+    the same "degrade instead of raise" shape as the fingerprint reader. The
+    resulting empty all-profiles stamp carries zero per-profile fingerprints, so
+    it is UNKNOWN evidence, not proof that no participating profile committed
+    rows. Accepting it would let the floor suppress the file-stat reconciliation
+    of an external writer for the whole hold, which is the #8694 failure mode
+    reached through a different degradation path.
+    """
+    key = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=True,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    stat = {"generation": 0}
+    profiles: dict[str, tuple] = {"value": (((1, 1), (1, 2), (7, 12)),)}
+
+    def _changing_stat_stamp(_key):
+        stat["generation"] += 1
+        generation = stat["generation"]
+        return (
+            (generation, 1),
+            (generation, 2),
+            (generation, 3),
+            (generation, 4),
+            (generation, 5),
+            (40, 91),
+            profiles["value"],
+            0,
+        )
+
+    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", _changing_stat_stamp)
+    routes._session_list_cache_set(key, _session_cache_payload("a_all", all_profiles=True))
+
+    built = []
+
+    def builder():
+        built.append(1)
+        return _session_cache_payload(f"fresh-{len(built)}", all_profiles=True)
+
+    # Control: one participating profile with a READ fingerprint still holds.
+    diag = _StageRecorder()
+    payload = routes._get_cached_session_list_payload(key=key, builder=builder, diag=diag)
+    assert payload == _session_cache_payload("a_all", all_profiles=True)
+    assert built == []
+    assert "session_list_cache_rate_floor_hold" in diag.stages
+
+    # Both stamps are written and read inside the enumeration-failure window, so
+    # only the unrelated stat components move: an empty profile set on BOTH
+    # sides still compares equal as row content.
+    profiles["value"] = ()
+    routes._session_list_cache_clear()
+    routes._session_list_cache_set(key, _session_cache_payload("a_all", all_profiles=True))
+    rebuilt = routes._get_cached_session_list_payload(key=key, builder=builder)
+    assert rebuilt == _session_cache_payload("fresh-1", all_profiles=True)
+    assert built == [1], "an unenumerated profile set must never authorize the hold"
+
+
 def _make_fingerprint_db(path, rows: int) -> None:
     import sqlite3
 

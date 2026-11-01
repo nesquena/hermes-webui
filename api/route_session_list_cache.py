@@ -441,6 +441,13 @@ def _session_list_cache_stamp_fingerprints_readable(stamp, all_profiles: bool) -
         return True
     if not isinstance(all_profiles_stamp, (tuple, list)):
         return False
+    if not all_profiles_stamp:
+        # ``_all_profiles_cli_contexts`` degrades to an empty context list when it
+        # cannot resolve a single profile home (its ``api.profiles`` import
+        # fails). An empty stamp therefore carries NO per-profile fingerprint —
+        # unknown evidence, not proof that nothing committed — and two of them
+        # compare equal. (#8694)
+        return False
     for profile_stamp in all_profiles_stamp:
         if not isinstance(profile_stamp, tuple) or len(profile_stamp) != 3:
             return False
