@@ -49,10 +49,19 @@ def display_history(snapshot):
 
 
 def config_for_session(session):
-    """Use the owning profile on workers without request-local profile context."""
+    """Use the owning profile on workers without request-local profile context.
+
+    The root profile resolves with ``isolate_config_override=True``. An external
+    ``HERMES_CONFIG_PATH`` then stays root's config while a named profile is
+    process-active, which is how the Gateway worker read it through ``get_config()``
+    before this resolver existed (Runs API opt-in included). Root still never reads a
+    named profile's file. Named profiles keep the resolver the worker used before.
+    """
     from api.config import get_config_for_profile_home
     from api.profiles import get_hermes_home_for_profile
-    return get_config_for_profile_home(get_hermes_home_for_profile(session.get("profile")))
+    home = get_hermes_home_for_profile(session.get("profile"))
+    is_root = Path(home).resolve() == Path(get_hermes_home_for_profile("default")).resolve()
+    return get_config_for_profile_home(home, isolate_config_override=is_root)
 
 
 def configured(session, config=None):

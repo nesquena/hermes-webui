@@ -16,6 +16,10 @@ from api import clarify, config, gateway_chat, gateway_sessions as sessions, mod
 
 @pytest.fixture
 def owner_profiles(tmp_path, monkeypatch):
+    # Each owner's transport lives in its own config.yaml. tests/conftest.py exports an external
+    # HERMES_CONFIG_PATH, which is root's config by the established rule (get_config_for_profile_home), so clear it
+    # here; test_native_worker_reads_root_transport_from_external_override covers the override.
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
     for name in ("default", "work", "family", "lab"):
         home = tmp_path if name == "default" else tmp_path / "profiles" / name
         home.mkdir(parents=True, exist_ok=True)
@@ -60,6 +64,25 @@ def test_native_worker_uses_explicit_owner_config(owner_profiles, monkeypatch, p
         assert not any(event[0] == "apperror" for event in events)
     finally:
         gateway_chat.STREAMS.pop("owned-config", None)
+
+
+@pytest.mark.parametrize("override_has_transport", [True, False], ids=["override-local", "override-unset"])
+def test_native_worker_reads_root_transport_from_external_override(
+    owner_profiles, tmp_path, monkeypatch, override_has_transport
+):
+    # An external HERMES_CONFIG_PATH is root's config while another profile is process-active: the root
+    # session's transport comes from it, not from a config.yaml left in the root home.
+    home = owner_profiles
+    external = tmp_path / "mounted" / "config.yaml"
+    external.parent.mkdir()
+    external.write_text("webui_chat_backend: gateway\n" + (
+        "webui_gateway_session_transport: local\n" if override_has_transport else ""), encoding="utf-8")
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(external))
+    monkeypatch.setattr(config, "_get_config_path", lambda: external)
+    monkeypatch.setattr(config, "get_config", lambda: config._load_yaml_config_file(external))
+    session = models.new_session(profile="default", workspace=str(home))
+    session.source_tag, session.session_source = "desktop", "other"
+    assert sessions.configured(vars(session)) is override_has_transport
 
 
 @pytest.mark.parametrize("update,accepted", [
