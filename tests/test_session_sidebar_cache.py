@@ -552,6 +552,125 @@ def test_session_list_cache_rate_floor_holds_through_an_all_profiles_fingerprint
     assert built == [1]
 
 
+def _make_fingerprint_db(path, rows: int) -> None:
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE sessions (id INTEGER PRIMARY KEY, title TEXT)")
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, body TEXT)")
+    for index in range(rows):
+        conn.execute("INSERT INTO sessions (title) VALUES (?)", (f"s{index}",))
+        conn.execute("INSERT INTO messages (body) VALUES (?)", (f"m{index}",))
+    conn.commit()
+    conn.close()
+
+
+def test_session_list_cache_rate_floor_declines_a_locked_participating_profile(
+    monkeypatch, tmp_path
+):
+    """An unreadable PARTICIPATING PROFILE fingerprint must not authorize the hold.
+
+    The all-profiles stamp carries one content fingerprint per participating
+    profile, read through the real ``_sqlite_content_fingerprint``. A real
+    rollback-journal ``EXCLUSIVE`` lock on a profile's state.db makes that read
+    degrade to the unreadable sentinel while the active profile's db stays
+    readable, so two stamps can differ only by an unrelated stat component while
+    the profile fingerprint is UNKNOWN on both sides: without the readability
+    guard the row-content tuples compare equal and the ten-second floor holds the
+    entry. (#8694)
+    """
+    import os
+    import sqlite3
+    from pathlib import Path
+
+    import api.route_session_list_cache as cache_module
+    from api import models
+
+    active_db = tmp_path / "active" / "state.db"
+    profile_db = tmp_path / "bravo" / "state.db"
+    active_db.parent.mkdir()
+    profile_db.parent.mkdir()
+    _make_fingerprint_db(active_db, 3)
+    _make_fingerprint_db(profile_db, 3)
+
+    monkeypatch.setattr(routes, "_active_state_db_path", lambda: str(active_db))
+    monkeypatch.setattr(
+        models, "_all_profiles_cli_contexts", lambda: ([("home", profile_db, "bravo")], None)
+    )
+
+    real_fingerprint = models._sqlite_content_fingerprint
+    schedule = {"locked": False}
+    produced_under_lock = []
+
+    def _fingerprint(path):
+        """Real producer; a real writer lock is held around the PROFILE read only.
+
+        The lock is a scheduling device — the production value is returned
+        unchanged, so readability is judged on what production returned.
+        """
+        if path is not None and Path(path) == profile_db and schedule["locked"]:
+            writer = sqlite3.connect(profile_db, isolation_level=None)
+            try:
+                writer.execute("PRAGMA journal_mode=DELETE")
+                writer.execute("BEGIN EXCLUSIVE")
+                value = real_fingerprint(path)
+            finally:
+                writer.execute("ROLLBACK")
+                writer.close()
+            produced_under_lock.append(value)
+            return value
+        return real_fingerprint(path)
+
+    monkeypatch.setattr(models, "_sqlite_content_fingerprint", _fingerprint)
+
+    key = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=True,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    built = []
+
+    def builder():
+        built.append(1)
+        return _session_cache_payload(f"fresh-{len(built)}", all_profiles=True)
+
+    # Control: with every participating fingerprint READ, moving an active-db
+    # stat alone still holds the entry — the floor is active, not disabled.
+    routes._session_list_cache_set(key, _session_cache_payload("a_all", all_profiles=True))
+    os.utime(active_db, ns=(1_000_000_000, 1_000_000_000))
+    diag = _StageRecorder()
+    payload = routes._get_cached_session_list_payload(key=key, builder=builder, diag=diag)
+    assert payload == _session_cache_payload("a_all", all_profiles=True)
+    assert built == []
+    assert "session_list_cache_rate_floor_hold" in diag.stages
+
+    # Same shape, but the participating profile's fingerprint is UNKNOWN on both
+    # the cached and the current stamp, and the only stamp movement is the
+    # unrelated active-db stat.
+    routes._session_list_cache_clear()
+    schedule["locked"] = True
+    routes._session_list_cache_set(key, _session_cache_payload("a_all", all_profiles=True))
+    assert produced_under_lock, "the profile fingerprint read must have run under the lock"
+    assert all(
+        models._content_fingerprint_readable(value) is False
+        for value in produced_under_lock
+    ), f"a locked profile read must be unreadable, got {produced_under_lock!r}"
+
+    os.utime(active_db, ns=(2_000_000_000, 2_000_000_000))
+    current_stamp = cache_module._session_list_cache_resolved_source_stamp(key)
+    assert models._content_fingerprint_readable(current_stamp[5]) is True, (
+        "the active profile's fingerprint must stay readable, otherwise this "
+        "test would pass for the wrong reason"
+    )
+    assert models._content_fingerprint_readable(current_stamp[6][0][2]) is False
+
+    rebuilt = routes._get_cached_session_list_payload(key=key, builder=builder)
+    assert rebuilt == _session_cache_payload("fresh-1", all_profiles=True)
+    assert built == [1], "an unreadable participating profile must never authorize the hold"
+
+
 def test_session_list_cache_owner_returns_stale_and_rebuilds_in_background(monkeypatch):
     routes._session_list_cache_clear()
     monkeypatch.setattr(routes, "_session_list_cache_source_stamp", lambda _key: ("stable",))
