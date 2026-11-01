@@ -10687,7 +10687,7 @@ function renderMd(raw){
   // Inline math: $...$ — require non-space/non-digit at opening boundary to avoid
   // false positives on currency like "$1,000 xuống ~$95" or "costs $5 and $10".
   // Aligns with smd's se() guard which also rejects $ followed by digits.
-  s=s.replace(/\$([^\s$\d\n][^$\n]*?[^\s$\n]|[^\s\d])\$/g,(_,m)=>{if(m.includes(' | '))return '\$'+m+'\$';math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
+  s=s.replace(/\$([^\s$\n][^$\n]*?[^\s$\n]|[^\s])\$/g,(_,m)=>{if(m.includes(' | '))return '\$'+m+'\$';if(/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(m))return '\$'+m+'\$';math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
   // Also stash \(...\) LaTeX delimiters.
   // Match a single literal backslash before the delimiter (the common LLM form).
   s=s.replace(/\\\((.+?)\\\)/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
@@ -25838,6 +25838,9 @@ function renderKatexBlocks(container,options){
     const src=el.textContent||'';
     const tagName=(el.tagName||'').toLowerCase();
     const displayMode=el.dataset.katex==='display'||tagName==='equation-block';
+    // Money guard: a "$1,000"-style span that slipped through the parser's
+    // opening-boundary guard must stay plain text, not become broken KaTeX.
+    if(!displayMode&&/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(src.trim())){ return; }
     try{
       katex.render(src,el,{
         displayMode,
