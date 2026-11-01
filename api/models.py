@@ -1383,6 +1383,16 @@ _METADATA_PREFIX_FIRST_STAGE_BYTES = 64 * 1024
 # meaning, so counts from an older contract fall back to the full parse.
 _MESSAGE_COUNT_MARKER = 1
 
+# Layout version of this writer's sidecars, emitted as `_row_layout` in the
+# metadata prefix next to `_mc_v`. It states the contract a head-only reader
+# depends on: EVERY metadata key -- and its effective ordering values -- is
+# normalized before `messages`. Neither `_mc_v` nor the presence of
+# `anchor_scene_index` implies that (a payload handed to `write_session()` keeps
+# its caller order and can place title/profile/archived after `messages`), so
+# readers that cut at `messages` must require this explicit version and take a
+# whole read when they do not find it.
+_ROW_LAYOUT_VERSION = 1
+
 
 def _read_metadata_json_prefix(path, max_prefix_bytes=_METADATA_PREFIX_MAX_BYTES):
     """Read only the metadata portion before the large arrays.
@@ -2154,6 +2164,13 @@ class Session:
             'gateway_run', 'delegation_reservation', 'delegation_cutoff_ts',
             'skill_provenance',
             'skill_provenance_generation',
+            # An explicitly attached ``last_message_at`` used to fall through to
+            # ``extra`` and serialize AFTER ``messages``, so the head-prefix
+            # reader could not see it and fell back to ``updated_at`` — 200
+            # instead of the attached 100 in the re-gate fixture. Listed here it
+            # is written ahead of the cut, and ``_PROJECTED_FIELDS`` makes a
+            # marked prefix that lacks it fall back to the complete reader.
+            'last_message_at',
         ]
         guarded_messages, exact_replay_rows_removed = _deduplicate_exact_stable_messages(self.messages)
         if exact_replay_rows_removed:
@@ -2199,6 +2216,13 @@ class Session:
         # sidecar without a checkpoint is byte-identical to before.
         if _pending_hidden_wakeup_at:
             meta['_pending_hidden_wakeup_at'] = _pending_hidden_wakeup_at
+        # _row_layout states the OTHER half of the writer contract: every
+        # metadata key -- and its ordering values -- has just been normalized
+        # ahead of `messages` below. A head-only reader (the sidebar row read)
+        # can only cut at `messages` when the file says so; without it a payload
+        # whose order differs (write_session preserves the caller's dict) would
+        # silently lose title/profile/archived/pinned/source after the cut.
+        meta['_row_layout'] = _ROW_LAYOUT_VERSION
         meta['anchor_scene_index'] = _anchor_scene_index_from_records(self.anchor_activity_scenes)
         # Keep the in-memory fingerprint aligned with what we just persisted, so a
         # later metadata-only reload of THIS object (or any fingerprint reader)
@@ -2211,7 +2235,7 @@ class Session:
         meta['anchor_activity_scenes'] = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
         # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end. Exclude
         # the keys we placed explicitly above so they aren't emitted twice.
-        _placed = {'message_count', '_mc_v', 'anchor_scene_index', 'messages', 'tool_calls', 'anchor_activity_scenes'}
+        _placed = {'message_count', '_mc_v', '_row_layout', 'anchor_scene_index', 'messages', 'tool_calls', 'anchor_activity_scenes'}
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
