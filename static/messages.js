@@ -1543,14 +1543,17 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
 // `owner` is the {sid,text} that issued the command, captured by send() before
 // it awaited command metadata. The user can switch chats or edit the composer
 // during that wait, so only the issuing session, with its composer still
-// holding the command text, may be rewritten and persisted. Reading the
+// holding the command text, may be rewritten and persisted. A send that began
+// with no open session owns only the session it creates itself (send() sets
+// owner.sid after its own newSession()); with no owner session, nothing is
+// written. Reading the
 // session at write time instead wrote chat A's reworded prompt into chat B's
 // composer and replaced B's saved draft (#8717).
 function _setComposerAfterCliOnlyExplainer(value,owner){
   const el=$('msg');
   if(owner){
     const currentSid=S.session&&S.session.session_id||null;
-    if(owner.sid&&currentSid!==owner.sid) return;
+    if(!owner.sid||currentSid!==owner.sid) return;
     if(el&&String(el.value||'').trim()!==String(owner.text||'').trim()) return;
   }
   if(el){
@@ -1832,7 +1835,7 @@ async function send(){
       // command may still be waiting.
       const _registryUnavailable=!!(_agentCmdMeta&&_agentCmdMeta.available===false);
       if(_agentCmd&&_agentCmd.cli_only){
-        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
+        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});_slashOwner.sid=S.session&&S.session.session_id||null;}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd,_parsedCmd.args),_ts:Date.now()/1000});
         renderMessages();
@@ -1868,7 +1871,7 @@ async function send(){
           ? !_isWebuiDispatchableAgentCommand(_agentCmd)
           : _fallbackNonDispatchableAgentCommandCheck(_agentCmd)
       )){
-        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
+        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});_slashOwner.sid=S.session&&S.session.session_id||null;}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd,_parsedCmd.args),_ts:Date.now()/1000});
         renderMessages();
@@ -1996,7 +1999,10 @@ async function send(){
         S.messages.push({role:'assistant',content:'Command metadata is temporarily unavailable — please try again.',_ts:Date.now()/1000});
         renderMessages();
         // Keep the text in the composer so "try again" is one keypress
-        // instead of a retype (#8717).
+        // instead of a retype (#8717). Mark it dismissed: a slash-command
+        // loader that lands late must not reopen the list on that same text,
+        // or the next Enter picks a match instead of retrying.
+        if(typeof markSlashDropdownDismissed==='function') markSlashDropdownDismissed();
         hideCmdDropdown();return;
       }
     }

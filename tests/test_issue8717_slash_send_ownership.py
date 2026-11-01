@@ -251,3 +251,36 @@ def test_registry_outage_still_fails_closed_for_command_shaped_names_and_keeps_t
     assistant = [m["content"] for m in out["messages"] if m["role"] == "assistant"]
     assert any("temporarily unavailable" in m for m in assistant), assistant
     assert out["composer"] == command, out
+
+
+def test_retained_blocked_text_is_marked_dismissed_for_the_slash_list():
+    """#8718 gate (Codex, Chromium): with the text kept, a skill loader that
+    lands late re-opened the slash list on `/agents`, and the next Enter picked
+    `/multi-agents` instead of retrying. The kept text must be marked dismissed,
+    which refreshSlashCommandDropdown() honours until the user edits it."""
+    body = _PLAIN.replace(
+        "return {};",
+        "return { dismissed: slashDropdownDismissedFor(__msgInput.value) };",
+    )
+    out = _run("/agents", body, registry_error=True)
+    assert out["composer"] == "/agents", out
+    assert out["result"]["dismissed"] is True, out["result"]
+
+
+def test_send_without_a_session_does_not_claim_a_chat_it_did_not_create():
+    """#8718 gate (Codex, MARGINAL): a send that began with no open session must
+    not treat whatever chat is open after the wait as its own, even when that
+    chat's composer happens to hold the identical command text."""
+    body = """
+      const p = send();
+      await tick();
+      S.session = { session_id: 'sid-2', title: 'B' };
+      __msgInput.value = '/plan A migration';
+      __release();
+      await p; await tick();
+      return {};
+    """
+    out = _run("/plan A migration", body, start_session=False)
+    assert out["sid"] == "sid-2"
+    assert out["composer"] == "/plan A migration", out
+    assert out["saves"] == [], out["saves"]
