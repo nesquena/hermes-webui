@@ -1046,6 +1046,119 @@ async function loadCronGatewayNotice() {
   }
 }
 
+// Renders the cached _cronList into the sidebar, applying the name filter
+// (#6724). Pure render: no fetch and no detail refresh, so filter keystrokes
+// cannot supersede a network load or rebuild the selected job's detail.
+// Returns false when there are no jobs at all.
+function _renderCronList() {
+  const box = $('cronList');
+  if (!box || !Array.isArray(_cronList)) return false;
+  const query = ($('cronSearch')?.value || '').trim().toLowerCase();
+  box.innerHTML = '';
+  // Partition active vs paused so paused jobs don't drown the list (#4026).
+  // _cronList stays the single source of truth — only the render is split,
+  // which keeps openCronDetail, _cronNewJobIds, and detail refresh untouched.
+  const _activeJobs = [];
+  const _pausedJobs = [];
+  for (const job of _cronList) {
+    const status = _cronStatusMeta(job);
+    if (query && !String(job.name || '').toLowerCase().includes(query)) continue;
+    (status.state === 'paused' ? _pausedJobs : _activeJobs).push({ job, status });
+  }
+  const _appendCronItem = (parent, { job, status }) => {
+    const item = document.createElement('div');
+    item.className = 'cron-item';
+    item.id = _cronItemId(job);
+    if (job.read_only) {
+      item.classList.add('readonly');
+      item.style.opacity = '0.78';
+    }
+    const isNewRun = !job.read_only && _cronNewJobIds.has(String(job.id));
+    const isAgentMode = !job.no_agent;
+    const ownerProfileLabel = _cronProfileLabel(_cronOwnerProfileName(job));
+    const ownerProfileTitle = `Owner profile: ${ownerProfileLabel}`;
+    const readOnlyBadge = job.read_only
+      ? '<span class="cron-status disabled" title="Read-only from another profile">Read-only</span>'
+      : '';
+    item.innerHTML = `
+      <div class="cron-header">
+        ${isNewRun ? '<span class="cron-new-dot" title="New run"></span>' : ''}
+        ${isAgentMode ? '<span class="cron-agent-badge" title="Agent mode">🤖</span>' : `<span class="cron-script-badge" title="${esc(t('cron_script_badge_title') || 'Script job (no agent)')}">📜</span>`}
+        <span class="cron-name" title="${esc(job.name)}">${esc(job.name)}</span>
+        <span class="cron-profile-badge" title="${esc(ownerProfileTitle)}">${esc(ownerProfileLabel)}</span>
+        <span class="cron-status ${status.listClass}">${esc(status.label)}</span>
+        ${readOnlyBadge}
+      </div>`;
+    item.onclick = () => openCronDetail(job, item);
+    if (_currentCronDetailKey && _currentCronDetailKey === _cronJobKey(job)) item.classList.add('active');
+    parent.appendChild(item);
+  };
+  if (!_cronList.length) {
+    const emptyText = (!_showAllCronProfiles && _cronOtherProfileCount > 0)
+      ? 'No cron jobs in the active profile.'
+      : (t('cron_no_jobs') || 'No jobs yet');
+    box.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(emptyText)}</div>`;
+    _appendCronProfileToggle(box);
+    return false;
+  }
+  if (!_activeJobs.length && !_pausedJobs.length) {
+    box.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(t('cron_no_matching_jobs') || 'No jobs match your search.')}</div>`;
+    _appendCronProfileToggle(box);
+    return true;
+  }
+  for (const entry of _activeJobs) _appendCronItem(box, entry);
+  if (_pausedJobs.length) {
+    let collapsed = true;
+    try { collapsed = localStorage.getItem('cron-paused-collapsed') !== '0'; } catch (_e) {}
+    const details = document.createElement('details');
+    details.className = 'cron-paused-section';
+    // An active query shows matching paused rows immediately; that forced
+    // open state is temporary and must not overwrite the saved preference.
+    if (!collapsed || query) details.open = true;
+    const pausedLabel = t('cron_status_paused') || 'paused';
+    const headerLabel = pausedLabel.charAt(0).toUpperCase() + pausedLabel.slice(1);
+    const summary = document.createElement('summary');
+    summary.className = 'cron-paused-summary';
+    summary.textContent = `${headerLabel} (${_pausedJobs.length})`;
+    details.appendChild(summary);
+    details.addEventListener('toggle', () => {
+      if (query) return;
+      try { localStorage.setItem('cron-paused-collapsed', details.open ? '0' : '1'); } catch (_e) {}
+    });
+    const inner = document.createElement('div');
+    inner.className = 'cron-paused-inner';
+    details.appendChild(inner);
+    for (const entry of _pausedJobs) _appendCronItem(inner, entry);
+    box.appendChild(details);
+  }
+  _appendCronProfileToggle(box);
+  return true;
+}
+
+function syncCronSearchClear() {
+  const input = $('cronSearch');
+  const clear = $('cronSearchClear');
+  if (!input || !clear) return;
+  clear.hidden = !Boolean(input.value);
+}
+
+function filterCrons() {
+  syncCronSearchClear();
+  _renderCronList();
+}
+
+function clearCronSearch(focusInput = true) {
+  const input = $('cronSearch');
+  if (!input) return;
+  if (input.value) {
+    input.value = '';
+    filterCrons();
+  } else {
+    syncCronSearchClear();
+  }
+  if (focusInput) input.focus();
+}
+
 let _cronLoadGeneration = 0;  // monotonically bumped per loadCrons() entry; stale loads bail
 let _cronAcceptedLoadGeneration = 0;  // latest load that published _cronList
 let _cronLatestLoadSettled = Promise.resolve();  // lets save completion await a superseding reader
@@ -1093,77 +1206,11 @@ async function loadCrons(animate, options) {
     }
     // Capture after the await: the reader may have scrolled during the request.
     const listScrollTop = background ? box.scrollTop : 0;
-    box.innerHTML = '';
-    // Partition active vs paused so paused jobs don't drown the list (#4026).
-    // _cronList stays the single source of truth — only the render is split,
-    // which keeps openCronDetail, _cronNewJobIds, and detail refresh untouched.
-    const _activeJobs = [];
-    const _pausedJobs = [];
-    for (const job of _cronList) {
-      const status = _cronStatusMeta(job);
-      (status.state === 'paused' ? _pausedJobs : _activeJobs).push({ job, status });
-    }
-    const _appendCronItem = (parent, { job, status }) => {
-      const item = document.createElement('div');
-      item.className = 'cron-item';
-      item.id = _cronItemId(job);
-      if (job.read_only) {
-        item.classList.add('readonly');
-        item.style.opacity = '0.78';
-      }
-      const isNewRun = !job.read_only && _cronNewJobIds.has(String(job.id));
-      const isAgentMode = !job.no_agent;
-      const ownerProfileLabel = _cronProfileLabel(_cronOwnerProfileName(job));
-      const ownerProfileTitle = `Owner profile: ${ownerProfileLabel}`;
-      const readOnlyBadge = job.read_only
-        ? '<span class="cron-status disabled" title="Read-only from another profile">Read-only</span>'
-        : '';
-      item.innerHTML = `
-        <div class="cron-header">
-          ${isNewRun ? '<span class="cron-new-dot" title="New run"></span>' : ''}
-          ${isAgentMode ? '<span class="cron-agent-badge" title="Agent mode">🤖</span>' : `<span class="cron-script-badge" title="${esc(t('cron_script_badge_title') || 'Script job (no agent)')}">📜</span>`}
-          <span class="cron-name" title="${esc(job.name)}">${esc(job.name)}</span>
-          <span class="cron-profile-badge" title="${esc(ownerProfileTitle)}">${esc(ownerProfileLabel)}</span>
-          <span class="cron-status ${status.listClass}">${esc(status.label)}</span>
-          ${readOnlyBadge}
-        </div>`;
-      item.onclick = () => openCronDetail(job, item);
-      if (_currentCronDetailKey && _currentCronDetailKey === _cronJobKey(job)) item.classList.add('active');
-      parent.appendChild(item);
-    };
-    if (!_cronList.length) {
-      const emptyText = (!_showAllCronProfiles && _cronOtherProfileCount > 0)
-        ? 'No cron jobs in the active profile.'
-        : (t('cron_no_jobs') || 'No jobs yet');
-      box.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(emptyText)}</div>`;
-      _appendCronProfileToggle(box);
+    if (!_renderCronList()) {
       if (_cronMode !== 'create' && _cronMode !== 'edit') _clearCronDetail();
       _cronDetailRefreshKey = null;
       return data;
     }
-    for (const entry of _activeJobs) _appendCronItem(box, entry);
-    if (_pausedJobs.length) {
-      let collapsed = true;
-      try { collapsed = localStorage.getItem('cron-paused-collapsed') !== '0'; } catch (_e) {}
-      const details = document.createElement('details');
-      details.className = 'cron-paused-section';
-      if (!collapsed) details.open = true;
-      const pausedLabel = t('cron_status_paused') || 'paused';
-      const headerLabel = pausedLabel.charAt(0).toUpperCase() + pausedLabel.slice(1);
-      const summary = document.createElement('summary');
-      summary.className = 'cron-paused-summary';
-      summary.textContent = `${headerLabel} (${_pausedJobs.length})`;
-      details.appendChild(summary);
-      details.addEventListener('toggle', () => {
-        try { localStorage.setItem('cron-paused-collapsed', details.open ? '0' : '1'); } catch (_e) {}
-      });
-      const inner = document.createElement('div');
-      inner.className = 'cron-paused-inner';
-      details.appendChild(inner);
-      for (const entry of _pausedJobs) _appendCronItem(inner, entry);
-      box.appendChild(details);
-    }
-    _appendCronProfileToggle(box);
     // Background polls update unread markers without discarding loaded output
     // or collapsing a run the user is reading.
     if (_currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit') {
@@ -1194,7 +1241,9 @@ async function loadCrons(animate, options) {
   }
   finally {
     _resolveCronLoadSettled();
-    if (animate && refreshBtn) {
+    // Only the current load owner restores the button, even if it began
+    // non-animated: a superseded refresh must not re-enable it mid-load.
+    if (refreshBtn && _cronLoadSeq === _cronLoadGeneration) {
       refreshBtn.style.opacity = '';
       refreshBtn.disabled = false;
     }

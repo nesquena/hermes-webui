@@ -41,7 +41,7 @@ function _appendCronProfileToggle(){} function _clearCronDetail(){clears++;outpu
 function _renderCronDetail(job){renders++;renderedJob=job;output.innerHTML='Rebuilt';output.open=false;}
 function openCronDetail(job){if(typeof job==='string')job=_cronList.find(j=>j.id===job);if(!job)return;opened=job;_cronMode='detail';}
 function loadCrons(){return Promise.resolve();}
-eval(extract('loadCrons'));eval(extract('saveCronForm'));eval(extract('cancelCronForm'));
+eval(extract('_renderCronList'));eval(extract('loadCrons'));eval(extract('saveCronForm'));eval(extract('cancelCronForm'));
 eval(extract('cronPause'));eval(extract('cronResume'));
 async function waitRequests(n){for(let i=0;i<50&&pending.length<n;i++)await Promise.resolve();assert.equal(pending.length,n);}
 """
