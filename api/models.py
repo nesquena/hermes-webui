@@ -1837,6 +1837,8 @@ class Session:
                 worktree_branch=None,
                  worktree_repo_root=None,
                  worktree_created_at=None,
+                 worktree_placement=None,
+                 worktree_placement_reason=None,
                  enabled_toolsets=None,
                  composer_draft=None,
                  anchor_activity_scenes=None,
@@ -1993,6 +1995,13 @@ class Session:
         self.worktree_branch = str(worktree_branch) if worktree_branch else None
         self.worktree_repo_root = str(Path(worktree_repo_root).expanduser().resolve()) if worktree_repo_root else None
         self.worktree_created_at = worktree_created_at
+        # How the tree got its final location: the classifier's token plus, for a
+        # refused move, the move's own error. Durable so the placement is visible
+        # after the response is gone, not only in a log line.
+        self.worktree_placement = str(worktree_placement).strip()[:120] if worktree_placement else None
+        self.worktree_placement_reason = (
+            str(worktree_placement_reason).strip()[:500] if worktree_placement_reason else None
+        )
         self.is_cli_session = bool(kwargs.get('is_cli_session', False))
         self.source_tag = kwargs.get('source_tag')
         self.raw_source = kwargs.get('raw_source')
@@ -2147,6 +2156,7 @@ class Session:
             'gateway_routing', 'gateway_routing_history', 'last_used_model', 'llm_title_generated', 'manual_title',
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
+            'worktree_placement', 'worktree_placement_reason',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
             'enabled_toolsets', 'composer_draft',
             'process_wakeup_pause',
@@ -2762,6 +2772,10 @@ class Session:
                 'worktree_repo_root': self.worktree_repo_root,
                 'worktree_created_at': self.worktree_created_at,
             } if self.worktree_path else {}),
+            **({
+                'worktree_placement': self.worktree_placement,
+                'worktree_placement_reason': self.worktree_placement_reason,
+            } if self.worktree_placement else {}),
             'user_message_count': Session._compute_user_message_count(self.messages),
             'visible_message_count': visible_message_count,
             'active_stream_id': self.active_stream_id,
@@ -7550,6 +7564,8 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         worktree_branch=wt.get('branch') if wt else None,
         worktree_repo_root=wt.get('repo_root') if wt else None,
         worktree_created_at=wt.get('created_at') if wt else None,
+        worktree_placement=wt.get('placement') if wt else None,
+        worktree_placement_reason=wt.get('placement_reason') if wt else None,
         enabled_toolsets=enabled_toolsets,
     )
     # #4985: defensive — auto-generated uuids don't collide with the

@@ -18776,6 +18776,17 @@ def handle_post(handler, parsed) -> bool:
                         base_workspace = str(resolve_trusted_workspace(_lw))
                 worktree_info = create_worktree_for_workspace(base_workspace)
                 workspace = worktree_info["path"]
+                if worktree_info.get("placement") != "main":
+                    # A no-claim placement ("selected-unrecorded") or a refused
+                    # relocation ("move-failed") is a recorded outcome, not a
+                    # guess: the session keeps working in the tree the Agent
+                    # created, and the reason is logged with it.
+                    logger.info(
+                        "worktree placement=%s reason=%s path=%s",
+                        worktree_info.get("placement"),
+                        worktree_info.get("placement_reason"),
+                        workspace,
+                    )
             except (TypeError, ValueError) as e:
                 # Explicit requests keep the hard failure.  A config-default
                 # request on a non-git workspace (create_worktree_for_workspace
