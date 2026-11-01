@@ -131,6 +131,21 @@ def _base_open_flags() -> int:
     return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
 
 
+def _require_post_read_stat() -> None:
+    """Fail closed when the post-read containment check cannot run.
+
+    ``_still_sole_link`` looks the entry up with ``os.stat(dir_fd=...,
+    follow_symlinks=False)``. Without either capability it refuses every
+    script, so the listing must report the platform refusal through
+    ``unavailable`` rather than come back as a silent empty list (#7685's
+    rule; #8723 gate). Raises ``OSError`` like ``_base_open_flags``.
+    """
+    if os.stat not in os.supports_dir_fd:
+        raise OSError("os.stat(dir_fd=...) not supported; refusing scripts listing")
+    if os.stat not in os.supports_follow_symlinks:
+        raise OSError("os.stat(follow_symlinks=False) not supported; refusing scripts listing")
+
+
 def _leaf_open_flags() -> int:
     """Open flags for the scripts *leaf*.
 
@@ -242,10 +257,9 @@ def _still_sole_link(base: Path, name: str, fd: int) -> bool:
     into scripts/, so this narrows the window rather than establishing a
     boundary against it. Any error fails closed.
     """
-    if os.stat not in os.supports_dir_fd or os.stat not in os.supports_follow_symlinks:
-        return False
     base_fd = -1
     try:
+        _require_post_read_stat()
         fst = os.fstat(fd)
         if fst.st_nlink != 1:
             return False
@@ -447,6 +461,7 @@ def list_scripts() -> dict:
         # known-empty answer; a refusal is an unknown one.
         try:
             _base_open_flags()
+            _require_post_read_stat()
         except OSError as exc:
             unavailable = str(exc)
         if not unavailable:

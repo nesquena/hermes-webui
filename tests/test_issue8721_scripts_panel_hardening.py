@@ -308,3 +308,30 @@ def test_entry_cap_is_far_above_the_script_cap():
     """Walking a name is cheap with scandir; only describing is expensive, so
     the entry cap is a pathological-directory stop, not the working limit."""
     assert sp._MAX_LIST_ENTRIES >= 100 * sp._MAX_LISTED_SCRIPTS
+
+
+# ── #8723 gate round 2: the post-read check's capabilities are preflighted ─
+
+
+@pytest.mark.parametrize("capability_set", ["supports_dir_fd", "supports_follow_symlinks"])
+def test_missing_stat_capability_is_reported_not_a_silent_empty_list(
+    scripts, monkeypatch, capability_set
+):
+    """Without os.stat(dir_fd=...) or follow_symlinks=False the post-read
+    check refuses every script; the listing must say the platform cannot
+    serve it (``unavailable``) instead of reading as an empty folder."""
+    (scripts / "a.py").write_text('"""A."""\n')
+    reduced = {f for f in getattr(os, capability_set) if f is not os.stat}
+    monkeypatch.setattr(os, capability_set, reduced)
+    listing = sp.list_scripts()
+    assert listing["scripts"] == []
+    assert listing["exists"] is True
+    assert "not supported" in listing["unavailable"], listing
+    assert sp.read_script("a.py") is None
+
+
+def test_stat_capabilities_present_leave_unavailable_empty(scripts):
+    (scripts / "a.py").write_text('"""A."""\n')
+    listing = sp.list_scripts()
+    assert listing["unavailable"] == ""
+    assert [s["name"] for s in listing["scripts"]] == ["a.py"]
