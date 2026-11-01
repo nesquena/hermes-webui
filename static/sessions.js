@@ -2691,6 +2691,11 @@ async function _switchProfileForSessionLoad(profile){
   if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(true);
   if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);
   let reasoningSwitchHeld=false;
+  // #7685 finding 4/5: the Scripts pane is profile-owned too. Route this
+  // alternate switch through the SAME invalidate/refresh helpers as the
+  // canonical switch so Alpha rows do not stay up under Beta and a pending
+  // Alpha reply (success or error) cannot overwrite Beta's pane.
+  if(typeof _invalidateScriptsForProfileSwitch==='function') _invalidateScriptsForProfileSwitch();
   try{
     // Effort saves queued in the previous profile must go out under its cookie.
     if(typeof _beginReasoningProfileSwitch==='function'){
@@ -2717,6 +2722,17 @@ async function _switchProfileForSessionLoad(profile){
     if(typeof startGatewaySSE==='function') startGatewaySSE();
     if(typeof syncTopbar==='function') syncTopbar();
     if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
+    // #7685 finding 1 (MUST-FIX): invalidate AGAIN at accept, exactly like the
+    // canonical switch. The switch POST does not change S.activeProfile until
+    // it returns, so a list load started while the switch was PENDING captured
+    // the OLD owner key and passed its gate — it would repaint the previous
+    // profile's rows under the new profile. Bumping the generation here retires
+    // that in-flight reply.
+    if(typeof _invalidateScriptsForProfileSwitch==='function') _invalidateScriptsForProfileSwitch();
+    // #7685 finding 4/5: the switch is accepted for the new owner, so refresh
+    // the (cleared) Scripts pane for it. Silent-on-error, owner/generation
+    // gated like the canonical switch's refresh.
+    if(typeof _refreshScriptsAfterProfileSwitch==='function') _refreshScriptsAfterProfileSwitch();
     if(typeof renderSessionList==='function') await renderSessionList();
   }catch(switchErr){
     // The switch POST failed, so we're still on the previous profile and its
@@ -2729,6 +2745,10 @@ async function _switchProfileForSessionLoad(profile){
     if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
     _sessionListSkeletonActive=false;
     if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+    // #7685 finding 5: the switch was refused, so the old profile is still
+    // active. Restore the Scripts pane (cleared at switch start) for it
+    // instead of leaving it blank.
+    if(typeof _refreshScriptsAfterProfileSwitch==='function') _refreshScriptsAfterProfileSwitch();
     throw switchErr;
   }finally{
     if(reasoningSwitchHeld) _endReasoningProfileSwitch();
