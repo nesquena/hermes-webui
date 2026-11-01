@@ -2005,6 +2005,10 @@ class Session:
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
         self.share_token = str(share_token).strip() if share_token else None
         self.share_created_at = share_created_at
+        # The share pair this object last loaded or saved; save() uses it to
+        # tell an own change from a stale snapshot (#8399).
+        self._share_token_saved = self.share_token
+        self._share_created_at_saved = self.share_created_at
         self.skill_provenance_generation = max(
             0,
             _parse_nonnegative_int(kwargs.get('skill_provenance_generation')) or 0,
@@ -2102,6 +2106,21 @@ class Session:
                 # return) or failed (raise) save below cannot leave the
                 # adopted value looking like this object's own change.
                 self._reasoning_effort_saved = on_disk
+        # #8399: the share pair carries the same stale-snapshot class, and a
+        # writer that resolved its copy before a share create/revoke and saves
+        # after it puts its own older pair back -- orphaning a live snapshot on
+        # create, or restoring a revoked token on revoke. Adopt the on-disk pair
+        # when this object has not changed it since its baseline.
+        if (
+            self.share_token == getattr(self, '_share_token_saved', self.share_token)
+            and self.share_created_at
+            == getattr(self, '_share_created_at_saved', self.share_created_at)
+        ):
+            on_disk_share = _persisted_share_fields(self.path)
+            if on_disk_share is not _SHARE_FIELDS_ABSENT:
+                self.share_token, self.share_created_at = on_disk_share
+                self._share_token_saved = self.share_token
+                self._share_created_at_saved = self.share_created_at
         self._webui_pending_user_timestamp_identity = (
             _validated_webui_pending_user_timestamp_identity(
                 self, getattr(self, '_webui_pending_user_timestamp_identity', None)
@@ -2407,6 +2426,8 @@ class Session:
         # The value this save actually wrote, not one set on the live object
         # after the payload was built.
         self._reasoning_effort_saved = written_reasoning_effort
+        self._share_token_saved = self.share_token
+        self._share_created_at_saved = self.share_created_at
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
@@ -6290,6 +6311,61 @@ def _persisted_reasoning_effort(path):
     return _normalize_persisted_reasoning_effort(data['reasoning_effort'])
 
 
+_SHARE_FIELDS_ABSENT = object()
+
+
+def _normalize_persisted_share_token(value):
+    text = str(value).strip() if value else ''
+    return text or None
+
+
+def _persisted_share_fields(path):
+    """The sidecar's persisted ``(share_token, share_created_at)`` (#8399).
+
+    Mirrors ``_persisted_reasoning_effort``: the bounded metadata prefix answers
+    the common case, a prefix miss parses the whole sidecar, and only a missing
+    file or a parsed sidecar without the key reports absence. A sidecar that
+    exists but cannot be read raises OSError, so save() fails closed instead of
+    writing a share pair it could not compare.
+    """
+    parsed = None
+    try:
+        raw = _read_metadata_json_prefix(path)
+        parsed = json.loads(raw) if raw else None
+    except FileNotFoundError:
+        return _SHARE_FIELDS_ABSENT
+    except (OSError, ValueError):
+        parsed = None
+    if isinstance(parsed, dict) and 'share_token' in parsed:
+        return (
+            _normalize_persisted_share_token(parsed.get('share_token')),
+            parsed.get('share_created_at'),
+        )
+    try:
+        text = Path(path).read_text(encoding='utf-8')
+    except FileNotFoundError:
+        return _SHARE_FIELDS_ABSENT
+    except UnicodeDecodeError:
+        text = None
+    data = None
+    if text is not None:
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+    if not isinstance(data, dict):
+        logger.warning(
+            "session sidecar %s is not a JSON object; no persisted share fields to keep", path,
+        )
+        return _SHARE_FIELDS_ABSENT
+    if 'share_token' not in data:
+        return _SHARE_FIELDS_ABSENT
+    return (
+        _normalize_persisted_share_token(data.get('share_token')),
+        data.get('share_created_at'),
+    )
+
+
 # #7881: per-session reentrant persistence locks. Every Session.save() of one
 # session id -- skip_index=True included -- holds the same lock across its
 # persisted-effort read, payload construction and atomic replacement; the
@@ -8134,6 +8210,91 @@ class WorkspaceBindingPersistenceError(ValueError):
 
 
 _EXPECTED_WORKSPACE_UNSET = object()
+
+def update_session_share_fields(
+    session_id: str,
+    *,
+    share_token,
+    share_created_at,
+) -> bool:
+    """Atomically replace only the share fields of a session sidecar.
+
+    A share create/revoke must never persist conversation state. Saving a
+    detached Session object -- the copy a handler resolved, or one it reloaded
+    earlier in the request -- writes back the title and the transcript that copy
+    was built from, so a writer that finished while the share handler waited, or
+    between its last read and its save, is reverted (#8255 review, third round).
+
+    The patch runs under ``_session_persist_lock(sid)``, the same reentrant lock
+    every ``Session.save()`` of this session holds across its own
+    read-construct-replace, and which ``_write_persisted_reasoning_effort``
+    already uses as its precedent (#8253). Holding it across this
+    read-patch-replace is what makes a concurrent save either land before the
+    read (and be carried into the patched bytes) or after the replace (and win);
+    without it a save could slip between the final read and the replace and be
+    silently reverted (#8399 review).
+
+    The sidebar index is refreshed from the patched payload the way ``save()``
+    documents: a sidecar share token the index does not carry leaves
+    ``/api/sessions/search`` returning the previous state, so the UI either
+    loses the copy/revoke controls or keeps a dead link (#8399 review).
+
+    Returns False only when the sidecar does not exist, so the caller can
+    materialize one from its own copy. Unreadable sidecars and I/O errors raise,
+    as they do for ``Session.save``.
+    """
+    sid = str(session_id or "").strip()
+    if not sid or not is_safe_session_id(sid):
+        return False
+    path = SESSION_DIR / f"{sid}.json"
+    with _session_persist_lock(sid):
+        try:
+            original = path.read_bytes()
+        except FileNotFoundError:
+            return False
+        payload = json.loads(original.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"Session sidecar {sid!r} is not a JSON object")
+        payload["share_token"] = share_token
+        payload["share_created_at"] = share_created_at
+        tmp = path.with_suffix(
+            f".tmp.{os.getpid()}.{threading.current_thread().ident}"
+        )
+        try:
+            try:
+                body = json.dumps(payload, ensure_ascii=False, indent=2)
+                body.encode("utf-8")
+            except UnicodeEncodeError:
+                # Journal recovery can preserve a lone provider surrogate;
+                # escape it losslessly instead of failing the share write.
+                body = json.dumps(payload, ensure_ascii=True, indent=2)
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(body)
+                handle.flush()
+                os.fsync(handle.fileno())
+            with _INDEX_WRITE_LOCK:
+                _replace_session_sidecar(tmp, path, sid)
+                try:
+                    # Built from the sidecar just written, never from a possibly
+                    # stale live object (same ordered publish as save()).
+                    index_session = Session(**dict(payload))
+                    index_session._metadata_message_count = len(
+                        index_session.messages or []
+                    )
+                    _write_session_index(updates=[index_session])
+                except Exception:
+                    logger.warning(
+                        "session %s: share fields persisted but the sidebar index "
+                        "write failed; the index will be rebuilt on the next save",
+                        sid,
+                        exc_info=True,
+                    )
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+    return True
 
 
 def persist_recovered_workspace_binding(
