@@ -166,7 +166,12 @@ def cfg_path(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
     _reset_config_caches()
     yield path
+    # Leave the module as later tests expect it: the real config path, a loaded
+    # cache and its mtime. An emptied cache or a stale _cfg_path makes the next
+    # reload_config_if_stale() replace a later test's monkeypatched config.cfg.
     _reset_config_caches()
+    monkeypatch.undo()
+    config.reload_config()
 
 
 @pytest.fixture

@@ -3261,45 +3261,80 @@ def _custom_provider_slug_key(value: object) -> str:
     return produced.split(":", 1)[1] if produced.startswith("custom:") else produced
 
 
-def _raw_custom_provider_url(raw_cfg: dict, exp_cfg: dict, match: dict, url: str) -> str:
-    """Return the raw config text behind a selected custom provider's URL (#8032).
+# Fields _custom_provider_entries() writes on its copy of a native record; every
+# other field of the entry is the normalized record's own.
+_CUSTOM_PROVIDER_ENTRY_VIEW_FIELDS = frozenset({"name", "display_name", "model"})
 
-    ``match`` comes from ``_custom_provider_entries(exp_cfg)``, the env-expanded
-    view, and ``url`` is its resolved base URL. A legacy entry is that very dict
-    from ``exp_cfg["custom_providers"]``, so its raw twin sits at the same index
-    in ``raw_cfg`` (expansion keeps list positions). A native entry is a
-    normalized copy; its raw text is one of the ``api``/``url``/``base_url``
-    fields of the native records under the same identity. The first raw
-    candidate whose expansion is ``url`` wins, so a ``${VAR}`` endpoint stays a
-    reference on disk. When none matches (a shape this lookup does not know),
-    return ``url`` itself, which is what master writes. Pure and lock-safe.
+
+def _raw_custom_provider_url(raw_cfg: dict, exp_cfg: dict, match: dict, url: str) -> str:
+    """Return the raw config text behind the selected custom provider's URL (#8032).
+
+    ``match`` was selected from ``_custom_provider_entries(exp_cfg)``, the
+    env-expanded view, and ``url`` is its resolved base URL. Recover the field of
+    THAT record, never a value search across records:
+
+    * a legacy winner is the very dict from ``exp_cfg["custom_providers"]``;
+      expansion keeps list positions, so its raw twin is at the same index;
+    * a native winner is a normalized copy. Its source record is the one whose
+      ``_normalized_raw_provider_record(record, key)`` equals the entry on every
+      field the entries view copies (the normalizer stamps the record's own
+      config key as ``provider_key``), and the URL field is the one the
+      normalizer read: the first non-empty ``api``/``url``/``base_url`` of the
+      expanded record.
+
+    The raw text is used only when it expands to ``url``. Otherwise, or when the
+    source is not exactly one raw text, return ``url`` itself, which is what
+    master writes. Pure and lock-safe.
     """
     want = _normalize_base_url_for_compare(url)
-    candidates: list = []
-    exp_list = exp_cfg.get("custom_providers") if isinstance(exp_cfg, dict) else None
-    raw_list = raw_cfg.get("custom_providers") if isinstance(raw_cfg, dict) else None
-    if isinstance(exp_list, list) and isinstance(raw_list, list) and len(exp_list) == len(raw_list):
+
+    def _same(raw):
+        if isinstance(raw, str) and raw.strip():
+            if _normalize_base_url_for_compare(_expand_env_vars(raw)) == want:
+                return raw.strip()
+        return None
+
+    if not (isinstance(raw_cfg, dict) and isinstance(exp_cfg, dict)):
+        return url
+    exp_list = exp_cfg.get("custom_providers")
+    raw_list = raw_cfg.get("custom_providers")
+    if isinstance(exp_list, list):
         for index, entry in enumerate(exp_list):
-            if entry is match:
-                if isinstance(raw_list[index], dict):
-                    candidates.append(raw_list[index].get("base_url"))
-                break
-    if not candidates:
-        identity = _custom_provider_slug_key(match.get("name"))
-        raw_native = raw_cfg.get("providers") if isinstance(raw_cfg, dict) else None
-        if identity and isinstance(raw_native, dict):
-            for key, record in raw_native.items():
-                if not (_is_native_custom_provider_key(key) and isinstance(record, dict)):
-                    continue
-                if _custom_provider_slug_key(key) != identity:
-                    continue
-                candidates.extend(record.get(field) for field in ("api", "url", "base_url"))
-    for raw in candidates:
-        if not isinstance(raw, str) or not raw.strip():
+            if entry is not match:
+                continue
+            twin = raw_list[index] if (
+                isinstance(raw_list, list) and len(raw_list) == len(exp_list)
+            ) else None
+            return (_same(twin.get("base_url")) if isinstance(twin, dict) else None) or url
+    exp_native = exp_cfg.get("providers")
+    raw_native = raw_cfg.get("providers")
+    if not (isinstance(exp_native, dict) and isinstance(raw_native, dict)):
+        return url
+    found = set()
+    for key, record in exp_native.items():
+        if not isinstance(record, dict) or not record:
             continue
-        if _normalize_base_url_for_compare(_expand_env_vars(raw)) == want:
-            return raw.strip()
-    return url
+        normalized = _normalized_raw_provider_record(record, key)
+        if any(
+            match.get(field) != value
+            for field, value in normalized.items()
+            if field not in _CUSTOM_PROVIDER_ENTRY_VIEW_FIELDS
+        ):
+            continue
+        url_field = next(
+            (
+                field for field in _RAW_PROVIDER_URL_FIELDS
+                if isinstance(record.get(field), str) and record.get(field).strip()
+            ),
+            None,
+        )
+        raw_record = raw_native.get(key)
+        if url_field is None or not isinstance(raw_record, dict):
+            continue
+        raw = _same(raw_record.get(url_field))
+        if raw is not None:
+            found.add(raw)
+    return found.pop() if len(found) == 1 else url
 
 
 def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> dict | None:

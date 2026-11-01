@@ -23,6 +23,9 @@ def cfg_path(tmp_path, monkeypatch):
     monkeypatch.setenv("AUXSEL_LEGACY_URL", "https://legacy.example.test/v1")
     monkeypatch.setenv("AUXSEL_NATIVE_URL", "https://native-ref.example.test/v1")
     yield path
+    # Restore the real config path and env BEFORE reloading, so the module cache
+    # never keeps this test's synthetic config for a later test.
+    monkeypatch.undo()
     config.reload_config()
 
 
@@ -76,3 +79,21 @@ def test_two_entries_resolving_to_one_slug_still_fail_closed(cfg_path):
                 {"name": "shared", "base_url": "https://b.example.test/v1"},
             ],
         })
+
+
+@pytest.mark.parametrize("providers", [
+    # The canonical record wins; an earlier record's equal literal must not
+    # replace the winner's reference.
+    {"shared": {"base_url": "https://rotating.example.test/v1"},
+     "custom:shared": {"base_url": "${AUXSEL_ROTATING_URL}"}},
+    # The winner is chosen through its display-name alias under another key.
+    {"shared": {"models": ["gpt-4o"]},
+     "different-key": {"name": "Shared", "base_url": "${AUXSEL_ROTATING_URL}"}},
+], ids=["earlier-equal-literal", "winning-display-name-alias"])
+def test_winning_record_reference_is_written_and_follows_rotation(cfg_path, monkeypatch, providers):
+    monkeypatch.setenv("AUXSEL_ROTATING_URL", "https://rotating.example.test/v1")
+    saved = _save(cfg_path, {"providers": providers})
+    assert saved["auxiliary"]["vision"]["base_url"] == "${AUXSEL_ROTATING_URL}"
+    monkeypatch.setenv("AUXSEL_ROTATING_URL", "https://rotated.example.test/v1")
+    expanded = config._load_yaml_config_file(cfg_path)["auxiliary"]["vision"]["base_url"]
+    assert expanded == "https://rotated.example.test/v1"
