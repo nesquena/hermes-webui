@@ -9590,6 +9590,12 @@ function _syncTransparentEventTimestamp(row, header, opts){
       row.getAttribute('data-activity-at')
     )
     : null;
+  // The live fallback has no event of its own, so it is derived from the wall
+  // clock on every render frame and stored VERBATIM (#5700 depends on the exact
+  // observed second). The mid-stream replay (#8109) is not fixed here by
+  // degrading the stamp: `_refreshTransparentLiveRow` makes a re-rendered
+  // candidate inherit the row's already-observed stamp BEFORE diffing
+  // innerHTML, so a sub-second wall-clock delta alone never forces a rebuild.
   const ts=explicitTs||toolTs||attrTs||(live?_activityNowSeconds():null);
   const label=ts?_activityClockLabel(ts):'';
   let timeEl=header.querySelector('.transparent-event-time');
@@ -18744,6 +18750,37 @@ function _refreshTransparentLiveRow(existing, node, opts){
     !!node.querySelector('.msg-body.stream-fade-active,.stream-fade-word');
   if(candidateIsFadeProse){
     return _refreshTransparentFadeProseRow(existing, node, preservedState);
+  }
+  // #8109: a fresh live candidate re-stamps from the wall clock every frame, so
+  // its serialized innerHTML differs from the row already on screen and the diff
+  // below tears down + rebuilds the card, replaying the entrance/shimmer
+  // animation. Capture the existing row's OBSERVED live stamp BEFORE the
+  // attribute loop clobbers it, and transplant it onto the candidate's time
+  // span, so a wall-clock delta alone never counts as a content change. Guard on
+  // source `live` on BOTH sides: a real event timestamp that differs is a
+  // genuine change and must still re-render. We copy the already-computed
+  // label/title/stamp attributes directly rather than re-invoking
+  // `_syncTransparentEventTimestamp`, which would re-run the anchor-insert path
+  // (extra DOM work, and a duplicate span under a naive insertBefore). The stamp
+  // stays the exact first-observed second verbatim (#5700 depends on that value,
+  // not a quantized one).
+  const observedEventAt = existing.getAttribute('data-event-at-source') === 'live'
+    ? existing.getAttribute('data-event-at')
+    : null;
+  const candIsSyntheticLive = node.getAttribute('data-event-at-source') === 'live';
+  if(observedEventAt && candIsSyntheticLive){
+    const exTime = existing.querySelector('.transparent-event-time');
+    const candHeader = node.querySelector('.tool-card-header,.thinking-card-header');
+    const candTime = candHeader && candHeader.querySelector('.transparent-event-time');
+    if(exTime && candTime){
+      candTime.setAttribute('data-event-at', exTime.getAttribute('data-event-at'));
+      const exTitle = exTime.getAttribute('title');
+      if(exTitle) candTime.setAttribute('title', exTitle); else candTime.removeAttribute('title');
+      candTime.setAttribute('data-event-at-source', 'live');
+      candTime.textContent = exTime.textContent;
+      node.setAttribute('data-event-at', observedEventAt);
+      node.setAttribute('data-event-at-source', 'live');
+    }
   }
   const pairs = _transparentLiveRowAttributePairs(node);
   const kept = Object.create(null);
