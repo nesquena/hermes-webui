@@ -202,7 +202,7 @@ def _optional_col(name: str, columns: set[str], fallback: str = "NULL") -> str:
     return f"s.{name}" if name in columns else f"{fallback} AS {name}"
 
 
-def _effective_source_sql(columns: set[str]) -> str:
+def _effective_source_sql(columns: set[str], alias: str = "s") -> str:
     """SQL for the surface that made a session, ready for SELECT or WHERE.
 
     Newer Hermes Agent stores every local interactive surface (cli, tui, gui,
@@ -212,15 +212,18 @@ def _effective_source_sql(columns: set[str]) -> str:
     Only the surfaces WebUI already files as CLI-family (acp, cli, tui) are
     mapped. Desktop/gui, unknown or missing ``created_source``, older
     databases and every other source are unchanged.
+
+    ``alias`` is the table alias to read from (always a fixed internal name,
+    never user input), so lineage queries can compare parent and child.
     """
     if 'source' not in columns:
         return "NULL"
     if 'created_source' not in columns:
-        return "s.source"
+        return f"{alias}.source"
     return (
-        "(CASE WHEN LOWER(TRIM(COALESCE(s.source, ''))) = 'local' "
-        "AND LOWER(TRIM(COALESCE(s.created_source, ''))) IN ('acp', 'cli', 'tui') "
-        "THEN LOWER(TRIM(s.created_source)) ELSE s.source END)"
+        f"(CASE WHEN LOWER(TRIM(COALESCE({alias}.source, ''))) = 'local' "
+        f"AND LOWER(TRIM(COALESCE({alias}.created_source, ''))) IN ('acp', 'cli', 'tui') "
+        f"THEN LOWER(TRIM({alias}.created_source)) ELSE {alias}.source END)"
     )
 
 
@@ -909,10 +912,15 @@ def read_importable_agent_session_rows(
                 if wanted == 'assigned':
                     return _result([])
             elif {'parent_session_id', 'end_reason'} <= session_cols:
+                # Compare the surfaces the same way the listing shows them,
+                # so a 'local' + created_source continuation stays in its
+                # lineage's project bucket (#8674).
+                parent_source_sql = _effective_source_sql(session_cols, "parent")
+                child_source_sql = _effective_source_sql(session_cols, "child")
                 continuation_checks = [
                     "parent.end_reason IN ('compression', 'cli_close')",
-                    "(parent.source IS NULL OR child.source IS NULL "
-                    "OR LOWER(TRIM(parent.source)) = LOWER(TRIM(child.source)))",
+                    f"({parent_source_sql} IS NULL OR {child_source_sql} IS NULL "
+                    f"OR LOWER(TRIM({parent_source_sql})) = LOWER(TRIM({child_source_sql})))",
                 ]
                 if 'ended_at' in session_cols:
                     continuation_checks.append(

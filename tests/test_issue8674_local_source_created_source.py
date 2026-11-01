@@ -128,3 +128,92 @@ def test_source_filters_use_the_created_source(tmp_path):
     assert [r['id'] for r in tui_only] == ['local-tui']
     excluded = read_importable_agent_session_rows(db, exclude_sources=('cron', 'webui', 'tui'))
     assert {r['id'] for r in excluded} == {'local-cli', 'telegram'}
+
+
+def _lineage_db(path, rows):
+    """state.db with project + compression-lineage columns.
+
+    ``rows`` are (id, source, created_source, project_id, parent, started_at,
+    ended_at, end_reason).
+    """
+    conn = sqlite3.connect(str(path))
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY, source TEXT, created_source TEXT,
+            title TEXT, model TEXT, started_at REAL NOT NULL,
+            message_count INTEGER DEFAULT 0, project_id TEXT,
+            parent_session_id TEXT, ended_at REAL, end_reason TEXT
+        );
+        CREATE TABLE messages (
+            id TEXT PRIMARY KEY, session_id TEXT, role TEXT,
+            content TEXT, timestamp REAL
+        );
+        CREATE INDEX idx_messages_session ON messages(session_id, timestamp);
+        """
+    )
+    for sid, source, created, project, parent, started, ended, reason in rows:
+        conn.execute(
+            "INSERT INTO sessions (id, source, created_source, title, model, started_at,"
+            " message_count, project_id, parent_session_id, ended_at, end_reason)"
+            " VALUES (?, ?, ?, ?, 'm', ?, 2, ?, ?, ?, ?)",
+            (sid, source, created, sid, started, project, parent, ended, reason),
+        )
+        for j, role in enumerate(('user', 'assistant')):
+            conn.execute(
+                "INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, 'x', ?)",
+                (f"m_{sid}_{j}", sid, role, started + j / 10),
+            )
+    conn.commit()
+    conn.close()
+
+
+def _ids(db, **kw):
+    return sorted(r['id'] for r in read_importable_agent_session_rows(db, exclude_sources=None, **kw))
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize('surface', ['cli', 'tui', 'acp'])
+@pytest.mark.parametrize('owner', ['root', 'tip'])
+def test_project_filters_follow_a_local_continuation_like_the_listing(tmp_path, surface, owner):
+    """A legacy-stored root continued by a 'local' row is one conversation in every project view."""
+    db = tmp_path / 'state.db'
+    root_project = 'p' if owner == 'root' else None
+    tip_project = 'p' if owner == 'tip' else None
+    _lineage_db(db, [
+        ('root', surface, None, root_project, None, 100.0, 200.0, 'compression'),
+        ('tip', 'local', surface, tip_project, 'root', 200.0, None, None),
+    ])
+    everything = _ids(db)
+    assigned = _ids(db, project_assignment='assigned')
+    narrowed = _ids(db, project_assignment='assigned', project_ids=('p',))
+    other_project = _ids(db, project_assignment='assigned', project_ids=('q',))
+    unassigned = _ids(db, project_assignment='unassigned')
+    assert assigned == everything
+    assert narrowed == everything
+    assert other_project == []
+    assert unassigned == []
+
+
+def test_project_filters_still_split_a_real_cross_surface_continuation(tmp_path):
+    """Control: a 'local' row made by another surface is not pulled into the lineage."""
+    db = tmp_path / 'state.db'
+    _lineage_db(db, [
+        ('root', 'tui', None, 'p', None, 100.0, 200.0, 'compression'),
+        ('tip', 'local', 'cli', None, 'root', 200.0, None, None),
+    ])
+    assert 'tip' not in _ids(db, project_assignment='assigned')
+    assert 'tip' in _ids(db, project_assignment='unassigned')
+
+
+def test_project_filters_unchanged_for_legacy_storage(tmp_path):
+    """Control: plain-surface lineage (no 'local') behaves as before."""
+    db = tmp_path / 'state.db'
+    _lineage_db(db, [
+        ('root', 'tui', None, 'p', None, 100.0, 200.0, 'compression'),
+        ('tip', 'tui', None, None, 'root', 200.0, None, None),
+    ])
+    assert _ids(db, project_assignment='assigned') == _ids(db)
+    assert _ids(db, project_assignment='unassigned') == []
