@@ -10283,6 +10283,16 @@ function _restoreSessionOpenControlFocus(list, sid){
 }
 
 
+// #6393: the sidebar project-chip bar renders chips in whatever order
+// /api/projects returned (creation/disk order), which makes a long project
+// list hard to scan and makes the bar depend on when projects were created.
+// Return a *copy* sorted by project name so the chip bar is alphabetical and
+// stable across reloads. The shared `_allProjects` cache keeps its
+// authoritative order for the colour assignment and the pickers elsewhere.
+function _sortedProjectsForChips(projects){
+  return [...(projects||[])].sort((a,b)=>String((a&&a.name)||'').localeCompare(String((b&&b.name)||'')));
+}
+
 function renderSessionListFromCache(){
   // #4671: while a profile-switch skeleton is up, bail — _allSessions still holds the
   // PREVIOUS profile's rows until /api/sessions resolves, so any unrelated caller
@@ -10430,8 +10440,10 @@ function renderSessionListFromCache(){
       noneChip.onclick=()=>{_setActiveProjectFilter(NO_PROJECT_FILTER);};
       bar.appendChild(noneChip);
     }
-    // Project chips
-    for(const p of _allProjects){
+    // Project chips — alphabetical by project name (#6393). The sort is done
+    // on a copy so `_allProjects` keeps its authoritative order for the
+    // colour assignment and the project pickers.
+    for(const p of _sortedProjectsForChips(_allProjects)){
       const chip=document.createElement('span');
       chip.className='project-chip'+(p.project_id===_activeProject?' active':'');
       if(p.color){
