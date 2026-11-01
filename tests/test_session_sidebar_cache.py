@@ -400,6 +400,158 @@ def test_session_list_cache_rate_floor_never_holds_a_committed_message(monkeypat
     assert "session_list_cache_rate_floor_hold" not in diag.stages
 
 
+def test_content_fingerprint_marks_a_failed_read_as_unreadable(tmp_path):
+    """A locked state.db yields an UNREADABLE fingerprint, not a NULL one.
+
+    ``_sqlite_content_fingerprint`` degrades instead of blocking the hot path,
+    and it used to degrade to ``None`` per table. Two of those compare equal, so
+    a consumer could not tell "unchanged" from "could not read". The producer now
+    marks a failed read explicitly. (#8694)
+    """
+    import sqlite3
+
+    from api import models
+
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE sessions (id INTEGER PRIMARY KEY, title TEXT)")
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, body TEXT)")
+    conn.execute("INSERT INTO sessions (title) VALUES ('s1')")
+    conn.execute("INSERT INTO messages (body) VALUES ('m1')")
+    conn.commit()
+    conn.close()
+
+    readable = models._sqlite_content_fingerprint(db_path)
+    assert models._content_fingerprint_readable(readable) is True
+
+    writer = sqlite3.connect(db_path, isolation_level=None)
+    writer.execute("PRAGMA journal_mode=DELETE")
+    writer.execute("BEGIN EXCLUSIVE")
+    try:
+        locked = models._sqlite_content_fingerprint(db_path)
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+
+    assert locked is not None, "a per-table lock must not collapse into the total-failure None"
+    assert models._content_fingerprint_readable(locked) is False
+
+
+def test_session_list_cache_rate_floor_never_holds_an_unreadable_fingerprint(monkeypatch):
+    """An unknown state.db may not license the ten-second hold. (#8694)
+
+    With a writer touching state.db the stat components move on every poll, so
+    the floor is the only thing between a poll and a full rebuild. The hold must
+    therefore be authorized by a fingerprint that was actually READ: two
+    unreadable stamps compare equal, and before this guard they held the entry
+    while suppressing the file-stat reconciliation.
+    """
+    from api import models
+
+    key = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=False,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    stat = {"generation": 0}
+    fingerprint = {"value": models._CONTENT_FINGERPRINT_UNREADABLE}
+
+    def _changing_stat_stamp(_key):
+        stat["generation"] += 1
+        generation = stat["generation"]
+        return (
+            (generation, 1),
+            (generation, 2),
+            (generation, 3),
+            (generation, 4),
+            (generation, 5),
+            fingerprint["value"],
+            None,
+            0,
+        )
+
+    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", _changing_stat_stamp)
+
+    # Cached while the fingerprint read times out (a writer holds the lock) — the
+    # exact state the review replayed.
+    routes._session_list_cache_set(key, _session_cache_payload("two"))
+
+    built = []
+
+    def builder():
+        built.append(1)
+        return _session_cache_payload("four")
+
+    diag = _StageRecorder()
+    payload = routes._get_cached_session_list_payload(key=key, builder=builder, diag=diag)
+    assert payload == _session_cache_payload("four")
+    assert built == [1], "an unreadable fingerprint must never authorize the hold"
+    assert "session_list_cache_rate_floor_hold" not in diag.stages
+
+
+def test_session_list_cache_rate_floor_holds_through_an_all_profiles_fingerprint(monkeypatch):
+    """All-profiles keys hold on a fully readable stack, and never on a partial one.
+
+    The all-profiles stamp is a per-profile tuple of (db stat, wal stat, content
+    fingerprint). One unreadable profile fingerprint in that set makes the whole
+    stamp unusable as proof of "unchanged". (#8694)
+    """
+    from api import models
+
+    key = routes._session_list_cache_key(
+        active_profile="default",
+        all_profiles=True,
+        show_cli_sessions=False,
+        show_previous_messaging_sessions=False,
+        show_cron_sessions=False,
+    )
+    stat = {"generation": 0}
+    profile_fingerprint: dict[str, object] = {"value": (7, 12)}
+
+    def _changing_stat_stamp(_key):
+        stat["generation"] += 1
+        generation = stat["generation"]
+        profile_stamp = (
+            (1, 1),
+            (1, 2),
+            profile_fingerprint["value"],
+        )
+        return (
+            (generation, 1),
+            (generation, 2),
+            (generation, 3),
+            (generation, 4),
+            (generation, 5),
+            (40, 91),
+            (profile_stamp,),
+            0,
+        )
+
+    monkeypatch.setattr(routes, "_session_list_cache_source_stamp", _changing_stat_stamp)
+    routes._session_list_cache_set(key, _session_cache_payload("a_all", all_profiles=True))
+
+    built = []
+
+    def builder():
+        built.append(1)
+        return _session_cache_payload(f"fresh-{len(built)}", all_profiles=True)
+
+    # Readable stack: the floor still holds (the feature is not disabled).
+    diag = _StageRecorder()
+    payload = routes._get_cached_session_list_payload(key=key, builder=builder, diag=diag)
+    assert payload == _session_cache_payload("a_all", all_profiles=True)
+    assert built == []
+    assert "session_list_cache_rate_floor_hold" in diag.stages
+
+    # One profile's fingerprint becomes unreadable: the hold is not authorized.
+    profile_fingerprint["value"] = models._CONTENT_FINGERPRINT_UNREADABLE
+    rebuilt = routes._get_cached_session_list_payload(key=key, builder=builder)
+    assert rebuilt == _session_cache_payload("fresh-1", all_profiles=True)
+    assert built == [1]
+
+
 def test_session_list_cache_owner_returns_stale_and_rebuilds_in_background(monkeypatch):
     routes._session_list_cache_clear()
     monkeypatch.setattr(routes, "_session_list_cache_source_stamp", lambda _key: ("stable",))

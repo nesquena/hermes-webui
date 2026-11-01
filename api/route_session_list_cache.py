@@ -9,7 +9,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from api.config import LOCK, SESSION_DIR, SESSIONS, SETTINGS_FILE
-from api.models import _active_state_db_path, _active_stream_ids
+from api.models import _active_state_db_path, _active_stream_ids, _content_fingerprint_readable
 from api.profiles import _profiles_match
 
 
@@ -405,7 +405,7 @@ def _session_list_cache_key(
 _STAMP_ROW_CONTENT_INDEXES = (5, 6)
 
 
-def _session_list_cache_stamp_row_content(stamp):
+def _session_list_cache_stamp_row_content(stamp, all_profiles: bool = False):
     """Return the row-bearing part of a source stamp, or ``None`` when unknown.
 
     The rebuild-rate floor may only hold an entry whose ROW CONTENT is provably
@@ -413,12 +413,40 @@ def _session_list_cache_stamp_row_content(stamp):
     continuing a WebUI-origin session, a CLI turn — has to be visible on the very
     next request. That is the reconciliation contract pinned by
     ``tests/test_webui_state_db_reconciliation.py``, not an optional freshness
-    window. ``None`` (the streaming freeze marker's shorter tuple, or a stubbed
-    stamp) is unknown, and unknown never holds.
+    window. ``None`` (the streaming freeze marker's shorter tuple, a stubbed
+    stamp, or an UNREADABLE fingerprint) is unknown, and unknown never holds.
+
+    "Unreadable" is the important case: ``_sqlite_content_fingerprint`` degrades
+    to ``None`` (total failure) or the ``_CONTENT_FINGERPRINT_UNREADABLE``
+    sentinel (per-table lock/timeout) instead of blocking the hot path. Two such
+    stamps compare EQUAL, so without this check an unknown state.db would hold
+    for the whole floor and suppress the file-stat fallback that used to force
+    reconciliation. (#8694)
     """
     if not isinstance(stamp, tuple) or len(stamp) != 8:
         return None
+    if not _session_list_cache_stamp_fingerprints_readable(stamp, all_profiles):
+        return None
     return tuple(stamp[index] for index in _STAMP_ROW_CONTENT_INDEXES)
+
+
+def _session_list_cache_stamp_fingerprints_readable(stamp, all_profiles: bool) -> bool:
+    """True only when every fingerprint the hold depends on was actually read."""
+    if not _content_fingerprint_readable(stamp[5]):
+        return False
+    all_profiles_stamp = stamp[6]
+    if not all_profiles:
+        # The all-profiles collection is only read for an all-profiles key, so a
+        # ``None`` here is "not applicable", not a failed read.
+        return True
+    if not isinstance(all_profiles_stamp, (tuple, list)):
+        return False
+    for profile_stamp in all_profiles_stamp:
+        if not isinstance(profile_stamp, tuple) or len(profile_stamp) != 3:
+            return False
+        if not _content_fingerprint_readable(profile_stamp[2]):
+            return False
+    return True
 
 
 def _session_list_cache_probe(
@@ -454,10 +482,10 @@ def _session_list_cache_probe(
             # CONTENT is provably unchanged. A committed message (Desktop app,
             # CLI turn) breaks the reconciliation contract if it waits for the
             # floor, so row-content movement always rebuilds now.
-            row_content = _session_list_cache_stamp_row_content(stamp)
+            row_content = _session_list_cache_stamp_row_content(stamp, bool(key[1]))
             if (
                 row_content is not None
-                and row_content == _session_list_cache_stamp_row_content(current_stamp)
+                and row_content == _session_list_cache_stamp_row_content(current_stamp, bool(key[1]))
                 and (now - ts) < _SESSIONS_CACHE_MIN_REFRESH_SECONDS
             ):
                 _SESSIONS_CACHE.move_to_end(key)
