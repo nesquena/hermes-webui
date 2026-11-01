@@ -8,6 +8,10 @@ REPO = Path(__file__).resolve().parent.parent
 PROFILE_CONCEPT_FALLBACK_KEYS = {
     *PROFILE_CONCEPT_KEYS,
     "workspace_artifact_source_session",
+    # #6675: chaves de fullscreen mantidas em inglês (inglês é a fonte dessas
+    # strings) e registradas aqui pelo contrato canônico de fallback.
+    "preview_fullscreen",
+    "preview_fullscreen_exit",
 }
 
 
