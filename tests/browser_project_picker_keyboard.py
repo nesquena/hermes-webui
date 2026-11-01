@@ -255,7 +255,11 @@ SINGLE = ".project-picker:not(.batch-project-picker)"
 BATCH = ".batch-project-picker"
 
 
-def _new_page(browser, **context_args):
+# Every fresh page after seeding has at least three conversations.
+SESSION_ROWS_JS = "document.querySelectorAll('#sessionList .session-item[data-sid]').length >= 3"
+
+
+def _new_page(browser, wait_for_rows=True, **context_args):
     ctx = browser.new_context(base_url=BASE, **context_args)
     page = ctx.new_page()
     errors = []
@@ -267,6 +271,11 @@ def _new_page(browser, **context_args):
         ctx.close()
         return None, None, ["the app did not initialize"]
     page.wait_for_timeout(1000)
+    # On a busy host the conversation list can render after that second, and the
+    # checks then fail on "no row" instead of on behaviour (#8616). The first page
+    # opens before anything is seeded, so it has nothing to wait for.
+    if wait_for_rows:
+        _wait_until(page, SESSION_ROWS_JS, 20000)
     return ctx, page, errors
 
 
@@ -2772,7 +2781,9 @@ def main():
             browser = pw.chromium.launch(
                 headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
             )
-            ctx, page, errors = _new_page(browser, viewport={"width": 1440, "height": 900})
+            ctx, page, errors = _new_page(
+                browser, wait_for_rows=False, viewport={"width": 1440, "height": 900}
+            )
             if page is None:
                 print(f"SETUP FAIL: {errors}", file=sys.stderr)
                 return 2

@@ -58,7 +58,7 @@ class _ModelsResponse:
 @pytest.fixture(autouse=True)
 def _isolate_config(monkeypatch, tmp_path):
     old_cfg = dict(config.cfg)
-    old_mtime = config._cfg_mtime
+    markers = {name: getattr(config, name) for name in ("_cfg_mtime", "_cfg_path", "_cfg_fingerprint")}
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
     for var in _API_KEY_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
@@ -66,7 +66,8 @@ def _isolate_config(monkeypatch, tmp_path):
     yield
     config.cfg.clear()
     config.cfg.update(old_cfg)
-    config._cfg_mtime = old_mtime
+    for name, value in markers.items():
+        setattr(config, name, value)
     config.invalidate_models_cache()
 
 
@@ -160,6 +161,7 @@ providers:
     groups = _groups_by_id()
     assert "ollama" not in groups
     assert "custom" in groups
+    assert "custom:custom" not in groups
     model_ids = {model["id"] for model in groups["custom"]["models"]}
     assert {"custom-model", "custom-extra"} <= model_ids
 

@@ -109,7 +109,18 @@ def test_cron_create_recomputes_unpinned_provider_snapshot_under_selected_profil
     body = _payload(handler)
     assert handler.status == 200
     assert body["ok"] is True
+    # The snapshot is computed before the two jobs.json writes so the Agent
+    # jobs lock that makes them atomic (#7295) never spans the env swap.
     assert calls[0] == (
+        "compute",
+        {
+            "provider": None,
+            "model": "gpt-5.4",
+            "base_url": None,
+            "no_agent": False,
+        },
+    )
+    assert calls[1] == (
         "create",
         {
             "prompt": "ping",
@@ -119,15 +130,6 @@ def test_cron_create_recomputes_unpinned_provider_snapshot_under_selected_profil
             "skills": [],
             "model": "gpt-5.4",
             "provider": None,
-        },
-    )
-    assert calls[1] == (
-        "compute",
-        {
-            "provider": None,
-            "model": "gpt-5.4",
-            "base_url": None,
-            "no_agent": False,
         },
     )
     assert calls[2] == (
@@ -339,6 +341,15 @@ def test_cron_create_with_explicit_provider_recomputes_only_model_snapshot(monke
     assert body["ok"] is True
     assert calls == [
         (
+            "compute",
+            {
+                "provider": "openai-codex",
+                "model": None,
+                "base_url": None,
+                "no_agent": False,
+            },
+        ),
+        (
             "create",
             {
                 "prompt": "ping",
@@ -348,15 +359,6 @@ def test_cron_create_with_explicit_provider_recomputes_only_model_snapshot(monke
                 "skills": [],
                 "model": None,
                 "provider": "openai-codex",
-            },
-        ),
-        (
-            "compute",
-            {
-                "provider": "openai-codex",
-                "model": None,
-                "base_url": None,
-                "no_agent": False,
             },
         ),
         ("update", "job5130", {"profile": "research", "model_snapshot": "gpt-5.5"}),
