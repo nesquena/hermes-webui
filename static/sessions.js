@@ -2690,7 +2690,13 @@ async function _switchProfileForSessionLoad(profile){
   if(typeof _invalidateSessionListRenders==='function') _invalidateSessionListRenders();
   if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(true);
   if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);
+  let reasoningSwitchHeld=false;
   try{
+    // Effort saves queued in the previous profile must go out under its cookie.
+    if(typeof _beginReasoningProfileSwitch==='function'){
+      reasoningSwitchHeld=true;
+      await _beginReasoningProfileSwitch();
+    }
     const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
     S.activeProfile=data.active||name;
     S.activeProfileIsDefault=!!data.is_default;
@@ -2724,6 +2730,8 @@ async function _switchProfileForSessionLoad(profile){
     _sessionListSkeletonActive=false;
     if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
     throw switchErr;
+  }finally{
+    if(reasoningSwitchHeld) _endReasoningProfileSwitch();
   }
 }
 
@@ -4721,6 +4729,46 @@ function _mergePendingSessionMessage(session,messages){
     const marked=typeof _markRecoveredPromptRow==='function'?_markRecoveredPromptRow(pendingMsg):pendingMsg;
     messages.splice(target,0,marked);
     return true;
+  }
+  // A FULL (zero-offset) load is not "windowed", but its current-turn rows can
+  // already be persisted — a young session loaded with `_oldestIdx = 0` (small
+  // `msg_count`, no paging) reaches this merge with its assistant/tool rows in
+  // place and a `_live` tail. The fallback below then splices the prompt in
+  // front of the live row, i.e. BEHIND those persisted rows: the reported
+  // "there is content above my first message" order (live repro 2026-10-30:
+  // head = [assistant, tool, tool, tool, user(_pending), assistant]).
+  // `pending_started_at` is the server's authoritative turn start, so when it
+  // is present the same ownership rule as the windowed branch decides the
+  // position: in front of the first row at/after the turn start, and after
+  // every row when they all predate it (a new prompt never claims a previous
+  // turn's activity). Without a stamp the shape heuristics below still apply.
+  const ownershipStart=Number(session&&session.pending_started_at)||0;
+  if(ownershipStart>0&&typeof _currentTurnInsertIndex==='function'){
+    // A same-identity prompt row can already sit behind the live row (the
+    // malformed reconnect order #6419 repairs below). Judge ownership without
+    // it, then move that row (keeping its attachments and provenance) instead
+    // of inserting a second copy in front of it.
+    const misplacedIdx=liveAssistantIdx>=0?messages.findIndex((m,idx)=>
+      idx>liveAssistantIdx&&m&&m.role==='user'&&_sameTranscriptMessage(m,pendingMsg)
+    ):-1;
+    const withoutMisplaced=misplacedIdx>=0?messages.filter((_m,idx)=>idx!==misplacedIdx):messages;
+    const ownedIdx=_currentTurnInsertIndex(withoutMisplaced,ownershipStart);
+    if(ownedIdx>=0){
+      if(misplacedIdx>=0){
+        const [misplacedUser]=messages.splice(misplacedIdx,1);
+        // Let the producer adopt the moved row (it fills in pending attachments
+        // and provenance the row lacks), then insert it display-only, as the
+        // windowed branch does: an unpersisted prompt placed in front of saved
+        // rows must not shift the saved-row indices edit/fork rely on.
+        if(typeof getPendingSessionMessage==='function') getPendingSessionMessage(session,[misplacedUser]);
+        messages.splice(ownedIdx,0,
+          typeof _markRecoveredPromptRow==='function'?_markRecoveredPromptRow(misplacedUser):misplacedUser);
+        return true;
+      }
+      messages.splice(ownedIdx,0,
+        typeof _markRecoveredPromptRow==='function'?_markRecoveredPromptRow(pendingMsg):pendingMsg);
+      return true;
+    }
   }
   if(liveAssistantIdx>=0){
     const misplacedIdx=messages.findIndex((m,idx)=>
@@ -8058,7 +8106,9 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
   // event, focus, or visibility recovery says another client/process mutated
   // the active transcript (#4205 follow-up shape). The idle-reconcile path uses
   // a non-'poll' reason, so it already sails through this gate untouched.
-  if((reason||'poll')==='poll' && !_isExternalSession(S.session)) return 'skipped';
+  // A running delegated subagent has no stream; poll it so its end is noticed.
+  const _pollRunningSubagent = S.session.active===true && _isDelegatedSubagentRow(S.session);
+  if((reason||'poll')==='poll' && !_isExternalSession(S.session) && !_pollRunningSubagent) return 'skipped';
   // Cooldown: don't force-reload immediately after streaming ends — the
   // "done" event already delivered the final messages. Reloading here would
   // clear S.toolCalls and lose Activity. The idle-reconcile path may bypass
@@ -8125,6 +8175,12 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
         if(data.session.updated_at) S.session.updated_at = data.session.updated_at;
       }
       if(typeof renderSessionList==='function') void renderSessionList();
+    }
+    // A subagent can finish without a new message; apply the lifecycle flip.
+    if(typeof data.session.active==='boolean' && S.session && S.session.session_id===sid
+       && data.session.active!==S.session.active && _isDelegatedSubagentRow(S.session)){
+      S.session.active = data.session.active;
+      if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
     }
     return 'unchanged';
   }catch(e){
