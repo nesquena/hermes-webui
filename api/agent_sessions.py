@@ -202,6 +202,31 @@ def _optional_col(name: str, columns: set[str], fallback: str = "NULL") -> str:
     return f"s.{name}" if name in columns else f"{fallback} AS {name}"
 
 
+def _effective_source_sql(columns: set[str]) -> str:
+    """SQL for the surface that made a session, ready for SELECT or WHERE.
+
+    Newer Hermes Agent stores every local interactive surface (cli, tui, gui,
+    acp) as ``source='local'`` and keeps the real surface in
+    ``created_source``. Read such a row as its ``created_source`` so it gets
+    the same label, bucket and filters as before that storage change (#8674).
+    Older databases, rows without ``created_source`` and every other source
+    are unchanged.
+    """
+    if 'source' not in columns:
+        return "NULL"
+    if 'created_source' not in columns:
+        return "s.source"
+    return (
+        "(CASE WHEN LOWER(TRIM(COALESCE(s.source, ''))) = 'local' "
+        "AND TRIM(COALESCE(s.created_source, '')) != '' "
+        "THEN LOWER(TRIM(s.created_source)) ELSE s.source END)"
+    )
+
+
+def _source_col(columns: set[str]) -> str:
+    return f"{_effective_source_sql(columns)} AS source"
+
+
 def _safe_lower(value) -> str:
     return str(value or "").strip().lower()
 
@@ -861,13 +886,13 @@ def read_importable_agent_session_rows(
             included = tuple(str(source) for source in include_sources if source)
             if included:
                 placeholders = ", ".join("?" for _ in included)
-                where_clauses.append(f"s.source IN ({placeholders})")
+                where_clauses.append(f"{_effective_source_sql(session_cols)} IN ({placeholders})")
                 params.extend(included)
         if exclude_sources:
             excluded = tuple(str(source) for source in exclude_sources if source)
             if excluded:
                 placeholders = ", ".join("?" for _ in excluded)
-                where_clauses.append(f"s.source NOT IN ({placeholders})")
+                where_clauses.append(f"{_effective_source_sql(session_cols)} NOT IN ({placeholders})")
                 params.extend(excluded)
         if project_assignment is not None:
             wanted = str(project_assignment).strip().lower()
@@ -988,7 +1013,7 @@ def read_importable_agent_session_rows(
 
         select_sql = f"""
             SELECT s.id, s.title, s.model, s.message_count,
-                   s.started_at, s.source,
+                   s.started_at, {_source_col(session_cols)},
                    {session_source_expr},
                    {model_config_expr},
                    {user_id_expr},
@@ -1185,7 +1210,7 @@ def read_assigned_project_row_counts(
             )
             if excluded:
                 placeholders = ", ".join("?" for _ in excluded)
-                where_clauses.append(f"s.source NOT IN ({placeholders})")
+                where_clauses.append(f"{_effective_source_sql(session_cols)} NOT IN ({placeholders})")
                 params.extend(excluded)
             cur.execute(
                 f"""
@@ -1262,7 +1287,7 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
             if not required.issubset(session_cols):
                 return _empty_lineage_report(sid)
 
-            source_expr = _optional_col('source', session_cols)
+            source_expr = _source_col(session_cols)
             session_source_expr = _optional_col('session_source', session_cols)
             model_config_expr = _optional_col('model_config', session_cols)
             title_expr = _optional_col('title', session_cols)
@@ -1403,7 +1428,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
             if 'parent_session_id' not in session_cols or 'end_reason' not in session_cols:
                 return {}
             session_source_expr = _optional_col('session_source', session_cols)
-            source_expr = _optional_col('source', session_cols)
+            source_expr = _source_col(session_cols)
             model_config_expr = _optional_col('model_config', session_cols)
             message_count_expr = _optional_col('message_count', session_cols, '0')
             # Scoped fetch via PRIMARY KEY + idx_sessions_parent rather than a
