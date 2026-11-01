@@ -14344,7 +14344,16 @@ function _renderGatewayStatus(r){
       return `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;background:var(--code-bg);border:1px solid var(--border2);border-radius:12px;font-size:12px;font-weight:500">${icon} ${esc(p.label)}</span>`;
     }).join(' ');
   }
-  const lastActive=r.last_active?`<span style="font-size:11px;color:var(--muted)">${esc(t('gateway_last_active'))}: ${esc(new Date(r.last_active).toLocaleString())}</span>`:'';
+  // #8621: the card shows one separator, and it is the one the translator
+  // chose. A label that already ends in a colon keeps it -- a full-width "：",
+  // or a French " : " -- and only a label with no colon gets the template's
+  // ": ". An ASCII colon is followed by a space, a full-width one is not.
+  const _laLabel=t('gateway_last_active');
+  const _laSep=/([：:])\s*$/u.exec(_laLabel);
+  const _laText=_laSep
+    ? _laLabel.slice(0,_laSep.index)+_laSep[1]+(_laSep[1]===':'?' ':'')
+    : _laLabel+': ';
+  const lastActive=r.last_active?`<span style="font-size:11px;color:var(--muted)">${esc(_laText)}${esc(new Date(r.last_active).toLocaleString())}</span>`:'';
   const sessionInfo=r.session_count?`<span style="font-size:11px;color:var(--muted)">${r.session_count} ${esc(r.session_count!==1?t('gateway_sessions'):t('gateway_session'))}</span>`:'';
   card.innerHTML=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></span><span style="font-size:13px;font-weight:500;color:#22c55e">${esc(t('gateway_running'))}</span></div>${badges?`<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${badges}</div>`:''}<div style="display:flex;gap:12px">${sessionInfo}${lastActive}</div>${_gatewayActionControls(r)}`;
 }

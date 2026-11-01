@@ -4094,11 +4094,22 @@ body.resizing .sidebar{transition:none!important;}
   font-weight:400;
   opacity:.82;
 }
+/* Running chip: the live label must not inherit the settled muted grey (2.86:1 light). */
+.tool-worklog-group[data-tool-worklog-group="1"][data-subagent-running="1"] .tool-worklog-label{color:var(--accent-text);opacity:1;}
 .tool-worklog-group[data-tool-worklog-group="1"]:not([data-run-activity-group="1"]) .tool-worklog-summary:hover{
   background:transparent;
 }
 .tool-worklog-group[data-tool-worklog-group="1"]:not([data-run-activity-group="1"]) .as-dot{
   display:none;
+}
+/* Running subagent: a solid accent dot with master's compositor-only ring pulse
+   (@keyframes wlring, as on the tool-card running dot), not a paint pulse. The
+   dot is --accent-text on purpose, to match its "Running" label (5.17:1 in light
+   theme), not the tool-card dot's --accent. */
+.tool-worklog-group[data-tool-worklog-group="1"][data-subagent-running="1"] .as-dot{display:block;position:relative;background:var(--accent-text);opacity:1;}
+.tool-worklog-group[data-tool-worklog-group="1"][data-subagent-running="1"] .as-dot::after{content:"";position:absolute;inset:0;border-radius:50%;background:var(--accent-text);animation:wlring 1.3s ease-out infinite;pointer-events:none;}
+@media (prefers-reduced-motion: reduce){
+  .tool-worklog-group[data-tool-worklog-group="1"][data-subagent-running="1"] .as-dot::after{animation:none;opacity:0;}
 }
 .tool-worklog-running-label{display:none;color:var(--accent-text);font-family:var(--font-mono);font-size:12px;font-weight:600;line-height:1.4;}
 .tool-worklog-group[data-tool-worklog-running="1"] .tool-worklog-running-label{display:inline-flex;}

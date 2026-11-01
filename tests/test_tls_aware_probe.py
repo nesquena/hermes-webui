@@ -40,12 +40,16 @@ def _free_port() -> int:
 
 
 class _HealthHandler(http.server.BaseHTTPRequestHandler):
+    # Frame the body with Content-Length, as the real /health does (api/routes.py
+    # answers HTTP/1.1 with a length). Without one, the body ends at connection
+    # close, and http.server closes the TLS socket without a close_notify alert.
+    # curl 8.18 on OpenSSL 3.5 (ubuntu-26.04 runners) rejects that as a possibly
+    # truncated transfer, so the probe failed against this fake server while the
+    # same probe against a length-framed server passed.
     def do_GET(self):  # noqa: N802
         body = b'{"status": "ok"}'
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
-        # Delimit the response without relying on TLS EOF: HTTPServer closes
-        # without close_notify, which strict curl TLS backends reject.
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
