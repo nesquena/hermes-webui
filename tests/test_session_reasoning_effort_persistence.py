@@ -32,6 +32,7 @@ from __future__ import annotations
 import io
 import json
 import pathlib
+import sys
 import threading
 from types import SimpleNamespace
 
@@ -165,7 +166,8 @@ def test_overlapping_share_save_does_not_erase_pick_persisted_in_its_pause(
     tmp_path, monkeypatch, path,
 ):
     """#8399 review: share create/revoke patch the sidecar under the session
-    persistence lock. Pause the share write at its sidecar replace, accept and
+    persistence lock. Pause the share write at its sidecar patch (under that
+    lock, before the index lock), accept and
     persist XHigh during the pause, resume, then reload cold. The reload must
     report XHigh: the share write may not carry its pre-pause copy over a pick
     that landed while it waited."""
@@ -188,21 +190,31 @@ def test_overlapping_share_save_does_not_erase_pick_persisted_in_its_pause(
 
     paused = threading.Event()
     resume = threading.Event()
-    real_replace = models._replace_session_sidecar
+    real_fsync = models.os.fsync
 
-    def _pause_share_replace(tmp, target, sid_arg, *a, **kw):
-        if threading.current_thread().name == "share" and not paused.is_set():
-            paused.set()  # the share write holds the persistence lock here
-            assert resume.wait(10), "test never resumed the share replace"
-        return real_replace(tmp, target, sid_arg, *a, **kw)
+    def _pause_share_patch_fsync(fd):
+        # Pause at the share-field patch's own fsync: it runs under the session
+        # persistence lock but before the sidecar replace takes _INDEX_WRITE_LOCK.
+        # A pause inside that index lock would block the pick on the index lock
+        # too, and the test would pass without the persistence lock (#8399
+        # review, release fold). The caller check skips the share snapshot's
+        # own fsync in shares._write_json_atomic.
+        if (
+            threading.current_thread().name == "share"
+            and sys._getframe(1).f_code.co_name == "update_session_share_fields"
+            and not paused.is_set()
+        ):
+            paused.set()  # patched bytes written under the persistence lock
+            assert resume.wait(10), "test never resumed the share write"
+        return real_fsync(fd)
 
-    monkeypatch.setattr(models, "_replace_session_sidecar", _pause_share_replace)
+    monkeypatch.setattr(models.os, "fsync", _pause_share_patch_fsync)
 
     share = threading.Thread(
         target=post.post, args=("share", path, {"session_id": sid}), name="share",
     )
     share.start()
-    assert paused.wait(10), "the share write never reached its sidecar replace"
+    assert paused.wait(10), "the share write never reached its sidecar patch"
     SESSIONS.pop(sid, None)  # count-cap eviction: the pick reloads its own copy
     pick = threading.Thread(
         target=post.post, args=("pick", "/api/reasoning", {"effort": "xhigh", "session_id": sid}),

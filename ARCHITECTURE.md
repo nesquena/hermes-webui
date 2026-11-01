@@ -1850,7 +1850,11 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
                                -> {"stream_id", "session_id"}. Starts agent daemon thread.
     /api/chat                  (fallback, sync) {"session_id", "message", "model"?, "workspace"?}
                                -> blocks until agent finishes. Returns full result.
-    /api/share/create          {"session_id"} -> creates or refreshes a public read-only snapshot link
+    /api/share/create          {"session_id"} -> creates or refreshes a public read-only snapshot link.
+                               A recorded token is reused only while its snapshot is live: a
+                               revoked token is never republished (the handler checks it, and
+                               the snapshot writer leaves a revoked file untouched and mints a
+                               new token), so an old URL stays dead for anyone who kept it.
     /api/share/revoke          {"session_id"} -> revokes the current public snapshot link.
                                The token is resolved from the durable session sidecar under a
                                per-session *share* lock (create/revoke only — never the agent
@@ -1860,6 +1864,10 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
                                reverted. The call fails with an error if the snapshot still
                                resolves afterwards, and a session with no share revokes
                                idempotently with {"ok": true}.
+                               Both calls patch only the two share fields in the sidecar, and a
+                               whole-session save made from a copy loaded before that patch
+                               keeps the persisted share pair instead of writing back its own
+                               stale one.
     /api/approval/respond      {"session_id", "choice": once|session|always|deny}
                                -> {"ok": true, "choice": choice}
 

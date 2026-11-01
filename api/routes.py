@@ -18836,6 +18836,12 @@ def handle_post(handler, parsed) -> bool:
                 share_token=share_meta["share_token"],
                 share_created_at=share_meta["share_created_at"],
             )
+            # Mirror again now the patch is on disk (#8399 review, release
+            # fold): a resident save landing between the first mirror and the
+            # patch adopts the pre-patch pair from disk under the stale-save
+            # baseline, so the cached copy would serve the old pair until its
+            # next save.
+            _mirror_share_fields_to_cached_session(sid, persisted_session)
         finally:
             share_lock.release()
         _publish_session_list_changed(
@@ -18933,6 +18939,12 @@ def handle_post(handler, parsed) -> bool:
                 share_token=None,
                 share_created_at=None,
             )
+            # Mirror again now the patch is on disk (#8399 review, release
+            # fold): a resident save landing between the first mirror and the
+            # patch adopts the revoked token from disk under the stale-save
+            # baseline, and /api/session would keep reporting the dead link
+            # until that copy's next save.
+            _mirror_share_fields_to_cached_session(sid, target_session)
         finally:
             share_lock.release()
         _publish_session_list_changed(
