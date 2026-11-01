@@ -1354,20 +1354,22 @@ def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None)
         # have behind > 0 after fetching a newer tag that HEAD already contains
         # (#3140). In both cases applying the tag would no-op, move backwards,
         # or fail fast-forward; branch comparison is the truthful update path.
-        # Short-circuit `or` preserves the original minimal git-call pattern.
-        if (
+        #
+        # The stable-channel suppression covers only a checkout still on the
+        # stable line (HEAD holds or has passed the latest tag). A diverged
+        # branch has no stable position: suppressing there hid real drift on the
+        # check side and advertised nothing to apply, so both sides now fall
+        # through to the branch comparison.
+        on_stable_line = (
             (behind == 0 and _head_is_past_latest_tag(path, current_tag, channel))
             or (behind > 0 and _head_contains_ref(path, latest_tag))
-            or (behind > 0 and not _can_fast_forward_to(path, latest_tag))
-        ):
+        )
+        if on_stable_line and suppress_stable_fallthrough:
             # WebUI stable: "HEAD past/contains the latest stable tag" means
             # up-to-date on the promoted subset — NOT a signal to advance to
             # master. Return None so the caller reports no update.
-            if suppress_stable_fallthrough:
-                return None
-            # Experimental / agent: preserve the historical branch fallthrough.
-            pass
-        else:
+            return None
+        if not (on_stable_line or (behind > 0 and not _can_fast_forward_to(path, latest_tag))):
             return latest_tag
 
     upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
@@ -1498,9 +1500,14 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     # Patch releases can land on a side branch while day-to-day installs track
     # main past an older tag. A positive tag-name gap then advertises an update
     # that `git pull --ff-only <latest-tag>` cannot reach.
+    #
+    # The stable-channel suppression must NOT apply here: it would claim "up to
+    # date" for a checkout on a diverged branch (HEAD neither contains the
+    # latest tag nor can fast-forward to it) — the one state with no stable
+    # position at all, and exactly where a real drift of hundreds of commits to
+    # origin/master hides behind "up to date". Falling through to the branch
+    # comparison reports the truth.
     if behind > 0 and not _can_fast_forward_to(path, latest_tag):
-        if suppress_stable_fallthrough:
-            return _channel_up_to_date_info(path, name, channel, current_tag, latest_tag)
         return None
 
     remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
