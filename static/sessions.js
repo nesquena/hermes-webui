@@ -6374,21 +6374,35 @@ function _positionSessionActionMenu(anchorEl){
       rect=_projectPickerAnchorRect(anchorEl,_projectPickerVisibleBounds());
     }
   }
+  // Fixed coordinates and getBoundingClientRect use the layout viewport, but
+  // the visible part can be smaller AND offset (Android browser chrome,
+  // on-screen keyboard, pinch zoom). A low row's menu placed against
+  // window.innerHeight runs off the bottom of the screen. The project picker
+  // already reads the visible box via _projectPickerVisibleBounds, so the
+  // session menu places against the same box. typeof-guarded so
+  // extracted-function Node harnesses stay self-contained.
+  const _menuBounds=(typeof _projectPickerVisibleBounds==='function')
+    ?_projectPickerVisibleBounds()
+    :{top:0,left:0,bottom:window.innerHeight,right:window.innerWidth};
+  const _vTop=Number.isFinite(_menuBounds.top)?_menuBounds.top:0;
+  const _vLeft=Number.isFinite(_menuBounds.left)?_menuBounds.left:0;
+  const _vBottom=Number.isFinite(_menuBounds.bottom)?_menuBounds.bottom:window.innerHeight;
+  const _vRight=Number.isFinite(_menuBounds.right)?_menuBounds.right:window.innerWidth;
   const menuW=Math.min(280, Math.max(220, _sessionActionMenu.scrollWidth || 220));
   let left=rect.pointAnchored?rect.left:rect.right-menuW;
-  if(left<8) left=8;
-  if(left+menuW>window.innerWidth-8) left=window.innerWidth-menuW-8;
+  if(left<_vLeft+8) left=_vLeft+8;
+  if(left+menuW>_vRight-8) left=_vRight-menuW-8;
   _sessionActionMenu.style.left=left+'px';
-  _sessionActionMenu.style.top='8px';
+  _sessionActionMenu.style.top=(_vTop+8)+'px';
   // Reset any prior clamp so we measure the menu's natural height.
   _sessionActionMenu.style.maxHeight='';
   const menuH=_sessionActionMenu.offsetHeight || 0;
   const margin=8;
-  const maxAvail=window.innerHeight-margin*2;
+  const maxAvail=Math.max(0,_vBottom-_vTop-margin*2);
   let top=rect.bottom+6;
   // Prefer flipping above the row when the menu would overflow the bottom and
   // there's room above.
-  if(top+menuH>window.innerHeight-margin && rect.top>menuH+12){
+  if(top+menuH>_vBottom-margin && rect.top>_vTop+menuH+12){
     top=rect.top-menuH-6;
   }
   // If the menu is taller than the viewport, or still overflows after the flip
@@ -6396,11 +6410,11 @@ function _positionSessionActionMenu(anchorEl){
   // its height to the viewport and let it scroll instead of clipping off-screen.
   if(menuH>maxAvail){
     _sessionActionMenu.style.maxHeight=maxAvail+'px';
-    top=margin;
+    top=_vTop+margin;
   } else {
     // Clamp vertically so the whole menu stays on-screen at both edges.
-    if(top+menuH>window.innerHeight-margin) top=window.innerHeight-margin-menuH;
-    if(top<margin) top=margin;
+    if(top+menuH>_vBottom-margin) top=_vBottom-margin-menuH;
+    if(top<_vTop+margin) top=_vTop+margin;
   }
   _sessionActionMenu.style.top=top+'px';
 }
