@@ -151,6 +151,18 @@ read the relevant RFC before editing. In the PR description, name the state laye
 or event/control surface affected and include a regression test or manual
 verification for the relevant invariant.
 
+- [`docs/media-serving.md`](media-serving.md):
+  current contract for the `/api/media` route: the ordinary allowlist (profile
+  homes, `/tmp`, the active workspace, `MEDIA_ALLOWED_ROOTS`) and the deny list
+  for Hermes state files, plus the `generated=1` mode the markdown renderer
+  uses for model-emitted generated images. Generated mode is plain mode PLUS
+  canonical containment inside an owning profile's `cache/images` root (checked
+  on the resolved path, so a symlinked cache cannot borrow a root) and an
+  image-extension requirement the server enforces. The client-side
+  `/cache/images/` check in `static/ui.js` is defence in depth, never the gate.
+  Start here before changing the media allowlist, the image-cache roots, the
+  generated-mode gates, or the renderer's bare-path branch (#7634, #8303).
+
 Proposed RFCs are review guardrails, not implementation authorization. Do not
 implement RFC fragments unless the task or tracking issue explicitly asks for
 that slice.
