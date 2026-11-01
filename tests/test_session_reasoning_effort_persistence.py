@@ -32,7 +32,6 @@ from __future__ import annotations
 import io
 import json
 import pathlib
-import sys
 import threading
 from types import SimpleNamespace
 
@@ -165,9 +164,11 @@ def _cold_effort(sid):
 def test_overlapping_share_save_does_not_erase_pick_persisted_in_its_pause(
     tmp_path, monkeypatch, path,
 ):
-    """Codex repro (e71fd219 gate): pause a share create/revoke after its save
-    read the persisted effort (Low), accept and persist XHigh, resume the
-    share save. A cold reload must report XHigh."""
+    """#8399 review: share create/revoke patch the sidecar under the session
+    persistence lock. Pause the share write at its sidecar replace, accept and
+    persist XHigh during the pause, resume, then reload cold. The reload must
+    report XHigh: the share write may not carry its pre-pause copy over a pick
+    that landed while it waited."""
     _isolate_session_store(tmp_path, monkeypatch)
     sid = "share-overlap-effort"
     seeded = _seed_low_session(tmp_path, sid)
@@ -178,7 +179,7 @@ def test_overlapping_share_save_does_not_erase_pick_persisted_in_its_pause(
     _stub_reasoning_profile_side_effects(monkeypatch)
     monkeypatch.setattr(routes, "_session_requires_cli_metadata_lookup", lambda s: False)
     monkeypatch.setattr(routes, "_publish_session_list_changed", lambda *a, **kw: None)
-    monkeypatch.setattr(routes, "create_or_refresh_share", lambda s: {
+    monkeypatch.setattr(routes, "write_share_snapshot", lambda snapshot, **kw: {
         "share_token": "tok", "share_created_at": 1.0, "share_title": "t",
         "share_message_count": 2, "share_updated_at": 1.0,
     })
@@ -187,35 +188,29 @@ def test_overlapping_share_save_does_not_erase_pick_persisted_in_its_pause(
 
     paused = threading.Event()
     resume = threading.Event()
-    real_dedupe = models._deduplicate_exact_stable_messages
+    real_replace = models._replace_session_sidecar
 
-    def _pause_share_save(messages):
-        caller = sys._getframe(1).f_code.co_name
-        if (
-            threading.current_thread().name == "share"
-            and caller in {"save", "_save_locked"}
-            and not paused.is_set()
-        ):
-            # The save has already read the persisted effort (Low) by now.
-            paused.set()
-            assert resume.wait(10), "test never resumed the share save"
-        return real_dedupe(messages)
+    def _pause_share_replace(tmp, target, sid_arg, *a, **kw):
+        if threading.current_thread().name == "share" and not paused.is_set():
+            paused.set()  # the share write holds the persistence lock here
+            assert resume.wait(10), "test never resumed the share replace"
+        return real_replace(tmp, target, sid_arg, *a, **kw)
 
-    monkeypatch.setattr(models, "_deduplicate_exact_stable_messages", _pause_share_save)
+    monkeypatch.setattr(models, "_replace_session_sidecar", _pause_share_replace)
 
     share = threading.Thread(
         target=post.post, args=("share", path, {"session_id": sid}), name="share",
     )
     share.start()
-    assert paused.wait(10), "the share save never reached its payload construction"
+    assert paused.wait(10), "the share write never reached its sidecar replace"
     SESSIONS.pop(sid, None)  # count-cap eviction: the pick reloads its own copy
     pick = threading.Thread(
         target=post.post, args=("pick", "/api/reasoning", {"effort": "xhigh", "session_id": sid}),
         name="pick",
     )
     pick.start()
-    pick.join(0.5)  # unserialized: the pick lands during the pause
-    pick_waited_for_share_save = pick.is_alive()
+    pick.join(0.5)  # serialized: the pick waits for the share's persistence lock
+    pick_waited_for_share_write = pick.is_alive()
     resume.set()
     share.join(10)
     pick.join(10)
@@ -223,15 +218,11 @@ def test_overlapping_share_save_does_not_erase_pick_persisted_in_its_pause(
     assert post.results["share"][0] == 200, post.results["share"]
     assert post.results["pick"][0] == 200, post.results["pick"]
 
-    assert _cold_effort(sid) == "xhigh", "the overlapping share save erased the accepted pick"
-    assert pick_waited_for_share_save, (
-        "the pick persisted while a save of the same session was between its "
-        "effort read and its replacement"
+    assert _cold_effort(sid) == "xhigh", "the overlapping share write erased the accepted pick"
+    assert pick_waited_for_share_write, (
+        "the pick persisted while a share write of the same session held the "
+        "persistence lock across its sidecar replace"
     )
-    # Not asserted: the share's own field. Under the kept #7881 contract the
-    # pick saves its whole (cached) object, and that snapshot was resolved
-    # before the unlocked share save landed -- the same lost-update class any
-    # two full-object writers have; see NOTES residual risks.
 
 
 def test_persistence_lock_is_shared_and_reentrant():
@@ -561,20 +552,15 @@ def test_pick_during_share_create_save_keeps_share_token_and_revoke_unpublishes(
 
     paused = threading.Event()
     resume = threading.Event()
-    real_dedupe = models._deduplicate_exact_stable_messages
+    real_replace = models._replace_session_sidecar
 
-    def _pause_share_save(messages):
-        caller = sys._getframe(1).f_code.co_name
-        if (
-            threading.current_thread().name == "share"
-            and caller in {"save", "_save_locked"}
-            and not paused.is_set()
-        ):
+    def _pause_share_replace(tmp, target, sid_arg, *a, **kw):
+        if threading.current_thread().name == "share" and not paused.is_set():
             paused.set()  # the share file exists; its token is not on disk yet
-            assert resume.wait(10), "test never resumed the share save"
-        return real_dedupe(messages)
+            assert resume.wait(10), "test never resumed the share replace"
+        return real_replace(tmp, target, sid_arg, *a, **kw)
 
-    monkeypatch.setattr(models, "_deduplicate_exact_stable_messages", _pause_share_save)
+    monkeypatch.setattr(models, "_replace_session_sidecar", _pause_share_replace)
 
     share = threading.Thread(
         target=post.post, args=("share", "/api/share/create", {"session_id": sid}), name="share",
