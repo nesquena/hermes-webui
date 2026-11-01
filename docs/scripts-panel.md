@@ -30,9 +30,9 @@ multi-line docstring still reads as a one-line summary in the panel.
 
 ## What the panel shows
 
-Each row carries the script name and the description extracted from its
+Each row carries the script name, its size, and the description extracted from its
 leading text. The panel is a listing: it has no viewer, and scripts are edited
-on the server. `/api/scripts/list` also returns each script's size and
+on the server. `/api/scripts/list` also returns each script's
 last-modified time, and `/api/scripts/raw` serves a script's content, for
 clients that want them.
 
@@ -119,7 +119,9 @@ else is skipped rather than reported with its target's description.
 
 Two consequences are worth knowing:
 
-- On a platform without `O_NOFOLLOW`/`O_DIRECTORY` the listing is **refused**,
+- On a platform without `O_NOFOLLOW`/`O_DIRECTORY`, or whose `os.stat` lacks
+  `dir_fd` or `follow_symlinks=False` support (needed for the after-read
+  hardlink check), the listing is **refused**,
   and the refusal is reported rather than shown as an empty folder (see
   "A third state is a refusal" above).
 - A FIFO in the directory does not block the listing: the leaf is opened
@@ -132,7 +134,8 @@ different states: the listing carries an `exists` flag, and the panel shows
 yet." for the latter.
 
 A third state is a **refusal**: on a platform without `O_NOFOLLOW`/
-`O_DIRECTORY` the scripts directory cannot be opened safely, so the listing
+`O_DIRECTORY`, or without `os.stat` `dir_fd`/`follow_symlinks=False`
+support, the scripts directory cannot be read safely, so the listing
 cannot be produced at all. That is not the same fact as "this profile has no
 scripts", and the panel does not pretend it is — the listing carries an
 `unavailable` field with the reason, and the panel shows "Scripts are
@@ -172,6 +175,9 @@ The subtab copy lives in the `en` locale only and rides the existing
 - `tests/test_issue7685_scripts_panel_round4_opacity_ownership.py` — pane
   ownership during a profile switch.
 - `tests/test_issue7685_scripts_panel_round5_ux.py` — the UX review fixes.
+- `tests/test_issue8721_scripts_panel_hardening.py` — the #8721 hardening:
+  linear description parse, hardlink refusal before and after the read,
+  bounded listing, and capability refusals.
 - `tests/test_issue7685_scripts_tab_jobs_wording.py` — the Jobs/Scripts
   wording.
 - `tests/test_issue7685_scripts_panel_i18n_fallback.py` — the copy stays in

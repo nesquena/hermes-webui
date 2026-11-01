@@ -41,7 +41,8 @@ _MAX_SCRIPT_BYTES = 256 * 1024  # 256 KiB cap per read
 # a 4 KiB read and a parse, so an agent that writes thousands of files into
 # scripts/ must not turn one panel refresh into unbounded work: at most
 # _MAX_LISTED_SCRIPTS are described. Walking a name is cheap with a lazy
-# scandir (~0.7 us), so the entry cap only stops a pathological directory.
+# scandir (a few microseconds), so the entry cap only stops a pathological
+# directory.
 # A listing cut short by either cap is reported with ``truncated: true``.
 _MAX_LIST_ENTRIES = 100000
 _MAX_LISTED_SCRIPTS = 1000
@@ -471,10 +472,11 @@ def list_scripts() -> dict:
             # are only those among the entries walked, which depends on
             # directory order; ``truncated`` says so either way.
             names, truncated = _bounded_script_names(base, _MAX_LIST_ENTRIES)
-            candidates = sorted((base / n for n in names), key=lambda e: e.name.lower())
-            if len(candidates) > _MAX_LISTED_SCRIPTS:
+            names.sort(key=str.lower)
+            if len(names) > _MAX_LISTED_SCRIPTS:
                 truncated = True
-                candidates = candidates[:_MAX_LISTED_SCRIPTS]
+                names = names[:_MAX_LISTED_SCRIPTS]
+            candidates = [base / n for n in names]
             for entry in candidates:
                 # Acquire a validated descriptor FIRST: no preview metadata
                 # is read from anything that is not a regular file pinned
