@@ -3677,6 +3677,8 @@ from api.config import (
     PENDING_GOAL_CONTINUATION,
     _get_config_path,
     _load_yaml_config_file,
+    _load_yaml_config_file_raw,
+    _has_env_ref,
     _save_yaml_config_file,
     reload_config,
     get_config_for_profile_home,
@@ -8963,7 +8965,7 @@ def _read_profile_model_config(
         return None, None, None
 
     try:
-        from api.profiles import get_hermes_home_for_profile
+        from api.profiles import expand_profile_config, get_hermes_home_for_profile
 
         _profile_name = str(session.profile or "")
         _profile_home = get_hermes_home_for_profile(_profile_name)
@@ -8973,11 +8975,18 @@ def _read_profile_model_config(
         _pcfg = _read_profile_config_cached(_profile_name, _profile_cfg_path)
         if _pcfg is None:
             return None, None, None
+        # The cached parse is RAW: config.yaml keeps ``${VAR}`` references
+        # (#8032). Resolve them under the session profile's env binding, and
+        # treat a provider/default that stays unresolved as absent rather than
+        # forwarding the placeholder.
+        _pcfg = expand_profile_config(_profile_home, _pcfg)
         _model_cfg = _pcfg.get("model") or {}
         if not isinstance(_model_cfg, dict):
             return None, None, _pcfg
         _provider = (_model_cfg.get("provider") or "").strip() or None
         _default = (_model_cfg.get("default") or "").strip() or None
+        _provider = None if _has_env_ref(_provider) else _provider
+        _default = None if _has_env_ref(_default) else _default
     except Exception:
         logger.warning(
             "profile provider read failed for %r",
@@ -9081,10 +9090,9 @@ def _read_profile_config_cached(profile_name: str, cfg_path: str) -> dict | None
 def _sync_routing_kwargs(profile_cfg: dict | None, agent_params: set) -> dict:
     """Build the sync POST /api/chat provider_routing kwargs from a profile config.
 
-    ``profile_cfg`` is the raw dict returned by ``_read_profile_model_config()``:
-    a plain ``yaml.safe_load`` of the profile's ``config.yaml`` with NO env
-    expansion (that only runs in the main ``get_config()`` loader, which caches
-    the expanded view). Expanding with the same ``_expand_env_vars()`` the
+    ``profile_cfg`` is the dict returned by ``_read_profile_model_config()``,
+    already expanded under the session profile's env binding (#8032), or a
+    raw dict from another caller. Expanding with the same ``_expand_env_vars()`` the
     loader uses keeps a ``provider_routing`` reference such as
     ``only: [${ROUTE_PROVIDER}]`` from reaching the Agent as the literal
     ``${ROUTE_PROVIDER}`` string (and hence into OpenRouter's request body).
@@ -9115,33 +9123,6 @@ def _sync_routing_kwargs(profile_cfg: dict | None, agent_params: set) -> dict:
     # The shared helper drops (with a warning) any routing value that still
     # carries an unresolved ${...} after expansion, on both chat paths.
     return _provider_routing_kwargs_for_agent(cfg, agent_params)
-
-
-def _load_profile_config_dict(session) -> dict | None:
-    """Load the session profile's config.yaml as a dict, or None."""
-    if not getattr(session, "profile", None):
-        return None
-    try:
-        from api.profiles import get_hermes_home_for_profile
-
-        _profile_cfg_path = os.path.join(
-            str(get_hermes_home_for_profile(session.profile)),
-            "config.yaml",
-        )
-        if not os.path.isfile(_profile_cfg_path):
-            return None
-        from api import yaml_compat as yaml
-
-        with open(_profile_cfg_path, encoding="utf-8") as _f:
-            _pcfg = yaml.safe_load(_f) or {}
-        return _pcfg if isinstance(_pcfg, dict) else None
-    except Exception:
-        logger.warning(
-            "profile config read failed for %r",
-            getattr(session, "profile", None),
-            exc_info=True,
-        )
-        return None
 
 
 def _ordered_custom_provider_model_ids(entry: dict) -> list[str]:
@@ -34798,13 +34779,44 @@ def _normalize_names_list(names) -> list[str]:
 
 
 def _toggle_name_in_list(names, name: str, enabled: bool) -> list[str]:
-    """Add or remove *name* from *names*, returning a new list."""
-    names = _normalize_names_list(names)
+    """Add or remove *name* from *names*, returning the new field value."""
+    return _toggle_skill_name_value(names, name, enabled)[0]
+
+
+def _toggle_skill_name_value(raw_value, name: str, enabled: bool):
+    """Toggle *name* in one RAW ``disabled`` field; return ``(value, resolved_ref)``.
+
+    The field is edited in its raw form so ``${VAR}`` references survive the
+    save (#8032), but every decision uses the names the READER sees
+    (``_get_disabled_skill_names_for_profile``: expand first, then decode a
+    serialized list and strip each name):
+
+    * entries compare by their expanded, stripped name, so ``${SKILL}`` with
+      ``SKILL=" demo "`` is removed when enabling ``demo`` and never duplicated;
+    * a scalar reference that the edit doesn't need to touch is kept verbatim;
+    * a scalar reference that expands to a serialized LIST can't be kept as a
+      list entry (the reader would no longer decode it, silently enabling the
+      other names), so a partial edit writes the remaining resolved names
+      explicitly and reports ``resolved_ref=True``.
+    """
+    resolved = _normalize_names_list(_expand_env_vars(raw_value))
+    satisfied = (name not in resolved) if enabled else (name in resolved)
+    if isinstance(raw_value, str) and _has_env_ref(raw_value):
+        if satisfied:
+            return raw_value, False
+        raw_entries = _normalize_names_list(raw_value)
+        if _normalize_names_list(_expand_env_vars(raw_entries)) != resolved:
+            if enabled:
+                return [n for n in resolved if n != name], True
+            return resolved + [name], True
+    else:
+        raw_entries = _normalize_names_list(raw_value)
+    entry_names = [str(_expand_env_vars(entry)).strip() for entry in raw_entries]
     if enabled:
-        return [d for d in names if d != name]
-    if name not in names:
-        names.append(name)
-    return names
+        return [e for e, n in zip(raw_entries, entry_names, strict=True) if n != name], False
+    if name not in entry_names:
+        raw_entries.append(name)
+    return raw_entries, False
 
 
 def _handle_skill_toggle(handler, body):
@@ -34831,8 +34843,12 @@ def _handle_skill_toggle(handler, body):
         return bad(handler, f"Skill '{name}' not found", 404)
 
     config_path = _active_profile_config_path()
+    resolved_refs: list[str] = []
+    applied = False
     with _cfg_lock:
-        cfg = _load_yaml_config_file(config_path)
+        # RAW load (#8032 write rule): the profile's other ${VAR} references
+        # must be saved back verbatim, never as their resolved values.
+        cfg = _load_yaml_config_file_raw(config_path)
 
         # Ensure skills section exists as a dict
         if "skills" not in cfg or not isinstance(cfg["skills"], dict):
@@ -34840,25 +34856,50 @@ def _handle_skill_toggle(handler, body):
         skills_cfg = cfg["skills"]
 
         # Always update the global disabled list
-        skills_cfg["disabled"] = _toggle_name_in_list(
+        skills_cfg["disabled"], resolved_ref = _toggle_skill_name_value(
             skills_cfg.get("disabled"), name, enabled
         )
+        if resolved_ref:
+            resolved_refs.append("skills.disabled")
+        effective = skills_cfg["disabled"]
 
         # Write-through to platform_disabled.webui if it exists so that the
         # toggle takes effect for WebUI sessions (the agent checks the
         # platform-specific list first when HERMES_SESSION_PLATFORM=webui).
         platform_disabled = skills_cfg.get("platform_disabled")
         if isinstance(platform_disabled, dict) and "webui" in platform_disabled:
-            platform_disabled["webui"] = _toggle_name_in_list(
+            platform_disabled["webui"], resolved_ref = _toggle_skill_name_value(
                 platform_disabled["webui"], name, enabled
             )
+            if resolved_ref:
+                resolved_refs.append("skills.platform_disabled.webui")
+            effective = platform_disabled["webui"]
 
-        cfg["skills"] = skills_cfg
-        _save_yaml_config_file(config_path, cfg)
+        # Only save (and report ok) when the reader will see the requested state.
+        applied = (name in _normalize_disabled_set(_expand_env_vars(effective))) != enabled
+        if applied:
+            cfg["skills"] = skills_cfg
+            _save_yaml_config_file(config_path, cfg)
 
+    if not applied:
+        return bad(
+            handler,
+            f"Could not {'enable' if enabled else 'disable'} skill '{name}' in config.yaml",
+            409,
+        )
+    if resolved_refs:
+        logger.warning(
+            "Skill toggle for %r wrote explicit names to %s: the ${VAR} there expands "
+            "to a list, which a partial edit cannot keep as a reference",
+            name,
+            ", ".join(resolved_refs),
+        )
     reload_config()  # outside with block — reload_config() acquires the lock itself
     invalidate_profile_skills_stats()
-    return j(handler, {"ok": True, "name": name, "enabled": enabled})
+    payload = {"ok": True, "name": name, "enabled": enabled}
+    if resolved_refs:
+        payload["env_refs_resolved"] = resolved_refs
+    return j(handler, payload)
 
 
 def _handle_memory_write(handler, body):
