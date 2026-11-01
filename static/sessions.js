@@ -3295,7 +3295,8 @@ async function loadSession(sid){
     if(liveTailPrepared){
       S.messages=_dropCurrentTurnAssistantMessages(S.messages);
     }
-    S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);
+    S.messages=_mergeInflightTailMessages(S.messages,inflightMessages,
+      _inflightTurnOwnerStart(S.session,INFLIGHT[sid],activeStreamId));
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
     if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
       INFLIGHT[sid].messages=S.messages;
@@ -4669,7 +4670,7 @@ function _recoveredPromptCopyForTurn(row,pendingMsg,turnStart){
   if(!Number.isFinite(start)||start<=0) return false;
   if(row!==pendingMsg&&!_sameTranscriptMessage(row,pendingMsg)) return false;
   const owner=Number(row._recoveredTurnStart);
-  if(row._recoveredTurnStart!==undefined&&row._recoveredTurnStart!==null&&Number.isFinite(owner)){
+  if(row._recoveredTurnStart!==undefined&&row._recoveredTurnStart!==null&&Number.isFinite(owner)&&owner>0){
     return Math.abs(owner-start)<=_RECOVERED_PROMPT_TS_EPSILON;
   }
   const ts=_messageTimestampValue(row);
@@ -5108,9 +5109,33 @@ function _prepareRunningLiveTail(baseMessages,inflightMessages){
   return !!_messageComparableText(live);
 }
 
-function _mergeInflightTailMessages(baseMessages, inflightMessages){
+// The server's start time for the turn an INFLIGHT snapshot belongs to, or 0
+// when that is not proven. INFLIGHT can come from local storage with no server
+// live snapshot, so only an active stream that the snapshot itself names (or
+// a snapshot that names no stream) makes `pending_started_at` its turn.
+function _inflightTurnOwnerStart(session,inflight,activeStreamId){
+  const active=String(activeStreamId||'').trim();
+  if(!active||!session) return 0;
+  const own=String((inflight&&inflight.streamId)||'').trim();
+  if(own&&own!==active) return 0;
+  const start=Number(session.pending_started_at);
+  return Number.isFinite(start)&&start>0?start:0;
+}
+
+// `turnOwnerStart` (optional): the server start of the turn this INFLIGHT tail
+// belongs to (_inflightTurnOwnerStart). When known it places the recovered
+// prompt instead of the prompt's client-clock `_ts`, which can trail the
+// server start by latency or skew and so claim a previous turn's rows, and it
+// stamps the copy so the pending merge reuses it rather than adding a second
+// one (`_recoveredPromptCopyForTurn`).
+function _mergeInflightTailMessages(baseMessages, inflightMessages, turnOwnerStart){
   const base=Array.isArray(baseMessages)?baseMessages:[];
   const inflight=Array.isArray(inflightMessages)?inflightMessages:[];
+  const ownerStart=Number.isFinite(Number(turnOwnerStart))&&Number(turnOwnerStart)>0?Number(turnOwnerStart):0;
+  const placeRecoveredPrompt=(row,turnStart)=>{
+    if(ownerStart) row._recoveredTurnStart=ownerStart;
+    merged.splice(_recoveredPromptTargetIndex(merged,turnStart),0,_markRecoveredPromptRow(row));
+  };
   let firstLiveIdx=-1;
   for(let i=0;i<inflight.length;i++){
     if(inflight[i]&&inflight[i]._live){firstLiveIdx=i;break;}
@@ -5138,18 +5163,26 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages){
       // unpersisted (deferred session saving). Turn ownership decides between
       // the two: the prompt goes in front of the first current-turn row, or
       // after the window when every loaded row is older than the turn start.
-      const turnStart=_messageTimestampValue(candidate)
+      // The server's turn start wins over the prompt's client-clock `_ts`.
+      const turnStart=ownerStart||_messageTimestampValue(candidate)
         ||Number(typeof S!=='undefined'&&S&&S.session&&S.session.pending_started_at)||0;
       const existingIdx=_existingRecoveredPromptIndex(merged,candidate);
       if(existingIdx>=0){
         const [existing]=merged.splice(existingIdx,1);
-        merged.splice(_recoveredPromptTargetIndex(merged,turnStart),0,_markRecoveredPromptRow(existing));
+        placeRecoveredPrompt(existing,turnStart);
         continue;
       }
       if(_hasCurrentTailUserDuplicate(merged,candidate)) continue;
-      merged.splice(_recoveredPromptTargetIndex(merged,turnStart),0,_markRecoveredPromptRow(candidate));
+      placeRecoveredPrompt(candidate,turnStart);
       continue;
     }
+    // The prompt an earlier merge already recovered (the same row, or the copy
+    // stamped for this turn) is never appended again: a load that keeps the
+    // cached transcript re-merges this tail over it, and activity after the
+    // copy hides it from the tail-duplicate check below. Text alone is not
+    // enough; an earlier turn may have sent the same words.
+    if(isUser&&tailIdx===promptTailIdx&&(merged.includes(candidate)
+      ||(ownerStart&&merged.some(m=>_recoveredPromptCopyForTurn(m,candidate,ownerStart))))) continue;
     const duplicate=isUser
       ? _hasCurrentTailUserDuplicate(merged,candidate)
       : merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,candidate));
@@ -5166,7 +5199,7 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages){
         // branch above enforces; only the paging condition differed.)
         const hasAnyUser=merged.some(m=>m&&String(m.role||'')==='user');
         if(!hasAnyUser){
-          const turnStart=_messageTimestampValue(candidate)
+          const turnStart=ownerStart||_messageTimestampValue(candidate)
             ||Number(typeof S!=='undefined'&&S&&S.session&&S.session.pending_started_at)||0;
           // Marked display-only like the windowed branch: the prompt is NOT in
           // the server's canonical transcript yet (deferred session saving),
@@ -5175,7 +5208,7 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages){
           // keep_count (saved row 0 would look like absolute 1). The marker
           // keeps `_messageSessionIndexForRawIdx()` excluding the prompt, and
           // a later canonical reload drops the display copy once it persists.
-          merged.splice(_recoveredPromptTargetIndex(merged,turnStart),0,_markRecoveredPromptRow(candidate));
+          placeRecoveredPrompt(candidate,turnStart);
           continue;
         }
       }

@@ -53,7 +53,12 @@ _UI_PRODUCER = (
 
 
 def _function_source(src: str, name: str) -> str:
-    start = src.index("function " + name + "(")
+    # A helper missing from the file under test (an older static/sessions.js) yields nothing, so a run against an
+    # older tree fails on behaviour (or a ReferenceError naming the helper) rather than at extraction.
+    marker = "function " + name + "("
+    if marker not in src:
+        return ""
+    start = src.index(marker)
     brace = src.index("{", start)
     depth = 0
     for i in range(brace, len(src)):
