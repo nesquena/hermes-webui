@@ -16,6 +16,32 @@ def _is_local_interactive_persisted_source(source):
     }
 
 
+# Accidental closes that Hermes keeps resumable (fallback for older Agents
+# without hermes_state_common.is_automatic_end_reason).
+_RESUMABLE_END_REASONS = frozenset({
+    "idle_timeout", "startup_orphan_reap", "ws_orphan_reap",
+})
+# Explicit conversation boundaries never become redirects, whatever the Agent says.
+_BOUNDARY_END_REASONS = frozenset({
+    "reset", "user_closed", "compression", "new_session",
+})
+
+
+def _is_resumable_end_reason(reason):
+    """True when a tip closed this way may still receive the next turn."""
+    if reason in (None, ""):
+        return True
+    if not isinstance(reason, str) or reason in _BOUNDARY_END_REASONS:
+        return False
+    if reason in _RESUMABLE_END_REASONS:
+        return True
+    try:
+        from hermes_state_common import is_automatic_end_reason
+        return is_automatic_end_reason(reason) is True
+    except Exception:
+        return False
+
+
 def durable_compression_continuation(session):
     """Return (sealed, resumable tip), without making a recovery write.
 
@@ -60,12 +86,12 @@ def durable_compression_continuation(session):
         for row in (parent, child):
             if row.get("profile_name") not in (None, "", profile):
                 return True, None
-        # Only the observed automatic idle closure is resumable here. Explicit
-        # resets/closures and unknown future reasons must not become redirects.
+        # Only accidental automatic closures (idle/orphan sweeps) are resumable
+        # here. Explicit resets/closures and unknown reasons must not redirect.
         reason = child.get("end_reason")
-        if reason not in (None, "", "idle_timeout"):
+        if not _is_resumable_end_reason(reason):
             return True, None
-        if child.get("ended_at") is not None and reason != "idle_timeout":
+        if child.get("ended_at") is not None and reason in (None, ""):
             return True, None
         if db.get_compression_tip(sid) != tip:
             return True, None

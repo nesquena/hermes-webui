@@ -105,7 +105,25 @@ def test_idle_tip_accepts_normal_persistence_without_reopening_parent(lineage):
     assert db.get_messages(tip)[-1]["content"] == "resume task"
 
 
-@pytest.mark.parametrize("reason", ["reset", "user_closed", "compression"])
+@pytest.mark.parametrize("reason", ["startup_orphan_reap", "ws_orphan_reap"])
+def test_orphan_reaped_tip_is_resumable_continuation(lineage, monkeypatch, reason):
+    db, session = lineage
+    db._conn.execute("UPDATE sessions SET end_reason=?, ended_at=1234.0 WHERE id='idlechild'", (reason,))
+    db._conn.commit()
+    assert routes._pre_compression_continuation_session_id(session) == "idlechild"
+    _assert_stale_post_rotation(session, monkeypatch, "idlechild")
+    assert db.get_session("sealedparent")["end_reason"] == "compression"
+    assert db.get_session("idlechild")["end_reason"] == reason
+
+
+def test_open_tip_is_resumable_continuation(lineage):
+    db, session = lineage
+    db._conn.execute("UPDATE sessions SET end_reason=NULL, ended_at=NULL WHERE id='idlechild'")
+    db._conn.commit()
+    assert routes._pre_compression_continuation_session_id(session) == "idlechild"
+
+
+@pytest.mark.parametrize("reason", ["reset", "user_closed", "compression", "new_session", "unknown_future_reason"])
 @pytest.mark.parametrize("ended_at", [None, 1234.0])
 def test_unknown_or_sealed_terminal_tip_is_not_redirected(lineage, reason, ended_at):
     db, session = lineage
