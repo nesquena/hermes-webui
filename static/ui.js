@@ -1982,7 +1982,14 @@ function _messageWindowSnapshot(){
         const r=paintedRect(el);return r.height>0&&r.bottom>top&&r.top<top+viewportHeight;
       });
       const landmark=landmarks[landmarkIndex]||node;
-      return {node:landmark,row:node,landmarkIndex,sessionIndex:Number(source.dataset.sessionMsgIdx),
+      // Display-only recovered rows (#8519/#8543) carry an EMPTY session index;
+      // Number('') is 0 and would anchor the reader on canonical message 0.
+      // Empty or non-integer means "no session index" — the content-key
+      // fallback owns those rows, same contract as the commit's restamp loop.
+      const _snapIdxRaw=source.dataset.sessionMsgIdx;
+      const _snapIdx=(_snapIdxRaw==null||_snapIdxRaw==='')?NaN:Number(_snapIdxRaw);
+      return {node:landmark,row:node,landmarkIndex,
+        sessionIndex:Number.isSafeInteger(_snapIdx)&&_snapIdx>=0?_snapIdx:null,
         activityKind:node===source?'':node.dataset.worklogAnchorKey?'reason':'tool',
         activityKey:node.dataset.toolDisclosureKey||'',
         activitySourceIndex:node.dataset.toolSourceSessionIdx??null,
@@ -2208,8 +2215,22 @@ function _restoreMessageWindowReader(target,anchor, maxDelta=Infinity){
     if(!row){
       const sources=Array.from(target.querySelectorAll('[data-msg-idx]'));
       // Content-prefix keys can repeat in earlier messages. Resolve the stable
-      // session-relative source first, regardless of DOM order.
-      row=sources.find(node=>Number(node.dataset.sessionMsgIdx)===anchor.sessionIndex);
+      // session-relative source first, regardless of DOM order. A null anchor
+      // session index (display-only recovered row; snapshot contract above)
+      // skips this match entirely, and the candidate itself must carry a
+      // canonical index: Number('') is 0, so an unguarded match latches the
+      // restore onto message 0 or another display-only row instead of falling
+      // through to the content key (re-gate 7902ab5f).
+      if(anchor.sessionIndex!=null&&Number.isSafeInteger(anchor.sessionIndex)){
+        row=sources.find(node=>{
+          if(node.dataset.displayOnly==='1') return false;
+          const _idxRaw=node.dataset.sessionMsgIdx;
+          if(_idxRaw==null||_idxRaw==='') return false;
+          const _idx=Number(_idxRaw);
+          if(!Number.isSafeInteger(_idx)||_idx<0) return false;
+          return _idx===anchor.sessionIndex;
+        });
+      }
       if(!row&&anchor.key){
         const matches=sources.filter(node=>node.dataset.messageAnchorKey===anchor.key);
         // If the source disappeared, only a unique content match may own the
@@ -20182,6 +20203,21 @@ function renderCompressionUi(){
 // in-session updates (new messages, edits, stream events).
 const _sessionHtmlCache=new Map();
 let _sessionHtmlCacheSid=null; // session_id currently rendered in the DOM
+// #5966 (Codex F3): persist which capped Transparent-Stream turns the user has
+// revealed, keyed by `${session_id}:${ownerRawIdx}`, so a switch-away/back or a
+// normal rebuild does NOT silently re-cap a turn the user already expanded. The
+// DOM `data-transparent-earlier-revealed` flag alone is lost across the
+// _sessionHtmlCache innerHTML round-trip; this survives it. Reveal also
+// invalidates that session's cached HTML so the stored markup isn't stale-capped.
+// Defined here (not stub-only) because _transparentSettledTurnWouldBeCapped
+// consults the set through a typeof guard (upstream contract, test_issue7677):
+// with only the guard and no definition the references are brick-class
+// undefineds on this branch AND on the merge with master (the branch's earlier
+// file-wide deletion won the merge), which the scope_undef_gate rejects.
+const _transparentRevealedTurns=new Set();
+function _transparentRevealKey(sessionId, ownerIdx){
+  return String(sessionId||(S.session&&S.session.session_id)||'')+':'+String(ownerIdx);
+}
 function clearMessageRenderCache(){
   _clearRenderCache();
   _sessionHtmlCache.clear();
@@ -23362,9 +23398,11 @@ function renderMessages(options){
   // still owns it (it drives its own state during a stream), so this sweep is
   // safe to run even while busy — a historical blank turn must not re-paint
   // blank during a follow-up stream (Opus advisor, stage-342). A SETTLED live
-  // turn is covered (#7676): the invariant runs after every preservation and
-  // swap decision above, so a transferred blank live node is revealed rather
-  // than pinned as the pane's zero-visible-content reply.
+  // turn transferred by the preserved-live reconcile is covered (#7676) by
+  // _reconcilePreservedLiveTurn itself, not by this sweep: both commit paths
+  // reconcile AFTER it (the owned-window branch returns right after its
+  // commit), so the transferred node's hidden prose is revealed by the
+  // normalize pass inside the reconcile before any swap branch runs.
   {
     const _turnHasVisibleContent=(turn)=>{
       if(typeof _assistantTurnHasVisibleRenderedSegment==='function'){
@@ -23450,9 +23488,15 @@ function renderMessages(options){
     const revision=_messageWindowRevision, data=S.messages;
     requestAnimationFrame(()=>{
       if(revision!==_messageWindowRevision||S.messages!==data||S.session?.session_id!==sid) return;
-      // Post-processing may grow mounted content, but must not restore an old
-      // reader after wheel/touch input. The next window pass samples live geometry.
       _postProcessWithAnchorSuppression(liveInner);
+      // Post-processing may grow mounted content (a ~287px owned-commit repaint
+      // after an older-history load on a cached session). Settle INSIDE the same
+      // guarded rAF: _settleMessageWindowReader re-checks the input epoch and
+      // scrollTop snapshot itself, so it restores only when no wheel/touch input
+      // happened, and refuses a stale revision, a pinned follower or a jump of
+      // more than two viewports. The old "next window pass samples live
+      // geometry" contract sampled a frame too late and painted the drift.
+      _settleMessageWindowReader();
     });
     if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
     return;
