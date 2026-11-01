@@ -10230,7 +10230,7 @@ def _lookup_gateway_session_identity(session_id: str) -> dict:
 # Sources kept out of the default projection with no bounded pass of their own.
 # A session the user explicitly opens from one of them is resolved by id, so it
 # stays reachable however many newer runs exist (#8265 review on #8349).
-_CLI_LOOKUP_FALLBACK_SOURCES = ("oneshot",)
+_CLI_LOOKUP_FALLBACK_SOURCES = ("oneshot", "tool")
 
 
 def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False) -> dict:
