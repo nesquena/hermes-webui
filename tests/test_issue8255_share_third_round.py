@@ -232,13 +232,22 @@ def test_revoke_keeps_a_write_that_lands_after_the_final_reload(
 def test_create_reuses_the_resident_token_when_the_sidecar_lost_it(
     isolated_state, monkeypatch
 ):
-    """The reviewer's scenario 2: a checkpoint committed without the token."""
+    """The reviewer's scenario 2: a checkpoint committed without the token while
+    the link is still live, so the resident token is reused rather than
+    orphaned. The link has to be live: a revoked one is never reused (#8399)."""
     import api.models as models
     import api.routes as routes
+    import api.shares as shares
     from api.models import Session
 
     sid = _make_session()
     # A published snapshot whose token only the live session still carries.
+    shares.write_share_snapshot(
+        {"title": "t", "messages": [], "message_count": 0},
+        token="tok-resident",
+        source_session_id=sid,
+    )
+    assert shares.load_share("tok-resident") is not None
     resident = Session.load(sid)
     assert resident is not None
     resident.share_token = "tok-resident"

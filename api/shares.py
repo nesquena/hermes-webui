@@ -1076,7 +1076,26 @@ def write_share_snapshot(snapshot: dict, *, token: str = "", source_session_id: 
     """
     with _SHARE_LOCK:
         _ensure_share_dir()
-        token = str(token or "").strip() or secrets.token_urlsafe(18)
+        token = str(token or "").strip()
+        existing = None
+        path = _share_path(token) if token else None
+        if path is not None and path.exists():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                logger.debug("Ignoring malformed share snapshot at %s", path, exc_info=True)
+                existing = None
+            if isinstance(existing, dict) and existing.get("revoked_at"):
+                # The link was revoked: republishing this token would bring the
+                # old URL back to life for anyone who kept it, without issuing a
+                # new one. Keep the tombstone and mint a fresh token instead
+                # (#8399 review).
+                token = ""
+                path = None
+                existing = None
+        if path is None:
+            token = secrets.token_urlsafe(18)
+            path = _share_path(token)
         now = time.time()
         payload = {
             "token": token,
@@ -1088,14 +1107,8 @@ def write_share_snapshot(snapshot: dict, *, token: str = "", source_session_id: 
             "updated_at": now,
             "revoked_at": None,
         }
-        path = _share_path(token)
-        if path.exists():
-            try:
-                existing = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(existing, dict):
-                    payload["created_at"] = existing.get("created_at") or now
-            except Exception:
-                logger.debug("Ignoring malformed share snapshot at %s", path, exc_info=True)
+        if isinstance(existing, dict):
+            payload["created_at"] = existing.get("created_at") or now
         _write_json_atomic(path, payload)
     return {
         "share_token": token,

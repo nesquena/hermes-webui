@@ -18805,6 +18805,14 @@ def handle_post(handler, parsed) -> bool:
                 # second one that would orphan that link (#8255 review, third
                 # round).
                 durable_token = _resident_share_token(sid)
+            # A token whose link was revoked must never be reused: republishing
+            # it makes the old URL readable again for anyone who kept it, and no
+            # new link is ever issued (#8399 review). The sidecar can still name
+            # one after a revoke whose write was lost, or when this request
+            # resolved a copy that predates the revoke, so the token has to prove
+            # it is live before the snapshot writer may keep it.
+            if durable_token and load_share(durable_token) is None:
+                durable_token = ""
             share_meta = write_share_snapshot(
                 snapshot,
                 token=durable_token,

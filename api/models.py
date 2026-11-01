@@ -2005,6 +2005,10 @@ class Session:
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
         self.share_token = str(share_token).strip() if share_token else None
         self.share_created_at = share_created_at
+        # The share pair this object last loaded or saved; save() uses it to
+        # tell an own change from a stale snapshot (#8399).
+        self._share_token_saved = self.share_token
+        self._share_created_at_saved = self.share_created_at
         self.skill_provenance_generation = max(
             0,
             _parse_nonnegative_int(kwargs.get('skill_provenance_generation')) or 0,
@@ -2102,6 +2106,21 @@ class Session:
                 # return) or failed (raise) save below cannot leave the
                 # adopted value looking like this object's own change.
                 self._reasoning_effort_saved = on_disk
+        # #8399: the share pair carries the same stale-snapshot class, and a
+        # writer that resolved its copy before a share create/revoke and saves
+        # after it puts its own older pair back -- orphaning a live snapshot on
+        # create, or restoring a revoked token on revoke. Adopt the on-disk pair
+        # when this object has not changed it since its baseline.
+        if (
+            self.share_token == getattr(self, '_share_token_saved', self.share_token)
+            and self.share_created_at
+            == getattr(self, '_share_created_at_saved', self.share_created_at)
+        ):
+            on_disk_share = _persisted_share_fields(self.path)
+            if on_disk_share is not _SHARE_FIELDS_ABSENT:
+                self.share_token, self.share_created_at = on_disk_share
+                self._share_token_saved = self.share_token
+                self._share_created_at_saved = self.share_created_at
         self._webui_pending_user_timestamp_identity = (
             _validated_webui_pending_user_timestamp_identity(
                 self, getattr(self, '_webui_pending_user_timestamp_identity', None)
@@ -2407,6 +2426,8 @@ class Session:
         # The value this save actually wrote, not one set on the live object
         # after the payload was built.
         self._reasoning_effort_saved = written_reasoning_effort
+        self._share_token_saved = self.share_token
+        self._share_created_at_saved = self.share_created_at
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
@@ -6288,6 +6309,61 @@ def _persisted_reasoning_effort(path):
     if 'reasoning_effort' not in data:
         return _REASONING_EFFORT_ABSENT
     return _normalize_persisted_reasoning_effort(data['reasoning_effort'])
+
+
+_SHARE_FIELDS_ABSENT = object()
+
+
+def _normalize_persisted_share_token(value):
+    text = str(value).strip() if value else ''
+    return text or None
+
+
+def _persisted_share_fields(path):
+    """The sidecar's persisted ``(share_token, share_created_at)`` (#8399).
+
+    Mirrors ``_persisted_reasoning_effort``: the bounded metadata prefix answers
+    the common case, a prefix miss parses the whole sidecar, and only a missing
+    file or a parsed sidecar without the key reports absence. A sidecar that
+    exists but cannot be read raises OSError, so save() fails closed instead of
+    writing a share pair it could not compare.
+    """
+    parsed = None
+    try:
+        raw = _read_metadata_json_prefix(path)
+        parsed = json.loads(raw) if raw else None
+    except FileNotFoundError:
+        return _SHARE_FIELDS_ABSENT
+    except (OSError, ValueError):
+        parsed = None
+    if isinstance(parsed, dict) and 'share_token' in parsed:
+        return (
+            _normalize_persisted_share_token(parsed.get('share_token')),
+            parsed.get('share_created_at'),
+        )
+    try:
+        text = Path(path).read_text(encoding='utf-8')
+    except FileNotFoundError:
+        return _SHARE_FIELDS_ABSENT
+    except UnicodeDecodeError:
+        text = None
+    data = None
+    if text is not None:
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+    if not isinstance(data, dict):
+        logger.warning(
+            "session sidecar %s is not a JSON object; no persisted share fields to keep", path,
+        )
+        return _SHARE_FIELDS_ABSENT
+    if 'share_token' not in data:
+        return _SHARE_FIELDS_ABSENT
+    return (
+        _normalize_persisted_share_token(data.get('share_token')),
+        data.get('share_created_at'),
+    )
 
 
 # #7881: per-session reentrant persistence locks. Every Session.save() of one

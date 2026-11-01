@@ -32,7 +32,6 @@ from __future__ import annotations
 import io
 import json
 import pathlib
-import sys
 import threading
 from types import SimpleNamespace
 
@@ -189,15 +188,15 @@ def test_overlapping_share_save_does_not_erase_pick_persisted_in_its_pause(
 
     paused = threading.Event()
     resume = threading.Event()
-    real_fsync = models.os.fsync
+    real_replace = models._replace_session_sidecar
 
-    def _pause_share_fsync(fd):
+    def _pause_share_replace(tmp, target, sid_arg, *a, **kw):
         if threading.current_thread().name == "share" and not paused.is_set():
-            paused.set()  # patched bytes written, replace not reached: the window
-            assert resume.wait(10), "test never resumed the share write"
-        return real_fsync(fd)
+            paused.set()  # the share write holds the persistence lock here
+            assert resume.wait(10), "test never resumed the share replace"
+        return real_replace(tmp, target, sid_arg, *a, **kw)
 
-    monkeypatch.setattr(models.os, "fsync", _pause_share_fsync)
+    monkeypatch.setattr(models, "_replace_session_sidecar", _pause_share_replace)
 
     share = threading.Thread(
         target=post.post, args=("share", path, {"session_id": sid}), name="share",
@@ -553,15 +552,15 @@ def test_pick_during_share_create_save_keeps_share_token_and_revoke_unpublishes(
 
     paused = threading.Event()
     resume = threading.Event()
-    real_fsync = models.os.fsync
+    real_replace = models._replace_session_sidecar
 
-    def _pause_share_fsync(fd):
+    def _pause_share_replace(tmp, target, sid_arg, *a, **kw):
         if threading.current_thread().name == "share" and not paused.is_set():
             paused.set()  # the share file exists; its token is not on disk yet
-            assert resume.wait(10), "test never resumed the share write"
-        return real_fsync(fd)
+            assert resume.wait(10), "test never resumed the share replace"
+        return real_replace(tmp, target, sid_arg, *a, **kw)
 
-    monkeypatch.setattr(models.os, "fsync", _pause_share_fsync)
+    monkeypatch.setattr(models, "_replace_session_sidecar", _pause_share_replace)
 
     share = threading.Thread(
         target=post.post, args=("share", "/api/share/create", {"session_id": sid}), name="share",
