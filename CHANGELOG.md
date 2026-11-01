@@ -431,6 +431,8 @@
 
 ### Changed
 
+- **Slash menu polish.** `/pet` shows its argument hint, every command row uses the same `<required>` / `[optional]` argument notation, and typing a hidden registry command such as `/agents` gets the CLI-only explainer instead of being sent to the model as plain text. `/help` shows every option of a usage hint. Thanks @happy5318. (#7683, fixes #7675)
+
 - **A running subagent's transcript shows its live work.** Opening a delegated subagent while it runs used to show one collapsed, empty "Processed" chip that never updated until a reload. Its last turn now opens with every step's thinking and tool cards, the newest step reads "Running", the page follows the running child, and the steps settle to the usual collapsed chips when it finishes. The parent's delegate card is named by the subagent's goal. Thanks @carlotestor. (#7885)
 
 - **German: 208 strings that still showed English are translated.** MCP (37), Settings and composer (116) and slash commands (55). Thanks @solarmaster961. (#8291, #8292, #8293)

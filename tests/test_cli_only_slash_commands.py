@@ -95,7 +95,10 @@ def test_frontend_fetches_bundle_command_metadata_lazily():
 def test_frontend_matches_agent_command_aliases():
     helper_idx = COMMANDS_JS.find("async function getAgentCommandMetadata")
     assert helper_idx != -1
-    helper = COMMANDS_JS[helper_idx : helper_idx + 700]
+    # #8203's name-first -> alias -> slug-variant structure (with its three
+    # explanatory comment blocks) pushes the pins ~60 chars past the old 700
+    # bound; the assertions below are unchanged, only the window is wider.
+    helper = COMMANDS_JS[helper_idx : helper_idx + 800]
     assert "cmd.aliases" in helper
     assert "some(a=>String(a||'').toLowerCase()===needle)" in helper
 
@@ -108,15 +111,34 @@ def test_frontend_can_execute_agent_commands_via_api_endpoint():
     assert COMMANDS_JS.count("api('/api/commands/exec'") == 1
 
 
-def test_cli_only_response_mentions_webui_and_cli_scope():
+def test_cli_only_response_mentions_webui_scope():
     assert "function cliOnlyCommandResponse" in COMMANDS_JS
-    assert "Hermes CLI-only command" in COMMANDS_JS
-    assert "cannot run inside the WebUI" in COMMANDS_JS
+    # #7683 review: "is only available in the Hermes CLI" replaced the longer
+    # "is a Hermes CLI-only command and cannot run inside the WebUI" (UX gate copy).
+    assert "is only available in the Hermes CLI" in COMMANDS_JS
+    assert "cannot run inside the WebUI" not in COMMANDS_JS
+
+
+def test_prompt_style_cli_only_response_points_at_a_bare_prompt():
+    """Prompt-style registry commands (/plan, /review, /learn) tell the user
+    their request is ALREADY in the composer, reworded to keep the command's
+    intent, and to send it (#7683 review round 3 + UX gate)."""
+    assert "const PROMPT_STYLE_CLI_ONLY_COMMANDS=new Set(['plan','review','learn']);" in COMMANDS_JS
+    response_idx = COMMANDS_JS.find("function cliOnlyCommandResponse")
+    response = COMMANDS_JS[response_idx : COMMANDS_JS.index("\n}\n", response_idx)]
+    assert "PROMPT_STYLE_CLI_ONLY_COMMANDS.has(name)" in response
+    # The old wording ("Send it without the slash...") read as an
+    # instruction to retype the whole prompt, and following it literally
+    # produced "plan write a migration plan…".
+    assert "Send it without the slash to ask the agent directly." not in response
+    assert "Your request is in the composer, reworded as a normal message." in response
+    assert "Edit it if needed, then send it." in response
+    assert "Press Send to ask the agent directly." not in response
 
 
 def test_browser_cli_only_response_explains_server_side_browser_tools():
     response_idx = COMMANDS_JS.find("function cliOnlyCommandResponse")
-    response = COMMANDS_JS[response_idx : response_idx + 900]
+    response = COMMANDS_JS[response_idx : COMMANDS_JS.index("\n}\n", response_idx)]
     assert "if(name==='browser')" in response
     assert "configured server-side" in response
     assert "`/browser` itself only works in `hermes chat`" in response
@@ -318,10 +340,13 @@ def test_agent_command_metadata_helper_resolves_name_and_alias():
         const byAlias = await getAgentCommandMetadata('browse');
         const unknown = await getAgentCommandMetadata('does-not-exist');
         return {
-          by_name: byName && byName.name,
-          by_alias: byAlias && byAlias.name,
-          cli_only: byAlias && byAlias.cli_only === true,
-          unknown: unknown === null
+          by_name: byName && byName.command && byName.command.name,
+          by_alias: byAlias && byAlias.command && byAlias.command.name,
+          cli_only: byAlias && byAlias.command && byAlias.command.cli_only === true,
+          available: byName && byName.available === true
+            && byAlias && byAlias.available === true
+            && unknown && unknown.available === true,
+          unknown: unknown && unknown.command === null
         };
         """
     )
@@ -330,6 +355,7 @@ def test_agent_command_metadata_helper_resolves_name_and_alias():
         "by_name": "browser",
         "by_alias": "browser",
         "cli_only": True,
+        "available": True,
         "unknown": True,
     }
 
@@ -339,12 +365,12 @@ def test_cli_only_response_helper_uses_canonical_command_name():
         """
         const meta = await getAgentCommandMetadata('browse');
         return {
-          response: cliOnlyCommandResponse('browse', meta)
+          response: cliOnlyCommandResponse('browse', meta && meta.command)
         };
         """
     )
 
-    assert "`/browser` is a Hermes CLI-only command" in result["response"]
+    assert "`/browser` is only available in the Hermes CLI" in result["response"]
     assert "Attach browser tools" in result["response"]
     assert "configured server-side" in result["response"]
 
@@ -598,7 +624,7 @@ def test_send_intercepts_cli_only_commands_before_agent_round_trip():
 
     assert "await getAgentCommandMetadata(_parsedCmd.name)" in intercept
     assert "if(_agentCmd&&_agentCmd.cli_only)" in intercept
-    assert "cliOnlyCommandResponse(_parsedCmd.name,_agentCmd)" in intercept
+    assert "cliOnlyCommandResponse(_parsedCmd.name,_agentCmd,_parsedCmd.args)" in intercept
     assert "return;" in intercept
 
 
@@ -655,9 +681,9 @@ def test_reload_skills_agent_command_metadata_resolves_alias():
         const byName = await getAgentCommandMetadata('reload-skills');
         const byAlias = await getAgentCommandMetadata('reload_skills');
         return {
-          by_name: byName && byName.name,
-          by_alias: byAlias && byAlias.name,
-          cli_only: byAlias && byAlias.cli_only === true
+          by_name: byName && byName.command && byName.command.name,
+          by_alias: byAlias && byAlias.command && byAlias.command.name,
+          cli_only: byAlias && byAlias.command && byAlias.command.cli_only === true
         };
         """
     )
@@ -675,9 +701,9 @@ def test_codex_runtime_agent_command_metadata_resolves_alias():
         const byName = await getAgentCommandMetadata('codex-runtime');
         const byAlias = await getAgentCommandMetadata('codex_runtime');
         return {
-          by_name: byName && byName.name,
-          by_alias: byAlias && byAlias.name,
-          cli_only: byAlias && byAlias.cli_only === true
+          by_name: byName && byName.command && byName.command.name,
+          by_alias: byAlias && byAlias.command && byAlias.command.name,
+          cli_only: byAlias && byAlias.command && byAlias.command.cli_only === true
         };
         """
     )
@@ -997,7 +1023,7 @@ def test_alias_typed_text_reaches_exec_dispatch():
     result = _run_commands_js(
         """
         const byAlias = await getAgentCommandMetadata('reload_skills');
-        const canonical = byAlias && byAlias.name;
+        const canonical = byAlias && byAlias.command && byAlias.command.name;
         return { canonical, dispatched: canonical === 'reload-skills' };
         """
     )
@@ -1186,6 +1212,7 @@ def test_slash_alias_matching_covers_bundle_rows():
     result = _run_commands_js(
         """
         _agentCommandCacheReady = true;
+        _bundleCommandCacheReady = true;
         _bundleCommandCache.length = 0;
         _bundleCommandCache.push({name: 'knowledge-loop', desc: 'Bundle', source: 'bundle'});
         return {
@@ -1289,10 +1316,10 @@ def test_agent_command_metadata_resolves_implicit_underscore_spelling():
         const reverse = await getAgentCommandMetadata('knowledge-loop');
         const missing = await getAgentCommandMetadata('does-not-exist');
         return {
-          leaf_by_underscore: leafByUnderscore && leafByUnderscore.name,
-          leaf_by_hyphen: leafByHyphen && leafByHyphen.name,
-          reverse: reverse && reverse.name,
-          missing: missing === null
+          leaf_by_underscore: leafByUnderscore && leafByUnderscore.command && leafByUnderscore.command.name,
+          leaf_by_hyphen: leafByHyphen && leafByHyphen.command && leafByHyphen.command.name,
+          reverse: reverse && reverse.command && reverse.command.name,
+          missing: missing && missing.command === null
         };
         """
     )
@@ -1315,8 +1342,8 @@ def test_agent_command_metadata_dual_spelling_keeps_literal_precedence():
         const u = await getAgentCommandMetadata('plugin_review');
         const h = await getAgentCommandMetadata('plugin-review');
         return {
-          underscore_typed: u && u.name,
-          hyphen_typed: h && h.name
+          underscore_typed: u && u.command && u.command.name,
+          hyphen_typed: h && h.command && h.command.name
         };
     """
     for reg_order in (
@@ -1386,10 +1413,10 @@ def test_exec_transport_canonicalizes_alias_token_and_keeps_args():
         const leaf = await getAgentCommandMetadata('leaf_review');
         const plugin = await getAgentCommandMetadata('plugin_review');
         const browser = await getAgentCommandMetadata('browse');
-        const outLeaf = await _runAgentCommandTransport('/leaf_review do X with args', leaf);
-        const outPlugin = await _runAgentCommandTransport('/plugin_review do Y', plugin);
-        const outBare = await _runAgentCommandTransport('/leaf_review', leaf);
-        const outAlias = await _runAgentCommandTransport('/browse connect', browser);
+        const outLeaf = await _runAgentCommandTransport('/leaf_review do X with args', leaf.command);
+        const outPlugin = await _runAgentCommandTransport('/plugin_review do Y', plugin.command);
+        const outBare = await _runAgentCommandTransport('/leaf_review', leaf.command);
+        const outAlias = await _runAgentCommandTransport('/browse connect', browser.command);
         const outUnknown = await _runAgentCommandTransport('/mystery foo', {name: 'mystery'});
         return { outLeaf, outPlugin, outBare, outAlias, outUnknown };
         """
