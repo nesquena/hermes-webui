@@ -14211,6 +14211,10 @@ _SETTINGS_DEFAULTS = {
     "bot_name": os.getenv(
         "HERMES_WEBUI_BOT_NAME", "Hermes"
     ),  # display name for the assistant
+    # #7611: optional deployment label (e.g. "Production") decorated onto the
+    # browser/desktop window title and app titlebar so side-by-side instances
+    # are distinguishable. Empty by default -> title behaves exactly as before.
+    "instance_name": str(os.getenv("HERMES_WEBUI_INSTANCE_NAME", "") or "").strip()[:80],
     "sound_enabled": False,  # play notification sound when assistant finishes
     "rtl": False,  # right-to-left chat layout (chat messages + composer only)
     "notifications_enabled": False,  # browser notification when tab is in background
@@ -14734,6 +14738,17 @@ def save_settings(settings: dict) -> dict:
             if k == "tts_voice":
                 if not isinstance(v, str) or len(v) > 200 or "\x00" in v:
                     continue
+            # #7611: instance name is operator-supplied and lands in
+            # document.title / the app titlebar. Accept only a plain short
+            # string: reject non-strings, control characters (NUL truncates
+            # the value in C-level consumers) and over-long values. An empty
+            # string is VALID and clears the label.
+            if k == "instance_name":
+                if not isinstance(v, str):
+                    continue
+                if "\x00" in v or any(ord(ch) < 32 or ord(ch) == 127 for ch in v):
+                    continue
+                v = v.strip()[:80]
             # Validate language codes (BCP-47-like: 'en', 'zh', 'fr', 'zh-CN')
             if k == "language" and (
                 not isinstance(v, str) or not _SETTINGS_LANG_RE.match(v)

@@ -48,6 +48,17 @@ const APP_TITLEBAR_KEYS = {
 const MAIN_VIEW_PANELS = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'];
 const MAIN_VIEW_SIDEBAR_PANEL_FALLBACKS = { plugin: 'settings' };
 
+function _syncInstanceNameBadge(){
+  // #7611: surface the configured instance label in the app titlebar so an
+  // operator can tell two side-by-side deployments apart without leaving the
+  // tab. Hidden entirely when unset, so single-instance users see no change.
+  const el=document.getElementById('appTitlebarInstance');
+  if(!el) return;
+  const name=(typeof instanceDisplayName==='function')?instanceDisplayName():'';
+  el.textContent=name;
+  el.hidden=!name;
+}
+
 /**
  * Update the top app titlebar to reflect the current page or selected conversation.
  * On the chat panel, a selected session's title takes precedence over the page name.
@@ -82,6 +93,11 @@ function syncAppTitlebar() {
     const bot = typeof assistantDisplayName === 'function' ? assistantDisplayName() : '';
     document.title = bot ? mainText + ' \u2014 ' + bot : mainText;
   }
+  // #7611: decorate the window title with the configured instance label and
+  // show the label in the titlebar. Safe on the chat panel too — syncTopbar
+  // owns that title and the decorator is idempotent.
+  if (typeof _applyInstanceTitle === 'function') _applyInstanceTitle();
+  _syncInstanceNameBadge();
   if (subEl) {
     if (subText) {
       subEl.textContent = subText;
@@ -13194,6 +13210,7 @@ function _applySavedSettingsUi(saved, body, opts){
     _applyStructuredCodeViewSettings(body.structured_code_default_view,body.structured_code_auto_tree_lines,false);
   }
   window._botName=body.bot_name||'Hermes';
+  window._instanceName=body.instance_name||'';  // #7611
   if(typeof applyBotName==='function') applyBotName();
   else if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
   if(typeof setLocale==='function') setLocale(language);
@@ -13937,6 +13954,11 @@ async function saveSettings(andClose){
   body.auto_title_refresh_every=(($('settingsAutoTitleRefresh')||{}).value||'0');
   const botName=(($('settingsBotName')||{}).value||'').trim();
   body.bot_name=botName||'Hermes';
+  // #7611: the instance label is operator/env-supplied (there is no settings
+  // field for it), so echo the loaded mirror back on the payload. Without this
+  // key _applySavedSettingsUi() below read `body.instance_name||''` and wiped
+  // the loaded name to '' after every successful save.
+  body.instance_name=String(window._instanceName||'').trim();
   // Password: only act if the field has content; blank = leave auth unchanged
   if(pw && pw.trim()){
     const currentPwField=$('settingsCurrentPassword');
