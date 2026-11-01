@@ -6018,6 +6018,18 @@ function _normalizeConfiguredModelKey(modelId){
   return s.replace(/-/g,'.');
 }
 
+function _configuredModelIdentity(modelId,providerId){
+  let s=String(modelId||'').trim().toLowerCase();
+  const provider=String(providerId||'').trim().toLowerCase();
+  if(provider){
+    const atPrefix=`@${provider}:`;
+    const slashPrefix=`${provider}/`;
+    if(s.startsWith(atPrefix)) s=s.slice(atPrefix.length)||s;
+    else if(s.startsWith(slashPrefix)) s=s.slice(slashPrefix.length)||s;
+  }
+  return s.replace(/-/g,'.');
+}
+
 function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   const normalized=_normalizeConfiguredModelKey(modelId);
   const provider=String(badge&&badge.provider||'').toLowerCase();
@@ -6079,10 +6091,12 @@ function _getConfiguredModelBadge(modelId,badgeMap,providerId){
   const provider=String(providerId||'').toLowerCase();
   const exact=map[modelId];
   if(exact && (!provider || !exact.provider || String(exact.provider).toLowerCase()===provider)) return exact;
-  const targetNorm=_normalizeConfiguredModelKey(modelId);
+  const targetIdentity=_configuredModelIdentity(modelId,provider);
   const matches=[];
   for(const [candidate,badge] of Object.entries(map)){
-    if(_normalizeConfiguredModelKey(candidate)===targetNorm) matches.push(badge);
+    const badgeProvider=String(badge&&badge.provider||'').toLowerCase();
+    if(provider&&badgeProvider&&badgeProvider!==provider) continue;
+    if(_configuredModelIdentity(candidate,badgeProvider||provider)===targetIdentity) matches.push(badge);
   }
   if(!matches.length) return null;
   if(provider){
