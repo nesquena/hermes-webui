@@ -98,3 +98,31 @@ def test_opened_tool_session_resolves_by_id(fake_hermes_home):
 
     assert routes._lookup_cli_session_metadata("tool-000").get("session_id") == "tool-000"
     assert models.get_cli_session_by_id("desk-0", "tool") == {}
+
+
+def test_tool_session_resolves_under_a_named_profile(tmp_path, monkeypatch):
+    from api import routes
+    from tests.test_issue8265_oneshot_sessions_window import _configure_named_profiles
+
+    homes = [tmp_path / "default-home", tmp_path / "work-home"]
+    for home in homes:
+        home.mkdir()
+    _make_state_db(homes[0] / "state.db", sessions=1, messages_per_session=1)
+    _make_state_db(homes[1] / "state.db", sessions=1, messages_per_session=1)
+    _insert_session(homes[1] / "state.db", "tool-work", source="tool")
+    _configure_named_profiles(monkeypatch, tmp_path, homes)
+
+    meta = routes._resolve_cli_import_metadata(
+        "tool-work", requested_profile="work", allow_all_profiles=True,
+    )
+    assert meta.get("session_id") == "tool-work"
+    assert meta.get("profile") == "work"
+
+
+def test_every_window_excluded_source_without_its_own_pass_resolves_by_id():
+    from api import routes
+
+    assert set(routes._CLI_LOOKUP_FALLBACK_SOURCES) == (
+        set(models.INTERACTIVE_WINDOW_EXCLUDED_CLI_SOURCES) - set(models.BACKGROUND_CLI_SOURCES)
+    )
+    assert "tool" in routes._CLI_LOOKUP_FALLBACK_SOURCES
