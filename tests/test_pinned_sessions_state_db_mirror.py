@@ -122,7 +122,7 @@ def _pin_setup(tmp_path, monkeypatch, **db_kwargs):
     homes = _homes(tmp_path, monkeypatch)
     db = homes["default"] / "state.db"
     _make_state_db(db, **db_kwargs)
-    sessions = {"s1": _PinSession("s1")}
+    sessions = collections.OrderedDict({"s1": _PinSession("s1")})  # the route re-resolves via the LRU
     return db, sessions, _pin_endpoint(monkeypatch, sessions)
 
 
@@ -475,8 +475,7 @@ def _real_session_pin_endpoint(tmp_path, monkeypatch, sid="s1"):
     cache = collections.OrderedDict({sid: live})
     monkeypatch.setattr(models, "SESSIONS", cache)
     monkeypatch.setattr(routes, "SESSIONS", cache)
-    sessions = {}
-    post = _pin_endpoint(monkeypatch, sessions)
+    post = _pin_endpoint(monkeypatch, cache)  # the route must see the same LRU the test mutates
     from api.config import _get_session_agent_lock as real_lock
     monkeypatch.setattr(routes, "_get_session_agent_lock", real_lock)
     monkeypatch.setattr(routes, "get_session", lambda s, **kw: cache[s])

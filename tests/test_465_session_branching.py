@@ -559,6 +559,47 @@ def test_branch_route_uses_get_display_backstop_for_large_state_db(monkeypatch):
     routes.SESSIONS.pop(cap["ok"]["session_id"], None)
 
 
+@pytest.mark.parametrize(
+    ("keep_count", "expected_provenance"),
+    [(None, {"review-skill": 3}), (1, {}), (0, {})],
+)
+def test_branch_only_copies_skill_provenance_when_full_history_is_kept(
+    monkeypatch, keep_count, expected_provenance
+):
+    source = routes.Session(
+        session_id="src-skill-provenance",
+        workspace=".",
+        messages=[
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "second"},
+        ],
+        skill_provenance={"review-skill": 3},
+    )
+    body = {"session_id": source.session_id}
+    if keep_count is not None:
+        body["keep_count"] = keep_count
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: body)
+    monkeypatch.setattr(routes, "get_session", lambda *_a, **_k: source)
+    monkeypatch.setattr(routes, "_session_requires_cli_metadata_lookup", lambda _s: False)
+    monkeypatch.setattr(routes, "_is_messaging_session_record", lambda _s: False)
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", lambda _s: source.messages)
+    monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *_a, **_k: [])
+    monkeypatch.setattr(routes, "merge_session_messages_append_only", lambda side, _state, **_k: side)
+    monkeypatch.setattr(routes, "_merged_webui_lineage_messages_for_display", lambda _s, messages: messages)
+    monkeypatch.setattr(routes, "_evict_sessions_over_cap", lambda: None)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_a, **_k: None)
+    monkeypatch.setattr(routes.Session, "save", lambda self: None)
+
+    cap = _capture_route(monkeypatch)
+    routes.handle_post(_FakeHandler(), urlparse("/api/session/branch"))
+
+    assert cap["status"] == 200
+    forked = routes.SESSIONS[cap["ok"]["session_id"]]
+    assert forked.skill_provenance == expected_provenance
+    routes.SESSIONS.pop(forked.session_id, None)
+
+
 def test_branch_route_messaging_empty_cli_does_not_copy_hidden_state_db(monkeypatch):
     """Messaging-empty forks must not include state.db rows GET never displayed."""
     conclusion = {"role": "assistant", "content": "displayed conclusion"}

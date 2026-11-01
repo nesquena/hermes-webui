@@ -7,6 +7,36 @@ matching the upstream Hermes Agent behaviour.
 """
 
 
+def _mock_named_catalog(monkeypatch, model_ids):
+    """Mock the named-custom HTTP boundary, not the retired raw-ID producer."""
+    import json
+    import socket
+    import urllib.request
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({"data": [{"id": mid} for mid in model_ids]}).encode()
+
+    requests = []
+
+    def probe(request, **_kwargs):
+        requests.append(request.full_url)
+        assert request.full_url == "https://llm.example.com/v1/models"
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", probe)
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *_a, **_k: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+    ])
+    return requests
+
+
 def _provider_group(payload: dict, provider_id: str) -> dict:
     for group in payload.get("groups", []):
         if group.get("provider_id") == provider_id:
@@ -44,17 +74,15 @@ def test_models_discovered_skips_config_allowlist_and_uses_live_catalog(monkeypa
     monkeypatch.setattr(config, "reload_config", lambda: None)
     monkeypatch.setattr(config, "_cfg_mtime", 0.0, raising=False)
     monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0.0, raising=False)
-    monkeypatch.setattr(
-        config, "_read_live_provider_model_ids",
-        lambda pid: live_ids if pid == "custom-llm" else [],
-    )
+    requests = _mock_named_catalog(monkeypatch, live_ids)
 
     config.invalidate_models_cache()
     payload = config.get_available_models(force_refresh=True)
-    group = _provider_group(payload, "custom-llm")
+    group = _provider_group(payload, "custom:custom-llm")
     ids = [m["id"] for m in group["models"]]
 
     assert ids == live_ids
+    assert requests == ["https://llm.example.com/v1/models"]
 
 
 def _setup_provider(monkeypatch, tmp_path, provider_cfg, live_ids):
@@ -74,12 +102,9 @@ def _setup_provider(monkeypatch, tmp_path, provider_cfg, live_ids):
     monkeypatch.setattr(config, "reload_config", lambda: None)
     monkeypatch.setattr(config, "_cfg_mtime", 0.0, raising=False)
     monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0.0, raising=False)
-    monkeypatch.setattr(
-        config, "_read_live_provider_model_ids",
-        lambda pid: live_ids if pid == "custom-llm" else [],
-    )
+    requests = _mock_named_catalog(monkeypatch, live_ids)
     config.invalidate_models_cache()
-    return config
+    return config, requests
 
 
 def test_discover_models_false_pins_configured_allowlist_despite_discovered_flag(monkeypatch, tmp_path):
@@ -101,13 +126,14 @@ def test_discover_models_false_pins_configured_allowlist_despite_discovered_flag
         },
     }
     live_ids = ["model-a", "model-b", "model-c", "model-d", "model-e"]
-    config = _setup_provider(monkeypatch, tmp_path, provider_cfg, live_ids)
+    config, requests = _setup_provider(monkeypatch, tmp_path, provider_cfg, live_ids)
 
     payload = config.get_available_models(force_refresh=True)
-    group = _provider_group(payload, "custom-llm")
+    group = _provider_group(payload, "custom:custom-llm")
     ids = [m["id"] for m in group["models"]]
 
     assert ids == ["model-a", "model-b"]
+    assert requests == []
 
 
 def test_discover_models_false_string_form_also_pins(monkeypatch, tmp_path):
@@ -121,13 +147,14 @@ def test_discover_models_false_string_form_also_pins(monkeypatch, tmp_path):
         "models": {"model-a": {}, "model-b": {}},
     }
     live_ids = ["model-a", "model-b", "model-c"]
-    config = _setup_provider(monkeypatch, tmp_path, provider_cfg, live_ids)
+    config, requests = _setup_provider(monkeypatch, tmp_path, provider_cfg, live_ids)
 
     payload = config.get_available_models(force_refresh=True)
-    group = _provider_group(payload, "custom-llm")
+    group = _provider_group(payload, "custom:custom-llm")
     ids = [m["id"] for m in group["models"]]
 
     assert ids == ["model-a", "model-b"]
+    assert requests == []
 
 
 def test_discovered_catalog_survives_transient_live_probe_failure(monkeypatch, tmp_path):
@@ -147,13 +174,14 @@ def test_discovered_catalog_survives_transient_live_probe_failure(monkeypatch, t
         "models": {"model-a": {"supports_vision": True}, "model-b": {"context_length": 128000}},
     }
     # Live probe returns NOTHING (transient failure), provider not in _PROVIDER_MODELS.
-    config = _setup_provider(monkeypatch, tmp_path, provider_cfg, [])
+    config, requests = _setup_provider(monkeypatch, tmp_path, provider_cfg, [])
 
     payload = config.get_available_models(force_refresh=True)
-    group = _provider_group(payload, "custom-llm")
+    group = _provider_group(payload, "custom:custom-llm")
     ids = [m["id"] for m in group["models"]]
 
     assert ids == ["model-a", "model-b"]
+    assert requests == ["https://llm.example.com/v1/models"]
 
 
 def test_discovered_flag_without_models_key_and_empty_probe_does_not_500(monkeypatch, tmp_path):
@@ -170,9 +198,10 @@ def test_discovered_flag_without_models_key_and_empty_probe_does_not_500(monkeyp
         "models_discovered": True,
         # no "models" key at all
     }
-    config = _setup_provider(monkeypatch, tmp_path, provider_cfg, [])
+    config, requests = _setup_provider(monkeypatch, tmp_path, provider_cfg, [])
 
     # Must not raise; provider absent from the static catalog degrades to an empty
     # group (filtered out) rather than a 500.
     payload = config.get_available_models(force_refresh=True)
     assert isinstance(payload.get("groups"), list)
+    assert requests == ["https://llm.example.com/v1/models"]
