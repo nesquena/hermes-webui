@@ -2985,8 +2985,40 @@
   .mic-btn{transition:color .15s,background .15s;}
   .mic-btn.recording{color:var(--error);background:rgba(239,83,80,.12);animation:mic-pulse 1.2s ease-in-out infinite;}
   @keyframes mic-pulse{0%,100%{box-shadow:0 0 0 0 rgba(239,83,80,.3);}50%{box-shadow:0 0 0 6px rgba(239,83,80,0);}}
-  .mic-status{font-size:11px;color:var(--error);padding:4px 12px;display:flex;align-items:center;gap:6px;}
-  .mic-dot{width:6px;height:6px;border-radius:50%;background:var(--error);animation:mic-pulse 1.2s ease-in-out infinite;flex-shrink:0;}
+
+  /* ── Dictation readout in the composer strip (#micStatus) ──
+     One strip, every dictation state: dot + m:ss + level bar while recording,
+     a spinner and "Transcribing…" while the request is in flight, a short
+     outcome, then hidden. It lives here rather than inside the mic button
+     because the desktop footer squeezes that button to 25 px with the
+     workspace pane open, and anything wider makes _fitComposerFooter() flip
+     the whole footer into icon mode.
+     The label keeps --text (the body colour, which every palette keeps above
+     4.5:1); the state colour is carried by the dot / spinner / bar. Warning
+     and success are mixed 60% toward --text because the raw tokens miss the
+     3:1 graphical minimum on the light themes (default light --warning is
+     2.40:1 and --success 3.86:1 against the composer).
+     The bar's TRACK is ink, not a tint of the state: a 25% tint of --error
+     measured 1.28-1.58:1 against the composer, so the empty bar vanished and
+     with it the "nothing reaches the mic" signal. 70% of --text clears 3:1 in
+     every palette (3.47:1 worst, catppuccin light) and keeps the track
+     distinct from the state-coloured fill. */
+  .mic-status{--mic-state:var(--text);font-size:11px;color:var(--text);padding:4px 12px;display:flex;align-items:center;gap:6px;font-variant-numeric:tabular-nums;min-height:19px;}
+  .mic-status .mic-dot{display:none;width:6px;height:6px;border-radius:50%;background:var(--mic-state);animation:mic-pulse 1.2s ease-in-out infinite;flex-shrink:0;}
+  .mic-status .mic-spinner{display:none;width:9px;height:9px;border-radius:50%;border:1.5px solid var(--mic-state);border-top-color:transparent;animation:spin .8s linear infinite;flex-shrink:0;}
+  .mic-status .mic-status-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .mic-status .mic-timer{display:none;margin-left:auto;color:var(--muted);}
+  .mic-status .mic-level{display:none;flex:0 0 auto;box-sizing:border-box;width:46px;height:6px;border-radius:3px;overflow:hidden;border:1px solid color-mix(in srgb,var(--text) 70%,transparent);background:transparent;}
+  .mic-status .mic-level-fill{display:block;height:100%;border-radius:1px;background:var(--mic-state);transform:scaleX(var(--mic-level,0));transform-origin:left center;transition:transform .06s linear;}
+  .mic-status.is-rec{--mic-state:var(--error);}
+  .mic-status.is-rec .mic-dot,.mic-status.is-rec .mic-timer,.mic-status.is-rec .mic-level{display:block;}
+  .mic-status.is-think{--mic-state:color-mix(in srgb,var(--warning) 60%,var(--text));}
+  .mic-status.is-think .mic-spinner{display:block;}
+  .mic-status.is-done{--mic-state:color-mix(in srgb,var(--success) 60%,var(--text));}
+  .mic-status.is-empty{--mic-state:color-mix(in srgb,var(--warning) 60%,var(--text));}
+  .mic-status.is-failed{--mic-state:color-mix(in srgb,var(--error) 60%,var(--text));}
+  .mic-status.is-done .mic-dot,.mic-status.is-empty .mic-dot,.mic-status.is-failed .mic-dot{display:block;animation:none;}
+  @media(prefers-reduced-motion:reduce){.mic-status .mic-level-fill{transition:none;}.mic-status .mic-spinner,.mic-status .mic-dot{animation:none;}}
 
   /* ── Turn-based voice mode (#1333) ── */
   .voice-mode-btn{transition:color .15s,background .15s;}
