@@ -13902,6 +13902,12 @@ _SETTINGS_DEFAULTS = {
     "default_workspace": str(DEFAULT_WORKSPACE),
     "onboarding_completed": False,
     "send_key": "enter",  # 'enter', 'ctrl+enter', or 'shift+enter'
+    # Agent-native slash commands are ordinary chat input by default. Operators
+    # can opt back into the legacy WebUI command dispatcher for deployments that
+    # rely on its local /new, /model, /clear, ... behavior.
+    "intercept_slash_commands": os.getenv(
+        "HERMES_WEBUI_INTERCEPT_SLASH_COMMANDS", ""
+    ).strip().lower() in {"1", "true", "yes", "on"},
     "show_token_usage": False,  # show input/output token badge below assistant messages
     "show_quota_chip": False,  # show ambient provider quota chip in composer footer (default off; wide desktop only when enabled, see style.css @media)
     "show_conversation_outline": False,  # show opt-in desktop jump-to-question outline panel

@@ -312,11 +312,13 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Approval and clarification browser alerts notify once per pending owner when its session is not actively viewed. Local approval dismissal hides attention without resolving the prompt; resolution, replacement, and cancellation retire that owner's alert state. Denied or failed notification delivery can retry while the prompt remains pending.
 
 ### Slash commands
-- Type `/` in the composer for autocomplete dropdown
-- Plain skills match case-insensitive keywords in their name or description; built-in, agent/plugin, and bundle commands keep prefix matching and take precedence over a same-slug skill
-- Built-in: `/help`, `/clear`, `/compress [focus topic]`, `/compact` (alias), `/model <name>`, `/workspace <name>`, `/new`, `/usage`, `/theme`
-- Arrow keys navigate, Tab/Enter select, Escape closes
-- Unrecognized commands pass through to the agent
+- Slash-prefixed composer text is sent unchanged to Hermes Agent by default, so
+  native commands such as `/help`, `/model`, `/new`, and `/agents` retain their
+  agent-side meaning.
+- Set `HERMES_WEBUI_INTERCEPT_SLASH_COMMANDS=1` before starting WebUI to opt into
+  the legacy local command dispatcher and autocomplete menu.
+- In that opt-in mode, plain skills match case-insensitive keywords in their name
+  or description; built-in, agent/plugin, and bundle commands keep prefix matching.
 
 #### Model aliases in `/model`
 
@@ -450,6 +452,7 @@ Full list of environment variables:
 | `HERMES_WEBUI_SETTINGS_FILE` | `<state dir>/settings.json` | Optional path for this instance's WebUI settings file (sessions, workspaces and projects stay in the state directory). Read once at startup, so restart after changing it |
 | `HERMES_WEBUI_DEFAULT_WORKSPACE` | `~/workspace` | Default workspace |
 | `HERMES_WEBUI_DEFAULT_MODEL` | *(provider default)* | Optional model override; leave unset to use the active Hermes provider default |
+| `HERMES_WEBUI_INTERCEPT_SLASH_COMMANDS` | *(unset / disabled)* | Opt into the legacy WebUI slash-command dispatcher and autocomplete. When unset, all slash-prefixed composer text is sent to Hermes Agent unchanged. |
 | `HERMES_WEBUI_PASSWORD` | *(unset)* | Set to enable password authentication |
 | `HERMES_WEBUI_CSP_CONNECT_EXTRA` | *(unset)* | Optional space-separated `http(s)://` or `ws(s)://` origins to append to the enforced and report-only CSP `connect-src` directives for trusted reverse-proxy, tunnel, or extension sidecar deployments |
 | `HERMES_WEBUI_CSP_IMG_EXTRA` | *(unset)* | Optional space-separated `http(s)://` image origins (wildcard subdomain and port allowed), or the bare `https:` / `http:` scheme, added to the CSP `img-src`. Remote images are blocked by default so an assistant reply cannot make the browser fetch an arbitrary URL; blocked images render as an inert "Open image" link. Use this to show images from a trusted CDN inline, e.g. an image-generation provider |
