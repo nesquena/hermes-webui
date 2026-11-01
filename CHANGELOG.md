@@ -5,6 +5,8 @@
 
 ### Added
 
+- **Dictation shows what it's doing.** While you dictate, the strip above the message box shows a timer and a live level meter, a hollow bar that fills as your voice reaches the microphone. After you stop, the strip shows "Transcribing…" and then the outcome: "N words added", "No speech detected. Try again." or "Transcription failed". Screen readers hear each state once. The mic button keeps its icon and red recording state as the stop control. Settings → Preferences has a new opt-in, "Stop dictation automatically after silence" (off by default). Thanks @fedebyes. (#8564)
+
 - **Tasks has a read-only Scripts tab.** Next to Jobs, a Scripts tab lists the active profile's `scripts/` folder (the scripts cron jobs can run) with each file's size, age and the description from its leading comment. The tab only lists (there is no viewer yet; to view or edit a script, open the file on the server); a read-only `GET /api/scripts/raw` returns one file's text for a later viewer. Reads stay inside that folder (no symlinks out, size-capped), a platform that cannot open the folder safely says so instead of showing an empty list, and the tab hides "New job" since it cannot create anything. Thanks @happy5318. (#7685, for #2316)
 
 - **The workspace Artifacts panel shows which skills each conversation used.** A new "Skills used" section lists every skill the session loaded and how many times, counted from successful skill loads (the Agent's `skill_view`, `/use` and bundle commands) and kept per session and profile. Files and skills sit in their own collapsible sections ("Files changed N", "Skills used N"), and the Artifacts badge counts both. Thanks @rodboev. (#6693, for #6593)
