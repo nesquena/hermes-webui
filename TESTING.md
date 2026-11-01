@@ -16,6 +16,14 @@ message counts remain visible when role metadata is absent or entirely NULL;
 that fallback does not prove their messages contain a user turn. This is a
 read-side projection change, not a database migration or live-streaming change.
 
+Also run `./scripts/test.sh -q tests/test_desktop_orphan_sidecar_prune.py`.
+Desktop sidecars use only the strict owning-profile orphan pass, even though
+Desktop is now classified as interactive. The fresh-process regressions assert
+that an isolated profile with an empty database cannot remove another profile's
+entry from the shared persisted `_index.json`. Confirmed owning-profile deletion
+must still prune with the interactive-session toggle either on or off. Hiding an
+interactive row from the response must not prune its retained index entry.
+
 ## User-bounded legacy tool anchors (#8427)
 
 Run `./scripts/test.sh -q -rs tests/test_issue8427_tool_anchor_user_boundary.py`.
