@@ -37,9 +37,15 @@ last-modified time, and `/api/scripts/raw` serves a script's content, for
 clients that want them.
 
 Hardlinked files (link count above one) are not listed or served, the same
-rule as the wiki browser. A listing walks at most 10,000 directory entries and
-describes at most 1,000 scripts; a listing cut short is flagged
-`"truncated": true`.
+rule as the wiki browser. The check runs again after the read, so a file whose
+scripts entry changes while it is being read is refused too. The listing
+reports how many were skipped in `skipped_hardlinked`. Hermes never hardlinks
+scripts itself; a folder copied with `cp -al` is the usual way to get them.
+
+A listing describes at most 1,000 scripts, in name order, and walks at most
+100,000 directory entries. A listing cut short by either cap is flagged
+`"truncated": true`. Past the entry cap, which scripts appear depends on the
+directory's own order.
 
 A profile with no `scripts/` directory and a profile with an empty one are
 different states: the panel says which one it is rather than showing an
@@ -59,7 +65,10 @@ Returns the listing for the active profile:
     {"name": "backup.sh", "size": 812, "modified": 1759000000, "description": "Nightly backup."}
   ],
   "directory": "/home/user/.hermes/scripts",
-  "exists": true
+  "exists": true,
+  "unavailable": "",
+  "truncated": false,
+  "skipped_hardlinked": 0
 }
 ```
 

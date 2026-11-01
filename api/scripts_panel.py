@@ -37,12 +37,13 @@ _SH_COMMENT_BLOCK_RE = re.compile(r"^(#.*\n)+", re.MULTILINE)
 
 _SCRIPT_EXTS = {".py", ".sh"}
 _MAX_SCRIPT_BYTES = 256 * 1024  # 256 KiB cap per read
-# Listing work caps (#8721). Every listed script costs an open, an fstat, a
-# 4 KiB read and a parse, so an agent that writes thousands of files into
-# scripts/ must not turn one panel refresh into unbounded work. Directory
-# entries walked mirror the wiki browser's _LLM_WIKI_MAX_FILES; a listing cut
-# short by either cap is reported with ``truncated: true``.
-_MAX_LIST_ENTRIES = 10000
+# Listing work caps (#8721). Every described script costs an open, an fstat,
+# a 4 KiB read and a parse, so an agent that writes thousands of files into
+# scripts/ must not turn one panel refresh into unbounded work: at most
+# _MAX_LISTED_SCRIPTS are described. Walking a name is cheap with a lazy
+# scandir (~0.7 us), so the entry cap only stops a pathological directory.
+# A listing cut short by either cap is reported with ``truncated: true``.
+_MAX_LIST_ENTRIES = 100000
 _MAX_LISTED_SCRIPTS = 1000
 
 
@@ -436,6 +437,7 @@ def list_scripts() -> dict:
     out: list[dict] = []
     unavailable = ""
     truncated = False
+    skipped_hardlinked = 0
     if base.is_dir():
         # Capability pre-check: without O_NOFOLLOW/O_DIRECTORY the directory
         # cannot be opened safely, so _open_script_for_read refuses EVERY
@@ -450,8 +452,9 @@ def list_scripts() -> dict:
         if not unavailable:
             # Collect candidate names first (bounded), then describe them in
             # name order, so a listing cut short by the script cap shows the
-            # same first scripts every time rather than whatever order the
-            # directory happened to return.
+            # first scripts by name. If the ENTRY cap is hit, the candidates
+            # are only those among the entries walked, which depends on
+            # directory order; ``truncated`` says so either way.
             names, truncated = _bounded_script_names(base, _MAX_LIST_ENTRIES)
             candidates = sorted((base / n for n in names), key=lambda e: e.name.lower())
             if len(candidates) > _MAX_LISTED_SCRIPTS:
@@ -463,6 +466,15 @@ def list_scripts() -> dict:
                 # inside the scripts directory.
                 acquired = _open_script_for_read(base, entry.name)
                 if acquired is None:
+                    # Count refused hardlinks so a client can say why a script
+                    # is missing instead of showing a silent empty list. A
+                    # metadata-only lstat; nothing is read.
+                    try:
+                        lst = os.lstat(entry)
+                        if stat_module.S_ISREG(lst.st_mode) and lst.st_nlink > 1:
+                            skipped_hardlinked += 1
+                    except OSError:
+                        pass
                     continue
                 fd, st = acquired
                 try:
@@ -488,6 +500,7 @@ def list_scripts() -> dict:
         "exists": base.is_dir(),
         "unavailable": unavailable,
         "truncated": truncated,
+        "skipped_hardlinked": skipped_hardlinked,
     }
 
 

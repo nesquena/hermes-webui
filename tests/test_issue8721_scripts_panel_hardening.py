@@ -277,3 +277,34 @@ def test_listing_does_not_materialise_the_whole_directory(scripts, monkeypatch):
     assert consumed, "enumeration must go through os.scandir"
     assert listing["truncated"] is True
     assert len(consumed) <= 11, len(consumed)
+
+
+# ── #8723 senior gate: say why scripts are missing ─────────────────────────
+
+
+@pytest.mark.skipif(not hasattr(os, "link"), reason="no hardlink support")
+def test_listing_counts_skipped_hardlinked_scripts(scripts, tmp_path):
+    """A `cp -al` copy gives every script link count 2. The listing must say
+    so instead of reading as an empty folder."""
+    backup = tmp_path / "scripts.bak"
+    backup.mkdir()
+    for name in ("a.py", "b.sh"):
+        (scripts / name).write_text("# s\n")
+        os.link(scripts / name, backup / name)
+    (scripts / "c.py").write_text("# s\n")
+    (scripts / "notes.txt").write_text("x")
+    listing = sp.list_scripts()
+    assert [s["name"] for s in listing["scripts"]] == ["c.py"]
+    assert listing["skipped_hardlinked"] == 2
+    assert listing["truncated"] is False
+
+
+def test_listing_reports_zero_skipped_normally(scripts):
+    (scripts / "a.py").write_text("# s\n")
+    assert sp.list_scripts()["skipped_hardlinked"] == 0
+
+
+def test_entry_cap_is_far_above_the_script_cap():
+    """Walking a name is cheap with scandir; only describing is expensive, so
+    the entry cap is a pathological-directory stop, not the working limit."""
+    assert sp._MAX_LIST_ENTRIES >= 100 * sp._MAX_LISTED_SCRIPTS
