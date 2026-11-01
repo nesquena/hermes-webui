@@ -582,7 +582,9 @@ def test_queue_card_cross_session_clear_called_before_draft_save(cleanup_test_se
     ordered_steps = (
         "if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();",
         "if(typeof _clearQueueCardDisplay==='function') _clearQueueCardDisplay(currentSid);",
-        "const draftText = ($('msg') || {}).value || '';",
+        # The composer text, or the unsent draft while a prompt recalled
+        # with ArrowUp is showing (#8665).
+        "const draftText = typeof _composerDraftValue === 'function'",
         "const draftFiles = S.pendingFiles ? [...S.pendingFiles] : [];",
         "try {",
         "await _saveComposerDraftNow(currentSid, draftText, draftFiles);",
