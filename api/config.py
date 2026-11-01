@@ -7053,8 +7053,20 @@ def _main_model_request_overrides(
 
 
 def _same_json_value(a, b) -> bool:
-    """Equal as JSON, so type edits count: Python treats 1 == True == 1.0 (#8129 r7)."""
-    return json.dumps(a, sort_keys=True, default=str) == json.dumps(b, sort_keys=True, default=str)
+    """Equal as JSON, so type edits count: Python treats 1 == True == 1.0 (#8129 r7).
+
+    One JSON round-trip first: JSON object keys are strings, so a YAML mapping
+    with mixed int/str keys (``logit_bias: {100: 1, '101': 2}``) can be sorted,
+    while values keep their JSON types. A value JSON cannot encode at all
+    (non-scalar mapping keys) falls back to plain equality.
+    """
+    def _canonical(value):
+        return json.dumps(json.loads(json.dumps(value, default=str)), sort_keys=True)
+
+    try:
+        return _canonical(a) == _canonical(b)
+    except (TypeError, ValueError):
+        return a == b
 
 
 def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> None:

@@ -97,3 +97,32 @@ def test_winning_record_reference_is_written_and_follows_rotation(cfg_path, monk
     monkeypatch.setenv("AUXSEL_ROTATING_URL", "https://rotated.example.test/v1")
     expanded = config._load_yaml_config_file(cfg_path)["auxiliary"]["vision"]["base_url"]
     assert expanded == "https://rotated.example.test/v1"
+
+
+def test_advanced_save_with_mixed_key_extra_body_succeeds_and_keeps_the_block(cfg_path):
+    """Changing only the timeout must not fail on an extra_body with mixed int/str keys (master returns 200)."""
+    raw = {
+        "model": {"default": "gpt-4o", "provider": "openai", "base_url": "https://main.example.test/v1"},
+        "auxiliary": {"vision": {
+            "provider": "openai", "model": "gpt-4o", "timeout": 30,
+            "extra_body": {"logit_bias": {100: 1, "101": 2}},
+        }},
+    }
+    config._save_yaml_config_file(cfg_path, raw)
+    config.reload_config()
+    config.set_auxiliary_model("vision", "openai", "gpt-4o", advanced={
+        "timeout": 60,
+        # What the UI re-submits: the displayed JSON object, keys as strings.
+        "extra_body": {"logit_bias": {"100": 1, "101": 2}},
+    })
+    saved = yaml.safe_load(cfg_path.read_text())
+    slot = saved["auxiliary"]["vision"]
+    assert slot["timeout"] == 60
+    assert slot["extra_body"] == {"logit_bias": {100: 1, "101": 2}}  # unchanged block kept as written
+
+
+def test_same_json_value_still_counts_type_edits_and_handles_mixed_keys():
+    assert config._same_json_value({100: 1, "101": 2}, {"100": 1, "101": 2})
+    assert not config._same_json_value({"a": 1}, {"a": True})
+    assert not config._same_json_value({"a": 1}, {"a": 1.0})
+    assert not config._same_json_value({"a": 1}, {"a": 2})
