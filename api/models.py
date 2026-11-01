@@ -2233,11 +2233,14 @@ class Session:
         # unchanged `attachments` field plus the files in the session inbox --
         # the renderer never drew inline user image parts (static/ui.js:20548).
         from api.session_image_persistence_override import compact_persisted_image_parts
-        persisted_context = copy.deepcopy(getattr(self, 'context_messages', None) or [])
-        # No digest stamp: context rows are provider-replay shapes. Only the
-        # display transcript is deduplicated, so only it needs the discriminator.
-        compact_persisted_image_parts(persisted_context, stamp_digest=False)
-        extra['context_messages'] = persisted_context
+        # `context_messages` is the provider replay prefix and is persisted
+        # EXACTLY as loaded: an existing contract requires those rows to survive
+        # a save/load round trip byte-identically (so the next model call replays
+        # what the user actually sent). Bounding this array needs load-time
+        # rehydration of bounded attachment references, which is a separate
+        # change; `scripts/migrate_persisted_image_payloads.py --include-context`
+        # is the opt-in operator path until then.
+        extra['context_messages'] = getattr(self, 'context_messages', None) or []
         payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
         try:
             payload.encode('utf-8')
@@ -2373,6 +2376,23 @@ class Session:
                                 existing_exact_replay_rows_removed,
                                 self.session_id,
                             )
+                        # The shrink backup is a durable persistence artifact
+                        # too: copying a legacy sidecar byte-for-byte would mint
+                        # a full-size .bak containing the inline image bytes this
+                        # save just compacted away. Project the copy (best effort;
+                        # a parse failure keeps the raw text).
+                        try:
+                            from api.session_image_persistence_override import project_message_payloads
+                            _bak_payload = existing if isinstance(existing, dict) else json.loads(backup_text)
+                            _projected_bak = project_message_payloads(_bak_payload)
+                            if _projected_bak is not _bak_payload:
+                                backup_text = json.dumps(_projected_bak, ensure_ascii=False, indent=2)
+                                logger.info(
+                                    "Compacted persisted image payloads in the shrink backup for session %s",
+                                    self.session_id,
+                                )
+                        except Exception:
+                            pass
                         bak_tmp = bak_path.with_suffix(
                             f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
                         )
@@ -3603,10 +3623,24 @@ def _partial_message_signature(message: dict) -> tuple:
             bool(tool_call.get('is_error', False)),
             str(tool_call.get('preview') or tool_call.get('snippet') or ''),
         ))
+    # Fields that distinguish two turns must participate, or two legitimate
+    # adjacent partial markers collapse and the loader persists the deletion
+    # (see _collapse_adjacent_duplicate_partials). Content alone is not enough:
+    # the same text can carry different attachments, different persisted image
+    # provenance, or a different provider mirror.
+    attachments_sig = ()
+    attachments = message.get('attachments')
+    if isinstance(attachments, list):
+        attachments_sig = tuple(json.dumps(item, sort_keys=True, default=str) for item in attachments)
     return (
         str(message.get('content') or '').strip(),
         str(message.get('reasoning') or '').strip(),
         tuple(tool_sig),
+        message.get('timestamp'),
+        message.get('id') or message.get('message_id'),
+        attachments_sig,
+        str(message.get('_image_payload_digest') or ''),
+        str(message.get('api_content') or ''),
     )
 
 
@@ -8213,6 +8247,11 @@ def persist_recovered_workspace_binding(
                     "Failed to persist recovered workspace: session workspace changed"
                 )
             payload["workspace"] = resolved
+            # This writer rewrites the whole sidecar outside Session.save(); apply
+            # the same durable-image projection so it cannot re-inflate a legacy
+            # file with inline base64.
+            from api.session_image_persistence_override import project_message_payloads
+            payload = project_message_payloads(payload)
             tmp = path.with_suffix(
                 f".tmp.{os.getpid()}.{threading.current_thread().ident}"
             )

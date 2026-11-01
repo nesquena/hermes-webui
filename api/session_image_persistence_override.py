@@ -27,6 +27,7 @@ without it so strict provider schemas never gain an unknown key.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 
@@ -42,6 +43,12 @@ _MARKER = {"type": "text", "text": "[image attachment]"}
 # chars is collision-safe at session scale and costs 16 bytes per image row.
 _DIGEST_FIELD = "_image_payload_digest"
 _DIGEST_CHARS = 16
+# Payload keys that hold durable message arrays in WebUI session/journal shapes.
+# Default is the display transcript only: `context_messages` is the provider
+# replay prefix, and an existing contract (tests/test_cancel_restart_journal_recovery.py)
+# requires those rows to survive a save/load round trip byte-identically.
+# Bounding that prefix needs load-time rehydration, which is a separate change.
+_DISPLAY_MESSAGE_KEYS = frozenset({"messages"})
 
 
 def _url_value(part: dict):
@@ -140,6 +147,10 @@ def compact_persisted_image_parts(messages, *, stamp_digest: bool = True) -> int
     Callers pass a projection they own (a save-time snapshot or a deep copy),
     never the live provider payload.
 
+    Only the display transcript is projected. ``context_messages`` is the
+    provider replay prefix and is preserved exactly; bounding it requires
+    load-time rehydration (see the update note above).
+
     ``stamp_digest`` adds ``_image_payload_digest`` to a projected row so the
     lossless dedup guard can still tell two originally-different rows apart on a
     later save. Keep it OFF for provider-replay rows: those are serialized and
@@ -174,3 +185,54 @@ def compact_persisted_image_parts(messages, *, stamp_digest: bool = True) -> int
             message[_DIGEST_FIELD] = digest.hexdigest()[:_DIGEST_CHARS]
     return changed
 
+
+
+def _has_inline_image(value) -> bool:
+    """Cheap early-out scan: does this payload hold any inline image part?"""
+    if isinstance(value, list):
+        return any(_has_inline_image(item) for item in value)
+    if isinstance(value, dict):
+        if _inline_image_payload(value) is not None:
+            return True
+        return any(_has_inline_image(child) for child in value.values())
+    return False
+
+
+def project_message_payloads(value, *, stamp_digest: bool = False, keys=None):
+    """Return a bounded copy of a JSON-shaped payload, or the SAME object if clean.
+
+    Every embedded ``messages`` / ``context_messages`` array is projected through
+    :func:`compact_persisted_image_parts`. Copy-on-write: a payload with no inline
+    image bytes is returned unchanged, so callers on hot paths pay a scan, not a
+    deep copy. Used by the other durable writers (run journal, recovery
+    materialization, backups) that bypass ``Session.save()``.
+    """
+    message_keys = _DISPLAY_MESSAGE_KEYS if keys is None else frozenset(keys)
+    if isinstance(value, dict):
+        out = None
+        for key, child in value.items():
+            if key in message_keys and isinstance(child, list):
+                if not _has_inline_image(child):
+                    continue
+                projected = copy.deepcopy(child)
+                if compact_persisted_image_parts(projected, stamp_digest=stamp_digest):
+                    if out is None:
+                        out = dict(value)
+                    out[key] = projected
+                continue
+            projected_child = project_message_payloads(child, stamp_digest=stamp_digest, keys=message_keys)
+            if projected_child is not child:
+                if out is None:
+                    out = dict(value)
+                out[key] = projected_child
+        return value if out is None else out
+    if isinstance(value, list):
+        out = None
+        for index, item in enumerate(value):
+            projected_item = project_message_payloads(item, stamp_digest=stamp_digest, keys=message_keys)
+            if projected_item is not item:
+                if out is None:
+                    out = list(value)
+                out[index] = projected_item
+        return value if out is None else out
+    return value

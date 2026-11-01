@@ -172,8 +172,14 @@ def test_save_collapses_exact_duplicate_image_rows(session_dir):
     assert len(persisted["messages"]) == 1
 
 
-def test_save_bounds_the_whole_json_with_a_populated_user_context(session_dir, tmp_path, monkeypatch):
-    """Both histories must be bounded, and the live provider payload untouched."""
+def test_save_bounds_the_display_transcript_and_keeps_replay_prefix_exact(session_dir, tmp_path, monkeypatch):
+    """The display copy is bounded; the provider replay prefix stays byte-exact.
+
+    `context_messages` is what the next model call replays, and an existing
+    contract requires those rows to survive a save/load round trip unchanged
+    (tests/test_cancel_restart_journal_recovery.py). Bounding it needs load-time
+    rehydration, which this PR does not ship.
+    """
     import api.upload as upload
 
     attachments = tmp_path / "attachments"
@@ -193,17 +199,15 @@ def test_save_bounds_the_whole_json_with_a_populated_user_context(session_dir, t
     )
     assert isinstance(provider_payload, list) and "data:image" in json.dumps(provider_payload)
     user_row = {"role": "user", "content": provider_payload, "attachments": ["photo.jpg"]}
-    session = Session(session_id=session_id, messages=[user_row], context_messages=[json.loads(json.dumps(user_row))])
+    context_row = json.loads(json.dumps(user_row))
+    session = Session(session_id=session_id, messages=[user_row], context_messages=[context_row])
 
     session.save(touch_updated_at=False)
 
-    text = (session_dir / f"{session_id}.json").read_text()
-    assert "data:image" not in text
-    assert len(text) < 200_000, f"persisted session JSON is {len(text)} bytes"
-    persisted = json.loads(text)
-    assert "data:image" not in json.dumps(persisted["context_messages"])
+    persisted = json.loads((session_dir / f"{session_id}.json").read_text())
     assert "data:image" not in json.dumps(persisted["messages"])
-    # The live provider payload still carries the bytes for the next model call.
+    assert persisted["context_messages"] == [context_row]
+    # The live objects still carry the bytes for the next model call.
     assert "data:image" in json.dumps(session.context_messages)
     assert "data:image" in json.dumps(session.messages)
 
@@ -288,8 +292,9 @@ def test_provider_replay_rows_are_not_stamped_with_transcript_provenance(session
 
     persisted = json.loads((session_dir / "prov-shape.json").read_text())
     assert "_image_payload_digest" in persisted["messages"][0]
+    # The replay prefix is persisted untouched: no marker, no provenance key.
     assert all("_image_payload_digest" not in m for m in persisted["context_messages"])
-    assert "data:image" not in json.dumps(persisted["context_messages"])
+    assert "data:image" in json.dumps(persisted["context_messages"])
 
 
 def test_api_content_sidecar_is_projected_too(session_dir):
@@ -309,12 +314,13 @@ def test_api_content_sidecar_is_projected_too(session_dir):
     session.save(touch_updated_at=False)
 
     text = (session_dir / "apic.json").read_text()
-    assert "data:image" not in text, "api_content mirror leaked inline bytes"
+    assert "data:image" not in json.dumps(json.loads(text)["messages"]), "api_content mirror leaked inline bytes"
     persisted = json.loads(text)
-    for message in (persisted["messages"][0], persisted["context_messages"][0]):
-        mirror = json.loads(message["api_content"])
-        assert mirror[0] == {"type": "text", "text": "what is this"}
-        assert mirror[1] == {"type": "text", "text": "[image attachment]"}
+    mirror = json.loads(persisted["messages"][0]["api_content"])
+    assert mirror[0] == {"type": "text", "text": "what is this"}
+    assert mirror[1] == {"type": "text", "text": "[image attachment]"}
+    # The replay row keeps its provider-shaped mirror exactly as loaded.
+    assert persisted["context_messages"][0]["api_content"] == api_content
     # The live row keeps its provider-shaped mirror for the next model call.
     assert json.loads(session.messages[0]["api_content"])[1]["image_url"]["url"].startswith("data:image/jpeg")
 
