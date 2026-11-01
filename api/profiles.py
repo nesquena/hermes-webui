@@ -17,7 +17,7 @@ import sys
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from api import yaml_compat as yaml
 
@@ -99,23 +99,31 @@ _SKILL_HOME_MODULE_PATCH_LOCK = threading.RLock()
 def snapshot_skill_home_modules() -> dict[str, dict[str, object]]:
     """Snapshot imported skill-module path globals before a temporary patch."""
     snapshot: dict[str, dict[str, object]] = {}
-    for module_name in _SKILL_HOME_MODULES:
-        module = sys.modules.get(module_name)
-        if module is None:
-            snapshot[module_name] = {"module_present": False}
-            continue
-        snapshot[module_name] = {
-            "module_present": True,
-            "has_HERMES_HOME": hasattr(module, "HERMES_HOME"),
-            "HERMES_HOME": getattr(module, "HERMES_HOME", None),
-            "has_SKILLS_DIR": hasattr(module, "SKILLS_DIR"),
-            "SKILLS_DIR": getattr(module, "SKILLS_DIR", None),
-        }
+    with _SKILL_HOME_MODULE_PATCH_LOCK:
+        for module_name in _SKILL_HOME_MODULES:
+            module = sys.modules.get(module_name)
+            if module is None:
+                snapshot[module_name] = {"module_present": False}
+                continue
+            values: dict[str, object] = {"module_present": True}
+            for attr in ("HERMES_HOME", "SKILLS_DIR", "_SKILLS_DIR_AT_IMPORT"):
+                values[f"has_{attr}"] = hasattr(module, attr)
+                values[attr] = getattr(module, attr, None)
+            snapshot[module_name] = values
     return snapshot
 
 
 def _skill_modules_support_profile_home(profile_home: Path) -> bool:
-    """Return ``True`` when both skill modules resolve to this profile home."""
+    """Return ``True`` when both skill modules resolve to this profile home.
+
+    Deliberately lock-free and unchanged from master: streaming calls this per
+    turn to choose the dynamic (concurrent) path, and a legacy turn may hold
+    ``_SKILL_HOME_MODULE_PATCH_LOCK`` for its whole duration. It keeps master's
+    lexical comparison, so a profile whose ``skills/`` is a symlink stays on the
+    concurrent path. Write-approval apply/diff need the stricter containment
+    check; they hold the lock themselves and call
+    ``_skill_modules_support_profile_home_locked``.
+    """
     expected_dir = (Path(profile_home) / 'skills').expanduser()
 
     for module_name in _SKILL_HOME_MODULES:
@@ -179,48 +187,158 @@ def _skill_modules_support_profile_home(profile_home: Path) -> bool:
     return True
 
 
-def patch_skill_home_modules(home: Path) -> None:
-    """Patch imported skill modules that cache HERMES_HOME at import time."""
+def _skill_modules_support_profile_home_locked(profile_home: Path) -> bool:
+    """Strict check for write-approval apply/diff; hold the patch lock to keep it valid.
+
+    Unlike the lock-free streaming helper above, this also resolves symlinks and
+    refuses any skills directory that resolves outside the profile home, so an
+    approval can never write through a link into another profile.
+    """
+    expected_home = Path(profile_home).expanduser()
+    expected_home_resolved = expected_home.resolve(strict=False)
+    expected_dir = Path(os.path.abspath(expected_home / "skills"))
+    expected_dir_resolved = expected_dir.resolve(strict=False)
+    try:
+        expected_dir_resolved.relative_to(expected_home_resolved)
+    except ValueError:
+        logger.debug("Expected skills directory resolves outside profile home %s", profile_home)
+        return False
+
     for module_name in _SKILL_HOME_MODULES:
         module = sys.modules.get(module_name)
         if module is None:
-            continue
+            logger.debug("Skill capability check: %s not pre-imported in sys.modules", module_name)
+            return False
+
+        if not hasattr(module, 'SKILLS_DIR'):
+            logger.debug("Skill capability check: %s missing SKILLS_DIR", module_name)
+            return False
+
+        if not hasattr(module, '_SKILLS_DIR_AT_IMPORT'):
+            logger.debug("Skill capability check: %s missing _SKILLS_DIR_AT_IMPORT", module_name)
+            return False
+
         try:
-            module.HERMES_HOME = home
-            module.SKILLS_DIR = home / "skills"
-        except AttributeError:
-            logger.debug("Failed to patch %s module", module_name)
+            current_skills_dir = Path(
+                os.path.abspath(Path(str(module.SKILLS_DIR)).expanduser())
+            )
+            import_skills_dir = Path(
+                os.path.abspath(Path(str(module._SKILLS_DIR_AT_IMPORT)).expanduser())
+            )
+        except Exception:
+            logger.debug(
+                "Skill capability check: %s has invalid SKILLS_DIR or _SKILLS_DIR_AT_IMPORT",
+                module_name,
+                exc_info=True,
+            )
+            return False
+
+        if current_skills_dir != import_skills_dir:
+            logger.debug(
+                "Skill capability check: %s.SKILLS_DIR %r does not match imported baseline %r",
+                module_name,
+                current_skills_dir,
+                import_skills_dir,
+            )
+            return False
+
+        skills_dir = getattr(module, '_skills_dir', None)
+        if not callable(skills_dir):
+            logger.debug("Skill capability check: %s._skills_dir is not callable", module_name)
+            return False
+
+        try:
+            resolved = Path(os.path.abspath(Path(skills_dir()).expanduser()))
+            resolved_real = resolved.resolve(strict=False)
+        except Exception:
+            logger.debug(
+                "Skill capability check: %s._skills_dir() failed",
+                module_name,
+                exc_info=True,
+            )
+            return False
+
+        try:
+            resolved_real.relative_to(expected_home_resolved)
+        except ValueError:
+            logger.debug(
+                "Skill capability check: %s resolves outside profile home %r",
+                module_name,
+                str(resolved_real),
+            )
+            return False
+
+        if resolved != expected_dir or resolved_real != expected_dir_resolved:
+            logger.debug(
+                "Skill capability check: %s resolves %r instead of %r",
+                module_name,
+                str(resolved),
+                str(expected_dir),
+            )
+            return False
+
+    return True
+
+
+def patch_skill_home_modules(home: Path, *, align_import_baseline: bool = False) -> None:
+    """Patch imported skill modules that cache HERMES_HOME at import time.
+
+    ``align_import_baseline`` is only for process-wide home switches
+    (``_set_hermes_home``). Scoped fallback patches must leave
+    ``_SKILLS_DIR_AT_IMPORT`` alone: the resulting ``SKILLS_DIR`` mismatch is what
+    makes other profiles' capability checks fail and wait on the fallback lock
+    instead of running concurrently against globals this scope will restore.
+    """
+    skills_dir = Path(home) / "skills"
+    with _SKILL_HOME_MODULE_PATCH_LOCK:
+        for module_name in _SKILL_HOME_MODULES:
+            module = sys.modules.get(module_name)
+            if module is None:
+                continue
+            try:
+                module_attrs: Any = module
+                module_attrs.HERMES_HOME = home
+                module_attrs.SKILLS_DIR = skills_dir
+                if align_import_baseline and hasattr(module_attrs, "_SKILLS_DIR_AT_IMPORT"):
+                    # This global process switch is an intentional home change, not
+                    # a custom skills-directory override. Keep Agent's comparison
+                    # baseline aligned so request-local HERMES_HOME overrides remain
+                    # authoritative after profile deletion or switching.
+                    module_attrs._SKILLS_DIR_AT_IMPORT = skills_dir
+            except AttributeError:
+                logger.debug("Failed to patch %s module", module_name)
 
 
 def restore_skill_home_modules(snapshot: dict[str, dict[str, object]]) -> None:
     """Restore skill-module globals captured by snapshot_skill_home_modules()."""
-    for module_name, values in snapshot.items():
-        module = sys.modules.get(module_name)
-        if not values.get("module_present"):
-            if module is not None:
-                sys.modules.pop(module_name, None)
-                parent_name, _, child_name = module_name.rpartition(".")
-                parent = sys.modules.get(parent_name)
-                if parent is not None:
-                    try:
-                        delattr(parent, child_name)
-                    except AttributeError:
-                        pass
-            continue
-        if module is None:
-            continue
-        for attr in ("HERMES_HOME", "SKILLS_DIR"):
-            has_attr = bool(values.get(f"has_{attr}"))
-            try:
-                if has_attr:
-                    setattr(module, attr, values.get(attr))
-                else:
-                    try:
-                        delattr(module, attr)
-                    except AttributeError:
-                        pass
-            except AttributeError:
-                logger.debug("Failed to restore %s.%s", module_name, attr)
+    with _SKILL_HOME_MODULE_PATCH_LOCK:
+        for module_name, values in snapshot.items():
+            module = sys.modules.get(module_name)
+            if not values.get("module_present"):
+                if module is not None:
+                    sys.modules.pop(module_name, None)
+                    parent_name, _, child_name = module_name.rpartition(".")
+                    parent = sys.modules.get(parent_name)
+                    if parent is not None:
+                        try:
+                            delattr(parent, child_name)
+                        except AttributeError:
+                            pass
+                continue
+            if module is None:
+                continue
+            for attr in ("HERMES_HOME", "SKILLS_DIR", "_SKILLS_DIR_AT_IMPORT"):
+                has_attr = bool(values.get(f"has_{attr}"))
+                try:
+                    if has_attr:
+                        setattr(module, attr, values.get(attr))
+                    else:
+                        try:
+                            delattr(module, attr)
+                        except AttributeError:
+                            pass
+                except AttributeError:
+                    logger.debug("Failed to restore %s.%s", module_name, attr)
 
 
 def _unwrap_profile_home_to_base(home: Path) -> Path:
@@ -1782,7 +1900,7 @@ def _set_hermes_home(home: Path):
     os.environ['HERMES_HOME'] = str(home)
     _pin_process_profile_home(home)
 
-    patch_skill_home_modules(home)
+    patch_skill_home_modules(home, align_import_baseline=True)
 
     # Patch cron/jobs module-level cache
     try:
