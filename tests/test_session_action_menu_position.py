@@ -231,6 +231,26 @@ def _visible_bounds_source() -> str:
     return _block("function _projectPickerVisibleBounds(", "\nfunction ")
 
 
+def test_action_menu_cap_uses_dynamic_viewport_units():
+    """The CSS cap must track the actually-visible height (100dvh), not the
+    large-viewport 100vh: in the Android WebView 100vh resolves shorter than
+    the visual viewport, so a vh-only cap clips the menu's box and forces an
+    internal scroll even when the menu would fit. The vh line stays as the
+    fallback for older engines."""
+    css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    marker = ".session-action-menu{"
+    start = css.find(marker)
+    assert start != -1, ".session-action-menu rule not found"
+    end = css.find("}", start)
+    rule = css[start:end]
+    assert "max-height:calc(100dvh - 16px)" in rule, (
+        f"the menu cap must use dynamic viewport units; got {rule[-120:]}"
+    )
+    assert rule.index("max-height:calc(100vh - 16px)") < rule.index(
+        "max-height:calc(100dvh - 16px)"
+    ), "the vh cap must stay first as the fallback"
+
+
 # An Android-like viewport: the layout viewport (window.innerHeight) is
 # taller than the visible box (visualViewport) once browser chrome eats
 # space. position:fixed is relative to the visible box, so the menu must

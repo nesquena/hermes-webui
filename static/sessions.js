@@ -6396,7 +6396,11 @@ function _positionSessionActionMenu(anchorEl){
   _sessionActionMenu.style.top=(_vTop+8)+'px';
   // Reset any prior clamp so we measure the menu's natural height.
   _sessionActionMenu.style.maxHeight='';
-  const menuH=_sessionActionMenu.offsetHeight || 0;
+  // scrollHeight is the truthful content height when a CSS max-height cap is
+  // holding the box shorter (offsetHeight then reports the cap, not the
+  // content). A stale first layout (content missing/empty at measure time)
+  // is corrected by the rAF re-position in _mountSessionActionMenu below.
+  const menuH=Math.max(_sessionActionMenu.scrollHeight||0,_sessionActionMenu.offsetHeight||0);
   const margin=8;
   const maxAvail=Math.max(0,_vBottom-_vTop-margin*2);
   let top=rect.bottom+6;
@@ -6506,6 +6510,16 @@ function _mountSessionActionMenu(menu, session, anchorEl){
   const row=anchorEl.closest('.session-item,.session-child-session');
   if(row) row.classList.add('menu-open');
   _positionSessionActionMenu(anchorEl);
+  // The first measure can race late-arriving content (fonts, locale strings)
+  // and read a short menu that then grows past the viewport. Re-measure once
+  // layout settles; the second pass is idempotent when nothing changed.
+  if(typeof requestAnimationFrame==='function'){
+    const _settledMenu=menu;
+    requestAnimationFrame(()=>{
+      if(_sessionActionMenu!==_settledMenu||!_settledMenu.isConnected) return;
+      _positionSessionActionMenu(_sessionActionAnchor);
+    });
+  }
   _playSessionActionMenuEntrance(menu);
   const menuItems=()=>Array.from(menu.querySelectorAll('.session-action-opt:not([disabled])'));
   // True while a Tab pressed in the menu moves the focus.
