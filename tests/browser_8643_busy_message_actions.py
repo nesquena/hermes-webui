@@ -32,6 +32,14 @@ WHAT THIS CHECKS
     are gone, not the messages.
   - idle again: both come back, so the gate is the run, not the row.
 
+  Then behaviour 2 — the review reproduction for a regeneration that fails to
+  START: the production `startRegeneration()` runs for real, with ONLY the
+  `/api/chat/start` API-adapter boundary substituted by a controlled
+  rejection. After the rejection the transcript must be back to its idle
+  action bar (Edit + Regenerate), the restore must survive a forced
+  session-HTML cache read, and a render that ran while busy must never be
+  served to the idle view (the cache signature covers the busy flag).
+
   Undo is pinned at the source instead (see
   tests/test_issue8643_busy_message_actions.py): the `undoBtn` const in
   renderMessages() is never inserted into `footHtml`, so no Undo button exists
@@ -164,6 +172,58 @@ THREE_STATES_JS = """() => {
 """ % ACTION_BUTTONS_JS
 
 
+# The review reproduction: a regeneration whose /api/chat/start is REFUSED.
+# The production startRegeneration() runs for real; only the api() adapter
+# boundary for that one path is substituted with a controlled rejection (the
+# same substitution the reviewer's probe made). The background sidebar
+# reconciler is stubbed for the duration — it clears S.busy on its own when a
+# /api/sessions response reports the session idle, and a clear landing between
+# the rejection and the restore render would paper over the ordering bug.
+# renderMessages() is wrapped to record the busy flag every render actually
+# saw, which is the ordering under test read straight off the production calls.
+FAILED_REGENERATION_JS = """async ({sid}) => {
+  const probe = %s;
+  const realReconcile = window._reconcileActiveSessionIdleStateFromList;
+  window._reconcileActiveSessionIdleStateFromList = () => false;
+  const realRender = window.renderMessages;
+  const renderBusy = [];
+  window.renderMessages = function (...args) {
+    renderBusy.push(!!S.busy);
+    return realRender.apply(this, args);
+  };
+  const realApi = window.api;
+  window.api = (path, opts) => (path === '/api/chat/start')
+    ? Promise.reject(Object.assign(new Error('controlled rejection: /api/chat/start refused'), {status: 500}))
+    : realApi(path, opts);
+  let threw = null;
+  S.session.regeneration_revision = 'probe-regeneration-revision';
+  try {
+    await startRegeneration(sid, 'probe-regeneration-revision');
+  } catch (error) {
+    threw = String((error && error.message) || error);
+  }
+  window.api = realApi;
+  window.renderMessages = realRender;
+  window._reconcileActiveSessionIdleStateFromList = realReconcile;
+  const afterReject = probe();
+  // What switching away and back does: force the session-HTML cache read.
+  _sessionHtmlCacheSid = null;
+  renderMessages();
+  const afterCacheRestore = probe();
+  // A render that ran while busy must never be served to the idle view: paint
+  // busy (that footer lands in the cache), then restore at idle.
+  S.busy = true;
+  renderMessages();
+  const busyRender = probe();
+  S.busy = false;
+  _sessionHtmlCacheSid = null;
+  renderMessages();
+  const afterBusyTaggedRestore = probe();
+  return {threw, renderBusy, afterReject, afterCacheRestore, busyRender, afterBusyTaggedRestore};
+}
+""" % ACTION_BUTTONS_JS
+
+
 def _failures_idle(state, label):
     problems = []
     if state["busy"]:
@@ -203,6 +263,47 @@ def _failures_busy(state):
         problems.append("busy: no Copy button rendered — the transcript itself is missing")
     if FINAL_TEXT not in state["renderedText"]:
         problems.append("busy: the final answer is no longer rendered — the transcript went away")
+    return problems
+
+
+def _failures_rejected_regeneration(result):
+    """A regeneration refused at /api/chat/start must leave the idle action bar.
+
+    Every check here discriminates the review's P2: the restore render used to
+    run while S.busy was still true (the busy predicate then omitted Edit and
+    Regenerate, and setBusy(false) never rebuilt them), and the busy-derived
+    HTML landed in the session cache without busy in its signature, so a cache
+    restore kept the missing buttons on an idle transcript.
+    """
+    problems = []
+    if "controlled rejection" not in (result.get("threw") or ""):
+        problems.append(
+            "the controlled rejection never reached startRegeneration()"
+            f" (threw={result.get('threw')!r}) — this section would pass vacuously"
+        )
+    render_busy = result.get("renderBusy") or []
+    if not render_busy or render_busy[0] is not True:
+        problems.append(
+            "startRegeneration()'s optimistic render ran with S.busy="
+            f"{render_busy[0] if render_busy else None!r}, expected the running-turn state —"
+            " the pending user row keeps a dead Edit until the stream attaches"
+        )
+    if not render_busy or render_busy[-1] is not False:
+        problems.append(
+            "the restored transcript was last painted with S.busy="
+            f"{render_busy[-1] if render_busy else None!r}, expected idle — the busy"
+            " predicate omits Edit and Regenerate from an idle transcript"
+        )
+    problems += _failures_idle(
+        result.get("afterReject") or {}, "after the refused regeneration"
+    )
+    problems += _failures_idle(
+        result.get("afterCacheRestore") or {}, "cache restore after the refused regeneration"
+    )
+    problems += _failures_busy(result.get("busyRender") or {})
+    problems += _failures_idle(
+        result.get("afterBusyTaggedRestore") or {}, "idle restore of a busy-written cache entry"
+    )
     return problems
 
 
@@ -285,6 +386,20 @@ def main() -> int:
                         f"{label}: Regenerate is offered on the interim answer"
                         f" (row {INTERIM_ASSISTANT_IDX})"
                     )
+
+            # Behaviour 2: the regeneration whose start is refused.
+            session_id = page.evaluate(
+                "() => (S.session && S.session.session_id) || ''"
+            )
+            rejected = page.evaluate(FAILED_REGENERATION_JS, {"sid": session_id})
+            rejected_problems = _failures_rejected_regeneration(rejected)
+            failures += rejected_problems
+            if not rejected_problems:
+                print("OK  rejected regeneration — Edit and Regenerate return once"
+                      " /api/chat/start refuses")
+                print("OK  cache restore after a refused regeneration keeps both buttons")
+                print("OK  a busy-written cache entry is never served to the idle transcript")
+                print("OK  the refused regeneration paints no buttons while the turn runs")
 
             failures += [f"pageerror: {kind} {text}" for kind, text in errors]
             context.close()

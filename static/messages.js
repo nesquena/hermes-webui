@@ -1937,7 +1937,11 @@ async function send(){
   clearLiveToolCards();  // clear any leftover live cards from last turn
   let optimisticMessages;
   try{
-    S.messages.push(userMsg);renderMessages();setBusy(true);
+    // #8643: busy before the optimistic render, so the just-pushed user row
+    // never paints Edit while the turn it belongs to is already running.
+    // Rendering first left the idle-styled row — and its dead Edit — on screen
+    // until the first stream event re-rendered at busy.
+    S.messages.push(userMsg);setBusy(true);renderMessages();
     if(S.session&&!S.session.pending_started_at) S.session.pending_started_at=Date.now()/1000;
     if(typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
     else appendThinking('',{pending:true});
@@ -2137,7 +2141,14 @@ async function send(){
     if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);removeThinking();
     if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
     S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});
-    _queueDrainSid=activeSid;renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`);
+    // #8643: clear busy before the rebuild, same ordering as the regeneration
+    // failure terminal in startRegeneration(). The error row IS the turn's
+    // final assistant row, so rendering while still busy painted it without
+    // Regenerate (and the last user row without Edit), and setBusy(false)
+    // never rebuilt them — the failed send left a transcript whose actions did
+    // not match its idle state. _queueDrainSid stays first: setBusy(false)
+    // reads it to drain a queued message for this session.
+    _queueDrainSid=activeSid;setBusy(false);renderMessages();setComposerStatus(`Error: ${errMsg}`);
     // #5472: the send was rejected before the turn was durably started, so the
     // composer text + attachments (cleared at send time) would otherwise be
     // lost. Put back the ORIGINAL captured draft (not the mutated /moa/bundle
@@ -2242,7 +2253,12 @@ async function startRegeneration(sessionId, regenerationRevision){
   const retained=Object.assign({},snapshot[userIndex],{_pending:true});
   S.messages=snapshot.slice(0,userIndex+1);
   S.messages[userIndex]=retained;
-  renderMessages();setBusy(true);
+  // #8643: set busy BEFORE the optimistic render. Rendering first painted the
+  // idle action bar (Edit on the pending user row) and nothing re-renders
+  // until the stream attaches, so the button sat on screen — tappable, and
+  // refused by editMessage()/regenerateResponse() on S.busy — for the whole
+  // /api/chat/start round-trip. Paint the state the turn is actually in.
+  setBusy(true);renderMessages();
   if(typeof ensureLiveWorklogShell==='function')ensureLiveWorklogShell();
   else if(typeof appendThinking==='function')appendThinking('',{pending:true});
   try{
@@ -2268,7 +2284,15 @@ async function startRegeneration(sessionId, regenerationRevision){
     if(S.session&&S.session.session_id===sid){
       S.messages=snapshot;delete INFLIGHT[sid];
       if(typeof clearInflightState==='function')clearInflightState(sid);
-      removeThinking();renderMessages();setBusy(false);setComposerStatus('');
+      // #8643: clear busy BEFORE rebuilding the restored transcript. Rendering
+      // first painted the running-turn action bar — the busy predicate omits
+      // Edit on the pending user row and Regenerate on the turn's final
+      // assistant row — and setBusy(false) only touches the composer, so the
+      // restored idle transcript kept the button-less footer until some
+      // unrelated re-render. Availability has to follow the real state
+      // transition (busy → idle), so the flag moves first. Same ordering as
+      // the send() failure terminal.
+      removeThinking();setBusy(false);renderMessages();setComposerStatus('');
     }
     throw error;
   }
