@@ -1,11 +1,14 @@
 """#7293 Codex r2 finding 1 — a settle must not return before a run whose worker
 holds the session lock is cancelled and persisted.
 
-The returned-error credential retry runs ``run_conversation()`` while the
-worker holds the owning session's lock. A restart settle that waited for that
-lock longer than the settle budget returned (and the restart reached ``execv``)
-with the run's cancellation unpublished, its agent never interrupted and
-neither its partial output nor a server marker on disk.
+The returned-error credential retry used to run ``run_conversation()`` while
+the worker held the owning session's lock. A restart settle that waited for
+that lock longer than the settle budget returned (and the restart reached
+``execv``) with the run's cancellation unpublished, its agent never
+interrupted and neither its partial output nor a server marker on disk.
+Since #6693 the retry releases the lock around ``run_conversation()`` (as the
+primary send does), so the settle can finalize the turn itself; the outcome
+checked here must hold whichever side writes it.
 
 These tests drive the REAL streaming worker into that branch (only the Agent
 and the credential refresh are synthetic: the retry's provider call blocks
@@ -71,14 +74,6 @@ def _on_disk(scene) -> dict:
     return json.loads(pathlib.Path(scene.session.path).read_text(encoding="utf-8"))
 
 
-def _session_lock_is_held_elsewhere() -> bool:
-    lock = config._get_session_agent_lock("original")
-    if lock.acquire(blocking=False):
-        lock.release()
-        return False
-    return True
-
-
 def _drain_events(scene) -> list:
     out = []
     while not scene.events.empty():
@@ -95,7 +90,9 @@ def test_restart_settle_waits_for_a_lock_holding_credential_retry(worker_scene, 
         future = pool.submit(scene.run)
         try:
             assert retry_entered.wait(10), "worker never reached the credential retry"
-            assert _session_lock_is_held_elsewhere(), "the retry must be running under the session lock"
+            # Since #6693 the retry runs without the session lock (skill callbacks
+            # persist through it), so the settle may take the lock and finalize the
+            # turn itself. Either way, everything below must hold when it returns.
             retained_flag = config.CANCEL_FLAGS["run"]
 
             started = time.monotonic()
