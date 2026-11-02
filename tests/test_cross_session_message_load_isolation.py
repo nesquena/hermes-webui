@@ -137,6 +137,9 @@ ENSURE_MESSAGES_LOADED_SRC = _extract_function(SESSIONS_SRC, "_ensureMessagesLoa
 INFLIGHT_HAS_VISIBLE_STATE_SRC = _extract_function(SESSIONS_SRC, "_inflightHasVisibleLiveState")
 SELECT_LIVE_RECOVERY_INFLIGHT_SRC = _extract_function(SESSIONS_SRC, "_selectLiveRecoveryInflight")
 MERGE_PENDING_SESSION_MESSAGE_SRC = _extract_function(SESSIONS_SRC, "_mergePendingSessionMessage")
+# #7925 re-gate SHOULD-FIX: the prefix-proof/stitch helpers this sandbox used
+# to inline were removed with the unreachable machinery itself. The sandbox no
+# longer references them, so no placeholders are substituted for them.
 COMPOSER_DRAFT_HELPERS_SRC = "\n".join(
     _extract_function(SESSIONS_SRC, name)
     for name in (
@@ -285,6 +288,15 @@ function createEnvironment() {
   globalThis._loadingOlder = false;
   globalThis._loadSessionGeneration = 0;
   globalThis._pendingCarryForwardSnapshot = null;
+  // #7925 re-gate (2026-10-27): module-level state the extracted
+  // loadSession/_ensureMessagesLoaded now reference. The harness injects only
+  // the extracted functions, not the module-level lets — declare them here or
+  // the reads throw ReferenceError inside the load flow. Empty digest ⇒ the
+  // append-only fast path is skipped and every reload takes the bounded
+  // replace / full fetch this harness already asserts on.
+  globalThis._sessionPrefixFp = '';
+  globalThis._sessionPrefixFpEnd = -1;
+  globalThis._pendingSessionToolCalls = null;
   globalThis._messagesTruncated = false;
   globalThis._oldestIdx = 0;
   globalThis._messageRenderWindowSize = 0;

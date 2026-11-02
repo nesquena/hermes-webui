@@ -177,6 +177,14 @@ async function api() {{
 }}
 function _sameTranscriptMessage(a, b) {{ return a && b && a.role === b.role && a.content === b.content; }}
 function _syncToolCallsForLoadedMessages() {{}}
+// #7925 re-gate (2026-10-31, finding 2): _loadOlderMessages merges the page's
+// cards into the held ones before the sync; this harness stubs the merge (it
+// asserts the scroll-restore contract, not card content).
+function _mergeSessionToolCards(existing, incoming) {{
+  const out = Array.isArray(existing) ? existing.slice() : [];
+  for (const tc of (Array.isArray(incoming) ? incoming : [])) out.push(tc);
+  return out;
+}}
 function _messageIsRenderable() {{ return true; }}
 function msgContent(message) {{ return message && message.content; }}
 function _currentMessageRenderWindowSize() {{ return _messageRenderWindowSize; }}

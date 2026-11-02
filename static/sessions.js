@@ -31,6 +31,26 @@ let _loadSessionGeneration = 0;
 // _statusCard, _anchor_stream_id) survive the wholesale replace. null when there is nothing
 // to carry forward (initial load, switch-to-different-session, etc.).
 let _pendingCarryForwardSnapshot = null;
+// #7925 re-gate (2026-10-27, silent finding): the loaded session-level tool
+// card list, kept across loadSession's metadata adoption. The messages=0
+// metadata response carries ``tool_calls: []`` and replacing S.session with
+// it empties the list; on the append-only fast path the messages=1 response
+// then carries ONLY the new owners, so merging into the emptied list drops
+// every older card (the maintainer's ``older-card`` regression, reproduced
+// through the real loadSession + Chromium). Consumed by the append branch;
+// discarded by every other path.
+let _pendingSessionToolCalls = null;
+// #7925 re-gate (2026-10-27 review, finding 4): the server-computed prefix
+// digest the client holds for its current view, plus the absolute row count
+// that digest covers (the view's held end). Every full/limited/append load
+// response mints `prefix_fp` over rows [0, coverage end); the client stores
+// it with the view and echoes it on the next append-only fast-path request,
+// where the server recomputes over [0, msg_after + 1) and refuses on
+// mismatch — closing the non-destructive earlier-row edit hole that no
+// generation bump reports. Empty/invalid ⇒ the fast path is skipped and the
+// reload takes the authoritative full fetch (master's behaviour).
+let _sessionPrefixFp = '';
+let _sessionPrefixFpEnd = -1;
 
 // ── Composer draft persistence ────────────────────────────────────────────────
 
@@ -2515,6 +2535,8 @@ async function newSession(flash, options={}){
       _clearEmptyComposerModelOverride();
     }
     S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
+    // A brand-new session has no rendered prefix to vouch for.
+    _sessionPrefixFp='';_sessionPrefixFpEnd=-1;
     // #8356: New Chat takes the pane without going through loadSession(), so
     // an in-flight loadSession() for the previous session still owns the load
     // (its _loadingSessionId/_loadGeneration match) and its response can write
@@ -2961,6 +2983,12 @@ async function loadSession(sid){
       S.toolCalls = [];
       _messagesTruncated = false;
       _oldestIdx = 0;
+      // The held view (and the prefix digest vouching for it) is gone: the
+      // next reload must re-establish both through a full fetch. The
+      // keep-stale-until-loaded path deliberately keeps them — the append
+      // fast path still describes the transcript on screen.
+      _sessionPrefixFp = '';
+      _sessionPrefixFpEnd = -1;
     }
     // Close live SSE streams from the session we're leaving. The error
     // handler checks _isSessionActivelyViewed() and won't auto-reconnect
@@ -3136,12 +3164,32 @@ async function loadSession(sid){
     _loadingSessionId=null;
     return loadSession(continuationSid,{...opts,_continuationParentSid:sid,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
+  // #7925 re-gate (2026-10-29, silent finding 1): the metadata response
+  // carries `tool_calls: []`, so the card list must be snapshotted BEFORE
+  // `S.session=data.session` replaces the live session — after the
+  // replacement the previous cards are already gone and the capture below
+  // always sees an empty list, so a same-session reload dropped the older
+  // session-level cards. Snapshot the prior list here, then hand it to the
+  // capture site after the toolsets clear (which keeps the
+  // `S.session=data.session` → `S._pendingSessionToolsets=null` adjacency
+  // asserted by tests/test_issue4490_presession_toolsets.py intact).
+  const _priorSessionToolCalls = (currentSid === sid && S.session && Array.isArray(S.session.tool_calls) && S.session.tool_calls.length)
+    ? S.session.tool_calls.map(tc => (tc && typeof tc === 'object' ? {...tc} : tc))
+    : null;
   S.session=data.session;
   if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.
   S._pendingSessionToolsets=null;
+  // #7925 re-gate (2026-10-27, silent finding): keep the loaded card list
+  // across this metadata replacement — same-session reloads only (a switch
+  // must not inherit the previous session's cards). The append branch of
+  // _ensureMessagesLoaded merges the response's new owners into it; every
+  // other path discards it. Placed after the toolsets clear so the
+  // `S.session=data.session` → `S._pendingSessionToolsets=null` adjacency
+  // (asserted by tests/test_issue4490_presession_toolsets.py) survives.
+  _pendingSessionToolCalls = _priorSessionToolCalls;
   // #7855: a session switch is a hard context boundary — drop any restored
   // goal-continuation draft left over from the previous session (restored but
   // never sent, or abandoned mid-settle) so it cannot attach to the next send.
@@ -4294,7 +4342,57 @@ function _messageReloadLimitForSession(sid){
   }
   return _INITIAL_MSG_LIMIT;
 }
-
+function _appendAnchorRowFingerprint(row){
+  // One-row FNV-1a digest of the LAST RENDERED row, byte-identical to
+  // api/routes.py:_append_anchor_fingerprint for any row the JSON round-trip
+  // preserves. The server hashes the row's public projection (internal fields
+  // stripped, content redacted) — the exact bytes this client rendered — so a
+  // rewrite of the seam row, a compaction that touched it, or a change in
+  // what the client would render all make the two digests diverge and the
+  // append-only fast path (#7925 re-gate) is refused in favour of the
+  // authoritative full fetch. Exotic shapes (float 1e-7, a BOM, ints > 2^53,
+  // \x1f) also diverge and fail closed — never a stale row.
+  //
+  // charCodeAt yields UTF-16 CODE UNITS and Math.imul keeps every
+  // intermediate product exact, matching the server's Python modulo
+  // arithmetic bit for bit. Returns '' when the row cannot be described
+  // (non-object row), which the caller treats as "unprovable" and skips the
+  // fast path.
+  if(!row || typeof row!=='object') return '';
+  const role=String(row.role||'');
+  let content=row.content;
+  let text='';
+  if(Array.isArray(content)){
+    for(const part of content){
+      if(part && part.type==='text') text+=String(part.text||'');
+    }
+  }else if(content===undefined || content===null){
+    text='';
+  }else{
+    text=String(content);
+  }
+  const timestamp=(row.timestamp===undefined||row.timestamp===null)
+    ? (row._ts===undefined||row._ts===null?null:row._ts)
+    : row.timestamp;
+  const tids=[];
+  if(Array.isArray(row.tool_calls)){
+    for(const tc of row.tool_calls){
+      if(tc && (tc.id || tc.tool_call_id)) tids.push(String(tc.id||tc.tool_call_id));
+    }
+  }
+  if(Array.isArray(content)){
+    for(const part of content){
+      if(part && part.type==='tool_use' && (part.id||part.tool_use_id)) tids.push(String(part.id||part.tool_use_id));
+    }
+  }
+  const payload=[role,text.trim(),timestamp===null||timestamp===undefined?'':String(timestamp),tids.sort().join(',')].join('\u0000');
+  let hash=0x811c9dc5>>>0;
+  for(let j=0;j<payload.length;j++){
+    hash=(hash^payload.charCodeAt(j))>>>0;
+    hash=(Math.imul(hash,0x01000193))>>>0;
+  }
+  return (hash>>>0).toString(36).padStart(26,'0');
+}
 function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
   const msgs=Array.isArray(messages)?messages:[];
   // During active streaming, skip — clearing S.toolCalls would lose Activity
@@ -4324,6 +4422,55 @@ function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
   }
 }
 
+// #7925 re-gate (2026-10-31, finding 2): merge two session-level tool-card
+// lists that describe the same transcript at two different window offsets.
+// Cards are matched by tid (id fallback) and the INCOMING record wins on a
+// collision; the incoming cards are appended after the held ones so the list
+// order stays stable. `existingShift` / `incomingShift` rebase each side's
+// `assistant_msg_idx` into the combined view's coordinate space:
+//   * append path: the response window starts at `_messages_offset`, so its
+//     cards shift by (offset - _oldestIdx) and the held cards do not move;
+//   * prepend path: the held cards were relative to the pre-prepend view, so
+//     they shift by the prepended length while the page's cards (already
+//     relative to the new view's head) do not move.
+// A card whose `assistant_msg_idx` is not a finite number cannot be attributed
+// to a row, so it is carried through unshifted rather than dropped.
+function _mergeSessionToolCards(existingCards, incomingCards, existingShift, incomingShift){
+  const _existingShift=Number(existingShift)||0;
+  const _incomingShift=Number(incomingShift)||0;
+  const _keyOf=(tc)=>(tc&&typeof tc==='object')?(tc.tid!==undefined?tc.tid:tc.id):undefined;
+  const _rebased=(tc,shift)=>{
+    if(!tc||typeof tc!=='object') return tc;
+    const idx=Number(tc.assistant_msg_idx);
+    return Number.isFinite(idx)?Object.assign({},tc,{assistant_msg_idx:idx+shift}):Object.assign({},tc);
+  };
+  const merged=[];
+  const byKey=new Map();
+  for(const tc of (Array.isArray(existingCards)?existingCards:[])){
+    if(!tc||typeof tc!=='object') continue;
+    const card=_rebased(tc,_existingShift);
+    const key=_keyOf(card);
+    if(key!==undefined){
+      if(byKey.has(key)) continue;
+      byKey.set(key,card);
+    }
+    merged.push(card);
+  }
+  for(const tc of (Array.isArray(incomingCards)?incomingCards:[])){
+    if(!tc||typeof tc!=='object') continue;
+    const card=_rebased(tc,_incomingShift);
+    const key=_keyOf(card);
+    if(key!==undefined&&byKey.has(key)){
+      const at=merged.indexOf(byKey.get(key));
+      if(at>=0) merged[at]=Object.assign({},byKey.get(key),card);
+      continue;
+    }
+    if(key!==undefined) byKey.set(key,card);
+    merged.push(card);
+  }
+  return merged;
+}
+
 async function _ensureMessagesLoaded(sid, opts) {
   // `opts` is an explicit named parameter (vs loadSession's arguments[1]
   // pattern) because _ensureMessagesLoaded is a module-private helper: it is
@@ -4349,23 +4496,101 @@ async function _ensureMessagesLoaded(sid, opts) {
   }
   // Fetch session messages with a tail window for fast initial load.
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
-  // A reload window above the server's msg_limit ceiling would be clamped by
-  // the backend (returning only the last _MSG_LIMIT_MAX rows), which can
-  // silently SHRINK an already-loaded transcript that had more than the ceiling
-  // of rows visible (rows 400–999 replaced by 500–999). When the requested
-  // window exceeds the ceiling, fall back to the bare full-transcript request
-  // (no msg_limit / no expand_renderable) so a same-session refresh never drops
-  // already-loaded older rows (Codex gate #6154, silent row-loss).
-  const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;
-  const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';
+  // #7899: A reload window above the server's msg_limit ceiling used to fall
+  // back to a bare full-transcript request (no msg_limit / no
+  // expand_renderable), turning every focus/SSE reconciliation on a >500-row
+  // session into a full multi-MB transcript download. The reload width is
+  // now either satisfiable under the ceiling (plain bounded tail replace, so
+  // no loaded rows are lost — Codex gate #6154) or it is not, and when it is
+  // not the request is either the explicit full-transcript `msg_limit=all`
+  // (the shape the backend documents for a width the ceiling cannot express)
+  // or the append-only fast path below.
+  //
+  // #7925 re-gate (blocking, scope): `msg_limit=all` and master's bare GET
+  // are the SAME request server-side — both return the full transcript — so
+  // an over-ceiling reload used to re-download a multi-thousand-row
+  // transcript on every refresh. The append-only fast path fixes that: the
+  // client asks for only the rows strictly after its last rendered index
+  // (msg_after + anchor fingerprint + transcript_generation) and APPENDS
+  // them instead of replacing. The server refuses the fast path (and returns
+  // the authoritative full document) when the anchor row's fingerprint or
+  // the transcript generation changed or the count shrank, so
+  // compaction/undo/edits stay exactly as safe as master's full reload.
+  // #7925 re-gate (2026-10-30, CI): the over-ceiling full-transcript
+  // request must keep master's BARE-GET shape (no `msg_limit`, no
+  // `expand_renderable`) — `msg_limit=all` is the SAME request server-side
+  // (`_parse_msg_limit('all')` returns None and `explicit_all` is never
+  // read), but the bare shape is the documented historical full-transcript
+  // contract: api/routes.py `_resolve_effective_msg_limit` reserves `all`
+  // for the frontend paths that address rows by ABSOLUTE transcript index
+  // (outline jump, jump-to-start), and upstream's own contract test
+  // (tests/test_inflight_tail_loadsession_canonical_indices.py) pins the
+  // reload's full fetch to the no-msg_limit shape.
+  const _reloadWidthExceedsCeiling = !(reloadLimit && reloadLimit <= _msgLimitMax);
+  const boundedReloadLimit = _reloadWidthExceedsCeiling ? null : reloadLimit;
+  let reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';
+  // Append-only fast path: the reload needs a width the ceiling cannot
+  // express (the client loaded more than one bounded window) AND the client
+  // still holds a contiguous transcript it can vouch for. The anchor is the
+  // last rendered absolute index (msg_after), proven unchanged by the anchor
+  // fingerprint + transcript_generation — so this works for a paged window
+  // that ends at the newest row as much as for a pristine prefix from row 0
+  // (the #7899 scenario: >500 rows paged, then a refresh).
+  const _appendFastPath =
+    _reloadWidthExceedsCeiling &&
+    Array.isArray(S.messages) && S.messages.length > 0 &&
+    Number.isFinite(Number(S.session && S.session.transcript_generation)) &&
+    // #7925 re-gate (2026-10-27, finding 4): the append must also vouch for
+    // the PREFIX it holds. The stored digest has to cover exactly the view's
+    // held end ([0, _oldestIdx + length)); any drift (a paged view, a stale
+    // digest) skips the fast path rather than sending an unprovable claim.
+    _sessionPrefixFp !== '' &&
+    _sessionPrefixFpEnd === _oldestIdx + S.messages.length;
+  let appendParam = '';
+  // #7925 re-gate (2026-10-21, finding 2): rows can land locally while the
+  // append fetch is in flight (a streaming turn appending to S.messages, a
+  // delegation wakeup, a sibling loader). Concatenating the server's window
+  // onto a transcript that already grew duplicates those rows, and the anchor
+  // the request vouched for no longer describes what is held. Snapshot the
+  // shape the anchor described; any drift routes the response to the
+  // authoritative full fetch instead of the concat.
+  let _appendPreLength = -1;
+  let _appendPreAnchorRow = null;
+  let _appendPreOldestIdx = -1;
+  if (_appendFastPath) {
+    const lastRenderedIdx = _oldestIdx + S.messages.length - 1;
+    const anchorFp = _appendAnchorRowFingerprint(S.messages[S.messages.length - 1]);
+    if (anchorFp !== '') {
+      _appendPreLength = S.messages.length;
+      _appendPreAnchorRow = S.messages[S.messages.length - 1];
+      _appendPreOldestIdx = _oldestIdx;
+      appendParam =
+        `&msg_after=${lastRenderedIdx}` +
+        `&anchor_fp=${encodeURIComponent(anchorFp)}` +
+        `&transcript_generation=${Number(S.session.transcript_generation)}` +
+        `&prefix_fp=${encodeURIComponent(_sessionPrefixFp)}` +
+        `&msg_limit=${_msgLimitMax}`;
+      // The append request carries its own bounded msg_limit; drop the
+      // `all` width (a duplicate msg_limit would make parse_qs take the
+      // first value and cost the server the full-merge path for nothing).
+      reloadLimitParam = '';
+      // The append window is capped like any bounded window (the server's
+      // limited-display merge stays the cheap one); when more new rows exist
+      // the response says so and we fall back to a full fetch.
+    }
+  }
   // Older frontends used expand_renderable=1 to request visible-row expansion.
   // The server now counts msg_limit by visible transcript rows by default; keep
   // the flag for compatibility with mixed-version deployments.
-  const expandParam = boundedReloadLimit ? '&expand_renderable=1' : '';
+  // #7925 re-gate (2026-10-30, CI): master sends this flag only alongside a
+  // bounded width — the bare full-transcript request carries neither
+  // `msg_limit` nor `expand_renderable`. The append fast path carries its own
+  // bounded `msg_limit`, so it keeps the flag.
+  const expandParam = boundedReloadLimit || appendParam ? '&expand_renderable=1' : '';
   let data;
   try {
     data = await api(
-      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,
+      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${appendParam}${expandParam}`,
       {timeoutMs:120000}
     );
   } finally {
@@ -4374,9 +4599,154 @@ async function _ensureMessagesLoaded(sid, opts) {
   if (!_ownsLoad()) return;
   // Guard: api() may have redirected (401) and returned undefined.
   if (!data || !data.session) return;
+  _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
+  if (appendParam && data.session._append_only === true) {
+    // Append-only fast path accepted: retain the rendered prefix and append
+    // only the rows the server returned after the anchor. The cursor is
+    // unchanged (the retained rows still start at _oldestIdx) and the
+    // ephemeral-field carry-forward does not apply (nothing was replaced).
+    //
+    // #7925 re-gate (2026-10-21, finding 2): if rows landed locally while the
+    // append fetch was in flight the anchor no longer describes the held
+    // transcript, and concatenating the window would duplicate them. Treat
+    // that drift exactly like an over-cap window: re-fetch the authoritative
+    // full transcript through the replace path below.
+    const _appendConcurrentChange =
+      _appendPreLength >= 0 &&
+      (S.messages.length !== _appendPreLength ||
+        S.messages[S.messages.length - 1] !== _appendPreAnchorRow ||
+        _oldestIdx !== _appendPreOldestIdx);
+    // The append does not change whether OLDER rows exist beyond the window:
+    // keep the previous truncation state and OR in the response's signal that
+    // more NEWER rows exist beyond the capped append window. Only the newer
+    // signal decides the fallback — a paged window that ends at the newest
+    // row stays truncated (older rows unloaded) with no need for a full fetch.
+    const _appendHasMoreRows = !!data.session._messages_truncated || _appendConcurrentChange;
+    _messagesTruncated = _messagesTruncated || _appendHasMoreRows;
+    if (!_appendHasMoreRows) {
+      const appended = (data.session.messages || []).filter(m => m && m.role);
+      if (appended.length) {
+        S.messages = [...S.messages, ...appended];
+        if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
+      }
+      // #7925 re-gate (2026-10-21, finding 3): the append branch used to
+      // return before tool-card synchronization, so a session-level tool card
+      // that arrived with the append window never reached the client. Merge
+      // the response's cards by tid into the session-level list, rebasing the
+      // window-relative assistant_msg_idx (the server rebases full-transcript
+      // coordinates into the returned window) into the combined transcript's
+      // coordinate space, then run the existing sync over the combined
+      // transcript — the same contract the replace path below upholds.
+      //
+      // #7925 re-gate (2026-10-27, silent finding): merge into the list kept
+      // across loadSession's metadata replacement (_pendingSessionToolCalls),
+      // not the emptied S.session.tool_calls — and restore it even when this
+      // response carries no new cards, or the older cards stay dropped.
+      if (S.session && S.session.session_id === sid) {
+        const _cards = (Array.isArray(_pendingSessionToolCalls) && _pendingSessionToolCalls.length)
+          ? _pendingSessionToolCalls
+          : (Array.isArray(S.session.tool_calls) ? S.session.tool_calls : []);
+        if (Array.isArray(data.session.tool_calls) && data.session.tool_calls.length) {
+          // The response window starts at `_messages_offset`, so its cards are
+          // relative to that window and must be rebased into the combined
+          // transcript's coordinate space; the held cards do not move.
+          const _appendIdxShift = (Number(data.session._messages_offset) || 0) - _oldestIdx;
+          S.session.tool_calls = _mergeSessionToolCards(
+            _cards, data.session.tool_calls, 0, _appendIdxShift
+          );
+        } else {
+          S.session.tool_calls = _cards;
+        }
+      }
+      _pendingSessionToolCalls = null;
+      if (!(typeof INFLIGHT !== 'undefined' && INFLIGHT && INFLIGHT[sid])) {
+        _syncToolCallsForLoadedMessages(S.messages, S.session && S.session.tool_calls);
+      }
+      // #7925 re-gate (2026-10-27, finding 4): the append response minted a
+      // fresh prefix digest over [0, the extended held end) — adopt it so the
+      // NEXT append vouches for the longer prefix. A response without one
+      // (older server) invalidates the stored digest: the next reload takes
+      // the authoritative full fetch instead of an unprovable append.
+      if (data.session.prefix_fp) {
+        _sessionPrefixFp = String(data.session.prefix_fp);
+        _sessionPrefixFpEnd = _oldestIdx + S.messages.length;
+      } else {
+        _sessionPrefixFp = '';
+        _sessionPrefixFpEnd = -1;
+      }
+      // Clean append: the new rows are all there is — refresh the session
+      // metadata that every transcript landing must update, then finish. The
+      // regeneration revision is re-adopted from this response (the
+      // transcript changed by construction, so any stored revision is stale).
+      if(S.session&&S.session.session_id===sid){
+        if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
+        S.session.message_count=Number(data.session.message_count || S.messages.length);
+        if(typeof data.session.visible_message_count==='number'&&data.session.visible_message_count>=0){
+          S.session.visible_message_count=data.session.visible_message_count;
+        }
+        if(!S.busy){
+          S.session._visibleBaselineLocal=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role&&m._source!=='delegation_wakeup').length;
+          S.session._visibleBaselineServer=(typeof data.session.visible_message_count==='number'&&data.session.visible_message_count>=0)
+            ?data.session.visible_message_count
+            :S.session._visibleBaselineLocal;
+        }
+        S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
+        if(data.session.todo_state !== undefined){
+          S.session.todo_state = data.session.todo_state;
+        }else{
+          delete S.session.todo_state;
+        }
+        if(typeof _hydrateTodosFromSession === 'function'){
+          _hydrateTodosFromSession(S.session);
+        }
+        if(typeof scheduleTodosRefresh === 'function'){
+          scheduleTodosRefresh();
+        }
+        if(typeof _isSessionActivelyViewedForList !== 'function' || _isSessionActivelyViewedForList(sid)){
+          _setSessionViewedCount(sid, Number(S.session.message_count || S.messages.length));
+        }
+        if(typeof syncTopbar==='function') syncTopbar();
+      }
+      // #7925 re-gate (2026-10-27, should-fix): the replace path below
+      // re-expands the render window to cover the loaded transcript, but the
+      // append path returned without it — after an append the hidden-rows
+      // affordance still described the pre-append window (it read 551 where
+      // master's replace reads 401). Same bounded expansion as the replace
+      // path (#6999 cap included).
+      if(typeof _messageRenderableMessageCount==='function'&&typeof _currentMessageRenderWindowSize==='function'){
+        _messageRenderWindowSize=Math.max(
+          _currentMessageRenderWindowSize(),
+          Math.min(_messageRenderableMessageCount(), (typeof MESSAGE_RENDER_WINDOW_DEFAULT==='number'?MESSAGE_RENDER_WINDOW_DEFAULT:50)*4)
+        );
+      }
+      return;
+    }
+    // The capped append window could not cover every new row (>msg_limit rows
+    // arrived since the last refresh — rare), or rows landed locally during
+    // the fetch. Either way the held transcript is not the one the anchor
+    // described: re-fetch the authoritative full transcript and fall through
+    // to the normal replace path below, which re-checks ownership and updates
+    // every session metadata field — exactly master's cost.
+    // #7925 re-gate (2026-10-30, CI): master's bare full-transcript GET
+    // shape (no msg_limit / no expand_renderable) — `msg_limit=all` is the
+    // same request server-side but not the documented full-transcript
+    // contract shape (see the reloadLimitParam comment above).
+    try {
+      data = await api(
+        `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`,
+        {timeoutMs:120000}
+      );
+    } finally {
+      if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);
+    }
+    if (!_ownsLoad() || !data || !data.session) return;
+  }
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
-  _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
+  // The append fast path was not taken (or was refused): the snapshot kept
+  // across the metadata replacement is not needed — this response carries
+  // the window's own card list, which the sync below adopts wholesale.
+  _pendingSessionToolCalls = null;
   // #3162: `msgs` is reassigned below by the #3018 ephemeral-field carry-forward,
   // so it must be `let`, not `const`. The `const` form threw a TypeError inside
   // _ensureMessagesLoaded() that surfaced as a "Failed to load conversation messages"
@@ -4405,6 +4775,13 @@ async function _ensureMessagesLoaded(sid, opts) {
   }
   if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
   S.messages = msgs;
+  // #7925 re-gate (2026-10-27, finding 4): every load response mints the
+  // prefix digest over rows [0, coverage end) — store it with the view this
+  // response established so the next append-only fast-path request can vouch
+  // for the prefix. A response without one invalidates the stored digest
+  // (the fast path is skipped, the reload already took the full fetch).
+  _sessionPrefixFp = data.session.prefix_fp ? String(data.session.prefix_fp) : '';
+  _sessionPrefixFpEnd = _oldestIdx + (Array.isArray(S.messages) ? S.messages.length : 0);
   // Expand render window to cover all loaded messages so the next
   // renderMessages() doesn't hide most of them behind a tiny window.
   if(typeof _messageRenderableMessageCount==='function'&&typeof _currentMessageRenderWindowSize==='function'){
@@ -5339,7 +5716,24 @@ async function _loadOlderMessages() {
       );
     }
     S.messages = nextMessages;
-    _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);
+    // #7925 re-gate (2026-10-31, finding 2): the prepend used to hand the sync
+    // ONLY the incoming page's cards, so every session-level card the held view
+    // already owned was dropped — and a later focus reload cannot repair it:
+    // an over-ceiling reload takes the append-only fast path, whose EMPTY
+    // window carries no cards (the server selects the returned rows' owners),
+    // so the merge is skipped and the dropped card stays missing where
+    // master's full reload delivers it. Keep the held cards, shift their owner
+    // indices by the prepended length (they are relative to the pre-prepend
+    // view), and merge the page's cards (already relative to the new view's
+    // head) before the sync.
+    const _prependedToolCalls = _mergeSessionToolCards(
+      S.session && S.session.tool_calls,
+      responseSession.tool_calls,
+      olderMsgs.length,
+      0
+    );
+    if (S.session) S.session.tool_calls = _prependedToolCalls;
+    _syncToolCallsForLoadedMessages(nextMessages, _prependedToolCalls);
     // #7882 (greptile round-4 P2): older rows prepended during an in-flight
     // send are server-known rows — advance the send's optimistic-count
     // baseline by exactly the prepended visible rows so the send's eventual
