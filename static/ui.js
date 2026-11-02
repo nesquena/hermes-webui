@@ -7052,17 +7052,26 @@ function renderModelDropdown(){
         const row=document.createElement('div');
         row.className='model-opt'+(_isSelectedModelRow(m)?' active':'');
         let badgeLabel = '';
+        let badgeTitle = '';
         if (m.badge) {
-          // 直接用badge的原始key（即config.yaml里的ID）
+          // #8733: the chip shows the readable role the group rows already use
+          // ("Primary", "Fallback 2") instead of the matched config key. That key
+          // can be an '@provider:model' routing spelling, which wraps the chip onto
+          // its own line on desktop and breaks mid-string on ~320px phones. The key
+          // stays reachable on the row subtitle and on the chip's title attribute.
           const rawId = badgeKeyMap.get(m.badge) || m.value || m.badge.label || 'Configured';
-          badgeLabel = rawId;
-          if(m.badge.provider){
-            const providerName=m.badge.provider.replace(/^custom:/,'').split('/')[0];
-            badgeLabel += ` (${providerName})`;
-          }
+          const roleLabel = String(m.badge.role||'').replace(/^./,c=>c.toUpperCase());
+          badgeLabel = (m.badge.label && !String(m.badge.label).includes('@'))
+            ? String(m.badge.label)
+            : (roleLabel || 'Configured');
+          badgeTitle = rawId;
         }
-        const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
-        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${_selectedModelBadge(m)}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+        const badgeAttrs = badgeTitle ? ` title="${esc(badgeTitle)}"` : '';
+        const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}"${badgeAttrs}>${esc(badgeLabel)}</span>`:'';
+        // Keep the raw key visible in the subtitle when it differs from the row id,
+        // so dropping it from the chip never hides which config entry matched.
+        const rowSubtitle = (badgeTitle && badgeTitle !== m.id) ? badgeTitle : m.id;
+        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${_selectedModelBadge(m)}</div><span class="model-opt-id">${esc(rowSubtitle)}</span>`;
         row.onclick=()=>selectFromDropdown(m.value,(m.badge&&m.badge.provider)||m.providerId||null);
         dd.appendChild(row);
       }
