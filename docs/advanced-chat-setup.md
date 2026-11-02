@@ -353,3 +353,13 @@ locally and want browser-originated chat to use the same runtime/tool path as
 messaging surfaces. Attachments, cancellation, approvals, and clarify prompts
 still follow WebUI's current compatibility path and may not match every messaging
 surface until the runtime-adapter migration is complete.
+
+## Idempotency keys for `POST /api/chat/start`
+
+External automation can retry `POST /api/chat/start` safely with an
+`Idempotency-Key` header (or `idempotency_key` body field): the first
+request claims the key durably before any turn is admitted, and retries
+with the same key replay the original acceptance instead of starting a
+second turn. See [Idempotency keys for `POST /api/chat/start`](idempotency-keys.md)
+for the full contract — transports, request fingerprinting, retention,
+crash-window handling, and every error code.
