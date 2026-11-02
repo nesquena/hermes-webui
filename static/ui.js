@@ -16078,6 +16078,40 @@ function _worklogDetailDisclosureKeyForElement(el, counts){
   counts[base]=idx+1;
   return `${base}#${idx}`;
 }
+function _thinkingCardText(el){
+  if(!el) return '';
+  const body=_worklogDetailScrollableBody(el);
+  const pre=body&&body.querySelector?body.querySelector('pre'):null;
+  const raw=(pre?pre.textContent:(body?body.textContent:''))||'';
+  return String(raw).trim();
+}
+function _worklogDetailTurnScope(el, root){
+  if(!el) return '';
+  const turn=el.closest?el.closest('.assistant-turn'):null;
+  if(turn){
+    const container=(root&&root.querySelectorAll&&root.querySelectorAll('.assistant-turn').length>0)
+      ? root
+      : (turn.parentElement||(typeof document!=='undefined'&&document.querySelectorAll?document:null));
+    if(container&&container.querySelectorAll){
+      const turns=Array.from(container.querySelectorAll('.assistant-turn'));
+      const idx=turns.indexOf(turn);
+      if(idx>=0) return `turn:${idx}`;
+    }
+    return 'turn:0';
+  }
+  const msgRow=el.closest?el.closest('.msg-row,.msg'):null;
+  if(msgRow){
+    const container=(root&&root.querySelectorAll&&root.querySelectorAll('.msg-row,.msg').length>0)
+      ? root
+      : (msgRow.parentElement||(typeof document!=='undefined'&&document.querySelectorAll?document:null));
+    if(container&&container.querySelectorAll){
+      const rows=Array.from(container.querySelectorAll('.msg-row,.msg'));
+      const idx=rows.indexOf(msgRow);
+      if(idx>=0) return `msg:${idx}`;
+    }
+  }
+  return 'turn:default';
+}
 function _captureWorklogDetailDisclosureState(root){
   const state=new Map();
   if(!root||!root.querySelectorAll) return state;
@@ -16087,6 +16121,7 @@ function _captureWorklogDetailDisclosureState(root){
   // empty, but the ordinal/derived keys carry no session id — this stamp makes
   // the isolation explicit instead of depending on that wipe invariant. (Opus #4063.)
   try{ state._sid=S.session?S.session.session_id:null; }catch(_){ state._sid=null; }
+  state._thinkingFallbacks=[];
   const counts=Object.create(null);
   root.querySelectorAll(_worklogDetailDisclosureSelector).forEach(el=>{
     const key=_worklogDetailDisclosureKeyForElement(el, counts);
@@ -16107,6 +16142,17 @@ function _captureWorklogDetailDisclosureState(root){
     };
     if(participates) snap.atBottom=_worklogDetailBodyAtTail(body);
     state.set(key,snap);
+    if(el.classList&&el.classList.contains('thinking-card')){
+      const text=_thinkingCardText(el);
+      if(text){
+        state._thinkingFallbacks.push({
+          turnScope:_worklogDetailTurnScope(el, root),
+          text,
+          snap,
+          consumed:false,
+        });
+      }
+    }
   });
   return state;
 }
@@ -16117,8 +16163,33 @@ function _restoreWorklogDetailDisclosureState(root, state){
   const counts=Object.create(null);
   root.querySelectorAll(_worklogDetailDisclosureSelector).forEach(el=>{
     const key=_worklogDetailDisclosureKeyForElement(el, counts);
-    if(!key||!state.has(key)) return;
-    const saved=state.get(key);
+    let saved=null;
+    if(key&&state.has(key)){
+      saved=state.get(key);
+      if(el.classList&&el.classList.contains('thinking-card')&&Array.isArray(state._thinkingFallbacks)){
+        for(let i=0;i<state._thinkingFallbacks.length;i++){
+          const fb=state._thinkingFallbacks[i];
+          if(!fb.consumed&&fb.snap===saved){
+            fb.consumed=true;
+            break;
+          }
+        }
+      }
+    }else if(el.classList&&el.classList.contains('thinking-card')&&Array.isArray(state._thinkingFallbacks)){
+      const text=_thinkingCardText(el);
+      if(text){
+        const turnScope=_worklogDetailTurnScope(el, root);
+        for(let i=0;i<state._thinkingFallbacks.length;i++){
+          const fb=state._thinkingFallbacks[i];
+          if(!fb.consumed&&fb.turnScope===turnScope&&fb.text===text){
+            fb.consumed=true;
+            saved=fb.snap;
+            break;
+          }
+        }
+      }
+    }
+    if(!saved) return;
     const open=(saved&&typeof saved==='object'&&'open' in saved)?saved.open:saved;
     _setWorklogDetailDisclosureOpen(el, open);
     const scrollTop=(saved&&typeof saved==='object')?Number(saved.scrollTop):0;
@@ -16148,7 +16219,8 @@ function _restoreWorklogDetailDisclosureState(root, state){
         // The re-pin reads scrollHeight; skip it on a collapsed card (the tail
         // read forces a layout) — _toggleThinkingCard re-pins on open.
         const elOpen=!el.classList||el.classList.contains('open');
-        if(atBottom&&elOpen){
+        const settledPinToTail = !destLive && !!(saved && typeof saved === 'object' && saved.atBottom === true);
+        if((atBottom || settledPinToTail) && elOpen){
           body.scrollTop=Math.max(0, body.scrollHeight-body.clientHeight);
         }else if(Number.isFinite(scrollTop)&&scrollTop>0){
           body.scrollTop=Math.min(scrollTop, Math.max(0, body.scrollHeight-body.clientHeight));

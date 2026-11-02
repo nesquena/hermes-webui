@@ -198,6 +198,7 @@ for(const name of [
   '_worklogDetailTextKey','_worklogDetailBaseKey',
   '_worklogDetailDisclosureIsOpen','_worklogDetailScrollableBody',
   '_setWorklogDetailDisclosureOpen','_worklogDetailDisclosureKeyForElement',
+  '_thinkingCardText','_worklogDetailTurnScope',
   '_captureWorklogDetailDisclosureState','_restoreWorklogDetailDisclosureState',
   '_renderThinkingInto','_refreshTransparentThinkingLiveRow',
 ]) eval(extractFunc(uiSrc,name));
@@ -758,6 +759,28 @@ const out={};
   out.s22_long_follows=rebuiltB.body.scrollTop;
 }
 
+// ── S23: settled thinking card restores scroll and tail position across key change (#8286) ──
+{
+  const live=makeThinkingRow('deep reasoning steps\nsecond line\nthird line\nend of thought', true);
+  live.body.clientHeight=200;
+  live.body.scrollHeight=1000;
+  live.body.scrollTop=800; // at bottom
+  _bindThinkingTailFollow(live.body, true); // was following at tail
+
+  const state=_captureWorklogDetailDisclosureState(live.row);
+
+  // Settled row: not live, and loses its stream data-thinking-key
+  const settled=makeThinkingRow('deep reasoning steps\nsecond line\nthird line\nend of thought', false);
+  settled.row.removeAttribute('data-thinking-key');
+  settled.body.clientHeight=200;
+  settled.body.scrollHeight=1000;
+  settled.body.scrollTop=0; // starts at top in freshly built DOM
+
+  _restoreWorklogDetailDisclosureState(settled.row, state);
+  out.s23_settled_scroll=settled.body.scrollTop;
+  out.s23_settled_pinned=settled.body.scrollTop===800;
+}
+
 console.log(JSON.stringify(out, null, 2));
 """
 
@@ -1057,7 +1080,7 @@ def test_collapse_and_expand_mid_stream_keeps_following():
 
 
 def test_live_marker_is_cleared_at_settlement():
-    src = (Path(__file__).resolve().parents[1] / "static" / "ui.js").read_text()
+    src = (Path(__file__).resolve().parents[1] / "static" / "ui.js").read_text(encoding="utf-8")
 
     # Every row-level settlement/demotion strip that clears data-live-thinking
     # must also clear data-live-thinking-row, or _thinkingRowIsLive stays true
@@ -1066,3 +1089,11 @@ def test_live_marker_is_cleared_at_settlement():
     live_row_strips = src.count("removeAttribute('data-live-thinking-row')")
     assert strips >= 5
     assert live_row_strips == strips
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_thinking_card_settled_scroll_restored_across_key_change():
+    out = _run_scenarios()
+    assert out["s23_settled_pinned"] is True
+    assert out["s23_settled_scroll"] == 800
+
