@@ -3679,6 +3679,8 @@ from api.config import (
     _load_yaml_config_file,
     _load_yaml_config_file_raw,
     _has_env_ref,
+    _preserve_env_ref,
+    _normalize_base_url_for_compare,
     _save_yaml_config_file,
     reload_config,
     get_config_for_profile_home,
@@ -36351,7 +36353,17 @@ def _handle_mcp_server_update(handler, name, body):
         servers = dict(servers) if isinstance(servers, dict) else {}
         existing_cfg = servers.get(name, {})
         if body.get("url"):
-            server_cfg["url"] = body["url"].strip()
+            # The MCP list shows the EXPANDED url, so an unchanged re-save
+            # submits the resolved string. Keep the ${VAR} already stored when
+            # it still resolves to what was submitted — otherwise the
+            # expansion (and a token inside it) replaces the reference on disk
+            # (#8700).
+            existing_url = existing_cfg.get("url") if isinstance(existing_cfg, dict) else None
+            server_cfg["url"] = _preserve_env_ref(
+                existing_url,
+                body["url"].strip(),
+                normalize=_normalize_base_url_for_compare,
+            )
             if body.get("headers"):
                 server_cfg["headers"] = _strip_masked_values(body["headers"], existing_cfg.get("headers", {}))
         else:
