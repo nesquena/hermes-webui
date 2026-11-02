@@ -929,3 +929,90 @@ assert.strictEqual(messages[messages.length - 1]._live, true);
 assert.strictEqual(messages.filter(m => m.role === 'user').length, 1);
 """
     _run(script)
+
+
+def test_zero_offset_load_places_prompt_before_persisted_turn_rows():
+    """A full (zero-offset) load of a young session must still place the prompt
+    by turn ownership.
+
+    Live repro (2026-10-30): a running session loaded with ``_oldestIdx = 0``
+    (6 rows, no paging) reached ``_mergePendingSessionMessage()`` with its
+    current-turn assistant/tool rows already persisted and a ``_live`` tail.
+    ``windowed`` was false, so the live-tail fallback spliced the prompt in
+    front of the live row -- BEHIND those persisted rows::
+
+        head = [assistant(1793376057.9), tool, tool, tool,
+                user(_pending, 1793376044.0), assistant(1793376065.7)]
+
+    The prompt's ``pending_started_at`` (1793376044.1) proves every persisted
+    row above it belongs to the SAME turn, so the prompt must lead them.
+    """
+    helper_src = _helper_src()
+    script = f"""
+const assert = require('assert');
+let _oldestIdx = 0;   // full load: no tail window, so `windowed` is false
+{helper_src}
+
+function getPendingSessionMessage(session, messages) {{
+  const text = String((session && session.pending_user_message) || '').trim();
+  if (!text) return null;
+  return {{role:'user', content:text, _ts:(session.pending_started_at || 10), _pending:true}};
+}}
+
+const START = 1793376044.0683815;
+const messages = [
+  {{role:'assistant', timestamp: 1793376057.9483058, content:'PR located, CI green'}},
+  {{role:'tool', timestamp: 1793376058.4285958, content:'{{"ok":true}}'}},
+  {{role:'tool', timestamp: 1793376058.4368327, content:'{{"ok":true}}'}},
+  {{role:'tool', timestamp: 1793376060.95812, content:'{{"ok":true}}'}},
+  {{role:'assistant', _live:true, content:'reading the maintainer review'}},
+];
+const changed = _mergePendingSessionMessage(
+  {{pending_user_message:'fix the webui PR', pending_started_at: START}},
+  messages
+);
+assert.strictEqual(changed, true);
+assert.deepStrictEqual(
+  messages.map(m => m.role),
+  ['user', 'assistant', 'tool', 'tool', 'tool', 'assistant'],
+  'prompt must lead the persisted current-turn rows, not the live tail'
+);
+assert.strictEqual(messages[0].content, 'fix the webui PR');
+assert.strictEqual(messages[messages.length - 1]._live, true);
+assert.strictEqual(messages.filter(m => m.role === 'user').length, 1);
+"""
+    _run(script)
+
+
+def test_zero_offset_load_keeps_previous_turn_rows_above_the_prompt():
+    """Turn ownership must not steal: rows older than pending_started_at stay above."""
+    helper_src = _helper_src()
+    script = f"""
+const assert = require('assert');
+let _oldestIdx = 0;
+{helper_src}
+
+function getPendingSessionMessage(session, messages) {{
+  const text = String((session && session.pending_user_message) || '').trim();
+  if (!text) return null;
+  return {{role:'user', content:text, _ts:(session.pending_started_at || 10), _pending:true}};
+}}
+
+const messages = [
+  {{role:'user', timestamp: 100, content:'previous question'}},
+  {{role:'assistant', timestamp: 101, content:'previous answer'}},
+  {{role:'assistant', _live:true, content:'starting the new turn'}},
+];
+const changed = _mergePendingSessionMessage(
+  {{pending_user_message:'new question', pending_started_at: 200}},
+  messages
+);
+assert.strictEqual(changed, true);
+assert.deepStrictEqual(
+  messages.map(m => m.role),
+  ['user', 'assistant', 'user', 'assistant'],
+  'previous-turn rows must stay above the prompt'
+);
+assert.strictEqual(messages[2].content, 'new question');
+"""
+    _run(script)
