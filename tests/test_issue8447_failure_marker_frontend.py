@@ -250,3 +250,95 @@ def test_sessions_js_contains_the_failure_marker_hook():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     assert "session-failure-indicator" in js
     assert "_sessionFailureState(s)" in js
+
+
+# ── #8603 review round 3, finding 7: the locale strings ────────────────────
+
+def _locale_failure_strings(i18n: str, locale_key: str) -> list[str]:
+    """Every ``session_failure_*`` value line inside one locale block."""
+    start = i18n.index(f"\n  {locale_key}: {{")
+    depth = 0
+    pos = i18n.index("{", start)
+    block_start = pos
+    in_single = in_double = in_backtick = escape = False
+    while pos < len(i18n):
+        ch = i18n[pos]
+        if escape:
+            escape = False
+        elif in_single:
+            if ch == "\\":
+                escape = True
+            elif ch == "'":
+                in_single = False
+        elif in_double:
+            if ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_double = False
+        elif in_backtick:
+            if ch == "\\":
+                escape = True
+            elif ch == "`":
+                in_backtick = False
+        elif ch == "'":
+            in_single = True
+        elif ch == '"':
+            in_double = True
+        elif ch == "`":
+            in_backtick = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                block = i18n[block_start + 1:pos]
+                return [
+                    line.strip() for line in block.splitlines()
+                    if "session_failure_" in line
+                ]
+        pos += 1
+    raise AssertionError(f"{locale_key} locale block is not balanced")
+
+
+def test_failure_locale_strings_are_translated_not_english():
+    """The three locales the reviewer flagged must not read as English.
+
+    ``cs`` shipped the English strings verbatim, so a Czech install showed
+    "Last turn failed (billing)".
+    """
+    i18n = I18N_JS_PATH.read_text(encoding="utf-8")
+    for locale in ("cs", "pt", "es", "it", "fr", "de", "ru", "ja", "ko",
+                   "tr", "pl", "vi"):
+        for line in _locale_failure_strings(i18n, locale):
+            assert "Last turn failed" not in line, (locale, line)
+
+
+def test_failure_locale_strings_are_not_the_simplified_chinese_copy():
+    """``zh-Hant`` must not repeat the ``zh`` strings.
+
+    Traditional and Simplified Chinese differ in these characters
+    (失敗 / 失败), so a copy is visible to every Traditional reader.
+    """
+    i18n = I18N_JS_PATH.read_text(encoding="utf-8")
+    zh = _locale_failure_strings(i18n, "zh")
+    zh_hant = _locale_failure_strings(i18n, "'zh-Hant'")
+    assert zh and zh_hant
+    for line in zh_hant:
+        assert line not in zh, line
+        assert "失敗" in line or "工作階段" in line, line
+
+
+def test_portuguese_failure_string_agrees_with_its_noun():
+    """``turno`` is masculine: ``Último turno``, not ``Última turno``."""
+    i18n = I18N_JS_PATH.read_text(encoding="utf-8")
+    for line in _locale_failure_strings(i18n, "pt"):
+        assert "Último turno" in line, line
+        assert "Última turno" not in line, line
+
+
+def test_czech_failure_strings_are_czech():
+    i18n = I18N_JS_PATH.read_text(encoding="utf-8")
+    lines = _locale_failure_strings(i18n, "cs")
+    assert lines
+    for line in lines:
+        assert "Poslední tah selhal" in line, line
