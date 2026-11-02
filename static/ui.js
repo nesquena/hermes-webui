@@ -2598,12 +2598,17 @@ function _openImgLightbox(imgEl) {
   let allImages = [];
   let startIndex = 0;
   if(!imgEl.closest('.attach-tray')){
-    let container = imgEl.closest('.msg-row, .assistant-turn-blocks, .assistant-turn, .user-turn');
+    // A tool-card image preview (vision_analyze) opens on its own and never
+    // joins the message's carousel: it shows what a tool read, not an image
+    // of the reply, and a failed preview is hidden but still in the DOM.
+    const toolPreview = imgEl.closest('.tool-card-image-preview');
+    let container = toolPreview || imgEl.closest('.msg-row, .assistant-turn-blocks, .assistant-turn, .user-turn');
     if(!container) container = imgEl.parentElement;
     if(container){
-      const siblings = container.querySelectorAll('.msg-media-img');
+      const siblings = Array.from(container.querySelectorAll('.msg-media-img'))
+        .filter(image => image.closest('.tool-card-image-preview') === toolPreview);
       if(siblings.length>1){
-        allImages = Array.from(siblings);
+        allImages = siblings;
         startIndex = allImages.indexOf(imgEl);
         if(startIndex===-1) startIndex=0;
       }
@@ -20868,7 +20873,7 @@ function _toolArgsSnapshot(args, limit){
   // incidental-arg limit, or long commands/paths get cut and recovery-rebuilt
   // diffs (built from old_string/new_string/patch) break (#4928). Mirrors the
   // backend _TOOL_ARG_CONTENT_KEYS / _TOOL_ARG_CONTENT_CAP.
-  const contentKeys=new Set(['command','cmd','script','code','patch','diff','old_string','new_string','content','path','file_path']);
+  const contentKeys=new Set(['command','cmd','script','code','patch','diff','old_string','new_string','content','path','file_path','image_url']);
   const CONTENT_CAP=4000;
   const keys=[
     ...priority.filter(k=>Object.prototype.hasOwnProperty.call(args,k)),
@@ -24421,7 +24426,64 @@ function _toolCardPreviewText(tc, displaySnippet){
   if(tc&&tc.is_error) return 'Failed';
   return 'Completed';
 }
+// vision_analyze names the analyzed picture in args.image_url; its card previews
+// that image in the expanded detail. Two names qualify: the bare tool, and the
+// mcp__hermes__ form a provider uses when it serves Hermes' tools from an MCP
+// server named "hermes" (the claude-subscription-directsdk provider plugin
+// does). That second name is a naming match, not proof of origin: the Agent
+// names any configured MCP server's tools mcp__<server>__<tool>. What makes
+// accepting it safe is that every ref, whatever the name, goes through the same
+// gating below (/api/media roots, CSP img-src, data: image check). Other
+// servers' vision_analyze tools do not get a preview.
+function _isVisionAnalyzeTool(tc){
+  const name=String(tc&&tc.name||'');
+  return name==='vision_analyze'||name==='mcp__hermes__vision_analyze';
+}
+function _visionToolImageRef(tc){
+  if(!_isVisionAnalyzeTool(tc)) return '';
+  const raw=tc.args&&tc.args.image_url;
+  const ref=typeof raw==='string'?raw.trim():'';
+  // Persisted args are capped with a trailing '...': such a ref points nowhere.
+  if(!ref||ref.endsWith('...')) return '';
+  if(/^data:/i.test(ref)) return _isSafeDataImageUri(ref)?ref:'';
+  // The visible args are redacted; never put an unredacted secret back into an
+  // img src or link href (e.g. a signed ?token=… image URL).
+  if(_redactToolTargetLabel(ref)!==ref) return '';
+  const kind=_mediaKindForName(ref);
+  if(/^https?:\/\//i.test(ref)){
+    // Extensionless CDN paths may still be images (#853); a known non-image
+    // extension (report.pdf, page.html) is not.
+    const leaf=ref.split(/[?#]/)[0].split('/').pop()||'';
+    const hasExt=/\.[a-z0-9]{1,8}$/i.test(leaf);
+    return (kind==='image'||_SVG_EXTS.test(leaf)||!hasExt)?ref:'';
+  }
+  // /api/media resolves the path on the server, so only an absolute path (or a
+  // local file:// URI, same authorities _inlineMediaHtmlForRef accepts) names
+  // the file the agent actually read. UNC shares (//host, \\host) are refused.
+  const local=/^file:\/\//i.test(ref)?ref.replace(/^file:\/\/(?:localhost|127\.0\.0\.1|\[::1\])?/i,''):ref;
+  if(!/^(?:\/(?!\/)|[A-Za-z]:[\\/])/.test(local)) return '';
+  return kind==='image'?ref:'';
+}
+function _visionToolImagePreviewHtml(tc){
+  const ref=_visionToolImageRef(tc);
+  const html=ref?_inlineMediaHtmlForRef(ref):'';
+  return html?`<div class="tool-card-image-preview">${html}</div>`:'';
+}
+// A preview whose image fails to load (e.g. /api/media refuses a path outside
+// the allowed roots) is hidden instead of showing a broken-image icon; the
+// image_url arg below it still names the file. Image errors do not bubble, so
+// this listens in the capture phase.
+function _hideBrokenToolImagePreview(e){
+  const img=e&&e.target;
+  if(!img||img.tagName!=='IMG'||typeof img.closest!=='function') return;
+  const preview=img.closest('.tool-card-image-preview');
+  if(preview) preview.hidden=true;
+}
+if(typeof document!=='undefined'&&document&&typeof document.addEventListener==='function'){
+  document.addEventListener('error',_hideBrokenToolImagePreview,true);
+}
 function _toolCardAllowsDetail(kind, tc){
+  if(typeof _visionToolImageRef==='function'&&_visionToolImageRef(tc)) return true;
   const infoKinds={read:1,search:1,list:1,web:1};
   if(infoKinds[kind]&&!(tc&&tc.is_error)) return false;
   return true;
@@ -24488,6 +24550,7 @@ function buildToolCard(tc){
   const detailLeadText=hasDetail&&typeof _toolDetailLeadText==='function'?_toolDetailLeadText(toolKind,tc):'';
   const detailLeadLabel=typeof _toolDetailLeadLabel==='function'?_toolDetailLeadLabel(toolKind):(toolKind==='shell'?'Shell':'Input');
   const detailLead=detailLeadText?`<div class="tool-card-detail-lead"><div class="tool-card-detail-lead-label">${esc(detailLeadLabel)}</div><pre>${esc(detailLeadText)}</pre></div>`:'';
+  const imagePreview=hasDetail&&typeof _visionToolImagePreviewHtml==='function'?_visionToolImagePreviewHtml(tc):'';
   const argsEntries=tc.args&&Object.keys(tc.args).length?Object.entries(tc.args):[];
   const visibleArgs=(detailLeadText&&toolKind==='shell')?[]:argsEntries;
   row.innerHTML=`
@@ -24501,6 +24564,7 @@ function buildToolCard(tc){
       </div>
       ${hasDetail?`<div class="tool-card-detail">
         ${detailLead}
+        ${imagePreview}
         ${visibleArgs.length?`<div class="tool-card-args">${
           visibleArgs.map(([k,v])=>{
             let sv=String(v);
