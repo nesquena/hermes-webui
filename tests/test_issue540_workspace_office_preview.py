@@ -231,7 +231,12 @@ def test_openfile_download_only_path_preserves_existing_office_save_route():
 
 def test_pdf_preview_path_is_unchanged():
     assert "showPreview('pdf')" in WORKSPACE_JS
-    assert "_workspaceRouteForPath(path, 'raw', {inline:true})" in WORKSPACE_JS
+    # The PDF branch still previews through the raw route with inline=1. The
+    # added `workspaceOnly` option is what keeps an artifact-open preview
+    # answered by the workspace alone (#8421: /api/file/raw otherwise falls back
+    # to the session's attachment inbox); it is absent for every other caller,
+    # whose URLs are byte-for-byte what they were.
+    assert "_workspaceRouteForPath(path, 'raw', {inline:true,workspaceOnly})" in WORKSPACE_JS
 
 
 def test_zip_and_legacy_office_formats_still_download():
