@@ -6486,6 +6486,223 @@ function _focusModelPicker(dd){
   catch(_e){ try{ target.focus(); }catch(_e2){} }
 }
 
+// ── Frequently-used models + server-backed pin state ───────────────────────
+// Storage is SERVER-owned (api/models/preferences), never localStorage. The
+// cache below only mirrors the last server snapshot for rendering the picker
+// group; a profile switch or stale request is discarded via request-seq guard.
+let _modelFrequentCache=null;       // {profile,pins:[{model,provider}],usage:[{...}],limit,fetchedAt}
+let _modelFrequentRequestSeq=0;     // request-generation guard
+let _modelFrequentInFlight=false;   // dedupe overlapping GETs
+const _MODEL_FREQUENT_TTL_MS=30000; // small TTL, refreshed on open / re-open
+function _frequentProfileName(){return (typeof S!=='undefined'&&S&&S.activeProfile)||'default';}
+// Stable identity: strip ONLY the exact routing prefix `@<provider>:` or
+// `<provider>/` when it matches a known provider, and nothing else. We do NOT
+// reuse `_modelPickerOptionIdentity` (lossy dot/hyphen/last-slash normalisation)
+// for the pin key, per the exact-key requirement.
+function _frequentModelKey(modelId,providerId){
+  const provider=String(providerId||'').trim();
+  let value=String(modelId||'');
+  const atPrefix=provider?`@${provider}:`:'';
+  if(atPrefix&&value.startsWith(atPrefix)){
+    value=value.slice(atPrefix.length);
+  }else if(provider&&value.startsWith(provider+'/')&&value.length>provider.length){
+    value=value.slice(provider.length+1);
+  }
+  return JSON.stringify([provider,value]);
+}
+function _frequentPinSet(){
+  const cache=_modelFrequentCache;
+  if(!cache||cache.profile!==_frequentProfileName()||!Array.isArray(cache.pins)) return null;
+  const set=new Set();
+  for(const p of cache.pins){ if(p)set.add(_frequentModelKey(p.model,p.provider)); }
+  return set;
+}
+function _frequentIsPinned(model,provider){
+  const set=_frequentPinSet();
+  return !!set&&set.has(_frequentModelKey(model,provider));
+}
+function _modelPreferencesAge(){
+  if(!_modelFrequentCache||_modelFrequentCache.profile!==_frequentProfileName()) return Number.POSITIVE_INFINITY;
+  return Date.now()-(_modelFrequentCache.fetchedAt||0);
+}
+// Async load of server pin/usage state. Guards against late responses leaking
+// a prior profile or overwriting newer pin updates (seq is bumped on every
+// request AND on every local pin toggle).
+async function _loadModelFrequentPrefs(){
+  const profile=_frequentProfileName();
+  if(_modelFrequentInFlight===profile) return;
+  _modelFrequentInFlight=profile;
+  const seq=++_modelFrequentRequestSeq;
+  try{
+    const data=await api('/api/models/preferences',{timeoutToast:false});
+    if(seq!==_modelFrequentRequestSeq||profile!==_frequentProfileName()) return; // superseded/profile changed
+    if(!data) return;
+    if(data.profile&&data.profile!==profile) return; // profile switched mid-flight
+    _modelFrequentCache={profile,pins:Array.isArray(data.pins)?data.pins:[],usage:Array.isArray(data.usage)?data.usage:[],limit:Number(data.limit)||6,fetchedAt:Date.now()};
+  }catch(_e){
+    // Failures degrade gracefully: leave the prior cache (or none) in place and
+    // let the picker render normal models. Known-absent endpoint -> no group.
+  }finally{
+    if(seq===_modelFrequentRequestSeq) _modelFrequentInFlight=false;
+  }
+  if(typeof _refreshOpenFrequent==='function'){
+    try{_refreshOpenFrequent();}catch(_e){}
+  }
+}
+// Toggle server pin state. Returns true on success (cached pins updated),
+// false on failure (UI reverts), or null when another request superseded it.
+async function _setModelPinned(model,provider,pinned){
+  const profile=_frequentProfileName();
+  const seq=++_modelFrequentRequestSeq;
+  _modelFrequentInFlight=false;
+  let updated;
+  try{
+    updated=await api('/api/models/preferences',{method:'POST',body:JSON.stringify({model,provider,pinned})});
+  }catch(_e){
+    if(typeof showToast==='function') showToast((t('model_pin_failed')||'Failed to update pinned model')+': '+_e.message,4000,'error');
+    return false;
+  }
+  if(seq!==_modelFrequentRequestSeq||profile!==_frequentProfileName()) return null; // superseded
+  if(typeof updated==='object'&&updated){
+    if(updated.profile&&updated.profile!==profile) return null; // profile switched
+    _modelFrequentCache={profile:updated.profile||profile,pins:Array.isArray(updated.pins)?updated.pins:[],usage:Array.isArray(updated.usage)?updated.usage:[],limit:Number(updated.limit)||6,fetchedAt:Date.now()};
+  }else{
+    // POST returned no body / wrapper: re-fetch authoritative state silently.
+    await _loadModelFrequentPrefs();
+    return _frequentIsPinned(model,provider);
+  }
+  if(typeof _refreshOpenFrequent==='function'){
+    try{_refreshOpenFrequent(_frequentModelKey(model,provider));}catch(_e){}
+  }
+  return true;
+}
+// Wrapper used by row handlers to toggle pin without changing the model.
+function _toggleModelPin(model,provider){
+  const wasPinned=_frequentIsPinned(model,provider);
+  return _setModelPinned(model,provider,!wasPinned);
+}
+// Provider for pin identity of a row. Returns '' for unknown/synthetic
+// provider-less rows so their star is skipped safely (no pin on a row whose
+// route we cannot assert).
+function _rowPinProvider(m){
+  const raw=String((m&&m.value!=null?m.value:m&&m.id)||'');
+  if(raw.startsWith('__models_endpoint_error__')||(m&&m.endpointErrorOnly)) return ''; // not selectable -> no pin
+  return String((m&&m.providerId)||(m&&m.badge&&m.badge.provider)||(typeof _providerFromModelValue==='function'?_providerFromModelValue(raw):'')||'').trim();
+}
+function _rowPinStarHtml(m){
+  const provider=_rowPinProvider(m);
+  if(!provider||!m||m.value==null) return '';
+  const pinned=_frequentIsPinned(m.value,provider);
+  const label=pinned?(t('model_unpin_aria')||'Unpin model'):(t('model_pin_aria')||'Pin to top');
+  return `<button type="button" class="model-pin-star${pinned?' pinned':''}" role="switch" aria-checked="${pinned?'true':'false'}" aria-label="${esc(label)}" title="${esc(label)}" data-route-pin="1">${li('star',13)}</button>`;
+}
+function _bindRowStar(row,m){
+  const provider=_rowPinProvider(m);
+  if(!provider||!m||m.value==null||!row||typeof row.querySelector!=='function') return;
+  const btn=row.querySelector('.model-pin-star');
+  if(!btn) return;
+  btn.addEventListener('click',(e)=>{
+    e.preventDefault();e.stopPropagation(); // no select, no close
+    if(btn.disabled) return;
+    btn.disabled=true;
+    _toggleModelPin(m.value,provider).then(ok=>{
+      if(ok===true) btn.setAttribute('aria-checked',String(_frequentIsPinned(m.value,provider)));
+    }).finally(()=>{btn.disabled=false;});
+  });
+}
+// Scroll the row for `changedKey` into view after the picker re-renders, so a
+// pin/unpin does not leave the user's cursor on a row that moved. Purely a
+// viewport nicety: a missing row or an unscrollable container is a no-op.
+// Defined at TOP LEVEL on purpose — it is called BARE from
+// `_refreshOpenFrequent`, so a nested definition would be undefined there
+// (the #3696 brick class this repo's scope_undef_gate enforces).
+function _scrollFrequentRowIntoView(dd,changedKey){
+  if(!dd||changedKey==null||typeof dd.querySelectorAll!=='function') return;
+  const rows=dd.querySelectorAll('.model-opt');
+  for(const row of rows){
+    if(!row||typeof row.querySelector!=='function') continue;
+    const btn=row.querySelector('.model-pin-star');
+    const idEl=row.querySelector('.model-opt-id');
+    if(!idEl) continue;
+    // The star's aria state is the only per-row pin identity in the DOM; match
+    // on the row's visible model id against the key's model segment.
+    const want=String(changedKey);
+    const id=String(idEl.textContent||'').trim();
+    if(id && (want===id || want.endsWith('::'+id) || want.endsWith(':'+id))){
+      try{row.scrollIntoView({block:'nearest'});}catch(_e){}
+      if(btn) row.classList.add('model-opt--pinned-flash');
+      return;
+    }
+  }
+}
+// Compute the ordered frequent-model rows for the picker group, reusing the
+// canonical `_modelData` entries (never a duplicate <option>). Pinned first in
+// server order (at most `limit`), then remaining slots filled by usage
+// count-desc / last_used-desc. Absent/unavailable rows are ignored.
+function _computeFrequentEntries(modelData,cache){
+  if(!modelData||!Array.isArray(modelData)||!cache) return {rows:[],emptyHint:false,groupShown:false};
+  const limit=Math.max(1,Math.min(6,Number(cache.limit)||6));
+  const byKey=new Map();
+  for(const m of modelData){
+    const provider=_rowPinProvider(m);
+    const key=provider?_frequentModelKey(m.value,provider):'none:'+String(m.value||'');
+    if(!byKey.has(key)) byKey.set(key,m);
+  }
+  const chosen=[]; const seen=new Set();
+  const add=(model,provider)=>{
+    const key=provider?_frequentModelKey(model,provider):'none:'+String(model||'');
+    if(seen.has(key)) return;
+    const entry=byKey.get(key);
+    if(!entry) return; // unavailable/absent -> ignore
+    seen.add(key); chosen.push(entry);
+  };
+  for(const p of (Array.isArray(cache.pins)?cache.pins:[]).slice(0,limit)){
+    add(p&&p.model,p&&p.provider);
+  }
+  const usage=Array.from(Array.isArray(cache.usage)?cache.usage:[]);
+  usage.sort((a,b)=>((Number(b.count)||0)-(Number(a.count)||0))||((Number(b.last_used)||0)-(Number(a.last_used)||0))||_frequentModelKey(a.model,a.provider).localeCompare(_frequentModelKey(b.model,b.provider)));
+  for(const u of usage){
+    if(chosen.length>=limit) break;
+    add(u&&u.model,u&&u.provider);
+  }
+  // A hint row is useful only when we actually have a server snapshot but it is
+  // empty (no pins, no usable history) — the group still renders so the pin
+  // buttons on normal rows remain reachable above the fold.
+  return {rows:chosen.slice(0,limit),emptyHint:chosen.length===0,groupShown:true};
+}
+
+// Re-render an OPEN model dropdown (composer or settings) after pin/usage data
+// changes, preserving the search term, focus, and scroll position so the user's
+// context is not disturbed. Used by the async prefs load and after a pin toggle.
+function _refreshOpenFrequent(_changedKey){
+  const combos=[
+    {ddId:'composerModelDropdown',selectId:'modelSelect',opts:()=>({})},
+    {ddId:'settingsModelDropdown',selectId:'settingsModel',opts:()=>({
+      dropdownId:'settingsModelDropdown',selectId:'settingsModel',forceOpenKey:'settingsModel',
+      closeDropdown:closeSettingsModelDropdown,selectModel:selectSettingsModelFromDropdown,
+      scopeNoteText:t('settings_desc_model')||'Used for new conversations. Existing conversations keep their selected model.',
+    })},
+  ];
+  for(const combo of combos){
+    const dd=$(combo.ddId);
+    if(!dd||!dd.classList||!dd.classList.contains('open')) continue;
+    const si=dd.querySelector&&dd.querySelector('.model-search-input');
+    const term=(si&&si.value)||'';
+    const hadFocus=document.activeElement===si;
+    const scrollTop=typeof dd.scrollTop==='number'?dd.scrollTop:0;
+    try{renderModelDropdown(combo.opts());}catch(_e){continue;}
+    const ns=dd.querySelector&&dd.querySelector('.model-search-input');
+    if(ns){
+      if(term){ns.value=term; try{ns.dispatchEvent(new Event('input'));}catch(_e){}}
+      if(hadFocus) ns.focus();
+    }
+    try{dd.scrollTop=scrollTop;}catch(_e){}
+    if(_changedKey!=null&&typeof _scrollFrequentRowIntoView==='function'){
+      try{_scrollFrequentRowIntoView(dd,_changedKey);}catch(_e){}
+    }
+  }
+}
+
 function renderModelDropdown(){
   const opts=arguments[0]||{};
   const dd=$(opts.dropdownId||'composerModelDropdown');
@@ -6784,8 +7001,9 @@ function renderModelDropdown(){
     const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
     const _plainGroup=m.group?String(m.group).replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
     const providerChip=(_plainGroup&&withProviderChip)?`<span class="model-opt-provider">${esc(_plainGroup)}</span>`:'';
-    row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${_selectedModelBadge(m)}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+    row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${providerChip}${badgeHtml}${_selectedModelBadge(m)}${typeof _rowPinStarHtml==='function'?_rowPinStarHtml(m):''}</div><span class="model-opt-id">${esc(m.id)}</span>`;
     row.onclick=()=>selectFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
+    if(typeof _bindRowStar==='function') _bindRowStar(row,m);
     return row;
   };
   const _expandOverflowGroup=(groupMetaEntry)=>{
@@ -6946,9 +7164,22 @@ function renderModelDropdown(){
   // The group that owns the currently-selected model. Groups start COLLAPSED by
   // default (#4279); the selected provider's group is the one exception so the
   // user always sees their active model without expanding anything. (#4279 + UX)
+  // Values currently painted as frequent shortcuts. A selection that is already
+  // shown at the top of the picker does NOT claim its own provider group: the
+  // shortcut group already surfaces it, so auto-expanding the provider group
+  // again just repeats the same row and pushes the rest of the list down.
+  const _frequentShortcutValues=(()=>{
+    try{
+      if(typeof _computeFrequentEntries!=='function'||!_modelFrequentCache
+         ||_modelFrequentCache.profile!==_frequentProfileName()) return new Set();
+      const _entries=_computeFrequentEntries(_modelData,_modelFrequentCache);
+      return new Set(((_entries&&_entries.rows)||[]).map(m=>String((m&&m.value)||'')));
+    }catch(_e){ return new Set(); }
+  })();
   const _selectedGroupKey=(()=>{
     const _selVal=String((sel&&sel.value)||'');
     if(!_selVal) return null;
+    if(_frequentShortcutValues.has(_selVal)) return null;
     const _hit=_modelData.find(m=>m&&!m.endpointErrorOnly&&_isSelectedModelRow(m)) || _modelData.find(m=>m&&!m.endpointErrorOnly&&String(m.value||'')===_selVal);
     return _hit?_hit.groupKey:null;
   })();
@@ -6959,8 +7190,9 @@ function renderModelDropdown(){
     const _plainGroup=m.group?String(m.group).replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,''):'';
     const _underOwnHeading=shouldRenderHeading&&!!(m.groupKey&&_groupWrappers[m.groupKey]);
     const providerChip=(_plainGroup&&!_underOwnHeading)?`<span class="model-opt-provider">${esc(_plainGroup)}</span>`:'';
-    row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${_selectedModelBadge(m)}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+    row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${providerChip}${badgeHtml}${_selectedModelBadge(m)}${typeof _rowPinStarHtml==='function'?_rowPinStarHtml(m):''}</div><span class="model-opt-id">${esc(m.id)}</span>`;
     row.onclick=()=>selectFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
+    if(typeof _bindRowStar==='function') _bindRowStar(row,m);
     return row;
   };
   const _filterModels=(term)=>{
@@ -7038,6 +7270,34 @@ function renderModelDropdown(){
     dd.appendChild(_searchRow);
     dd.appendChild(_custSep);
     dd.appendChild(_custRow);
+    // Frequently-used model group at the very top, default expanded. Hidden
+    // during an active search so plain search results aren't clouded by pinned
+    // shortcuts (#frequent). Reuses canonical _modelData entries — no duplicate
+    // <option>, and each row selects via the normal provider route.
+    if(!hasSearch && typeof _modelFrequentCache!=='undefined' && _modelFrequentCache && _modelFrequentCache.profile===_frequentProfileName() && typeof _computeFrequentEntries==='function'){
+      const _freq=_computeFrequentEntries(_modelData,_modelFrequentCache);
+      if(_freq.groupShown){
+        const freqHeading=document.createElement('div');
+        freqHeading.className='model-group model-group-frequent open';
+        freqHeading.textContent=t('model_group_frequent')||'Frequently used';
+        dd.appendChild(freqHeading);
+        const freqBody=document.createElement('div');
+        freqBody.className='model-group-body';
+        freqBody.dataset.group='__frequent__';
+        dd.appendChild(freqBody);
+        if(_freq.rows.length){
+          for(const m of _freq.rows) freqBody.appendChild(_makeModelRow(m,false));
+        }else if(_freq.emptyHint){
+          const hint=document.createElement('div');
+          hint.className='model-freq-empty';
+          hint.textContent=t('model_frequent_empty')||'Star a model to pin it here';
+          freqBody.appendChild(hint);
+        }
+        // Keep the frequent group open even when it is not the selected group.
+        _groupOpenState['__frequent__']=true;
+        freqHeading.classList.add('open');
+      }
+    }
     if(configuredModels.length){
       const configuredHeading=document.createElement('div');
       configuredHeading.className='model-group';
@@ -7062,8 +7322,9 @@ function renderModelDropdown(){
           }
         }
         const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
-        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${_selectedModelBadge(m)}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${_selectedModelBadge(m)}${typeof _rowPinStarHtml==='function'?_rowPinStarHtml(m):''}</div><span class="model-opt-id">${esc(m.id)}</span>`;
         row.onclick=()=>selectFromDropdown(m.value,(m.badge&&m.badge.provider)||m.providerId||null);
+        if(typeof _bindRowStar==='function') _bindRowStar(row,m);
         dd.appendChild(row);
       }
     }
@@ -7328,6 +7589,9 @@ function renderModelDropdown(){
 
 async function selectModelFromDropdown(value){
   const preferredProviderId=arguments[1];
+  // Kick an async server preferences fetch (non-blocking; TTL-guarded) so the
+  // top frequent group renders without holding up the normal model list.
+  if(typeof _frequentPrefsMaybeLoad==='function'){try{_frequentPrefsMaybeLoad();}catch(_e){}}
   const sel=$('modelSelect');
   if(!sel) { closeModelDropdown(); return; }
   const provider=String(preferredProviderId||'').trim()||null;
@@ -7393,6 +7657,12 @@ async function toggleModelDropdown(){
     if(ready&&typeof ready.catch==='function') ready.catch(()=>{});
   }
   if(dd.classList.contains('open')) return;
+  // Kick an async server preferences fetch (non-blocking; TTL-guarded) so the
+  // top frequent group renders without holding up the normal model list. This
+  // must also run on OPEN, not only on selection: after a reload the cache is
+  // cold, so a first open would otherwise render no frequent group at all and
+  // the feature looks missing.
+  if(typeof _frequentPrefsMaybeLoad==='function'){try{_frequentPrefsMaybeLoad();}catch(_e){}}
   renderModelDropdown({label:'Conversation model'});
   dd.classList.add('open');
   _positionModelDropdown();
@@ -7434,6 +7704,22 @@ function _returnModelPickerFocus(dd, anchors){
     try{el.focus({preventScroll:true});}catch(_){continue;}
     if(document.activeElement===el) return;
   }
+}
+
+async function _frequentPrefsMaybeLoad(){
+  if(_modelFrequentInFlight===_frequentProfileName()) return;
+  if(_modelPreferencesAge()<(_MODEL_FREQUENT_TTL_MS||30000)) return; // TTL still fresh
+  try{await _loadModelFrequentPrefs();}catch(_e){}
+}
+
+// Warm the cache once the page has settled, so the first picker open after a
+// reload already shows the frequent group instead of popping it in later. The
+// open/select kicks remain the fallback when this has not run yet.
+if(typeof setTimeout==='function'){
+  setTimeout(()=>{
+    if(typeof _loadModelFrequentPrefs!=='function') return;
+    try{_loadModelFrequentPrefs();}catch(_e){}
+  },2000);
 }
 
 function closeModelDropdown(){
@@ -7496,6 +7782,7 @@ function selectSettingsModelFromDropdown(value,preferredProviderId){
 
 function openSettingsModelDropdown(){
   const dd=$('settingsModelDropdown');
+  if(typeof _frequentPrefsMaybeLoad==='function'){try{_frequentPrefsMaybeLoad();}catch(_e){}}
   const sel=$('settingsModel');
   const chip=$('settingsModelChip');
   if(!dd||!sel) return;

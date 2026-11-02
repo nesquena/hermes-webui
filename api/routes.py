@@ -17066,6 +17066,15 @@ def handle_get(handler, parsed) -> bool:
         j(handler, build_system_health_payload())
         return True
 
+    if parsed.path == "/api/models/preferences":
+        from api.model_preferences import get_preferences
+
+        try:
+            return j(handler, get_preferences())
+        except Exception:
+            logger.exception("model preferences GET failed")
+            return bad(handler, "Unable to read model preferences", status=503)
+
     if parsed.path == "/api/models":
         # Profile-scoping for non-default profiles (#3957) is handled INSIDE
         # get_available_models() — it binds the active profile's env + TLS on
@@ -18479,6 +18488,19 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         return True
+
+    if parsed.path == "/api/models/preferences":
+        from api.model_preferences import PreferencesError, apply_preferences
+
+        try:
+            if not isinstance(body, dict):
+                return bad(handler, "Expected a JSON object", status=400)
+            return j(handler, apply_preferences(body.get("model"), body.get("provider"), body.get("pinned")))
+        except PreferencesError as exc:
+            return bad(handler, str(exc), status=400)
+        except Exception:
+            logger.exception("model preferences POST failed")
+            return bad(handler, "Unable to save model preferences", status=503)
 
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)
@@ -28400,6 +28422,8 @@ def _start_regeneration_stream_locked(
                 "workspace": workspace,
                 "model": persisted_model,
                 "model_provider": persisted_model_provider,
+                "source": str(turn.source) if turn.source else "webui",
+                "profile": getattr(s, "profile", None) or "default",
                 "created_at": s.pending_started_at,
             },
         )
@@ -28934,6 +28958,8 @@ def _start_chat_stream_for_session(
                                 "workspace": workspace,
                                 "model": persisted_model,
                                 "model_provider": persisted_model_provider,
+                                "source": str(source) if source else "webui",
+                                "profile": getattr(s, "profile", None) or "default",
                                 "created_at": s.pending_started_at,
                             },
                         )
