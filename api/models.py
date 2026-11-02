@@ -13174,6 +13174,12 @@ def _agent_durable_multimodal_content(msg: dict) -> str | None:
             return None
     if not image_parts:
         return None
+    # Deliberately the LEGACY blob collapse: unlike the content/visible keys,
+    # this mirror key must KEEP the ``[screenshot]`` annotation, because it is
+    # the evidence that pairs a rich image row with the Agent's scalar
+    # projection of it (#6460 only concerns the content key). Both sides of the
+    # pairing collapse identically, so the line boundary is not load-bearing
+    # here.
     return " ".join("\n".join(normalized_parts).split())
 
 
@@ -13208,7 +13214,9 @@ def _session_message_multimodal_mirror_key(
     if content is None:
         if not isinstance(raw_content, str):
             return None
-        content = _normalized_session_message_content(msg)
+        # Same legacy projection as the rich side above: the annotation stays,
+        # because it is what identifies an Agent image projection.
+        content = " ".join(str(raw_content or "").split())
     timestamp, timestamp_valid = _message_exact_timestamp_details(msg)
     if not timestamp_valid or timestamp is None:
         return None
@@ -14274,19 +14282,57 @@ def _session_message_dedup_key(msg: dict):
     ), msg)
 
 
+# The agent's durable projection of a native image part is a marker on a LINE OF
+# ITS OWN (``agent/session_persistence.py``: ``_image_marker`` returns
+# ``[screenshot]``, or ``[screenshot detail=<level>]`` when a detail rode along,
+# and ``_durable_content`` joins the parts with newlines). Only a line that IS
+# the marker is that annotation -- the same text inside a sentence is user prose.
+_GENERATED_IMAGE_MARKER_LINE = re.compile(
+    r"[ \t]*\[screenshot(?:[ \t]+detail=(?:low|high|auto))?\][ \t]*"
+)
+
+
+def _strip_generated_image_marker_lines(text: str) -> str:
+    """Drop the agent's whole-line ``[screenshot]`` annotations from a body.
+
+    The agent persists an image-bearing turn as its text plus one marker line per
+    native image part, while the WebUI sidecar keeps the bare display text with
+    no annotation at all. Collapsing the whole blob with ``split()`` first erased
+    the line boundary, so the annotation read as ordinary trailing prose and the
+    state.db row keyed differently from its sidecar twin -- reconciliation then
+    re-appended the turn and the agent merged it into the next user message
+    (#6460).
+
+    The boundary is what carries the meaning, so normalise per line: a line that
+    consists solely of the marker is the annotation and does not belong to the
+    message identity, while a marker embedded in a line of prose is literal user
+    text and is kept. A generated marker can therefore never collide with a user
+    who typed those characters.
+    """
+    if "[screenshot" not in text:
+        return text
+    return "\n".join(
+        line
+        for line in text.split("\n")
+        if not _GENERATED_IMAGE_MARKER_LINE.fullmatch(line)
+    )
+
+
 def _normalized_session_message_content(msg: dict):
     """Visible identity for a message's content.
 
-    Scalars normalise whitespace as before. Structured content returns the same
-    out-of-band tuple as the merge/dedup keys, so content and visible keys can
-    never place a list and a string in the same identity space.
+    Scalars normalise whitespace and drop the agent's whole-line ``[screenshot]``
+    annotations (see ``_strip_generated_image_marker_lines``) as before.
+    Structured content returns the same out-of-band tuple as the merge/dedup
+    keys, so content and visible keys can never place a list and a string in the
+    same identity space.
     """
     if not isinstance(msg, dict):
         return repr(msg)
     content = msg.get("content")
     if isinstance(content, list) and content:
         return _content_identity_for_key(content)
-    return " ".join(str(content or "").split())
+    return " ".join(_strip_generated_image_marker_lines(str(content or "")).split())
 
 
 def _loose_session_message_content(value: str) -> str:
