@@ -14550,23 +14550,53 @@ function _gatewayActionButton(action){
 }
 function _gatewayLockNote(kind,bodyHtml){
   const icon=typeof li==='function'?`<span style="display:inline-flex;flex-shrink:0;margin-top:2px">${li('lock',12)}</span>`:'';
-  return `<div class="gateway-external-note" data-gateway-note="${esc(kind)}" style="display:flex;align-items:flex-start;gap:6px;margin-top:10px;font-size:12px;line-height:1.45;color:var(--muted)">${icon}<span>${bodyHtml}</span></div>`;
+  return `<div class="gateway-external-note" data-gateway-note="${esc(kind)}" style="display:flex;align-items:flex-start;gap:6px;margin-top:10px;font-size:12px;line-height:1.45;color:var(--muted)">${icon}<span style="display:block;flex:1;min-width:0">${bodyHtml}</span></div>`;
 }
 function _gatewayLocalUnprovenNoteHtml(lifecycle){
   // The exact one-time start command comes from the server (it adds
   // `--profile <name>` for a named profile, like the Start button does).
-  // Escape the whole translation first, then put the escaped command, wrapped
-  // in inline code, at the locale's {cmd} placeholder. Only static markup and
-  // escaped text are added after esc(), so the note stays XSS-safe.
+  // Inline, a long command wrapped mid-flag inside the sentence and was hard to
+  // select on a touch device, so the command gets a block of its own with a copy
+  // button (#8639). The sentence is split at the locale's {cmd} placeholder: the
+  // text before it stays above the block, the text after it resumes below, and
+  // every translation keeps its own wording and punctuation.
+  // Escape the whole translation first, then put the escaped command at the
+  // placeholder. Only static markup and escaped text are added after esc(), so
+  // the note stays XSS-safe.
   const raw=lifecycle&&lifecycle.start_command;
   const command=(typeof raw==='string'&&raw.trim())?raw:'hermes gateway start';
-  const codeStyle='font-family:var(--font-mono,monospace);font-size:11px;background:var(--code-bg);padding:1px 5px;border-radius:4px;white-space:pre-wrap;overflow-wrap:anywhere';
+  const template=esc(t('gateway_local_unproven'));
+  const cut=template.indexOf('{cmd}');
+  if(cut<0) return template;  // no placeholder: nothing for this machine to run
+  const before=template.slice(0,cut).trim();
+  const after=template.slice(cut+5).trim();
+  const codeStyle='display:block;font-family:var(--font-mono,monospace);font-size:11px;background:var(--code-inline-bg);color:var(--code-text);padding:4px 6px;border-radius:4px;white-space:pre-wrap;overflow-wrap:anywhere';
   // Keep each `--flag` whole when the chip wraps: a break inside `--profile`
   // left a bare `--` at the line end, which reads as the end-of-options marker.
   // The pattern only matches `--` plus letters/hyphens in the already escaped
   // text, so it cannot touch an entity or markup.
   const cmdHtml=esc(command).replace(/(^|\s)(--[a-z][a-z-]*)/g,'$1<span style="white-space:nowrap">$2</span>');
-  return esc(t('gateway_local_unproven')).split('{cmd}').join(`<code style="${codeStyle}">${cmdHtml}</code>`);
+  const block=`<div class="gateway-start-cmd" data-gateway-cmd-block style="display:flex;align-items:flex-start;gap:6px;margin:6px 0 4px"><code style="${codeStyle}">${cmdHtml}</code><button class="sm-btn gateway-copy-cmd-btn" type="button" data-gateway-cmd="${esc(command)}" onclick="_copyGatewayStartCommand(this)" style="flex-shrink:0;padding:3px 8px;font-size:11px">${esc(t('copy'))}</button></div>`;
+  return `${before?`<div>${before}</div>`:''}${block}${after?`<div>${after}</div>`:''}`;
+}
+function _copyGatewayStartCommand(btn){
+  // The same clipboard path as copyExtensionsDiagnostics(): the shared helper
+  // when ui.js is on the page, the Clipboard API otherwise, and a toast either
+  // way. The raw command lives in the button's data attribute so copying never
+  // re-reads the rendered (wrapped) chip.
+  const text=(btn&&typeof btn.getAttribute==='function')?btn.getAttribute('data-gateway-cmd'):'';
+  if(!text) return;
+  const fail=()=>{if(typeof showToast==='function') showToast(t('copy_failed'));};
+  const done=()=>{
+    if(!btn) return;
+    const orig=btn.textContent;
+    btn.textContent=t('copied');
+    if(btn.classList&&btn.classList.add) btn.classList.add('copied');
+    setTimeout(()=>{btn.textContent=orig;if(btn.classList&&btn.classList.remove) btn.classList.remove('copied');},1500);
+  };
+  if(typeof _copyText==='function'){_copyText(text).then(done).catch(fail);return;}
+  if(typeof navigator!=='undefined'&&navigator&&navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(done).catch(fail);return;}
+  fail();
 }
 function _gatewayActionControls(r){
   // Lifecycle actions drive the LOCAL `hermes gateway` CLI. Offer them only when
@@ -14610,7 +14640,7 @@ function _renderGatewayStatus(r){
   if(r.platforms&&r.platforms.length){
     badges=r.platforms.map(p=>{
       const icon=platformIcons[p.name]||'📡';
-      return `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;background:var(--code-bg);border:1px solid var(--border2);border-radius:12px;font-size:12px;font-weight:500">${icon} ${esc(p.label)}</span>`;
+      return `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;background:var(--code-inline-bg);color:var(--code-text);border:1px solid var(--border2);border-radius:12px;font-size:12px;font-weight:500">${icon} ${esc(p.label)}</span>`;
     }).join(' ');
   }
   // #8621: the card shows one separator, and it is the one the translator
