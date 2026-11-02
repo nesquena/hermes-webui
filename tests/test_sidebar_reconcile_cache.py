@@ -7,14 +7,19 @@ next poll and the walk runs again -- measured 98 rows x 0.19 s = 18.8 s of a
 20 s ``all_sessions.state_db_overrides`` stage, while the SQL for the same ids
 takes 7 ms.
 
-The revision an answer belongs to is (sidecar bytes, state.db message count),
-and that is what the cache keys on, so these tests pin:
+The revision an answer belongs to is the sidecar bytes AND the state store's
+generation (its message count is not a revision: a row-addressed update rewrites
+a payload without moving either count). The tests below pin:
 
   * a second poll over an unchanged board does NOT re-parse the sidecar and does
-    NOT re-read state.db;
+    NOT re-read state.db (the unchanged-board counters);
   * a sidecar rewrite invalidates the entry (the visible count is re-derived);
-  * a state.db count change invalidates the entry;
-  * the answer itself is unchanged -- the cache is transparent.
+  * a state.db count change invalidates the entry (append schedule);
+  * a same-count store write invalidates the entry (native update schedule);
+  * a write that lands DURING the walk is not published under the newer
+    generation -- the next poll re-derives instead of serving a stale answer;
+  * an unprovable store generation caches nothing at all;
+  * the answer itself, including its hidden-row provenance, is unchanged.
 """
 from __future__ import annotations
 
@@ -39,9 +44,20 @@ def store(tmp_path, monkeypatch):
     sessions = tmp_path / "sessions"
     sessions.mkdir()
     monkeypatch.setattr(models, "SESSION_DIR", sessions)
+    # The cache keys on the resolved store's stat signature. Point it at a real
+    # (harmless) file under tmp_path: the walk's state.db read is stubbed below,
+    # so only its generation -- the file's stat -- is under test.
+    db = tmp_path / "state.db"
+    db.write_bytes(b"state-store-v1")
+    monkeypatch.setattr(models, "_agent_state_db_path", lambda profile=None: db)
     yield sessions
     if clear is not None:
         clear()
+
+
+def _state_db(store):
+    """The (fake) state.db file the fixture resolved for this test."""
+    return store.parent / "state.db"
 
 
 def _write_sidecar(sessions, messages, *, title="t"):
@@ -64,6 +80,19 @@ def _write_sidecar(sessions, messages, *, title="t"):
     st = path.stat()
     os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
     return path
+
+
+def _commit_to_store(db, *, payload=b"state-store-v2"):
+    """Simulate a commit to the store without touching the message count.
+
+    A row-addressed write (``set_message_api_content``) rewrites a row's payload
+    and nothing else: no append, no count change, no watermark. The store file
+    is what moves.
+    """
+    with open(db, "wb") as handle:
+        handle.write(payload)
+    st = db.stat()
+    os.utime(db, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
 
 
 def _row(role, text, ts):
@@ -131,6 +160,8 @@ def test_second_poll_over_an_unchanged_board_does_not_rewalk(store, monkeypatch)
 
 
 def test_a_sidecar_rewrite_invalidates_the_entry(store, monkeypatch):
+    # Sequential control: prime -> save -> poll must answer from the new bytes,
+    # on the same code path the cache serves.
     _write_sidecar(store, [_row("user", "hello", 1.0)])
     _install_state_db(monkeypatch, _state_rows(3))
     loads = _count_loads(monkeypatch)
@@ -159,6 +190,7 @@ def test_a_state_db_count_change_invalidates_the_entry(store, monkeypatch):
     assert loads["loads"] == 1
 
     state["rows"] = _state_rows(5)
+    _commit_to_store(_state_db(store), payload=b"state-store-appended")
     grown = _walk(count=5)
 
     assert loads["loads"] == 2, (
@@ -169,14 +201,139 @@ def test_a_state_db_count_change_invalidates_the_entry(store, monkeypatch):
     )
 
 
-def test_the_hidden_row_provenance_survives_the_cache(store, monkeypatch):
-    # A hidden row is the one signal the caller must not pay twice (#7882); an
-    # answer served from cache must carry the same provenance as the walk.
+def test_a_same_count_store_write_invalidates_the_entry(store, monkeypatch):
+    # The native path (``set_message_api_content`` from the turn prologue)
+    # rewrites a row's payload and moves neither the total nor the active count.
+    # That payload is part of the merge identity, so the count based key alone
+    # would keep serving the previous answer forever.
+    _write_sidecar(store, [_row("user", "hello", 1.0)])
+    state = _install_state_db(monkeypatch, _state_rows(3))
+    loads = _count_loads(monkeypatch)
+
+    primed = _walk(count=3)
+    assert primed is not None
+    assert loads["loads"] == 1
+
+    # Control: without a store write, the same poll is answered from cache.
+    assert _walk(count=3) == primed
+    assert loads["loads"] == 1, "an unchanged store must still hit the cache"
+
+    # Same row count, new payload: only the store file moves. The restamped row
+    # now duplicates the sidecar's own text, so the merge identity changes even
+    # though neither count does -- the answer must move with it.
+    state["rows"] = [
+        _row("user", "hello", 100.0),
+        _row("assistant", "m1", 101.0),
+        _row("user", "m2", 102.0),
+    ]
+    _commit_to_store(_state_db(store))
+
+    refreshed = _walk(count=3)
+    assert loads["loads"] == 2, (
+        "a same-count store write left the cached answer in place: the count is "
+        "not a transcript revision"
+    )
+    assert refreshed is not None and refreshed.visible != primed.visible, (
+        "the walk must re-derive the transcript after the write "
+        f"(before={primed}, after={refreshed})"
+    )
+
+
+def test_a_write_during_the_walk_is_not_published(store, monkeypatch):
+    # A publication must carry the generation the walk READ, never the one the
+    # store has at write time: attaching an old answer to a newer signature is
+    # a durable stale entry, unlike an in-flight request choosing an older
+    # snapshot.
     _write_sidecar(store, [_row("user", "hello", 1.0)])
     _install_state_db(monkeypatch, _state_rows(3))
-    _count_loads(monkeypatch)
+    loads = _count_loads(monkeypatch)
+
+    original = (store / f"{SID}.json").read_bytes()
+    original_st = (store / f"{SID}.json").stat()
+    raced = {"done": False}
+    real_load = models.Session.load.__func__
+
+    def _load_and_save_mid_walk(cls, sid):
+        session = real_load(cls, sid)
+        if not raced["done"]:
+            raced["done"] = True
+            # A real save lands while this walk is still reconciling.
+            _write_sidecar(
+                store,
+                [
+                    _row("user", "hello", 1.0),
+                    _row("assistant", "hi", 2.0),
+                    _row("user", "again", 3.0),
+                ],
+            )
+        return session
+
+    monkeypatch.setattr(models.Session, "load", classmethod(_load_and_save_mid_walk))
+
+    stale = _walk(count=3)
+    assert stale is not None, "the in-flight walk still returns its own snapshot"
+    assert raced["done"] is True
+    assert loads["loads"] == 1
+
+    # Put the sidecar back exactly as this poll saw it: the revision is then
+    # byte- and nanosecond-identical, so a second poll can only miss if nothing
+    # was published.
+    path = store / f"{SID}.json"
+    path.write_bytes(original)
+    os.utime(path, ns=(original_st.st_atime_ns, original_st.st_mtime_ns))
+
+    second = _walk(count=3)
+    assert loads["loads"] == 2, (
+        "the walk published an answer derived from a snapshot that changed under "
+        "it, so the next poll served a stale count"
+    )
+    assert second is not None and second.visible == stale.visible, (
+        "the re-derived answer must describe the same revision this poll reads"
+    )
+
+
+def test_an_unprovable_store_generation_caches_nothing(store, monkeypatch):
+    # Three states, not two: an unresolvable store is UNKNOWN, and an unknown
+    # revision must be re-read, never answered from cache.
+    _write_sidecar(store, [_row("user", "hello", 1.0)])
+    _install_state_db(monkeypatch, _state_rows(3))
+    loads = _count_loads(monkeypatch)
+    monkeypatch.setattr(models, "_agent_state_db_path", lambda profile=None: None)
+
+    assert _walk(count=3) is not None
+    assert _walk(count=3) is not None
+    assert loads["loads"] == 2, (
+        "a walk with no provable store generation was cached anyway"
+    )
+
+
+def test_the_hidden_row_provenance_survives_the_cache(store, monkeypatch):
+    # A hidden row is the one signal the caller must not pay twice (#7882); an
+    # answer served from cache must carry the same provenance as the walk. The
+    # transcript here really contains a hidden row -- a hidden-negative fixture
+    # would pass without the flag ever being set.
+    _write_sidecar(store, [_row("user", "hello", 1.0)])
+    rows = _state_rows(2) + [
+        {
+            "role": "user",
+            "content": "wakeup",
+            "timestamp": 102.0,
+            "_source": "delegation_wakeup",
+        }
+    ]
+    _install_state_db(monkeypatch, rows)
+    loads = _count_loads(monkeypatch)
 
     first = _walk(count=3)
     second = _walk(count=3)
     assert first is not None and second is not None
+    assert first.hidden_excluded is True, (
+        "the fixture must actually contain a hidden row, or this proves nothing"
+    )
+    # The sidecar row plus three state rows, one of them hidden and dropped.
+    assert first.visible == 3, (
+        f"the hidden row must not be counted (got {first.visible})"
+    )
+    assert loads["loads"] == 1, "the second poll must be the cache hit under test"
     assert second.hidden_excluded == first.hidden_excluded
+    assert second.visible == first.visible
