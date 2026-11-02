@@ -72,7 +72,12 @@ from api.session_events import (
     unsubscribe_session_events,
 )
 from api.gateway_restart import restart_active_profile_gateway
-from api.shares import create_or_refresh_share, load_share, revoke_share
+from api.shares import (
+    ShareTokenOwnershipError,
+    create_or_refresh_share,
+    load_share,
+    revoke_share,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18628,6 +18633,9 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         try:
             share_meta = create_or_refresh_share(snapshot_session)
+        except ShareTokenOwnershipError as exc:
+            # #8734: never overwrite a snapshot another session owns.
+            return bad(handler, str(exc), 409)
         except ValueError as exc:
             return bad(handler, str(exc), 400)
         persisted_session = stored_session
@@ -18637,9 +18645,13 @@ def handle_post(handler, parsed) -> bool:
                 snapshot_session,
                 cli_meta=cli_meta,
             )
-        persisted_session.share_token = share_meta["share_token"]
-        persisted_session.share_created_at = share_meta["share_created_at"]
-        persisted_session.save(touch_updated_at=False)
+        # #8735: the share pair is written by its single writer, under the
+        # session persistence lock — a plain save here could be rolled back (or
+        # roll back) by another writer holding a stale copy of this session.
+        persisted_session.update_session_share_fields(
+            token=share_meta["share_token"],
+            created_at=share_meta["share_created_at"],
+        )
         _publish_session_list_changed(
             "session_share_create",
             profile=getattr(persisted_session, "profile", None),
@@ -18658,6 +18670,12 @@ def handle_post(handler, parsed) -> bool:
                     "message_count": share_meta["share_message_count"],
                     "created_at": share_meta["share_created_at"],
                     "updated_at": share_meta["share_updated_at"],
+                    # #8734: this session's sidecar named a token another
+                    # session owns; the server minted a fresh one instead of
+                    # rewriting that snapshot. The client must adopt the token
+                    # above, never the one it echoed in.
+                    "token_reassigned": bool(share_meta.get("token_reassigned")),
+                    "replaced_token": share_meta.get("replaced_token") or "",
                 },
                 "session": public_session_projection(
                     response_session.compact() | {"messages": response_session.messages}
@@ -18685,10 +18703,14 @@ def handle_post(handler, parsed) -> bool:
             )
             target_session.share_token = token
             target_session.share_created_at = getattr(snapshot_session, "share_created_at", None)
-        revoke_share(target_session)
-        target_session.share_token = None
-        target_session.share_created_at = None
-        target_session.save(touch_updated_at=False)
+        try:
+            revoke_share(target_session)
+        except ShareTokenOwnershipError as exc:
+            # #8734: the token this sidecar names belongs to another session.
+            # Refusing keeps that session's link up and names the mismatch
+            # instead of answering 200 for a revoke that hit a foreign file.
+            return bad(handler, str(exc), 409)
+        target_session.update_session_share_fields(token=None, created_at=None)
         _publish_session_list_changed(
             "session_share_revoke",
             profile=getattr(target_session, "profile", None),
