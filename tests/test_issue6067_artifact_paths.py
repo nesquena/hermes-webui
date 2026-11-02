@@ -187,7 +187,7 @@ def test_issue6067_artifact_filenames_remain_visible_across_artifact_widths():
           const $ = id => document.getElementById(id);
           const esc = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;')
             .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-          const t = key => key === 'workspace_artifact_source_session' ? 'session' : key;
+          const t = key => key === 'workspace_artifact_source_session' ? 'session' : key === 'workspace_artifact_files_changed' ? 'Files changed' : key;
           const collectSessionArtifacts = () => S.artifacts;
           const openArtifactPath = path => opened.push(path);
           {renderer}
