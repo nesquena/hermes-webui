@@ -1066,7 +1066,14 @@ def _request_session_visibility_exempt(method: str, path: str | None) -> bool:
 
 
 def _session_id_visible_to_request_profile(handler, sid, *, emit_error: bool = True) -> bool:
-    """Return whether ``sid`` belongs to the active profile.
+    """Return whether ``sid`` belongs to the request's profile.
+
+    The benchmark is ALWAYS the request's ACTIVE profile. A request-body
+    ``profile`` field is untrusted client input (a claim about ownership,
+    never an authorization token), so it must never widen or narrow the
+    visibility benchmark here — #7826 removed that relabel after a
+    default-bound request with ``profile:"work"`` let a foreign row reach
+    the archive route's disk-loading code path.
 
     On a profile mismatch, the helper mirrors the detail-load endpoint's
     contract (#13043, #13493): return ``409 session_profile_mismatch`` for
@@ -1157,6 +1164,14 @@ def _guard_request_session_visibility(handler, parsed, body=None, method="GET") 
 
     Covers top-level `session_id` in the query/body. Routes that accept session
     IDs under other keys must enforce their own visibility checks.
+
+    The benchmark is the request's ACTIVE profile and nothing else. A
+    request-body ``profile`` field is untrusted input: #7826 briefly let it
+    relabel the benchmark here, which meant a default-bound request carrying
+    ``profile:"work"`` passed this guard on a ``work``-owned row and reached
+    the archive route's disk-loading path (whose repairs then rewrote the
+    foreign sidecar). The relabel is gone — the archive route enforces
+    owner==bound on its own.
     """
     method = str(method).upper()
     if _request_session_visibility_exempt(method, getattr(parsed, "path", "")):
@@ -10227,6 +10242,122 @@ def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False)
                 return row
     except Exception:
         return {}
+    return {}
+
+
+def _lookup_cli_session_owner_readonly(
+    session_id: str,
+    *,
+    allowed_profiles: "list[str] | None" = None,
+) -> dict:
+    """Exact-owner, read-only cross-profile metadata lookup.
+
+    ``_lookup_cli_session_metadata(all_profiles=True)`` routes through
+    ``get_cli_sessions()``, whose projection reaches ``Session.load`` when a
+    legacy sidecar layout makes ``load_metadata_only`` fall back. That
+    collapse-and-save (with a ``.bak``) is a WRITE, and it fired on the
+    DENIED-archive path: a 409 for a foreign session still rewrote the
+    neighbouring sidecar (#7826 security finding, reproduced with real auth).
+
+    This helper never loads a sidecar. It enumerates each profile's
+    HERMES_HOME, opens that profile's ``state.db`` with
+    ``open_state_db_readonly``, and reads the one row for ``session_id``
+    through a parameterized query. ``allowed_profiles`` restricts the scan to
+    the profiles the caller is authorised for, so a bound user gets no
+    metadata about a foreign owner at all.
+
+    Returns ``{}`` when the id is unknown or lives outside the allowed set —
+    the caller then takes its normal 404 self-heal path.
+    """
+    if not session_id:
+        return {}
+    sid = str(session_id)
+    try:
+        from api.models import (
+            _all_profiles_cli_contexts,
+        )
+        from api.profiles import (
+            get_active_profile_name,
+            get_hermes_home_for_profile,
+        )
+    except Exception:
+        return {}
+
+    allowed = None
+    if allowed_profiles is not None:
+        allowed = {str(p or "default").strip() or "default" for p in allowed_profiles}
+
+    # Reuse the model layer's per-profile context enumeration (home + state.db
+    # path per profile) so this scan and the sidebar agree on what exists.
+    # ``_all_profiles_cli_contexts`` is itself exception-guarded and returns
+    # [] on any failure.
+    try:
+        contexts, _cache_key = _all_profiles_cli_contexts()
+    except Exception:
+        contexts = []
+
+    if not contexts:
+        # Single-profile fallback: the active profile's own store only.
+        try:
+            home = Path(get_hermes_home_for_profile(get_active_profile_name()))
+            db = home / "state.db"
+            contexts = [(home, db, str(get_active_profile_name() or "default"))]
+        except Exception:
+            return {}
+
+    for _home, db_path, profile_value in contexts:
+        profile_name = str(profile_value or "default").strip() or "default"
+        if allowed is not None and profile_name not in allowed:
+            continue
+        try:
+            if not db_path or not db_path.exists():
+                continue
+            with closing(open_state_db_readonly(db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT id, source, started_at, ended_at, message_count "
+                    "FROM sessions WHERE id = ? LIMIT 1",
+                    (sid,),
+                )
+                row = cur.fetchone()
+        except Exception:
+            continue
+        if row is None:
+            continue
+        source_value = (row["source"] if "source" in row.keys() else "") or ""
+        # #7826 re-gate CORE: expose read_only so the archive fallback's guard
+        # can actually fire. state.db has no ``read_only`` column (the flag is
+        # derived, never stored), so it is reconstructed here from the row's
+        # source family the same way ``_is_claimable_cli_source`` refuses
+        # foreign-owned rows: gateway / claude_code / messaging /
+        # external_agent / cron / subagent / unknown are read-only views of an
+        # external store and must never be materialized into a writable WebUI
+        # sidecar.
+        read_only_flag = False
+        if source_value:
+            try:
+                read_only_flag = not _is_claimable_cli_source(
+                    {
+                        "source_tag": source_value,
+                        "raw_source": source_value,
+                        "session_source": source_value,
+                    },
+                    state_db_source=source_value,
+                )[0]
+            except Exception:
+                read_only_flag = False
+        return {
+            "session_id": sid,
+            "profile": profile_name,
+            "source": source_value,
+            "read_only": read_only_flag,
+            "started_at": (row["started_at"] if "started_at" in row.keys() else None),
+            "ended_at": (row["ended_at"] if "ended_at" in row.keys() else None),
+            "message_count": (
+                row["message_count"] if "message_count" in row.keys() else 0
+            ),
+        }
     return {}
 
 
@@ -21207,8 +21338,26 @@ def handle_post(handler, parsed) -> bool:
                 # "wrong profile" from "no such session" and both answered 404.
                 # Only an all-profiles request may probe other profiles: a request that carries ``profile`` without
                 # ``all_profiles`` is an active-profile archive and keeps master's 404 for a foreign session.
+                # #7826 security: the re-probe below must NOT add another
+                # get_cli_sessions() pass. Its projection reaches
+                # Session.load on a legacy sidecar layout, which collapses
+                # duplicate partials and SAVES (with a .bak) — a WRITE that
+                # fired on this DENIED-archive path and rewrote a foreign
+                # sidecar. Use the read-only, exact-owner query instead: it
+                # opens each profile's state.db read-only and never loads a
+                # sidecar. Returns {} for unknown ids, so the 404 self-heal
+                # still fires exactly as before.
+                # Accuracy note (2026-10-27 re-gate, senior advisor): this
+                # path still goes through get_cli_sessions(all_profiles=True)
+                # ONCE, inherited from master — the _resolve_cli_import_metadata
+                # call above routes through _lookup_cli_session_metadata, which
+                # enumerates get_cli_sessions(all_profiles=True) when the
+                # request carried all_profiles. The constraint here is on the
+                # NEW re-probe only: it must not add a second such pass. Not
+                # worse than master; the claim is scoped to what it actually
+                # pins.
                 if _arch_allow_all and _arch_profile:
-                    _owner_meta = _lookup_cli_session_metadata(sid, all_profiles=True)
+                    _owner_meta = _lookup_cli_session_owner_readonly(sid)
                     _owner_profile = (_owner_meta or {}).get("profile")
                     if _owner_profile and not _profiles_match(_owner_profile, _arch_profile):
                         return j(handler, {
@@ -21226,6 +21375,52 @@ def handle_post(handler, parsed) -> bool:
                 _resolved_profile = cli_meta.get("profile")
                 if _resolved_profile and not _profiles_match(_resolved_profile, _arch_profile):
                     return j(handler, {"error": "Session belongs to another profile", "code": "session_profile_mismatch"}, 409)
+            # #7549/#7826: the session exists in another profile's store.
+            # Mirror the detail-load endpoint's cross-profile contract (#7710)
+            # instead of a bare 404: a KNOWN other profile gets 409 with its
+            # name so the client can offer a profile switch, while
+            # unknown/legacy None-profile rows keep the 404 self-heal firing.
+            # #7826: a profile-less metadata row must stay on the bare-404
+            # path. Materializing it into whichever profile happens to be
+            # active would silently re-parent a foreign session — the 404
+            # keeps the browser's stale-URL self-heal firing instead.
+            _arch_profile = cli_meta.get("profile") or None
+            if not _arch_profile:
+                return bad(handler, "Session not found", 404)
+            # #7826: the active-profile benchmark applies ONLY to unqualified
+            # requests. A scoped request (all_profiles + profile) already went
+            # through the #7731 mismatch check above against its claimed owner,
+            # so a matching scoped archive must succeed instead of 409ing
+            # against the ACTIVE profile.
+            if not _arch_allow_all and not _profiles_match(_arch_profile, _get_active_profile_name()):
+                return j(handler, {
+                    "error": "Session belongs to a different profile",
+                    "code": "session_profile_mismatch",
+                    "session_id": sid,
+                    "profile": _arch_profile,
+                }, 409)
+            # #7826 re-gate CORE: the owner-only lookup cannot safely MATERIALIZE.
+            # It opens each profile's state.db read-only and never loads a sidecar,
+            # so it carries none of the metadata a write path needs — most visibly
+            # `read_only`. A Gateway row older than 25 newer CLI rows therefore
+            # detail-loads with `read_only: true`, but after a cache eviction this
+            # fallback matched it, materialized a sidecar with `read_only: false`
+            # and null source identity, and returned 200 where master returns 404
+            # without creating a file.
+            #
+            # The fallback exists ONLY to turn a foreign owner into a 409 (above).
+            # A same-profile match through it is exactly the shape that must not be
+            # materialized: the row was ALSO invisible to the active-profile CLI
+            # lookup (that is why the fallback ran), so master's behaviour for it is
+            # a bare 404, and re-creating it as a writable sidecar with null source
+            # identity would both change master's outcome and silently re-parent a
+            # read-only foreign session. Provenance-tracking the fallback keeps the
+            # 404 self-heal firing for every same-profile fallback match while the
+            # foreign-owner 409 above is preserved.
+            #
+            # (This replaces the 400 that used to sit here: a read-only row reaching
+            # this fallback is exactly the shape that must not be materialized, and
+            # 404 keeps the browser's stale-URL self-heal firing.)
             # #7731: remember the resolved identity for the re-stamp after the
             # lock-held reload below. ``_archive_cli_meta`` is captured from the
             # ACTIVE profile only, so on the cross-profile path it is empty and
@@ -21233,7 +21428,7 @@ def handle_post(handler, parsed) -> bool:
             # plus null source fields) of a CLI-origin session.
             _archive_resolved_meta = cli_meta
             if cli_meta.get("read_only"):
-                return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
+                return bad(handler, "Session not found", 404)
             # Delegated subagent children (#5307) are view-only and owned by the
             # delegate runner — never materialize one into a writable WebUI
             # sidecar via the archive fallback (the 3rd of the shared
@@ -21289,6 +21484,15 @@ def handle_post(handler, parsed) -> bool:
                 s.thread_id = cli_meta.get("thread_id")
                 s.session_key = cli_meta.get("session_key")
                 s.platform = cli_meta.get("platform")
+        # Read-only imported sessions (Claude Code / CLI / Gateway rows that
+        # already carry a materialized WebUI sidecar) must not be archived:
+        # archiving mutates the session's own state, and these rows are a
+        # read-only view of an external store. The fallback above 404s read-only
+        # CLI rows before any materialization; this guard covers the main
+        # sidecar path so the WebUI cannot flip `archived` on a read-only
+        # import (mirrors the delete/rename/update read-only guards).
+        if getattr(s, "read_only", False) or getattr(s, "is_read_only", False):
+            return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
         with _get_session_agent_lock(sid):
             # #7738: re-resolve the canonical session under the lock so the
             # object we mutate is the resident one (not a stale, evicted one).
