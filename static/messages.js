@@ -3561,6 +3561,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const isError=!!(tool&&(tool.is_error||tool.error));
     row.row_id=tid?`settled:${activeSid||'session'}:${streamId||'stream'}:tool:${tid}`:row.row_id;
     row.tool_call_id=tid||null;
+    // #7653 re-gate round 15 (10-27 re-review, item 3): a settled row rebuilt
+    // from a live mirror entry keeps the occurrence ordinal, so its
+    // ``_anchorSceneExistingRowKey`` matches the projected twin (live scene
+    // rows carry the occurrence on the payload) and the settle path merges
+    // the same occurrence's two spellings instead of keeping two cards.
+    const occurrence=tool&&tool.occurrence!==undefined&&tool.occurrence!==null&&tool.occurrence!==''
+      ?tool.occurrence
+      :(tool&&tool.payload&&tool.payload.occurrence!==undefined&&tool.payload.occurrence!==null&&tool.payload.occurrence!==''
+        ?tool.payload.occurrence
+        :null);
     row.tool={
       id:tid||null,
       name,
@@ -3574,8 +3584,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       is_error:isError,
       duration:tool&&tool.duration!==undefined?tool.duration:null,
       started_at:tool&&tool.started_at!==undefined?tool.started_at:null,
+      ...(occurrence!==null&&occurrence!==''?{occurrence}:{}),
       signature:[name,tid||'',JSON.stringify(args||{})].join('|'),
     };
+    if(occurrence!==null&&occurrence!=='') row.occurrence=occurrence;
     row.payload={
       ...row.payload,
       tid:tid||undefined,
@@ -3588,6 +3600,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       is_error:isError,
       duration:tool&&tool.duration!==undefined?tool.duration:undefined,
       started_at:tool&&tool.started_at!==undefined?tool.started_at:undefined,
+      ...(occurrence!==null&&occurrence!==''?{occurrence}:{}),
     };
     return row;
   }
@@ -3839,6 +3852,68 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!_empty(live.started_at)&&_empty(tool.started_at)&&_empty(payload.started_at)){
       tool.started_at=live.started_at; payload.started_at=live.started_at; enriched=true;
     }
+    // #7358 round 4: the live tool mirror carries the authoritative
+    // ``is_error`` (set by the structured ``tool_complete`` callback
+    // at SSE emit time) but the persisted ``tool`` row and the
+    // ``payload`` object both lack the field. The compact /
+    // transparent render paths downstream default to ``false`` when
+    // ``is_error`` is missing, so a failed tool that was correctly
+    // shown red live reverts to "Completed" on cold reload. Carry
+    // the live value through to both rows so the cold-reload render
+    // matches the live card.
+    // #7358 round 5 (re-gate 9/22): also honour the
+    // ``S._settledToolIsErrorByTid`` map populated by
+    // ``_syncToolCallsForLoadedMessages`` so a true cold reload with
+    // no browser-persisted live mirror still carries the persisted
+    // failure through. The live value still wins when both are set
+    // (defensive — the live can only ever be true here after the
+    // round-4 guard, and the persisted map is also gated to ``true``
+    // only, so the union is exactly the set of failed tools).
+    // #7358 (re-gate 9/24): the live verdict may only be copied when the
+    // row/live pair matched through the tool id. This helper is reached
+    // either from the per-id dedup path or from
+    // ``_anchorSceneMatchingContentToolRow``, whose name / invocation
+    // fallback can pair an older *successful* settled row with a newer
+    // *failed* live call; copying the verdict there would settle the older
+    // row as Failed. The per-tid persisted map lookup below is already
+    // id-keyed and is unchanged.
+    const _rowTid=String(
+      (row&&(row.tool_call_id||(row.tool&&(row.tool.id||row.tool.tid)))) || ''
+    ).trim();
+    const _liveTid=String((live&&(live.tid||live.id||live.tool_call_id||live.tool_use_id||live.call_id))||'').trim();
+    const _matchedById=!!_rowTid&&!!_liveTid&&_rowTid===_liveTid;
+    const _persistedEntry=S&&S._settledToolIsErrorByTid&&_rowTid?S._settledToolIsErrorByTid[_rowTid]:null;
+    // #7358 round 9 (re-gate 10/01 finding 2): a reused id (``call_0``) must
+    // not let one failed occurrence repaint an earlier successful row red.
+    // Flat ``true`` (genuinely unique id) still applies tid-wide; a reused-id
+    // object is honoured only when the row can name its owning assistant
+    // message index and that index matches the recorded failure.
+    let _persistedIsError=false;
+    if(_persistedEntry===true) _persistedIsError=true;
+    else if(_persistedEntry&&typeof _persistedEntry==='object'&&_persistedEntry.is_error===true){
+      // #7358 round 10 (re-gate finding 3): a cold-reloaded scene row stores
+      // its owning assistant message index on ``row.group.assistant_msg_idx``
+      // and ``row.payload.assistant_msg_idx`` — the top level has no
+      // ``assistant_msg_idx`` field (see ``_anchorSceneRowBase``), so a
+      // reused-id failure never matched its row and the card reverted to
+      // "Completed". Resolve the owner through the same fallback chain the
+      // ``sessions.js`` producer and the ``ui.js`` consumer use.
+      const _rowAIdx=(row&&row.assistant_msg_idx!=null&&row.assistant_msg_idx!=='')?row.assistant_msg_idx
+        :(row&&row.group&&row.group.assistant_msg_idx!=null&&row.group.assistant_msg_idx!=='')?row.group.assistant_msg_idx
+        :(row&&row.payload&&row.payload.assistant_msg_idx!=null&&row.payload.assistant_msg_idx!=='')?row.payload.assistant_msg_idx
+        :null;
+      const _rowIdx=(_rowAIdx!=null&&_rowAIdx!==''&&Number.isFinite(Number(_rowAIdx)))?Number(_rowAIdx):null;
+      if(_rowIdx!=null){
+        _persistedIsError=(_persistedEntry.assistant_msg_idx!=null&&Number(_persistedEntry.assistant_msg_idx)===_rowIdx)||
+          (!!_persistedEntry.occurrences&&_persistedEntry.occurrences[_rowIdx]===true);
+      }
+    }
+    const _liveIsError=_matchedById&&Boolean(live&&live.is_error===true);
+    if((_liveIsError||_persistedIsError)&&tool.is_error!==true&&payload.is_error!==true){
+      tool.is_error = true;
+      payload.is_error = true;
+      enriched = true;
+    }
     const liveArgs=_anchorSceneToolArgs(live);
     if(liveArgs&&typeof liveArgs==='object'&&Object.keys(liveArgs).length){
       const mergeMissingArgs=(existing)=>{
@@ -4006,7 +4081,46 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!row||typeof row!=='object') return '';
     if(row.role==='tool'){
       const tool=row.tool&&typeof row.tool==='object'?row.tool:{};
-      return `tool:${row.tool_call_id||tool.id||tool.tid||tool.tool_call_id||tool.tool_use_id||tool.call_id||row.row_id||''}`;
+      const tid=row.tool_call_id||tool.id||tool.tid||tool.tool_call_id||tool.tool_use_id||tool.call_id||row.row_id||'';
+      // #7653 re-gate round 11 (finding 4, SILENT): a re-armed start is a
+      // SECOND occurrence of an id this stream already saw (``call_0`` emitted
+      // twice). Keying on the tid alone collapsed the two occurrences into one
+      // key, so the push loop below dropped the second row from the activity
+      // scene — Chromium showed only ``exit 3`` where the base keeps ``echo
+      // FIRST``. The paired start/completion events now carry the occurrence
+      // index (server: ``api/streaming.py`` ``on_tool_start``'s rearm branch),
+      // and a persisted row inherits it through ``_partial_tool_calls`` /
+      // ``s.tool_calls``, so the key includes it whenever either side names
+      // one. A row with no occurrence keeps the historical tid key, which is
+      // the pre-#7653 behaviour for a provider that never reuses an id.
+      //
+      // #7653 re-gate round 15 (10-27 re-review, item 3): scope by the OWNER
+      // first, matching the server's ``_anchor_scene_row_key``
+      // (``tool:<tid>@<owner>``) and the ui.js ``_anchorSceneToolRowLogicalKey``.
+      // Settled/hydrated rows carry their owning assistant message index on
+      // ``group``/``payload`` (``_anchorSceneRowBase``) but no occurrence
+      // ordinal, so two occurrences of one tid at different owners collapsed
+      // here even though the live path already separated them. Read the
+      // occurrence from ``payload`` too (the persisted scene rows carry it
+      // there — ``_anchor_scene_tool_row`` in api/routes.py).
+      const group=row.group&&typeof row.group==='object'?row.group:{};
+      const payload=row.payload&&typeof row.payload==='object'?row.payload:{};
+      const owner=row.assistant_msg_idx!==undefined&&row.assistant_msg_idx!==null&&row.assistant_msg_idx!==''
+        ?row.assistant_msg_idx
+        :(group.assistant_msg_idx!==undefined&&group.assistant_msg_idx!==null&&group.assistant_msg_idx!==''
+          ?group.assistant_msg_idx
+          :(payload.assistant_msg_idx!==undefined&&payload.assistant_msg_idx!==null&&payload.assistant_msg_idx!==''
+            ?payload.assistant_msg_idx
+            :null));
+      if(owner!=null&&owner!=='') return `tool:${tid}@${owner}`;
+      const occ=row.occurrence!==undefined&&row.occurrence!==null&&row.occurrence!==''
+        ?row.occurrence
+        :(tool.occurrence!==undefined&&tool.occurrence!==null&&tool.occurrence!==''
+          ?tool.occurrence
+          :(payload.occurrence!==undefined&&payload.occurrence!==null&&payload.occurrence!==''
+            ?payload.occurrence
+            :null));
+      return occ===null?`tool:${tid}`:`tool:${tid}#${occ}`;
     }
     if(row.role==='prose'||row.role==='thinking'){
       const identity=row.identity&&typeof row.identity==='object'?row.identity:{};
@@ -4224,6 +4338,57 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       return false;
     };
+    // #7653 re-gate round 15 (10-27 re-review, item 3): bridge the two
+    // spellings of the SAME occurrence in the settle path. A projected live
+    // row knows its occurrence ordinal (``tool:<tid>#<occ>``) but no owner,
+    // while the settled transcript row knows its owner
+    // (``tool:<tid>@<owner>``) but no ordinal. The ordinal and the owner are
+    // both ORDERED per tid (the k-th occurrence owns the k-th assistant
+    // message that emits the tid), so a row of one spelling pairs with the
+    // same-rank row of the other spelling — and two DIFFERENT occurrences
+    // never pair (each consumes its own rank, round-11 trailing alignment
+    // semantics).
+    const _twinConsumed=new Set(); // row indices already consumed as a twin
+    const _anchorSceneToolRowTwinIndex=(row,key)=>{
+      if(!key||key.indexOf('tool:')!==0) return -1;
+      const rest=key.slice('tool:'.length);
+      const at=rest.indexOf('@');
+      const hash=rest.indexOf('#');
+      const tid=at>0?rest.slice(0,at):(hash>0?rest.slice(0,hash):rest);
+      if(!tid) return -1;
+      const incomingOwner=at>0?rest.slice(at+1):null;
+      const incomingOcc=hash>0?rest.slice(hash+1):null;
+      const ownerRows=[]; // {index, owner} in push order
+      const occRows=[];   // {index, occ} in push order — includes BARE rows
+      for(let i=0;i<rows.length;i+=1){
+        if(_twinConsumed.has(i)) continue;
+        const k=_anchorSceneExistingRowKey(rows[i]);
+        if(!k||k.indexOf('tool:')!==0) continue;
+        const r=k.slice('tool:'.length);
+        const a=r.indexOf('@');
+        const h=r.indexOf('#');
+        const t=a>0?r.slice(0,a):(h>0?r.slice(0,h):r);
+        if(t!==tid) continue;
+        if(a>0) ownerRows.push({index:i,owner:r.slice(a+1)});
+        else occRows.push({index:i,occ:h>0?r.slice(h+1):null});
+      }
+      if(incomingOwner!=null){
+        if(!occRows.length) return -1;
+        // Next-unused pairing: owners and occurrences both arrive in
+        // per-tid order, so the k-th owner row pairs with the k-th
+        // occurrence row (round-11 trailing alignment semantics). Two
+        // DIFFERENT occurrences never pair — each consumes its own rank.
+        // A bare ownerless row (legacy, no ordinal) is the single-spelling
+        // case: at most one can exist per tid (two bare rows collapse via
+        // the exact-key path above), so it pairs only with the first owner.
+        return occRows[0].index;
+      }
+      if(incomingOcc!=null){
+        if(!ownerRows.length) return -1;
+        return ownerRows[0].index;
+      }
+      return -1;
+    };
     const pushRow=(row,origin)=>{
       if(!row||typeof row!=='object') return;
       const finalSegmentEligible=finalSegmentLiveProseRows.has(row);
@@ -4241,6 +4406,25 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           rows[existingIdx]={...rows[existingIdx],...row,display_hint:_anchorSceneRowDisplayHintForMode(row,sceneMode)};
         }
         return;
+      }
+      // #7653 re-gate round 15 (10-27 re-review, item 3): bridge the two
+      // spellings of the SAME occurrence — a projected live row that knows
+      // only its occurrence ordinal (``tool:<tid>#<occ>``) and the settled
+      // transcript row that knows only its owner (``tool:<tid>@<owner>``).
+      // The live path (round 11) and the hydration path (round 14) keep two
+      // DIFFERENT occurrences apart, so without the bridge the settle path
+      // here kept BOTH spellings of ONE occurrence and the turn grew a
+      // duplicate card after settlement.
+      if(key&&key.startsWith('tool:')&&!seen.has(key)){
+        const twinIdx=_anchorSceneToolRowTwinIndex(row,key);
+        if(twinIdx>=0){
+          // Same occurrence already projected: keep the earlier row (the live
+          // registry row carries the freshest body); its twin's settled body
+          // was already merged upstream (_enrichSettledToolRowBodyFromLive).
+          _twinConsumed.add(twinIdx);
+          seen.add(key);
+          return;
+        }
       }
       if(key) seen.add(key);
       // ── provenance-aware mirror consumption (settled rows) ───
@@ -4930,18 +5114,132 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
   function _mergeSettledToolCallsWithLiveMetadata(rawCalls){
     const liveCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
+    // #7358/#7653 (re-gate 10/06, reviewer Finding 2, SILENT): a reused
+    // tool id owns several live rows (the server's re-arm branch appends a
+    // second ``call_0`` row for the second occurrence) and they do not
+    // share a verdict. A one-entry-per-tid map gave the FIRST row to
+    // every occurrence, so the one-way upgrade below painted both cards
+    // with the first occurrence's ``is_error``. Keep an ARRAY per tid and
+    // hand each persisted row the next unused entry (``used``).
     const byTid=new Map();
     liveCalls.forEach((tc,idx)=>{
       if(!tc||typeof tc!=='object') return;
       const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
-      if(tid&&!byTid.has(tid)) byTid.set(tid,{tc,idx});
+      if(!tid) return;
+      let rows=byTid.get(tid);
+      if(!rows){ rows=[]; byTid.set(tid,rows); }
+      rows.push({tc,idx});
     });
     const used=new Set();
-    return (rawCalls||[]).map((raw,idx)=>{
+    // #7653 re-gate round 11 (finding 2, SILENT): pair by OCCURRENCE, not by
+    // consumption order. The next-unused rule is order-dependent, so a
+    // persisted row whose order differs from the mirror's append order gets a
+    // neighbour's verdict — the reviewer's "a later failed call_0 repaints an
+    // older success" (``[true,true]`` where the base preserves
+    // ``[false,true]``). Two rules fix it, in order of strength:
+    //
+    // 1. OCCURRENCE-EXACT: when the settled row and a live row both name the
+    //    same owning ``assistant_msg_idx`` (the server writes it into every
+    //    ``s.tool_calls`` entry), pair on it. Order stops mattering.
+    // 2. TRAILING ALIGNMENT for an indexless pairing: when the settled rows
+    //    of a tid OUTNUMBER its live rows, the live rows belong to the
+    //    trailing occurrences (the turn that just settled), so skip that many
+    //    leading settled rows entirely — a skipped row takes NOTHING, not even
+    //    the name fallback, because consuming any row marks it used and
+    //    starves the occurrence that owns it.
+    //
+    // A named index with no owning live row transfers nothing rather than
+    // borrowing a neighbour's verdict.
+    const _ownerIdxOf=(row)=>{
+      const v=row&&row.assistant_msg_idx;
+      return (v===undefined||v===null||v===''||!Number.isFinite(Number(v)))?null:Number(v);
+    };
+    const _tidOf=(row)=>(row&&(row.tid||row.id||row.tool_call_id||row.tool_use_id||row.call_id))||'';
+    const _settledCountByTid=new Map();
+    (rawCalls||[]).forEach((raw)=>{
+      const t=_tidOf(raw);
+      if(t) _settledCountByTid.set(t,(_settledCountByTid.get(t)||0)+1);
+    });
+    const _skipLeadingByTid=new Map();
+    _settledCountByTid.forEach((count,t)=>{
+      const rows=byTid.get(t);
+      if(rows&&rows.length&&count>rows.length) _skipLeadingByTid.set(t,count-rows.length);
+    });
+    // #7653 re-gate round 14 (10-19 review, item 4): reserve the live rows
+    // for the EXPLICIT id/occurrence matches across ALL settled rows FIRST,
+    // then run the name fallback over the live rows that are left. The old
+    // single pass let an earlier row whose id has no live row (or no
+    // occurrence-exact match) consume a later row's own live row through the
+    // NAME fallback — the reviewer's recovery-metadata swap, reproduced even
+    // with distinct ids: settled [old@1, new@4], mirror holding only `new`,
+    // left `new` with null/null in both consumers.
+    //
+    // Two sub-passes guarantee an occurrence-exact match is never stolen by
+    // an earlier row's id-own reservation: first every occurrence-exact
+    // pairing, then each remaining row's id-own next-unused row (metadata
+    // reservation). The verdict upgrade stays gated on the occurrence-exact
+    // match (``exact``), never on the loosened id-own metadata match.
+    const _seenByTid=new Map();
+    const _rows=(rawCalls||[]).map((raw,idx)=>{
       const next={...(raw||{}),done:true};
       const tid=next.tid||next.id||next.tool_call_id||next.tool_use_id||next.call_id||'';
-      let matchEntry=tid?byTid.get(tid):null;
-      if(!matchEntry){
+      const _nextOwner=_ownerIdxOf(next);
+      const _seen=_seenByTid.get(tid)||0;
+      _seenByTid.set(tid,_seen+1);
+      const _skipLeading=(tid?_skipLeadingByTid.get(tid):0)||0;
+      // An indexless row inside the trailing-skip window takes NOTHING (not
+      // even the name fallback), so the occurrence that owns the live row
+      // can still claim it (round 11).
+      const _skipThisRow=(_nextOwner==null)&&(_seen<_skipLeading);
+      return {next,tid,owner:_nextOwner,skip:_skipThisRow};
+    });
+    const _reserved=new Map();
+    // Sub-pass 1a — occurrence-exact: the live row owning the SAME assistant index.
+    for(const r of _rows){
+      if(r.skip||r.owner==null) continue;
+      const idRows=r.tid?byTid.get(r.tid):null;
+      if(!idRows||!idRows.length) continue;
+      const owned=idRows.find(entry=>{
+        const v=entry&&entry.tc?entry.tc.assistant_msg_idx:undefined;
+        return (v!==undefined&&v!==null&&v!==''&&Number(v)===r.owner)&&!used.has(entry.idx);
+      });
+      if(owned){ used.add(owned.idx); _reserved.set(r,{tc:owned.tc,idx:owned.idx,exact:true}); }
+    }
+    // Sub-pass 1b — the id's own next-unused live row. A row whose id HAS
+    // its own live row must never be starved of it by an earlier row's name
+    // fallback. Verdict eligibility keeps the round-10/12 semantics: an
+    // INDEXLESS settled row (no owner to prove) keeps the next-unused
+    // verdict transfer; an OWNED row whose occurrence-exact match failed
+    // takes presentation keys only — the loosened metadata match must never
+    // repaint a row failed.
+    for(const r of _rows){
+      if(r.skip||_reserved.has(r)) continue;
+      const idRows=r.tid?byTid.get(r.tid):null;
+      if(!idRows||!idRows.length) continue;
+      const nextRow=idRows.find(entry=>!used.has(entry.idx));
+      if(nextRow){
+        used.add(nextRow.idx);
+        _reserved.set(r,{tc:nextRow.tc,idx:nextRow.idx,exact:r.owner==null});
+      }
+    }
+    return _rows.map((r)=>{
+      const next=r.next;
+      const tid=r.tid;
+      // #7358 (re-gate 9/24): keep the id-map hit and the name fallback
+      // distinguishable. The one-way ``is_error`` upgrade below may only
+      // run off the id map: the name fallback can pair an older
+      // *successful* terminal call with a newer *failed* one, and the
+      // upgrade would then settle the older row as Failed. The name
+      // fallback stays name-matchable for the presentation-only keys
+      // (burst / duration / started_at).
+      //
+      // #7358/#7653 (re-gate 10/06, Finding 2, SILENT): resolve a reused
+      // id per occurrence — the next unused live row of that tid. When
+      // they are all consumed the ownership is ambiguous, so skip the
+      // transfer instead of guessing.
+      const idMatchEntry=(_reserved.get(r)&&_reserved.get(r).exact)?_reserved.get(r):null;
+      let matchEntry=_reserved.get(r)||null;
+      if(!matchEntry&&!r.skip){
         const name=next.name||((next.function||{}).name)||'';
         const matchIdx=liveCalls.findIndex((tc,i)=>tc&&!used.has(i)&&(!name||tc.name===name));
         if(matchIdx>=0) matchEntry={tc:liveCalls[matchIdx],idx:matchIdx};
@@ -4951,6 +5249,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const live=matchEntry.tc||{};
         for(const key of ['activityBurstId','duration','started_at']){
           if((next[key]===undefined||next[key]===null)&&live[key]!==undefined&&live[key]!==null) next[key]=live[key];
+        }
+        // #7358 round 5 (re-gate 9/22): preserve the live mirror's
+        // ``is_error`` when the persisted summary doesn't carry it. The
+        // merge is one-way: live can only upgrade the row to a failure,
+        // never downgrade a persisted failure back to success. A
+        // session.tool_calls entry that already has ``is_error: true`` is
+        // preserved (the spread above already copied it), so the only case
+        // the live write matters is the missing-or-false summary.
+        // #7358 (re-gate 9/24): the upgrade is gated on the id-map hit —
+        // a name-fallback match must not inherit another call's failure.
+        // #7653 round 14 (item 4): the gate is the occurrence-EXACT match;
+        // the id-own metadata reservation transfers presentation keys only.
+        if(idMatchEntry&&live.is_error===true&&next.is_error!==true){
+          next.is_error=true;
         }
       }
       return next;
@@ -7091,6 +7403,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           });
           if(!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length){
             S.toolCalls=d.session.tool_calls.map(tc=>tc);
+            // #7653 r14 (item 2): rebuild the verdict map from THIS settlement before the merge — the stale reload map repainted reused ids red after `done`.
+            if(typeof _buildSettledToolIsErrorMap==='function'){
+              S._settledToolIsErrorByTid=_buildSettledToolIsErrorMap(d.session.tool_calls);
+            }
             S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(d.session.tool_calls);
           } else {
             if(hasMessageToolMetadata) S._settledLiveToolMetadata=S.toolCalls.map(tc=>({...tc,done:true}));
@@ -8032,6 +8348,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           return hasTc||hasPartialTc||hasTu;
         });
         if(!hasMessageToolMetadata&&session.tool_calls&&session.tool_calls.length){
+          // #7653 re-gate round 14 (10-19 review, item 2): rebuild the verdict
+          // map from this recovery's summary before the merge — the recovery
+          // path used to keep the map from the last load, so a stale reused-id
+          // verdict survived the recovery and painted the wrong occurrence.
+          if(typeof _buildSettledToolIsErrorMap==='function'){
+            S._settledToolIsErrorByTid=_buildSettledToolIsErrorMap(session.tool_calls);
+          }
           S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(session.tool_calls||[]);
         }else{
           if(hasMessageToolMetadata) S._settledLiveToolMetadata=S.toolCalls.map(tc=>({...tc,done:true}));

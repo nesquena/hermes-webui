@@ -17491,7 +17491,16 @@ function _appendWorklogReason(list, anchor){
 function _toolIdentity(tc){
   if(!tc) return '';
   const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
-  if(tid) return `id:${tid}`;
+  if(tid){
+    // #7653 re-gate round 15 (10-27 re-review, item 3): a reused id owns
+    // several worklog cards, so the step dedup must be occurrence-scoped —
+    // a tid-only key dropped the second ``call_0`` card of the same step.
+    const owner=_toolCardOwnerIndex(tc);
+    if(owner!=null) return `id:${tid}@${owner}`;
+    const occ=_toolCardOccurrence(tc);
+    if(occ!=null&&occ!=='') return `id:${tid}#${occ}`;
+    return `id:${tid}`;
+  }
   const args=tc.args&&typeof tc.args==='object'?tc.args:{};
   return [
     tc.assistant_msg_idx!==undefined?`a:${tc.assistant_msg_idx}`:'',
@@ -17500,10 +17509,50 @@ function _toolIdentity(tc){
     String(tc.snippet||tc.preview||'').slice(0,160),
   ].join('|');
 }
+function _toolCardOwnerIndex(tc){
+  if(!tc) return null;
+  const group=(tc.group&&typeof tc.group==='object')?tc.group:{};
+  const payload=(tc.payload&&typeof tc.payload==='object')?tc.payload:{};
+  const tool=(tc.tool&&typeof tc.tool==='object')?tc.tool:{};
+  const raw=tc.assistant_msg_idx!==undefined&&tc.assistant_msg_idx!==null&&tc.assistant_msg_idx!==''
+    ?tc.assistant_msg_idx
+    :(group.assistant_msg_idx!==undefined&&group.assistant_msg_idx!==null&&group.assistant_msg_idx!==''
+      ?group.assistant_msg_idx
+      :(payload.assistant_msg_idx!==undefined&&payload.assistant_msg_idx!==null&&payload.assistant_msg_idx!==''
+        ?payload.assistant_msg_idx
+        :(tool.assistant_msg_idx!==undefined&&tool.assistant_msg_idx!==null&&tool.assistant_msg_idx!==''
+          ?tool.assistant_msg_idx
+          :null)));
+  return (raw!=null&&raw!==''&&Number.isFinite(Number(raw)))?Number(raw):null;
+}
+function _toolCardOccurrence(tc){
+  if(!tc) return null;
+  const group=(tc.group&&typeof tc.group==='object')?tc.group:{};
+  const payload=(tc.payload&&typeof tc.payload==='object')?tc.payload:{};
+  const tool=(tc.tool&&typeof tc.tool==='object')?tc.tool:{};
+  const raw=tc.occurrence!==undefined&&tc.occurrence!==null&&tc.occurrence!==''
+    ?tc.occurrence
+    :(group.occurrence!==undefined&&group.occurrence!==null&&group.occurrence!==''
+      ?group.occurrence
+      :(payload.occurrence!==undefined&&payload.occurrence!==null&&payload.occurrence!==''
+        ?payload.occurrence
+        :(tool.occurrence!==undefined&&tool.occurrence!==null&&tool.occurrence!==''
+          ?tool.occurrence
+          :null)));
+  return (raw!=null&&raw!=='')?raw:null;
+}
 function _toolDisclosureIdentity(tc){
   if(!tc) return '';
   const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
-  if(tid) return `id:${tid}`;
+  if(tid){
+    // Same occurrence scoping as _toolIdentity: two occurrences of a reused
+    // id must not share one disclosure key (toggling one would open both).
+    const owner=_toolCardOwnerIndex(tc);
+    if(owner!=null) return `id:${tid}@${owner}`;
+    const occ=_toolCardOccurrence(tc);
+    if(occ!=null&&occ!=='') return `id:${tid}#${occ}`;
+    return `id:${tid}`;
+  }
   const stable=[
     tc.assistant_msg_idx!==undefined?`a:${tc.assistant_msg_idx}`:'',
     tc.name||'tool',
@@ -17524,9 +17573,37 @@ function _anchorSceneToolRowLogicalKey(row){
   if(!row||row.role!=='tool') return '';
   const tool=(row.tool&&typeof row.tool==='object')?row.tool:{};
   const payload=(row.payload&&typeof row.payload==='object')?row.payload:{};
+  const group=(row.group&&typeof row.group==='object')?row.group:{};
   const id=row.tool_call_id||tool.id||tool.tid||tool.tool_call_id||tool.tool_use_id||tool.call_id||
     payload.tid||payload.id||payload.tool_call_id||payload.tool_use_id||payload.call_id||'';
-  return id?`call:${id}`:'';
+  if(!id) return '';
+  // #7653 re-gate round 15 (10-27 re-review, item 3): scope the render key by
+  // the OCCURRENCE, never the tid alone. The server hydration keeps one
+  // owner-scoped row per occurrence (``echo FIRST`` then ``exit 3`` on one
+  // reused ``call_0``), but a tid-only key here pushed both rows through the
+  // byKey merge in ``_anchorSceneRowsForRendering`` and collapsed them back
+  // into one card. The durable identity is the owning assistant message
+  // (``group``/``payload`` ``assistant_msg_idx`` on every hydrated row); live
+  // stream-born rows carry the occurrence ordinal instead, so it is the
+  // fallback. A row naming neither keeps the historical bare-tid key, which
+  // is the pre-#7653 behaviour for a provider that never reuses an id.
+  const owner=row.assistant_msg_idx!==undefined&&row.assistant_msg_idx!==null&&row.assistant_msg_idx!==''
+    ?row.assistant_msg_idx
+    :(group.assistant_msg_idx!==undefined&&group.assistant_msg_idx!==null&&group.assistant_msg_idx!==''
+      ?group.assistant_msg_idx
+      :(payload.assistant_msg_idx!==undefined&&payload.assistant_msg_idx!==null&&payload.assistant_msg_idx!==''
+        ?payload.assistant_msg_idx
+        :null));
+  if(owner!=null&&owner!=='') return `call:${id}@${owner}`;
+  const occ=row.occurrence!==undefined&&row.occurrence!==null&&row.occurrence!==''
+    ?row.occurrence
+    :(tool.occurrence!==undefined&&tool.occurrence!==null&&tool.occurrence!==''
+      ?tool.occurrence
+      :(payload.occurrence!==undefined&&payload.occurrence!==null&&payload.occurrence!==''
+        ?payload.occurrence
+        :null));
+  if(occ!=null&&occ!=='') return `call:${id}#${occ}`;
+  return `call:${id}`;
 }
 function _anchorSceneMergeToolRows(prev, row){
   if(!prev) return row;
@@ -22002,6 +22079,52 @@ function _assistantSegmentIsTurnFinal(row, mi){
   const last=segs.length?segs[segs.length-1]:null;
   return !last||String(last.dataset.msgIdx)===String(mi);
 }
+
+// #7653 re-gate round 14 (10-19 review, item 4): reserve the live mirror
+// rows for the EXPLICIT id/occurrence matches across ALL candidates before
+// any name fallback runs. The old per-row matching let an earlier candidate
+// whose id has no live row (or no occurrence-exact match) consume a later
+// row's own live row through the NAME fallback — the reviewer's
+// recovery-metadata starvation (``new`` left with null/null), reproduced
+// even with distinct ids.
+//
+// Two sub-passes guarantee an occurrence-exact match is never stolen by an
+// earlier row's id-own reservation: first every occurrence-exact pairing,
+// then each remaining row's id-own next-unused row. Verdict eligibility
+// keeps the round-10/12 semantics: an INDEXLESS candidate (no owner to
+// prove) keeps the next-unused verdict transfer; an OWNED candidate whose
+// occurrence-exact match failed takes presentation keys only — the loosened
+// metadata match never repaints a row failed.
+function _reserveLiveToolMetadataForCandidates(candidates, liveMetadataByTid, used){
+  const reserved=new Map();
+  const _ownerOf=(c)=>{
+    const v=c&&c.next?c.next.assistant_msg_idx:undefined;
+    return (v!==undefined&&v!==null&&v!==''&&Number.isFinite(Number(v)))?Number(v):null;
+  };
+  for(const c of candidates||[]){
+    const _owner=_ownerOf(c);
+    if(_owner==null) continue;
+    const idRows=c.tid?liveMetadataByTid.get(c.tid):null;
+    if(!idRows||!idRows.length) continue;
+    const owned=idRows.find(entry=>{
+      const v=entry&&entry.tc?entry.tc.assistant_msg_idx:undefined;
+      return (v!==undefined&&v!==null&&v!==''&&Number(v)===_owner)&&!used.has(entry.idx);
+    });
+    if(owned){ used.add(owned.idx); reserved.set(c,{tc:owned.tc,idx:owned.idx,exact:true}); }
+  }
+  for(const c of candidates||[]){
+    if(reserved.has(c)) continue;
+    const idRows=c.tid?liveMetadataByTid.get(c.tid):null;
+    if(!idRows||!idRows.length) continue;
+    const nextRow=idRows.find(entry=>!used.has(entry.idx));
+    if(nextRow){
+      used.add(nextRow.idx);
+      reserved.set(c,{tc:nextRow.tc,idx:nextRow.idx,exact:_ownerOf(c)==null});
+    }
+  }
+  return reserved;
+}
+
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
   // typeof guard: node harnesses extract renderMessages() without its helpers (#6717).
@@ -23072,18 +23195,106 @@ function renderMessages(options){
       }
     });
     const derived=[];
+    // #7653 re-gate round 14 (10-19 review, item 4): the fallback rows are
+    // collected first so the live mirror rows can be reserved for the
+    // EXPLICIT id/occurrence matches across ALL rows before any name
+    // fallback runs. The old per-row matching let an earlier row whose id
+    // has no live row consume a later row's own live row through the name
+    // fallback — the reviewer's recovery-metadata starvation (``new`` left
+    // with null/null), reproduced even with distinct ids.
+    const _fallbackCandidates=[];
     const liveToolMetadata=Array.isArray(S._settledLiveToolMetadata)
       ? S._settledLiveToolMetadata
       : (Array.isArray(S.toolCalls)?S.toolCalls:[]);
+    // #7358 round 10+ / #7653 (re-gate 10/06, reviewer Finding 2, SILENT):
+    // a reused tool id legitimately owns SEVERAL live rows — the server's
+    // re-arm branch appends a second ``call_0`` row for the second
+    // occurrence — and they do NOT share a verdict. Keeping one entry per
+    // tid (``!liveMetadataByTid.has(tid)``) hands the FIRST row to every
+    // occurrence, so the one-way upgrade below paints both cards with the
+    // first occurrence's ``is_error``. The live-settle path therefore
+    // rendered ``[[0,true],[2,true]]`` for a "fail then succeed" pair.
+    // Keep an ARRAY per tid in mirror order and hand each settled row the
+    // next entry that has not been used yet (``usedLiveToolMetadata``).
     const liveMetadataByTid=new Map();
     liveToolMetadata.forEach((tc,idx)=>{
       if(!tc||typeof tc!=='object') return;
       const tid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
-      if(tid&&!liveMetadataByTid.has(tid)) liveMetadataByTid.set(tid,{tc,idx});
+      if(!tid) return;
+      let rows=liveMetadataByTid.get(tid);
+      if(!rows){ rows=[]; liveMetadataByTid.set(tid,rows); }
+      rows.push({tc,idx});
     });
     const usedLiveToolMetadata=new Set();
-    const copyLiveToolMetadata=(next,name,tid)=>{
-      let matchEntry=tid?liveMetadataByTid.get(tid):null;
+    // #7358 round 5 (re-gate 9/22): cold-reload-friendly persisted
+    // ``is_error`` index populated by ``_syncToolCallsForLoadedMessages``.
+    // When the browser has no in-memory live mirror (a true cold reload),
+    // ``liveMetadataByTid`` is empty and the per-tid lookup below cannot
+    // upgrade a settled row to a failure. Fall back to this map so a
+    // failed tool that was correctly classified server-side still renders
+    // red after reload, instead of falling back to the default ``false``
+    // and silently flipping to "Completed" (Finding 2 of the 9/22
+    // re-gate review). The merge is one-way: a missing-or-false row can
+    // only be upgraded to ``true``; an already-true row is never cleared.
+    const _persistedIsErrorByTid=(S&&S._settledToolIsErrorByTid&&typeof S._settledToolIsErrorByTid==='object')?S._settledToolIsErrorByTid:null;
+    const copyLiveToolMetadata=(next,name,tid,preserved)=>{
+      // #7653 re-gate round 14 (10-19 review, item 4): ``preserved`` is the
+      // live entry the caller reserved for this row across ALL candidates
+      // BEFORE any name fallback ran (null = no explicit match). The old
+      // per-row matching let an earlier candidate whose id has no live row
+      // consume a later row's own live row through the NAME fallback — the
+      // reviewer's recovery-metadata starvation (``new`` left with
+      // null/null), reproduced even with distinct ids.
+      // #7358 (re-gate 9/24): keep the id-map hit and the name fallback
+      // distinct — the one-way is_error upgrade below may only run off the
+      // id map. A name match can pair an older successful terminal call
+      // with a newer failed one, settling the older row as Failed. The
+      // name fallback stays name-matchable for the presentation-only keys
+      // (burst / duration / started_at).
+      //
+      // #7358/#7653 (re-gate 10/06, reviewer Finding 2, SILENT):
+      // ``liveMetadataByTid`` now maps a tid to the ARRAY of its live rows,
+      // so a reused id resolves per occurrence: take the next row that no
+      // settled row has consumed yet. When every row of this tid is already
+      // used, the ownership is ambiguous (more occurrences rendered than the
+      // server settled) — skip the transfer entirely rather than re-pair a
+      // row and guess a verdict.
+      const idRows=tid?liveMetadataByTid.get(tid):null;
+      // #7653 re-gate round 11 (finding 2, SILENT): pair by OCCURRENCE, not
+      // by consumption order — the same crossing the messages.js consumer
+      // had. A settled row names its owning assistant index (top level, or
+      // on ``group``/``payload`` for a scene row), and a live row derived
+      // from the transcript carries the same field, so when both name one
+      // the pairing is exact and order stops mattering. A named index with
+      // no owning live row transfers nothing; an indexless mirror keeps the
+      // next-unused rule.
+      const _nextOwnerAIdx=(next&&next.assistant_msg_idx!=null&&next.assistant_msg_idx!=='')?next.assistant_msg_idx
+        :(next&&next.group&&next.group.assistant_msg_idx!=null&&next.group.assistant_msg_idx!=='')?next.group.assistant_msg_idx
+        :(next&&next.payload&&next.payload.assistant_msg_idx!=null&&next.payload.assistant_msg_idx!=='')?next.payload.assistant_msg_idx
+        :null;
+      const _nextOwnerIdx=(_nextOwnerAIdx!=null&&_nextOwnerAIdx!==''&&Number.isFinite(Number(_nextOwnerAIdx)))?Number(_nextOwnerAIdx):null;
+      let idMatchEntry=null;
+      let matchEntry=null;
+      if(preserved!==undefined){
+        // The caller reserved this row's live entry across all candidates.
+        // ``exact`` marks the occurrence-exact pairing — the only shape that
+        // may transfer a verdict; an id-own metadata reservation transfers
+        // the presentation keys only.
+        matchEntry=preserved||null;
+        if(preserved&&preserved.exact) idMatchEntry=preserved;
+      }else if(idRows&&idRows.length){
+        if(_nextOwnerIdx!=null){
+          const owned=idRows.find(entry=>{
+            const v=entry&&entry.tc?entry.tc.assistant_msg_idx:undefined;
+            return (v!==undefined&&v!==null&&v!==''&&Number(v)===_nextOwnerIdx);
+          });
+          if(owned) idMatchEntry=owned;
+        }else{
+          const nextRow=idRows.find(entry=>!usedLiveToolMetadata.has(entry.idx));
+          if(nextRow) idMatchEntry=nextRow;
+        }
+        matchEntry=idMatchEntry;
+      }
       if(!matchEntry){
         const matchIdx=liveToolMetadata.findIndex((tc,i)=>tc&&!usedLiveToolMetadata.has(i)&&(!name||tc.name===name));
         if(matchIdx>=0) matchEntry={tc:liveToolMetadata[matchIdx],idx:matchIdx};
@@ -23094,6 +23305,51 @@ function renderMessages(options){
         for(const key of ['activityBurstId','duration','started_at']){
           if((next[key]===undefined||next[key]===null)&&live[key]!==undefined&&live[key]!==null) next[key]=live[key];
         }
+        // One-way is_error upgrade from the live mirror — id-map hit only
+        // (#7358 re-gate 9/24): a name-fallback match must not inherit
+        // another call's failure.
+        if(idMatchEntry&&live.is_error===true&&next.is_error!==true){
+          next.is_error=true;
+        }
+      }
+      // #7358 round 5 (re-gate 9/22): cold-reload fallback to the
+      // persisted per-tid map when the live mirror is empty (the
+      // common case on a hard browser reload). Same one-way rule.
+      // #7358 round 9 (re-gate 10/01 finding 2): a reused tool id (llama.cpp's
+      // constant id, or per-turn ``call_0``) must not resurrect an earlier
+      // successful card red. The persisted entry is flat ``true`` only for a
+      // genuinely unique id; a reused id is scoped to its owning
+      // assistant_msg_idx (plus an ``occurrences`` set when several failed
+      // calls share it). Honour the row's own index so a successful call_0
+      // stays green; a row carrying no index can safely apply a flat ``true``
+      // but never a reused-id occurrence it can't prove it owns.
+      const _persistedEntry=tid&&_persistedIsErrorByTid?_persistedIsErrorByTid[tid]:null;
+      if(_persistedEntry===true&&next.is_error!==true){
+        // Flat ``true`` = a genuinely unique failed id — no occurrence scope
+        // to consult, apply tid-wide (rounds 3-8 behaviour unchanged).
+        next.is_error=true;
+      }else if(_persistedEntry&&typeof _persistedEntry==='object'&&_persistedEntry.is_error===true&&next.is_error!==true){
+        // Reused id: only honour the row's own owning assistant message index
+        // (or an explicit failed occurrence) so a successful sibling isn't
+        // resurrected red. A row that can't identify its occurrence must not
+        // absorb a reused-id failure it can't prove it owns.
+        // #7358 round 10 (re-gate finding 3): same fallback chain as the
+        // ``messages.js`` consumer — a scene row carries its owning assistant
+        // message index on ``next.group.assistant_msg_idx`` /
+        // ``next.payload.assistant_msg_idx`` (the top level has no
+        // ``assistant_msg_idx`` field on a cold-reloaded row), so without the
+        // fallback a reused-id failure never matched and reverted to
+        // "Completed".
+        const _rowAIdx=(next&&next.assistant_msg_idx!=null&&next.assistant_msg_idx!=='')?next.assistant_msg_idx
+          :(next&&next.group&&next.group.assistant_msg_idx!=null&&next.group.assistant_msg_idx!=='')?next.group.assistant_msg_idx
+          :(next&&next.payload&&next.payload.assistant_msg_idx!=null&&next.payload.assistant_msg_idx!=='')?next.payload.assistant_msg_idx
+          :null;
+        const _rowIdx=(_rowAIdx!=null&&_rowAIdx!==''&&Number.isFinite(Number(_rowAIdx)))?Number(_rowAIdx):null;
+        const _occOwned=(_rowIdx!=null)&&(
+          (_persistedEntry.assistant_msg_idx!=null&&Number(_persistedEntry.assistant_msg_idx)===_rowIdx)||
+          (!!_persistedEntry.occurrences&&_persistedEntry.occurrences[_rowIdx]===true)
+        );
+        if(_occOwned) next.is_error=true;
       }
       return next;
     };
@@ -23110,15 +23366,19 @@ function renderMessages(options){
         const patchSnippet=_cliPatchSnippetFromArgs(name,args);
         const resultSnippet=resultsByTid[tid]||persistedSnippetByTid[tid]||'';
         let argsSnap=_toolArgsSnapshot(args);
-        derived.push(copyLiveToolMetadata({
+        _fallbackCandidates.push({
+          next:{
+            name,
+            snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+            is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+            tid,
+            assistant_msg_idx:assistantToolAnchorIdx,
+            args:argsSnap,
+            done:true,
+          },
           name,
-          snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
-          is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
           tid,
-          assistant_msg_idx:assistantToolAnchorIdx,
-          args:argsSnap,
-          done:true,
-        }, name, tid));
+        });
       });
       // WebUI partial/live format: _partial_tool_calls snapshots survive
       // interrupted or adapter-shaped settles even when session.tool_calls is empty.
@@ -23137,15 +23397,27 @@ function renderMessages(options){
         const patchSnippet=_cliPatchSnippetFromArgs(name,args);
         const resultSnippet=resultsByTid[tid]||tc.snippet||tc.preview||persistedSnippetByTid[tid]||'';
         const argsSnap=_toolArgsSnapshot(args);
-        derived.push(copyLiveToolMetadata({
+        // #7653 re-gate round 11 (finding 4, SILENT): carry the occurrence
+        // identity through hydration. ``_partial_tool_calls`` rows are the
+        // mirror rows ``cancel_stream`` persisted, and a re-armed start
+        // contributes a SECOND row of the same tid — without the occurrence
+        // the rebuilt rows collapse to one key in the activity-scene dedup
+        // and the second occurrence never renders.
+        const occ=(tc.occurrence!==undefined&&tc.occurrence!==null&&tc.occurrence!=='')?tc.occurrence:null;
+        _fallbackCandidates.push({
+          next:{
+            name,
+            snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+            is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+            tid,
+            assistant_msg_idx:assistantToolAnchorIdx,
+            ...(occ===null?{}:{occurrence:occ}),
+            args:argsSnap,
+            done:true,
+          },
           name,
-          snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
-          is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
           tid,
-          assistant_msg_idx:assistantToolAnchorIdx,
-          args:argsSnap,
-          done:true,
-        }, name, tid));
+        });
       });
       // Anthropic format: tool_use blocks inside assistant content array
       if(Array.isArray(m.content)){
@@ -23157,15 +23429,19 @@ function renderMessages(options){
           const patchSnippet=_cliPatchSnippetFromArgs(name,args);
           const resultSnippet=resultsByTid[tid]||persistedSnippetByTid[tid]||'';
           const argsSnap=_toolArgsSnapshot(args);
-          derived.push(copyLiveToolMetadata({
+          _fallbackCandidates.push({
+            next:{
+              name,
+              snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+              is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+              tid,
+              assistant_msg_idx:assistantToolAnchorIdx,
+              args:argsSnap,
+              done:true,
+            },
             name,
-            snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
-            is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
             tid,
-            assistant_msg_idx:assistantToolAnchorIdx,
-            args:argsSnap,
-            done:true,
-          }, name, tid));
+          });
         });
       }
       // WebUI-internal partial tool calls captured on cancel/stop
@@ -23179,18 +23455,33 @@ function renderMessages(options){
           const patchSnippet=_cliPatchSnippetFromArgs(name,args);
           const resultSnippet=_cliToolResultSnippet(tc.snippet||tc.result||tc.output||tc.preview||'');
           const argsSnap=_toolArgsSnapshot(args,4);
-          derived.push(copyLiveToolMetadata({
+          _fallbackCandidates.push({
+            next:{
+              name,
+              snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+              is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+              tid,
+              assistant_msg_idx:assistantToolAnchorIdx,
+              args:argsSnap,
+              done:true,
+            },
             name,
-            snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
-            is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
             tid,
-            assistant_msg_idx:assistantToolAnchorIdx,
-            args:argsSnap,
-            done:true,
-          }, name, tid));
+          });
         });
       }
     });
+    // #7653 re-gate round 14 (item 4): reserve the live rows for the
+    // explicit id/occurrence matches across ALL candidates FIRST, then run
+    // the name fallback over what is left (the helper holds the two
+    // sub-passes and the verdict-eligibility rule).
+    // typeof guard: node harnesses extract renderMessages() without its helpers (#6717).
+    const _reservedLive=(typeof _reserveLiveToolMetadataForCandidates==='function')
+      ?_reserveLiveToolMetadataForCandidates(_fallbackCandidates, liveMetadataByTid, usedLiveToolMetadata)
+      :new Map();
+    for(const c of _fallbackCandidates){
+      derived.push(copyLiveToolMetadata(c.next, c.name, c.tid, _reservedLive.get(c)||null));
+    }
     if(derived.length) S.toolCalls=derived;
     if(S._settledLiveToolMetadata) S._settledLiveToolMetadata=null;
   }
