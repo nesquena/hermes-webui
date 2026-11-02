@@ -1539,8 +1539,23 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
 // saved while typing ("/plan X") survived and a reload restored the slash
 // command, which only repeats the explainer (#7683 fold check). An empty value
 // clears the saved draft; _saveComposerDraftNow also cancels a pending autosave.
-function _setComposerAfterCliOnlyExplainer(value){
+//
+// `owner` is the {sid,text} that issued the command, captured by send() before
+// it awaited command metadata. The user can switch chats or edit the composer
+// during that wait, so only the issuing session, with its composer still
+// holding the command text, may be rewritten and persisted. A send that began
+// with no open session owns only the session it creates itself (send() sets
+// owner.sid after its own newSession()); with no owner session, nothing is
+// written. Reading the
+// session at write time instead wrote chat A's reworded prompt into chat B's
+// composer and replaced B's saved draft (#8717).
+function _setComposerAfterCliOnlyExplainer(value,owner){
   const el=$('msg');
+  if(owner){
+    const currentSid=S.session&&S.session.session_id||null;
+    if(!owner.sid||currentSid!==owner.sid) return;
+    if(el&&String(el.value||'').trim()!==String(owner.text||'').trim()) return;
+  }
   if(el){
     el.value=value;
     if(typeof autoResize==='function')autoResize();
@@ -1745,6 +1760,11 @@ async function send(){
   }
   let _slashDisplayTextOverride=null;
   let _pendingMoaConfig=null;
+  // #8717: the session and composer text that issued a slash command,
+  // captured before the metadata awaits in the intercept below. Composer
+  // writes after those awaits go through
+  // _setComposerAfterCliOnlyExplainer(value,_slashOwner).
+  const _slashOwner={sid:S.session&&S.session.session_id||null,text};
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
   // commands so chat order is correct: some handlers (e.g. cmdHelp) push
@@ -1815,7 +1835,7 @@ async function send(){
       // command may still be waiting.
       const _registryUnavailable=!!(_agentCmdMeta&&_agentCmdMeta.available===false);
       if(_agentCmd&&_agentCmd.cli_only){
-        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
+        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});_slashOwner.sid=S.session&&S.session.session_id||null;}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd,_parsedCmd.args),_ts:Date.now()/1000});
         renderMessages();
@@ -1827,11 +1847,11 @@ async function send(){
            && isPromptStyleCliOnlyCommand(_agentCmd.name||_parsedCmd.name)){
           _setComposerAfterCliOnlyExplainer(typeof promptStyleComposerText==='function'
             ? promptStyleComposerText(_agentCmd.name||_parsedCmd.name,text)
-            : text.replace(/^\s*\/\S+\s*/,''));
+            : text.replace(/^\s*\/\S+\s*/,''),_slashOwner);
           hideCmdDropdown();
           return;
         }
-        _setComposerAfterCliOnlyExplainer('');hideCmdDropdown();return;
+        _setComposerAfterCliOnlyExplainer('',_slashOwner);hideCmdDropdown();return;
       }
       // Non-dispatchable registry commands (e.g. /agents) must not leak as
       // plain text to the model. Route them through the CLI-only explainer
@@ -1851,7 +1871,7 @@ async function send(){
           ? !_isWebuiDispatchableAgentCommand(_agentCmd)
           : _fallbackNonDispatchableAgentCommandCheck(_agentCmd)
       )){
-        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
+        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});_slashOwner.sid=S.session&&S.session.session_id||null;}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd,_parsedCmd.args),_ts:Date.now()/1000});
         renderMessages();
@@ -1862,11 +1882,11 @@ async function send(){
            && isPromptStyleCliOnlyCommand(_agentCmd.name||_parsedCmd.name)){
           _setComposerAfterCliOnlyExplainer(typeof promptStyleComposerText==='function'
             ? promptStyleComposerText(_agentCmd.name||_parsedCmd.name,text)
-            : text.replace(/^\s*\/\S+\s*/,''));
+            : text.replace(/^\s*\/\S+\s*/,''),_slashOwner);
           hideCmdDropdown();
           return;
         }
-        _setComposerAfterCliOnlyExplainer('');hideCmdDropdown();return;
+        _setComposerAfterCliOnlyExplainer('',_slashOwner);hideCmdDropdown();return;
       }
       const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'').trim().toLowerCase();
       if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){
@@ -1961,17 +1981,29 @@ async function send(){
         typeof _slashCommandSlugVariants === 'function'
           ? _slashCommandSlugVariants(_parsedCmd.name)
           : [_parsedCmd.name];
+      //
+      // Only a command-shaped first token is guarded. Built-in, skill and
+      // bundle names match [a-z0-9][a-z0-9_-]*, as does every plugin command
+      // seen on a current install (the Agent does not validate plugin names).
+      // Any other first token, such as the path in `/tmp/example.js explain`,
+      // is ordinary text and is sent as it was before this guard existed (#8717).
+      const _commandShapedSlashName=/^[a-z0-9][a-z0-9_-]*$/.test(String(_parsedCmd.name||''));
       const _skillCmd =
-        _registryUnavailable && !_bundleCmd && _agentCmdName !== 'moa'
+        _registryUnavailable && _commandShapedSlashName && !_bundleCmd && _agentCmdName !== 'moa'
         && typeof loadSkillCommands === 'function'
           ? (await loadSkillCommands()).find(skill => _skillVariants.includes(skill.name))
           : null;
-      if(!_bundleCmd&&!_skillCmd&&_registryUnavailable&&_agentCmdName!=='moa'){
+      if(_commandShapedSlashName&&!_bundleCmd&&!_skillCmd&&_registryUnavailable&&_agentCmdName!=='moa'){
         if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         S.messages.push({role:'assistant',content:'Command metadata is temporarily unavailable — please try again.',_ts:Date.now()/1000});
         renderMessages();
-        $('msg').value='';autoResize();hideCmdDropdown();return;
+        // Keep the text in the composer so "try again" is one keypress
+        // instead of a retype (#8717). Mark it dismissed: a slash-command
+        // loader that lands late must not reopen the list on that same text,
+        // or the next Enter picks a match instead of retrying.
+        if(typeof markSlashDropdownDismissed==='function') markSlashDropdownDismissed();
+        hideCmdDropdown();return;
       }
     }
   }
