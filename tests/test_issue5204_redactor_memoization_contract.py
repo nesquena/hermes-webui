@@ -43,68 +43,115 @@ def test_clean_text_unchanged_through_cache():
     assert helpers._redact_fn_cached(sample) == sample == helpers._redact_fn_uncached(sample)
 
 
-def test_huge_tool_dump_skips_agent_pass_but_still_masks_secrets():
-    """Megabyte URL-heavy dumps must not hang in agent.redact (GIL wedge)."""
-    import time
-    secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
-    blob = ("http://example.com/foo " * 40000) + " " + secret
-    assert len(blob) > helpers._REDACT_AGENT_MAX_TEXT_LEN
-    t0 = time.monotonic()
-    out = helpers._redact_fn_cached(blob)
-    elapsed = time.monotonic() - t0
-    assert elapsed < 2.0, f"huge-dump redact took {elapsed:.2f}s"
-    assert secret not in out
-    assert out == helpers._redact_fn_uncached(blob)
+# ── #7345 review: oversized fields must keep the full Agent boundary ─────────
+# Secrets below are assembled at runtime so no literal credential sits in the
+# source. Every assertion checks that the sensitive atom is ABSENT.
+import pytest
+
+_BOUNDARY_LENS = (16384, 16385, 200_000)
 
 
-def test_residual_shapes_masked_above_agent_cap():
-    """The >16KB agent-pass bypass no longer leaks the prefix-less shapes.
+def _pad_to(payload: str, total: int) -> str:
+    filler = "x" * max(0, total - len(payload) - 1)
+    out = filler + " " + payload
+    assert len(out) >= total
+    return out
 
-    Above _REDACT_AGENT_MAX_TEXT_LEN a single field skips the expensive agent
-    scans (only the agent's cheap prefix pass, including runtime-registered
-    plugin prefixes, runs) and the local fallback covers the rest. The fallback
-    also masks the
-    three prefix-less agent-only shapes (bare JWT eyJ..., DB connection-string
-    passwords, Telegram bot tokens) via _JWT_RE/_URI_USERINFO_RE/_TELEGRAM_RE,
-    so they stay masked in an oversize field. This test pins that both below and
-    above the cap. If a future change stops masking these above the cap, update
-    the code comment on _REDACT_AGENT_MAX_TEXT_LEN too.
-    """
-    jwt = (
-        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
-        ".eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ"
-        ".dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
-    )
-    db_pw = "s3cr3tDbPassw0rd"
-    connstr = f"postgres://dbuser:{db_pw}@db.internal:5432/prod"
-    tg_token = "AAHdqTcvbXsj2kd83jfhs8sJDHf83jfhsu2"
-    telegram = f"123456789:{tg_token}"
-    filler = "x" * (helpers._REDACT_AGENT_MAX_TEXT_LEN + 100)
 
-    # Below the cap the agent pass runs and masks all three shapes.
-    small = f"start {jwt} {connstr} {telegram} end"
-    small_out = helpers._redact_fn_uncached(small)
-    assert jwt not in small_out
-    assert db_pw not in small_out
-    assert tg_token not in small_out
+def _agent():
+    return pytest.importorskip("agent.redact")
 
-    # Above the cap the agent pass is skipped, but the fallback now covers these.
-    big = f"{filler} {jwt} {connstr} {telegram}"
-    assert len(big) > helpers._REDACT_AGENT_MAX_TEXT_LEN
-    big_out = helpers._redact_fn_uncached(big)
-    assert jwt not in big_out, "JWT leaked above cap - fallback JWT pass missing"
-    assert db_pw not in big_out, "DB-connstr pw leaked above cap - fallback URI pass missing"
-    assert tg_token not in big_out, "Telegram token leaked above cap - fallback pass missing"
-    # Structure is preserved: only the secret is masked, not the surrounding URL.
-    assert "postgres://dbuser:" in big_out
-    assert "@db.internal:5432/prod" in big_out
-    assert "123456789:" in big_out
 
-    # A short-prefix secret in the same oversize field also stays masked (the
-    # fallback prefix list keeps the common shapes safe above the cap).
-    sk = "sk-ABCDEFGHIJKLMNOP1234567890"
-    assert sk not in helpers._redact_fn_uncached(f"{filler} {sk}")
+def _real_redactor():
+    # Production composition: rebuild from the real Agent rather than any
+    # cached instance a sibling test may have swapped in.
+    return helpers._build_redact_fn()
 
-    # False-positive guard: benign URLs / number-colon prose are untouched.
+
+@pytest.mark.parametrize("total", _BOUNDARY_LENS)
+def test_registered_vault_value_scrubbed_at_and_above_16k(total):
+    agent = _agent()
+    if not hasattr(agent, "register_vault_redaction_value"):
+        pytest.skip("installed hermes-agent predates the vault registry")
+    vault_pw = "Plain" + "Vault" + "Passw0rd" + "Q7z"  # no known prefix shape
+    agent.register_vault_redaction_value(vault_pw)
+    try:
+        redact = _real_redactor()
+        for text in (_pad_to(f"login ok {vault_pw}", total), f"short {vault_pw}"):
+            assert vault_pw not in redact(text)
+    finally:
+        agent.clear_vault_redaction_values()
+
+
+def _agent_only_shapes():
+    tok = "A1b2C3d4E5f6G7h8J9k0L1m2N3p4Q5r6"
+    return {
+        "zhipu": ("0123456789abcdef0123456789abcdef" + "." + "AbCdEfGhIjKlMnOp", "AbCdEfGhIjKlMnOp"),
+        "config_assign": ("db_password: " + "Hunter2" + "Correct" + "Horse9", "Hunter2CorrectHorse9"),
+        "json_field": ('{"api_key": "' + "zq" + tok + '"}', "zq" + tok),
+        "api_key_header": ("X-API-Key: " + "kk" + tok, "kk" + tok),
+        "jwt_one_part": ("eyJ" + "hbGciOiJIUzI1NiJ9xyzzy", "hbGciOiJIUzI1NiJ9xyzzy"),
+        "jwt_two_part": ("eyJ" + "hbGciOiJIUzI1NiJ9" + "." + "c2lnbmF0dXJlX19f", "c2lnbmF0dXJlX19f"),
+        "db_uri": ("postgres://svc:" + "Db" + "Pw" + "9q8w7e6r" + "@db.internal/prod", "DbPw9q8w7e6r"),
+        "telegram": ("123456789:" + "AAH" + tok, "AAH" + tok),
+    }
+
+
+@pytest.mark.parametrize("total", _BOUNDARY_LENS)
+@pytest.mark.parametrize("shape", sorted(_agent_only_shapes()))
+def test_webui_matches_agent_boundary_for_oversized_fields(shape, total):
+    """Parity: whatever the Agent's public force=True redactor masks, WebUI
+    masks too, on both sides of the old 16KB cap."""
+    agent = _agent()
+    payload, atom = _agent_only_shapes()[shape]
+    text = _pad_to(payload, total)
+    if atom in agent.redact_sensitive_text(text, force=True):
+        pytest.skip(f"installed hermes-agent does not cover {shape}")
+    assert atom not in _real_redactor()(text)
+
+
+def test_no_private_agent_regex_fast_path():
+    """WebUI must not reach into private Agent regex internals (#7345 review)."""
+    import inspect
+    src = inspect.getsource(helpers._build_redact_fn)
+    for private in ('"_PREFIX_RE"', "_agent_prefix_only_redact", "_has_known_prefix_substring", "_mask_control_split_tokens"):
+        assert private not in src
+
+
+def test_fallback_masks_prefixless_shapes_without_agent():
+    """Defense-in-depth: the no-agent fallback also covers JWT / URI userinfo /
+    Telegram, preserving surrounding structure."""
+    import builtins
+    real_import = builtins.__import__
+
+    def no_agent(name, *a, **k):
+        if name == "agent.redact" or name.startswith("agent.redact"):
+            raise ImportError("simulated: no hermes-agent")
+        return real_import(name, *a, **k)
+
+    builtins.__import__ = no_agent
+    try:
+        fallback = helpers._build_redact_fn()
+    finally:
+        builtins.__import__ = real_import
+
+    jwt = "eyJ" + "hbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiIxIn0" + "." + "c2lnbmF0dXJlX19fX19f"
+    db_pw = "s3cr3t" + "DbPassw0rd"
+    tg = "AAH" + "dqTcvbXsj2kd83jfhs8sJDHf83jfhsu2"
+    out = fallback(f"{jwt} postgres://dbuser:{db_pw}@db.internal:5432/prod 123456789:{tg}")
+    assert jwt not in out and db_pw not in out and tg not in out
+    assert "postgres://dbuser:" in out and "@db.internal:5432/prod" in out and "123456789:" in out
     benign = "See http://localhost:8080/api and ratio 12345:67 at 2026-09-01T18:11:00"
-    assert helpers._redact_fn_uncached(benign) == benign
+    assert fallback(benign) == benign
+
+
+def test_fallback_prefixless_passes_are_linear_on_huge_runs():
+    """The JWT / URI-userinfo / Telegram fallback regexes must not go
+    quadratic on a multi-MB alphanumeric run (that would re-create the very
+    /api/session GIL wedge this redactor sits on)."""
+    import time
+    redact = helpers._build_redact_fn()
+    for blob in ("x" * 400_000, "1" * 400_000, "ab-" * 130_000):
+        t0 = time.monotonic()
+        redact(blob)
+        assert time.monotonic() - t0 < 5.0
