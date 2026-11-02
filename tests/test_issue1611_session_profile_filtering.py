@@ -609,7 +609,7 @@ def test_session_export_allows_session_from_active_profile():
     parsed = urlparse("/api/session/export?session_id=active_export_001")
     with patch("api.routes.get_session", return_value=active), \
          patch("api.routes.get_active_profile_name", return_value="default"), \
-         patch("api.routes.redact_session_data", side_effect=lambda data: data):
+         patch("api.routes.redact_session_data", side_effect=lambda data, **kwargs: data):
         routes._handle_session_export(handler, parsed)
 
     assert handler.status == 200

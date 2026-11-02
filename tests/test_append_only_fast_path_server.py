@@ -1110,62 +1110,91 @@ def test_append_verify_refuses_after_the_redaction_setting_flips(monkeypatch):
 def test_prefix_fingerprint_tracks_the_active_turn_token():
     """2026-10-31 re-gate, the third member of the class: the active-turn
     token (``active_stream_id`` + ``pending_started_at``) is session-level
-    state that ``redact_session_data`` applies after the mint — it decides
-    whether a covered user row is delivered with ``_active_turn_user: true``
+    state that ``redact_session_data`` applies — it decides whether a covered
+    user row is delivered with ``_active_turn_user: true``
     (ui.js:15016 / sessions.js:4969 read that flag).
 
-    RED-before: the unmodified digest has no token channel, so the first
-    assertion fails.
+    #7925 by-construction: the token is no longer seeded into the digest; it
+    is hashed through the marking it produces. A session-level token change
+    that marks no delivered row is not a rendered difference and correctly
+    leaves the digest alone, so the fixture carries the row-level token the
+    production settlement helper stamps on the turn's own user row.
+
+    RED-before: on the seeded digest the token moved the proof without moving
+    any delivered row; on a by-construction digest over an UN-stamped document
+    the two digests are equal.
     """
     from api.process_event_utils import build_active_turn_token
 
-    rows = _make_rows(2001)
+    rows = _make_rows(602)
     token = build_active_turn_token("stream-1", 1700000000.0)
     assert token
-    held_fp = _display_prefix_fingerprint(rows, 2000, active_turn_token=token)
-    assert _display_prefix_fingerprint(rows, 2000) != held_fp, (
-        "the active-turn token is session state applied after the mint and "
-        "was not seeded into the digest — a turn ending (or a new one "
-        "starting) changes the delivered user row without moving the digest"
+    stamped = [dict(r) for r in rows]
+    stamped[600]["_active_turn_token"] = token
+    held_fp = _display_prefix_fingerprint(stamped, 602, active_turn_token=token)
+    # Premise: the session's token really changes the delivered row.
+    marked = _public_message_projection(
+        stamped[600], _enabled=True, _active_turn_token=token
+    )
+    assert marked.get("_active_turn_user") is True, marked
+    assert _display_prefix_fingerprint(rows, 602, active_turn_token=token) != held_fp, (
+        "the active-turn token decides the covered user row's delivered "
+        "marking but did not move the digest"
     )
     # A different token must move it too.
     other = build_active_turn_token("stream-2", 1700000900.0)
-    assert _display_prefix_fingerprint(rows, 2000, active_turn_token=other) != held_fp
+    assert _display_prefix_fingerprint(stamped, 602, active_turn_token=other) != held_fp
     # The same token must not churn it.
-    assert _display_prefix_fingerprint(rows, 2000, active_turn_token=token) == held_fp
+    assert _display_prefix_fingerprint(stamped, 602, active_turn_token=token) == held_fp
 
 
 def test_append_verify_refuses_when_the_active_turn_token_changes():
-    """2026-10-31 re-gate, the active-turn token on the verify side."""
+    """2026-10-31 re-gate, the active-turn token on the verify side.
+
+    #7925 by-construction: the digest hashes the ``_active_turn_user`` marking
+    the token produces, so the client's view is established with the turn's
+    user row delivered marked; when the turn ends that row is no longer marked
+    and the held proof must refuse.
+    """
     from api.process_event_utils import build_active_turn_token
 
-    rows = _make_rows(2001)
+    rows = _make_rows(602)
     token = build_active_turn_token("stream-1", 1700000000.0)
-    held_fp = _display_prefix_fingerprint(rows, 2000, active_turn_token=token)
+    stamped = [dict(r) for r in rows]
+    stamped[600]["_active_turn_token"] = token
+    held_fp = _display_prefix_fingerprint(stamped, 602, active_turn_token=token)
     s = _FakeSession(
         generation=0,
         active_stream_id="stream-1",
         pending_started_at=1700000000.0,
     )
     anchor_fp = _append_anchor_fingerprint(
-        _public_message_projection(rows[1999], _enabled=True)
+        _public_message_projection(stamped[601], _enabled=True)
     )
-    assert _append_fast_path_anchor(s, rows, "1999", anchor_fp, "0", held_fp) == 1999
+    assert _append_fast_path_anchor(s, stamped, "601", anchor_fp, "0", held_fp) == 601
     # The turn ended: the covered user row is no longer delivered with
     # ``_active_turn_user``, so the held digest must refuse.
     s.active_stream_id = None
-    assert _append_fast_path_anchor(s, rows, "1999", anchor_fp, "0", held_fp) is None
+    assert _append_fast_path_anchor(s, stamped, "601", anchor_fp, "0", held_fp) is None
 
 
 def test_prefix_fingerprint_entry_meta_carries_every_out_of_row_input():
     """The memo's reuse guard must carry the same out-of-row inputs the digest
-    is seeded with, or a display-cache hit can hand out a digest minted under
-    different session state / settings.
+    is projected under, or a display-cache hit can hand out a digest minted
+    under different session state / settings.
+
+    #7925 by-construction: the inputs are no longer seeds, so each one must
+    move the digest by moving the delivered rows — the fixture therefore
+    carries a row-level active-turn token (the marking the session token
+    produces) and a credential-free document where only the scene and the
+    card can change a delivered row.
     """
     from api.process_event_utils import build_active_turn_token
     from api.routes import _build_prefix_fingerprint_entry
 
     rows = _make_rows(10)
+    token = build_active_turn_token("stream-1", 1700000000.0)
+    rows[2]["_active_turn_token"] = token  # the turn's own user row
     s = _FakeSession(generation=0)
     s.tool_calls = [{"assistant_msg_idx": 3, "id": "t1", "result": "one"}]
     s.anchor_activity_scenes = {"index:3": _scene_record(3, "m3")}
@@ -1184,7 +1213,8 @@ def test_prefix_fingerprint_entry_meta_carries_every_out_of_row_input():
     assert edited["meta"] != entry["meta"]
     assert edited["digest"] != entry["digest"]
 
-    # A different active-turn token must change the meta as well.
+    # A different active-turn token must change the meta as well — and, because
+    # the covered user row carries the token, the delivered marking moves too.
     s.tool_calls = [{"assistant_msg_idx": 3, "id": "t1", "result": "one"}]
     s.active_stream_id = "stream-2"
     s.pending_started_at = 1700000900.0
@@ -1283,7 +1313,13 @@ def test_sidecar_only_prefix_digest_tracks_a_tool_card_edit(monkeypatch, tmp_pat
 
 def test_sidecar_only_prefix_digest_tracks_the_redaction_setting(monkeypatch, tmp_path):
     """should-fix + finding 2 on the sidecar-only shape: flipping the redaction
-    setting in process (no sidecar write) must move the next GET's digest."""
+    setting in process (no sidecar write) must move the next GET's digest.
+
+    #7925 by-construction: the switch is no longer seeded, so the fixture
+    carries a credential row whose DELIVERED text actually changes with the
+    policy — that is what moves the digest (a document nothing can redact
+    projects identically under either policy, and rightly so).
+    """
     import api.config
 
     sidecar = [
@@ -1291,6 +1327,7 @@ def test_sidecar_only_prefix_digest_tracks_the_redaction_setting(monkeypatch, tm
          "timestamp": 1700000000 + i}
         for i in range(601)
     ]
+    sidecar[500]["content"] = _credential_row()
     routes, captured = _warm_cache_append_harness(monkeypatch, tmp_path, sidecar, [])
 
     _warm_get(routes)
@@ -1301,8 +1338,13 @@ def test_sidecar_only_prefix_digest_tracks_the_redaction_setting(monkeypatch, tm
     _warm_get(routes)
     after = captured["payload"]["session"]["prefix_fp"]
     assert after != before, (
-        "the redaction setting flipped but the sidecar-only memo handed out "
+        "the redaction setting flipped but the sidecar-only path handed out "
         "the digest minted under the old setting"
+    )
+    # The delivered rows must move with it: the credential is masked now.
+    delivered = captured["payload"]["session"]["messages"] or []
+    assert _credential_row() not in json.dumps(delivered), (
+        "the response delivered an unmasked credential with api_redact_enabled=True"
     )
 
 

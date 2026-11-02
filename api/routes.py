@@ -11,6 +11,7 @@ import inspect
 import errno
 import io
 import gzip
+import itertools
 import json
 from api.sse_chunked import end_sse_headers
 import logging
@@ -3645,6 +3646,8 @@ from api.helpers import (
     public_session_projection,
     strip_public_internal_fields,
     _redact_text,
+    _public_message_projection,
+    _redact_tool_calls,
     _CLIENT_DISCONNECT_ERRORS,
     split_media_token_ref,
     _PUBLIC_MESSAGE_INTERNAL_FIELDS,
@@ -11234,6 +11237,15 @@ def _append_anchor_fingerprint(row) -> str:
 # delivered row keep its proof, so an empty append was accepted. It therefore
 # stays INSIDE the digest (``_active_turn_user``, the derived delivery flag,
 # remains excluded).
+#
+# #7925 by-construction (this change): the digest no longer needs this set to
+# decide what to hash. ``_display_prefix_projection`` runs the delivery's own
+# transforms — ``_public_message_projection`` strips exactly these fields — so
+# an excluded field cannot reach the hash input at all, and the token's effect
+# is hashed through the ``_active_turn_user`` marking the projection applies.
+# The set is retained as the pinned description of that strip boundary (the
+# strip set minus the one field that is an input to the delivery), which is
+# what the test above enumerates.
 _PREFIX_FP_EXCLUDED_FIELDS = frozenset(
     _PUBLIC_MESSAGE_INTERNAL_FIELDS - {"_active_turn_token"}
 )
@@ -11336,7 +11348,67 @@ def _display_prefix_fp_inputs(session) -> "_DisplayPrefixFpInputs":
     )
 
 
-def _display_prefix_fingerprint(
+# ── The delivered projection (#7925 by-construction) ───────────────────────
+# The prefix digest must hash what the browser RECEIVES. Every transform
+# between the merged document and the serialized response that can change a
+# row's delivered bytes is therefore applied HERE, once, by the delivery code
+# itself, and the digest's input is the serialization of the result:
+#
+#   1. scene hydration — ``_hydrate_anchor_activity_scenes`` over the same
+#      records (and the same session-level card list) the response hydrates
+#      with, at ``message_offset=0`` so a row's absolute index is its own;
+#   2. internal-field stripping, credential redaction and the active-turn
+#      marking — ``_public_message_projection``, the very function
+#      ``redact_session_data`` uses to build the response body.
+#
+# The four out-of-row "seeds" this replaces (``redact=``, ``active_turn=``,
+# ``owned_tool_calls=`` and the scene-hydration approximation) existed to
+# APPROXIMATE those transforms from outside the delivery; they are gone. A
+# transform that cannot change a delivered byte cannot move the digest, and
+# one that can is inside the hashed bytes — the proof and the delivered rows
+# are two views of the same projection, so they physically cannot drift apart.
+#
+# Bounded work (#7899): the projection covers exactly ``[0, count)`` — the
+# client's held prefix, which is the widest range an append can vouch for —
+# and never walks past it. The slice happens BEFORE any traversal, hydration
+# is skipped entirely when the session holds no scene records, and the card
+# work is skipped when it holds no cards, so a document longer than the
+# covered prefix costs nothing extra. Rows at or after ``count`` belong to the
+# appended window and are not the proof's business.
+#
+# Transport-layer clipping (``_messages_for_limited_payload``) is deliberately
+# NOT part of the projection: it bounds the payload, it does not change what a
+# row IS, and whether a row is clipped depends on which window it lands in —
+# hashing the clipped form would make the same row hash differently at mint
+# and at verify time and refuse legitimate appends. The client keeps a clipped
+# row's range out of the fast path (``_content_truncated`` is visible to it).
+
+#: Domain-separation tag for the prefix digest format. Bumped ``/2`` → ``/3``
+#: when the digest's input became the delivered projection instead of the
+#: pre-transform rows plus seeds: the tag is inside the hash, so a digest
+#: minted by an older build can never compare equal to a new-format one, and a
+#: format change fails closed instead of silently reusing a stale proof.
+_PREFIX_FP_DIGEST_TAG = b"prefix_fp/3\x1f"
+
+
+def _projection_row_bytes(value) -> bytes:
+    """Serialize one projected row/card the way the digest hashes it.
+
+    ``sort_keys`` + compact separators + ``default=str`` keep the encoding
+    total over any persisted shape, and ``surrogatepass`` keeps it total over
+    a lone surrogate a crashed stream can persist (half a pair split
+    mid-token): strict utf-8 would raise, and the digest must never 500 a GET.
+    """
+    return json.dumps(
+        value,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8", "surrogatepass")
+
+
+def _display_prefix_projection(
     messages,
     count,
     *,
@@ -11345,56 +11417,20 @@ def _display_prefix_fingerprint(
     redact_enabled=None,
     active_turn_token=None,
     inputs=None,
-) -> str:
-    """Server-computed digest over rows ``[0, count)`` of a display document.
+):
+    """Project rows ``[0, count)`` into the form the response serializes.
 
-    Returned as ``prefix_fp`` on every full or limited load; an append-only
-    fast-path request echoes the digest it holds and the server recomputes
-    over ``[0, msg_after + 1)``, refusing the append on any mismatch
-    (alongside the ``transcript_generation`` check).
+    Returns ``(projected_rows, projected_cards)``, or ``None`` when ``count``
+    cannot be parsed (the caller then fails closed). ``projected_cards`` is
+    the covered prefix's own session-level tool cards in their delivered
+    (scrubbed, redacted) form — the response's ``tool_calls`` field for that
+    prefix — so a card summary edit on a row the client already holds moves
+    the digest too, while a card owned by a row at/after ``count`` stays out
+    (it belongs to the appended rows).
 
-    Coverage is complete by construction (2026-10-29 review, finding 2), and
-    "by construction" is taken to mean the whole delivered projection of a
-    covered row, not just the row's own fields (2026-10-31 re-gate): each row
-    is hashed as the browser receives it — the whole projected row minus
-    ``_PREFIX_FP_EXCLUDED_FIELDS``, which is exactly the field set stripped
-    before delivery — AND the inputs that live outside the row but change that
-    projection are mixed in before the rows:
-
-    * ``scenes`` — rows carrying a saved anchor-activity scene are hydrated
-      first, so a scene save moves the digest even though it never modifies a
-      row;
-    * ``tool_calls`` — the session-level cards the covered prefix OWNS are
-      hashed through ``_prefix_owned_tool_calls`` (the response path's own
-      window selector), so a card summary edit on an already-held row moves
-      the digest on a scene-free session too. Cards owned by rows at or after
-      ``count`` belong to the appended rows and stay out, or every turn that
-      runs a tool would refuse its own append;
-    * ``redact_enabled`` — the effective ``api_redact_enabled`` value.
-      ``redact_session_data`` applies it AFTER this digest is minted, so
-      without the seed a settings flip would re-project every covered row
-      (masking / unmasking credentials) while the fingerprint stood still;
-    * ``active_turn_token`` — the eager-row token derived from the session's
-      ``active_stream_id`` / ``pending_started_at``, also applied after the
-      mint, which decides whether a covered user row is delivered with
-      ``_active_turn_user: true``.
-
-    Why a fingerprint rather than a revision counter: it is complete by
-    construction. A counter must be bumped by every writer that touches an
-    earlier row (settled reasoning, saved attachments, scene saves, tool card
-    edits, anything added later), and one missed writer means silently stale
-    rows. Hashing the prefix costs milliseconds — far less than resending the
-    rows it protects.
-
-    Both minting and verification happen server-side over the same merged
-    document (scenes/tool_calls/settings read off the same session object), so
-    no browser-side re-derivation (and no JS/Python byte-parity constraint,
-    unlike the single-row anchor digest) is required.
-
-    ``inputs`` (#7925 re-gate, 2026-10-31 finding 1): a request-scoped
-    ``_DisplayPrefixFpInputs`` snapshot. When given, its four fields REPLACE the
-    individual arguments, so every consumer of one request hashes the very
-    inputs the response rows were projected from.
+    ``inputs``: a request-scoped ``_DisplayPrefixFpInputs`` snapshot. When
+    given, its four fields REPLACE the individual arguments, so every consumer
+    of one request projects the very inputs the response rows were built from.
     """
     if inputs is not None:
         scenes = inputs.scenes
@@ -11404,30 +11440,21 @@ def _display_prefix_fingerprint(
     try:
         total = int(count)
     except (TypeError, ValueError):
-        return ""
-    if redact_enabled is None:
-        redact_enabled = _effective_redact_enabled()
-    digest = hashlib.blake2b(digest_size=20)
-    rows = list(messages or [])
+        return None
     if total < 0:
         total = 0
-    # ── Out-of-row inputs, seeded BEFORE the rows (2026-10-31 re-gate) ──
-    # Domain-separation tag: the digest format changed when these seeds were
-    # added, so a digest minted by an older build can never compare equal.
-    digest.update(b"prefix_fp/2\x1f")
-    digest.update(b"redact=" + (b"1" if redact_enabled else b"0") + b"\x1f")
-    digest.update(
-        b"active_turn="
-        + str(active_turn_token or "").encode("utf-8", "surrogatepass")
-        + b"\x1f"
-    )
-    digest.update(
-        b"owned_tool_calls="
-        + str(
-            _display_aux_fingerprint(_prefix_owned_tool_calls(tool_calls, total))
-        ).encode("ascii")
-        + b"\x1f"
-    )
+    if isinstance(messages, list):
+        # Bounded work: the slice is taken BEFORE anything is walked, so rows
+        # at/after the coverage end are never materialized, hydrated or hashed.
+        source = messages if total >= len(messages) else messages[:total]
+    else:
+        source = list(itertools.islice(messages if messages is not None else (), total))
+    if total > len(source):
+        total = len(source)
+    if redact_enabled is None:
+        redact_enabled = _effective_redact_enabled()
+    enabled = bool(redact_enabled)
+    rows = source
     if scenes:
         rows = _hydrate_anchor_activity_scenes(
             rows,
@@ -11435,35 +11462,175 @@ def _display_prefix_fingerprint(
             message_offset=0,
             tool_calls=tool_calls,
         )
-    for row in rows[:total]:
-        if not isinstance(row, dict):
-            # Deterministic stand-in: a non-dict row still occupies a slot.
-            digest.update(b"\x00<non-dict-row>\x00")
-            continue
-        digest.update(
-            json.dumps(
-                {
-                    key: value
-                    for key, value in row.items()
-                    if key not in _PREFIX_FP_EXCLUDED_FIELDS
-                },
-                sort_keys=True,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                default=str,
-            # surrogatepass: a crashed stream can persist a lone surrogate
-            # (half a pair split mid-token); strict utf-8 refuses to encode it
-            # and the digest must stay total over any persisted content.
-            ).encode("utf-8", "surrogatepass")
+    projected = [
+        _public_message_projection(
+            row,
+            _enabled=enabled,
+            _active_turn_token=active_turn_token,
         )
+        for row in rows
+    ]
+    cards = (
+        _redact_tool_calls(
+            _prefix_owned_tool_calls(tool_calls, total),
+            _enabled=enabled,
+        )
+        if tool_calls
+        else []
+    )
+    return projected, cards
+
+
+def _display_prefix_projection_scoped(projection, count, *, tool_calls, redact_enabled):
+    """Re-scope an already-computed whole-document projection to ``[0, count)``.
+
+    The rows are an exact prefix slice — the projection is per-row, so slicing
+    cannot change any row. The cards are re-selected for the shorter coverage:
+    a card owned by a row at/after ``count`` belongs to the appended rows and
+    must leave the covered prefix's digest (the boundary
+    ``test_prefix_fingerprint_excludes_cards_owned_by_appended_rows`` pins).
+    """
+    rows = list((projection or ((), ()))[0] or [])[:count]
+    cards = (
+        _redact_tool_calls(
+            _prefix_owned_tool_calls(tool_calls, count),
+            _enabled=bool(redact_enabled),
+        )
+        if tool_calls
+        else []
+    )
+    return rows, cards
+
+
+def _response_prefix_projection(session, messages, count, cached, *, inputs=None):
+    """The one delivered projection a GET response needs (#7925
+    by-construction).
+
+    Returns ``(rows, cards)`` for rows ``[0, count)`` — the rows the response
+    serializes plus the covered prefix's own session-level tool cards — so the
+    proof and the response body are two views of the SAME projection and
+    cannot describe different rows.
+
+    On a display-merge cache hit the entry already carries the projection of
+    the whole document, built under the entry's ``meta``. While that guard
+    still matches (same document — the cache key — and same scene records,
+    cards, redaction switch and active-turn token), the projection is sliced
+    down to this request's coverage instead of recomputed, so a warm hit pays
+    nothing. Otherwise it is computed here, once, for this response.
+    """
+    if inputs is None:
+        inputs = _display_prefix_fp_inputs(session)
+    entry = cached[0] if isinstance(cached, list) and cached else None
+    if (
+        isinstance(entry, dict)
+        and entry.get("meta") == inputs.meta
+        and isinstance(entry.get("rows"), list)
+        and entry.get("coverage", -1) >= count
+    ):
+        return _display_prefix_projection_scoped(
+            (entry["rows"], entry.get("cards")),
+            count,
+            tool_calls=inputs.tool_calls,
+            redact_enabled=inputs.redact_enabled,
+        )
+    projection = _display_prefix_projection(messages, count, inputs=inputs)
+    return projection if projection is not None else ([], [])
+
+
+def _prefix_fingerprint_over_projection(projected_rows, projected_cards) -> str:
+    """Hash one already-computed delivered projection (#7925 by-construction).
+
+    The input is the serialization of the PROJECTED rows — never the
+    pre-transform rows — so the digest and the response body are two views of
+    the same bytes. The coverage end rides along so two different ranges can
+    never collide, and the domain-separation tag makes an older format's
+    digest compare unequal by construction.
+    """
+    digest = hashlib.blake2b(digest_size=20)
+    digest.update(_PREFIX_FP_DIGEST_TAG)
+    digest.update(b"coverage=" + str(len(projected_rows)).encode("ascii") + b"\x1f")
+    for row in projected_rows:
+        digest.update(_projection_row_bytes(row))
+        digest.update(b"\x1f")
+    for card in projected_cards or ():
+        digest.update(_projection_row_bytes(card))
         digest.update(b"\x1f")
     return digest.hexdigest()
+
+
+def _display_prefix_fingerprint(
+    messages,
+    count,
+    *,
+    scenes=None,
+    tool_calls=None,
+    redact_enabled=None,
+    active_turn_token=None,
+    inputs=None,
+    projection=None,
+) -> str:
+    """Server-computed digest over rows ``[0, count)`` of a display document.
+
+    Returned as ``prefix_fp`` on every full or limited load; an append-only
+    fast-path request echoes the digest it holds and the server recomputes
+    over ``[0, msg_after + 1)``, refusing the append on any mismatch
+    (alongside the ``transcript_generation`` check).
+
+    Coverage is complete by construction (2026-10-29 review, finding 2), and
+    "by construction" is taken to mean the whole DELIVERED projection of a
+    covered row (2026-10-31 re-gate): each row is hashed exactly as the
+    browser receives it — scene-hydrated, internal fields stripped,
+    credentials redacted, active-turn marked — plus the covered prefix's own
+    session-level tool cards in their delivered form. The projection is the
+    delivery's own transform (``_public_message_projection``, the function
+    ``redact_session_data`` uses), so there is no separate field whitelist and
+    no out-of-row seed to drift out of sync with the delivery: a saved anchor
+    scene, a redaction flip, an active-turn boundary and a card summary edit
+    all move the digest because they all move the delivered rows.
+
+    Why a fingerprint rather than a revision counter: it is complete by
+    construction. A counter must be bumped by every writer that touches an
+    earlier row (settled reasoning, saved attachments, scene saves, tool card
+    edits, anything added later), and one missed writer means silently stale
+    rows. Hashing the prefix costs milliseconds — far less than resending the
+    rows it protects.
+
+    Both minting and verification happen server-side over the same merged
+    document (the input snapshot is read once per request and threaded
+    through), so no browser-side re-derivation (and no JS/Python byte-parity
+    constraint, unlike the single-row anchor digest) is required.
+
+    ``inputs`` (#7925 re-gate, 2026-10-31 finding 1): a request-scoped
+    ``_DisplayPrefixFpInputs`` snapshot. When given, its four fields REPLACE
+    the individual arguments, so every consumer of one request hashes the very
+    inputs the response rows were projected from.
+
+    ``projection`` (#7925 by-construction): an already-computed
+    ``(rows, cards)`` projection, so a caller that has just built the
+    delivered rows for the response body does not compute them a second time
+    for the proof. ``messages``/``count`` are then documentation only.
+    """
+    if projection is None:
+        projection = _display_prefix_projection(
+            messages,
+            count,
+            scenes=scenes,
+            tool_calls=tool_calls,
+            redact_enabled=redact_enabled,
+            active_turn_token=active_turn_token,
+            inputs=inputs,
+        )
+        if projection is None:
+            # Fail closed: an unparsable coverage publishes no proof, so the
+            # client's next reload takes the authoritative full fetch.
+            return ""
+    return _prefix_fingerprint_over_projection(projection[0], projection[1])
 
 
 def _build_prefix_fingerprint_entry(session, messages, *, inputs=None):
     """Digest value stored on a display-merge cache entry, with the inputs
     that can change rendered rows without touching the merged document
-    (anchor scene records, session tool calls, the redaction setting, the
+    (anchor scene records, session tool cards, the redaction setting, the
     active-turn token) as a reuse guard.
 
     The mint reuses it on a cache hit while ``meta`` matches, so ordinary
@@ -11473,6 +11640,14 @@ def _build_prefix_fingerprint_entry(session, messages, *, inputs=None):
     or when a post-mint input (the redaction setting, the active-turn token)
     moved; a persisted change invalidates the entry's key via the sidecar
     stat signature anyway.
+
+    ``rows`` / ``cards`` / ``coverage`` (#7925 by-construction): the
+    PROJECTION the digest was computed from, kept on the entry so the
+    response mint and the response body read the SAME projected rows instead
+    of each re-deriving them — a warm display-cache hit then recomputes
+    nothing at all, and a cold load projects the document exactly once. They
+    are only valid under this entry's ``meta`` (the same inputs shaped them),
+    so a caller must check ``meta`` before reusing the digest OR the rows.
 
     ``inputs`` (2026-10-31 finding 1): the request's single snapshot. The
     caller (the GET handler) reads it once, before it projects the response
@@ -11484,28 +11659,43 @@ def _build_prefix_fingerprint_entry(session, messages, *, inputs=None):
         return None
     if inputs is None:
         inputs = _display_prefix_fp_inputs(session)
-    digest = _display_prefix_fingerprint(messages, len(messages), inputs=inputs)
+    projection = _display_prefix_projection(messages, len(messages), inputs=inputs)
+    if projection is None:
+        return None
+    rows, cards = projection
+    # Routed through ``_display_prefix_fingerprint`` (with the projection
+    # handed over) so the digest is minted by exactly one code path — the
+    # same one the response mint uses — and the document is projected once.
+    digest = _display_prefix_fingerprint(
+        messages,
+        len(messages),
+        inputs=inputs,
+        projection=projection,
+    )
     if not digest:
         return None
     return {
         "meta": inputs.meta,
         "digest": digest,
+        "coverage": len(rows),
+        "rows": rows,
+        "cards": cards,
     }
 
 
-def _mint_display_prefix_fingerprint(session, messages, count, cached, *, inputs=None):
+def _mint_display_prefix_fingerprint(session, messages, count, cached, *, inputs=None, projection=None):
     """Mint the response's ``prefix_fp``, reusing the display-merge cache
-    entry's digest when the document and every out-of-row input that shapes a
-    covered row's delivered projection are unchanged (#7925 re-gate,
-    2026-10-29 should-fix 1; 2026-10-31 findings 1+2).
+    entry's digest when the document and every input that shapes a covered
+    row's delivered projection are unchanged (#7925 re-gate, 2026-10-29
+    should-fix 1; 2026-10-31 findings 1+2).
 
     ``cached`` is the out-param list filled by ``_display_merge_cached_messages``
     / ``_limited_webui_messages_for_display_with_sidecar`` (the usable entry's
-    ``prefix_fp`` dict, or None). The reuse is only valid
-    for full coverage (``count == len(messages)``), which is exactly the shape
-    of every display-cache-hit response: the merge cache is never probed for
-    append requests (whose coverage can end mid-document) or msg_before
-    paging.
+    ``prefix_fp`` dict, or None). The reuse is only valid for the coverage the
+    entry's digest was minted over (``coverage == count``), which is exactly
+    the shape of every display-cache-hit response: the merge cache is never
+    probed for append requests (whose coverage can end mid-document) or
+    msg_before paging.
 
     ``inputs`` (2026-10-31 finding 1): the request's single out-of-row input
     snapshot. Without it this function re-read the scene records, the session
@@ -11514,16 +11704,25 @@ def _mint_display_prefix_fingerprint(session, messages, count, cached, *, inputs
     published a digest of the new inputs over the old rows — and every later
     reload accepted an empty append. The GET handler now reads the snapshot
     once (before the projection) and passes it here.
+
+    ``projection`` (#7925 by-construction): the delivered projection the
+    caller already built for this response's rows. Handing it over means the
+    proof hashes the very bytes the response serializes, and computes them
+    exactly once; without it the mint derives its own projection.
     """
     if inputs is None:
         inputs = _display_prefix_fp_inputs(session)
     if cached and count == len(messages):
         entry = cached[0] if isinstance(cached, list) and cached else None
-        if isinstance(entry, dict) and entry.get("meta") == inputs.meta:
+        if (
+            isinstance(entry, dict)
+            and entry.get("meta") == inputs.meta
+            and entry.get("coverage") == count
+        ):
             digest = entry.get("digest")
             if isinstance(digest, str) and digest:
                 return digest
-    return _display_prefix_fingerprint(messages, count, inputs=inputs)
+    return _display_prefix_fingerprint(messages, count, inputs=inputs, projection=projection)
 
 
 def _append_fast_path_anchor(s, all_messages, msg_after_raw, anchor_fp_raw, generation_raw, prefix_fp_raw=None, *, inputs=None) -> "int | None":
@@ -11551,13 +11750,15 @@ def _append_fast_path_anchor(s, all_messages, msg_after_raw, anchor_fp_raw, gene
        changes no row at all (a saved anchor-activity scene, a ``_source``
        stamp, a session-level tool card on a scene-free session) and inputs
        applied after the mint (the credential-redaction setting, the
-       active-turn token) — the digest covers each row as the browser
-       receives it, hydrated scenes included. A missing digest fails closed —
-       an older client loses only the fast path.
+       active-turn token). By construction (#7925) the digest covers each
+       row as the browser receives it — the delivered projection itself, so
+       each of those inputs moves the digest by moving the delivered rows
+       rather than through a seed. A missing digest fails closed — an older
+       client loses only the fast path.
 
     ``inputs`` (2026-10-31 finding 1): the GET handler's single out-of-row
-    input snapshot, so this verification and the response's mint hash the very
-    same inputs the delivered rows were projected from.
+    input snapshot, so this verification and the response's mint project the
+    very same inputs the delivered rows were built from.
     """
     try:
         after_idx = int(msg_after_raw)
@@ -11589,9 +11790,9 @@ def _append_fast_path_anchor(s, all_messages, msg_after_raw, anchor_fp_raw, gene
     if _display_prefix_fingerprint(
         all_messages,
         after_idx + 1,
-        # The same out-of-row inputs the mint seeds with (2026-10-31 re-gate),
-        # read off the same session object, so a settings flip or a turn
-        # boundary between the client's view and this request refuses.
+        # The same out-of-row input snapshot the mint projects with
+        # (2026-10-31 re-gate), so a settings flip or a turn boundary between
+        # the client's view and this request refuses.
         inputs=inputs,
     ) != str(prefix_fp_raw):
         return None
@@ -16855,23 +17056,42 @@ def _handle_session_get(handler, parsed) -> bool:
                 msg_after=_append_mode_anchor,
                 expand_renderable=expand_renderable,
             )
-            if _window_limit is not None:
-                _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
-            _truncated_msgs = _hydrate_anchor_activity_scenes(
-                _truncated_msgs,
-                # 2026-10-31 finding 1: hydrate from the request's single input
-                # snapshot, never a fresh read — the digest minted below hashes
-                # these very inputs, so the proof always describes the rows
-                # this response delivers.
-                _display_fp_inputs.scenes if _display_fp_inputs else None,
-                message_offset=_messages_offset,
-                tool_calls=_display_tool_calls,
+            # #7925 by-construction: ONE delivered projection serves the proof
+            # AND the body. The digest hashes the projection of rows
+            # [0, coverage_end) — the client's held prefix, the widest range an
+            # append can vouch for — and the response body is the SAME
+            # projection's window slice, so the proof can never describe rows
+            # other than the ones this response delivers. Bounded work: the
+            # projection stops at the coverage end and never walks the rest of
+            # the document, and on a warm display-cache hit it is reused from
+            # the entry instead of recomputed.
+            _coverage_end = _messages_offset + len(_truncated_msgs)
+            _projected_rows, _projected_cards = _response_prefix_projection(
+                s,
+                _all_msgs,
+                _coverage_end,
+                _prefix_fp_out,
+                inputs=_display_fp_inputs,
             )
+            _truncated_msgs = _projected_rows[_coverage_end - len(_truncated_msgs):]
+            if _window_limit is not None:
+                # Transport-layer clipping only (a payload bound on over-long
+                # hidden tool results). It is NOT part of a row's semantic
+                # projection, so it never enters the digest: the same row must
+                # hash identically whether it arrives clipped in one window or
+                # whole in another, or mint and verify would disagree about a
+                # row neither side changed. The client keeps a clipped row's
+                # range out of the fast path (``_content_truncated`` is visible
+                # to it) and answers with the authoritative full fetch.
+                _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
         else:
             _truncated_msgs = []
             _messages_offset = 0
             _window_limit = None
             _append_mode_anchor = None
+            _coverage_end = 0
+            _projected_rows = []
+            _projected_cards = []
         # Index of the first returned message in the full message array.
         # Frontend uses this as cursor for scroll-to-top paging.
         # Session-level tool_calls windowing keys off whether the returned
@@ -17081,23 +17301,29 @@ def _handle_session_get(handler, parsed) -> bool:
         # should-fix 1): mint the prefix fingerprint over rows [0, K) of the
         # merged display document, where K is the absolute index just past
         # this response's coverage (a full load covers [0, len); a windowed or
-        # append load covers [0, offset+len)). Each row is hashed as the
-        # browser receives it (whole projected row minus the explicit
-        # exclusion set, hydrated anchor scenes included), so a scene save or
-        # a _source change moves the digest. On a display-cache hit the
-        # digest rides on the cache entry and is reused instead of re-hashing
-        # the whole document. Contract: docs/CONTRACTS.md.
+        # append load covers [0, offset+len)). #7925 by-construction: the
+        # digest hashes the DELIVERED projection of those rows — the very
+        # projection the response body above is a window slice of — so a scene
+        # save, a _source change, a redaction flip, an active-turn boundary or
+        # a card summary edit moves the digest by moving the delivered rows,
+        # never through a seed. On a display-cache hit the digest rides on the
+        # cache entry and is reused instead of re-hashing the whole document.
+        # Contract: docs/CONTRACTS.md.
         if load_messages and _all_msgs:
             raw["prefix_fp"] = _mint_display_prefix_fingerprint(
                 s,
                 _all_msgs,
-                _messages_offset + len(_truncated_msgs),
+                _coverage_end,
                 _prefix_fp_out,
                 # 2026-10-31 finding 1: mint from the SAME out-of-row input
                 # snapshot the rows above were projected with, so the published
                 # proof can never describe inputs the delivered rows do not
                 # carry.
                 inputs=_display_fp_inputs,
+                # #7925 by-construction: hand over the projection this response
+                # already built, so the proof hashes exactly the bytes the body
+                # serializes and computes them once.
+                projection=(_projected_rows, _projected_cards),
             )
         _t4 = _time.monotonic()
         if _diag: _diag.stage("t4_after_compact_and_merge")
@@ -17135,7 +17361,22 @@ def _handle_session_get(handler, parsed) -> bool:
             )
             if revision:
                 raw["regeneration_revision"] = revision
-        redact = redact_session_data(raw)
+        redact = redact_session_data(
+            raw,
+            # #7925 by-construction: the credential-redaction switch was
+            # captured ONCE, before anything was projected, and the delivered
+            # projection above was built under it. Re-reading the setting here
+            # could project the body under a different policy than the proof
+            # published beside it was minted with.
+            redact_enabled=(
+                _display_fp_inputs.redact_enabled if _display_fp_inputs else None
+            ),
+            # The response's messages ARE that projection — scene-hydrated,
+            # stripped, redacted, active-turn marked — i.e. the very rows the
+            # digest hashed, so building the delivered form a second time here
+            # would both duplicate the work and risk a different result.
+            _messages_projected=load_messages,
+        )
         _t5 = _time.monotonic()
         if _diag: _diag.stage("t5_after_redact")
         resp = j(handler, {"session": redact})
