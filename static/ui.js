@@ -5649,6 +5649,14 @@ async function populateModelDropdown(opts={}){
     if(requestSeq!==_modelDropdownRequestSeq) return;
     window._activeProvider=data.active_provider||null;
     window._defaultModel=data.default_model||null;
+    // #8527 re-gate: a pending profile-switch model reset is deliberately NOT
+    // released here. This payload is the ACTIVE profile's own defaults, but the
+    // picker below can still fail to rebuild — an empty catalog (no groups and
+    // no configured fallback) or a failed hydration leaves the PREVIOUS
+    // profile's option selected, and a gate released at this point would let
+    // newSession() fall back to that stale pair. The release happens after the
+    // rebuild/reconcile below; the empty-result branch keeps the gate armed and
+    // quarantines the stale options.
     window._configuredModelBadges=data.configured_model_badges||{};
     window._modelEndpointErrors={};
     const _sortModelEntries=(items,providerId)=>{
@@ -5745,10 +5753,35 @@ async function populateModelDropdown(opts={}){
       if(willRetry){
         _modelCatalogFallbackRetried=true;
         populateModelDropdown({...opts,freshness:'session_visit'}).catch(()=>{});
+        // A fresher retry owns the picker: keep BOTH the gate and the current
+        // options until it settles (clearing here would only flicker, and the
+        // armed gate already blocks the stale fallback in the meantime).
+        return;
       }
+      // #8527 re-gate: no server groups and no configured fallback — this
+      // profile has nothing to pick. The <select> still holds the PREVIOUS
+      // profile's options (the clear below never ran), so a reset gate released
+      // on this path would let newSession() adopt that stale pair
+      // ({model:'old/model',model_provider:'old-route'}) under this profile's
+      // name. Keep the one-shot gate armed AND drop the stale options so an
+      // empty catalog can never be picked from. (The hardcoded-HTML fallback
+      // only applies to a FAILED fetch — the catch below — never to a
+      // successful empty response.)
+      sel.innerHTML='';
+      if(typeof syncModelChip==='function') syncModelChip();
       return; // no server groups and no configured fallback
     }
-    const previousSelection=_captureModelDropdownSelection(sel);
+    // #8527 re-gate: while a profile-switch model reset is still pending, the
+    // dropdown's current selection belongs to the PREVIOUS profile — it is
+    // exactly the foreign state the one-shot gate exists to quarantine. Do not
+    // let the rebuild reconcile it back in: _reconcileModelDropdownSelection
+    // would re-apply it (re-injecting the old provider as a custom option and
+    // selecting it), re-opening the very fallback the gate just closed. A fresh
+    // explicit/project choice never flows through here — newSession() consults
+    // those ahead of the picker/persisted fallbacks.
+    const previousSelection=(typeof S!=='undefined'&&S&&S._profileSwitchModelReset)
+      ?null
+      :_captureModelDropdownSelection(sel);
     // Clear existing options
     sel.innerHTML='';
     _dynamicModelLabels={};
@@ -5796,6 +5829,15 @@ async function populateModelDropdown(opts={}){
     }
     _reconcileModelDropdownSelection(sel,data,previousSelection,opts);
     if(typeof syncModelChip==='function') syncModelChip();
+    // #8527 re-gate: the picker now holds the ACTIVE profile's own catalog
+    // (rebuilt above and reconciled — with the previous profile's selection
+    // quarantined while the reset was pending), so a pending profile-switch
+    // model reset is complete: release the one-shot gate and let newSession()
+    // use the refreshed picker again. The switch's auto-created session already
+    // went out model-less while the picker was still the previous profile's.
+    // typeof-guarded for the bare single-function eval harnesses that lack
+    // module scope.
+    if(typeof S!=='undefined'&&S)S._profileSwitchModelReset=false;
     const dd=$('composerModelDropdown');
     if(dd&&dd.classList.contains('open')&&typeof renderModelDropdown==='function'){
       renderModelDropdown();
