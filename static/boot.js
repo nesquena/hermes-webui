@@ -2977,6 +2977,7 @@ $('modelSelect').onchange=async()=>{
   }
 };
 $('msg').addEventListener('input',()=>{
+  if(typeof _endPromptHistory==='function') _endPromptHistory();
   updateSendBtn();
   scheduleComposerAutoResize();
   // Persist composer draft to server (debounced in _saveComposerDraft).
@@ -3091,6 +3092,77 @@ function _isNumpadEnter(e){
 // falls through to the `else { send() }` branch — sending the message instead
 // of inserting a newline (issue: mobile Enter sends on fresh page load).
 try{ window._sendKey=localStorage.getItem('hermes-pref-send_key')||'enter'; }catch(_){ window._sendKey='enter'; }
+// Prompt history (#8665): ArrowUp recalls prompts already sent in this chat,
+// like a terminal. It starts only with the caret at the very start of the
+// text, so normal multiline editing keeps its arrow keys. While browsing, Up
+// goes older from the first line and Down goes newer from the last line;
+// Down past the newest prompt brings back what you were typing.
+let _promptHistory=null; // {sid, index, draft, shown}
+function _sentPromptsForHistory(messages){
+  const out=[];
+  for(const m of (messages||[])){
+    if(!m||m.role!=='user'||m._source==='delegation_wakeup'||m.recovery_control===true) continue;
+    let text=typeof msgContent==='function'?msgContent(m):String(m.content||'').trim();
+    if(typeof _stripWorkspaceDisplayPrefix==='function') text=_stripWorkspaceDisplayPrefix(text);
+    if(typeof _stripAttachedFilesMarkerForDisplay==='function') text=_stripAttachedFilesMarkerForDisplay(text);
+    text=String(text||'').trim();
+    if(text&&out[out.length-1]!==text) out.push(text);
+  }
+  return out;
+}
+// A real edit (input event) ends browsing; the edited text is the new draft.
+function _endPromptHistory(){ _promptHistory=null; }
+// What to save as this chat's draft: while a recalled prompt is on screen,
+// that is the unsent text the user had before pressing Up, not the recall.
+function _composerDraftValue(el){
+  const value=String((el&&el.value)||'');
+  const h=_promptHistory;
+  const sid=S&&S.session&&S.session.session_id;
+  if(h&&h.sid===sid&&h.shown===value) return String(h.draft||'');
+  return value;
+}
+// Pure step: returns {state, value} when the key is handled, else null.
+function _promptHistoryStep(state, dir, value, items){
+  if(dir<0){
+    if(!items.length) return null;
+    const cur=state||{index:items.length, draft:value};
+    const index=Math.max(0, Math.min(cur.index, items.length)-1);
+    return {state:{...cur, index, shown:items[index]}, value:items[index]};
+  }
+  if(!state) return null;
+  const index=state.index+1;
+  if(index>=items.length) return {state:null, value:state.draft};
+  return {state:{...state, index, shown:items[index]}, value:items[index]};
+}
+function _handlePromptHistoryKey(e, el){
+  if(e.key!=='ArrowUp'&&e.key!=='ArrowDown') return false;
+  if(e.shiftKey||e.altKey||e.ctrlKey||e.metaKey||e.isComposing||_imeComposing) return false;
+  const value=String(el.value||'');
+  const start=el.selectionStart, end=el.selectionEnd;
+  if(start!==end) return false;
+  const sid=S&&S.session&&S.session.session_id;
+  // Typing, sending or switching chats ends browsing.
+  if(_promptHistory&&(_promptHistory.sid!==sid||_promptHistory.shown!==value)) _promptHistory=null;
+  const items=_sentPromptsForHistory(S&&S.messages);
+  // The chat's prompts changed under us (Undo, reload): keep the saved draft
+  // and start again from the newest prompt instead of using an old index.
+  const itemsKey=items.join('\u0000');
+  if(_promptHistory&&_promptHistory.itemsKey!==itemsKey) _promptHistory={..._promptHistory, index:items.length};
+  if(e.key==='ArrowUp'){
+    if(_promptHistory? value.slice(0, start).includes('\n') : start!==0) return false;
+  }else if(!_promptHistory||value.slice(end).includes('\n')){
+    return false;
+  }
+  const step=_promptHistoryStep(_promptHistory, e.key==='ArrowUp'?-1:1, value, items);
+  if(!step) return false;
+  e.preventDefault();
+  _promptHistory=step.state?{...step.state, sid, itemsKey}:null;
+  el.value=step.value;
+  el.setSelectionRange(el.value.length, el.value.length);
+  if(typeof updateSendBtn==='function') updateSendBtn();
+  if(typeof autoResize==='function') autoResize();
+  return true;
+}
 $('msg').addEventListener('keydown',e=>{
   // Autocomplete navigation when dropdown is open
   const dd=$('cmdDropdown');
@@ -3110,6 +3182,7 @@ $('msg').addEventListener('keydown',e=>{
       return;
     }
   }
+  if(!dropdownOpen&&typeof _handlePromptHistoryKey==='function'&&_handlePromptHistoryKey(e, $('msg'))) return;
   // Send key: respect user preference.
   // On touch-primary devices (coarse pointer, no fine pointer co-existing),
   // default to Enter = newline regardless of whether the visual viewport has

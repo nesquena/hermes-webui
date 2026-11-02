@@ -11386,7 +11386,9 @@ function lockComposerForClarify(placeholderText){
   // card is active (and survives page refresh / syncs across clients).
   const sid = S && S.session && S.session.session_id;
   if (sid && typeof _saveComposerDraftNow === 'function') {
-    const saveText = String(input.value || '');
+    const saveText = typeof _composerDraftValue === 'function'
+      ? _composerDraftValue(input)
+      : String(input.value || '');
     const saveFiles = Array.isArray(S && S.pendingFiles) ? [...S.pendingFiles] : [];
     // #7855: an unchanged restored goal continuation keeps its token in this save. Without it the
     // payload stores goal_continuation_id '' and the continuation sent after a reload is no longer

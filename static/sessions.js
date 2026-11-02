@@ -2876,7 +2876,10 @@ async function loadSession(sid){
   if (currentSid && currentSid !== sid) {
     if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
     if(typeof _clearQueueCardDisplay==='function') _clearQueueCardDisplay(currentSid);
-    const draftText = ($('msg') || {}).value || '';
+    // A prompt recalled with ArrowUp is not the draft; save what the user typed (#8665).
+    const draftText = typeof _composerDraftValue === 'function'
+      ? _composerDraftValue($('msg'))
+      : (($('msg') || {}).value || '');
     const draftFiles = S.pendingFiles ? [...S.pendingFiles] : [];
     try {
       // #7855 (round 7): the departing session's restored continuation token
