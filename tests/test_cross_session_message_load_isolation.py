@@ -170,6 +170,15 @@ COMPOSER_DRAFT_HELPERS_SRC = "\n".join(
         "_clearComposerDraft",
     )
 )
+# #7925 re-gate (2026-11-02, proof-gated fast path): the reload flow now gates
+# the append-only fast path on per-row provenance, so the sandbox needs the
+# three helpers it calls (the harness injects only the functions it names, not
+# the whole module) and the WeakSet store they read — the same convention this
+# harness already follows for `_sessionPrefixFp` / `_sessionPrefixFpEnd`.
+PREFIX_PROOF_HELPERS_SRC = "\n".join(
+    _extract_function(SESSIONS_SRC, name)
+    for name in ("_markPrefixProvenRows", "_heldRowsArePrefixProven", "_adoptPrefixProof")
+)
 
 
 def _normalise_ws(s: str) -> str:
@@ -296,6 +305,10 @@ function createEnvironment() {
   // replace / full fetch this harness already asserts on.
   globalThis._sessionPrefixFp = '';
   globalThis._sessionPrefixFpEnd = -1;
+  // #7925 re-gate (2026-11-02): the per-row provenance store the append-only
+  // fast path's gate now reads. Same convention as the digest above: the
+  // harness injects only the extracted functions, not the module-level lets.
+  globalThis._prefixProvenRows = new WeakSet();
   globalThis._pendingSessionToolCalls = null;
   globalThis._messagesTruncated = false;
   globalThis._oldestIdx = 0;
@@ -452,6 +465,7 @@ const _composerDraftLatestIntentSequenceBySid = new Map();
 const _composerDraftPostPromisesBySid = new Map();
 let _composerDraftIntentSequence = 0;
 __COMPOSER_DRAFT_HELPERS_SRC__
+__PREFIX_PROOF_HELPERS_SRC__
 __INFLIGHT_HAS_VISIBLE_STATE_SRC__
 __SELECT_LIVE_RECOVERY_INFLIGHT_SRC__
 __MERGE_PENDING_SESSION_MESSAGE_SRC__
@@ -1074,6 +1088,7 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
             "__MERGE_PENDING_SESSION_MESSAGE_SRC__", MERGE_PENDING_SESSION_MESSAGE_SRC
         )
         .replace("__COMPOSER_DRAFT_HELPERS_SRC__", COMPOSER_DRAFT_HELPERS_SRC)
+        .replace("__PREFIX_PROOF_HELPERS_SRC__", PREFIX_PROOF_HELPERS_SRC)
         .replace("__LOAD_SESSION_SRC__", LOAD_SESSION_SRC)
         .replace("__ENSURE_MESSAGES_LOADED_SRC__", ENSURE_MESSAGES_LOADED_SRC)
     )
@@ -1271,6 +1286,7 @@ def test_new_chat_pane_takeover_midflight_does_not_write_stale_rows(tmp_path):
             "__MERGE_PENDING_SESSION_MESSAGE_SRC__", MERGE_PENDING_SESSION_MESSAGE_SRC
         )
         .replace("__COMPOSER_DRAFT_HELPERS_SRC__", COMPOSER_DRAFT_HELPERS_SRC)
+        .replace("__PREFIX_PROOF_HELPERS_SRC__", PREFIX_PROOF_HELPERS_SRC)
         .replace("__LOAD_SESSION_SRC__", LOAD_SESSION_SRC)
         .replace("__ENSURE_MESSAGES_LOADED_SRC__", ENSURE_MESSAGES_LOADED_SRC)
     )

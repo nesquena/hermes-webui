@@ -64,7 +64,21 @@ def test_server_window_load_session_recovery_fork_lifecycle(oldest_idx):
     prelude = _fork_harness(_index_helpers(), _helper_src(), _fork_caller(), oldest_idx=0)
     # Replace the unrelated post-fork navigation seam with the actual loader.
     prelude = prelude.replace("async function loadSession() {}", _function(src, "loadSession"))
-    script = prelude + _ensure_loaded_scaffold() + recovery + _function(src, "_ensureMessagesLoaded") + f"""
+    # #7925 re-gate (2026-11-02, proof-gated fast path): the reload flow now
+    # gates on per-row provenance, so the sandbox needs the three helpers and
+    # the store they read — the same convention this harness already follows for
+    # `_sessionPrefixFp` (module-level state the extracted functions reference).
+    prefix_proof_helpers = "\n".join(
+        _function(src, name)
+        for name in ("_markPrefixProvenRows", "_heldRowsArePrefixProven", "_adoptPrefixProof")
+    )
+    script = (
+        prelude
+        + _ensure_loaded_scaffold()
+        + recovery
+        + prefix_proof_helpers
+        + _function(src, "_ensureMessagesLoaded")
+        + f"""
 let _loadingOlder = false;
 let _yoloEnabled = false;
 let settled = false;
@@ -170,5 +184,6 @@ INFLIGHT.s1 = {{streamId:'stream-1', messages:[
   console.log(JSON.stringify({{offset:{oldest_idx}, lifecycle:true}}));
 }})().catch(e=>{{ console.error(e); process.exit(1); }});
 """
+    )
     out = _run_file(script)
     assert '"lifecycle":true' in out, out

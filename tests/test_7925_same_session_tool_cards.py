@@ -120,6 +120,10 @@ let _msgLimitMax = 500;
 let _pendingCarryForwardSnapshot = null;
 let _sessionPrefixFp = 'fp-held-601';
 let _sessionPrefixFpEnd = 601;
+// #7925 re-gate (2026-11-02, proof-gated fast path): the per-row provenance.
+// The load that established this 601-row view vouched for every row in it, so
+// the driver seeds the set before the reload runs.
+let _prefixProvenRows = new WeakSet();
 let _pendingSessionToolCalls = null;
 let _messageRenderWindowSize = 50;
 const MESSAGE_RENDER_WINDOW_DEFAULT = 50;
@@ -204,6 +208,10 @@ const _allSessions = [];
   // keepStaleUntilLoaded is the focus-recovery path: the held transcript and
   // its prefix digest stay in place, so the append-only fast path can run
   // (this is the reload the maintainer reproduced in Chromium).
+  // #7925 re-gate (2026-11-02): the load that established the held view also
+  // vouched for its rows — seed the provenance the fast path now gates on.
+  _prefixProvenRows = new WeakSet();
+  for (const m of S.messages) _prefixProvenRows.add(m);
   await loadSession(SESSION_ID, {force: true, keepStaleUntilLoaded: true});
   const cards = (S.session.tool_calls || []).map(tc => tc.tid);
   console.log(JSON.stringify({cards, apiCalls: apiCalls.length}));
@@ -214,6 +222,12 @@ const _allSessions = [];
         prelude
         + "\n"
         + _function(_SESSIONS, "_mergeSessionToolCards")
+        + "\n"
+        + _function(_SESSIONS, "_markPrefixProvenRows")
+        + "\n"
+        + _function(_SESSIONS, "_heldRowsArePrefixProven")
+        + "\n"
+        + _function(_SESSIONS, "_adoptPrefixProof")
         + "\n"
         + _function(_SESSIONS, "loadSession")
         + "\n"
@@ -303,7 +317,7 @@ def _merge_helper_src() -> str:
     )
 
 
-def _load_older_harness(*, page_cards) -> str:
+def _load_older_harness(*, page_cards, clip_page_row=False) -> str:
     """Node script: the real ``_loadOlderMessages`` (backward paging) followed
     by the real focus-reload loader, against a controllable transport.
 
@@ -313,6 +327,11 @@ def _load_older_harness(*, page_cards) -> str:
     which prepends absolute rows 0..102 and delivers the card owned by absolute
     row 5; a focus reload then takes the append-only fast path with an EMPTY
     window. Master's full reload keeps both cards.
+
+    ``clip_page_row`` stamps the page's row 5 with the bounded-payload clipper's
+    ``_content_truncated`` marker (the clipper runs on every bounded window,
+    ``msg_before`` paging included), so that row is a preview rather than the
+    server's row — the shape the proof-gated fast path must refuse to vouch for.
     """
     prelude = """
 // The canonical 602-row transcript: row 5 and row 400 are assistant rows.
@@ -341,6 +360,11 @@ let _msgLimitMax = 500;
 let _pendingCarryForwardSnapshot = null;
 let _sessionPrefixFp = 'fp-held-602';
 let _sessionPrefixFpEnd = 602;
+// #7925 re-gate (2026-11-02, proof-gated fast path): the per-row provenance
+// for the held tail window. The driver seeds it before phase 1, exactly like
+// the load that established the view; the prepend then vouches for the rows IT
+// delivered, which is what keeps the fast path alive after paging back.
+let _prefixProvenRows = new WeakSet();
 let _pendingSessionToolCalls = null;
 let _messageRenderWindowSize = 50;
 let _messagesGeneration = 0;
@@ -351,14 +375,23 @@ const INFLIGHT = {};
 const apiCalls = [];
 const SESSION_ID = 'sid-7925-page';
 const PAGE_CARDS = __PAGE_CARDS__;
+const CLIP_PAGE_ROW = __CLIP_PAGE_ROW__;
 
 function api(url, opts) {
   apiCalls.push(url);
   if (url.indexOf('msg_before=102') >= 0) {
     // The older page: absolute rows 0..102, rebased onto the page, carrying
-    // the card owned by absolute row 5.
+    // the card owned by absolute row 5. With CLIP_PAGE_ROW the page's row 5
+    // arrives as the bounded-payload clipper's preview (the clipper runs on
+    // every bounded window, `msg_before` paging included).
     return Promise.resolve({session: {
-      messages: TRANSCRIPT.slice(0, 102),
+      messages: TRANSCRIPT.slice(0, 102).map((m, i) => (CLIP_PAGE_ROW && i === 5)
+        ? Object.assign({}, m, {
+            content: 'x'.repeat(9000).slice(0, 24) + ' …[clipped]',
+            _content_truncated: true,
+            _content_original_chars: 9000,
+          })
+        : m),
       _messages_offset: 0,
       _messages_truncated: false,
       _msg_limit_max: 500,
@@ -384,7 +417,9 @@ function api(url, opts) {
       tool_calls: [],
     }});
   }
-  // The metadata response carries NO session-level cards.
+  // The full-transcript response (master's bare GET). It answers from the
+  // CANONICAL transcript — the authoritative document — never from the
+  // locally-mutated view, so a clipped preview is repaired here.
   return Promise.resolve({session: {
     _messages_truncated: false,
     _messages_offset: 0,
@@ -393,7 +428,7 @@ function api(url, opts) {
     visible_message_count: 602,
     session_id: SESSION_ID,
     transcript_generation: 3,
-    messages: S.messages.map(m => Object.assign({}, m)),
+    messages: TRANSCRIPT.map(m => Object.assign({}, m)),
     tool_calls: [],
   }});
 }
@@ -439,20 +474,36 @@ const _allSessions = [];
     prelude = (
         prelude.replace("__PAGE_CARDS__", json.dumps(page_cards))
         .replace("__HELD_CARDS__", json.dumps(held_cards))
+        .replace("__CLIP_PAGE_ROW__", "true" if clip_page_row else "false")
     )
 
     driver = """
 (async () => {
+  // #7925 re-gate (2026-11-02): the load that established the held tail window
+  // vouched for its rows too — seed the provenance the fast path now gates on.
+  _prefixProvenRows = new WeakSet();
+  for (const m of S.messages) _prefixProvenRows.add(m);
   // Phase 1: backward paging prepends absolute rows 0..102.
   await _loadOlderMessages();
   const afterPage = (S.toolCalls || []).map(tc => tc.tid);
   const afterPageIdx = (S.toolCalls || []).map(tc => tc.assistant_msg_idx);
   const messagesAfterPage = (S.messages || []).length;
+  const clippedAfterPage = (S.messages || []).filter(m => m && m._content_truncated).length;
   // Phase 2: the focus reload takes the append-only fast path (empty window).
   await loadSession(SESSION_ID, {force: true, keepStaleUntilLoaded: true});
   const cards = (S.toolCalls || []).map(tc => tc.tid);
   const idxs = (S.toolCalls || []).map(tc => tc.assistant_msg_idx);
-  console.log(JSON.stringify({afterPage, afterPageIdx, cards, idxs, messagesAfterPage, apiCalls: apiCalls.length}));
+  console.log(JSON.stringify({
+    afterPage, afterPageIdx, cards, idxs, messagesAfterPage, apiCalls: apiCalls.length,
+    clippedAfterPage,
+    // Which shape the focus reload took: the append fast path (msg_after=) or
+    // master's bare full-transcript GET.
+    reloadTookFastPath: apiCalls.some(u => u.indexOf('msg_after=') >= 0),
+    reloadWasBareFullFetch: apiCalls.length >= 3
+      && apiCalls[2].indexOf('msg_after=') < 0 && apiCalls[2].indexOf('msg_limit') < 0,
+    clippedRows: (S.messages || []).filter(m => m && m._content_truncated).length,
+    row5Content: (S.messages || [])[5] ? String(S.messages[5].content) : null,
+  }));
 })().catch(e => { console.error(e && e.stack || e); process.exit(1); });
 """
 
@@ -462,6 +513,12 @@ const _allSessions = [];
         + _helper_slice()
         + "\n"
         + _merge_helper_src()
+        + "\n"
+        + _function(_SESSIONS, "_markPrefixProvenRows")
+        + "\n"
+        + _function(_SESSIONS, "_heldRowsArePrefixProven")
+        + "\n"
+        + _function(_SESSIONS, "_adoptPrefixProof")
         + "\n"
         + _function(_SESSIONS, "_advanceVisibleBaselineForServerKnownRows")
         + "\n"
@@ -516,6 +573,57 @@ def test_backward_paging_keeps_the_held_session_level_cards():
         f"{out['cards']}"
     )
     assert out["idxs"] == [400, 5], out["idxs"]
+    # #7925 re-gate (2026-11-02, finding a — PIN): a page fetched with
+    # `msg_before` delivers SERVER rows, so the prepended rows keep their
+    # provenance and the focus reload still takes the append-only fast path.
+    # This is the guard against over-reverting: treating every paged row as
+    # unproven would send this reload back to a full 602-row download on every
+    # focus, which is exactly the #7899 cost the fast path exists to remove.
+    assert out["reloadTookFastPath"] is True, (
+        "paging back must not cost the fast path — the focus reload fell back "
+        "to the full fetch"
+    )
+
+
+@_node_tests
+def test_backward_paged_row_that_arrived_clipped_loses_the_proof():
+    """#7925 re-gate (2026-11-02, findings a+b): a row the page delivered as a
+    bounded-payload PREVIEW is not the row the server's digest describes, so it
+    cannot vouch for it.
+
+    The clipper (``api/routes.py:_messages_for_limited_payload``) runs on every
+    bounded window — ``msg_before`` paging included — and stamps the preview
+    with ``_content_truncated``. The server's ``prefix_fp`` hashes the
+    UNCLIPPED document, so a preview slips through the digest check: the client
+    would echo a proof that matches while holding a row the transcript does not
+    contain, and keep the clipped diff with no signal that content is missing
+    (``_messages_truncated`` only folds the clip in on the APPEND path).
+
+    RED before the proof-gated gate: the held interval still ended where the
+    digest's coverage ended, so the append fast path ran and the clipped row
+    stayed clipped. The per-row proof refuses it and the reload takes master's
+    bare full-transcript GET, which skips the clipper and repairs the row.
+    """
+    page_cards = [{"tid": "older-card", "assistant_msg_idx": 5, "summary": "older card"}]
+    out = json.loads(_run_node(_load_older_harness(
+        page_cards=page_cards,
+        clip_page_row=True,
+    )))
+    assert out["messagesAfterPage"] == 602, out["messagesAfterPage"]
+    assert out["clippedAfterPage"] == 1, (
+        "the page's clipped tool result never landed — fixture too weak"
+    )
+    assert out["reloadTookFastPath"] is False, (
+        "the append fast path vouched for a row that is only a clipped preview"
+    )
+    assert out["reloadWasBareFullFetch"] is True, (
+        "the fallback must be master's bare full-transcript GET: "
+        f"{out}"
+    )
+    assert out["clippedRows"] == 0, (
+        "the full fetch must deliver the unclipped row (it skips the clipper)"
+    )
+    assert out["row5Content"] == "m5", out["row5Content"]
 
 
 @_node_tests

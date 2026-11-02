@@ -43,6 +43,11 @@ _HARNESS_FUNCTIONS = (
     "_appendAnchorRowFingerprint",
     "_syncToolCallsForLoadedMessages",
     "_mergeSessionToolCards",
+    # #7925 re-gate (2026-11-02, proof-gated fast path): the per-row proof
+    # marker and the gate built on it, so the REAL logic is under test.
+    "_markPrefixProvenRows",
+    "_heldRowsArePrefixProven",
+    "_adoptPrefixProof",
 )
 
 
@@ -143,6 +148,13 @@ let _messageRenderWindowSize = 200;
 // digest over rows [0, coverage end) and the client stores it).
 let _sessionPrefixFp = '';
 let _sessionPrefixFpEnd = -1;
+// #7925 re-gate (2026-11-02, proof-gated fast path): per-row provenance. The
+// digest above is an interval-level claim the client cannot split, so what it
+// tracks instead is which held rows are verbatim server rows. Seeded by
+// runScenario exactly like the load that established the view. The marking /
+// gating helpers themselves are extracted from sessions.js (see
+// _HARNESS_FUNCTIONS) so the REAL logic runs here.
+let _prefixProvenRows = new WeakSet();
 // The prefix digest is server-private (the client only stores and echoes
 // it), so any deterministic function over the render-relevant fields of
 // rows [0, K) serves the harness — the coverage length rides along so two
@@ -189,6 +201,21 @@ function makeRows(n){
   return rows;
 }
 function isRenderable(r){ return !!r && (r.role==='user'||r.role==='assistant'); }
+// #7925 re-gate (2026-11-02): mirror api/routes.py:_messages_for_limited_payload.
+// The bounded-payload clipper trims over-long tool-result rows on EVERY bounded
+// window (`msg_limit`, `msg_before` paging, the append window alike) and stamps
+// the preview with `_content_truncated`; the full fetch (limit===null) skips it.
+// The server hashes the UNCLIPPED document for `prefix_fp`, so a preview is
+// exactly the row the client cannot prove.
+function clipForTransport(row){
+  if(!row||!row._clip) return row;
+  const text=String(row.content||'');
+  return Object.assign({}, row, {
+    content:text.slice(0,24)+' …[clipped]',
+    _content_truncated:true,
+    _content_original_chars:text.length,
+  });
+}
 function appendWindow(after, cap){
   // Mirror api/routes.py:_message_window_for_display(msg_after=...): the
   // window is the CONTIGUOUS suffix starting at the anchor's NEXT row;
@@ -223,6 +250,12 @@ function makeFakeServer(state){
     const base={session_id:'s1', transcript_generation:state.generation, message_count:state.rows.length,
                 visible_message_count:state.rows.length, _msg_limit_max:500};
     if(msgAfter!==null){
+      // #7925 re-gate (2026-11-02): a local write can land while the request is
+      // in flight. `await` defers the caller's continuation to a microtask, so
+      // code running HERE executes before the response is processed — exactly
+      // the window the real streaming turn (and the INFLIGHT live-tail merge)
+      // writes in.
+      if(state.midflight) state.midflight();
       const afterIdx=parseInt(msgAfter,10);
       const anchor=state.rows[afterIdx];
       const genRaw=q.get('transcript_generation');
@@ -241,7 +274,7 @@ function makeFakeServer(state){
         const aw=appendWindow(state.rows.slice(afterIdx+1), limit===null?500:limit);
         const offset=afterIdx+1+aw.offset;
         state.rowsReturned+=aw.window.length;
-        return {session:{...base, messages:aw.window, _messages_offset:offset,
+        return {session:{...base, messages:aw.window.map(clipForTransport), _messages_offset:offset,
                          _messages_truncated:(offset+aw.window.length)<state.rows.length, _append_only:true,
                          tool_calls:state.appendToolCalls.slice(),
                          prefix_fp:_prefixFpFor(state.rows.slice(0, offset+aw.window.length))}};
@@ -257,13 +290,29 @@ function makeFakeServer(state){
     }
     const tw=tailWindow(state.rows, limit);
     state.rowsReturned+=tw.window.length;
-    return {session:{...base, messages:tw.window, _messages_offset:tw.offset, _messages_truncated:tw.offset>0,
+    return {session:{...base, messages:tw.window.map(clipForTransport), _messages_offset:tw.offset, _messages_truncated:tw.offset>0,
                      prefix_fp:_prefixFpFor(state.rows.slice(0, tw.offset+tw.window.length))}};
   };
 }
 
+// #7925 re-gate (2026-11-02): the local writes a streaming turn can land while
+// an append request is in flight. `appendRow` is the classic shape (the count
+// grows, so the 2026-10-21 shape probe catches it); `swapMiddleRow` is the
+// live-tail swap — a locally-owned row replaces one in the MIDDLE of the held
+// range, leaving both the count and the last row untouched, so ONLY the
+// per-row proof can see it.
+const _MIDFLIGHT_WRITES={
+  appendRow(){ S.messages.push({role:'assistant', content:'streamed answer'}); },
+  swapMiddleRow(){
+    const at=Math.floor((S.messages||[]).length/2);
+    if(at<0 || at>=S.messages.length || at===S.messages.length-1) return;
+    S.messages[at]={role:'assistant', content:'streamed answer', _live:true};
+  },
+};
+
 async function runScenario(sc){
-  const state={rows:sc.serverRows, generation:sc.generation, requests:[], rowsReturned:0, appendToolCalls:sc.appendToolCalls||[]};
+  const state={rows:sc.serverRows, generation:sc.generation, requests:[], rowsReturned:0, appendToolCalls:sc.appendToolCalls||[],
+               midflight:(sc.midflight&&_MIDFLIGHT_WRITES[sc.midflight])?_MIDFLIGHT_WRITES[sc.midflight]:null};
   globalThis.api=makeFakeServer(state);
   S={messages:(sc.clientRows||[]).slice(), session:{session_id:'s1',
       transcript_generation:sc.clientGeneration!==undefined?sc.clientGeneration:sc.generation,
@@ -287,6 +336,21 @@ async function runScenario(sc){
   const _heldEnd=_oldestIdx+(sc.clientRows||[]).length;
   _sessionPrefixFp=sc.noPrefixFp ? '' : _prefixFpFor(sc.serverRows.slice(0,_heldEnd));
   _sessionPrefixFpEnd=sc.noPrefixFp ? -1 : _heldEnd;
+  // #7925 re-gate (2026-11-02, proof-gated fast path): seed the per-row
+  // provenance exactly like the same load did. Every held row is a verbatim
+  // server row EXCEPT the one `clipHeldRow` names — a bounded window the
+  // bounded-payload clipper previewed, which the client therefore cannot
+  // prove even though the server's digest (computed over the UNCLIPPED
+  // document) still matches it.
+  _prefixProvenRows=new WeakSet();
+  const _clipIdx=(typeof sc.clipHeldRow==='number')?sc.clipHeldRow:-1;
+  if(_clipIdx>=0 && S.messages[_clipIdx]) S.messages[_clipIdx]._content_truncated=true;
+  if(!sc.noPrefixFp){
+    for(let i=0;i<S.messages.length;i++){
+      if(i===_clipIdx) continue;
+      _prefixProvenRows.add(S.messages[i]);
+    }
+  }
   // A non-destructive server-side edit that lands AFTER the client's view
   // was established (settled-reasoning backfill, saved attachments): same
   // generation, anchor row untouched — only the prefix digest catches it.
@@ -298,7 +362,20 @@ async function runScenario(sc){
   // the loaded card list kept across that replacement.
   if(S.session){ S.session.tool_calls = sc.sessionToolCalls || []; }
   _pendingSessionToolCalls = (sc.heldToolCalls||[]).map(tc=>({...tc}));
-  await _ensureMessagesLoaded('s1', {force:true});
+  // `reloads` > 1 drives a SECOND reload against the same held view, which is
+  // how a row that landed in an earlier response is judged by the next one.
+  // `betweenPhases` models what the server (and the metadata the client saw)
+  // did in between.
+  const _reloads=Math.max(1, Number(sc.reloads)||1);
+  for(let _phase=0; _phase<_reloads; _phase++){
+    if(_phase>0 && sc.betweenPhases){
+      for(const _extra of (sc.betweenPhases.appendServerRows||[])) state.rows.push(_extra);
+      if(sc.betweenPhases.sessionMessageCount!=null) S.session.message_count=sc.betweenPhases.sessionMessageCount;
+      // loadSession re-captures the width hint before every reload.
+      _sameSessionForceReloadHint=sc.hint||null;
+    }
+    await _ensureMessagesLoaded('s1', {force:true});
+  }
   const last=(Array.isArray(S.messages)&&S.messages.length)?S.messages[S.messages.length-1]:null;
   return {requests:state.requests, rowsReturned:state.rowsReturned,
           messagesLen:Array.isArray(S.messages)?S.messages.length:0,
@@ -712,6 +789,101 @@ class TestAppendOnlyFastPath:
         assert all("msg_limit=all" not in req for req in result["requests"]), (
             f"the full-fetch fallback must not use msg_limit=all: {result['requests']}"
         )
+
+    def test_bounded_window_row_that_arrived_clipped_loses_the_proof(self, tmp_path):
+        # #7925 re-gate (2026-11-02, finding b): the bounded-payload clipper runs
+        # on EVERY bounded window (`msg_limit` included, not just the append
+        # window), so an over-long tool result lands in the client's view as a
+        # preview carrying `_content_truncated`. The server's `prefix_fp` hashes
+        # the UNCLIPPED document, so the digest still matches — the held
+        # interval ends exactly where the proof's coverage ends — and the
+        # pre-gate client sent the append anyway, keeping a clipped diff with no
+        # signal that content was missing (`_messages_truncated` folds the clip
+        # in only on the append path, and the append path never ran).
+        #
+        # Phase 1 establishes the view: a 500-row bounded tail window whose last
+        # row is the clipped tool result. Phase 2 grows the transcript so the
+        # reload width exceeds the 500-row ceiling — the shape that takes the
+        # append fast path when the prefix is provable.
+        rows = make_rows_json(501)
+        huge = "y" * 9000
+        rows[500] = {"role": "assistant", "content": huge, "timestamp": 1700000500, "_clip": True}
+        scenario = {
+            "serverRows": rows,
+            # The 500-row tail window the phase-1 load delivers.
+            "clientRows": rows[1:501],
+            "oldestIdx": 1,
+            "truncated": True,
+            "generation": 0,
+            "hint": _hint(500, 501, True),
+            "sessionMessageCount": 501,
+            "reloads": 2,
+            "betweenPhases": {
+                "appendServerRows": [
+                    {"role": "assistant", "content": f"new{i}", "timestamp": 1700001000 + i}
+                    for i in range(100)
+                ],
+                "sessionMessageCount": 601,
+            },
+        }
+        result = _run_harness(json.dumps(scenario), tmp_path)
+        # Phase 1 really was the bounded window that clipped the row.
+        assert "msg_limit=500" in result["requests"][0], result["requests"]
+        assert any(m.get("_content_truncated") for m in result["messages"]) is False, (
+            "the clipped preview survived the reload"
+        )
+        # Phase 2 must refuse the fast path and take master's bare full GET.
+        assert len(result["requests"]) == 2, result["requests"]
+        second = result["requests"][1]
+        assert "msg_after=" not in second, (
+            f"the append vouched for a clipped preview: {second}"
+        )
+        assert "msg_limit=" not in second, (
+            f"the fallback must keep master's bare-GET shape: {second}"
+        )
+        assert "expand_renderable" not in second, second
+        # … and it delivers the authoritative (unclipped) document.
+        assert result["rowsReturned"] == 500 + 601, result
+        assert result["messagesLen"] == 601, result
+        assert result["messages"][500]["content"] == huge, (
+            "the full fetch must repair the clipped tool result"
+        )
+
+    def test_local_row_swapped_in_midflight_loses_the_proof(self, tmp_path):
+        # #7925 re-gate (2026-11-02, finding c): a locally written row that lands
+        # while the append fetch is in flight must not be absorbed into the
+        # proven prefix — not even when it keeps the shape the 2026-10-21 guard
+        # probed (same row count, same last row, same `_oldestIdx`). The
+        # live-tail merge can splice a locally-owned row into the middle of the
+        # held range exactly like that; a length/last-row probe reports "no
+        # drift" and the server's window is concatenated underneath a row no
+        # response ever delivered.
+        #
+        # RED before the proof-gated gate: one request, the append accepted, the
+        # locally-owned row left in the transcript. The response-time
+        # re-validation now refuses it and the reload takes the full fetch.
+        rows = make_rows_json(502)
+        scenario = {
+            "serverRows": rows,
+            "clientRows": rows[:500],
+            "oldestIdx": 0,
+            "truncated": True,
+            "generation": 0,
+            "hint": _hint(500, 501, True),
+            "sessionMessageCount": 502,
+            "midflight": "swapMiddleRow",
+        }
+        result = _run_harness(json.dumps(scenario), tmp_path)
+        assert len(result["requests"]) == 2, (
+            f"expected append + full-fallback requests, got {result['requests']} — "
+            "a same-length local row swap was absorbed into the proven prefix"
+        )
+        assert "msg_after=" not in result["requests"][1], result["requests"]
+        assert not any(m.get("_live") for m in result["messages"]), (
+            "the locally-owned row survived the full fetch"
+        )
+        assert result["messagesLen"] == 502, result
+        assert result["messages"][250]["content"] == "m250", result["messages"][250]
 
 
 def make_rows_json(n: int) -> list:
