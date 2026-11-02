@@ -28234,11 +28234,13 @@ def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
     return _pending_turn_in_registration_window(session)
 
 
-def _local_agent_worker_kwargs(*, model_provider, goal_related: bool, moa_config) -> dict:
+def _local_agent_worker_kwargs(*, model_provider, goal_related: bool, moa_config, user=None) -> dict:
     """Build kwargs shared by both launch sites for the in-process worker."""
     kwargs = {"model_provider": model_provider, "goal_related": goal_related}
     if moa_config:
         kwargs["moa_config"] = moa_config
+    if user:
+        kwargs["user"] = user
     return kwargs
 
 
@@ -28257,6 +28259,7 @@ def _start_regeneration_stream_locked(
     backend_is_gateway: bool,
     persisted_model=None,
     persisted_model_provider=None,
+    user=None,
 ):
     """Commit a retained-row regeneration before releasing its real worker."""
     from api.session_ops import (
@@ -28313,6 +28316,7 @@ def _start_regeneration_stream_locked(
             model_provider=model_provider,
             goal_related=goal_related,
             moa_config=moa_config,
+            user=user,
         )
 
     def _gated_worker():
@@ -28712,6 +28716,7 @@ def _start_chat_stream_for_session(
     rearm_deferred_wakeup: bool = False,
     consumed_claimed_by_dispatch: bool = False,
     on_admitted=None,
+    user=None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn.
 
@@ -28854,6 +28859,7 @@ def _start_chat_stream_for_session(
                             source=source,
                             moa_config=moa_config,
                             backend_is_gateway=backend_is_gateway,
+                            user=user,
                         )
                     except Exception:
                         restore_consumed_continuation_markers()
@@ -28966,6 +28972,7 @@ def _start_chat_stream_for_session(
                             model_provider=model_provider,
                             goal_related=goal_related,
                             moa_config=moa_config,
+                            user=user,
                         )
                     if backend_is_gateway:
                         from api.gateway_chat import _mark_gateway_run_starting
@@ -29217,6 +29224,7 @@ def _start_run(
     rearm_deferred_wakeup: bool = False,
     consumed_claimed_by_dispatch: bool = False,
     on_admitted=None,
+    user=None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -29312,6 +29320,7 @@ def _start_run(
                 rearm_deferred_wakeup=rearm_deferred_wakeup,
                 consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
                 on_admitted=on_admitted,
+                user=user,
             )
 
         def _legacy_adapter_factory():
@@ -29366,6 +29375,7 @@ def _start_run(
         rearm_deferred_wakeup=rearm_deferred_wakeup,
         consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
         on_admitted=on_admitted,
+        user=user,
     )
 
 
@@ -30500,8 +30510,13 @@ def _handle_chat_start(handler, body, diag=None):
         # with start_session_turn so both entry points behave identically
         # under runtime_adapter_enabled() / runtime_adapter_runner_enabled()
         # — Q-2979-A2 / Copilot discussion_r3305864087/r3305864173).
+        # The trusted-auth user for this turn (None when trusted auth is off).
+        # check_auth already resolved it for this request, so this is a cache hit.
+        from api.auth import ensure_trusted_auth_session
+        _trusted_user = (ensure_trusted_auth_session(handler) or {}).get("username") or None
         start_run_kwargs = {
             "msg": msg,
+            "user": _trusted_user,
             "attachments": attachments,
             "workspace": workspace,
             "model": model,
