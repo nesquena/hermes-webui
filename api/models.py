@@ -2005,6 +2005,12 @@ class Session:
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
         self.share_token = str(share_token).strip() if share_token else None
         self.share_created_at = share_created_at
+        # #8735: the share pair has exactly one writer
+        # (``update_session_share_fields``). While this flag is false, a
+        # whole-session save keeps the pair the FILE names instead of its own
+        # copy, so an object that outlived the LRU cache cannot write an older
+        # token back over a newer one.
+        self._share_pair_dirty = False
         self.skill_provenance_generation = max(
             0,
             _parse_nonnegative_int(kwargs.get('skill_provenance_generation')) or 0,
@@ -2060,6 +2066,25 @@ class Session:
         with _session_persist_lock(self.session_id):
             return self._save_locked(touch_updated_at=touch_updated_at, skip_index=skip_index)
 
+    def update_session_share_fields(self, token, created_at) -> None:
+        """Write the share pair — the ONLY writer of ``share_token`` (#8735).
+
+        Holding the same persistence lock ``save()`` takes, the pair is set on
+        this object and written by one flagged save. Every other whole-session
+        save keeps whatever the sidecar names (see ``_save_locked``), so a copy
+        that never received this patch cannot roll the pair back — which is how
+        a writer that left the LRU cache used to restore a revoked token and
+        leave the newer public URL unreachable by revoke.
+        """
+        with _session_persist_lock(self.session_id):
+            self.share_token = str(token).strip() if token else None
+            self.share_created_at = created_at
+            self._share_pair_dirty = True
+            try:
+                self._save_locked(touch_updated_at=False)
+            finally:
+                self._share_pair_dirty = False
+
     def _save_locked(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
@@ -2107,6 +2132,18 @@ class Session:
                 self, getattr(self, '_webui_pending_user_timestamp_identity', None)
             )
         )
+        # ── #8735 single-writer share pair ─────────────────────────────
+        # ``update_session_share_fields`` is the only writer of
+        # share_token/share_created_at. Every other whole-session save (rename,
+        # append, an after-turn save from an object that outlived the LRU cache)
+        # re-reads the pair from the FILE under the persistence lock and adopts
+        # it. Comparing the disk and not the in-memory baseline is what stops a
+        # stale copy from writing an old token back over a newer one that revoke
+        # could then no longer reach.
+        if not getattr(self, '_share_pair_dirty', False):
+            persisted_share_pair = _persisted_share_pair(self.session_id)
+            if persisted_share_pair is not None:
+                self.share_token, self.share_created_at = persisted_share_pair
         # Keep the checkpoint fact only while it still names a row in this
         # transcript AND the same turn the pending fields name (#7882 cap
         # follow-up). The eager checkpoint is the only writer, but it is not the
@@ -6855,6 +6892,25 @@ def _persisted_session_meta_prefix(sid) -> dict | None:
         return json.loads(prefix)
     except Exception:
         return None
+
+
+def _persisted_share_pair(sid):
+    """Return the share pair the sidecar currently names, or None (#8735).
+
+    ``(share_token, share_created_at)`` read from the metadata prefix, which
+    ``_read_metadata_json_prefix`` keeps bounded (no messages parse). Returns
+    None when the sidecar is absent or unreadable, or when it predates the share
+    fields entirely — a caller adopting None would erase a pair it legitimately
+    holds, so "no answer" stays distinct from "persisted as empty".
+    """
+    prefix = _persisted_session_meta_prefix(sid)
+    if not isinstance(prefix, dict):
+        return None
+    if 'share_token' not in prefix and 'share_created_at' not in prefix:
+        return None
+    token = prefix.get('share_token')
+    token = str(token).strip() if token else None
+    return (token or None), prefix.get('share_created_at')
 
 
 def _session_sidecar_exists(sid) -> bool | None:

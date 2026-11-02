@@ -18645,9 +18645,13 @@ def handle_post(handler, parsed) -> bool:
                 snapshot_session,
                 cli_meta=cli_meta,
             )
-        persisted_session.share_token = share_meta["share_token"]
-        persisted_session.share_created_at = share_meta["share_created_at"]
-        persisted_session.save(touch_updated_at=False)
+        # #8735: the share pair is written by its single writer, under the
+        # session persistence lock — a plain save here could be rolled back (or
+        # roll back) by another writer holding a stale copy of this session.
+        persisted_session.update_session_share_fields(
+            token=share_meta["share_token"],
+            created_at=share_meta["share_created_at"],
+        )
         _publish_session_list_changed(
             "session_share_create",
             profile=getattr(persisted_session, "profile", None),
@@ -18706,9 +18710,7 @@ def handle_post(handler, parsed) -> bool:
             # Refusing keeps that session's link up and names the mismatch
             # instead of answering 200 for a revoke that hit a foreign file.
             return bad(handler, str(exc), 409)
-        target_session.share_token = None
-        target_session.share_created_at = None
-        target_session.save(touch_updated_at=False)
+        target_session.update_session_share_fields(token=None, created_at=None)
         _publish_session_list_changed(
             "session_share_revoke",
             profile=getattr(target_session, "profile", None),
