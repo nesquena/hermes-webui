@@ -14,7 +14,7 @@ def test_webui_session_metadata_load_skips_cli_metadata_scan(monkeypatch):
 
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: session)
     monkeypatch.setattr(routes, "_clear_stale_stream_state", lambda _session: None)
-    monkeypatch.setattr(routes, "redact_session_data", lambda payload: payload)
+    monkeypatch.setattr(routes, "redact_session_data", lambda payload, **kwargs: payload)
     monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
     monkeypatch.setattr(
         routes,
@@ -47,7 +47,7 @@ def test_read_only_session_metadata_load_preserves_cli_metadata_lookup(monkeypat
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: session)
     monkeypatch.setattr(routes, "_clear_stale_stream_state", lambda _session: None)
     monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid, profile=None: [])
-    monkeypatch.setattr(routes, "redact_session_data", lambda payload: payload)
+    monkeypatch.setattr(routes, "redact_session_data", lambda payload, **kwargs: payload)
     monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
 
     def fake_lookup(sid):
@@ -86,7 +86,7 @@ def test_messaging_session_metadata_load_preserves_cli_metadata_lookup(monkeypat
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: session)
     monkeypatch.setattr(routes, "_clear_stale_stream_state", lambda _session: None)
     monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid, profile=None: [])
-    monkeypatch.setattr(routes, "redact_session_data", lambda payload: payload)
+    monkeypatch.setattr(routes, "redact_session_data", lambda payload, **kwargs: payload)
     monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
 
     def fake_lookup(sid):
@@ -119,7 +119,7 @@ def test_messaging_session_metadata_matches_full_display_merge(monkeypatch):
     monkeypatch.setattr(routes, "_clear_stale_stream_state", lambda _session: None)
     monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda sid, **_kw: {"session_id": sid, "session_source": "messaging", "raw_source": "telegram"})
     monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid, profile=None: cli)
-    monkeypatch.setattr(routes, "redact_session_data", lambda payload: payload)
+    monkeypatch.setattr(routes, "redact_session_data", lambda payload, **kwargs: payload)
     monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
     full = routes.handle_get(object(), urlparse("/api/session?session_id=telegram_resume&messages=1&resolve_model=0"))["session"]
     meta = routes.handle_get(object(), urlparse("/api/session?session_id=telegram_resume&messages=0&resolve_model=0"))["session"]
