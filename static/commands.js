@@ -26,7 +26,7 @@ const COMMANDS=[
   {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'[query]'},
   {name:'use',       desc:t('cmd_use'),      fn:cmdUse,      arg:'<skill-name>', subArgs:'skills', noEcho:true},
   {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop,      noEcho:true},
-  {name:'goal',      desc:t('cmd_goal'),     fn:cmdGoal,      arg:'[status|pause|resume|clear|<text>]', subArgs:['status','pause','resume','clear']},
+  {name:'goal',      desc:t('cmd_goal'),     fn:cmdGoal,      arg:'[status|show|pause|resume|clear|draft <text>|<text>]', subArgs:['status','show','pause','resume','clear','draft']},
   {name:'queue',     desc:t('cmd_queue'),    fn:cmdQueue,     arg:'<message>', noEcho:true},
   {name:'interrupt', desc:t('cmd_interrupt'), fn:cmdInterrupt, arg:'<message>', noEcho:true},
   {name:'steer',     desc:t('cmd_steer'),    fn:cmdSteer,     arg:'<message>', noEcho:true},
@@ -1587,6 +1587,11 @@ async function cmdGoal(args){
   if(!S.session){await newSession();}
   if(!S.session||!S.session.session_id){showToast(t('no_active_session'));return;}
   const activeSid=S.session.session_id;
+  // `/goal draft <text>` waits on Hermes' contract drafter (an auxiliary-model
+  // call bounded by the goal_judge timeout), and it sets a goal and starts a
+  // run, so it gets a longer request budget and must never be retried.
+  const _goalVerb=String(args||'').trim().split(/\s+/)[0].toLowerCase();
+  const _isGoalDraft=_goalVerb==='draft';
   try{
     // #6703: re-assert the explicit-pick marker on /api/goal the same way
     // /api/chat/start does. Without it the server's model resolver treats a
@@ -1622,8 +1627,8 @@ async function cmdGoal(args){
       model_provider:_goalProvider,
       explicit_model_pick:_explicitPick,
       profile:S.activeProfile||S.session.profile||'default',
-    })});
-    const msg = (() => {
+    }),...(_isGoalDraft?{timeoutMs:90000,retries:0}:{})});
+    const statusMsg = (() => {
       const raw = String((r && r.message) || '').trim();
       const key = String((r && r.message_key) || '').trim();
       const args = Array.isArray(r && r.message_args) ? r.message_args : [];
@@ -1634,10 +1639,18 @@ async function cmdGoal(args){
       }
       return raw;
     })();
+    // /goal show: the (translatable) status line, then Hermes' contract block.
+    const detail=String((r && r.detail) || '').trim();
+    const msg=detail ? (statusMsg ? `${statusMsg}\n${detail}` : detail) : statusMsg;
     if(msg){
       S.messages.push({role:'assistant',content:msg,_ts:Date.now()/1000,_goalStatus:true,_transient:true});
       renderMessages({preserveScroll:true});
-      showToast(msg.split('\n')[0],2600);
+      // The server names the toast type when the outcome is not in the text
+      // (a draft that fell back to a free-form goal still reads "Goal set").
+      const toastType=/^(info|success|warning|error)$/.test(String((r && r.toast_type) || '')) ? r.toast_type : null;
+      const toastText=String((r && r.toast_message) || '').trim() || msg.split('\n')[0];
+      if(toastType) showToast(toastText,toastType==='warning'?null:2600,toastType);
+      else showToast(msg.split('\n')[0],2600);
     }
     if(!r||!r.stream_id)return;
     // #6705: consume the one-shot pending explicit-pick marker only after a
@@ -1676,7 +1689,9 @@ async function cmdGoal(args){
     const err=String((e&&e.message)||e||'Goal command failed');
     S.messages.push({role:'assistant',content:`**Goal command failed:** ${err}`,_ts:Date.now()/1000,_error:true});
     renderMessages({preserveScroll:true});
-    showToast(err,3000);
+    // A draft refusal ("Usage: /goal draft …") carries no error keyword for
+    // showToast's text heuristic, so name the type explicitly.
+    showToast(err,3000,_isGoalDraft?'error':undefined);
   }
 }
 

@@ -29129,6 +29129,9 @@ def _runtime_adapter_goal_action(goal_args: str) -> str:
     action = str(goal_args or "").strip().lower()
     if not action or action == "status":
         return "status"
+    if action.split(None, 1)[0] == "show":
+        # `/goal show [...]` is a read-only status view (Hermes' control-verb rule).
+        return "status"
     if action in ("pause", "resume"):
         return action
     if action in ("clear", "stop", "done"):
@@ -29935,6 +29938,7 @@ def _handle_goal_command(handler, body):
     will_kickoff = bool(
         goal_args.strip()
         and goal_action not in ("status", "pause", "resume", "clear", "stop", "done")
+        and goal_adapter_action != "status"
         and not stream_running
     )
     workspace = model = model_provider = normalized_model = None

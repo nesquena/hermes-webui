@@ -1104,7 +1104,7 @@ def test_cli_only_explainer_labels_the_description_and_goal_hint_uses_brackets()
     src = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
     assert "is only available in the Hermes CLI." in src
     assert "In the CLI: ${desc}" in src
-    assert "arg:'[status|pause|resume|clear|<text>]'" in src
+    assert "arg:'[status|show|pause|resume|clear|draft <text>|<text>]'" in src
 
 
 _DRAFT_SPY = (

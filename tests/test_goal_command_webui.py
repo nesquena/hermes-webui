@@ -664,7 +664,7 @@ def test_streaming_goal_hook_emits_evaluating_state_before_judge():
 
 def test_frontend_has_goal_slash_command_and_status_event_handler():
     assert "{name:'goal'" in COMMANDS_JS
-    assert "subArgs:['status','pause','resume','clear']" in COMMANDS_JS
+    assert "subArgs:['status','show','pause','resume','clear','draft']" in COMMANDS_JS
     assert "function cmdGoal" in COMMANDS_JS
     assert "api('/api/goal'" in COMMANDS_JS
     assert "stream_id" in COMMANDS_JS
