@@ -16136,7 +16136,15 @@ def _merge_session_messages_append_only_impl(
         seen_dedup_keys.add(_cached_message_key(msg, "dedup"))
         content_key = _cached_message_key(msg, "content_sidecar")
         seen_content_keys.add(content_key)
-        seen_content_only_keys.add(_cached_message_key(msg, "content_only_sidecar"))
+        # #8672: the content-only set exists solely for the in-window
+        # distinct-tool-call exception, so only tool-call rows feed it. Deriving
+        # it for every row would add a third content-key derivation per message
+        # and break the bounded-normalisation invariant
+        # (test_merge_append_only_normalization_cache).
+        if msg.get("tool_calls"):
+            seen_content_only_keys.add(
+                _cached_message_key(msg, "content_only_sidecar")
+            )
         visible_key = _cached_message_key(msg, "visible_sidecar")
         seen_visible_keys.add(visible_key)
         sidecar_visible_keys.add(visible_key)
@@ -16477,9 +16485,10 @@ def _merge_session_messages_append_only_impl(
             seen_message_keys.add(key)
             seen_dedup_keys.add(dedup_key)
             seen_content_keys.add(content_key)
-            seen_content_only_keys.add(
-                _cached_message_key(msg, "content_only_state")
-            )
+            if msg.get("tool_calls"):
+                seen_content_only_keys.add(
+                    _cached_message_key(msg, "content_only_state")
+                )
             seen_visible_keys.add(visible_key)
             _remember_merged_message(msg, source="state")
             continue
@@ -16693,9 +16702,6 @@ def _merge_session_messages_append_only_impl(
                             seen_message_keys.add(key)
                             seen_dedup_keys.add(dedup_key)
                             seen_content_keys.add(content_key)
-                            seen_content_only_keys.add(
-                                _cached_message_key(msg, "content_only_state")
-                            )
                             seen_visible_keys.add(visible_key)
                             _remember_merged_message(msg, source="state")
                         continue
@@ -16704,7 +16710,10 @@ def _merge_session_messages_append_only_impl(
         seen_message_keys.add(key)
         seen_dedup_keys.add(dedup_key)
         seen_content_keys.add(content_key)
-        seen_content_only_keys.add(_cached_message_key(msg, "content_only_state"))
+        if msg.get("tool_calls"):
+            seen_content_only_keys.add(
+                _cached_message_key(msg, "content_only_state")
+            )
         seen_visible_keys.add(visible_key)
         # This terminal path is shared by state.db reconciliation and by ordered
         # sidecar stitching (notably compression continuations). Only the caller
