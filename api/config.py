@@ -3402,6 +3402,34 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
     return matches[0] if matches else None
 
 
+def _raw_custom_provider_endpoint(raw_cfg: dict, provider: str, url: str) -> str | None:
+    """Recover the raw text behind the selected custom provider's endpoint (#8700).
+
+    ``set_hermes_default_model`` derives ``model.base_url`` from the provider
+    RECORD's resolved URL. When that record stores ``base_url: ${URL}`` the
+    derived value is the expansion, so writing it baked a token-carrying URL
+    into config.yaml. Returns the record's raw field when the reference is the
+    source of *url*, else ``None`` so the caller keeps the master behaviour.
+
+    Reads only the in-scope raw + expanded dicts, so it is lock-safe. An
+    ambiguous slug or a non-custom provider resolves to ``None`` (unchanged
+    write) rather than failing a save master would accept.
+    """
+    if not (isinstance(provider, str) and provider.startswith("custom:") and isinstance(raw_cfg, dict)):
+        return None
+    try:
+        exp_cfg = _expand_env_vars(raw_cfg)
+        match = _unique_custom_provider_entry(
+            _custom_provider_entries(exp_cfg), _custom_provider_slug_key(provider)
+        )
+        if match is None:
+            return None
+        raw_url = _raw_custom_provider_url(raw_cfg, exp_cfg, match, url)
+    except Exception:
+        return None
+    return raw_url if _has_env_ref(raw_url) else None
+
+
 def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
@@ -7100,6 +7128,43 @@ def _same_json_value(a, b) -> bool:
         return a == b
 
 
+def _preserve_env_refs_in_object(raw_value, new_value):
+    """Return *new_value* with every ``${VAR}`` leaf the edit left unchanged restored (#8700).
+
+    ``extra_body`` is edited as the EXPANDED object the advanced dialog displays,
+    so a user changing one leaf submits an object where every other reference
+    arrived resolved. #8129 only kept the raw block when the WHOLE object came
+    back equal; this compares leaf by leaf instead, against the expanded
+    original, so an unrelated edit no longer bakes the referenced values in.
+
+    Structure follows *new_value* — a key the edit removed stays removed, a list
+    the edit resized is written as given (positional refs can't be trusted) —
+    and a leaf is kept only through ``_preserve_env_ref``, i.e. when its
+    reference still expands to the submitted value.
+    """
+    if isinstance(raw_value, dict) and isinstance(new_value, dict):
+        return {
+            key: (
+                _preserve_env_refs_in_object(raw_value[key], value)
+                if key in raw_value
+                else value
+            )
+            for key, value in new_value.items()
+        }
+    if (
+        isinstance(raw_value, list)
+        and isinstance(new_value, list)
+        and len(raw_value) == len(new_value)
+    ):
+        return [
+            _preserve_env_refs_in_object(raw_item, item)
+            for raw_item, item in zip(raw_value, new_value)
+        ]
+    if isinstance(raw_value, str) and isinstance(new_value, str):
+        return _preserve_env_ref(raw_value, new_value)
+    return new_value
+
+
 def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> None:
     """Apply supported advanced model options to a config block in-place."""
     if advanced is None:
@@ -7140,10 +7205,14 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
             if not extra_body:
                 model_cfg.pop("extra_body", None)
             elif not _same_json_value(_expand_env_vars(model_cfg.get("extra_body")), extra_body):
-                # Only a changed object is written: re-submitting the displayed
-                # (resolved) one unchanged keeps the raw block and its ${VAR}
-                # references (#8032).
-                model_cfg["extra_body"] = extra_body
+                # An edited object is written, but the reference leaves the edit
+                # did not touch stay references: the dialog re-posts the object
+                # EXPANDED, so writing it wholesale baked sibling values in
+                # (#8700). An unchanged object keeps its raw block via the
+                # branch above (#8032).
+                model_cfg["extra_body"] = _preserve_env_refs_in_object(
+                    model_cfg.get("extra_body"), extra_body
+                )
         else:
             raise ValueError("extra_body must be a JSON object")
     if "service_tier" in advanced:
@@ -7224,11 +7293,23 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         if resolved_base_url and not provider_override_won:
             # Same value as master writes; only a ${VAR} already in model.base_url
             # that resolves to it is kept instead of its expansion (#8032).
-            model_cfg["base_url"] = _preserve_env_ref(
+            _resolved_url = str(resolved_base_url).strip().rstrip("/")
+            _stored_url = _preserve_env_ref(
                 raw_model_cfg.get("base_url"),
-                str(resolved_base_url).strip().rstrip("/"),
+                _resolved_url,
                 normalize=_normalize_base_url_for_compare,
             )
+            if _stored_url == _resolved_url:
+                # The endpoint is DERIVED from the selected provider's record,
+                # which may hold a ${VAR} of its own; recover that raw text
+                # instead of baking its expansion, token included (#8700).
+                _stored_url = (
+                    _raw_custom_provider_endpoint(
+                        config_data, str(persisted_provider or resolved_provider or ""), _resolved_url
+                    )
+                    or _stored_url
+                )
+            model_cfg["base_url"] = _stored_url
         elif persisted_provider != previous_provider:
             if persisted_provider == "openai":
                 model_cfg["base_url"] = "https://api.openai.com/v1"
