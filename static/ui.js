@@ -5822,6 +5822,32 @@ const _liveModelCache={};
 // Used by syncTopbar() to defer model corrections until the fetch completes,
 // preventing premature fallback to the first static model (#1169).
 const _liveModelFetchPending=new Set();
+// Per-provider owner token for the pending marker above: an obsolete fetch's
+// cleanup must not clear a successor's pending state (#1169, #6919).
+const _liveModelFetchOwners=new Map();
+// #6919: advanced by invalidateLiveModelCache(). A _fetchLiveModels() dispatch
+// captures the epoch before it fires and rejects its response after the
+// awaits when the epoch moved, so a response that was in flight during an
+// invalidation cannot repopulate _liveModelCache or enrich the dropdown.
+// Deliberately independent of _modelDropdownRequestSeq, which only orders
+// concurrent populateModelDropdown() calls — the Settings caller passes no
+// requestSeq at all.
+let _liveModelInvalidationEpoch=0;
+
+// #6919: the providers-panel "Refresh Models" button clears the SERVER's
+// live-models cache; this is the matching browser-side eviction so the next
+// _fetchLiveModels() actually re-fetches instead of serving the stale page
+// cache. providerId omitted -> clear every provider. Every invalidation
+// advances the epoch so in-flight fetches are revoked too, even when no
+// completed cache entry exists.
+function invalidateLiveModelCache(providerId){
+  _liveModelInvalidationEpoch++;
+  if(providerId){
+    delete _liveModelCache[providerId];
+  }else{
+    for(const k in _liveModelCache) delete _liveModelCache[k];
+  }
+}
 
 function _addLiveModelsToSelect(provider, models, sel){
   if(!provider||!models||!models.length||!sel) return 0;
@@ -5922,6 +5948,11 @@ function _addLiveModelsToSelect(provider, models, sel){
 async function _fetchLiveModels(provider, sel, requestSeq=null){
   if(!provider||!sel) return;
   if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+  // #6919: capture the invalidation epoch BEFORE dispatch. A response that
+  // was in flight when invalidateLiveModelCache() ran is obsolete and must
+  // not repopulate the cache or enrich the dropdown — checked after each
+  // await, before the cache publication and the DOM enrichment below.
+  const invalidationEpoch=_liveModelInvalidationEpoch;
   // Already fetched — apply cached models to this select element (#872)
   if(_liveModelCache[provider]){
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
@@ -5930,15 +5961,20 @@ async function _fetchLiveModels(provider, sel, requestSeq=null){
     return;
   }
   _liveModelFetchPending.add(provider);
+  const fetchOwner={};
+  _liveModelFetchOwners.set(provider,fetchOwner);
   try{
     const url=new URL('api/models/live',document.baseURI||location.href);
     url.searchParams.set('provider',provider);
     const _liveRes=await fetch(url.href,{credentials:'include'});
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(invalidationEpoch!==_liveModelInvalidationEpoch) return;
     if(_redirectIfUnauth(_liveRes)) return;
     const data=await _liveRes.json();
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(invalidationEpoch!==_liveModelInvalidationEpoch) return;
     if(!data.models||!data.models.length) return;
+    if(invalidationEpoch!==_liveModelInvalidationEpoch) return;
     _liveModelCache[provider]=data.models;
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
     const added=_addLiveModelsToSelect(provider,data.models,sel);
@@ -5949,7 +5985,14 @@ async function _fetchLiveModels(provider, sel, requestSeq=null){
   }catch(e){
     console.debug('[hermes] Live model fetch failed for',provider,e.message);
   }finally{
-    _liveModelFetchPending.delete(provider);
+    // Successor-aware cleanup: if a newer fetch for the same provider
+    // claimed the pending marker while this one was in flight, this
+    // (possibly revoked) fetch must not clear the successor's pending
+    // state — syncTopbar() defers model correction on it (#1169).
+    if(_liveModelFetchOwners.get(provider)===fetchOwner){
+      _liveModelFetchPending.delete(provider);
+      _liveModelFetchOwners.delete(provider);
+    }
   }
 }
 
