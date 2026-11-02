@@ -12256,9 +12256,10 @@ let _ttsGeneration=0;
 // replacement — and stopTTS() — invalidates all prior tokens, and every
 // asynchronous callback must verify ownership before mutating shared state.
 // `_ttsSpeaking` alone cannot distinguish playback A from playback B.
-// A generation bump also cancels the requests the dead generation still has in
+// A generation bump also aborts the requests the dead generation still has in
 // flight: the token only keeps stale responses out of the AudioContext, while
-// the AbortController below takes the abandoned synthesis off the wire.
+// the AbortController below stops the browser downloading and decoding the
+// abandoned response. The server still finishes that provider call.
 function _beginTtsPlayback(){
   _ttsSpeaking=true;
   // Bump BEFORE aborting: the abort handlers are microtasks, but the token must
@@ -12337,8 +12338,9 @@ function _sendTtsRequest(init, owner){
     return _acquireTtsRequestSlot(owner).then(function(reserved){
       if(!reserved) return {ok:false, err:new Error('aborted'), aborted:true};
       // One AbortController per request: stopTTS()/a replacement aborts it, so
-      // an abandoned synthesis stops consuming the network and the provider
-      // immediately instead of resolving into a generation-guarded no-op.
+      // the browser drops an abandoned response at once instead of downloading
+      // it into a generation-guarded no-op. The server-side synthesis and the
+      // request-rate window are not refunded.
       const ctl=_trackTtsAbort(_newTtsAbortController());
       const opts=ctl?Object.assign({}, init, {signal:ctl.signal}):init;
       return fetch(new URL('api/tts', document.baseURI || location.href).href, opts)
@@ -12870,8 +12872,8 @@ function stopTTS(){
   // Invalidate every in-flight generation (all engines, all chains) before
   // clearing state, so a late fetch/onended/decode callback can neither
   // resume a stopped chain nor clobber a later playback. Then cancel the
-  // requests those generations still have on the wire: stopping must stop the
-  // synthesis, not just ignore its response.
+  // requests those generations still have on the wire, so stopping releases
+  // the browser's side of each request instead of only ignoring its response.
   _ttsGeneration++;
   _abortPendingTtsRequests();
   if('speechSynthesis' in window){
