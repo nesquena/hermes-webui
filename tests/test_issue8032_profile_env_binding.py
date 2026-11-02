@@ -411,6 +411,7 @@ _ALLOWED = {
     ("routes.py", "_read_profile_config_cached"): _LOADER + " (raw parse cache)",
     ("yaml_compat.py", "safe_load"): _LOADER,
     ("profiles.py", "load_profile_config"): "THE helper",
+    ("config.py", "get_config_for_profile_home"): "value reader: expands via expand_profile_config (#8737)",
     ("routes.py", "_read_profile_model_config"): "value reader: expands via expand_profile_config",
     ("profiles.py", "_profile_secret_env_names"): "reads ${NAME} reference NAMES; expanding destroys them",
     ("config.py", "_declares_model_provider_kind"): "plugin.yaml, not config.yaml",
