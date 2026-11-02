@@ -899,6 +899,276 @@ def test_dedup_token_branch_still_appends_a_genuinely_new_owner():
     ], f"the appended owner must keep the historical order; got {_contents(out)}"
 
 
+# ── #8574 review P2: invalidate the superseded slot before rejecting an
+#    invalid/idless owner ─────────────────────────────────────────────────
+#
+# ``_register_retained_owner_slot`` used to return on the incoming row's id
+# BEFORE clearing the previous occupant of the slot being republished. The
+# documented legacy exact-replacement path (a token-bearing user row with no
+# valid ownership id replaces the earlier same-exact-key row) therefore left
+# the superseded owner's ``(stable_id, slot)`` pair in the registry: a later
+# timestamp-shifted replay of that superseded owner resolved against the
+# stale mapping and overwrote the replacement inside ``deduped`` — the
+# persisted model context lost the replacement row while the display
+# transcript kept it. Boolean, negative, fractional and conflicting-alias
+# ids all fail the same ownership check, so they all walked that path.
+
+
+def _p2_user_row(content, timestamp, token, stable_id=None, **extra):
+    """A user row with the given active-turn token and durable id."""
+    row = {
+        "role": "user",
+        "content": content,
+        "timestamp": timestamp,
+        "_source": "webui",
+        "_active_turn_token": token,
+    }
+    if stable_id is not None:
+        row["id"] = stable_id
+    row.update(extra)
+    return row
+
+
+# The review's minimal helper schedule: two independently owned turns that
+# repeat ``higher`` verbatim inside one timestamp bucket (durable ids 1 and
+# 3), an id-less token-bearing replacement of owner 3's row (the documented
+# legacy exact-replacement path), then a timestamp-shifted replay of owner 3.
+_P2_BASE_HISTORY = [
+    _p2_user_row("higher", 100.0, "s1:100", 1),
+    {"role": "assistant", "content": "guess 50", "timestamp": 101.0, "id": 2},
+    _p2_user_row("higher", 100.0, "s2:100", 3),
+    {"role": "assistant", "content": "guess 75", "timestamp": 103.0, "id": 4},
+]
+_P2_REPLAY_ROW = _p2_user_row("higher", 250.0, "s2:100", 3)
+
+# Every shape that fails ``_stable_message_ownership_id`` reaches the same
+# legacy replacement: a missing id, a boolean, a negative int, a non-integer
+# float, and an ``id``/``message_id`` alias conflict. ``kept_id`` is what the
+# retained replacement row must still carry afterwards.
+_P2_INVALID_ID_ROWS = {
+    "missing-id": ({"stable_id": None}, None),
+    "boolean": ({"stable_id": True}, True),
+    "negative": ({"stable_id": -7}, -7),
+    "fractional": ({"stable_id": 3.5}, 3.5),
+    "conflicting-alias": ({"stable_id": 11, "message_id": 12}, 11),
+}
+
+
+def _p2_schedule(replacement_kwargs):
+    """The review's 4-step schedule with the given invalid-id replacement."""
+    return copy.deepcopy(_P2_BASE_HISTORY) + [
+        _p2_user_row("higher", 100.0, "s3:100", **replacement_kwargs),
+        {"role": "assistant", "content": "guess 100", "timestamp": 105.0, "id": 6},
+        copy.deepcopy(_P2_REPLAY_ROW),
+    ]
+
+
+def test_dedup_token_branch_invalid_id_replacement_invalidates_the_superseded_slot():
+    """#8574 review P2: the 4-step schedule keeps the replacement AND the replay.
+
+    Owner 3's row is replaced by an id-less token-bearing row (the documented
+    legacy exact-replacement path). The superseded owner must stop being
+    broadcast by the retained-slot registry at that moment, so the later
+    timestamp-shifted replay of owner 3 can no longer resolve against owner
+    3's old slot and overwrite the replacement: it appends instead.
+    """
+    from api.streaming import _deduplicate_context_messages
+
+    out = _deduplicate_context_messages(_p2_schedule({}))
+    assert _contents(out) == [
+        "higher",
+        "guess 50",
+        "higher",
+        "guess 75",
+        "guess 100",
+        "higher",
+    ], (
+        "the id-less replacement must survive in the slot the legacy "
+        f"exact-replacement gave it, with the replay appended; got {_contents(out)}"
+    )
+    assert _user_ids(out) == [1, None, 3], (
+        "owner 1 keeps its slot, the replacement keeps its id-less shape, and "
+        f"the replay of owner 3 is appended; got ids={_user_ids(out)}"
+    )
+    assert out[2].get("_active_turn_token") == "s3:100" and "id" not in out[2], (
+        "the retained replacement row must be the id-less token holder; got "
+        f"{out[2]}"
+    )
+    assert out[-1].get("id") == 3 and out[-1].get("timestamp") == 250.0, (
+        "the timestamp-shifted replay must be appended as its own row, never "
+        f"merged into the replacement's slot; got {out[-1]}"
+    )
+    assert out[-1].get("_active_turn_token") == "s2:100", (
+        "the appended replay must keep owner 3's active-turn token; got "
+        f"{out[-1]}"
+    )
+    assert out[0].get("id") == 1 and out[0].get("_active_turn_token") == "s1:100", (
+        "the other same-key owner must be untouched by the invalidation; got "
+        f"{out[0]}"
+    )
+
+
+@pytest.mark.parametrize("kind", sorted(_P2_INVALID_ID_ROWS))
+def test_dedup_token_branch_invalid_id_replacement_invalidates_the_superseded_slot_parametrized(
+    kind,
+):
+    """Every id shape that fails the ownership check walks the same path.
+
+    The reviewer confirmed boolean, negative, fractional and conflicting-alias
+    ids all reach the legacy exact-replacement, so each must invalidate the
+    superseded owner's slot entry exactly like the id-less row does.
+    """
+    from api.streaming import _deduplicate_context_messages
+
+    replacement_kwargs, kept_id = _P2_INVALID_ID_ROWS[kind]
+    out = _deduplicate_context_messages(_p2_schedule(replacement_kwargs))
+    assert _contents(out) == [
+        "higher",
+        "guess 50",
+        "higher",
+        "guess 75",
+        "guess 100",
+        "higher",
+    ], (
+        f"the {kind} replacement must survive with the replay appended; got "
+        f"{_contents(out)}"
+    )
+    assert _user_ids(out) == [1, kept_id, 3], (
+        f"the {kind} replacement must keep its own id shape and the replay of "
+        f"owner 3 must be appended; got ids={_user_ids(out)}"
+    )
+    assert out[2].get("_active_turn_token") == "s3:100", (
+        f"the retained replacement row must be the {kind} token holder; got "
+        f"{out[2]}"
+    )
+    assert out[-1].get("id") == 3 and out[-1].get("timestamp") == 250.0, (
+        f"the {kind} case must append the replay instead of overwriting the "
+        f"replacement; got {out[-1]}"
+    )
+
+
+def test_retained_owner_slot_lookup_names_the_occupant_until_the_replacement():
+    """Helper pin: the retained-slot lookup still names the occupant.
+
+    Before any replacement, the lookup for owner 3 must return the slot owner
+    3 actually occupies (the review's "the retained slot's lookup still points
+    at that occupant before the replacement" check). Registering the invalid
+    replacement of that slot must then invalidate ONLY the superseded entry:
+    owner 1 — a different, still-valid owner of the same key — keeps its own
+    slot, and a subsequent VALID registration still republishes the slot.
+    """
+    from api.streaming import (
+        _message_replay_key,
+        _register_retained_owner_slot,
+        _retained_owner_slot_for,
+    )
+
+    first_owner = _p2_user_row("higher", 100.0, "s1:100", 1)
+    second_owner = _p2_user_row("higher", 100.0, "s2:100", 3)
+    key = _message_replay_key(second_owner)
+    slots = {}
+    _register_retained_owner_slot(key, first_owner, 0, slots)
+    _register_retained_owner_slot(key, second_owner, 2, slots)
+
+    assert _retained_owner_slot_for(key, second_owner, slots) == 2, (
+        "before the replacement the retained-slot lookup must still name the "
+        f"slot owner 3 occupies; got {slots}"
+    )
+    assert _retained_owner_slot_for(key, first_owner, slots) == 0, (
+        f"owner 1 must keep its own slot; got {slots}"
+    )
+
+    # The id-less replacement of slot 2 invalidates ONLY the superseded entry.
+    id_less = {"role": "user", "content": "higher"}
+    _register_retained_owner_slot(key, id_less, 2, slots)
+    assert _retained_owner_slot_for(key, second_owner, slots) is None, (
+        "the superseded owner must stop being broadcast once its slot is "
+        f"republished, even by an id-less replacement; got {slots}"
+    )
+    assert _retained_owner_slot_for(key, first_owner, slots) == 0, (
+        "invalidating the superseded slot must not disturb another still-valid "
+        f"owner of the same key; got {slots}"
+    )
+
+    # Control: a VALID registration still republishes the slot for its own id.
+    third_owner = _p2_user_row("higher", 100.0, "s3:100", 9)
+    _register_retained_owner_slot(key, third_owner, 2, slots)
+    assert _retained_owner_slot_for(key, third_owner, slots) == 2, (
+        f"a valid owner must republish the slot for itself; got {slots}"
+    )
+    assert _retained_owner_slot_for(key, first_owner, slots) == 0, (
+        f"owner 1 must still be addressable; got {slots}"
+    )
+
+
+@pytest.mark.parametrize("kind", ["missing-id", "boolean"])
+def test_sync_chat_retains_the_superseded_slot_replacement(tmp_path, monkeypatch, kind):
+    """#8574 review P2 over the real route: display AND context keep the row.
+
+    The reviewer's original repro: a real synchronous ``POST /api/chat`` whose
+    seeded history carries the 4-step schedule (two independently owned
+    ``higher`` turns, an invalid-id token-bearing replacement of the second,
+    then a timestamp-shifted replay of the replaced owner), followed by a cold
+    ``Session.load``. The persisted model context used to drop the replacement
+    row — the replay resolved against the superseded owner's stale slot entry
+    and overwrote it — while the display transcript kept it. Both arrays must
+    now retain the replacement row and append the replay.
+    """
+    replacement_kwargs, kept_id = _P2_INVALID_ID_ROWS[kind]
+    sid = f"i8574-stale-slot-{kind}"
+    reloaded = _sync_http_send(
+        tmp_path,
+        monkeypatch,
+        sid,
+        _p2_schedule(replacement_kwargs),
+        "lower",
+        "guess 90",
+    )
+    assert reloaded is not None
+    context = reloaded.context_messages
+    display = reloaded.messages
+
+    for label, rows in (("model context", context), ("display transcript", display)):
+        kept = [
+            r
+            for r in rows
+            if isinstance(r, dict) and r.get("_active_turn_token") == "s3:100"
+        ]
+        assert len(kept) == 1, (
+            f"the {label} must retain the {kind} replacement row exactly once; "
+            f"got ids={_user_ids(rows)} contents={_contents(rows)}"
+        )
+        assert kept[0].get("id") == kept_id, (
+            f"the retained replacement row in the {label} must keep its {kind} "
+            f"id shape; got {kept[0]}"
+        )
+        replay = [
+            r
+            for r in rows
+            if isinstance(r, dict)
+            and r.get("id") == 3
+            and r.get("timestamp") == 250.0
+        ]
+        assert len(replay) == 1, (
+            f"the {label} must append the timestamp-shifted replay of owner 3 "
+            f"exactly once; got ids={_user_ids(rows)} contents={_contents(rows)}"
+        )
+
+    context_higher = _contents(context).count("higher")
+    assert context_higher == 3, (
+        "the model context must carry owner 1, the retained replacement and "
+        f"the appended replay; got contents={_contents(context)}"
+    )
+    assert _contents(context)[-2:] == ["lower", "guess 90"], (
+        "the current turn must still settle at the tail of the context; got "
+        f"{_contents(context)}"
+    )
+    assert _user_ids(context) == [1, kept_id, 3, 8], (
+        "the model context must keep owner 1, the replacement (its own id "
+        f"shape), the appended replay and the new turn; got ids={_user_ids(context)}"
+    )
+
+
 def test_sync_chat_cold_follow_up_collapses_replayed_owner(tmp_path, monkeypatch):
     """#8574 finding 2 over the real route: cold follow-up, no re-seed.
 
