@@ -80,7 +80,7 @@ const messagesFns = [
 	  '_enrichSettledToolRowBodyFromLive',
 	  '_anchorSceneRowsByMessageIndex',
 	];
-const uiFns = ['_anchorSceneToolCallFromRow'];
+const uiFns = ['_anchorSceneToolCallFromRow','_toolCommandIsPreviewOnly','_toolDetailLeadLabel'];
 let code = '(function(){\n';
 code += 'var activeSid="test-session"; var streamId="test-stream"; var S;\n';
 for (const n of messagesFns) code += extractFunc(mSrc, n) + '\n';
@@ -111,6 +111,7 @@ process.stdin.on('end',()=>{
         idx:idx, name:tc.name, tid:tc.tid,
         snippet:tc.snippet||'', snippetLen:(tc.snippet||'').length,
         args:tc.args||{}, command:tc.command||'',
+        display_command:tc.display_command||'', leadLabel:_toolDetailLeadLabel('shell',tc),
         rendersOutputBody:!!tc.snippet,
         rendersDiff:/^@@\\s/.test(tc.snippet||'') && (tc.snippet||'').split('\\n').filter(l=>l[0]==='+'||l[0]==='-').length>=2,
         transparentOutputTabNonEmpty:!!outputTab,
@@ -1215,3 +1216,26 @@ def test_short_genuine_prefix_not_clobbered(driver_path):
     assert _card(cards, "terminal")["snippet"] == short, (
         "a genuinely short persisted body (not a cap-length preview) must win"
     )
+
+
+def _gateway_preview_turn(persisted_display="npm ci + 1 command", live_display="npm ci + 1 command"):
+    # Gateway runs carry only the producer's summarized display_command, no executed command.
+    call = {"id": "gw-1", "name": "terminal", "started_at": 100, "args": {},
+            "display_command": persisted_display, "snippet": "ok"}
+    live = {**call, "assistant_msg_idx": 1, "display_command": live_display}
+    return {
+        "messages": [
+            {"role": "user", "content": "install"},
+            {"role": "assistant", "content": "Done.", "tool_calls": [call]},
+            {"role": "assistant", "content": "final answer"},
+        ],
+        "turnStart": 0, "lastAsstIndex": 2, "S": {"toolCalls": [live]},
+    }
+
+
+@pytest.mark.parametrize("persisted_display", ["npm ci + 1 command", ""], ids=["persisted-row", "live-tool-call"])
+def test_gateway_display_command_survives_settled_render_as_preview(driver_path, persisted_display):
+    term = _card(_run(driver_path, _gateway_preview_turn(persisted_display=persisted_display)), "terminal")
+    assert term["display_command"] == "npm ci + 1 command"
+    assert term["command"] == "", "a preview must never be folded into the executed command"
+    assert term["leadLabel"] == "Command preview"
