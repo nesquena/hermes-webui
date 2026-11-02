@@ -11065,7 +11065,14 @@ function renderMd(raw){
     // Bracket set is paren / square / curly only -- NOT angle brackets, since
     // angle brackets are overwhelmingly comparison operators in real LLM table
     // output (`| x < 5 | y > 10 |`) and treating them as a pair collapses cells.
-    const _protectPipes=r=>{let prev;do{prev=r;r=r.replace(/([([\x7b][^)\]\x7d]*)[|]([^)\]\x7d]*[)\]\x7d])/g,(_,a,b)=>a+'\x00PIPE\x00'+b);r=r.replace(/(<code>[^<]*)[|]([^<]*<\/code>)/g,(_,a,b)=>a+'\x00PIPE\x00'+b);}while(r!==prev);return r;};
+    // A GFM backslash-escaped pipe (`\|`) is also a literal pipe inside a cell,
+    // not a column delimiter — and it takes no bracket partner, so the bracket
+    // pass above never sees it. Without this rule a cell like
+    // `| error\|panic\|fatal |` splits into four cells and leaks the bare
+    // backslashes into the rendered text. The escape is consumed here (the
+    // sentinel restore emits only the pipe) because GFM defines `\|` as an
+    // escaped literal, not as a backslash followed by a pipe.
+    const _protectPipes=r=>{let prev;do{prev=r;r=r.replace(/([([\x7b][^)\]\x7d]*)[|]([^)\]\x7d]*[)\]\x7d])/g,(_,a,b)=>a+'\x00PIPE\x00'+b);r=r.replace(/(<code>[^<]*)[|]([^<]*<\/code>)/g,(_,a,b)=>a+'\x00PIPE\x00'+b);r=r.replace(/\\[|]/g,'\x00PIPE\x00');}while(r!==prev);return r;};
     const _restorePipes=s=>s.replace(/\x00PIPE\x00/g,'|');
     const parseRow=r=>{r=_protectPipes(r);return r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<td>${inlineMd(_restorePipes(c.trim()))}</td>`).join('');};
     const parseHeader=r=>{r=_protectPipes(r);return r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<th>${inlineMd(_restorePipes(c.trim()))}</th>`).join('');};
