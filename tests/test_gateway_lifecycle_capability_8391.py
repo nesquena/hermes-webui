@@ -982,7 +982,7 @@ def test_health_banner_hides_restart_button_unless_gateway_is_managed():
 
 
 def test_gateway_external_managed_copy_exists_in_every_locale():
-    assert I18N_JS.count("gateway_external_managed:") == 15
+    assert I18N_JS.count("gateway_external_managed:") == 16
 
 
 # ── follow-up D: loopback Gateway with no ownership proof yet ─────────────
@@ -1310,7 +1310,7 @@ def _locale_blocks() -> dict[str, str]:
 def test_gateway_local_unproven_copy_exists_once_per_locale_with_external_note():
     blocks = _locale_blocks()
     with_external = [name for name, body in blocks.items() if "gateway_external_managed:" in body]
-    assert len(with_external) == 15
+    assert len(with_external) == 16
 
     values = {}
     for name in with_external:

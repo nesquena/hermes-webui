@@ -21,6 +21,8 @@
 
 - **Native OIDC login works with identity providers that accept only HTTP Basic client authentication.** WebUI always sent the client secret in the token request body (`client_secret_post`), which providers that support only `client_secret_basic` reject. In the default `auto` mode it now switches to Basic only when the provider's discovery document says `client_secret_post` is not supported, so existing deployments send byte-for-byte the same request; `webui_oidc.token_auth_method` (or `HERMES_WEBUI_OIDC_TOKEN_AUTH_METHOD`) can force either method. Basic credentials are form-encoded first as RFC 6749 section 2.3.1 requires, and an unsupported configured value is logged once instead of on every auth check. Thanks @chesterXalan. (#6471)
 
+- **Catalan (`ca`) locale.** Hermes WebUI can now be used in Català: all 1,844 UI strings, the tool-activity summaries and the login page are translated (informal "tu"; `Steer` kept as the feature name). Registered in `static/i18n.js` and `_LOGIN_LOCALE`, with locale-count tests updated to 16 and a new `tests/test_catalan_locale.py`.
+
 ### Performance
 
 - **Long sessions no longer freeze on open and scroll.** Finding the first visible row measured every virtualized row one layout at a time (18,682 forced layouts, 21.8 s in one measured session); it now binary-searches the rows and skips hidden ones. The session HTML cache now keys on the whole rendered message instead of the message count, so an edit in the middle of a transcript cannot serve stale HTML, and pasted-image base64 is not rehashed on every render. No visible change. Thanks @happy5318, building on @RechildIce's analysis in #7695. (#8228)

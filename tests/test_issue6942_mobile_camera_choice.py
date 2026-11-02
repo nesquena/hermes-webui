@@ -58,7 +58,7 @@ def test_choice_accessibility_layout_and_locale_parity():
     assert "composer_attach_options" in i18n
 
     locales = re.findall(r"^  (?:[\"']?)([A-Za-z][A-Za-z0-9-]*)(?:[\"']?): \{", i18n, re.MULTILINE)
-    assert len(locales) == 15
+    assert len(locales) == 16
     for key in ("composer_attach_options", "composer_attach_photo", "composer_attach_files"):
         assert len(re.findall(rf"^    {key}:", i18n, re.MULTILINE)) == len(locales)
 
