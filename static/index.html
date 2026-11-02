@@ -14,7 +14,17 @@
 <link rel="manifest" href="manifest.json" crossorigin="use-credentials">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<!-- iOS 26+ draws a wide "scroll pocket" blur over the top of an INSTALLED web
+     app, and WebKit only suppresses it while the status bar is NOT edge-to-edge.
+     `black-translucent` extends the web view under the status bar, so the top
+     obscured inset is 0, WebKit never builds its fixed-colour-extension view,
+     and the blur is then drawn unconditionally — no amount of opaque painting
+     or `viewport-fit` can remove it. `default` hands the status bar back to the
+     platform, which re-enables that mechanism and lets the opaque app titlebar
+     colour the status bar instead. Same pairing the Memos PWA ships.
+     The titlebar half of the fix lives in style.css
+     (`.pwa-standalone.pwa-ios .app-titlebar`). -->
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="Hermes">
 <link rel="apple-touch-icon" sizes="512x512" href="static/apple-touch-icon.png">
 <script>(function(){try{var _hadAppearance=localStorage.getItem('hermes-theme')!==null||localStorage.getItem('hermes-skin')!==null;var themes={light:1,dark:1,system:1},skins={codex:1,terracotta:1,default:1,ares:1,mono:1,graphite:1,github:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1,catppuccin:1,hepburn:1,nous:1,'geist-contrast':1,neon:1,'neon-soft':1,'neon-paint':1,zeus:1,'verdigris':1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark');var pendingExt=s&&s!=='default'&&!skins[s]&&!legacy[s];var skin=skins[s]?s:(pendingExt?s:(m?m[1]:'default'));if(_hadAppearance){localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);}if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;}catch(e){document.documentElement.classList.add('dark');}})()</script>
@@ -72,6 +82,26 @@
   }
 })()</script>
 <link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">
+<!-- iOS 26/27 status-bar "scroll pocket" fix — deliberately inlined, keep it here.
+     WebKit only suppresses the wide system blur over the top of an installed web
+     app while a fixed/sticky opaque box is hit-tested 4px inside the top edge,
+     and that whole mechanism is gated on the status bar obscuring the web view
+     (hence `default` above, never `black-translucent`). The opaque titlebar is
+     that box. This copy is load-bearing, not defensive: installed apps on this
+     origin are NOT a secure context (plain HTTP on a LAN/Tailscale address), so
+     no service worker ever registers and every `?v=` URL below is served
+     `Cache-Control: immutable` for a year — CSS shipped only in style.css
+     cannot reach an already-installed app. index.html IS re-fetched from the
+     server on every launch, so the rule rides along with it. style.css carries
+     the same rule for HTTPS/service-worker deployments; the duplication is
+     intentional and pinned by
+     tests/test_mobile_layout.py::test_installed_ios_titlebar_is_the_status_bar_color_source.
+     Measured on iOS 27 (installed): layout viewport 812px vs screen height
+     874px — the 62px difference is the system status-bar strip, and
+     env(safe-area-inset-top) reads 0 there. -->
+<style>
+  .pwa-standalone.pwa-ios .app-titlebar{position:sticky;top:0;}
+</style>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" integrity="sha384-LJcOxlx9IMbNXDqJ2axpfEQKkAYbFjJfhXexLfiRJhjDU81mzgkiQq8rkV0j6dVh" crossorigin="anonymous">
   <!-- KaTeX math rendering CSS (loaded eagerly from vendored assets to prevent font CSP noise) -->
   <link rel="stylesheet" href="static/vendor/katex/0.16.22/katex.min.css">
