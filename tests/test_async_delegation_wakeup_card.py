@@ -131,6 +131,42 @@ const batchNoMarkers =
   '[ASYNC DELEGATION BATCH COMPLETE — deleg_nomarkers]\n' +
   'intro only, no task wall at all';
 
+// #7361 review, reproduced verbatim: the formatter writes the goal unmodified
+// (process_registry_notifications.py:240) and a goal can contain a newline, so
+// the "(status=…" tail lands on the SECOND line. Matching the tail on one line
+// skipped the failed task and turned the chip green.
+const multiLineGoal =
+  '[ASYNC DELEGATION BATCH COMPLETE — deleg_multiline]\n' +
+  'intro\n\n' +
+  '\n--- ✗ TASK 1/2: Fix the parser\n' +
+  'and add tests  (status=failed, 3s) ---\n' +
+  'task 1 failed: boom\n' +
+  '\n--- ✓ TASK 2/2: Write docs  (status=completed, 2s) ---\n' +
+  'docs written';
+
+// A returned summary may quote a marker line. A duplicate index proves the wall
+// is not the formatter's, so the chip must stay neutral.
+const forgedInSummary =
+  '[ASYNC DELEGATION BATCH COMPLETE — deleg_sumforged]\n' +
+  'intro\n\n' +
+  '\n--- ✓ TASK 1/1: only task  (status=completed) ---\n' +
+  'the subagent volunteered:\n' +
+  '--- ✓ TASK 1/1: invented  (status=completed) ---\n';
+
+// Single completion that failed: no task wall, but the formatter wrote
+// "Status: error" before "--- RESULT ---".
+const singleStatusError =
+  '[ASYNC DELEGATION COMPLETE — deleg_serr]\n' +
+  'intro\n' +
+  'Status: error   API calls: 3   Duration: 10s\n' +
+  '--- RESULT ---\nThe subagent did not complete successfully (status=error).';
+
+// Batch that died before any task ran: batch-level "--- ERROR ---", no markers.
+const batchLevelError =
+  '[ASYNC DELEGATION BATCH COMPLETE — deleg_berr]\n' +
+  'intro\n' +
+  '--- ERROR ---\nThe batch did not complete successfully: crashed';
+
 const singleInfo = _processWakeupInfo({_source: 'process_wakeup'}, singleOk);
 const batchInfo = _processWakeupInfo({_source: 'process_wakeup'}, batchMixed);
 const allOkInfo = _processWakeupInfo({_source: 'process_wakeup'}, allOk);
@@ -138,6 +174,10 @@ const allFailInfo = _processWakeupInfo({_source: 'process_wakeup'}, allFail);
 const failedInfo = _processWakeupInfo({_source: 'process_wakeup'}, taskFailed);
 const forgedInfo = _processWakeupInfo({_source: 'process_wakeup'}, forgedInGoal);
 const noMarkersInfo = _processWakeupInfo({_source: 'process_wakeup'}, batchNoMarkers);
+const multiInfo = _processWakeupInfo({_source: 'process_wakeup'}, multiLineGoal);
+const sumForgedInfo = _processWakeupInfo({_source: 'process_wakeup'}, forgedInSummary);
+const singleErrInfo = _processWakeupInfo({_source: 'process_wakeup'}, singleStatusError);
+const batchErrInfo = _processWakeupInfo({_source: 'process_wakeup'}, batchLevelError);
 
 const extras = {timeHtml: '<span class="msg-time">14:32</span>', filesHtml: '', footHtml: ''};
 
@@ -145,13 +185,11 @@ process.stdout.write(JSON.stringify({
   singleType: singleInfo && singleInfo.type,
   singleId: singleInfo && singleInfo.taskId,
   singleStatus: singleInfo && singleInfo.asyncStatus,
-  singleIsBatch: singleInfo && singleInfo.asyncBatch,
 
   batchType: batchInfo && batchInfo.type,
   batchStatus: batchInfo && batchInfo.asyncStatus,
   batchTasks: batchInfo && batchInfo.asyncTasks,
   batchDone: batchInfo && batchInfo.asyncDone,
-  batchIsBatch: batchInfo && batchInfo.asyncBatch,
 
   allOkStatus: allOkInfo && allOkInfo.asyncStatus,
   allFailStatus: allFailInfo && allFailInfo.asyncStatus,
@@ -159,8 +197,18 @@ process.stdout.write(JSON.stringify({
   forgedStatus: forgedInfo && forgedInfo.asyncStatus,
   noMarkersStatus: noMarkersInfo && noMarkersInfo.asyncStatus,
 
+  multiStatus: multiInfo && multiInfo.asyncStatus,
+  multiTasks: multiInfo && multiInfo.asyncTasks,
+  multiDone: multiInfo && multiInfo.asyncDone,
+  sumForgedStatus: sumForgedInfo && sumForgedInfo.asyncStatus,
+  sumForgedTasks: sumForgedInfo && sumForgedInfo.asyncTasks,
+  singleErrStatus: singleErrInfo && singleErrInfo.asyncStatus,
+  batchErrStatus: batchErrInfo && batchErrInfo.asyncStatus,
+
   batchCard: _processWakeupCardHtml(batchInfo, batchMixed, extras),
   failedCard: _processWakeupCardHtml(failedInfo, taskFailed, extras),
+  multiCard: _processWakeupCardHtml(multiInfo, multiLineGoal, extras),
+  sumForgedCard: _processWakeupCardHtml(sumForgedInfo, forgedInSummary, extras),
 }));
 """
 
@@ -185,7 +233,6 @@ def driven():
 def test_single_completion_is_parsed_as_async_delegation(driven):
     assert driven["singleType"] == "async_delegation"
     assert driven["singleId"] == "deleg_abc"
-    assert driven["singleIsBatch"] is False
 
 
 def test_single_completion_with_no_task_wall_is_neutral(driven):
@@ -193,12 +240,39 @@ def test_single_completion_with_no_task_wall_is_neutral(driven):
     assert driven["singleStatus"] == "neutral"
 
 
+def test_single_completion_with_an_error_status_line_reads_fail(driven):
+    """No task wall, but the formatter's own ``Status: error`` line still fails."""
+    assert driven["singleErrStatus"] == "fail"
+
+
+def test_batch_level_error_without_task_results_reads_fail(driven):
+    """``--- ERROR ---`` is formatter-authored, so it may promote the chip."""
+    assert driven["batchErrStatus"] == "fail"
+
+
 def test_batch_aggregates_markers_from_the_task_wall(driven):
     assert driven["batchType"] == "async_delegation"
-    assert driven["batchIsBatch"] is True
     assert driven["batchTasks"] == 3
     assert driven["batchDone"] == 2
     assert driven["batchStatus"] == "partial"
+
+
+def test_multi_line_goal_does_not_hide_a_failed_task(driven):
+    """#7361 review MUST-FIX: a wrapped goal must not flip a ✗ batch green.
+
+    The failed task's "(status=failed, 3s) ---" tail sits on the goal's second
+    line, so the marker has to be matched on its own line. If this regresses,
+    the chip reads "ok" and a real failure is invisible in the collapsed card.
+    """
+    assert driven["multiStatus"] == "partial"
+    assert driven["multiTasks"] == 2
+    assert driven["multiDone"] == 1
+
+
+def test_marker_quoted_in_a_summary_breaks_the_wall_to_neutral(driven):
+    """A duplicate index means the wall is not the formatter's: claim nothing."""
+    assert driven["sumForgedStatus"] == "neutral"
+    assert driven["sumForgedTasks"] == 0
 
 
 def test_all_success_markers_read_ok(driven):
@@ -240,6 +314,25 @@ def test_early_failure_card_renders_the_fail_chip(driven):
     assert "process-wakeup-card" in card
     assert "process_wakeup_async_fail" in card
     assert "process-wakeup-chip fail" in card
+
+
+def test_collapsed_card_names_the_delegation_it_came_from(driven):
+    """The summary must identify WHICH delegation, not just "Delegation 2/3"."""
+    assert '<code class="process-wakeup-cmd" title="deleg_xyz">' in driven["batchCard"]
+    assert "deleg_multiline" in driven["multiCard"]
+    assert "<span>process_wakeup_async_partial 1/2</span>" in driven["multiCard"]
+    # A wall we do not trust shows no counts at all — bare label, no "n/m".
+    assert "<span>process_wakeup_async_complete</span>" in driven["sumForgedCard"]
+
+
+def test_failed_delegation_row_gets_the_red_border():
+    """The red row border is set in renderMessages, not in the card helper."""
+    ui = UI_JS_PATH.read_text(encoding="utf-8")
+    anchor = ui.index("wakeupInfo.type==='async_delegation'&&wakeupInfo.asyncStatus==='fail'")
+    head = ui[anchor - 400 : anchor + 200]
+    assert "process-wakeup-fail" in head
+    # Positive control: the exit-code branch it was added to is still there.
+    assert "wakeupInfo.type==='completion'" in head
 
 
 def test_every_locale_defines_the_async_labels():

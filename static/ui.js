@@ -21124,29 +21124,56 @@ function _parseAsyncDelegationBody(s){
   const isFailure=head[2]!=null;
   const delegId=String(isFailure?head[2]:head[1]||'').trim();
   if(!delegId) return null;
-  const isBatch=!isFailure&&/^\[ASYNC DELEGATION BATCH COMPLETE — /.test(s);
-  // Formatter-owned per-task markers: "--- ✓ TASK 1/3: goal  (status=completed, ...) ---"
-  const taskRe=/^---\s*(✓|✗|⚠)\s*TASK\s+(\d+)\/(\d+)(?::[^\n]*?)?\s*\(status=([^,\)\n]*)/gm;
+  // Formatter-owned per-task markers: "--- ✓ TASK 1/3: <goal>  (status=completed, ...) ---".
+  // Match the MARKER alone, never the "(status=…" tail: the formatter writes the
+  // goal unmodified (tools/process_registry_notifications.py:240) and a delegate_task
+  // goal can contain newlines, so requiring the tail on the same line silently
+  // skipped that task — and a skipped ✗ could flip the chip green (#7361 review).
+  const taskRe=/^---\s*(✓|✗|⚠)\s*TASK\s+(\d+)\/(\d+)(?=\s|:|$)/gm;
   const tasks=[];
   let tm;
   while((tm=taskRe.exec(s))!==null){
-    tasks.push({icon:tm[1],index:Number(tm[2]),total:Number(tm[3]),status:String(tm[4]||'').trim()});
+    tasks.push({icon:tm[1],index:Number(tm[2]),total:Number(tm[3])});
   }
+  // Fail closed: the wall is trusted only when it is COMPLETE — exactly one marker
+  // per index 1..n, every marker agreeing on n. A gap or a duplicate (a
+  // marker-shaped line inside a returned summary) proves nothing, so the chip
+  // stays neutral instead of guessing an outcome from partial counts.
+  const total=tasks.length?tasks[0].total:0;
+  const seen=new Set();
+  let complete=tasks.length>0&&total>0;
+  for(const x of tasks){
+    if(x.total!==total||x.index<1||x.index>total||seen.has(x.index)){complete=false;break;}
+    seen.add(x.index);
+  }
+  if(complete&&seen.size!==total) complete=false;
   let status;
   if(isFailure) status='fail';
-  else if(!tasks.length) status='neutral';          // unknown grammar → neutral chip, never "ok"
-  else if(tasks.every(x=>x.icon==='✓')) status='ok';
-  else if(tasks.every(x=>x.icon==='✗')) status='fail';
-  else status='partial';
+  else if(complete){
+    if(tasks.every(x=>x.icon==='✓')) status='ok';
+    else if(tasks.every(x=>x.icon==='✗')) status='fail';
+    else status='partial';
+  }else{
+    // No usable wall: two formatter-authored lines may still prove a failure.
+    // The single completion writes "Status: <status>   API calls: …" before
+    // "--- RESULT ---" (process_registry_notifications.py:300) and a batch that
+    // died before any task ran writes a batch-level "--- ERROR ---" (line 230).
+    // Only those lines count — goal/summary prose never does.
+    const resultIdx=s.indexOf('--- RESULT ---');
+    const preamble=resultIdx>=0?s.slice(0,resultIdx):s;
+    const stm=preamble.match(/^Status:\s*([A-Za-z_]+)/m);
+    const batchError=/(?:^|\n)--- ERROR ---(?:\r?\n|$)/.test(s);
+    status=(batchError||(stm&&!['completed','success'].includes(stm[1])))?'fail':'neutral';
+  }
   return {
     type:'async_delegation',
     taskId:delegId,
     exitCode:null,
     pattern:null,
-    asyncBatch:isBatch||isFailure||tasks.length>1,
+    asyncId:delegId,
     asyncStatus:status,
-    asyncTasks:tasks.length,
-    asyncDone:tasks.filter(x=>x.icon==='✓').length,
+    asyncTasks:complete?total:0,
+    asyncDone:complete?tasks.filter(x=>x.icon==='✓').length:0,
     output:null,
   };
 }
@@ -21168,7 +21195,7 @@ function _processWakeupInfo(m, text){
     exitCode:pick('exit_code','exitCode'),
     pattern:pick('pattern','pattern'),
     output:parsed?parsed.output:null,
-    asyncBatch:parsed?!!parsed.asyncBatch:false,
+    asyncId:parsed?String(parsed.asyncId||''):'',
     asyncStatus:parsed?parsed.asyncStatus:null,
     asyncTasks:parsed?parsed.asyncTasks:0,
     asyncDone:parsed?parsed.asyncDone:0,
@@ -21200,7 +21227,10 @@ function _processWakeupCardHtml(info, rawText, extras){
     const icon=exitOk?li('check',11):(exitKnown?li('x',11):'');
     chip=`<span class="process-wakeup-chip ${cls}">${icon}<span>exit ${esc(exitStr||'?')}</span></span>`;
   }
-  const cmdHtml=info.command?`<code class="process-wakeup-cmd" title="${esc(info.command)}">${esc(info.command)}</code>`:'';
+  // #7361 review: the collapsed summary said "Delegation partial 2/3" without
+  // saying WHICH delegation. The empty cmd slot now carries the delegation id.
+  const cmdText=info.command||((info.type==='async_delegation'&&info.asyncId)?String(info.asyncId):'');
+  const cmdHtml=cmdText?`<code class="process-wakeup-cmd" title="${esc(cmdText)}">${esc(cmdText)}</code>`:'';
   // Preserve output byte-for-byte for the <pre>; trim ONLY for the
   // empty/non-empty decision so leading indentation and trailing blank lines
   // survive (#6350 review finding 1).
@@ -21884,7 +21914,10 @@ function renderMessages(options){
       if(wakeupInfo){
         noticeClass+=' process-wakeup-notice-card';
         const exitStr=wakeupInfo.exitCode==null?'':String(wakeupInfo.exitCode);
-        if(wakeupInfo.type==='completion'&&/^-?\d+$/.test(exitStr)&&exitStr!=='0') noticeClass+=' process-wakeup-fail';
+        // A failed async delegation gets the same red row border the failing
+        // exit-code cards get (#7361 review), from the same fail-closed status.
+        if((wakeupInfo.type==='completion'&&/^-?\d+$/.test(exitStr)&&exitStr!=='0')
+          ||(wakeupInfo.type==='async_delegation'&&wakeupInfo.asyncStatus==='fail')) noticeClass+=' process-wakeup-fail';
         noticeInnerHtml=_processWakeupCardHtml(wakeupInfo, processText, {timeHtml, filesHtml, footHtml:`<div class="msg-foot"><span class="msg-actions">${copyBtn}</span></div>`});
       }else{
         const processTextHtml=processText?`<pre class="process-wakeup-text">${esc(processText)}</pre>`:'';
