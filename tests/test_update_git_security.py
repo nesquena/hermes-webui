@@ -136,6 +136,9 @@ def test_authenticated_fetch_uses_trusted_global_helper_not_repo_helper(
             f"!{sys.executable} {helper} {trusted_marker} {username} {password}",
         ],
         env=env,
+        # Not the checkout: a linked worktree whose git dir is unavailable (sandboxed
+        # suite run) makes even `git config --global` exit 128.
+        cwd=str(home),
         check=True,
         timeout=20,
     )
@@ -221,12 +224,14 @@ def test_ssh_fetch_uses_trusted_global_command_with_batch_mode(
     subprocess.run(
         ["git", "config", "--global", "core.sshCommand", trusted_command],
         env=env,
+        cwd=str(home),
         check=True,
         timeout=20,
     )
     subprocess.run(
         ["git", "config", "--global", "ssh.variant", ssh_variant],
         env=env,
+        cwd=str(home),
         check=True,
         timeout=20,
     )
@@ -667,6 +672,7 @@ def test_update_git_diagnostic_does_not_relay_credential_helper_stderr(
     subprocess.run(
         ["git", "config", "--global", "credential.helper", f"!{sys.executable} {helper}"],
         env=env,
+        cwd=str(home),
         check=True,
         timeout=20,
     )

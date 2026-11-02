@@ -28,7 +28,7 @@ from api.config import (
     _get_session_agent_lock,
     _parse_provider_qualified_model_id,
     clear_session_writeback_owner_if_owned,
-    coerce_reasoning_effort_for_model,
+    resolve_session_reasoning_effort,
     gateway_approval_unavailable_reason,
     gateway_supports_approval,
     peek_stream,
@@ -54,6 +54,53 @@ GATEWAY_RUN_ID_WAIT_TIMEOUT = 5.0
 # stream_id -> (base_url, api_key) of the Gateway the stream's run lives on, for Stop
 # and approval replies; a reattached run's Gateway need not be the process profile's.
 _STREAM_ENDPOINTS: dict[str, tuple[str, str]] = {}
+# #7293: streams whose resumable Gateway run identity (the exact request before
+# admission, then the run id) has been durably saved in the session. Only these
+# survive a WebUI restart (``_resume_gateway_run_for_session`` reattaches them),
+# so only these are left out of restart blocking and shutdown-drain accounting.
+# A legacy /v1/chat/completions relay never records one, and a Runs API launch
+# has none until its first successful save; both count as WebUI-owned work.
+_DURABLE_RUN_STREAMS: set[str] = set()
+_DURABLE_RUN_STREAMS_LOCK = threading.Lock()
+
+
+def _mark_gateway_run_durable(stream_id: str) -> None:
+    stream_id = str(stream_id or "").strip()
+    if stream_id:
+        with _DURABLE_RUN_STREAMS_LOCK:
+            _DURABLE_RUN_STREAMS.add(stream_id)
+
+
+class GatewayHandoffCancelled(RuntimeError):
+    """Stop or a server settle cancelled the stream before its durable handoff (#7293)."""
+
+
+def _publish_gateway_run_durable(stream_id: str) -> bool:
+    """Mark ``stream_id`` durable iff it is still registered and not cancelled.
+
+    Runs on the STREAMS_LOCK edge where Stop and the server settle publish a
+    cancellation, so exactly one of the two wins (#7293).
+    """
+    with STREAMS_LOCK:
+        flag = CANCEL_FLAGS.get(stream_id)
+        if stream_id not in STREAMS or (flag is not None and flag.is_set()):
+            return False
+        _mark_gateway_run_durable(stream_id)
+        return True
+
+
+def gateway_run_durably_resumable(stream_id: str) -> bool:
+    """True once ``stream_id``'s Gateway run identity is saved for reattachment.
+
+    Stays true until the stream's Gateway state is released: a later save that
+    clears the record also persists the turn's terminal state, so the run is
+    either reattachable from disk or already settled there.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return False
+    with _DURABLE_RUN_STREAMS_LOCK:
+        return stream_id in _DURABLE_RUN_STREAMS
 
 
 def gateway_run_endpoint(run_id: str) -> tuple[str, str]:
@@ -175,6 +222,8 @@ def release_gateway_stream_state(stream_id: str, *, finish_pending: bool = True)
     _clear_gateway_run_starting(stream_id)
     with _STREAM_RUN_STARTING_CONDITION:
         _STREAM_ENDPOINTS.pop(stream_id, None)
+    with _DURABLE_RUN_STREAMS_LOCK:
+        _DURABLE_RUN_STREAMS.discard(stream_id)
 
 
 def gateway_run_id_pending(stream_id: str) -> bool:
@@ -382,21 +431,39 @@ def _gateway_use_runs_api_enabled(config_data=None, environ: dict[str, str] | No
     return raw in ("1", "true", "yes", "on")
 
 
-def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=None):
-    """Read and coerce user-configured reasoning effort for a gateway request."""
+def _gateway_reasoning_effort_for_request(
+    cfg, *, model=None, model_provider=None, session_effort=None
+):
+    """Resolve and coerce the session effort, falling back to profile config."""
     try:
-        cfg_data = cfg if isinstance(cfg, dict) else {}
-        effort_cfg = cfg_data.get("agent", {}) if isinstance(cfg_data, dict) else {}
-        effort_raw = effort_cfg.get("reasoning_effort") if isinstance(effort_cfg, dict) else None
-        coerced = coerce_reasoning_effort_for_model(
-            effort_raw,
-            model,
+        coerced = resolve_session_reasoning_effort(
+            cfg,
+            session_effort=session_effort,
+            model_id=model,
             provider_id=model_provider,
         )
         # Preserve explicit "none" while still omitting absent or invalid effort.
         return None if not coerced else str(coerced)
     except Exception:
         return None
+
+
+def _gateway_reasoning_body_fields(reasoning_effort) -> dict:
+    """Request-body fields that carry a resolved effort to the Gateway.
+
+    The Gateway decodes effort only from ``model_options`` (structured
+    ``reasoning``, or the legacy ``reasoning_effort`` key inside it) and ignores
+    a top-level ``reasoning_effort``; that key is still sent for any Gateway that
+    reads it. ``None`` or ``""`` (the session's "Default") sends nothing, so the
+    Gateway applies its own profile config: its protocol has no "provider
+    default, ignore config" value, and ``{"enabled": true}`` alone means a
+    medium effort on several providers.
+    """
+    effort = str(reasoning_effort or "").strip().lower()
+    if not effort:
+        return {}
+    reasoning = {"enabled": False} if effort == "none" else {"enabled": True, "effort": effort}
+    return {"reasoning_effort": effort, "model_options": {"reasoning": reasoning}}
 
 
 def _gateway_session_yolo_enabled(session_id: str) -> bool:
@@ -420,6 +487,7 @@ def _settle_gateway_run_approval(
 
     run_id = str(approval_data.get("run_id") or "").strip()
     identity_v1 = bool(approval_data.get("_gateway_agent_identity_v1"))
+    execution_generation = approval_data.get("_gateway_execution_generation")
     with gateway_yolo_handoff(session_id):
         if _gateway_session_yolo_enabled(session_id):
             try:
@@ -428,6 +496,11 @@ def _settle_gateway_run_approval(
                     api_key,
                     run_id,
                     approval_data["approval_id"] if identity_v1 else "",
+                    **(
+                        {"execution_generation": execution_generation}
+                        if identity_v1 and execution_generation is not None
+                        else {}
+                    ),
                 )
                 return True, None, 0
             except Exception:
@@ -447,6 +520,8 @@ def _auto_approve_gateway_run(
     api_key: str,
     run_id: str,
     approval_id: str,
+    *,
+    execution_generation: int | None = None,
 ) -> None:
     """Resolve one Runs API prompt using only the shipped approval contract.
 
@@ -455,7 +530,8 @@ def _auto_approve_gateway_run(
     flag is enabled. Native Agent-side YOLO would be preferable because it can
     bypass gates before they pause and also covers Agent-owned computer-use
     policy; https://github.com/NousResearch/hermes-agent/pull/61946 tracks that
-    API capability. Until then, do not send speculative fields to the Agent.
+    API capability. Until then, send only the fields the gateway itself
+    published for this prompt (its id and, when present, its generation).
     """
     from api.runner_client import HttpRunnerClient
 
@@ -463,6 +539,7 @@ def _auto_approve_gateway_run(
         run_id,
         approval_id,
         "once",
+        **({"execution_generation": execution_generation} if execution_generation is not None else {}),
     )
 
 
@@ -594,6 +671,22 @@ def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
     return ("tool_complete" if is_complete else "tool"), event_payload
 
 
+def _gateway_prompt_identity(payload) -> str:
+    """The exact per-prompt id a gateway published, across payload generations.
+
+    ``request_id`` (session bridge) and ``prompt_id`` (pending-controls
+    projection) are the canonical names; ``approval_id`` / ``id`` are the
+    older shapes kept for gateways that still send them.
+    """
+    return str(
+        payload.get("request_id")
+        or payload.get("prompt_id")
+        or payload.get("approval_id")
+        or payload.get("id")
+        or ""
+    ).strip()
+
+
 def _gateway_runs_approval_event(payload: dict) -> dict | None:
     """Map a runs-API approval.request payload to the WebUI approval contract."""
     if not isinstance(payload, dict):
@@ -605,7 +698,15 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
     pattern_key = str(payload.get("pattern_key") or "").strip()
     args = payload.get("args") if isinstance(payload.get("args"), (list, dict)) else []
     run_id = str(payload.get("run_id") or "").strip()
-    raw_approval_id = str(payload.get("approval_id") or payload.get("id") or "").strip()
+    raw_approval_id = _gateway_prompt_identity(payload)
+    # The canonical Runs API approval payload identifies the prompt as
+    # ``request_id`` (session bridge) or ``prompt_id`` (pending-controls
+    # projection) and fences it with an integer ``execution_generation``. Keep
+    # both: without them the client can only guess a local id and has nothing
+    # the generation-fenced respond endpoint will accept.
+    execution_generation = payload.get("execution_generation")
+    if type(execution_generation) is not int:
+        execution_generation = None
     approval_id = raw_approval_id
     if not approval_id:
         approval_id = uuid.uuid4().hex
@@ -627,14 +728,75 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
         "run_id": run_id,
         "approval_id": approval_id,
         "_gateway_raw_approval_id_present": bool(raw_approval_id),
+        "_gateway_execution_generation": execution_generation,
         "choices": choices,
         "allow_permanent": bool(allow_permanent),
     }
 
 
 def _gateway_approval_key(payload) -> str:
-    """Stable id for one gateway approval, shared by the status probe and the event relay."""
-    return str(payload.get("approval_id") or payload.get("id") or payload.get("timestamp") or "")
+    """Stable id for one gateway approval, shared by the status probe and the event relay.
+
+    The execution generation is part of the identity: a run that re-publishes the
+    same prompt id at a newer generation is a different prompt, and answering the
+    old generation is refused by the gateway. Keying on the id alone deduped that
+    replay away and left the mirror pointing at a dead generation.
+    """
+    identity = _gateway_prompt_identity(payload) or str(payload.get("timestamp") or "")
+    generation = payload.get("execution_generation")
+    if identity and type(generation) is int:
+        return f"{identity}#{generation}"
+    return identity
+
+
+def _gateway_status_approval(status: dict) -> dict | None:
+    """The pending approval a durable run status describes, in either projection shape.
+
+    The session bridge answers ``status["approval"]`` with the latest single
+    prompt; the canonical authority projection answers ``pending_controls``,
+    where the run's own queue order puts the prompt that must be answered first
+    at the head.
+    """
+    approval = status.get("approval")
+    if isinstance(approval, dict):
+        return approval
+    controls = status.get("pending_controls")
+    if not isinstance(controls, list):
+        return None
+    for control in controls:
+        if isinstance(control, dict) and control.get("kind") == "approval":
+            return control
+    return None
+
+
+def _gateway_approval_identity_v1(approval_data: dict, base_url: str, api_key: str) -> bool:
+    """Decide once, at card-creation time, whether this card carries a canonical identity.
+
+    Shared by every card origin — the Runs API relay and the default
+    ``/v1/chat/completions`` stream — so both publish the same creation-time
+    decision and ``/api/approval/respond`` never has to re-derive it: it
+    cannot, because the advertised capability is not published by gateways
+    that fence prompts by generation.
+
+    Exact-id answering needs a trustworthy per-prompt identity. A gateway that
+    published an ``execution_generation`` for this prompt proves it can fence
+    the answer to that exact prompt (canonical Runs API contract), so the
+    generation itself is the authority; the advertised capability remains the
+    fallback for gateways that only promise it via ``/v1/capabilities``.
+
+    A locally generated fallback id (``_gateway_raw_approval_id_present`` is
+    False) is never canonical: the gateway did not publish that id, so
+    answering with it is a guaranteed 400. It must not be promoted into one
+    here — the legacy body shape is the only honest answer for such a card.
+    """
+    from api.config import gateway_supports_approval_identity_v1
+
+    approval_data = approval_data or {}
+    if not bool(approval_data.get("_gateway_raw_approval_id_present")):
+        return False
+    if approval_data.get("_gateway_execution_generation") is not None:
+        return True
+    return bool(gateway_supports_approval_identity_v1(base_url, api_key))
 
 
 def _relay_gateway_run_approval(session_id, run_id, payload, base_url, api_key, *, put_gateway_event) -> bool:
@@ -648,9 +810,9 @@ def _relay_gateway_run_approval(session_id, run_id, payload, base_url, api_key, 
     if not approval_data:
         return False
     approval_data["run_id"] = run_id
-    from api.config import gateway_supports_approval_identity_v1
-    identity_v1 = bool(approval_data.get("_gateway_raw_approval_id_present")) and gateway_supports_approval_identity_v1(base_url, api_key)
-    approval_data["_gateway_agent_identity_v1"] = identity_v1
+    approval_data["_gateway_agent_identity_v1"] = _gateway_approval_identity_v1(
+        approval_data, base_url, api_key
+    )
     auto_approved, head, total = _settle_gateway_run_approval(
         session_id,
         approval_data,
@@ -1159,7 +1321,17 @@ def _run_gateway_runs_api_streaming(
         update_active_run(stream_id, phase="gateway-request")
         # Persist the exact body first: a restart before the run id is saved replays this admission.
         if on_run_id is not None:
-            on_run_id("", request=run_body)
+            try:
+                on_run_id("", request=run_body)
+            except GatewayHandoffCancelled:
+                # Cancelled before the handoff was durable: never submit the run (#7293).
+                from api.streaming import _server_settle_reason, _worker_cancel_event_payload
+
+                server_settled = _server_settle_reason(stream_id) is not None
+                put_gateway_event("cancel", _worker_cancel_event_payload(stream_id) if server_settled else {
+                    "message": "Cancelled by user",
+                })
+                return None, {}
         run_id = _admit_gateway_run(url_runs, headers, run_body, stream_id)
     except Exception:
         _finish_gateway_run_starting(stream_id)
@@ -1254,14 +1426,21 @@ def _run_gateway_runs_api_streaming(
         gateway advertises ``approval_identity_v1``; without both, skip the
         status-card insert entirely so the replay alone orders the queue
         A -> B."""
-        approval = status.get("approval")
+        approval = _gateway_status_approval(status)
         if (
             str(status.get("status") or "").strip().lower() == "waiting_for_approval"
             and isinstance(approval, dict)
         ):
-            raw_approval_id = str(approval.get("approval_id") or approval.get("id") or "").strip()
+            raw_approval_id = _gateway_prompt_identity(approval)
+            exact_generation = approval.get("execution_generation")
             from api.config import gateway_supports_approval_identity_v1
-            if not (raw_approval_id and gateway_supports_approval_identity_v1(base_url, api_key)):
+            if not (
+                raw_approval_id
+                and (
+                    type(exact_generation) is int
+                    or gateway_supports_approval_identity_v1(base_url, api_key)
+                )
+            ):
                 return
             approval_key = _gateway_approval_key(approval)
             if approval_key and approval_key not in surfaced_approval_ids:
@@ -1613,16 +1792,34 @@ _REATTACH_SCAN_HEAD_BYTES = 16 * 1024
 
 
 def _record_gateway_run(session_id: str, stream_id: str, run_id: str, request=None, **extra) -> None:
-    """Persist the run id (or, before admission, the exact request) so a restarted WebUI can reattach."""
+    """Persist the run id (or, before admission, the exact request) so a restarted WebUI can reattach.
+
+    The request record is the run's durable handoff (#7293): when the stream was
+    cancelled or detached first, it is withdrawn and ``GatewayHandoffCancelled``
+    stops the admission.
+    """
     try:
         with _get_session_agent_lock(session_id):
             session = get_session(session_id)
             if not _stream_writeback_is_current(session, stream_id):
+                if not run_id:
+                    raise GatewayHandoffCancelled(stream_id)
                 return
+            previous = session.gateway_run
             session.gateway_run = {"run_id": run_id, "stream_id": stream_id, **extra}
             if not run_id:
                 session.gateway_run["request"] = request
             session.save(touch_updated_at=False)
+            # Only now can a restart reattach this run (#7293 drain accounting).
+            if not _publish_gateway_run_durable(stream_id) and not run_id:
+                # Cancelled or detached while saving: withdraw the replayable request.
+                session.gateway_run = previous
+                try:
+                    session.save(touch_updated_at=False)
+                finally:  # even a failed withdrawal never admits the run
+                    raise GatewayHandoffCancelled(stream_id)
+    except GatewayHandoffCancelled:
+        raise
     except Exception:
         logger.warning("Failed to persist gateway run %s for session %s", run_id, session_id, exc_info=True)
         if not run_id:
@@ -1698,7 +1895,7 @@ def _await_gateway_run_result(
             status = _get_gateway_run_status(base_url, api_key, run_id)
         except (urllib.error.URLError, OSError, ValueError):
             return True  # fail open: a stale card 409s, a missing one stalls the run
-        approval = status.get("approval")
+        approval = _gateway_status_approval(status)
         return (
             str(status.get("status") or "").strip().lower() == "waiting_for_approval"
             and isinstance(approval, dict)
@@ -1706,7 +1903,7 @@ def _await_gateway_run_result(
         )
 
     def surface_parked_approval(status):
-        approval = status.get("approval")
+        approval = _gateway_status_approval(status)
         if str(status.get("status") or "").strip().lower() == "waiting_for_approval" and isinstance(approval, dict):
             approval_key = _gateway_approval_key(approval)
             if approval_key not in surfaced_approval_ids:
@@ -1973,9 +2170,13 @@ def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
       the cached ambient config); without one it keeps the shared URL.
     - Key, on a URL that is not the shared one: the profile's own HERMES_WEBUI_GATEWAY_API_KEY or API_SERVER_KEY,
       or none; the launcher's and the shared key are never sent to another Gateway.
-    - Key, on the shared URL: the profile's own HERMES_WEBUI_GATEWAY_API_KEY, then the shared alias (the
-      launcher's export, or the root profile's .env), then the profile's API_SERVER_KEY (the key of its own
-      Gateway), then the shared key.
+    - Key, on the shared URL, for another profile: its own HERMES_WEBUI_GATEWAY_API_KEY, then the shared key
+      (what v0.52.492 sends), then its API_SERVER_KEY only when there is no shared key at all. A profile's
+      API_SERVER_KEY is the key of its OWN Gateway route: the Agent's API server picks the profile from the URL
+      and accepts only that profile's key, so on the shared URL it would be a 401.
+    - Key, on the shared URL, for the process profile's own sessions: its own HERMES_WEBUI_GATEWAY_API_KEY, then
+      the shared alias (the launcher's export, or the root profile's .env), then its API_SERVER_KEY (read fresh
+      from its .env), then the shared key.
     - Exception (#8432): under a NAMED process profile, a profile with a key but no URL gets the process pair
       (URL and key from one source, as v0.52.492 sends) unless the shared URL is provably the launcher's (an
       export that no profile .env supplied, or an operator config file outside every profile home), because that
@@ -2034,7 +2235,26 @@ def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
         # (mirrored from its .env or read from its config). Never send this profile's key there; use the process
         # pair, URL and key from one source, exactly what v0.52.492 sends for every fresh turn.
         return shared_url, shared_key
-    return url, (own_alias or shared_alias or own_key or shared_key)
+    if _session_is_process_profile(home):
+        # The process profile's own sessions: the shared key IS this profile's key, read fresh from its .env.
+        return url, (own_alias or shared_alias or own_key or shared_key)
+    # Another profile on the shared URL. Its API_SERVER_KEY is the key of its OWN Gateway route (the Agent's API
+    # server picks the profile from the URL, its default listener or /p/<profile> under gateway.multiplex_profiles,
+    # and accepts only that profile's key), so it never replaces the shared key here: that was a 401 where
+    # v0.52.492 sends the shared key. Only an explicit WebUI alias set for this profile
+    # (HERMES_WEBUI_GATEWAY_API_KEY in its .env) outranks the shared key; its API_SERVER_KEY is used only when the
+    # WebUI was given no shared key at all. A profile that wants its own route sets its own URL.
+    return url, (own_alias or shared_key or own_key)
+
+
+def _session_is_process_profile(session_home) -> bool:
+    """True when the session's profile home is the profile the WebUI process runs on (fail: False)."""
+    from api import profiles as _profiles
+
+    try:
+        return _same_profile_home(session_home, _profiles.get_process_profile_home())
+    except Exception:
+        return False
 
 
 def _gateway_config_for_profile(profile_name) -> dict | None:
@@ -2077,6 +2297,10 @@ def _resume_gateway_run_for_session(session) -> bool:
     with STREAMS_LOCK:
         if stream_id in STREAMS:
             return False
+        # The record being reattached was loaded from the saved session: a restart
+        # can reattach it again, so it is not WebUI-owned drain work (#7293). Durable
+        # before the drain can see the stream, so no settle ever selects it.
+        _mark_gateway_run_durable(stream_id)
         STREAMS[stream_id] = create_stream_channel()
         CANCEL_FLAGS[stream_id] = CANCEL_FLAGS.get(stream_id, threading.Event())
         # Ownership token: Stop can detach this stream (and a successor could even
@@ -2223,11 +2447,14 @@ def _settle_gateway_terminal_error(
 def _settle_gateway_cancelled_turn(session_id, stream_id) -> None:
     """Keep the prompt, the streamed partial, and a cancel marker when the run ended cancelled and Stop did not already settle it."""
     from api.streaming import (
+        CANCEL_INITIATOR_SERVER,
+        CANCEL_INITIATOR_USER,
         _CANCEL_MARKER_PATTERNS,
         _build_partial_message,
         _materialize_pending_user_turn_before_error,
         _partial_marker_already_present,
         _persist_cancelled_turn,
+        _server_settle_reason,
     )
 
     with _get_session_agent_lock(session_id):
@@ -2317,7 +2544,14 @@ def _settle_gateway_cancelled_turn(session_id, stream_id) -> None:
         session.pending_attachments = []
         session.pending_started_at = None
         session.pending_user_source = None
-        _persist_cancelled_turn(session, message="Cancelled by gateway")
+        # A server settle (#7293) that cancelled this launch before its handoff can
+        # lose the session lock to this worker: write its marker, not a user one.
+        _server_reason = _server_settle_reason(stream_id)
+        _persist_cancelled_turn(
+            session,
+            message=_server_reason or "Cancelled by gateway",
+            initiator=CANCEL_INITIATOR_SERVER if _server_reason is not None else CANCEL_INITIATOR_USER,
+        )
         session.gateway_run = None
         session.save()
 
@@ -2705,6 +2939,57 @@ def _cleanup_gateway_pending_mirror(session_id: str) -> None:
         logger.debug("Failed to reconcile gateway pending mirror during teardown", exc_info=True)
 
 
+def settle_gateway_stream_approvals(session_id: str, stream_id: str, *, reason: str) -> None:
+    """Fail-close every approval card of the Gateway run ``stream_id`` maps to.
+
+    Shared by the stream worker's teardown and ``cancel_stream`` (user Stop and
+    the #7293 server settle). Stop must retire the run's cards itself: the
+    worker can stay blocked on the Gateway socket long after the turn was saved
+    as interrupted, and until its teardown a click on the card was still relayed
+    and resumed a run WebUI had already recorded as stopped.
+
+    Deliberately lock-free beyond the approval registry's own ``_lock``: Stop and
+    the server settle must never wait on an approval relay (whose POST is bounded
+    only by the runner client's timeout). Once this returns, a click finds the
+    card gone and gets 409 without reaching the Gateway. A relay that had
+    already validated its card before this ran still sends its one POST; that is
+    a click that effectively happened just before Stop.
+    """
+    from api.route_approvals import settle_gateway_pending_run
+
+    run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip() if stream_id else ""
+    if not session_id or not run_id:
+        return
+    settle_gateway_pending_run(session_id, run_id, reason=reason)
+
+
+def _submit_stream_approval_mirror(session_id: str, approval_data: dict, cancel_event) -> tuple[dict | None, int]:
+    """Publish a default-stream approval card unless its stream is being stopped.
+
+    Stop sets the cancel flag and then retires the run's cards under the approval
+    registry lock. The insertion re-checks the flag under that same lock
+    (``submit_gateway_pending_mirror(..., cancel_event=...)``), so either the
+    card is inserted before Stop's retirement (which then removes it) or the
+    insertion sees the flag and publishes nothing. No card can appear after
+    Stop has returned, not even before the recheck below. The recheck after
+    publishing stays as a second line of defence. (A click that validated the
+    card in the instant before it was retired still relays once; that is a
+    click that happened before Stop, not after it.)
+    """
+    from api.route_approvals import settle_gateway_pending_run, submit_gateway_pending_mirror
+
+    if cancel_event.is_set():
+        return None, 0
+    head, total = submit_gateway_pending_mirror(session_id, approval_data, cancel_event=cancel_event)
+    run_id = str(approval_data.get("run_id") or "").strip()
+    if run_id and cancel_event.is_set():
+        settle_gateway_pending_run(
+            session_id, run_id, reason="Gateway run was cancelled before approval resolution",
+        )
+        return None, 0
+    return head, total
+
+
 def _run_gateway_chat_streaming(
     session_id,
     msg_text,
@@ -2838,6 +3123,7 @@ def _run_gateway_chat_streaming(
             logger.debug("Failed to put gateway event to queue")
 
     s = None
+    api_key = ""
     final_text = ""
     terminal_error = ""
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
@@ -2847,10 +3133,24 @@ def _run_gateway_chat_streaming(
 
         # Profile-bound like the endpoint below: the worker thread has no request profile TLS.
         cfg = _gateway_config_for_profile(getattr(s, "profile", None)) or get_config()
+        # A legacy session (no stored effort) inherits agent.reasoning_effort from its
+        # own profile's isolated config, as the composer chip and the local worker do:
+        # cfg above still honours an ambient HERMES_CONFIG_PATH for a named profile.
+        session_effort = getattr(s, "reasoning_effort", None)
+        try:
+            from api.config import effective_session_reasoning_effort
+            from api.profiles import get_hermes_home_for_profile
+
+            session_effort = effective_session_reasoning_effort(
+                session_effort, get_hermes_home_for_profile(getattr(s, "profile", None)),
+            )
+        except Exception:
+            logger.warning("isolated reasoning config read failed; using the session config", exc_info=True)
         reasoning_effort = _gateway_reasoning_effort_for_request(
             cfg,
             model=model,
             model_provider=model_provider,
+            session_effort=session_effort,
         )
         # The session's own profile, not the process-active one: this worker thread has no
         # thread-local profile, so get_config()/os.environ describe whichever profile the
@@ -2914,8 +3214,7 @@ def _run_gateway_chat_streaming(
             body_extras = {}
             if model_provider:
                 body_extras["provider"] = model_provider
-            if reasoning_effort is not None:
-                body_extras["reasoning_effort"] = reasoning_effort
+            body_extras.update(_gateway_reasoning_body_fields(reasoning_effort))
             if _gw_overrides.get("service_tier"):
                 body_extras["service_tier"] = _gw_overrides["service_tier"]
             def record_run(run_id, request=None):
@@ -3018,8 +3317,7 @@ def _run_gateway_chat_streaming(
             }
             if model_provider:
                 body["provider"] = model_provider
-            if reasoning_effort is not None:
-                body["reasoning_effort"] = reasoning_effort
+            body.update(_gateway_reasoning_body_fields(reasoning_effort))
             if _gw_overrides.get("service_tier"):
                 body["service_tier"] = _gw_overrides["service_tier"]
             req = urllib.request.Request(
@@ -3065,9 +3363,18 @@ def _run_gateway_chat_streaming(
                             _approval_run_id = str(approval_data.get("run_id") or "").strip()
                             if _approval_run_id:
                                 _STREAM_RUN_IDS[stream_id] = _approval_run_id
+                            # Same creation-time identity decision the Runs API
+                            # relay makes (#8579): the mirror must carry the
+                            # marker /api/approval/respond reads, or a
+                            # generation-fenced gateway rejects the relayed
+                            # answer with 400 invalid_params and the card never
+                            # settles. Skipping it here silently downgraded
+                            # every default-stream card to the legacy body.
+                            approval_data["_gateway_agent_identity_v1"] = _gateway_approval_identity_v1(
+                                approval_data, base_url, api_key
+                            )
                             try:
-                                from api.route_approvals import submit_gateway_pending_mirror
-                                head, total = submit_gateway_pending_mirror(session_id, approval_data)
+                                head, total = _submit_stream_approval_mirror(session_id, approval_data, cancel_event)
                                 approval_data = {**(head or approval_data), "pending_count": total}
                             except Exception:
                                 logger.debug("submit_gateway_pending_mirror failed", exc_info=True)
@@ -3410,17 +3717,14 @@ def _run_gateway_chat_streaming(
             "hint": "Check HERMES_WEBUI_GATEWAY_BASE_URL and Gateway API server health.",
         })
     finally:
-        mapped_run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip()
-        if mapped_run_id:
-            try:
-                from api.route_approvals import settle_gateway_pending_run
-                settle_gateway_pending_run(
-                    session_id,
-                    mapped_run_id,
-                    reason="Gateway run ended during teardown before approval resolution",
-                )
-            except Exception:
-                logger.debug("Failed to settle gateway pending approvals during teardown", exc_info=True)
+        try:
+            settle_gateway_stream_approvals(
+                session_id,
+                stream_id,
+                reason="Gateway run ended during teardown before approval resolution",
+            )
+        except Exception:
+            logger.debug("Failed to settle gateway pending approvals during teardown", exc_info=True)
         if s is not None:
             try:
                 with _get_session_agent_lock(session_id):
