@@ -100,6 +100,89 @@ jobs:
           docs_only="$result"
           echo "docs_only=$docs_only"
 
+  # The env-keys API talks to the AGENT's own .env reader/writer, so its
+  # real-path tests need the agent's modules to be importable. The matrix
+  # above does NOT install hermes-agent: doing so there would turn every
+  # `importorskip("hermes_cli...")` test in the suite from skipped into
+  # running, which is a far wider blast radius than this API deserves.
+  #
+  # So the agent is fetched HERE, in a job of its own, and only the
+  # env-keys modules run against it. That gives the real-agent path actual
+  # CI coverage (it used to skip in every shard) without touching the
+  # matrix's behaviour.
+  #
+  # The agent's SOURCE is used, at a pinned revision, rather than its PyPI
+  # distribution:
+  #   * `hermes-agent`'s setup.py refuses wheel and sdist builds outright
+  #     ("Building wheels or sdists for hermes-agent is not supported"), so a
+  #     plain `pip install` of it cannot work at all; only an editable
+  #     install of a source checkout is supported, and that needs the tree on
+  #     disk.
+  #   * The newest PyPI release is three months old and predates the agent
+  #     APIs these tests exercise (`agent.secret_scope.serves_routed_profile`,
+  #     `hermes_constants.pin_process_hermes_home`,
+  #     `hermes_cli.config._write_env_lines`). Installing the distribution
+  #     therefore runs the real-agent assertions against a stale agent, and
+  #     they fail rather than skip.
+  # A checkout at a pinned revision is importable as-is and is exactly the
+  # agent revision the assertions are written against.
+  env-keys-real-agent:
+    needs: changes
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    env:
+      # Pinned agent revision. Bump it deliberately, and re-run the env-keys
+      # real-agent tests locally against the same revision before bumping.
+      AGENT_REV: bf0203a794a07aac3ff764972ab9087baa4e4f4e
+    steps:
+      - name: Docs-only short-circuit
+        if: needs.changes.outputs.docs_only == 'true'
+        run: echo "Docs-only change set — skipping the env-keys real-agent job (nothing executable changed)."
+
+      - uses: actions/checkout@v4
+        if: needs.changes.outputs.docs_only != 'true'
+
+      - name: Set up Python
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install "pyyaml>=6.0" pytest pytest-timeout pytest-asyncio python-docx openpyxl python-pptx
+          # `hermes_cli.config` imports `hermes_yaml` -> `ruamel`, so this is
+          # required for the agent's modules to import at all.
+          pip install "ruamel.yaml"
+
+      - name: Fetch the agent source at the pinned revision
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          mkdir -p agent-src
+          cd agent-src
+          git init -q .
+          git remote add origin https://github.com/NousResearch/hermes-agent.git
+          git fetch -q --depth 1 origin "$AGENT_REV"
+          git checkout -q FETCH_HEAD
+          git rev-parse HEAD
+
+      - name: Run the env-keys real-agent tests
+        if: needs.changes.outputs.docs_only != 'true'
+        env:
+          # The agent's modules import from the checkout, and the repo's own
+          # agent discovery finds the same tree, so these tests run against
+          # the real agent instead of skipping.
+          PYTHONPATH: ${{ github.workspace }}/agent-src
+          HERMES_WEBUI_AGENT_DIR: ${{ github.workspace }}/agent-src
+        run: |
+          pytest tests/test_issue7870_real_agent_paths.py \
+                 tests/test_issue7870_isolated_profile_paths.py \
+                 tests/test_issue7870_no_raw_env_reads.py \
+                 tests/test_issue7870_env_keys_profile_auth.py \
+                 -v --timeout=60
+
   lint:
     needs: changes
     # `lint` is not currently a required check, but add always() anyway so it can
