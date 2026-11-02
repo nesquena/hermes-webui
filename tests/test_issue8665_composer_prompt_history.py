@@ -248,13 +248,13 @@ def _binding_src() -> str:
 
 
 def _switch_save_src() -> str:
-    """loadSession()'s real lines: draft restore, then binding check and save."""
+    """loadSession()'s real pre-switch lines, as one unedited slice: from the
+    #8665 draft restore through the binding check and the awaited draft save."""
     load = SESSIONS_JS.index("async function loadSession(sid){")
-    restore = SESSIONS_JS.index(RESTORE_LINE, load)
-    start = SESSIONS_JS.index("  let _switchContId = '';", restore)
+    anchor = SESSIONS_JS.index("  // #8665: leaving a chat while a sent prompt is recalled", load)
     end = SESSIONS_JS.index(
-        "      _handleComposerDraftPostFailure(error, currentSid, draftText, draftFiles);", start)
-    return RESTORE_LINE + "\n" + SESSIONS_JS[start:end] + "    }\n  }\n"
+        "      _handleComposerDraftPostFailure(error, currentSid, draftText, draftFiles);", anchor)
+    return SESSIONS_JS[anchor:end] + "    }\n  }\n"
 
 
 CONTINUATION = r"""
