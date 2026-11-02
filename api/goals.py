@@ -3,15 +3,23 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import logging
 import re
+import threading
 import secrets
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+try:  # Older hermes-agent builds have no quality gates.
+    from hermes_cli.goals import CONTINUATION_PROMPT_GATE_FAILED_TEMPLATE  # type: ignore
+except Exception:  # pragma: no cover - depends on installed hermes-agent
+    CONTINUATION_PROMPT_GATE_FAILED_TEMPLATE = ""  # type: ignore
 
 try:  # Exposed as a module attribute so tests can monkeypatch it directly.
     from hermes_cli.goals import (  # type: ignore
@@ -653,12 +661,764 @@ def has_active_goal(
         return False
 
 
+def resume_kickoff_prompt(
+    session_id: str,
+    *,
+    profile_home: str | Path | None = None,
+) -> str | None:
+    """Continuation prompt to kick off a just-resumed active goal, or None."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None
+    mgr = _manager(sid, profile_home=profile_home)
+    if mgr is None:
+        return None
+    try:
+        if not mgr.is_active():
+            return None
+        prompt = None
+        if hasattr(mgr, "next_continuation_prompt"):
+            prompt = mgr.next_continuation_prompt()
+        if not prompt:
+            goal = str(getattr(getattr(mgr, "state", None), "goal", "") or "").strip()
+            if goal and CONTINUATION_PROMPT_TEMPLATE:
+                prompt = CONTINUATION_PROMPT_TEMPLATE.format(goal=goal)
+        return str(prompt or "").strip() or None
+    except Exception as exc:
+        logger.debug("resume kickoff prompt failed for session=%s: %s", sid, exc)
+        return None
+
+
+def _gather_goal_turn_background_state(
+    session_id: str,
+    *,
+    profile_home: str | Path | None = None,
+) -> tuple[Any, int]:
+    """Return ``(background_processes, active_delegations)`` for *session_id*."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None, 0
+    try:
+        from hermes_cli.goals import (  # type: ignore
+            count_active_delegations,
+            gather_background_processes,
+        )
+    except Exception:
+        # No Agent CLI on this install: the durable state.db count is still authoritative.
+        count_active_delegations = gather_background_processes = None
+    context_api = _native_profile_context_api(profile_home) if profile_home else None
+    token = None
+    if context_api is not None:
+        try:
+            token = context_api[0](Path(profile_home).expanduser().resolve())
+        except Exception:
+            token = None
+    try:
+        bg_procs = None
+        active_deleg = 0
+        if gather_background_processes is not None:
+            try:
+                bg_procs = gather_background_processes(owner_task_id=sid)
+            except Exception:
+                bg_procs = None
+        if count_active_delegations is not None:
+            try:
+                active_deleg = int(count_active_delegations(sid) or 0)
+            except Exception:
+                active_deleg = 0
+        active_deleg = max(active_deleg, _state_db_live_delegations(sid, profile_home))
+        return bg_procs, active_deleg
+    finally:
+        if token is not None and context_api is not None:
+            try:
+                context_api[1](token)
+            except Exception:
+                pass
+
+
+def gateway_evaluated_goal_in_turn(
+    session_id: str,
+    *,
+    min_evaluated_at: float | None,
+    profile_home: str | Path | None = None,
+) -> bool:
+    """Return True when the Gateway already evaluated *session_id*'s goal in this turn."""
+    if min_evaluated_at is None or GoalManager is None or GoalManager is not _NativeGoalManager:
+        return False
+    sid = str(session_id or "").strip()
+    if not sid:
+        return False
+    if profile_home is not None:
+        try:
+            db_file = Path(profile_home).expanduser().resolve() / "state.db"
+            if not db_file.is_file():
+                return False
+        except Exception:
+            return False
+    mgr = _manager(sid, profile_home=profile_home)
+    if mgr is None:
+        return False
+    state = getattr(mgr, "state", None)
+    if state is None:
+        return False
+    try:
+        last_turn_at = float(getattr(state, "last_turn_at", 0.0) or 0.0)
+        return last_turn_at > 0.0 and last_turn_at >= float(min_evaluated_at)
+    except Exception:
+        return False
+
+
+_LIVE_DELEGATION_STATES = ("running", "stalling", "finalizing")
+
+
+def _state_db_live_delegations(session_id: str, profile_home: str | Path | None) -> int:
+    """Live async delegations for *session_id* recorded in the profile's state.db (fail-safe 0)."""
+    try:
+        from api.agent_sessions import open_state_db_readonly
+        from api.profiles import get_active_hermes_home
+
+        home = Path(profile_home) if profile_home else Path(get_active_hermes_home())
+        db = home / "state.db"
+        if not db.exists():
+            return 0
+        conn = open_state_db_readonly(db)
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM async_delegations WHERE state IN (?,?,?) "
+                "AND (parent_session_id = ? OR origin_session_id = ?)",
+                (*_LIVE_DELEGATION_STATES, session_id, session_id),
+            ).fetchone()
+        finally:
+            conn.close()
+        return int(row[0] or 0) if row else 0
+    except Exception:
+        return 0
+
+
+def goal_message_key(decision: Dict[str, Any]) -> str:
+    """i18n key for a goal event; the templated default needs its turns/max/reason args."""
+    key = str(decision.get("message_key") or "")
+    if key or not decision.get("message_args"):
+        return key
+    return "goal_continuing"
+
+
+def _hold_while_delegations_run(decision: Dict[str, Any], session_id: str, profile_home) -> Dict[str, Any]:
+    """Defer a continuation while subagents run; their completion wakeup re-evaluates the goal."""
+    if not decision.get("should_continue"):
+        return decision
+    live = _state_db_live_delegations(session_id, profile_home)
+    if live <= 0:
+        return decision
+    return {
+        **decision,
+        "should_continue": False,
+        "continuation_prompt": None,
+        "verdict": "wait",
+        "reason": f"waiting on {live} running subagent(s)",
+        "message": f"⏳ Goal waiting on {live} running subagent(s); resumes when they finish.",
+        "message_key": "",
+        "message_args": [],
+    }
+
+
+def _decision_from_evaluated_state(mgr: Any, state: Any) -> Optional[Dict[str, Any]]:
+    """Reconstruct the native decision from a GoalState already updated in-turn.
+
+    Returns ``None`` when the decision cannot be reconstructed faithfully;
+    the caller then does not adopt the persisted state.
+    """
+    status = str(getattr(state, "status", "") or "").strip()
+    verdict = str(getattr(state, "last_verdict", "") or "continue").strip() or "continue"
+    reason = str(getattr(state, "last_reason", "") or "").strip()
+    paused_reason = str(getattr(state, "paused_reason", "") or "").strip()
+    turns_used = int(getattr(state, "turns_used", 0) or 0)
+    max_turns = int(getattr(state, "max_turns", 0) or 0)
+
+    if status == "done":
+        return {
+            "status": "done",
+            "should_continue": False,
+            "continuation_prompt": None,
+            "verdict": "done",
+            "reason": reason,
+            "message": f"✓ Goal achieved: {reason}" if reason else "✓ Goal achieved",
+        }
+
+    if status == "paused":
+        if verdict == "blocked" or paused_reason.startswith("judged unachievable"):
+            msg = (
+                f"🚫 Goal judged unachievable — paused: {reason or paused_reason} "
+                "Re-scope with /goal set, or override with /goal resume."
+            )
+        elif paused_reason.startswith("turn budget exhausted"):
+            msg = (
+                f"⏸ Goal paused — {turns_used}/{max_turns} turns used. "
+                "Use /goal resume to keep going, or /goal clear to stop."
+            )
+        else:
+            detail = paused_reason or reason
+            msg = f"⏸ Goal paused — {detail}" if detail else "⏸ Goal paused."
+        return {
+            "status": "paused",
+            "should_continue": False,
+            "continuation_prompt": None,
+            "verdict": verdict,
+            "reason": reason or paused_reason,
+            "message": msg,
+        }
+
+    def _inactive() -> Dict[str, Any]:
+        return {
+            "status": status or None,
+            "should_continue": False,
+            "continuation_prompt": None,
+            "verdict": "inactive",
+            "reason": "no active goal",
+            "message": "",
+        }
+
+    if status != "active":
+        # Cleared or unknown: never derive a continuation from it.
+        return _inactive()
+    try:
+        if not mgr.is_active():
+            return _inactive()
+    except Exception:
+        return None
+
+    # The live barrier, not the persisted verdict, decides a parked goal:
+    # resume clears the barrier but leaves ``last_verdict="wait"`` behind.
+    is_waiting = False
+    if hasattr(mgr, "is_waiting"):
+        try:
+            is_waiting = bool(mgr.is_waiting())
+        except Exception:
+            return None
+    if is_waiting:
+        if hasattr(mgr, "_waiting_decision"):
+            try:
+                return dict(mgr._waiting_decision(state) or {})
+            except Exception:
+                pass
+        return {
+            "status": "active",
+            "should_continue": False,
+            "continuation_prompt": None,
+            "verdict": "waiting",
+            "reason": reason,
+            "message": f"⏳ Goal parked — waiting: {reason}" if reason else "⏳ Goal parked",
+        }
+
+    # Native ``evaluate_after_turn`` runs the quality gates BEFORE the judge
+    # and leaves ``last_verdict`` untouched on a failing one, so the first gate
+    # with attempts and a non-zero exit is the one that failed this turn.
+    failed_gate = None
+    for gate in list(getattr(state, "gates", None) or []):
+        attempts = int(getattr(gate, "attempts", 0) or 0)
+        exit_code = getattr(gate, "last_exit_code", None)
+        if attempts > 0 and exit_code not in (None, 0):
+            failed_gate = gate
+            break
+    if failed_gate is not None:
+        if not CONTINUATION_PROMPT_GATE_FAILED_TEMPLATE:
+            return None  # cannot rebuild the native prompt faithfully: don't adopt
+        command = str(getattr(failed_gate, "command", "") or "")
+        exit_code = getattr(failed_gate, "last_exit_code", None)
+        attempts = int(getattr(failed_gate, "attempts", 0) or 0)
+        max_retries = int(getattr(failed_gate, "max_retries", 0) or 0)
+        try:
+            prompt = CONTINUATION_PROMPT_GATE_FAILED_TEMPLATE.format(
+                goal=getattr(state, "goal", ""),
+                command=command,
+                exit_code=exit_code,
+                attempt=attempts,
+                max_retries=max_retries,
+                output=str(getattr(failed_gate, "last_output_tail", "") or "") or "(no output)",
+            )
+        except Exception:
+            return None
+        return {
+            "status": "active",
+            "should_continue": True,
+            "continuation_prompt": prompt,
+            "verdict": "gate_failed",
+            "reason": f"gate failed (exit {exit_code}): $ {command}",
+            "message": (
+                f"✗ Quality gate failed ({turns_used}/{max_turns} turns, "
+                f"attempt {attempts}/{max_retries}): $ {command}"
+            ),
+        }
+
+    # A lifted WAIT barrier can leave an active goal past max_turns: pause it.
+    if max_turns > 0 and turns_used >= max_turns:
+        budget_reason = f"turn budget exhausted ({turns_used}/{max_turns})"
+        try:
+            mgr.pause(reason=budget_reason)
+        except Exception:
+            return None
+        return {
+            "status": "paused",
+            "should_continue": False,
+            "continuation_prompt": None,
+            "verdict": verdict,
+            "reason": reason or budget_reason,
+            "message": (
+                f"⏸ Goal paused — {turns_used}/{max_turns} turns used. "
+                "Use /goal resume to keep going, or /goal clear to stop."
+            ),
+        }
+
+    prompt = None
+    if hasattr(mgr, "next_continuation_prompt"):
+        try:
+            prompt = mgr.next_continuation_prompt()
+        except Exception:
+            prompt = None
+    if not prompt:
+        return None
+    # An unobserved WAIT barrier continues; a live barrier returned above.
+    if verdict in ("wait", "waiting", "gate_failed"):
+        verdict = "continue"
+    return {
+        "status": "active",
+        "should_continue": True,
+        "continuation_prompt": prompt,
+        "verdict": verdict,
+        "reason": reason,
+        "message": f"↻ Continuing toward goal ({turns_used}/{max_turns}): {reason}",
+    }
+
+
+def stream_channel_has_subscribers(channel: Any) -> bool:
+    """Return True when at least one live SSE subscriber is attached to *channel*."""
+    if channel is None:
+        return False
+    snap_fn = getattr(channel, "diagnostic_snapshot", None)
+    if not callable(snap_fn):
+        return True
+    try:
+        snap = snap_fn() or {}
+        return int(snap.get("subscriber_count", 0) or 0) > 0
+    except Exception:
+        return True
+
+
+# A browser hand-off is a LEASE: a tab that switched away never posts the
+# queued continuation, so after this grace the server dispatches the same
+# record (same ID) itself.
+GOAL_CONTINUATION_BROWSER_GRACE_SECONDS = 15.0
+_BROWSER_GRACE_TIMERS: dict[str, Any] = {}
+_BROWSER_GRACE_LOCK = threading.Lock()
+# Bounded and therefore only a label: the pending record decides admission,
+# so an evicted entry can never turn a spent token into a turn.
+_SPENT_GOAL_CONTINUATION_IDS: "OrderedDict[tuple, None]" = OrderedDict()
+_SPENT_GOAL_CONTINUATION_LIMIT = 64
+
+
+def _locked_pending_record(session_id: str) -> Optional[Dict[str, Any]]:
+    """Live record when marker and record agree. Caller holds the record lock."""
+    if not session_id or session_id not in _cfg.PENDING_GOAL_CONTINUATION:
+        return None
+    record = _cfg.PENDING_GOAL_CONTINUATION_PROMPTS.get(session_id)
+    return record if isinstance(record, dict) else None
+
+
+def _locked_pending_record_matches(session_id: str, continuation_id: str) -> bool:
+    """True when the live record carries *continuation_id*. Caller holds the lock."""
+    record = _locked_pending_record(session_id)
+    current = str((record or {}).get("continuation_id") or "").strip()
+    return bool(current) and secrets.compare_digest(current, continuation_id)
+
+
+def pending_goal_continuation_record(session_id: str) -> Optional[Dict[str, Any]]:
+    """Copy of the session's pending record (lease deadline included), or None."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None
+    with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
+        record = _locked_pending_record(sid)
+        if not record:
+            return None
+        prompt = str(record.get("prompt") or "").strip()
+        cid = str(record.get("continuation_id") or "").strip()
+        if not prompt or not cid:
+            return None
+        deadline = record.get("browser_grace_deadline")
+        return {
+            "prompt": prompt,
+            "continuation_id": cid,
+            "detached_owned": bool(record.get("detached_owned")),
+            "grace_deadline": float(deadline) if isinstance(deadline, (int, float)) else None,
+        }
+
+
+def _arm_browser_grace_timer(sid: str, cid: str, grace: float) -> None:
+    """One bounded daemon timer per session; re-arming cancels the previous."""
+    holder: dict[str, Any] = {}
+
+    def _fire() -> None:
+        with _BROWSER_GRACE_LOCK:
+            if _BROWSER_GRACE_TIMERS.get(sid) is holder.get("timer"):
+                _BROWSER_GRACE_TIMERS.pop(sid, None)
+        try:
+            # One wakeup per record: take the lease over, or re-run a restored
+            # server-owned record with its own ID.
+            if not dispatch_browser_owned_goal_continuation(sid, cid):
+                retry_detached_goal_continuation(sid)
+        except Exception:
+            logger.debug(
+                "Browser-owned goal continuation fallback failed for %s",
+                sid,
+                exc_info=True,
+            )
+
+    timer = threading.Timer(grace, _fire)
+    timer.daemon = True
+    holder["timer"] = timer
+    with _BROWSER_GRACE_LOCK:
+        previous = _BROWSER_GRACE_TIMERS.pop(sid, None)
+        _BROWSER_GRACE_TIMERS[sid] = timer
+    if previous is not None:
+        previous.cancel()
+    timer.start()
+
+
+def hand_goal_continuation_to_browser(
+    session_id: str, continuation_id: str, *, grace_seconds: float | None = None
+) -> bool:
+    """Give an attached browser first refusal, with a server-side deadline."""
+    sid = str(session_id or "").strip()
+    cid = str(continuation_id or "").strip()
+    if not sid or not cid:
+        return False
+    grace = (
+        GOAL_CONTINUATION_BROWSER_GRACE_SECONDS
+        if grace_seconds is None
+        else grace_seconds
+    )
+    try:
+        grace = max(0.0, float(grace))
+    except Exception:
+        grace = GOAL_CONTINUATION_BROWSER_GRACE_SECONDS
+    with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
+        if not _locked_pending_record_matches(sid, cid):
+            return False
+        _cfg.PENDING_GOAL_CONTINUATION_PROMPTS[sid]["browser_grace_deadline"] = (
+            time.monotonic() + grace
+        )
+    _arm_browser_grace_timer(sid, cid, grace)
+    return True
+
+
+def dispatch_goal_continuation(
+    session_id: str, continuation_id: str, channel: Any
+) -> bool:
+    """Lease the record to a live browser, else keep the server as dispatcher.
+
+    True means the browser must receive ``goal_continue``; False means the
+    server owns the record and starts the turn at teardown.
+    """
+    cid = str(continuation_id or "").strip()
+    if stream_channel_has_subscribers(channel):
+        hand_goal_continuation_to_browser(session_id, cid)
+        return True
+    mark_detached_goal_continuation(session_id, cid)
+    return False
+
+
+def dispatch_browser_owned_goal_continuation(
+    session_id: str, continuation_id: str = ""
+) -> bool:
+    """Take over a browser-held continuation once its grace deadline passed.
+
+    The record keeps its ID and gains ``detached_owned``, so admission stays
+    the single arbiter for a browser POST that lands anyway.
+    """
+    record = pending_goal_continuation_record(session_id)
+    if not record or record["detached_owned"]:
+        return False
+    want = str(continuation_id or "").strip()
+    if want and not secrets.compare_digest(record["continuation_id"], want):
+        return False
+    deadline = record.get("grace_deadline")
+    if deadline is None or time.monotonic() < deadline:
+        return False
+    if not mark_detached_goal_continuation(session_id, record["continuation_id"]):
+        return False
+    start_detached_goal_continuation(
+        session_id, record["prompt"], record["continuation_id"]
+    )
+    return True
+
+
+def goal_continuation_already_dispatched(session_id: str, continuation_id: str) -> bool:
+    """True when this process recorded admitting a record with this ID.
+
+    A LABEL only: the pending record decides whether a token may start a turn.
+    """
+    key = (str(session_id or "").strip(), str(continuation_id or "").strip())
+    if not key[0] or not key[1]:
+        return False
+    with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
+        return key in _SPENT_GOAL_CONTINUATION_IDS
+
+
+def _note_goal_continuation_consumed(session_id: str, continuation_id: str) -> None:
+    """Remember an admitted ID. Caller holds ``PENDING_GOAL_CONTINUATION_LOCK``."""
+    key = (str(session_id or "").strip(), str(continuation_id or "").strip())
+    if not key[0] or not key[1]:
+        return
+    _SPENT_GOAL_CONTINUATION_IDS[key] = None
+    while len(_SPENT_GOAL_CONTINUATION_IDS) > _SPENT_GOAL_CONTINUATION_LIMIT:
+        _SPENT_GOAL_CONTINUATION_IDS.popitem(last=False)
+
+
+def pending_goal_continuation_matches(session_id: str, continuation_id: str) -> bool:
+    """True when the session's pending record is exactly *continuation_id*."""
+    sid = str(session_id or "").strip()
+    cid = str(continuation_id or "").strip()
+    if not sid or not cid:
+        return False
+    with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
+        return _locked_pending_record_matches(sid, cid)
+
+
+def detached_goal_continuation_skip_reason(session_id: str, continuation_id: str = "") -> str:
+    """Why a detached continuation must NOT start, or '' when it may.
+
+    Pre-flight only: admission re-validates record and goal under the lock.
+    """
+    sid = str(session_id or "").strip()
+    if not sid:
+        return "missing_session"
+    if not pending_goal_continuation_matches(sid, continuation_id):
+        return "not_pending"
+    try:
+        from api.models import get_session
+
+        s = get_session(sid)
+    except Exception:
+        return "session_unavailable"
+    try:
+        from api.compression_continuation import durable_compression_continuation
+
+        if durable_compression_continuation(s)[0]:
+            return "sealed_parent"
+    except Exception:
+        return "lineage_unknown"
+    owner = getattr(s, "profile", None)
+    try:
+        from api.profiles import (
+            _is_isolated_profile_mode,
+            _profiles_match,
+            get_active_profile_name,
+            get_hermes_home_for_profile,
+        )
+
+        if _is_isolated_profile_mode() and not _profiles_match(
+            owner, get_active_profile_name()
+        ):
+            return "foreign_profile"
+        profile_home = get_hermes_home_for_profile(owner or "default")
+    except Exception:
+        return "profile_unresolved"
+    try:
+        from api.streaming import _session_has_cancel_marker
+
+        if _session_has_cancel_marker(s):
+            return "cancelled"
+    except Exception:
+        return "cancel_state_unknown"
+    if getattr(s, "pending_user_message", None):
+        return "turn_pending"
+    try:
+        from api.background_process import _session_has_active_turn
+
+        if _session_has_active_turn(sid):
+            return "turn_active"
+    except Exception:
+        return "turn_state_unknown"
+    if not has_active_goal(sid, profile_home=profile_home):
+        return "goal_inactive"
+    return ""
+
+
+def retire_continuation_for_sealed_parent(session_id: str) -> None:
+    """Retire a continuation whose session was compressed, and say so.
+
+    The record is dropped (a turn must never start on the sealed parent), but the
+    goal must not stop silently: pause it on the continuation tip with a reason
+    naming the compression and the child, so the status line explains the stop.
+    """
+    sid = str(session_id or "").strip()
+    if not sid:
+        return
+    tip = None
+    profile_home = None
+    try:
+        from api.compression_continuation import durable_compression_continuation
+        from api.models import get_session
+        from api.profiles import get_hermes_home_for_profile
+
+        s = get_session(sid)
+        tip = durable_compression_continuation(s)[1]
+        profile_home = get_hermes_home_for_profile(getattr(s, "profile", None) or "default")
+    except Exception:
+        logger.debug("sealed-parent lineage lookup failed for session=%s", sid, exc_info=True)
+    clear_pending_goal_continuation(sid)
+    target = tip or sid
+    try:
+        from api.config import _get_session_agent_lock
+
+        # /goal clear|pause|resume mutate the goal under this same per-session lock.
+        # Load -> is_active -> pause must be one critical section: the manager caches
+        # native state at load, so a clear that lands between the read and the save
+        # would be overwritten by a stale "paused" write.
+        with _get_session_agent_lock(target):
+            mgr = _manager(target, profile_home=profile_home)
+            if mgr is not None and mgr.is_active():
+                child = f" Continue in session {tip}." if tip else ""
+                mgr.pause(
+                    reason=(
+                        f"session {sid} was compressed; its pending goal continuation was "
+                        f"stopped.{child} Use /goal resume to continue."
+                    )
+                )
+    except Exception:
+        logger.warning("could not record stopped goal continuation for session=%s", sid, exc_info=True)
+
+
+def start_detached_goal_continuation(
+    session_id: str,
+    continuation_prompt: str,
+    continuation_id: str,
+) -> None:
+    """Run a registered continuation server-side (0 SSE subscribers).
+
+    Admission consumes the record by ID; a stopped runner is retried with it.
+    """
+    sid = str(session_id or "").strip()
+    prompt = str(continuation_prompt or "").strip()
+    cid = str(continuation_id or "").strip()
+    if not sid or not prompt or not cid:
+        return
+
+    def _runner() -> None:
+        try:
+            from api.routes import start_session_turn
+
+            reason = detached_goal_continuation_skip_reason(sid, cid)
+            if reason:
+                logger.debug(
+                    "Detached goal continuation skipped for session %s: %s",
+                    sid,
+                    reason,
+                )
+                if reason == "sealed_parent":
+                    # A turn must never start on the compressed parent; retries would loop.
+                    retire_continuation_for_sealed_parent(sid)
+                return
+            result = start_session_turn(
+                sid, prompt, source="goal_wakeup", goal_continuation_id=cid
+            )
+            status = 0
+            if isinstance(result, dict):
+                try:
+                    status = int(result.get("_status", 200) or 200)
+                except Exception:
+                    status = 0
+            if status and status >= 400:
+                # The record still owns its dispatcher: resume/idle retries it.
+                logger.debug(
+                    "Detached goal continuation rejected for session %s: status=%s reason=%s",
+                    sid,
+                    status,
+                    result.get("reason") if isinstance(result, dict) else "",
+                )
+        except Exception:
+            logger.debug(
+                "Detached goal continuation start failed for session %s",
+                sid,
+                exc_info=True,
+            )
+
+    threading.Thread(
+        target=_runner,
+        name=f"goal-continue-{sid[:12]}",
+        daemon=True,
+    ).start()
+
+
+def mark_detached_goal_continuation(session_id: str, continuation_id: str) -> bool:
+    """Record the WebUI server as the SOLE dispatcher of this continuation."""
+    sid = str(session_id or "").strip()
+    cid = str(continuation_id or "").strip()
+    if not sid or not cid:
+        return False
+    with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
+        if not _locked_pending_record_matches(sid, cid):
+            return False
+        _cfg.PENDING_GOAL_CONTINUATION_PROMPTS[sid]["detached_owned"] = True
+        return True
+
+
+def pending_detached_goal_continuation(session_id: str) -> Optional[Dict[str, Any]]:
+    """Return ``{prompt, continuation_id}`` for a WebUI-owned pending record."""
+    record = pending_goal_continuation_record(session_id)
+    if not record or not record["detached_owned"]:
+        return None
+    return {"prompt": record["prompt"], "continuation_id": record["continuation_id"]}
+
+
+def retry_detached_goal_continuation(session_id: str) -> bool:
+    """Re-dispatch a WebUI-owned (detached) continuation with its EXISTING ID.
+
+    Retrying is safe because admission consumes the record by ID under the
+    session lock: concurrent attempts collapse to at most one admitted turn.
+    """
+    record = pending_detached_goal_continuation(session_id)
+    if not record:
+        return dispatch_browser_owned_goal_continuation(session_id)
+    start_detached_goal_continuation(
+        session_id, record["prompt"], record["continuation_id"]
+    )
+    return True
+
+
+def settle_goal_continuation_after_turn(
+    session_id: str,
+    continuation_prompt: str,
+    continuation_id: str,
+    *,
+    cancelled: bool,
+) -> None:
+    """Start the server-owned continuation, else retry a stopped one.
+
+    A cancelled turn never dispatches; admission still admits one turn.
+    """
+    if cancelled:
+        return
+    try:
+        if continuation_prompt:
+            start_detached_goal_continuation(
+                session_id, continuation_prompt, continuation_id
+            )
+        else:
+            retry_detached_goal_continuation(session_id)
+    except Exception:
+        logger.debug(
+            "Goal continuation teardown failed for session %s", session_id, exc_info=True
+        )
+
+
 def evaluate_goal_after_turn(
     session_id: str,
     last_response: str,
     *,
     user_initiated: bool = True,
     profile_home: str | Path | None = None,
+    min_evaluated_at: float | None = None,
 ) -> Dict[str, Any]:
     """Evaluate a completed turn against the standing goal, if any."""
     sid = str(session_id or "").strip()
@@ -682,16 +1442,50 @@ def evaluate_goal_after_turn(
             "message": "",
         }
     try:
+        state = getattr(mgr, "state", None)
+        if (
+            min_evaluated_at is not None
+            and state is not None
+            and float(getattr(state, "last_turn_at", 0.0) or 0.0) >= float(min_evaluated_at)
+        ):
+            decision = _decision_from_evaluated_state(mgr, state)
+            if decision is not None:
+                return _hold_while_delegations_run(_goal_decision_payload(decision, state), sid, profile_home)
         if not mgr.is_active():
             return {
-                "status": getattr(getattr(mgr, "state", None), "status", None),
+                "status": getattr(state, "status", None),
                 "should_continue": False,
                 "continuation_prompt": None,
                 "verdict": "inactive",
                 "reason": "no active goal",
                 "message": "",
             }
-        decision = mgr.evaluate_after_turn(str(last_response or ""), user_initiated=user_initiated)
+        eval_kwargs: Dict[str, Any] = {"user_initiated": user_initiated}
+        target_eval = getattr(
+            getattr(mgr, "_manager", mgr),
+            "evaluate_after_turn",
+            mgr.evaluate_after_turn,
+        )
+        try:
+            params = inspect.signature(target_eval).parameters
+            accepts_var_kw = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+            )
+            if (
+                accepts_var_kw
+                or "background_processes" in params
+                or "active_delegations" in params
+            ):
+                bg_procs, active_deleg = _gather_goal_turn_background_state(
+                    sid, profile_home=profile_home
+                )
+                if accepts_var_kw or "background_processes" in params:
+                    eval_kwargs["background_processes"] = bg_procs
+                if accepts_var_kw or "active_delegations" in params:
+                    eval_kwargs["active_delegations"] = active_deleg
+        except Exception:
+            pass
+        decision = mgr.evaluate_after_turn(str(last_response or ""), **eval_kwargs)
     except Exception as exc:
         logger.debug("goal evaluation failed for session=%s: %s", sid, exc)
         return {
@@ -709,7 +1503,7 @@ def evaluate_goal_after_turn(
     decision.setdefault("message", "")
     decision = dict(decision)
     decision = _goal_decision_payload(decision, getattr(mgr, "state", None))
-    return decision
+    return _hold_while_delegations_run(decision, sid, profile_home)
 
 
 # ── #6885 goal-continuation admission (single-record lifecycle) ─────────────
@@ -790,6 +1584,8 @@ def register_pending_goal_continuation(session_id: str, continuation_prompt: str
     record = {
         "prompt": prompt,
         "continuation_id": uuid.uuid4().hex,
+        # False until a writer learns no browser is attached.
+        "detached_owned": False,
     }
     with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
         _cfg.PENDING_GOAL_CONTINUATION.add(session_id)
@@ -869,6 +1665,7 @@ def consume_pending_goal_continuation(session_id: str, msg: str) -> str | dict |
         if not secrets.compare_digest(cont_id, incoming):
             # Mismatch: keep the record for the browser's real dispatch.
             return False
+        _note_goal_continuation_consumed(session_id, cont_id)
         _drop_pending_goal_continuation(session_id)
         return dict(record)
 
@@ -887,35 +1684,65 @@ def restore_pending_goal_continuation(session_id: str, receipt) -> bool:
     record (that would burn a continuation the browser has not sent yet).
     Restoring an older ID would also resurrect a consumed one.
 
-    ``receipt`` is what
-    :func:`consume_pending_goal_continuation` returned: the record dict, or
-    the session id when only the marker was present.
+    ``receipt`` is what :func:`consume_pending_goal_continuation` returned:
+    the record dict, or the session id when only the marker was present.
+
+    Consuming a record cancels its grace timer, so the rollback owes the
+    dispatch obligation back: the record's own deadline, or one grace out when
+    the server owns it (never a hot loop on a failing launch).
     """
     session_id = str(session_id or "").strip()
     if not session_id or receipt is None or receipt is False:
         return False
+    rearm: tuple[str, float] | None = None
     with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
         if session_id in _cfg.PENDING_GOAL_CONTINUATION_PROMPTS:
             # A newer continuation is armed; keep it and drop the stale receipt.
             return False
         if isinstance(receipt, dict):
             record = dict(receipt)
-            if not str(record.get("continuation_id") or "").strip():
+            cont_id = str(record.get("continuation_id") or "").strip()
+            if not cont_id:
                 return False
         else:
             # Marker-only admission (no popped record): re-arm the marker
             # alone, matching #7249's rollback for the legacy half-pair.
             record = None
+            cont_id = ""
         _cfg.PENDING_GOAL_CONTINUATION.add(session_id)
         if record is not None:
+            deadline = record.get("browser_grace_deadline")
+            # No usable lease deadline: the server owns the retry.
+            server_owned = bool(record.get("detached_owned")) or not isinstance(
+                deadline, (int, float)
+            )
+            if cont_id and server_owned:
+                record["detached_owned"] = True
             _cfg.PENDING_GOAL_CONTINUATION_PROMPTS[session_id] = record
-        return True
+            # The rollback un-consumed this ID: it is dispatchable again.
+            _SPENT_GOAL_CONTINUATION_IDS.pop((session_id, cont_id), None)
+            if cont_id and server_owned:
+                # One grace out: a persistently failing launch must not hot-loop.
+                rearm = (cont_id, max(0.0, float(GOAL_CONTINUATION_BROWSER_GRACE_SECONDS)))
+            elif cont_id and isinstance(deadline, (int, float)):
+                rearm = (cont_id, max(0.0, float(deadline) - time.monotonic()))
+    if rearm is not None:
+        _arm_browser_grace_timer(session_id, rearm[0], rearm[1])
+    return True
 
 
 def _drop_pending_goal_continuation(session_id: str) -> None:
-    """Remove both halves of the record. Caller holds the lock."""
+    """Remove both halves of the record and cancel its grace timer.
+
+    Caller holds the record lock. Cancelling is best-effort: a timer that
+    fires anyway finds no matching record and does nothing.
+    """
     _cfg.PENDING_GOAL_CONTINUATION.discard(session_id)
     _cfg.PENDING_GOAL_CONTINUATION_PROMPTS.pop(session_id, None)
+    with _BROWSER_GRACE_LOCK:
+        timer = _BROWSER_GRACE_TIMERS.pop(str(session_id), None)
+    if timer is not None:
+        timer.cancel()
 
 
 def clear_pending_goal_continuation(session_id: str) -> None:
