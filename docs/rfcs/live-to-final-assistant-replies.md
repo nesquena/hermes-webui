@@ -204,6 +204,11 @@ Requirements:
   explain a visible error or recovery outcome.
 - Very long final answers remain complete and readable. They should not be
   hidden inside the activity summary or replaced by a progress/status artifact.
+- A settled provider-error card can be dismissed from the transcript. The
+  dismissal is stored on its owning assistant error row, hides it from visible
+  transcript and sidebar counts, and survives reload. The prompt, partial work,
+  tool rows, later turns, raw message count, and model-context filtering remain
+  unchanged; active runs and read-only imported sessions are ineligible.
 
 ### Activity display and disclosure addenda
 

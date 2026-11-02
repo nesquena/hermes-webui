@@ -5134,6 +5134,50 @@ def _assistant_anchor_scene_message_ref(message) -> str:
     return _anchor_scene_message_ref_digest(payload)
 
 
+def _dismiss_error_source_rejection(sid: str, handler):
+    """Reject foreign sessions before the dismissal route loads a full owner."""
+    cli_meta = _lookup_cli_session_metadata(sid, all_profiles=True) or {}
+    state_source = _state_db_session_source(sid)
+    try:
+        existing = get_session(sid, metadata_only=True)
+    except KeyError:
+        existing = None
+    if existing is not None:
+        if not _session_visible_to_active_profile(getattr(existing, "profile", None), handler):
+            return "Session not found", 404
+        existing_sources = {
+            str(getattr(existing, key, None) or "").strip().lower()
+            for key in ("session_source", "raw_source", "source_tag")
+            if str(getattr(existing, key, None) or "").strip()
+        }
+        gateway_webui_source = state_source in {"api", "api_server"} and existing_sources == {"webui"}
+        if (
+            (cli_meta and not _session_source_is_webui(cli_meta) and not gateway_webui_source)
+            or (state_source not in {"", "webui", "fork"} and not gateway_webui_source)
+        ):
+            return "Read-only imported sessions cannot be modified", 403
+        if _session_is_subagent_view_only(sid):
+            return "Subagent sessions are view-only and cannot be modified from WebUI", 400
+        if (
+            getattr(existing, "read_only", False)
+            or getattr(existing, "is_cli_session", False)
+            or _is_messaging_session_record(existing)
+        ):
+            return "Read-only imported sessions cannot be modified", 403
+        return None
+
+    if cli_meta and not _session_visible_to_active_profile(cli_meta.get("profile"), handler):
+        return "Session not found", 404
+    if _session_is_subagent_view_only(sid):
+        return "Subagent sessions are view-only and cannot be modified from WebUI", 400
+    if (
+        (cli_meta and not _session_source_is_webui(cli_meta))
+        or state_source not in {"", "webui", "fork"}
+    ):
+        return "Read-only imported sessions cannot be modified", 403
+    return None
+
+
 def _assistant_anchor_scene_message_ref_payload(message) -> dict:
     role = str(message.get("role") or "")
     content = message.get("content")
@@ -6624,7 +6668,9 @@ def _handle_session_anchor_scene(handler, body):
     return j(handler, {"ok": True, "message_index": idx, "message_ref": ref})
 
 
-def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False):
+def _get_or_materialize_session(
+    sid: str, *, refresh_cli_messages: bool = False, allow_materialize: bool = True
+):
     """Get a session, materializing from CLI/agent metadata if not in WebUI store.
 
     Mirrors the fallback logic in /api/session/archive (routes.py:~8530).
@@ -6671,6 +6717,9 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
         return s
     except KeyError:
         pass
+
+    if not allow_materialize:
+        raise KeyError(sid)
 
     # Fallback: try to materialize from CLI/agent session metadata.
     # Active-profile-only: this helper is the shared chokepoint for rename,
@@ -10979,10 +11028,9 @@ def _message_counts_as_renderable_for_window(message) -> bool:
     to keep thinking/tool details inspectable, but they are not reply text. A
     tail page containing only transient metadata makes the frontend open to
     collapsed activity while newer real replies sit behind "load older messages".
-    Hidden internal rows (``delegation_wakeup``) are retained in storage for
-    model/recovery state but are never renderable, so they cannot consume the
-    visible-row budget — otherwise the 30-row restore window can be all-hidden
-    and the transcript opens blank (#quiet-delegation gate review).
+    Hidden internal rows (``delegation_wakeup``) and dismissed provider-error
+    rows remain in storage but do not consume the visible-row budget. Otherwise
+    a restore window can fill with hidden rows and open with no visible messages.
     """
     if not isinstance(message, dict):
         return False
@@ -16490,6 +16538,13 @@ def _handle_session_get(handler, parsed) -> bool:
             )
             if revision:
                 raw["regeneration_revision"] = revision
+        if load_messages:
+            try:
+                from api.session_ops import project_provider_error_dismissal_capabilities
+
+                raw = project_provider_error_dismissal_capabilities(s, raw)
+            except Exception:
+                logger.debug("Provider-error capability projection failed", exc_info=True)
         redact = redact_session_data(raw)
         _t5 = _time.monotonic()
         if _diag: _diag.stage("t5_after_redact")
@@ -18861,6 +18916,55 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/session/compression-recovery/start":
         return _handle_session_compression_recovery_start(handler, body)
 
+    if parsed.path == "/api/session/message/dismiss-error":
+        from api.session_ops import (
+            ProviderErrorDismissalUnavailable,
+            apply_provider_error_dismissal,
+        )
+        if not isinstance(body, dict):
+            return bad(handler, "Request body must be an object", 400)
+        sid = body.get("session_id")
+        dismiss_ref = body.get("dismiss_ref")
+        if set(body) != {"session_id", "dismiss_ref"}:
+            return bad(handler, "Request must contain only session_id and dismiss_ref", 400)
+        if not isinstance(sid, str) or not sid.strip():
+            return bad(handler, "session_id must be a string", 400)
+        if not isinstance(dismiss_ref, str) or len(dismiss_ref) != 64 or any(
+            char not in "0123456789abcdef" for char in dismiss_ref
+        ):
+            return bad(handler, "dismiss_ref must be a 64-character lowercase hex string", 400)
+
+        try:
+            rejection = _dismiss_error_source_rejection(sid, handler)
+            if rejection is not None:
+                return bad(handler, *rejection)
+            try:
+                session = _get_or_materialize_session(sid, allow_materialize=False)
+            except PermissionError:
+                return bad(handler, "Read-only imported sessions cannot be modified", 403)
+            except KeyError:
+                return bad(handler, "Session not found", 404)
+            if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
+                return bad(handler, "Session not found", 404)
+            plan = apply_provider_error_dismissal(session, dismiss_ref)
+        except ProviderErrorDismissalUnavailable as exc:
+            logger.info("provider-error dismissal rejected for %s: %s", sid, exc.code)
+            return bad(handler, "Could not dismiss the provider error card", exc.status)
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.warning("provider-error dismissal failed for %s: %s", sid, exc)
+            return bad(handler, "Could not persist the dismissal", 409)
+
+        from api.config import _evict_session_agent
+        _evict_session_agent(sid)
+        if plan.owner_session_id != sid:
+            _evict_session_agent(plan.owner_session_id)
+        _publish_session_list_changed(
+            "provider_error_dismissed",
+            profile=getattr(session, "profile", None),
+            session_id=sid,
+        )
+        return j(handler, {"ok": True})
+
     if parsed.path == "/api/session/duplicate":
         try:
             sid = body.get("session_id")
@@ -18911,6 +19015,10 @@ def handle_post(handler, parsed) -> bool:
                 archived=False,
                 project_id=session.project_id,
                 profile=session.profile,
+                session_source="fork",
+                source_tag="fork",
+                raw_source="fork",
+                source_label="Fork",
                 input_tokens=session.input_tokens,
                 output_tokens=session.output_tokens,
                 estimated_cost=session.estimated_cost,
@@ -22620,8 +22728,8 @@ def _handle_sessions_search(handler, parsed):
                 sess = get_session_for_scan(s["session_id"])
                 if sess is None:
                     continue
-                # Hidden internal rows neither match nor consume the search
-                # depth budget (#quiet-delegation gate review).
+                # Hidden transcript rows neither match nor consume the search
+                # depth budget.
                 scan_pool = [
                     m for m in (sess.messages or [])
                     if not is_hidden_transcript_row(m)
@@ -27863,6 +27971,23 @@ def _prepare_chat_start_session_for_stream(
         )
         else source
     )
+    existing_sources = {
+        str(getattr(s, key, None) or "").strip().lower()
+        for key in ("session_source", "raw_source", "source_tag")
+        if str(getattr(s, key, None) or "").strip()
+    }
+    if (
+        effective_source == "webui"
+        and not existing_sources
+        and not getattr(s, "is_cli_session", False)
+        and not getattr(s, "read_only", False)
+    ):
+        # Gateway state.db rows use source=api; the sidecar marker proves this
+        # WebUI session owns the shared session id.
+        s.session_source = "webui"
+        s.raw_source = "webui"
+        s.source_tag = "webui"
+        s.source_label = "WebUI"
     s.workspace = workspace
     _invalidate_session_route_state_if_changed(
         s,

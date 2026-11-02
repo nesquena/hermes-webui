@@ -2171,11 +2171,10 @@ class Session:
         # legacy-format reader that stops at a scene key still finds the count.
         # The full anchor_activity_scenes bodies serialize AFTER messages.
         meta['message_count'] = len(guarded_messages or [])
-        # #quiet-delegation: visible count excludes hidden internal rows
-        # (delegation_wakeup). Raw message_count stays the paging/reconnect
-        # authority; sidebar/topbar labels consume the visible count. Both are
-        # derived from the same in-memory array inside this same atomic write,
-        # so they can never disagree about a shrink.
+        # Visible count excludes rows hidden from the transcript, including
+        # delegation wakeups and dismissed provider errors. Raw message_count
+        # stays the paging/reconnect authority; sidebar/topbar labels consume
+        # the visible count. Both derive from the same array in this atomic write.
         meta['visible_message_count'] = sum(
             1 for m in (guarded_messages or [])
             if not is_hidden_transcript_row(m)
@@ -2654,8 +2653,8 @@ class Session:
         )
         if has_pending_user_message:
             message_count = max(message_count, 1)
-        # #quiet-delegation: labels that count "messages" for humans must not
-        # count hidden internal rows. Raw message_count stays the paging /
+        # Labels that count "messages" for humans must omit hidden transcript
+        # rows. Raw message_count stays the paging /
         # reconnect authority; visible_message_count feeds topbar + sidebar.
         # The metadata-prefix value is trusted ONLY for metadata-only stubs
         # (messages=[]); a full session re-walks the live array so a
