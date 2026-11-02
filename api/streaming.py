@@ -9211,14 +9211,29 @@ def _register_retained_owner_slot(key, msg, slot, retained_owner_slots) -> None:
     """
     if key is None or not isinstance(slot, int) or isinstance(slot, bool):
         return
-    stable_id, stable_valid = _stable_message_ownership_id(msg)
-    if not (stable_valid and stable_id is not None):
-        return
     entries = retained_owner_slots.get(key)
     if not isinstance(entries, list):
         entries = []
         retained_owner_slots[key] = entries
+    # #8574 review P2 (nesquena-hermes 2026-11-02): invalidate the PREVIOUS
+    # occupant of this slot BEFORE the incoming row's id is judged. A
+    # replacement republishes the slot for a new owner — including the
+    # documented legacy exact-replacement path, whose replacer carries no
+    # valid ownership id at all — so the superseded owner must stop being
+    # broadcast here even when the replacer can never itself be registered.
+    # Returning on the id check first left the stale ``(superseded_id,
+    # slot)`` pair in place: a later timestamp-shifted replay of the
+    # superseded owner resolved against that stale mapping and overwrote
+    # the replacement inside ``deduped``. Only REGISTERING the replacer
+    # depends on its id being valid. The filter keys on the slot alone, so
+    # entries naming OTHER owners of the same key (their own slots) are
+    # untouched; and since ``deduped[slot]`` is literally being overwritten
+    # by the caller, the dropped entry can never describe a row that still
+    # exists.
     entries[:] = [entry for entry in entries if entry[1] != slot]
+    stable_id, stable_valid = _stable_message_ownership_id(msg)
+    if not (stable_valid and stable_id is not None):
+        return
     entries.append((stable_id, slot))
 
 
