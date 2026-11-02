@@ -8847,15 +8847,31 @@ function filterSessions(){
 }
 
 function _sessionTimestampMs(session) {
-  const raw = Number(session && (session._sidebar_activity_at || session.last_message_at || session.updated_at || session.created_at || 0));
-  return Number.isFinite(raw) ? raw * 1000 : 0;
+  // Milliseconds stored as seconds, NaN, and a clock more than two days ahead
+  // sort as "1 minute ago": the label clamps a negative age to one minute.
+  // Reject that candidate and try the next field. Small positive fixtures stay
+  // valid.
+  function saneSeconds(raw) {
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0 || n >= 4e9) return 0;
+    if (n > Date.now() / 1000 + 48 * 3600) return 0;
+    return n;
+  }
+  if (!session) return 0;
+  const cands = [session._sidebar_activity_at, session.last_message_at, session.updated_at, session.created_at];
+  for (const raw of cands) {
+    const n = saneSeconds(raw);
+    if (n) return n * 1000;
+  }
+  return 0;
 }
 
 function _sessionSortTimestampMs(session) {
   const base = _sessionTimestampMs(session);
   const pending = Number(session && session.pending_started_at);
-  const pendingMs = Number.isFinite(pending) ? pending * 1000 : 0;
-  return Math.max(base, pendingMs);
+  const pendingOk = Number.isFinite(pending) && pending > 0 && pending < 4e9
+    && pending <= Date.now() / 1000 + 48 * 3600;
+  return Math.max(base, pendingOk ? pending * 1000 : 0);
 }
 
 function _sessionRunningSortRank(session) {
@@ -9022,6 +9038,9 @@ function _formatSessionDate(timestampMs, nowMs) {
 function _formatRelativeSessionTime(timestampMs, nowMs) {
   if (!timestampMs) return t('session_time_unknown');
   nowMs = nowMs || _serverNowMs();
+  // More than two days ahead is a corrupt clock, not skew. Clamping the age
+  // to zero would label it "1 minute ago".
+  if (timestampMs > nowMs + 48 * 60 * 60 * 1000) return t('session_time_unknown');
   const diffMs = Math.max(0, nowMs - timestampMs);
   const minute = 60 * 1000;
   const hour = 60 * minute;
