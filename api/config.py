@@ -1006,7 +1006,24 @@ def get_config_for_profile_home(
     # Read the profile file directly and apply documented defaults locally so the
     # returned dict matches ambient get_config() shape (including built-in
     # personalities) without mutating any global cache state.
-    profile_cfg = _load_yaml_config_file(source)
+    #
+    # #8737: expand the RAW document under the env binding of the profile that
+    # OWNS it — the same rule api.profiles.load_profile_config()/
+    # expand_profile_config() defines (#8129) and the streaming repair already
+    # follows (api/streaming.py:_apply_profile_home_context_to_streaming_model).
+    # A plain _load_yaml_config_file() expands against the CALLING thread's env;
+    # a detached worker has no request-local profile env, so the lookup fell
+    # through to os.environ — a ${VAR} only the profile's own .env defines
+    # stayed literal (or resolved through the wrong profile), and a value one
+    # profile's worker mirrored into the process env could surface here as
+    # another profile's config. Only the binding changes: the parse is still the
+    # mtime-keyed memoized one, so the hot read path keeps its cost.
+    from api.profiles import expand_profile_config
+
+    raw = _load_yaml_config_file_raw(source, _copy=False)
+    profile_cfg = expand_profile_config(Path(source).parent, raw) if raw else {}
+    if not isinstance(profile_cfg, dict):
+        profile_cfg = {}
     _apply_config_defaults(profile_cfg)
     return profile_cfg
 
