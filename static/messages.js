@@ -2141,13 +2141,8 @@ async function send(){
     if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);removeThinking();
     if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
     S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});
-    // #8643: clear busy before the rebuild, same ordering as the regeneration
-    // failure terminal in startRegeneration(). The error row IS the turn's
-    // final assistant row, so rendering while still busy painted it without
-    // Regenerate (and the last user row without Edit), and setBusy(false)
-    // never rebuilt them — the failed send left a transcript whose actions did
-    // not match its idle state. _queueDrainSid stays first: setBusy(false)
-    // reads it to drain a queued message for this session.
+    // #8643: clear busy first (as the regeneration failure terminal does) so
+    // the error row paints as an idle final answer, with Regenerate.
     _queueDrainSid=activeSid;setBusy(false);renderMessages();setComposerStatus(`Error: ${errMsg}`);
     // #5472: the send was rejected before the turn was durably started, so the
     // composer text + attachments (cleared at send time) would otherwise be
