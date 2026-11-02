@@ -219,6 +219,25 @@ function _isTouchKeyboardViewport(){
   try{return matchMedia('(hover:none) and (pointer:coarse)').matches&&!_hasFinePointerCoexisting();}catch(_){return false;}
 }
 
+// Validated visualViewport read (#8531): iOS 27 standalone PWAs on foldables
+// (iPhone Duo) can report garbage geometry after fold/unfold — observed
+// height -33554432 (= -2^25) — with no corrective resize event until the
+// device rotates. Returns null when the reading is implausible so callers
+// fall back to window dimensions instead of poisoning layout math.
+function _plausibleVisualViewport(){
+  const vv=window.visualViewport;
+  if(!vv) return null;
+  const h=Number(vv.height), w=Number(vv.width);
+  const ih=window.innerHeight, iw=window.innerWidth;
+  if(!Number.isFinite(h)||h<=0||h>ih*1.5) return null;
+  if(!Number.isFinite(w)||w<=0||w>iw*1.5) return null;
+  return {
+    width:w, height:h,
+    offsetTop:Math.max(0,Number(vv.offsetTop)||0),
+    offsetLeft:Math.max(0,Number(vv.offsetLeft)||0)
+  };
+}
+
 function _syncKeyboardBottomInset(){
   const root=document.documentElement;
   if(!root) return;
@@ -235,7 +254,16 @@ function _syncKeyboardBottomInset(){
     root.style.removeProperty('--keyboard-bottom-inset');
     return;
   }
-  const inset=Math.max(0,Math.ceil(window.innerHeight-(vv.height+vv.offsetTop)));
+  // Compute from one validated snapshot (#8531): a garbage reading clears the
+  // inset entirely — a cleared inset at worst lets the keyboard overlap the
+  // composer for one frame until the next sane viewport event, while any
+  // bogus-but-capped inset buries the transcript.
+  const vvOk=_plausibleVisualViewport();
+  if(!vvOk){
+    root.style.removeProperty('--keyboard-bottom-inset');
+    return;
+  }
+  const inset=Math.max(0,Math.ceil(window.innerHeight-(vvOk.height+vvOk.offsetTop)));
   if(inset>0){
     root.style.setProperty('--keyboard-bottom-inset',`${inset}px`);
   }else{
@@ -415,6 +443,10 @@ function _setWorkspacePanelMode(mode, returnFocusTo){
   }else{
     panel.classList.remove('mobile-open');
   }
+  // Closing the panel leaves the preview (and its editor) mounted, so the
+  // derived dirty state must be recomputed: a hidden editor is not unsaved work
+  // the user can be asked about (#8514).
+  if(typeof _syncPreviewDirty==='function') _syncPreviewDirty();
   syncWorkspacePanelUI();
 }
 
@@ -652,7 +684,11 @@ function _isPwaStandalone(){
 }
 
 function _isInteractiveSwipeTarget(target){
-  try{return !!(target&&target.closest&&target.closest('input,textarea,select,button,a,[contenteditable="true"],.topbar-chips,.composer-left,.sidebar,.rightpanel,.img-lightbox'));}
+  // .model-dropdown: the model menu is a floating panel, not part of the page
+  // behind it. Without it a PWA sidebar swipe starting inside the open menu
+  // drags the whole layout, and the printable-key/shortcut guards below treat
+  // keys typed in the menu as page-level shortcuts.
+  try{return !!(target&&target.closest&&target.closest('input,textarea,select,button,a,[contenteditable="true"],.topbar-chips,.composer-left,.sidebar,.rightpanel,.img-lightbox,.model-dropdown'));}
   catch(_){return false;}
 }
 
@@ -1100,7 +1136,44 @@ function _micToastKeyForRecognitionError(error){
 
   // Persist SR failure across reloads (e.g. Tailscale/network error)
   const _micForceMediaRecorderKey='mic_force_mediarecorder';
-  const _micForceMediaRecorderStored=localStorage.getItem(_micForceMediaRecorderKey);
+  const _micForceMediaRecorderExpiryKey='mic_force_mediarecorder_expires';
+  const _MIC_FORCE_MR_TTL_MS=24*60*60*1000;
+  // A persisted SR failure auto-expires after 24h: a transient outage (or a
+  // browser update that fixes SR) should not pin this device to MediaRecorder
+  // forever.
+  function _getMicForceMediaRecorderStored(){
+    try{
+      const exp=localStorage.getItem(_micForceMediaRecorderExpiryKey);
+      const stored=localStorage.getItem(_micForceMediaRecorderKey);
+      if(exp){
+        const expMs=parseInt(exp,10);
+        // A garbled expiry counts as expired too: a value that never parses
+        // would otherwise pin this device forever.
+        if(!Number.isFinite(expMs)||Date.now()>expMs){
+          localStorage.removeItem(_micForceMediaRecorderKey);
+          localStorage.removeItem(_micForceMediaRecorderExpiryKey);
+          return null;
+        }
+      }else if(stored==='0'||stored==='1'){
+        // Values saved before the expiry key existed would otherwise pin this
+        // device forever. Start the 24h window on the first read after upgrade.
+        // A full or read-only store must not discard the readable preference.
+        try{
+          localStorage.setItem(_micForceMediaRecorderExpiryKey,String(Date.now()+_MIC_FORCE_MR_TTL_MS));
+        }catch(_){}
+      }
+      return stored;
+    }catch(_){
+      return null;
+    }
+  }
+  function _setMicForceMediaRecorder(value){
+    try{
+      localStorage.setItem(_micForceMediaRecorderKey,String(value));
+      localStorage.setItem(_micForceMediaRecorderExpiryKey,String(Date.now()+_MIC_FORCE_MR_TTL_MS));
+    }catch(_){}
+  }
+  const _micForceMediaRecorderStored=_getMicForceMediaRecorderStored();
   // Prefer Hermes server-side STT (MediaRecorder -> /api/transcribe) only
   // after the server confirms an STT provider is available. No stored key must
   // keep browser SpeechRecognition as the first-click default until then; that
@@ -1264,7 +1337,7 @@ function _micToastKeyForRecognitionError(error){
   }
 
   function _allowBrowserSttFallback(){
-    return !!(SpeechRecognition&&localStorage.getItem(_micForceMediaRecorderKey)!=='1');
+    return !!(SpeechRecognition&&_getMicForceMediaRecorderStored()!=='1');
   }
 
   async function _transcribeBlob(blob, prefixSnapshot){
@@ -1282,11 +1355,31 @@ function _micToastKeyForRecognitionError(error){
         err.status=res.status;
         throw err;
       }
-      _commitTranscript(data.transcript||'', prefixSnapshot);
+      const transcript=(data.transcript||'').trim();
+      if(!transcript){
+        // Silence, not failure: the server answers 200 with an empty transcript
+        // (and no_speech) when the audio carried no speech. Committing an empty
+        // string left the user watching an unchanged composer, unable to tell a
+        // dead mic from a quiet room.
+        //
+        // A Send click while recording is an unambiguous send intent (same rule
+        // as the raw-audio path): honour it whenever the composer has anything
+        // send() would accept (text, staged files or selected context), instead
+        // of dropping the queued send and leaving the draft behind. The
+        // "no speech" toast is only for the case where there is nothing to send.
+        if(window._micPendingSend&&_composerHasContent()){
+          _commitTranscript('', prefixSnapshot);
+          return;
+        }
+        window._micPendingSend=false;
+        showToast(t('mic_no_speech'));
+        return;
+      }
+      _commitTranscript(transcript, prefixSnapshot);
     }catch(err){
       if(_isServerSttUnavailable(err)&&_allowBrowserSttFallback()){
         window._micPendingSend=false;
-        localStorage.setItem(_micForceMediaRecorderKey,'0');
+        _setMicForceMediaRecorder('0');
         _forceMediaRecorder=false;
         recognition=_ensureSpeechRecognition();
         showToast(err.message||t('mic_network'));
@@ -1490,7 +1583,7 @@ function _micToastKeyForRecognitionError(error){
       if(event.error==='network'||event.error==='not-allowed'
           ||event.error==='service-not-allowed'||event.error==='audio-capture'){
         // Persist SR failure: next reload will skip SpeechRecognition
-        localStorage.setItem(_micForceMediaRecorderKey,'1');
+        _setMicForceMediaRecorder('1');
         _forceMediaRecorder=true;
         recognition=null;
       }
@@ -1530,7 +1623,7 @@ function _micToastKeyForRecognitionError(error){
   // persisted '0' is respected and not re-flipped.
   function _applyDeferredServerSttFlip(){
     if(_serverSttAvailable&&!_forceMediaRecorder&&!window._micActive
-        &&localStorage.getItem(_micForceMediaRecorderKey)===null){
+        &&_getMicForceMediaRecorderStored()===null){
       _forceMediaRecorder=true;
       recognition=null;
     }
@@ -2771,7 +2864,10 @@ function clearPreview(opts={}){
   const pc=$('previewCode');if(pc)pc.textContent='';
   const pp=$('previewPathText');if(pp)pp.textContent='';
   const ft=$('fileTree');if(ft)ft.style.display='';
-  _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
+  _previewCurrentPath='';_previewCurrentMode='';
+  // Reset the editor baseline as well, so a later preview cannot inherit a
+  // stale "unsaved" comparison from the file that was just closed (#8514).
+  if(typeof _resetPreviewDirty==='function') _resetPreviewDirty(); else _previewDirty=false;
   if(typeof _previewOpenGen==='number') _previewOpenGen++;
   // #6710: retire any in-flight preview open (guarded so harnesses that extract
   // this function alone keep working).
@@ -3236,6 +3332,10 @@ function applyEmptyStatePanelPref(){
 }
 
 window.addEventListener('resize',()=>{
+  // Resync the keyboard inset on every window resize even when visualViewport
+  // exists (#8531): fold transitions can change window geometry without a
+  // trustworthy visualViewport event, so the inset must be re-validated here.
+  _syncKeyboardBottomInset();
   _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
   // Re-apply the sidebar state on viewport change (e.g. foldable unfold:
@@ -3999,6 +4099,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       : 'compact_worklog';
     window._transparentStream=window._chatActivityDisplayMode==='transparent_stream';
     window._transparentEventTimestamps=s.transparent_stream_event_timestamps!==false;
+    if(typeof setScreenReaderMode==='function') setScreenReaderMode(s.screen_reader_mode);
     window._terminalAutoExpandOnOutput=!!s.terminal_auto_expand_on_output;
     window._worklogDetailsExpandedByDefault=!!(
       Object.prototype.hasOwnProperty.call(s,'worklog_details_expanded_default')

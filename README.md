@@ -233,6 +233,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Download as Markdown transcript, full JSON export, or import from JSON
 - Create a public read-only share link for the active conversation from the Control Center; shared pages show a sanitized transcript snapshot without workspace, profile, or live controls
 - Sessions persist across page reloads and SSH tunnel reconnects
+- Model and reasoning-effort selections are restored per session; new-session defaults and legacy-session reasoning fallback use that session's profile configuration, including an authoritative `HERMES_CONFIG_PATH` for root; named profiles use their own `config.yaml` unless the override resolves inside that profile home
 - Browser tab title reflects the active session name
 - CLI session bridge -- CLI sessions from hermes-agent's SQLite store appear in the sidebar with a gold "cli" badge; click to import with full history and reply normally
 - Token/cost display -- input tokens, output tokens, estimated cost shown per conversation (toggle in Settings or `/usage` command)
@@ -262,6 +263,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Auto-stops after ~2s of silence
 - Appends to existing textarea content (doesn't replace)
 - Hidden when browser doesn't support Web Speech API (Chrome, Edge, Safari)
+- A saved fallback from browser speech recognition to server-side recording expires after 24 hours. Preferences stored by older versions get a 24-hour window on first use after upgrading. On reload after expiry, the mic returns to normal capture selection: server transcription takes priority when available; otherwise it uses browser speech recognition.
 
 ### Profiles
 - Profile chip in the **composer footer** -- dropdown showing all profiles with gateway status and model info
@@ -379,12 +381,13 @@ before the session's named-profile Gateway ownership is known.
 
 ### Panels
 - **Chat** -- session list, search, pin, archive, projects, new conversation
-- **Tasks** -- view, create, edit, run, pause/resume, delete cron jobs; run history; completion alerts
+- **Tasks** -- view, create, edit, run, pause/resume, delete cron jobs; run history; completion alerts; a **Scripts** subtab for a read-only browse of the profile's `~/.hermes/scripts/` directory (see [docs/scripts-panel.md](docs/scripts-panel.md))
 - **Skills** -- list all skills by category, search, preview, create/edit/delete; linked files viewer
 - **Memory** -- view and edit MEMORY.md and USER.md inline
 - **Profiles** -- create, switch, delete agent profiles; clone config
 - **Todos** -- live task list from the current session; hidden while the in-chat task list toggle is on, which also disables the workspace-panel Todos tab
 - **Insights** -- token, cost, and skill-usage analytics; period presets (7/30/90/365 days) plus a **Custom range** with start/end date pickers
+- **Artifacts** -- files changed in the session and Skills Used, with a separate skill count and per-skill use counts
 - **Spaces** -- add, rename, remove workspaces; quick-switch from topbar
 
 ### Mobile responsive
@@ -559,14 +562,14 @@ the community ARM64-Android field report: [`docs/remote-access.md`](docs/remote-
 
 ### Manual launch (without start.sh)
 
-If you prefer to launch the server directly:
+If you prefer to launch the server directly (for example from your own systemd unit):
 
 ```bash
-cd /path/to/hermes-agent          # or wherever sys.path can find Hermes modules
-HERMES_WEBUI_PORT=8787 venv/bin/python /path/to/hermes-webui/server.py
+export HERMES_WEBUI_AGENT_DIR=/path/to/hermes-agent   # optional, see below
+HERMES_WEBUI_PORT=8787 python3 /path/to/hermes-webui/server.py
 ```
 
-Note: use the agent venv Python (or any Python environment that has the Hermes agent dependencies installed). System Python will be missing `openai`, `httpx`, and other required packages.
+Before importing anything else, `server.py` activates the Hermes Agent's dependency environment. It uses `HERMES_WEBUI_AGENT_DIR` when set, otherwise the same discovery `start.sh` uses (`$HERMES_HOME/hermes-agent`, `~/.hermes/hermes-agent`, the `hermes` launcher, …), so the export is only needed for an Agent installed somewhere else. A Hermes-managed Agent (v0.21.6 or newer, installed by the official installer or `hermes update`) then restarts the server in its own Python with its own dependencies, so the interpreter you launch with does not need the Agent's packages. An older Agent that keeps its dependencies in `venv/` or `.venv/` is not restarted: run `server.py` with that venv's Python instead (`/path/to/hermes-agent/venv/bin/python`). System Python on its own lacks `openai`, `httpx` and other required packages.
 
 Health check:
 
@@ -788,6 +791,7 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 - [`THEMES.md`](THEMES.md) — theme + skin system, custom theme guide
 - [`docs/workspace-git.md`](docs/workspace-git.md) — the workspace Git controls
 - [`docs/kanban.md`](docs/kanban.md) — the Kanban board's status flow: who may set which column, how tasks enter and leave Scheduled, and the parent re-gating on Scheduled/Blocked → Ready
+- [`docs/scripts-panel.md`](docs/scripts-panel.md) — the Tasks panel's Scripts subtab: where the profile's `~/.hermes/scripts/` directory comes from, the read-only endpoints, and the containment rules
 - [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — administrator-controlled WebUI extension injection
 
 **Deploying & operating**
