@@ -368,7 +368,9 @@ def test_gateway_runs_api_submission():
 
     assert runs_called["called"], "The runs-API streaming path should have been invoked"
     assert captured["body_extras"]["reasoning_effort"] == "high"
-    assert captured["body_extras"]["model_options"] == {"reasoning": {"enabled": True, "effort": "high"}}
+    assert captured["body_extras"]["model_options"] == {
+        "reasoning": {"enabled": True, "effort": "high"}, "reasoning_effort": "high",
+    }
 
 
 @pytest.mark.parametrize(
