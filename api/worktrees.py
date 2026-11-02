@@ -338,6 +338,52 @@ def find_git_repo_root(workspace: str | Path) -> Path:
     root = result.stdout.strip()
     if not root:
         raise ValueError("Workspace is not inside a git repository")
+    # A workspace INSIDE a linked worktree must resolve to the repo that OWNS it. With
+    # `--show-toplevel` alone, a session worktree under `.worktrees/` becomes the root of
+    # the NEXT session worktree, nesting one level deeper per session — one chain reached
+    # 12 levels in a single day that way, and neither `hermes worktree list` nor
+    # `hermes worktree prune` can see past level 1. `--git-common-dir` is identical for
+    # every worktree of a repo, so it names the main one. A git too old for
+    # `--path-format` (pre 2.31) answers non-zero and the old root stands; the fallback
+    # below is what still catches those.
+    common = None
+    resolved_from_common = False
+    try:
+        common = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=ws,
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+            creationflags=windows_hide_flags(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        # This function's contract is ValueError, and its caller catches only that: a hung
+        # git must not surface as a TimeoutExpired from a path lookup.
+        common = None
+    if common is not None and common.returncode == 0 and common.stdout.strip():
+        common_dir = Path(common.stdout.strip())
+        candidate = common_dir.parent if common_dir.name == ".git" else common_dir
+        if candidate.name.endswith(".git"):
+            candidate = candidate.with_name(candidate.name[:-4])
+        # `.git` must exist, not merely `HEAD`: a submodule's common dir is
+        # `super/.git/modules/mod`, which is a git DIRECTORY rather than a repo root, and
+        # accepting it would create the next worktree inside the submodule's object store.
+        if (candidate / ".git").exists():
+            root = str(candidate)
+            resolved_from_common = True
+    # Last line of defence, for a root that still sits under a `.worktrees/` segment. It runs
+    # ONLY when git did not answer above: as a shape test it cannot tell a nested worktree
+    # from an independent repository that genuinely lives below such a directory, and
+    # overwriting a correct `--git-common-dir` answer there would point the next worktree at
+    # the WRONG repository. Gated on the ancestor being a repository as well.
+    if not resolved_from_common:
+        marker = "/.worktrees/"
+        if marker in root:
+            ancestor = root.split(marker, 1)[0]
+            if (Path(ancestor) / ".git").exists():
+                root = ancestor
     return Path(root).expanduser().resolve()
 
 
