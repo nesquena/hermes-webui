@@ -185,6 +185,14 @@ function _mergeSessionToolCards(existing, incoming) {{
   for (const tc of (Array.isArray(incoming) ? incoming : [])) out.push(tc);
   return out;
 }}
+// #7925 re-gate (2026-11-02, proof-gated fast path): the prepend also marks
+// the delivered rows as proof-backed and adopts the page's (narrower) proof.
+// This harness stubs both — it asserts the scroll-restore contract, not the
+// proof bookkeeping. Without them the extracted loader raises a ReferenceError
+// that its own try/catch swallows, which reads as "no scroll happened" rather
+// than as a broken harness.
+function _markPrefixProvenRows(rows) {{}}
+function _adoptPrefixProof(prefixFp, coverageEnd) {{}}
 function _messageIsRenderable() {{ return true; }}
 function msgContent(message) {{ return message && message.content; }}
 function _currentMessageRenderWindowSize() {{ return _messageRenderWindowSize; }}
