@@ -10217,7 +10217,9 @@ function showClarifyCard(pending) {
     input.disabled = false;
     input.removeAttribute('readonly');
     input.onkeydown = (e) => {
-      if (e.key === 'Enter') {
+      if (typeof window._composerShouldSendOnKey === 'function'
+          ? window._composerShouldSendOnKey(e)
+          : (e.key === 'Enter')) {
         e.preventDefault();
         respondClarify();
       }
