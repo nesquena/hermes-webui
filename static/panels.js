@@ -7593,9 +7593,16 @@ function renderProfileDropdown(data) {
     mgmt.onclick = () => { closeProfileDropdown(); mobileSwitchPanel('profiles'); };
     dd.appendChild(mgmt);
   }
-  // Sync titlebar label to the resolved active profile
+  // Sync titlebar label to the resolved active profile — through the same
+  // presentation helper the chip uses, so a renamed profile keeps its
+  // display_name instead of being overwritten by the canonical id when the
+  // dropdown opens (#8055 round-2). The canonical `active` value stays the
+  // identity for the menu rows/checkmarks above. typeof-tolerant like the
+  // other cross-file helpers in this file (applyBotName, syncAppTitlebar):
+  // profileChipDisplayLabel lives in ui.js, and the frontend test harnesses
+  // eval this function in isolation without it.
   const tbl = $('titlebarProfileLabel');
-  if (tbl) tbl.textContent = active;
+  if (tbl && typeof profileChipDisplayLabel === 'function') tbl.textContent = profileChipDisplayLabel();
 }
 
 function toggleProfileDropdown(e) {
@@ -7685,7 +7692,9 @@ async function switchToProfile(name) {
   //      clears pending/queued at switch start; discards renders already in flight/queued.
   //   3. _sessionListSkeletonActive (sessions.js) — renderSessionListFromCache() bails
   //      while true; cleared ONLY on fresh data (_applySessionListPayload), fetch-error,
-  //      and failure-restore — so a bail can't strand the skeleton.
+  //      and failure-restore — both the uncommitted rollback below and the
+  //      committed-ancillary recovery in the catch (greptile P1, 2026-10-17) — so a
+  //      bail can't strand the skeleton.
   //   4. _wsTreeGen (workspace.js) — bumped UNCONDITIONALLY here (incl. panel-closed, since
   //      loadDir('.') still runs); loadDir rejects stale /api/list whose gen is superseded.
   //   Plus _profileSwitchGeneration / _switchGen — guards superseded switches so a slower
@@ -7709,6 +7718,8 @@ async function switchToProfile(name) {
   const _titlebarBtn = $('titlebarProfileBtn');
   const _titlebarLabel = $('titlebarProfileLabel');
   const _prevProfileName = S.activeProfile || 'default';
+  const _prevProfileDisplayName = S.activeProfileDisplayName || '';
+  const _prevProfileIsDefault = S.activeProfileIsDefault;
   const _switchGen = ++_profileSwitchGeneration;
   // Hold a switch-in-flight marker for the whole run: the stale-snapshot arm
   // below only lands once this POST resolves, and the gap before it is exactly
@@ -7724,6 +7735,10 @@ async function switchToProfile(name) {
   // Optimistic name update — shows the target name right away
   if (_chipLabel) _chipLabel.textContent = name;
   if (_titlebarLabel) _titlebarLabel.textContent = name;
+  // Optimistically clear the cached display name: the switch target's label
+  // resolves from /api/profiles below, and until then the canonical name is
+  // the honest value to show (#8055).
+  S.activeProfileDisplayName = '';
 
   // ── Clear stale content + show loading skeletons immediately (#4662) ───────
   // The conversation list and workspace tree still show the PREVIOUS profile's
@@ -7772,6 +7787,12 @@ async function switchToProfile(name) {
   // `typeof`-tolerant because the frontend test harnesses eval this function in
   // isolation, without panels.js's module scope (where the counter lives).
   let _tabVisGuardHeld = false;
+  // Set once the server accepts the switch POST (the target profile has
+  // committed). The catch block rolls the labels back ONLY while this is
+  // false: a late ancillary error after a successful switch must not revert
+  // an already-committed target, and superseded switches are handled by the
+  // _switchGen guards (#8055 round-2).
+  let _switchCommitted = false;
 
   // #4671 CORE: the skeleton/embargo/generation setup is INSIDE the try so the
   // _switchGen-guarded finally always lifts the embargo — a throw in this synchronous
@@ -7809,6 +7830,10 @@ async function switchToProfile(name) {
     // A retained empty-composer pick belongs to the old profile's providers; keeping it
     // would make New Chat / Send post the old profile's model (#6506 gate).
     if (typeof _clearEmptyComposerModelOverride === 'function') _clearEmptyComposerModelOverride();
+    // The server accepted the POST: the target profile is now committed.
+    // From here on, an ancillary failure must NOT roll the labels back to the
+    // previous profile (#8055 round-2) — see the catch block.
+    _switchCommitted = true;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
     // The switch's optimistic chip already claims the new profile, but the
@@ -7824,6 +7849,13 @@ async function switchToProfile(name) {
     // reconciliation below; every other exit releases it in `finally`.
     _tabVisGuardHeld = true;
     if (typeof _tabVisReconcilePending === 'number') _tabVisReconcilePending++;
+    if (typeof data.display_name === 'string') S.activeProfileDisplayName = data.display_name;
+    if (typeof applyBotName === 'function') applyBotName();
+    if (typeof syncAppTitlebar === 'function') syncAppTitlebar();
+    const _switchedChipLabel = $('profileChipLabel');
+    if (_switchedChipLabel) _switchedChipLabel.textContent = profileChipDisplayLabel();
+    const _switchedTitleLabel = $('titlebarProfileLabel');
+    if (_switchedTitleLabel) _switchedTitleLabel.textContent = profileChipDisplayLabel();
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
@@ -8042,14 +8074,61 @@ async function switchToProfile(name) {
     return true;
 
   } catch (e) {
-    // Revert the optimistic name update on error
-    if (_switchGen === _profileSwitchGeneration && _chipLabel) _chipLabel.textContent = _prevProfileName;
-    if (_switchGen === _profileSwitchGeneration && _titlebarLabel) _titlebarLabel.textContent = _prevProfileName;
-    if (_switchGen === _profileSwitchGeneration) showToast(t('switch_failed') + e.message);
-    // The switch failed, so we're still on the previous profile and its caches
-    // are intact — restore the real list/tree so the loading skeletons we showed
-    // up front don't strand. (#4662)
-    if (_switchGen === _profileSwitchGeneration) {
+    // Revert the optimistic name update on error — but only for an
+    // UNCOMMITTED failure (the server rejected the POST before switching).
+    // Restore the previous identity/name pair, not just the canonical id, so
+    // the display name survives a failed switch (#8055 round-2). The labels
+    // resolve through profileChipDisplayLabel(), which reads the (unchanged)
+    // S.activeProfile — still _prevProfileName here — plus the restored
+    // display name. Late ancillary errors AFTER the POST committed
+    // (_switchCommitted) and superseded switches (_switchGen mismatch, which
+    // already returned early) must NOT roll back an already-committed target.
+    if (_switchGen === _profileSwitchGeneration && !_switchCommitted) {
+      S.activeProfileDisplayName = _prevProfileDisplayName;
+      S.activeProfileIsDefault = _prevProfileIsDefault;
+      if (_chipLabel) _chipLabel.textContent = profileChipDisplayLabel();
+      if (_titlebarLabel) _titlebarLabel.textContent = profileChipDisplayLabel();
+      if (typeof applyBotName === 'function') applyBotName();
+    } else if (_switchGen === _profileSwitchGeneration && _switchCommitted) {
+      // The switch already committed server-side; an ancillary error after it
+      // must not revert the labels to the previous profile — keep the
+      // committed target's resolved label.
+      if (_chipLabel) _chipLabel.textContent = profileChipDisplayLabel();
+      if (_titlebarLabel) _titlebarLabel.textContent = profileChipDisplayLabel();
+      // …but the ancillary failure (e.g. /api/session/new inside newSession())
+      // ALSO stranded the up-front skeletons: the restore below is gated on
+      // !_switchCommitted, so a committed switch's late error used to leave the
+      // session-list and workspace spinners up forever (greptile P1,
+      // static/panels.js:7684, 2026-10-17). The profile IS switched, so the
+      // skeletons must come down here too — without rolling anything back.
+      // The cookie already points at the committed profile, so a FRESH
+      // renderSessionList() paints the NEW profile's rows (the cached
+      // _allSessions still holds the PREVIOUS profile's — repainting it here
+      // would show the wrong profile's sessions), and the workspace tree
+      // reloads the same way. Lift the embargo first, exactly like the
+      // success path does before its switch-owned render.
+      if (typeof _setProfileSwitchListEmbargo === 'function') _setProfileSwitchListEmbargo(false);
+      _sessionListSkeletonActive = false;
+      try { await renderSessionList(); } catch (_) {}
+      // A newer switch may have started during the recovery render; it owns
+      // the skeletons now, so leave them (and the toast) to it — same
+      // supersession discipline as the success paths above.
+      if (_switchGen !== _profileSwitchGeneration) return false;
+      if (_workspaceVisibleAtStart && S.session && S.session.workspace && typeof loadDir === 'function') {
+        loadDir('.');
+      } else if (_workspaceVisibleAtStart && typeof clearWorkspaceTreeSkeleton === 'function') {
+        clearWorkspaceTreeSkeleton();
+      }
+      // Report the ancillary error. The switch itself succeeded, so this is
+      // the generic failure prefix — 'switch_failed' would claim the profile
+      // did not move when it did.
+      showToast(t('failed_colon') + e.message, 4000);
+    }
+    if (_switchGen === _profileSwitchGeneration && !_switchCommitted) showToast(t('switch_failed') + e.message);
+    // The switch failed before committing, so we're still on the previous
+    // profile and its caches are intact — restore the real list/tree so the
+    // loading skeletons we showed up front don't strand. (#4662)
+    if (_switchGen === _profileSwitchGeneration && !_switchCommitted) {
       // The switch failed; _allSessions still holds the (still-current) previous
       // profile, so clear the skeleton flag and re-render to restore the real list
       // rather than strand the up-front skeleton (#4671). Lift the embargo too so the
