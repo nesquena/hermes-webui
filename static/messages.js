@@ -1143,7 +1143,7 @@ function _editSelectionChipName(id,chip){
   const commit=()=>{ if(done)return; done=true; s.name=(inp.value.trim()||s.name).slice(0,120); _renderSelectionChips(); restoreFocus(); };
   const cancel=()=>{ if(done)return; done=true; _renderSelectionChips(); restoreFocus(); };
   inp.addEventListener('blur',commit);
-  inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){e.preventDefault();commit();} if(e.key==='Escape'){cancel();} });
+  inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){ if(window._isImeEnter&&window._isImeEnter(e))return; e.preventDefault();commit(); } if(e.key==='Escape'){cancel();} });
 }
 
 function _composerTextWithPendingSelections(){
@@ -9794,6 +9794,9 @@ let _clarifyVisibleSince = 0;
 let _clarifySignature = '';
 let _clarifySessionId = null;
 let _clarifyId = null;
+// IME guard for the clarify free-form input: a committed-but-still-composing
+// Enter must never submit the answer (mirrors the composer's `_imeComposing`).
+let _clarifyImeComposing = false;
 let _clarifyMissingEndpointWarned = false;
 let _clarifyCountdownTimer = null;
 let _clarifyExpiresAt = 0;
@@ -10216,11 +10219,26 @@ function showClarifyCard(pending) {
     if (!sameClarify) input.value = '';
     input.disabled = false;
     input.removeAttribute('readonly');
+    if (!input._clarifyImeTracked) {
+      input._clarifyImeTracked = true;
+      input.addEventListener('compositionstart', () => { _clarifyImeComposing = true; });
+      // Reset on the next tick: the committing keydown can land AFTER
+      // compositionend (Safari, some Linux IMEs), and it must be swallowed.
+      input.addEventListener('compositionend', () => {
+        setTimeout(() => { _clarifyImeComposing = false; }, 0);
+      });
+      input.addEventListener('blur', () => { _clarifyImeComposing = false; });
+    }
     input.onkeydown = (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        respondClarify();
-      }
+      if (e.key !== 'Enter') return;
+      // Enter while an IME composition is active confirms the candidate (or
+      // commits the raw pinyin). That keypress belongs to the IME, not to the
+      // form: returning early also avoids preventDefault(), which would break
+      // the commit itself. Issue: clarify answer sent mid-composition.
+      if (_clarifyImeComposing) return;
+      if (window._isImeEnter && window._isImeEnter(e)) return;
+      e.preventDefault();
+      respondClarify();
     };
   }
   if (typeof lockComposerForClarify === "function") {

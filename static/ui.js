@@ -6734,6 +6734,13 @@ function renderModelDropdown(){
   _custRow.className='model-custom-row';
   _custRow.innerHTML=`<input class="model-custom-input" type="text" placeholder="${esc(t('model_custom_placeholder')||'e.g. openai/gpt-5.4')}" spellcheck="false" autocomplete="off"><button class="model-custom-btn" title="Use this model">${li('plus',12)}</button>`;
   const _ci=_custRow.querySelector('.model-custom-input');
+  // One keydown listener for the custom model id: a committing Enter must not
+  // submit (nor reach the picker's other key paths), and Escape closes.
+  _ci.addEventListener('keydown',e=>{
+    if(e.key==='Enter'&&window._isImeEnter&&window._isImeEnter(e)){e.preventDefault();e.stopImmediatePropagation();e.stopPropagation();return;}
+    if(e.key==='Enter'){e.preventDefault();_applyCustom();}
+    if(e.key==='Escape'){e.preventDefault();e.stopPropagation();closeDropdown();}
+  });
   const _cb=_custRow.querySelector('.model-custom-btn');
   const _configuredRank=(badge)=>{
     if(!badge) return Number.POSITIVE_INFINITY;
@@ -7317,7 +7324,6 @@ function renderModelDropdown(){
   _sc.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){ _si.value=''; _filterModels(''); _si.focus(); e.preventDefault(); }});
   const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;selectFromDropdown(v,null);_ci.value='';};
   _cb.onclick=_applyCustom;
-  _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){e.preventDefault();e.stopPropagation();closeDropdown();}});
   _ci.addEventListener('click',e=>e.stopPropagation());
   dd.appendChild(_scopeNote);
   dd.appendChild(_searchRow);
@@ -11826,7 +11832,7 @@ function _renderQueueChips(sid){
         }
       }
     };
-    msgSpan.onkeydown=(e)=>{if(e.key==='Enter'){e.preventDefault();msgSpan.blur();}if(e.key==='Escape'){msgSpan.textContent=entryText||'—';msgSpan.blur();}};
+    msgSpan.onkeydown=(e)=>{if(e.key==='Enter'){if(window._isImeEnter&&window._isImeEnter(e))return;e.preventDefault();msgSpan.blur();}if(e.key==='Escape'){msgSpan.textContent=entryText||'—';msgSpan.blur();}};
     // Compact badges (files, model, profile)
     const badges=document.createElement('span');
     badges.className='queue-card-badges';

@@ -3056,6 +3056,16 @@ let _imeComposing=false;
 })();
 function _isImeEnter(e){return e.isComposing||e.keyCode===229||_imeComposing;}
 window._isImeEnter=_isImeEnter;
+// Composition tracking is NOT composer-only: the listeners above cover `#msg`,
+// which leaves every other field relying on the state-free part of
+// `_isImeEnter` — and that misses Safari / some Linux IMEs, where the
+// committing keydown arrives AFTER compositionend with isComposing=false.
+// Capture-phase document listeners keep `_imeComposing` accurate for whichever
+// field is focused (clarify card, kanban inputs, inline renames), so those
+// handlers only need `if(window._isImeEnter&&window._isImeEnter(e))return;`.
+document.addEventListener('compositionstart',()=>{_imeComposing=true;},true);
+document.addEventListener('compositionend',()=>{setTimeout(()=>{_imeComposing=false;},0);},true);
+document.addEventListener('focusout',()=>{_imeComposing=false;},true);
 // #3076: a touch-primary device (`pointer:coarse`) can still have a
 // physical keyboard attached (Android tablet + Bluetooth keyboard,
 // detachable Surface in tablet mode, iPad + Magic Keyboard). When that
