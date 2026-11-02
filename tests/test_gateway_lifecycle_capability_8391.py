@@ -1217,7 +1217,7 @@ def test_renderer_unproven_note_uses_the_external_note_lock_markup():
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_renderer_unproven_note_renders_command_as_inline_code_and_stays_escaped():
+def test_renderer_unproven_note_escapes_the_sentence_and_the_command():
     html = _render_gateway_card(
         {**_STATUS_BRANCHES["not_running"], "lifecycle": _UNPROVEN},
         strings={"gateway_local_unproven": _EN_LOCAL_UNPROVEN},
@@ -1227,7 +1227,7 @@ def test_renderer_unproven_note_renders_command_as_inline_code_and_stays_escaped
     assert ">hermes gateway start</code>" in html
     assert "{cmd}" not in html
     assert "WebUI hasn&#39;t confirmed this Gateway runs on this machine." in html
-    assert "start it once with <code" in html
+    assert "start it once with" in html
 
     hostile = '<img src=x onerror=alert(1)> then run {cmd} "now"'
     html = _render_gateway_card(
@@ -1288,6 +1288,133 @@ def test_renderer_unproven_branch_keys_on_reason_and_running():
     body = extract_function(PANELS_JS, "_gatewayActionControls").replace(" ", "")
     assert "lifecycle.reason==='local_gateway_unproven'&&!(r&&r.running)" in body
     assert "t('gateway_external_managed')" in body
+
+
+# ── #8639 (2): the one-time start command is its own line, with a copy button ─
+#
+# Inline, a long `hermes --profile <name> gateway start` chip wraps mid-command
+# inside the sentence, which is hard to select on a touch device. The card puts
+# the command in a block of its own, under the sentence, next to a copy button.
+# The sentence is split at the locale's {cmd} placeholder, so every translation
+# keeps its own wording and punctuation instead of being retranslated.
+
+_COPY_STRINGS = {"copy": "Copy", "copied": "Copied!", "copy_failed": "Copy failed"}
+
+
+def _click_copy_button(button_html: str, *, fail: bool = False) -> dict:
+    """Click a rendered copy button: run the card's handler on its attributes.
+
+    The handler is extracted from panels.js and executed with `_copyText` and
+    `showToast` stubbed, so the assertion is the behaviour of the button the
+    card actually rendered, not the source text that produced it.
+    """
+    body = extract_function(PANELS_JS, "_copyGatewayStartCommand")
+    attrs = dict(re.findall(r'([a-z-]+)="([^"]*)"', button_html))
+    harness = f"""
+const copied = [];
+const toasts = [];
+const _strings = {json.dumps(_COPY_STRINGS)};
+const t = (k) => Object.prototype.hasOwnProperty.call(_strings, k) ? _strings[k] : '[' + k + ']';
+const showToast = (m) => toasts.push(m);
+const _copyText = (text) => {{
+  copied.push(text);
+  return {'Promise.reject(new Error("denied"))' if fail else 'Promise.resolve()'};
+}};
+{body}
+const _attrs = {json.dumps(attrs)};
+const btn = {{
+  textContent: 'Copy',
+  classList: {{ add() {{}}, remove() {{}} }},
+  getAttribute(name) {{ return Object.prototype.hasOwnProperty.call(_attrs, name) ? _attrs[name] : null; }},
+}};
+_copyGatewayStartCommand(btn);
+setTimeout(() => {{
+  process.stdout.write(JSON.stringify({{ copied, toasts, label: btn.textContent }}));
+}}, 0);
+"""
+    proc = subprocess.run([NODE, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def _unproven_card(*, start_command: str = "hermes gateway start", sentence: str | None = None) -> str:
+    return _render_gateway_card(
+        {**_STATUS_BRANCHES["not_running"], "lifecycle": {**_UNPROVEN, "start_command": start_command}},
+        strings={"gateway_local_unproven": sentence or _EN_LOCAL_UNPROVEN, **_COPY_STRINGS},
+        esc_src=_ESC_SRC,
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_renderer_unproven_start_command_sits_in_its_own_block():
+    html = _unproven_card(start_command="hermes --profile work gateway start")
+
+    block = re.search(r"<div[^>]*data-gateway-cmd-block[^>]*>(.*?)</div>", html, re.S)
+    assert block, html
+    # One command, one block: the sentence never wraps around the command again.
+    assert html.count("<code") == 1
+    assert block.group(0).count("<code") == 1
+    assert "hermes --profile work gateway start</code>" not in block.group(0)  # --profile is wrapped
+    assert "gateway start</code>" in block.group(0)
+    code = re.search(r'<code style="([^"]*)"', block.group(0))
+    assert code, block.group(0)
+    assert "display:block" in code.group(1).replace(" ", "")
+
+    # The translation is split at {cmd}: the text before it stays above the
+    # block, the text after it resumes below it, each as its own line.
+    before, after = html.split(block.group(0))
+    before_text = re.sub(r"<[^>]+>", "", before)
+    after_text = re.sub(r"<[^>]+>", "", after)
+    assert before.rstrip().endswith("</div>")
+    assert after.lstrip().startswith("<div>")
+    assert before_text.strip().endswith("start it once with")
+    assert after_text.strip().startswith("; WebUI can manage it after that.")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_renderer_unproven_copy_button_copies_the_exact_start_command():
+    command = "hermes --profile work gateway start"
+    html = _unproven_card(start_command=command)
+
+    block = re.search(r"<div[^>]*data-gateway-cmd-block[^>]*>(.*?)</div>", html, re.S)
+    assert block, html
+    button = re.search(r"<button[^>]*>.*?</button>", block.group(1), re.S)
+    assert button, block.group(1)
+    assert 'type="button"' in button.group(0)
+    assert f'data-gateway-cmd="{command}"' in button.group(0)
+    assert ">Copy</button>" in button.group(0)
+
+    result = _click_copy_button(button.group(0))
+    assert result["copied"] == [command]
+    assert result["label"] == "Copied!"
+    assert result["toasts"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_renderer_unproven_copy_button_reports_a_failed_copy():
+    html = _unproven_card()
+    button = re.search(r"<button[^>]*>.*?</button>", re.search(
+        r"<div[^>]*data-gateway-cmd-block[^>]*>(.*?)</div>", html, re.S).group(1), re.S)
+
+    result = _click_copy_button(button.group(0), fail=True)
+    assert result["copied"] == ["hermes gateway start"]
+    assert result["toasts"] == ["Copy failed"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_renderer_external_note_offers_no_start_command_or_copy_button():
+    # The copy affordance belongs to the one-time start hint only: a Gateway
+    # managed elsewhere has nothing for this machine to run.
+    html = _render_gateway_card(
+        {**_STATUS_BRANCHES["not_running"], "lifecycle": _EXTERNAL},
+        strings={"gateway_local_unproven": _EN_LOCAL_UNPROVEN, **_COPY_STRINGS},
+        esc_src=_ESC_SRC,
+    )
+
+    assert "data-gateway-cmd-block" not in html
+    assert "data-gateway-cmd=" not in html
+    assert "<code" not in html
+    assert "<button" not in html
 
 
 def _locale_blocks() -> dict[str, str]:
@@ -1495,7 +1622,10 @@ def test_renderer_unproven_note_shows_the_server_start_command(command):
 
     assert html.count("<code") == 1
     assert _code_text(html) == command
-    assert "start it once with <code" in html
+    # The sentence stops at the block that carries the command (#8639).
+    assert re.search(
+        r"start it once with</div><div[^>]*data-gateway-cmd-block", html
+    ), html
     assert "{cmd}" not in html
 
 
