@@ -6777,6 +6777,85 @@ def set_max_tokens(max_tokens) -> dict[str, int | None]:
     return get_max_tokens_status()
 
 
+def get_vision_capability_first() -> dict:
+    """Read ``agent.vision_capability_first`` from the active profile's config.yaml."""
+    # Request-owned projection: capture the shared cache under the lock instead
+    # of reading the ambient mutable dict after it is released — a concurrent
+    # reload can clear/repopulate that dict between release and read, which
+    # would make this getter report another profile's boolean (gate 2026-10-14,
+    # persistence item 2).
+    cfg = get_config_snapshot()
+    agent_cfg = cfg.get("agent") if isinstance(cfg, dict) else None
+    enabled = isinstance(agent_cfg, dict) and agent_cfg.get("vision_capability_first") is True
+    return {"vision_capability_first": bool(enabled)}
+
+
+def set_vision_capability_first(enabled: bool) -> dict:
+    """Persist ``agent.vision_capability_first`` to the active profile's config.yaml.
+
+    Capability-first image routing: when true, ``auto`` mode attaches images
+    natively to ANY model whose vision capability resolves to True, and a
+    configured ``auxiliary.vision`` backend keeps its documented fallback role
+    (describing images for text-only mains) instead of capturing every image.
+    Default false preserves the #97339 de-facto aux behavior. The agent-side
+    default lives in hermes_cli/config_defaults.py; this only writes the key.
+
+    Strict raw read-modify-write on the captured canonical path (gate
+    2026-10-14, persistence item 1): the forgiving ``_load_yaml_config_file()``
+    reader env-expands ``${VAR}`` references — materializing environment-backed
+    values into the saved file — and maps unreadable/invalid/non-mapping YAML
+    to ``{}``, which the save below would then write back over the original
+    file. A genuinely missing (or empty) file starts a fresh config; an
+    unreadable, unparseable or wrongly-shaped existing file fails the save with
+    ``RuntimeError`` and leaves its bytes untouched.
+    """
+    config_path = _get_config_path()
+    with _cfg_lock:
+        try:
+            raw_text = config_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raw_text = ""
+        except OSError as exc:
+            raise RuntimeError(
+                f"Refusing to save vision_capability_first: cannot read {config_path}: {exc}"
+            ) from exc
+        if raw_text.strip():
+            try:
+                from api import yaml_compat as _yaml
+            except ImportError as exc:
+                raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
+            try:
+                parsed = _yaml.safe_load(raw_text)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Refusing to save vision_capability_first: {config_path} is not valid YAML"
+                ) from exc
+            if not isinstance(parsed, dict):
+                raise RuntimeError(
+                    f"Refusing to save vision_capability_first: {config_path} is not a YAML mapping"
+                )
+            config_data = parsed
+        else:
+            # Genuinely missing or empty file: nothing to preserve.
+            config_data = {}
+        agent_cfg = config_data.get("agent")
+        if agent_cfg is None:
+            # Absent/null agent block is created, matching the previous contract.
+            agent_cfg = {}
+        if not isinstance(agent_cfg, dict):
+            raise RuntimeError(
+                f"Refusing to save vision_capability_first: 'agent' in {config_path} is not a mapping"
+            )
+        agent_cfg["vision_capability_first"] = bool(enabled)
+        config_data["agent"] = agent_cfg
+        _save_yaml_config_file(config_path, config_data)
+    reload_config()
+    # Reply projects the value this request wrote (captured before releasing
+    # the lock), not a re-read of the shared cache another profile's reload
+    # could repopulate between the save and the read.
+    return {"vision_capability_first": bool(enabled)}
+
+
 def set_reasoning_display(show: bool) -> dict:
     """Persist ``display.show_reasoning`` to the active profile's config.yaml.
 

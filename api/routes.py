@@ -17097,6 +17097,10 @@ def handle_get(handler, parsed) -> bool:
         from api.config import get_auxiliary_models
         return j(handler, get_auxiliary_models())
 
+    if parsed.path == "/api/vision-capability-first":
+        from api.config import get_vision_capability_first
+        return j(handler, get_vision_capability_first())
+
     if parsed.path == "/api/dashboard/status":
         from api import dashboard_probe
 
@@ -19228,6 +19232,42 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         except RuntimeError as e:
+            return bad(handler, str(e), 500)
+
+    if parsed.path == "/api/vision-capability-first":
+        # Capability-first image routing toggle (agent.vision_capability_first
+        # in config.yaml — the same key the CLI/hermes config can set). Writes
+        # config.yaml, not WebUI settings.json, so every surface shares it.
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            return bad(handler, "vision-capability-first: 'enabled' must be a boolean")
+        # #7503 profile ownership: the browser retries a failed POST with a
+        # fresh cookie read (static/workspace.js api()), so a save started on
+        # profile A can be replayed after the user switched to profile B. The
+        # client binds the initiating profile to the request; reject a
+        # mismatch with 409 BEFORE writing, so a retried save can never
+        # persist A's choice into B's config.
+        claimed_profile = body.get("profile")
+        if not isinstance(claimed_profile, str) or not claimed_profile.strip():
+            return bad(handler, "vision-capability-first: 'profile' is required")
+        # Module-level alias (routes.py re-exports get_active_profile_name as
+        # _get_active_profile_name precisely so call sites inside handle_post
+        # cannot shadow it — a local `from api.profiles import
+        # get_active_profile_name` here made the name function-local for the
+        # WHOLE of handle_post, UnboundLocalError-ing every earlier POST
+        # branch that touches it (#5420 pin test, #7503 CI regression).
+        if not _profiles_match(claimed_profile.strip(), _get_active_profile_name()):
+            return bad(
+                handler,
+                "vision-capability-first: profile changed since the save started; reload the setting",
+                409,
+            )
+        from api.config import set_vision_capability_first
+        try:
+            return j(handler, set_vision_capability_first(enabled))
+        except RuntimeError as e:
+            # Strict setter: an unreadable/invalid config.yaml refuses the save
+            # without changing existing bytes; surface why instead of a bare 500.
             return bad(handler, str(e), 500)
 
     if parsed.path == "/api/admin/reload":
