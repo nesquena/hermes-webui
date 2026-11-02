@@ -2528,7 +2528,9 @@ _PROVIDER_ALIASES = {
 _OPENAI_COMPAT_ENDPOINTS = {
     "zai": "https://api.z.ai/v1",
     "minimax": "https://api.minimax.chat/v1",
-    "mistralai": "https://api.mistral.ai/v1",
+    # Keyed by the canonical provider slug — ``mistral``, not the OpenRouter
+    # vendor namespace ``mistralai`` (#6894).
+    "mistral": "https://api.mistral.ai/v1",
     "xai": "https://api.x.ai/v1",
     "deepseek": "https://api.deepseek.com",
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",

@@ -1519,7 +1519,7 @@ _PROVIDER_DISPLAY = {
     "opencode-zen": "OpenCode Zen",
     "opencode-go": "OpenCode Go",
     "lmstudio": "LM Studio",
-    "mistralai": "Mistral",
+    "mistral": "Mistral",
     "qwen": "Qwen",
     "x-ai": "xAI",
     "nvidia": "NVIDIA NIM",
@@ -1559,6 +1559,18 @@ _PROVIDER_ALIASES = {
     "deep-seek": "deepseek",
     "minimax-china": "minimax-cn",
     "minimax_cn": "minimax-cn",
+    # #6894 — the WebUI historically keyed Mistral as ``mistralai`` (the
+    # OpenRouter vendor namespace), while every agent-side surface —
+    # ``hermes_cli.models.provider_model_ids``, ``_MODELS_DEV_PREFERRED``,
+    # ``config_defaults`` STT/TTS — uses the bare ``mistral`` slug. Nothing
+    # normalised the pair, so ``MISTRAL_API_KEY`` detection emitted
+    # ``mistralai`` while live discovery / runtime dispatch only answered to
+    # ``mistral``: the picker group never got a live catalog and a saved
+    # default carried a provider id the agent cannot resolve. ``mistral`` is
+    # the canonical identity; ``mistralai`` is kept as a read-only alias so
+    # configs written by earlier WebUI builds keep resolving.
+    "mistralai": "mistral",
+    "mistral-ai": "mistral",
     "opencode": "opencode-zen",
     "grok": "xai",
     "x-ai": "xai",
@@ -2459,8 +2471,10 @@ _PROVIDER_MODELS = {
         {"id": "gemini-2.5-pro",                    "label": "Gemini 2.5 Pro"},
         {"id": "gemini-2.5-flash",                  "label": "Gemini 2.5 Flash"},
     ],
-    # Mistral — prefix used in OpenRouter model IDs (mistralai/mistral-large-latest)
-    "mistralai": [
+    # Mistral — the canonical WebUI/agent slug is ``mistral`` (#6894). The
+    # ``mistralai/`` namespace below belongs to OpenRouter model IDs and is
+    # unrelated to this provider key.
+    "mistral": [
         {"id": "mistral-large-latest", "label": "Mistral Large"},
         {"id": "mistral-small-latest", "label": "Mistral Small"},
     ],
@@ -10853,7 +10867,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             if all_env.get("XAI_API_KEY"):
                 detected_providers.add("x-ai")
             if all_env.get("MISTRAL_API_KEY"):
-                detected_providers.add("mistralai")
+                # Canonical slug is ``mistral`` (#6894) — the same identity the
+                # agent's provider_model_ids()/runtime dispatch uses. Writing
+                # ``mistralai`` here produced a picker group whose live
+                # discovery and @provider: routing never resolved.
+                detected_providers.add("mistral")
             if all_env.get("OPENCODE_ZEN_API_KEY") or all_env.get("OPENCODE_API_KEY"):
                 detected_providers.add("opencode-zen")
             if all_env.get("OPENCODE_GO_API_KEY") or all_env.get("OPENCODE_API_KEY"):

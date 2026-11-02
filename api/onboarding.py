@@ -199,14 +199,16 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "models": list(_PROVIDER_MODELS.get("nvidia", [])),
         "category": "specialized",
     },
-    "mistralai": {
+    "mistral": {
         "label": "Mistral",
         "env_var": "MISTRAL_API_KEY",
         "default_model": "mistral-large-latest",
         "default_base_url": "https://api.mistral.ai/v1",
         "requires_base_url": False,
-        # No catalog entry for mistralai today — wizard shows a free-text input.
-        "models": list(_PROVIDER_MODELS.get("mistralai", [])),
+        # Canonical slug is ``mistral`` (#6894), which is also the
+        # _PROVIDER_MODELS key — the wizard gets the curated list rather than
+        # a free-text input.
+        "models": list(_PROVIDER_MODELS.get("mistral", [])),
         "category": "specialized",
     },
     "x-ai": {

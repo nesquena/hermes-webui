@@ -823,7 +823,11 @@ _PROVIDER_ENV_VAR: dict[str, str] = {
     "deepseek": "DEEPSEEK_API_KEY",
     "minimax": "MINIMAX_API_KEY",
     "minimax-cn": "MINIMAX_CN_API_KEY",
-    "mistralai": "MISTRAL_API_KEY",
+    # Canonical slug is ``mistral`` (#6894) — the identity the agent's
+    # provider_model_ids()/runtime dispatch answers to. ``mistralai`` is the
+    # OpenRouter vendor namespace, not a WebUI provider key; it is folded onto
+    # ``mistral`` by api/config._PROVIDER_ALIASES.
+    "mistral": "MISTRAL_API_KEY",
     "x-ai": "XAI_API_KEY",
     "xiaomi": "XIAOMI_API_KEY",
     "neuralwatt": "NEURALWATT_API_KEY",
