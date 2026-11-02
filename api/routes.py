@@ -11725,15 +11725,79 @@ def _mint_display_prefix_fingerprint(session, messages, count, cached, *, inputs
     return _display_prefix_fingerprint(messages, count, inputs=inputs, projection=projection)
 
 
-def _append_fast_path_anchor(s, all_messages, msg_after_raw, anchor_fp_raw, generation_raw, prefix_fp_raw=None, *, inputs=None) -> "int | None":
-    """Validate an append-only fast-path request.
+def _delivered_window_projection(
+    session,
+    messages,
+    *,
+    msg_limit,
+    msg_before,
+    msg_after,
+    expand_renderable,
+    cached,
+    inputs=None,
+):
+    """Extract this response's window and project it — exactly ONCE.
+
+    #7925 by-construction: the delivered projection is the single source of
+    the response's rows, its proof and (on the append path) its fast-path
+    verification, so it is computed here, once, for the response's coverage
+    ``[0, offset + len(window))`` and never re-derived:
+
+    * the returned window is a slice of the returned rows, so the body and
+      the proof cannot describe different rows;
+    * the mint hashes the returned rows (``_mint_display_prefix_fingerprint``
+      is handed them);
+    * the append verification re-scopes the returned rows to the client's
+      held range (``_append_prefix_proof_matches``).
+
+    Returns ``(window, offset, coverage_end, rows, cards)``. ``window`` is
+    what the response serializes — transport-clipped when ``msg_limit``
+    bounds it, which is NOT part of the projection, so the same row hashes
+    identically clipped or whole. ``coverage_end`` is the absolute index just
+    past the projection's coverage; ``rows`` / ``cards`` are the projection
+    itself, for the mint.
+
+    Bounded work (#7899): the projection stops at the coverage end and never
+    walks the rest of the document, and on a warm display-cache hit it is
+    sliced from the entry instead of recomputed.
+    """
+    window, offset = _message_window_for_display(
+        messages,
+        msg_limit=msg_limit,
+        msg_before=msg_before,
+        msg_after=msg_after,
+        expand_renderable=expand_renderable,
+    )
+    coverage_end = offset + len(window)
+    rows, cards = _response_prefix_projection(
+        session, messages, coverage_end, cached, inputs=inputs
+    )
+    delivered = rows[coverage_end - len(window) :]
+    if msg_limit is not None:
+        # Transport-layer clipping only (a payload bound on over-long
+        # hidden tool results). It is NOT part of a row's semantic
+        # projection, so it never enters the digest: the same row must
+        # hash identically whether it arrives clipped in one window or
+        # whole in another, or mint and verify would disagree about a
+        # row neither side changed. The client keeps a clipped row's
+        # range out of the fast path (``_content_truncated`` is visible
+        # to it) and answers with the authoritative full fetch.
+        delivered = _messages_for_limited_payload(delivered)
+    return delivered, offset, coverage_end, rows, cards
+
+
+def _append_fast_path_precheck(
+    s, all_messages, msg_after_raw, anchor_fp_raw, generation_raw, prefix_fp_raw=None, *, inputs=None
+) -> "int | None":
+    """The projection-free half of the append fast-path validation.
 
     Returns the validated anchor index (the client's last rendered absolute
-    row index, so the window starts strictly after it) when every precondition
-    holds, else ``None`` — the caller then returns the authoritative full
-    transcript, which is exactly what master does today.
+    row index, so the window starts strictly after it) when every
+    precondition that needs no delivered projection holds, else ``None`` —
+    the caller then answers with the authoritative full transcript, which is
+    exactly what master does today.
 
-    Preconditions (all must hold):
+    Preconditions (all O(1) or single-row work):
     1. ``msg_after`` parses to a non-negative index and the anchor row exists.
     2. The client's ``transcript_generation`` equals the session's current one
        (no truncate/retry/undo rewrite since the client's view).
@@ -11741,24 +11805,14 @@ def _append_fast_path_anchor(s, all_messages, msg_after_raw, anchor_fp_raw, gene
        projection — the exact bytes the client rendered (internal fields
        stripped, content redacted), so a rewrite of the seam row or a change
        in what the client would render is detected.
-    4. ``prefix_fp`` matches a fresh digest over rows ``[0, after_idx + 1)``
-       of the merged display document (#7925 re-gate, 2026-10-27 finding 4;
-       2026-10-29 finding 2; 2026-10-31 findings 1+2). The generation bump
-       only reports DESTRUCTIVE rewrites; this digest also catches a
-       non-destructive edit of an earlier row (settled reasoning backfill,
-       saved attachments) that no writer reports, plus rendered data that
-       changes no row at all (a saved anchor-activity scene, a ``_source``
-       stamp, a session-level tool card on a scene-free session) and inputs
-       applied after the mint (the credential-redaction setting, the
-       active-turn token). By construction (#7925) the digest covers each
-       row as the browser receives it — the delivered projection itself, so
-       each of those inputs moves the digest by moving the delivered rows
-       rather than through a seed. A missing digest fails closed — an older
-       client loses only the fast path.
+    4. A ``prefix_fp`` echo is present at all (a missing digest fails closed:
+       an older client loses only the fast path).
 
-    ``inputs`` (2026-10-31 finding 1): the GET handler's single out-of-row
-    input snapshot, so this verification and the response's mint project the
-    very same inputs the delivered rows were built from.
+    The prefix-freshness proof — the one check that needs the client's whole
+    held prefix — is deliberately NOT here. It runs afterwards, against the
+    single delivered projection the response is built from
+    (``_append_prefix_proof_matches``), so one request computes that
+    projection once instead of once per check (#7925 by-construction).
     """
     try:
         after_idx = int(msg_after_raw)
@@ -11781,20 +11835,118 @@ def _append_fast_path_anchor(s, all_messages, msg_after_raw, anchor_fp_raw, gene
     if not prefix_fp_raw:
         return None
     from api.helpers import _public_message_projection
+
     if inputs is None:
         inputs = _display_prefix_fp_inputs(s)
-    _redact_enabled = inputs.redact_enabled
-    projected = _public_message_projection(anchor_row, _enabled=_redact_enabled)
+    projected = _public_message_projection(anchor_row, _enabled=inputs.redact_enabled)
     if _append_anchor_fingerprint(projected) != str(anchor_fp_raw):
         return None
-    if _display_prefix_fingerprint(
+    return after_idx
+
+
+def _append_prefix_proof_matches(projection, count, prefix_fp_raw, *, inputs) -> bool:
+    """Compare the client's echoed proof against the SHARED projection.
+
+    ``projection`` is the one delivered projection of this response — the
+    ``(rows, cards)`` pair the response body is a window slice of — and
+    ``count`` is the number of rows the client actually holds
+    (``msg_after + 1``). The proof is re-derived by RE-SCOPING that same
+    projection to the client's held range and hashing it, so the
+    verification, the delivered rows and the response's own proof are three
+    views of one projection object and cannot describe different rows
+    (#7925 by-construction).
+
+    Re-scoping instead of re-projecting is what keeps a request at one
+    projection: the rows are an exact prefix slice (the per-row projection is
+    a pure function of the row) and the cards are re-selected for the shorter
+    coverage. The one range-dependent transform is scene hydration, which
+    resolves an assistant ref occurring more than once in the COVERED range
+    by index instead of by ref — so the projection is scoped to the
+    response's coverage, and a row that arrives INSIDE that coverage and
+    duplicates a held row's ref moves the held row's scene. The digest then
+    no longer matches the echo and the append is REFUSED. That is fail-closed
+    and it is also correct: the server's current rendering of that held row
+    really did change (the same shape as the active-turn boundary), and the
+    authoritative full fetch re-delivers it. Avoiding the refusal would mean
+    recomputing the held prefix under a second, differently-scoped
+    projection — a second full redaction pass over the held rows (the
+    measured 32 MiB regression this shape removes) and a proof that is no
+    longer the same object as the delivered rows'.
+    ``test_duplicate_ref_arrival_refuses_and_redelivers_the_held_row`` pins
+    exactly that behaviour.
+
+    ``inputs``: the request's single out-of-row input snapshot, so the
+    verification re-scopes the very projection the delivered rows were built
+    from (2026-10-31 finding 1).
+    """
+    rows, cards = _display_prefix_projection_scoped(
+        projection,
+        count,
+        tool_calls=inputs.tool_calls,
+        redact_enabled=inputs.redact_enabled,
+    )
+    return _prefix_fingerprint_over_projection(rows, cards) == str(prefix_fp_raw)
+
+
+def _append_fast_path_anchor(
+    s,
+    all_messages,
+    msg_after_raw,
+    anchor_fp_raw,
+    generation_raw,
+    prefix_fp_raw=None,
+    *,
+    inputs=None,
+    projection=None,
+) -> "int | None":
+    """Validate an append-only fast-path request (the composed form).
+
+    ``_append_fast_path_precheck`` followed by ``_append_prefix_proof_matches``.
+    The GET handler calls the two halves separately — the precheck before the
+    response's projection exists (it decides which window to extract), the
+    proof afterwards against that projection — so one request computes the
+    delivered projection once. This composed form is the whole-validation
+    entry point for direct callers, and ``projection=`` lets a caller that
+    already holds the response's projection hand it over instead of paying
+    for a second one.
+
+    The proof half re-derives the digest over rows ``[0, after_idx + 1)`` of
+    the merged display document — the client's HELD range (#7925 re-gate,
+    2026-10-27 finding 4; 2026-10-29 finding 2; 2026-10-31 findings 1+2). The
+    generation bump only reports DESTRUCTIVE rewrites; this digest also
+    catches a non-destructive edit of an earlier row (settled reasoning
+    backfill, saved attachments) that no writer reports, plus rendered data
+    that changes no row at all (a saved anchor-activity scene, a ``_source``
+    stamp, a session-level tool card on a scene-free session) and inputs
+    applied after the mint (the credential-redaction setting, the
+    active-turn token). By construction (#7925) the digest covers each row as
+    the browser receives it, so each of those inputs moves the digest by
+    moving the delivered rows rather than through a seed. Any mismatch —
+    including the documented duplicate-ref scene resolution — refuses the
+    append, and the caller answers with the authoritative full transcript.
+    """
+    after_idx = _append_fast_path_precheck(
+        s,
         all_messages,
-        after_idx + 1,
-        # The same out-of-row input snapshot the mint projects with
-        # (2026-10-31 re-gate), so a settings flip or a turn boundary between
-        # the client's view and this request refuses.
+        msg_after_raw,
+        anchor_fp_raw,
+        generation_raw,
+        prefix_fp_raw,
         inputs=inputs,
-    ) != str(prefix_fp_raw):
+    )
+    if after_idx is None:
+        return None
+    if inputs is None:
+        inputs = _display_prefix_fp_inputs(s)
+    if projection is None:
+        projection = _display_prefix_projection(all_messages, after_idx + 1, inputs=inputs)
+        if projection is None:
+            # Fail closed: an unparsable coverage publishes no proof, so the
+            # client's next reload takes the authoritative full fetch.
+            return None
+    if not _append_prefix_proof_matches(
+        projection, after_idx + 1, prefix_fp_raw, inputs=inputs
+    ):
         return None
     return after_idx
 
@@ -17029,10 +17181,23 @@ def _handle_session_get(handler, parsed) -> bool:
             # exactly master's behaviour). `_append_mode_anchor` non-None means
             # the response carries only the rows after that index and the
             # client appends them instead of replacing.
+            #
+            # #7925 by-construction: the validation is split in two so ONE
+            # delivered projection serves the proof, the body and this check.
+            # The projection-free half (parse, range, generation, the anchor
+            # row's own digest) runs first and decides which window to
+            # extract; the prefix-freshness proof then runs against the SAME
+            # projection — re-scoped to the client's held range, never to the
+            # rows this response is about to deliver. The earlier shape ran
+            # the whole validation up front, so the proof was derived from a
+            # projection of the held range while the body and the mint used a
+            # projection of the response coverage: two full redaction passes
+            # over the held rows per append (the measured 32 MiB regression),
+            # and a proof that was not the same object as the delivered rows.
             _append_mode_anchor = None
             _window_limit = msg_limit
             if _msg_after is not None and msg_before is None:
-                _append_mode_anchor = _append_fast_path_anchor(
+                _append_mode_anchor = _append_fast_path_precheck(
                     s,
                     _all_msgs,
                     _msg_after,
@@ -17040,50 +17205,78 @@ def _handle_session_get(handler, parsed) -> bool:
                     _transcript_generation,
                     _prefix_fp,
                     # 2026-10-31 finding 1: the request's single input
-                    # snapshot — the same one the mint below hashes with, so
-                    # the verification and the published proof cannot
-                    # disagree about which inputs shaped the delivered rows.
+                    # snapshot — the same one the projection and the mint
+                    # below use, so the verification and the published proof
+                    # cannot disagree about which inputs shaped the delivered
+                    # rows.
                     inputs=_display_fp_inputs,
                 )
                 if _append_mode_anchor is not None:
                     _window_limit = msg_limit if msg_limit is not None else _MAX_MSG_LIMIT
                 else:
                     _window_limit = None
-            _truncated_msgs, _messages_offset = _message_window_for_display(
+            (
+                _truncated_msgs,
+                _messages_offset,
+                _coverage_end,
+                _projected_rows,
+                _projected_cards,
+            ) = _delivered_window_projection(
+                s,
                 _all_msgs,
                 msg_limit=_window_limit,
                 msg_before=(None if _append_mode_anchor is not None else msg_before),
                 msg_after=_append_mode_anchor,
                 expand_renderable=expand_renderable,
-            )
-            # #7925 by-construction: ONE delivered projection serves the proof
-            # AND the body. The digest hashes the projection of rows
-            # [0, coverage_end) — the client's held prefix, the widest range an
-            # append can vouch for — and the response body is the SAME
-            # projection's window slice, so the proof can never describe rows
-            # other than the ones this response delivers. Bounded work: the
-            # projection stops at the coverage end and never walks the rest of
-            # the document, and on a warm display-cache hit it is reused from
-            # the entry instead of recomputed.
-            _coverage_end = _messages_offset + len(_truncated_msgs)
-            _projected_rows, _projected_cards = _response_prefix_projection(
-                s,
-                _all_msgs,
-                _coverage_end,
-                _prefix_fp_out,
+                cached=_prefix_fp_out,
                 inputs=_display_fp_inputs,
             )
-            _truncated_msgs = _projected_rows[_coverage_end - len(_truncated_msgs):]
-            if _window_limit is not None:
-                # Transport-layer clipping only (a payload bound on over-long
-                # hidden tool results). It is NOT part of a row's semantic
-                # projection, so it never enters the digest: the same row must
-                # hash identically whether it arrives clipped in one window or
-                # whole in another, or mint and verify would disagree about a
-                # row neither side changed. The client keeps a clipped row's
-                # range out of the fast path (``_content_truncated`` is visible
-                # to it) and answers with the authoritative full fetch.
-                _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
+            if _append_mode_anchor is not None and not _append_prefix_proof_matches(
+                (_projected_rows, _projected_cards),
+                # The client's HELD range — up to and including its last
+                # rendered row — never the rows this response newly delivers:
+                # an append is proven against what the client holds, and the
+                # new rows are exactly what it is asking about. Re-scoping the
+                # response's own projection (instead of projecting the held
+                # range a second time) is what keeps the request at one
+                # projection; the documented duplicate-ref scene resolution
+                # then refuses rather than accepts a stale prefix.
+                _append_mode_anchor + 1,
+                _prefix_fp,
+                inputs=_display_fp_inputs,
+            ):
+                # The proof refused: fail closed to the authoritative full
+                # response, exactly what master does today.
+                _append_mode_anchor = None
+                _window_limit = None
+                if _coverage_end >= len(_all_msgs):
+                    # The discarded projection already reached the end of the
+                    # document — the usual focus-refresh refusal, where the
+                    # client holds everything and nothing new arrived — so it
+                    # IS the full response's projection and is re-used rather
+                    # than recomputed. Only a window the append limit capped
+                    # short of the document pays for a second projection, and
+                    # that one is the full response's own coverage, never a
+                    # scan beyond it (#7899).
+                    _messages_offset = 0
+                    _truncated_msgs = list(_projected_rows)
+                else:
+                    (
+                        _truncated_msgs,
+                        _messages_offset,
+                        _coverage_end,
+                        _projected_rows,
+                        _projected_cards,
+                    ) = _delivered_window_projection(
+                        s,
+                        _all_msgs,
+                        msg_limit=None,
+                        msg_before=None,
+                        msg_after=None,
+                        expand_renderable=expand_renderable,
+                        cached=_prefix_fp_out,
+                        inputs=_display_fp_inputs,
+                    )
         else:
             _truncated_msgs = []
             _messages_offset = 0
