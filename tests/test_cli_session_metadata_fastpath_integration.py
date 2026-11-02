@@ -148,6 +148,9 @@ def profiles(tmp_path, monkeypatch):
     monkeypatch.setattr(models, "PROJECTS_FILE", projects_file)
     monkeypatch.setattr(models, "_projects_migrated", True)
     monkeypatch.setattr(models, "_default_claude_code_projects_dir", lambda: None)
+    # Another test can leave a stream registered; with an active stream the CLI cache freezes and serves the
+    # pre-change snapshot, which is not what these tests exercise. Pin "no active streams" for this fixture.
+    monkeypatch.setattr(models, "_active_stream_ids", lambda: set())
     models.clear_cli_sessions_cache()
     try:
         yield state, homes
