@@ -15,6 +15,7 @@ test repeats the core check against the real SessionDB when it is importable.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 import queue
 import sys
 import types
@@ -508,7 +509,8 @@ def test_delayed_workspace_syncs_resolve_the_current_session_not_a_captured_one(
         s.save = lambda *a, **k: None
         return s
 
-    store = {"swap-sid": _session(ws_a)}  # stands in for SESSIONS
+    store = OrderedDict({"swap-sid": _session(ws_a)})  # stands in for SESSIONS
+    monkeypatch.setattr(routes, "SESSIONS", store)
     fake_db.create_session("swap-sid", source="webui", cwd=str(ws_a))
     resolvers = []
     body = {}
