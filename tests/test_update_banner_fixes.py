@@ -555,7 +555,9 @@ class TestApplyUpdateRestartSafety:
         assert result.get('active_runs') == 1
         assert result.get('restart_blocked') is True
         assert result.get('force_available') is True
-        assert '1 WebUI agent run is active' in result['message']
+        # #8667: an Agent update also cycles the Gateway, so its refusal names
+        # both kinds of run.
+        assert '1 agent run is active (WebUI and Gateway)' in result['message']
 
     def test_apply_update_refuses_when_active_run_without_stream(self, tmp_path, monkeypatch):
         import api.updates as upd
@@ -625,7 +627,9 @@ class TestApplyUpdateRestartSafety:
         assert result.get('active_runs') == 1
         assert result.get('restart_blocked') is True
         assert result.get('force_available') is True  # #7293
-        assert '1 WebUI agent run is active' in result['message']
+        # #8667: an Agent update also cycles the Gateway, so its refusal names
+        # both kinds of run.
+        assert '1 agent run is active (WebUI and Gateway)' in result['message']
 
     def test_wait_until_restart_safe_waits_for_active_run_to_clear(self, monkeypatch):
         import api.updates as upd

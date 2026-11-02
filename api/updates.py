@@ -240,13 +240,31 @@ def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict
         }
     active_streams = int(blocker_snapshot.get('active_streams') or 0)
     active_runs = int(blocker_snapshot.get('active_runs') or 0) or active_streams
-    detail = f"{active_runs} WebUI agent run{'s are' if active_runs != 1 else ' is'} active"
+    plural = active_runs != 1
+    # #8667: an Agent update also cycles the Gateway that executes the
+    # resumable Gateway runs (``_ensure_gateway_restart_for_agent_update``), so
+    # its refusal counts and names both kinds of run. A WebUI update keeps the
+    # WebUI-owned wording: the Gateway runs it does not settle keep running
+    # (#7293).
+    if target == 'agent':
+        detail = (
+            f"{active_runs} agent run{'s are' if plural else ' is'} active "
+            '(WebUI and Gateway)'
+        )
+        gateway_note = (
+            ' Updating the Agent also restarts the Gateway and stops '
+            + ('them' if plural else 'it') + '.'
+        )
+    else:
+        detail = f"{active_runs} WebUI agent run{'s are' if plural else ' is'} active"
+        gateway_note = ''
     return {
         'ok': False,
         'message': (
-            f'Cannot update {target} while {detail}. '
+            f'Cannot update {target} while {detail}.'
+            f'{gateway_note} '
             'Wait for the response to finish and retry, or force the update '
-            'to interrupt the active run' + ('s' if active_runs != 1 else '') + '.'
+            'to interrupt the active run' + ('s' if plural else '') + '.'
         ),
         'target': target,
         'restart_blocked': True,
@@ -540,11 +558,23 @@ def _run_fenced_update(target: str, force_active_runs: bool, run) -> dict:
             if blocker_snapshot.get('restart_blocked'):
                 if not force_active_runs:
                     return _restart_blocked_response(target, blocker_snapshot)
-                logger.warning(
-                    "Forced %s update with %s active WebUI run(s); they will be "
-                    "settled as interrupted before the restart",
-                    target, blocker_snapshot.get('active_runs'),
-                )
+                # #8667: name both cases — the WebUI settles its own runs, the
+                # Gateway runs end with the Gateway cycle and are settled
+                # afterwards by the worker teardown/watchdog.
+                if target == 'agent':
+                    logger.warning(
+                        "Forced %s update with %s active run(s) (WebUI and "
+                        "Gateway); the WebUI runs are settled as interrupted "
+                        "before the restart and the Gateway runs end when the "
+                        "Gateway cycles",
+                        target, blocker_snapshot.get('active_runs'),
+                    )
+                else:
+                    logger.warning(
+                        "Forced %s update with %s active WebUI run(s); they will "
+                        "be settled as interrupted before the restart",
+                        target, blocker_snapshot.get('active_runs'),
+                    )
             return run()
         finally:
             run_drain.release_run_admission_hold(token)
