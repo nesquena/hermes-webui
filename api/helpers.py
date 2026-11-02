@@ -751,6 +751,11 @@ MAX_BODY_BYTES = 20 * 1024 * 1024  # 20MB limit for non-upload POST bodies
 
 
 # ── Credential redaction ──────────────────────────────────────────────────────
+# Every field, regardless of size, goes through the Agent's public
+# redact_sensitive_text(..., force=True) boundary, which also runs the exact
+# registered-vault scrub. WebUI must not reimplement or bypass that boundary
+# with private Agent regex internals (review on #7345). The local fallback
+# below is defense-in-depth on top of it, never a replacement.
 
 def _build_redact_fn():
     """Return a redactor backed by hermes-agent plus local fallback patterns."""
@@ -816,6 +821,22 @@ def _build_redact_fn():
     _PRIVKEY_RE = _re.compile(
         r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
     )
+
+    # Prefix-less shapes the agent redactor covers but the prefix/keyword-based
+    # fallback historically did not. Defense-in-depth for the no-agent path
+    # (hermes-agent not importable) and for older Agent builds.
+    # All three are structure-preserving (keep botid / scheme/user/host and mask
+    # only the secret).
+    _JWT_RE = _re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}")
+    # scheme://user:PASSWORD@host — keep scheme/user/host, mask the password.
+    # The lookbehind anchors the scheme at a token start and every quantifier
+    # is bounded, so this stays linear on multi-MB alphanumeric runs (an
+    # unanchored `[a-zA-Z][...]*://` rescans from every offset: quadratic).
+    _URI_USERINFO_RE = _re.compile(
+        r"(?<![a-zA-Z0-9+.\-])([a-zA-Z][a-zA-Z0-9+.\-]{0,31}://[^/:@\s]{1,256}:)([^@/\s]{1,512})(@)"
+    )
+    # Telegram bot token <botid>:<token> — keep the numeric botid, mask token.
+    _TELEGRAM_RE = _re.compile(r"(\b\d{5,}:)([A-Za-z0-9_-]{20,})")
 
     def _mask(token: str) -> str:
         return f"{token[:6]}...{token[-4:]}" if len(token) >= 18 else "***"
@@ -884,6 +905,10 @@ def _build_redact_fn():
         if "=" in text:
             text = _ENV_RE.sub(_env_replacement, text)
         text = _PRIVKEY_RE.sub("[REDACTED PRIVATE KEY]", text)
+        # Prefix-less shapes the Agent also covers (defense-in-depth).
+        text = _JWT_RE.sub("[REDACTED JWT]", text)
+        text = _URI_USERINFO_RE.sub(lambda m: m.group(1) + _mask(m.group(2)) + m.group(3), text)
+        text = _TELEGRAM_RE.sub(lambda m: m.group(1) + _mask(m.group(2)), text)
         return text
 
     try:
