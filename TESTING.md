@@ -465,6 +465,21 @@ Run it locally with
 `python tests/browser_file_tree_keyboard.py`; add `--screenshots DIR` to write
 the Files tab with keyboard focus on a row at 1440x900 and 390x844.
 
+Also in that job, `tests/browser_composer_status_label.py` guards the
+focus-to-reveal treatment of the composer status row (#7856). The row clips long
+prefill context names and `title` only reaches mouse users, so
+`setComposerStatus()` makes it focusable and `.composer-status:focus` wraps it.
+Each of three phone viewports (390x844, 360x740, 320x700) x four labels (a short
+one, a medium one, a ~55-character spaced one, and an unbroken ~126-character
+one) x two focus paths (a real tap and Tab from the composer) asserts that the
+focused label is fully readable — normal wrapping, nothing clipped horizontally
+or vertically — that the Send control's 44x44 rect stays inside the viewport
+with its centre hit-testable, that `documentElement.scrollWidth` does not exceed
+the viewport, and that an ordinary send still POSTs the typed text to
+`/api/chat/start`. A content-sized percentage cap silently collapses a short
+label to 0px, which is why the short and medium labels are in the matrix.
+Run it locally with `python tests/browser_composer_status_label.py`.
+
 ## Public conversation lifecycle gate
 
 `tests/browser_conversation_lifecycle.py` adds a public deterministic
