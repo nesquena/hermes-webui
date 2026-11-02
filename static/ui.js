@@ -20446,6 +20446,19 @@ function _messageRenderCacheSignature(){
     hash^=31;
     hash=Math.imul(hash,16777619)>>>0;
   }
+  /* #8643: the action bar (Edit / Regenerate / Undo) is derived from S.busy,
+     so the SAME messages render a DIFFERENT footer while a turn runs. The
+     signature used to cover message/tool/session content only, so HTML painted
+     by a render that ran busy (the failed-regeneration restore before its
+     ordering fix, or any entry render) could satisfy an idle read and keep the
+     buttons missing on an idle transcript. Fold the flag in: a busy-written
+     entry can never satisfy an idle read, and vice versa. Normal scrolling
+     never reads this cache (the fast path is session-switch only, and a live
+     turn is excluded by !INFLIGHT[sid]), and the settled steady state both
+     writes and reads at busy=false, so the extra term invalidates nothing in
+     the common case — it only forces the one rebuild that would otherwise
+     serve the wrong footer. */
+  add('busy');add(S.busy?1:0);
   const messages=Array.isArray(S.messages)?S.messages:[];
   add(messages.length);
   /* The per-message render surface is hashed by _addMessageRenderHash, which
