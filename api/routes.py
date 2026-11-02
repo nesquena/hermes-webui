@@ -24117,6 +24117,13 @@ def _parse_range_header(range_header: str, file_size: int) -> tuple[int, int] | 
 
 def _open_file_read_fd(target: Path, anchor_root: Path | None = None) -> int:
     if anchor_root is None:
+        # Absolute paths that reach this branch are already the authorized
+        # canonical target (media resolves before the allow check). Reopen
+        # that path from its filesystem anchor without resolve(), so a symlink
+        # swapped in after the check is refused by O_NOFOLLOW. Relative paths
+        # have an empty anchor and keep the plain open.
+        if target.anchor:
+            return open_anchored_fd(Path(target.anchor), target, want_dir=False)
         flags = os.O_RDONLY
         # On Windows, files are opened in text mode by default; O_BINARY
         # prevents CRLF translation that would corrupt binary media files.
@@ -25430,11 +25437,23 @@ def _handle_media(handler, parsed):
         "text/x-diff",
         "application/vnd.excalidraw+json",
     }
+    # Office documents are download-only artifacts: never previewed inline, but
+    # they can be authorized through an owning session's exact MEDIA: token so a
+    # generated spreadsheet/Word file outside the media roots is still served.
+    _OFFICE_MEDIA_TYPES = {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword",
+        "application/vnd.ms-powerpoint",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    }
     _SESSION_MEDIA_TOKEN_TYPES = (
         _INLINE_IMAGE_TYPES
         | _AUDIO_VIDEO_PDF_TYPES
         | _ARCHIVE_TYPES
         | _SESSION_TEXT_ARTIFACT_TYPES
+        | _OFFICE_MEDIA_TYPES
         | {"text/html"}
     )
     session_media_allowed = _session_media_token_allows_path(
