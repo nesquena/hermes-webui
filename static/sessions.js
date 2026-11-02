@@ -10042,10 +10042,112 @@ function _sidebarHasUnprojectedRows(rows, projectIdFor){
   return rows.some(s=>!projectIdFor(s));
 }
 
+// #8141: display-only sidebar-bucket derivation for parent-owned delegated
+// children. A delegated subagent row (raw source 'subagent' linked as a
+// child_session to a resolved parent in the same payload) travels with its
+// parent's bucket so CLI-owned children attach under their CLI parent instead
+// of landing in the WebUI bucket where they inflated the badge but never
+// rendered. Raw source / read_only / ownership flags are untouched — the
+// server derives the same bucket (routes._sidebar_display_is_cli) so the
+// source filter, source counters, and this partition always agree.
+function _isDelegatedSubagentChild(s){
+  if(!s) return false;
+  if(s.relationship_type!=='child_session') return false;
+  const src=String(s.raw_source||s.source_tag||s.session_source||s.source||'').trim().toLowerCase();
+  return src==='subagent';
+}
+// A lineage edge (parent_session_id / lineage root / lineage tip) is only
+// meaningful inside one profile: session ids are unique per profile home, and
+// the All-profiles view merges several homes into one lookup map. Treat a row
+// whose profile differs as absent rather than following the edge — inheriting
+// another profile's bucket misclassifies the row (#8245 re-gate, 2026-10-19).
+function _sidebarSameProfileForLineage(a,b){
+  if(!a||!b) return false;
+  const pa=String(a.profile||a.profile_name||'').trim();
+  const pb=String(b.profile||b.profile_name||'').trim();
+  if(!pa||!pb) return true;   // a row without profile info carries no cross-profile risk
+  return pa===pb;
+}
+function _sidebarDisplayBucketIsCli(s, rowsById, memo){
+  if(!s) return false;
+  if(memo&&s.session_id&&memo.has(s.session_id)) return memo.get(s.session_id);
+  let result=_isCliSession(s);
+  if(_isDelegatedSubagentChild(s)){
+    const seen=new Set();
+    const path=[];
+    let cur=s;
+    let resolved=false;
+    while(_isDelegatedSubagentChild(cur)){
+      path.push(cur);
+      const parentId=String(cur.parent_session_id||'').trim();
+      if(!parentId||seen.has(parentId)) break;
+      seen.add(parentId);
+      const parent=rowsById.get(parentId);
+      // #8245 re-gate (2026-10-19): the All-profiles view puts several
+      // profiles' rows in one map, so a bare id lookup can resolve a parent
+      // that belongs to a DIFFERENT profile and inherit its bucket. A lineage
+      // edge is only meaningful within the same profile, so require the
+      // profiles to agree before following it; a cross-profile hit is treated
+      // as "parent not present" (the row keeps its own raw bucket).
+      // #8245 re-gate (2026-10-27): the check must run BEFORE the memo
+      // short-circuit. The server sorts by recency, so a newer alpha parent
+      // can be memoised first and beta's child then inherited its bucket
+      // through memo.has(parentId) — parent-first and child-first orders gave
+      // different answers. Resolve (and profile-check) the parent row first,
+      // then take the memoized verdict for it.
+      if(!parent||!_sidebarSameProfileForLineage(cur,parent)) break;
+      if(memo&&parentId&&memo.has(parentId)){
+        result=memo.get(parentId);
+        resolved=true;
+        break;
+      }
+      cur=parent;
+    }
+    if(!resolved&&cur!==s){
+      result=_isCliSession(cur);
+      resolved=true;
+    } else if(!resolved){
+      // Rotation/compression fallback: the direct parent row may be gone, but the
+      // lineage root/tip still derives the child's bucket.
+      for(const key of ['_parent_lineage_root_id','_parent_lineage_tip_id']){
+        const lineageId=String(s[key]||'').trim();
+        if(lineageId&&lineageId!==s.session_id&&rowsById.has(lineageId)){
+          const lineageRow=rowsById.get(lineageId);
+          // Same profile guard as the parent walk: a lineage id from another
+          // profile's home must not derive this row's bucket.
+          if(!_sidebarSameProfileForLineage(s,lineageRow)) continue;
+          result=_isCliSession(lineageRow);
+          resolved=true;
+          break;
+        }
+      }
+    }
+    // Every delegated row on the resolved path shares the ancestor's bucket.
+    if(memo){
+      for(const r of path) if(r&&r.session_id&&!memo.has(r.session_id)) memo.set(r.session_id,result);
+    }
+  }
+  if(memo&&s.session_id&&!memo.has(s.session_id)) memo.set(s.session_id,result);
+  return result;
+}
+
 function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   // Every payload row, before bucket/project/archive scoping; the attach step classifies parents from it.
-  const rowsById=_sidebarRowsById([allMatched, typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:null]);
+  // #8245 re-gate (2026-10-27): the classifier's map must hold the COMPLETE
+  // cached rows plus the sidebar's parent references, not only the filtered
+  // match set. A search that matched the child but not its parent left the
+  // parent unresolvable, so the child fell back to its raw (WebUI) bucket
+  // even though it arrived in the CLI payload — and the WebUI fetch then
+  // excluded it, hiding it from BOTH tabs. Master shows it.
+  const rowsById=_sidebarRowsById([
+    allMatched,
+    typeof _allSessions!=='undefined'?_allSessions:null,
+    typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:null,
+  ]);
   const projectIdFor=_sidebarProjectResolver(rowsById);
+  // #8141: one memo per partition pass so the derived display bucket is
+  // resolved once per lineage instead of once per consumer.
+  const displayBucketMemo=new Map();
   let cliSessionCount=0;
   const webuiProfileFiltered=[];
   const cliProfileFiltered=[];
@@ -10057,7 +10159,11 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   let cliArchivedCount=0;
   for(const s of allMatched){
     if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
-    const isCli=_isCliSession(s);
+    // #8141: display-only bucket — a parent-owned delegated child travels with
+    // its resolved parent/lineage (CLI children attach under CLI parents)
+    // instead of landing in the WebUI bucket where it inflated the badge but
+    // never rendered. Raw source / read_only / ownership flags are untouched.
+    const isCli=_sidebarDisplayBucketIsCli(s, rowsById, displayBucketMemo);
     if(isCli) cliSessionCount++;
     if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)) continue;
     const profileFiltered=isCli ? cliProfileFiltered : webuiProfileFiltered;
@@ -10109,10 +10215,14 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
 function _scopedSidebarReferenceRows(isCli, projectIdFor){
   if(typeof _sidebarReferenceSessions==='undefined'||!Array.isArray(_sidebarReferenceSessions)||!_sidebarReferenceSessions.length) return [];
   const resolve=projectIdFor||_sidebarProjectResolver(_sidebarRowsById([_sidebarReferenceSessions, typeof _allSessions!=='undefined'?_allSessions:null]));
+  // #8141: references use the same display-only bucket derivation so an
+  // archived CLI-parent lineage (including archived subagent links) stays in
+  // the CLI render's suppression context.
+  const scopeRowsById=_sidebarRowsById([typeof _allSessions!=='undefined'?_allSessions:null, _sidebarReferenceSessions]);
   return _sidebarReferenceSessions.filter(s=>{
     if(!s) return false;
-    // Source scope: only references in the same webui/cli bucket as this render.
-    if(_isCliSession(s)!==!!isCli) return false;
+    // Source scope: only references in the same webui/cli display bucket as this render.
+    if(_sidebarDisplayBucketIsCli(s, scopeRowsById)!==!!isCli) return false;
     // Project scope: mirror _partitionSidebarSessionRows exactly.
     const projectId=resolve(s);
     if(_activeProject===NO_PROJECT_FILTER){ if(projectId) return false; }
@@ -10736,7 +10846,24 @@ function renderSessionListFromCache(){
   const archivePagingFilterActive=_sessionArchivePagingFilterActive();
   if(_showArchived&&!archivePagingFilterActive){
     const activeArchivedTotal=_sessionSourceFilter==='cli'?_archivedCliCount:_archivedWebuiCount;
-    const loadedArchivedCount=sidebarRows.filter(s=>s&&s.archived&&(_sessionSourceFilter==='cli'?_isCliSession(s):!_isCliSession(s))).length;
+    // #8245 re-gate (2026-10-19): the server total comes from the DERIVED bucket
+    // (api/routes.py computes archived_cli_count with the ownership rule), so the
+    // loaded count must use the same rule. Counting loaded rows with the raw
+    // _isCliSession() never sees an archived delegated child of a CLI parent:
+    // it is in the server total but not in this count, so `remaining` never
+    // reaches zero and the CLI tab keeps offering "Load more archived" after
+    // everything is loaded (master does not).
+    const _archivedBucketRowsById=new Map(
+      sidebarRows.filter(s=>s&&s.session_id).map(s=>[String(s.session_id),s])
+    );
+    const _archivedDisplayBucketMemo=new Map();
+    const _archivedInBucket=(s)=>{
+      if(!s||!s.archived) return false;
+      return _sessionSourceFilter==='cli'
+        ? !!_sidebarDisplayBucketIsCli(s, _archivedBucketRowsById, _archivedDisplayBucketMemo)
+        : !_sidebarDisplayBucketIsCli(s, _archivedBucketRowsById, _archivedDisplayBucketMemo);
+    };
+    const loadedArchivedCount=sidebarRows.filter(_archivedInBucket).length;
     const archiveLoadCapReached=Number(_archivedRowsLoadedLimit||0)>=SESSION_ARCHIVED_MAX_LOADED_LIMIT;
     const remainingArchived=archiveLoadCapReached?0:Math.max(0, Number(activeArchivedTotal||0)-loadedArchivedCount);
     if(remainingArchived>0){
