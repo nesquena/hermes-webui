@@ -1032,7 +1032,12 @@ def apply_onboarding_setup(body: dict) -> dict:
     env_path = _get_active_hermes_home() / ".env"
     env_values = _load_env_file(env_path)
 
-    if not api_key and not _provider_api_key_present(provider, cfg, env_values):
+    # cfg is the RAW document this setup writes back; judge an existing key on
+    # an expanded copy (a ``${VAR}`` reference is the variable's value, #8032).
+    from api.profiles import expand_profile_config
+
+    _cfg_values = expand_profile_config(_get_active_hermes_home(), cfg)
+    if not api_key and not _provider_api_key_present(provider, _cfg_values, env_values):
         # Providers that may run keyless (lmstudio, ollama, custom — gated by
         # `key_optional` in _SUPPORTED_PROVIDER_SETUPS) are allowed to onboard
         # with no api_key. OAuth-capable wizard providers (currently Anthropic

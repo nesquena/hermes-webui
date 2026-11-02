@@ -28,7 +28,7 @@ from api.config import (
     _get_session_agent_lock,
     _parse_provider_qualified_model_id,
     clear_session_writeback_owner_if_owned,
-    coerce_reasoning_effort_for_model,
+    resolve_session_reasoning_effort,
     gateway_approval_unavailable_reason,
     gateway_supports_approval,
     peek_stream,
@@ -431,21 +431,39 @@ def _gateway_use_runs_api_enabled(config_data=None, environ: dict[str, str] | No
     return raw in ("1", "true", "yes", "on")
 
 
-def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=None):
-    """Read and coerce user-configured reasoning effort for a gateway request."""
+def _gateway_reasoning_effort_for_request(
+    cfg, *, model=None, model_provider=None, session_effort=None
+):
+    """Resolve and coerce the session effort, falling back to profile config."""
     try:
-        cfg_data = cfg if isinstance(cfg, dict) else {}
-        effort_cfg = cfg_data.get("agent", {}) if isinstance(cfg_data, dict) else {}
-        effort_raw = effort_cfg.get("reasoning_effort") if isinstance(effort_cfg, dict) else None
-        coerced = coerce_reasoning_effort_for_model(
-            effort_raw,
-            model,
+        coerced = resolve_session_reasoning_effort(
+            cfg,
+            session_effort=session_effort,
+            model_id=model,
             provider_id=model_provider,
         )
         # Preserve explicit "none" while still omitting absent or invalid effort.
         return None if not coerced else str(coerced)
     except Exception:
         return None
+
+
+def _gateway_reasoning_body_fields(reasoning_effort) -> dict:
+    """Request-body fields that carry a resolved effort to the Gateway.
+
+    The Gateway decodes effort only from ``model_options`` (structured
+    ``reasoning``, or the legacy ``reasoning_effort`` key inside it) and ignores
+    a top-level ``reasoning_effort``; that key is still sent for any Gateway that
+    reads it. ``None`` or ``""`` (the session's "Default") sends nothing, so the
+    Gateway applies its own profile config: its protocol has no "provider
+    default, ignore config" value, and ``{"enabled": true}`` alone means a
+    medium effort on several providers.
+    """
+    effort = str(reasoning_effort or "").strip().lower()
+    if not effort:
+        return {}
+    reasoning = {"enabled": False} if effort == "none" else {"enabled": True, "effort": effort}
+    return {"reasoning_effort": effort, "model_options": {"reasoning": reasoning}}
 
 
 def _gateway_session_yolo_enabled(session_id: str) -> bool:
@@ -751,6 +769,36 @@ def _gateway_status_approval(status: dict) -> dict | None:
     return None
 
 
+def _gateway_approval_identity_v1(approval_data: dict, base_url: str, api_key: str) -> bool:
+    """Decide once, at card-creation time, whether this card carries a canonical identity.
+
+    Shared by every card origin — the Runs API relay and the default
+    ``/v1/chat/completions`` stream — so both publish the same creation-time
+    decision and ``/api/approval/respond`` never has to re-derive it: it
+    cannot, because the advertised capability is not published by gateways
+    that fence prompts by generation.
+
+    Exact-id answering needs a trustworthy per-prompt identity. A gateway that
+    published an ``execution_generation`` for this prompt proves it can fence
+    the answer to that exact prompt (canonical Runs API contract), so the
+    generation itself is the authority; the advertised capability remains the
+    fallback for gateways that only promise it via ``/v1/capabilities``.
+
+    A locally generated fallback id (``_gateway_raw_approval_id_present`` is
+    False) is never canonical: the gateway did not publish that id, so
+    answering with it is a guaranteed 400. It must not be promoted into one
+    here — the legacy body shape is the only honest answer for such a card.
+    """
+    from api.config import gateway_supports_approval_identity_v1
+
+    approval_data = approval_data or {}
+    if not bool(approval_data.get("_gateway_raw_approval_id_present")):
+        return False
+    if approval_data.get("_gateway_execution_generation") is not None:
+        return True
+    return bool(gateway_supports_approval_identity_v1(base_url, api_key))
+
+
 def _relay_gateway_run_approval(session_id, run_id, payload, base_url, api_key, *, put_gateway_event) -> bool:
     """Auto-approve or surface one runs-API approval request as a WebUI approval card.
 
@@ -762,17 +810,9 @@ def _relay_gateway_run_approval(session_id, run_id, payload, base_url, api_key, 
     if not approval_data:
         return False
     approval_data["run_id"] = run_id
-    from api.config import gateway_supports_approval_identity_v1
-    # Exact-id answering needs a trustworthy per-prompt identity. A gateway
-    # that published an ``execution_generation`` for this prompt proves it can
-    # fence the answer to that exact prompt (canonical Runs API contract), so
-    # the generation itself is the authority; the advertised capability remains
-    # the fallback for gateways that only promise it via /v1/capabilities.
-    identity_v1 = bool(approval_data.get("_gateway_raw_approval_id_present")) and (
-        approval_data.get("_gateway_execution_generation") is not None
-        or gateway_supports_approval_identity_v1(base_url, api_key)
+    approval_data["_gateway_agent_identity_v1"] = _gateway_approval_identity_v1(
+        approval_data, base_url, api_key
     )
-    approval_data["_gateway_agent_identity_v1"] = identity_v1
     auto_approved, head, total = _settle_gateway_run_approval(
         session_id,
         approval_data,
@@ -2899,6 +2939,57 @@ def _cleanup_gateway_pending_mirror(session_id: str) -> None:
         logger.debug("Failed to reconcile gateway pending mirror during teardown", exc_info=True)
 
 
+def settle_gateway_stream_approvals(session_id: str, stream_id: str, *, reason: str) -> None:
+    """Fail-close every approval card of the Gateway run ``stream_id`` maps to.
+
+    Shared by the stream worker's teardown and ``cancel_stream`` (user Stop and
+    the #7293 server settle). Stop must retire the run's cards itself: the
+    worker can stay blocked on the Gateway socket long after the turn was saved
+    as interrupted, and until its teardown a click on the card was still relayed
+    and resumed a run WebUI had already recorded as stopped.
+
+    Deliberately lock-free beyond the approval registry's own ``_lock``: Stop and
+    the server settle must never wait on an approval relay (whose POST is bounded
+    only by the runner client's timeout). Once this returns, a click finds the
+    card gone and gets 409 without reaching the Gateway. A relay that had
+    already validated its card before this ran still sends its one POST; that is
+    a click that effectively happened just before Stop.
+    """
+    from api.route_approvals import settle_gateway_pending_run
+
+    run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip() if stream_id else ""
+    if not session_id or not run_id:
+        return
+    settle_gateway_pending_run(session_id, run_id, reason=reason)
+
+
+def _submit_stream_approval_mirror(session_id: str, approval_data: dict, cancel_event) -> tuple[dict | None, int]:
+    """Publish a default-stream approval card unless its stream is being stopped.
+
+    Stop sets the cancel flag and then retires the run's cards under the approval
+    registry lock. The insertion re-checks the flag under that same lock
+    (``submit_gateway_pending_mirror(..., cancel_event=...)``), so either the
+    card is inserted before Stop's retirement (which then removes it) or the
+    insertion sees the flag and publishes nothing. No card can appear after
+    Stop has returned, not even before the recheck below. The recheck after
+    publishing stays as a second line of defence. (A click that validated the
+    card in the instant before it was retired still relays once; that is a
+    click that happened before Stop, not after it.)
+    """
+    from api.route_approvals import settle_gateway_pending_run, submit_gateway_pending_mirror
+
+    if cancel_event.is_set():
+        return None, 0
+    head, total = submit_gateway_pending_mirror(session_id, approval_data, cancel_event=cancel_event)
+    run_id = str(approval_data.get("run_id") or "").strip()
+    if run_id and cancel_event.is_set():
+        settle_gateway_pending_run(
+            session_id, run_id, reason="Gateway run was cancelled before approval resolution",
+        )
+        return None, 0
+    return head, total
+
+
 def _run_gateway_chat_streaming(
     session_id,
     msg_text,
@@ -3032,6 +3123,7 @@ def _run_gateway_chat_streaming(
             logger.debug("Failed to put gateway event to queue")
 
     s = None
+    api_key = ""
     final_text = ""
     terminal_error = ""
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
@@ -3041,10 +3133,24 @@ def _run_gateway_chat_streaming(
 
         # Profile-bound like the endpoint below: the worker thread has no request profile TLS.
         cfg = _gateway_config_for_profile(getattr(s, "profile", None)) or get_config()
+        # A legacy session (no stored effort) inherits agent.reasoning_effort from its
+        # own profile's isolated config, as the composer chip and the local worker do:
+        # cfg above still honours an ambient HERMES_CONFIG_PATH for a named profile.
+        session_effort = getattr(s, "reasoning_effort", None)
+        try:
+            from api.config import effective_session_reasoning_effort
+            from api.profiles import get_hermes_home_for_profile
+
+            session_effort = effective_session_reasoning_effort(
+                session_effort, get_hermes_home_for_profile(getattr(s, "profile", None)),
+            )
+        except Exception:
+            logger.warning("isolated reasoning config read failed; using the session config", exc_info=True)
         reasoning_effort = _gateway_reasoning_effort_for_request(
             cfg,
             model=model,
             model_provider=model_provider,
+            session_effort=session_effort,
         )
         # The session's own profile, not the process-active one: this worker thread has no
         # thread-local profile, so get_config()/os.environ describe whichever profile the
@@ -3108,8 +3214,7 @@ def _run_gateway_chat_streaming(
             body_extras = {}
             if model_provider:
                 body_extras["provider"] = model_provider
-            if reasoning_effort is not None:
-                body_extras["reasoning_effort"] = reasoning_effort
+            body_extras.update(_gateway_reasoning_body_fields(reasoning_effort))
             if _gw_overrides.get("service_tier"):
                 body_extras["service_tier"] = _gw_overrides["service_tier"]
             def record_run(run_id, request=None):
@@ -3212,8 +3317,7 @@ def _run_gateway_chat_streaming(
             }
             if model_provider:
                 body["provider"] = model_provider
-            if reasoning_effort is not None:
-                body["reasoning_effort"] = reasoning_effort
+            body.update(_gateway_reasoning_body_fields(reasoning_effort))
             if _gw_overrides.get("service_tier"):
                 body["service_tier"] = _gw_overrides["service_tier"]
             req = urllib.request.Request(
@@ -3259,9 +3363,18 @@ def _run_gateway_chat_streaming(
                             _approval_run_id = str(approval_data.get("run_id") or "").strip()
                             if _approval_run_id:
                                 _STREAM_RUN_IDS[stream_id] = _approval_run_id
+                            # Same creation-time identity decision the Runs API
+                            # relay makes (#8579): the mirror must carry the
+                            # marker /api/approval/respond reads, or a
+                            # generation-fenced gateway rejects the relayed
+                            # answer with 400 invalid_params and the card never
+                            # settles. Skipping it here silently downgraded
+                            # every default-stream card to the legacy body.
+                            approval_data["_gateway_agent_identity_v1"] = _gateway_approval_identity_v1(
+                                approval_data, base_url, api_key
+                            )
                             try:
-                                from api.route_approvals import submit_gateway_pending_mirror
-                                head, total = submit_gateway_pending_mirror(session_id, approval_data)
+                                head, total = _submit_stream_approval_mirror(session_id, approval_data, cancel_event)
                                 approval_data = {**(head or approval_data), "pending_count": total}
                             except Exception:
                                 logger.debug("submit_gateway_pending_mirror failed", exc_info=True)
@@ -3604,17 +3717,14 @@ def _run_gateway_chat_streaming(
             "hint": "Check HERMES_WEBUI_GATEWAY_BASE_URL and Gateway API server health.",
         })
     finally:
-        mapped_run_id = str(_STREAM_RUN_IDS.get(stream_id) or "").strip()
-        if mapped_run_id:
-            try:
-                from api.route_approvals import settle_gateway_pending_run
-                settle_gateway_pending_run(
-                    session_id,
-                    mapped_run_id,
-                    reason="Gateway run ended during teardown before approval resolution",
-                )
-            except Exception:
-                logger.debug("Failed to settle gateway pending approvals during teardown", exc_info=True)
+        try:
+            settle_gateway_stream_approvals(
+                session_id,
+                stream_id,
+                reason="Gateway run ended during teardown before approval resolution",
+            )
+        except Exception:
+            logger.debug("Failed to settle gateway pending approvals during teardown", exc_info=True)
         if s is not None:
             try:
                 with _get_session_agent_lock(session_id):

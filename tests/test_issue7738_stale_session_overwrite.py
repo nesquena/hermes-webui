@@ -31,6 +31,8 @@ import io
 import json
 from types import SimpleNamespace
 
+import pytest
+
 import api.models as models
 import api.routes as routes
 from api.models import SESSIONS, Session
@@ -64,6 +66,12 @@ class _FakeHandler:
         pass
 
     def end_headers(self):  # noqa: D401 — protocol stub
+        pass
+
+    def _safe_webui_print(self, *args, **kwargs):  # noqa: D401 — protocol stub
+        # The real handler's journal print. /api/session/draft calls it for a
+        # request over 200 ms; a draft whose lock window runs a nested pick
+        # crosses that on a slow runner (CI 3.13 shard 2, PR #8253).
         pass
 
 
@@ -536,6 +544,335 @@ def test_archive_handler_re_resolves_session_under_lock_to_avoid_stale_overwrite
         "(newer) object's composer_draft must survive on disk (issue #7738). "
         f"Got stale-clobbered: {on_disk['composer_draft']!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# /api/reasoning with session_id — same-shape fix
+# ---------------------------------------------------------------------------
+
+
+def _stub_reasoning_profile_side_effects(monkeypatch):
+    """Keep the effort POST on the session save; the profile write and the
+    capability lookup are covered in tests/test_session_reasoning_effort.py.
+    """
+    monkeypatch.setattr(routes, "write_reasoning_effort", lambda effort, *_a: effort)
+    monkeypatch.setattr(
+        routes, "get_reasoning_status",
+        lambda **kw: {"reasoning_effort": kw.get("effort_override")},
+    )
+
+
+def test_reasoning_handler_re_resolves_session_under_lock_to_avoid_stale_overwrite(
+    tmp_path, monkeypatch,
+):
+    """#7738 same-shape regression: an effort pick must not save its stale
+    outside-resolved object over a newer draft autosave.
+    """
+    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+    sid = "stale-reasoning-1"
+    captured = _capture_post(monkeypatch, {"effort": "high", "session_id": sid})
+    _stub_reasoning_profile_side_effects(monkeypatch)
+
+    stale = _seed_stale_session(
+        session_dir, sid, title="t", draft={"text": "old draft"},
+    )
+    newer = _make_newer_session(
+        session_dir, sid, title="t", draft={"text": "NEWER draft"},
+    )
+    newer.save()
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda value: stale)
+    _install_swap_lock(monkeypatch, sid, swap_with=newer)
+
+    result = routes.handle_post(
+        _FakeHandler(b"{}"), SimpleNamespace(path="/api/reasoning"),
+    )
+
+    assert result is True
+    assert captured["status"] == 200, f"expected 200, got {captured}"
+    on_disk = _load_disk_session(session_dir, sid)
+    assert on_disk["reasoning_effort"] == "high"
+    assert on_disk["composer_draft"] == {"text": "NEWER draft"}, (
+        "the effort save must not revert a newer draft (issue #7738); "
+        f"got {on_disk['composer_draft']!r}"
+    )
+    assert SESSIONS[sid] is newer
+
+
+def test_reasoning_handler_falls_back_to_session_load_and_keeps_newer_turn(
+    tmp_path, monkeypatch,
+):
+    """#7738: with the session fully evicted, the effort pick reloads it from
+    disk under the lock, so a turn saved in the window is kept.
+    """
+    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+    sid = "stale-reasoning-2"
+    captured = _capture_post(monkeypatch, {"effort": "low", "session_id": sid})
+    _stub_reasoning_profile_side_effects(monkeypatch)
+
+    stale = _seed_stale_session(session_dir, sid, title="t", draft={"text": ""})
+    newer = _make_newer_session(session_dir, sid, title="t", draft={"text": ""})
+    newer.messages = list(stale.messages) + [
+        {"role": "assistant", "content": "hello"},
+        {"role": "user", "content": "newer turn"},
+    ]
+    newer.save()
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda value: stale)
+    _install_swap_lock(monkeypatch, sid, swap_with=None)
+
+    result = routes.handle_post(
+        _FakeHandler(b"{}"), SimpleNamespace(path="/api/reasoning"),
+    )
+
+    assert result is True
+    assert captured["status"] == 200, f"expected 200, got {captured}"
+    on_disk = _load_disk_session(session_dir, sid)
+    assert on_disk["reasoning_effort"] == "low"
+    assert len(on_disk["messages"]) == 3, (
+        "the effort save must not drop a turn saved after the outside "
+        f"resolve (issue #7738); got {len(on_disk['messages'])} messages"
+    )
+
+
+def test_reasoning_handler_profile_default_only_when_session_turns_read_only_under_lock(
+    tmp_path, monkeypatch,
+):
+    """#7738: the lock-held recheck keeps the outside check's contract — a
+    session that is read-only by the time the lock is taken gets only the
+    profile-default save, and its sidecar is left untouched.
+    """
+    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+    sid = "stale-reasoning-ro"
+    captured = _capture_post(monkeypatch, {"effort": "high", "session_id": sid})
+    _stub_reasoning_profile_side_effects(monkeypatch)
+    profile_saves = []
+    monkeypatch.setattr(
+        routes, "set_reasoning_effort",
+        lambda effort, **_kw: profile_saves.append(effort) or {"reasoning_effort": effort},
+    )
+
+    stale = _seed_stale_session(session_dir, sid, title="t", draft={"text": "d"})
+    newer = _make_newer_session(session_dir, sid, title="t", draft={"text": "d"})
+    newer.read_only = True
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda value: stale)
+    _install_swap_lock(monkeypatch, sid, swap_with=newer)
+
+    result = routes.handle_post(
+        _FakeHandler(b"{}"), SimpleNamespace(path="/api/reasoning"),
+    )
+
+    assert result is True
+    assert captured["status"] == 200, f"expected 200, got {captured}"
+    assert profile_saves == ["high"]
+    assert _load_disk_session(session_dir, sid).get("reasoning_effort") is None
+    assert newer.reasoning_effort is None
+
+
+def test_reasoning_handler_preserves_cli_source_identity_across_lock_reload(
+    tmp_path, monkeypatch,
+):
+    """#7776 Finding 2: the effort pick's lock-held Session.load(sid) must not
+    drop the CLI source identity of a materialized CLI/agent session.
+    """
+    from api import profiles as _profiles_mod
+
+    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+    sid = "cli-source-reasoning-1"
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "alpha")
+    monkeypatch.setattr(
+        _profiles_mod, "get_active_profile_name", lambda: "alpha",
+    )
+    _seed_sidecar_without_source_meta(session_dir, sid, title="cli title")
+    cli_meta = {
+        "session_id": sid,
+        "title": "cli title",
+        "is_cli_session": True,
+        "source_tag": "hermes-cli",
+        "raw_source": "hermes-cli",
+        "session_source": "cli",
+        "source_label": "Hermes CLI",
+    }
+    monkeypatch.setattr(
+        routes, "_lookup_cli_session_metadata",
+        lambda value, *, all_profiles=False: dict(cli_meta),
+    )
+    captured = _capture_post(monkeypatch, {"effort": "high", "session_id": sid})
+    _stub_reasoning_profile_side_effects(monkeypatch)
+
+    result = routes.handle_post(
+        _FakeHandler(b"{}"), SimpleNamespace(path="/api/reasoning"),
+    )
+
+    assert result is True
+    assert captured["status"] == 200, f"expected 200, got {captured}"
+    on_disk = _load_disk_session(session_dir, sid)
+    assert on_disk["reasoning_effort"] == "high"
+    assert on_disk.get("is_cli_session") is True
+    assert on_disk.get("source_tag") == "hermes-cli"
+    assert on_disk.get("raw_source") == "hermes-cli"
+    assert on_disk.get("source_label") == "Hermes CLI"
+
+
+def test_reasoning_handler_does_not_restamp_fork_as_webui(tmp_path, monkeypatch):
+    """#7776 Finding 3: an effort pick on a WebUI fork keeps session_source='fork'."""
+    sid = "webui-fork-reasoning-1"
+    session_dir = _setup_fork_rename_scenario(tmp_path, monkeypatch, sid=sid)
+    captured = _capture_post(monkeypatch, {"effort": "high", "session_id": sid})
+    _stub_reasoning_profile_side_effects(monkeypatch)
+
+    result = routes.handle_post(
+        _FakeHandler(b"{}"), SimpleNamespace(path="/api/reasoning"),
+    )
+
+    assert result is True
+    assert captured["status"] == 200, f"expected 200, got {captured}"
+    on_disk = _load_disk_session(session_dir, sid)
+    assert on_disk["reasoning_effort"] == "high"
+    _assert_fork_identity_survived(on_disk, sid, context="reasoning")
+
+
+def _reasoning_profile_writes(monkeypatch):
+    writes = []
+    monkeypatch.setattr(
+        routes, "write_reasoning_effort",
+        lambda effort, profile_home=None: writes.append((effort, str(profile_home))) or effort,
+    )
+    monkeypatch.setattr(
+        routes, "get_reasoning_status",
+        lambda **kw: {"reasoning_effort": kw.get("effort_override")},
+    )
+    monkeypatch.setattr(
+        routes, "get_hermes_home_for_profile",
+        lambda name: f"home:{name}", raising=False,
+    )
+    from api import profiles as _profiles_mod
+
+    monkeypatch.setattr(
+        _profiles_mod, "get_hermes_home_for_profile", lambda name: f"home:{name}",
+    )
+    return writes
+
+
+def test_reasoning_handler_refuses_chat_retagged_to_another_profile_before_lock(
+    tmp_path, monkeypatch,
+):
+    """The pre-routing visibility guard runs before the session lock; chat
+    start can retag an empty chat to another profile in between. The
+    lock-held owner check must refuse it rather than write that profile's
+    default or the chat.
+    """
+    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+    sid = "retag-reasoning-1"
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "alpha")
+    captured = _capture_post(monkeypatch, {"effort": "high", "session_id": sid})
+    writes = _reasoning_profile_writes(monkeypatch)
+
+    stale = _seed_stale_session(session_dir, sid, title="t", draft={"text": ""})
+    stale.profile = "alpha"
+    stale.messages = []  # retag only applies to empty chats
+    stale.save()
+    retagged = _make_newer_session(session_dir, sid, title="t", draft={"text": ""})
+    retagged.profile = "beta"
+    retagged.messages = []
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda value: stale)
+    _install_swap_lock(monkeypatch, sid, swap_with=retagged)
+
+    result = routes.handle_post(
+        _FakeHandler(b"{}"), SimpleNamespace(path="/api/reasoning"),
+    )
+
+    assert result is True
+    assert captured["status"] == 409, f"expected 409, got {captured}"
+    assert writes == []
+    assert retagged.reasoning_effort is None
+    assert _load_disk_session(session_dir, sid).get("reasoning_effort") is None
+
+
+def _retag_on_visibility_call(monkeypatch, session, call_number):
+    """Retag ``session`` to ``beta`` right after the Nth lock-held owner check
+    (1 = the check before the save, 2 = the recheck after it), as a
+    concurrent chat start would.
+    """
+    # The pre-routing guard passed; only the lock-held checks are observed here.
+    monkeypatch.setattr(
+        routes, "_session_id_visible_to_request_profile", lambda *a, **kw: True,
+    )
+    real_visible = routes._session_visible_to_active_profile
+    calls = []
+
+    def visible_then_retag(profile, handler=None):
+        ok = real_visible(profile, handler)
+        calls.append(profile)
+        if len(calls) == call_number:
+            # The production retag producer used by chat start and /goal.
+            assert routes._retag_empty_session_profile(session, "beta")[1] == "retagged"
+        return ok
+
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", visible_then_retag)
+    return calls
+
+
+def _seed_empty_alpha_session(session_dir, sid):
+    session = _seed_stale_session(session_dir, sid, title="t", draft={"text": ""})
+    session.profile = "alpha"
+    session.messages = []  # retag only applies to empty chats
+    session.reasoning_effort = "low"
+    session.save()
+    return session
+
+
+def test_reasoning_handler_refuses_chat_retagged_between_check_and_save(
+    tmp_path, monkeypatch,
+):
+    """A retag after the lock-held owner check but before the save is caught
+    by the recheck after the save: the pick is undone on the chat, no profile
+    default is written, and the request gets the mismatch response.
+    """
+    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+    sid = "retag-reasoning-2"
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "alpha")
+    captured = _capture_post(monkeypatch, {"effort": "high", "session_id": sid})
+    writes = _reasoning_profile_writes(monkeypatch)
+    session = _seed_empty_alpha_session(session_dir, sid)
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda value: session)
+    _retag_on_visibility_call(monkeypatch, session, 1)
+
+    result = routes.handle_post(
+        _FakeHandler(b"{}"), SimpleNamespace(path="/api/reasoning"),
+    )
+
+    assert result is True
+    assert captured["status"] == 409, f"expected 409, got {captured}"
+    assert writes == []
+    assert session.reasoning_effort == "low"
+    on_disk = _load_disk_session(session_dir, sid)
+    assert on_disk["reasoning_effort"] == "low"
+    assert on_disk["profile"] == "beta"
+
+
+def test_reasoning_handler_writes_checked_profile_when_retagged_after_recheck(
+    tmp_path, monkeypatch,
+):
+    """A retag after the post-save recheck comes after the pick completed; it
+    cannot redirect the profile default write away from the checked profile.
+    """
+    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+    sid = "retag-reasoning-3"
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "alpha")
+    captured = _capture_post(monkeypatch, {"effort": "high", "session_id": sid})
+    writes = _reasoning_profile_writes(monkeypatch)
+    session = _seed_empty_alpha_session(session_dir, sid)
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda value: session)
+    calls = _retag_on_visibility_call(monkeypatch, session, 2)
+
+    result = routes.handle_post(
+        _FakeHandler(b"{}"), SimpleNamespace(path="/api/reasoning"),
+    )
+
+    assert result is True
+    assert captured["status"] == 200, f"expected 200, got {captured}"
+    assert calls == ["alpha", "alpha"]
+    assert writes == [("high", "home:alpha")]
+    assert _load_disk_session(session_dir, sid)["reasoning_effort"] == "high"
 
 
 # ---------------------------------------------------------------------------
@@ -1171,3 +1508,507 @@ def test_apply_cli_source_meta_never_overwrites_existing_fork():
     )
     assert session.is_cli_session is False
     assert session.source_tag is None
+
+
+# ---------------------------------------------------------------------------
+# /api/session/draft — must not undo an effort pick saved after eviction
+# ---------------------------------------------------------------------------
+
+
+class _PickThenResumeLock:
+    """Proxy for the draft's session lock. Before the draft takes it, the
+    session is evicted, a newer turn lands on disk and a real effort pick is
+    saved through ``/api/reasoning``; ``evict_after_pick`` then drops the
+    pick's object too, so the draft must reload from disk.
+    """
+
+    def __init__(self, inner, run_pick, evict_after_pick):
+        self._inner = inner
+        self._run_pick = run_pick
+        self._evict_after_pick = evict_after_pick
+
+    def acquire(self, *args, **kwargs):
+        self._run_pick(self._evict_after_pick)
+        return self._inner.acquire(*args, **kwargs)
+
+    def release(self):
+        self._inner.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.release()
+
+
+@pytest.mark.parametrize("evict_after_pick", [False, True], ids=["pick-resident", "fully-evicted"])
+def test_draft_autosave_does_not_undo_effort_pick_saved_after_eviction(
+    tmp_path, monkeypatch, evict_after_pick,
+):
+    """#7738 same-shape: a draft resolved before eviction must not save its
+    stale object over a later effort pick and turn. The effort, the draft
+    and every message must survive a cold reload.
+    """
+    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+    sid = "stale-draft-effort"
+    _stub_reasoning_profile_side_effects(monkeypatch)
+
+    stale = _seed_stale_session(session_dir, sid, title="t", draft={"text": "old draft"})
+    stale.reasoning_effort = "low"
+    stale.save()
+
+    bodies = {"body": {"session_id": sid, "text": "new draft"}}
+    captured = _capture_post(monkeypatch, None)
+    monkeypatch.setattr(routes, "read_body", lambda handler: bodies["body"])
+    real_lock_factory = routes._get_session_agent_lock
+    fired = []
+
+    def _run_pick(evict):
+        if fired:
+            return
+        fired.append(True)
+        # Count-cap eviction, then a turn saved by another writer.
+        SESSIONS.pop(sid, None)
+        turn = Session.load(sid)
+        turn.messages = list(turn.messages) + [
+            {"role": "assistant", "content": "hello"},
+            {"role": "user", "content": "newer turn"},
+        ]
+        turn.save()
+        draft_body = bodies["body"]
+        bodies["body"] = {"effort": "xhigh", "session_id": sid}
+        monkeypatch.setattr(routes, "_get_session_agent_lock", real_lock_factory)
+        routes.handle_post(_FakeHandler(b"{}"), SimpleNamespace(path="/api/reasoning"))
+        assert captured["status"] == 200, f"effort pick failed: {captured}"
+        bodies["body"] = draft_body
+        if evict:
+            SESSIONS.pop(sid, None)
+
+    monkeypatch.setattr(
+        routes, "_get_session_agent_lock",
+        lambda value: _PickThenResumeLock(real_lock_factory(value), _run_pick, evict_after_pick),
+    )
+
+    handler = _FakeHandler(b"{}")
+    handler.command = "POST"
+    result = routes.handle_post(handler, SimpleNamespace(path="/api/session/draft"))
+
+    assert result is True
+    assert fired, "the effort pick must run inside the draft's window"
+    assert captured["status"] == 200, f"expected 200, got {captured}"
+    SESSIONS.clear()
+    cold = Session.load(sid)
+    assert cold.reasoning_effort == "xhigh", (
+        f"the draft save undid the accepted effort pick; got {cold.reasoning_effort!r}"
+    )
+    assert cold.composer_draft == {"text": "new draft"}
+    assert len(cold.messages) == 3, f"got {len(cold.messages)} messages"
+
+
+def test_draft_save_publishes_over_copy_cached_by_get_in_window(tmp_path, monkeypatch):
+    """A GET that caches the old copy after the draft's lock-held reload must
+    not keep the old draft in SESSIONS, or a later effort pick saves it back.
+    """
+    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+    sid = "draft-get-window"
+    _stub_reasoning_profile_side_effects(monkeypatch)
+    _seed_stale_session(session_dir, sid, title="t", draft={"text": "old draft"})
+    SESSIONS.pop(sid, None)
+
+    bodies = {"body": {"session_id": sid, "text": "new draft"}}
+    captured = _capture_post(monkeypatch, None)
+    monkeypatch.setattr(routes, "read_body", lambda handler: bodies["body"])
+    real_ensure_full = routes._ensure_full_session_before_mutation
+
+    def _ensure_then_get(value, session):
+        full = real_ensure_full(value, session)
+        routes.get_session(value)  # concurrent GET caches the old draft
+        return full
+
+    monkeypatch.setattr(routes, "_ensure_full_session_before_mutation", _ensure_then_get)
+    real_lock_factory = routes._get_session_agent_lock
+    _install_swap_lock(monkeypatch, sid, swap_with=None)  # evicted before the lock
+    handler = _FakeHandler(b"{}")
+    handler.command = "POST"
+    routes.handle_post(handler, SimpleNamespace(path="/api/session/draft"))
+    assert captured["status"] == 200, f"expected 200, got {captured}"
+    assert SESSIONS[sid].composer_draft == {"text": "new draft"}
+
+    monkeypatch.setattr(routes, "_ensure_full_session_before_mutation", real_ensure_full)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", real_lock_factory)
+    bodies["body"] = {"effort": "high", "session_id": sid}
+    routes.handle_post(_FakeHandler(b"{}"), SimpleNamespace(path="/api/reasoning"))
+    assert captured["status"] == 200, f"effort pick failed: {captured}"
+    SESSIONS.clear()
+    cold = Session.load(sid)
+    assert cold.reasoning_effort == "high"
+    assert cold.composer_draft == {"text": "new draft"}, (
+        f"a later effort pick saved the cached old draft back; got {cold.composer_draft!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Every other session writer — must not undo an effort pick saved after eviction
+# ---------------------------------------------------------------------------
+
+
+_ANCHOR_SCENE = {
+    "version": "activity_scene_v1",
+    "mode": "compact_worklog",
+    "activity_rows": [{"row_id": "tool-1", "role": "tool"}],
+    "final_answer": "hello",
+}
+
+
+def _seed_writer(session):
+    session.personality = "old"
+    session.pinned = True
+
+
+# (path, body, assertion on the cold-reloaded session)
+_WRITERS = [
+    ("/api/session/update", {"model": "newer-model"},
+     lambda s: s.model == "newer-model"),
+    ("/api/session/toolsets", {"toolsets": ["web"]},
+     lambda s: s.enabled_toolsets == ["web"]),
+    ("/api/personality/set", {"name": ""},
+     lambda s: s.personality is None),
+    ("/api/session/clear", {},
+     lambda s: s.messages == []),
+    ("/api/session/truncate", {"keep_count": 1},
+     lambda s: len(s.messages) == 1),
+    ("/api/session/pin", {"pinned": False},
+     lambda s: s.pinned is False),
+    ("/api/session/pin", {"pinned": True},
+     lambda s: s.pinned is True),
+    ("/api/session/anchor-scene", {"message_index": 1, "scene": _ANCHOR_SCENE},
+     lambda s: len(s.anchor_activity_scenes or {}) == 1),
+]
+
+
+@pytest.mark.parametrize(
+    "path,extra,check", _WRITERS,
+    ids=["update", "toolsets", "personality", "clear", "truncate", "unpin", "pin", "anchor-scene"],
+)
+def test_session_writer_does_not_undo_effort_pick_saved_after_eviction(
+    tmp_path, monkeypatch, path, extra, check,
+):
+    """#7738 class: each writer resolves Low, the session is evicted, an
+    effort pick saves XHigh, then the writer resumes. A cold reload must
+    keep XHigh and the writer's own change.
+    """
+    _isolate_session_store(tmp_path, monkeypatch)
+    sid = "stale-writer-effort"
+    _stub_reasoning_profile_side_effects(monkeypatch)
+    _stub_post_lock_side_effects(monkeypatch)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda p, profile=None: p)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda *a, **kw: None)
+    monkeypatch.setattr(routes, "_resolve_context_length_for_session_model", lambda *a: 0)
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda value: {})
+    import api.config as config
+    monkeypatch.setattr(config, "_evict_session_agent", lambda *a, **kw: None)
+    monkeypatch.setattr(routes, "list_profiles_api", lambda: [])
+    if "pinned" in extra and extra["pinned"]:
+        monkeypatch.setattr(routes, "all_sessions", lambda: [])
+
+    stale = Session(
+        session_id=sid,
+        title="t",
+        workspace=str(tmp_path),
+        model="old-model",
+        messages=[
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ],
+        reasoning_effort="low",
+    )
+    _seed_writer(stale)
+    if path == "/api/session/pin" and extra["pinned"]:
+        stale.pinned = False
+    stale.save()
+    SESSIONS[sid] = stale
+
+    bodies = {"body": {"session_id": sid, **extra}}
+    captured = _capture_post(monkeypatch, None)
+    monkeypatch.setattr(routes, "read_body", lambda handler: bodies["body"])
+    real_lock_factory = routes._get_session_agent_lock
+    fired = []
+
+    def _run_pick(_evict):
+        if fired:
+            return
+        fired.append(True)
+        SESSIONS.pop(sid, None)  # count-cap eviction
+        writer_body = bodies["body"]
+        bodies["body"] = {"effort": "xhigh", "session_id": sid}
+        monkeypatch.setattr(routes, "_get_session_agent_lock", real_lock_factory)
+        routes.handle_post(_FakeHandler(b"{}"), SimpleNamespace(path="/api/reasoning"))
+        assert captured["status"] == 200, f"effort pick failed: {captured}"
+        bodies["body"] = writer_body
+
+    monkeypatch.setattr(
+        routes, "_get_session_agent_lock",
+        lambda value: _PickThenResumeLock(real_lock_factory(value), _run_pick, False),
+    )
+
+    handler = _FakeHandler(b"{}")
+    handler.command = "POST"
+    result = routes.handle_post(handler, SimpleNamespace(path=path))
+
+    assert result is True
+    assert fired, "the effort pick must run inside the writer's window"
+    assert captured["status"] == 200, f"expected 200, got {captured}"
+    SESSIONS.clear()
+    cold = Session.load(sid)
+    assert cold.reasoning_effort == "xhigh", (
+        f"{path} undid the accepted effort pick; got {cold.reasoning_effort!r}"
+    )
+    assert check(cold), f"{path} lost its own change"
+
+
+# ---------------------------------------------------------------------------
+# A never-persisted New Conversation shell evicted before the lock
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("lane", ["draft", "reasoning"])
+def test_unsaved_shell_evicted_before_lock_is_kept(tmp_path, monkeypatch, lane):
+    """A cache-only shell has no sidecar to clobber, so the effort pick keeps
+    the outside-resolved object instead of answering 404 and losing the chat.
+
+    The draft lane follows master's draft lifecycle instead: a draft is only
+    persisted for the live cached owner (deletion must not race first-draft
+    ownership), so a shell gone from the cache under the lock is refused with
+    409 ``Session no longer active`` and the client keeps its local fallback.
+    Nothing is written for it either way.
+    """
+    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+    sid = "unsaved-shell"
+    _stub_reasoning_profile_side_effects(monkeypatch)
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda value: {})
+    shell = Session(session_id=sid, title="Untitled", workspace=str(tmp_path))
+    SESSIONS[sid] = shell
+    assert not (session_dir / f"{sid}.json").exists()
+
+    if lane == "draft":
+        body = {"session_id": sid, "text": "first words"}
+        path = "/api/session/draft"
+    else:
+        body = {"effort": "high", "session_id": sid}
+        path = "/api/reasoning"
+    captured = _capture_post(monkeypatch, body)
+    _install_swap_lock(monkeypatch, sid, swap_with=None)  # evicted before the lock
+
+    handler = _FakeHandler(b"{}")
+    handler.command = "POST"
+    routes.handle_post(handler, SimpleNamespace(path=path))
+
+    if lane == "draft":
+        assert captured["status"] == 409, f"expected 409, got {captured}"
+        assert captured["payload"].get("error") == "Session no longer active"
+        assert sid not in SESSIONS
+        assert not (session_dir / f"{sid}.json").exists()
+        assert not (session_dir / ".drafts" / f"{sid}.json").exists()
+        return
+    assert captured["status"] == 200, f"expected 200, got {captured}"
+    assert SESSIONS.get(sid) is shell, "the shell must be republished to the cache"
+    cold = Session.load(sid)
+    assert cold is not None
+    assert cold.reasoning_effort == "high"
+
+
+def test_shell_fallback_refuses_object_with_messages(tmp_path, monkeypatch):
+    """A gone session with messages is not a shell: keep the 404."""
+    _isolate_session_store(tmp_path, monkeypatch)
+    sid = "gone-with-messages"
+    outside = Session(
+        session_id=sid, title="t", workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    assert routes._resolve_session_under_lock(sid, outside) is None
+
+
+@pytest.mark.parametrize("lane", ["draft", "reasoning"])
+def test_empty_session_deleted_before_lock_is_not_resurrected(tmp_path, monkeypatch, lane):
+    """A delete in the window tombstones the chat; the empty-shell fallback
+    must not save the outside object back.
+    """
+    session_dir = _isolate_session_store(tmp_path, monkeypatch)
+    sid = "deleted-in-window"
+    _stub_reasoning_profile_side_effects(monkeypatch)
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda value: {})
+    outside = Session(session_id=sid, title="Untitled", workspace=str(tmp_path),
+                      composer_draft={"text": "draft"})
+    outside.save()
+    SESSIONS[sid] = outside
+
+    monkeypatch.setattr(routes, "_DELETED_SESSION_IDS", set())
+    # A tombstone that dropped this id (it is capped) must not matter.
+    monkeypatch.setattr(models, "_record_webui_deleted_session_tombstone", lambda value: None)
+    monkeypatch.setattr(routes, "_record_webui_deleted_session_tombstone", lambda value: None)
+    delete_captured = {}
+
+    def _delete_in_window():
+        monkeypatch.setattr(routes, "_get_session_agent_lock", real_lock_factory)
+        monkeypatch.setattr(routes, "read_body", lambda handler: {"session_id": sid})
+        monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda value: {})
+        monkeypatch.setattr(routes, "delete_cli_session", lambda value: True, raising=False)
+        import api.models as _m
+        monkeypatch.setattr(_m, "delete_cli_session", lambda value: True)
+        monkeypatch.setattr(routes, "_publish_session_list_changed", lambda *a, **kw: None)
+        routes.handle_post(_FakeHandler(b"{}"), SimpleNamespace(path="/api/session/delete"))
+        delete_captured.update(captured)
+        monkeypatch.setattr(routes, "read_body", lambda handler: body)
+
+    if lane == "draft":
+        body = {"session_id": sid, "text": "late keystroke"}
+        path = "/api/session/draft"
+    else:
+        body = {"effort": "high", "session_id": sid}
+        path = "/api/reasoning"
+    captured = _capture_post(monkeypatch, body)
+    real_lock_factory = routes._get_session_agent_lock
+
+    class _DeleteLock(_DropLock):
+        def acquire(self, *args, **kwargs):
+            _delete_in_window()
+            return self._inner.acquire(*args, **kwargs)
+
+    monkeypatch.setattr(
+        routes, "_get_session_agent_lock",
+        lambda value: _DeleteLock(real_lock_factory(value), value),
+    )
+
+    handler = _FakeHandler(b"{}")
+    handler.command = "POST"
+    routes.handle_post(handler, SimpleNamespace(path=path))
+
+    assert delete_captured.get("status") == 200, f"delete failed: {delete_captured}"
+    if lane == "draft":
+        # Master's draft lifecycle answers a session gone under the lock with
+        # 409 ``Session no longer active`` (the client keeps a local fallback).
+        assert captured["status"] == 409, f"expected 409, got {captured}"
+        assert captured["payload"].get("error") == "Session no longer active"
+        assert not (session_dir / ".drafts" / f"{sid}.json").exists()
+    else:
+        assert captured["status"] == 404, f"expected 404, got {captured}"
+    assert sid not in SESSIONS
+    assert not (session_dir / f"{sid}.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Session.save() chokepoint — a stale snapshot never rolls an effort pick back
+# ---------------------------------------------------------------------------
+
+
+def _pick_xhigh_via_route(monkeypatch, sid, captured=None, writer_body=None):
+    """Persist an XHigh pick through the real /api/reasoning handler. With
+    ``captured``, reuse that recorder and restore ``writer_body`` afterwards
+    so an enclosing request can still read its own body and response.
+    """
+    _stub_reasoning_profile_side_effects(monkeypatch)
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda value: {})
+    pick_body = {"effort": "xhigh", "session_id": sid}
+    if captured is None:
+        captured = _capture_post(monkeypatch, pick_body)
+    else:
+        monkeypatch.setattr(routes, "read_body", lambda handler: pick_body)
+    routes.handle_post(_FakeHandler(b"{}"), SimpleNamespace(path="/api/reasoning"))
+    assert captured["status"] == 200, f"effort pick failed: {captured}"
+    if writer_body is not None:
+        monkeypatch.setattr(routes, "read_body", lambda handler: writer_body)
+
+
+def _seed_low_session(tmp_path, sid):
+    s = Session(
+        session_id=sid,
+        title="t",
+        workspace=str(tmp_path),
+        messages=[{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}],
+        reasoning_effort="low",
+    )
+    s.save()
+    return s
+
+
+@pytest.mark.parametrize("shape", ["evicted-cache-object", "detached-load"])
+def test_stale_snapshot_save_keeps_effort_pick(tmp_path, monkeypatch, shape):
+    """#7881 gate round: chat start, compression, CLI refresh, branching and
+    share all save an object resolved before a pick. Whatever the writer,
+    the save must keep the picked effort and still write its own change.
+    """
+    _isolate_session_store(tmp_path, monkeypatch)
+    sid = "stale-snapshot-effort"
+    seeded = _seed_low_session(tmp_path, sid)
+    if shape == "evicted-cache-object":
+        SESSIONS[sid] = seeded
+        stale = seeded
+        SESSIONS.pop(sid)  # count-cap eviction before the pick
+    else:
+        SESSIONS[sid] = seeded  # the pick runs on the resident object
+        stale = Session.load(sid)  # CLI-refresh / compression-style snapshot
+
+    _pick_xhigh_via_route(monkeypatch, sid)
+
+    stale.title = "writer change"
+    stale.save()
+
+    assert stale.reasoning_effort == "xhigh", "the saved object must match disk"
+    SESSIONS.clear()
+    cold = Session.load(sid)
+    assert cold.reasoning_effort == "xhigh", (
+        f"a stale snapshot save undid the accepted pick; got {cold.reasoning_effort!r}"
+    )
+    assert cold.title == "writer change"
+
+
+def test_own_effort_change_and_rollback_are_still_written(tmp_path, monkeypatch):
+    _isolate_session_store(tmp_path, monkeypatch)
+    sid = "own-effort-change"
+    s = _seed_low_session(tmp_path, sid)
+    s.reasoning_effort = "high"
+    s.save()
+    assert Session.load(sid).reasoning_effort == "high"
+    s.reasoning_effort = "low"  # the route's rollback shape
+    s.save()
+    assert Session.load(sid).reasoning_effort == "low"
+
+
+@pytest.mark.parametrize("path", ["/api/share/create", "/api/share/revoke"])
+def test_share_writer_does_not_undo_effort_pick(tmp_path, monkeypatch, path):
+    """Share create/revoke save the session resolved before the share call,
+    without the session lock. A pick saved in that window must survive.
+    """
+    _isolate_session_store(tmp_path, monkeypatch)
+    sid = "share-stale-effort"
+    seeded = _seed_low_session(tmp_path, sid)
+    seeded.share_token = "tok"
+    seeded.save()
+    SESSIONS[sid] = seeded
+    monkeypatch.setattr(routes, "_session_requires_cli_metadata_lookup", lambda s: False)
+    monkeypatch.setattr(routes, "_publish_session_list_changed", lambda *a, **kw: None)
+
+    writer_body = {"session_id": sid}
+
+    def _pick_in_window(*_a, **_kw):
+        SESSIONS.pop(sid, None)
+        _pick_xhigh_via_route(monkeypatch, sid, captured, writer_body)
+        captured.clear()
+        return {
+            "share_token": "tok", "share_created_at": 1.0, "share_title": "t",
+            "share_message_count": 2, "share_updated_at": 1.0,
+        }
+
+    monkeypatch.setattr(routes, "create_or_refresh_share", _pick_in_window)
+    monkeypatch.setattr(routes, "revoke_share", _pick_in_window)
+    captured = _capture_post(monkeypatch, writer_body)
+    routes.handle_post(_FakeHandler(b"{}"), SimpleNamespace(path=path))
+
+    assert captured.get("status") == 200, f"expected 200, got {captured}"
+    SESSIONS.clear()
+    cold = Session.load(sid)
+    assert cold.reasoning_effort == "xhigh", (
+        f"{path} undid the accepted effort pick; got {cold.reasoning_effort!r}"
+    )
+    assert cold.share_token == (None if path.endswith("revoke") else "tok")
