@@ -742,9 +742,13 @@ def test_regeneration_tail_snapshot_reads_real_sqlite(monkeypatch, tmp_path):
     assert snap["prefix"]["count"] == 2, "rows < floor must be counted"
     assert len(snap["prefix_keys"]) == 2
     assert len(snap["tail"]) == 2, "rows >= floor must be the bounded tail"
-    # the repeated prompt key appears in BOTH the skipped prefix and the tail —
-    # exactly the occurrence-count collision the guard must refuse
-    assert snap["prefix_keys"][0] == snap["tail_keys"][0]
+    # #7587: the repeated prompt below (ts=100) and above (ts=300) the floor are
+    # two DISTINCT occurrences, so their visible keys no longer collapse.  The
+    # prefix/tail collision guard is now driven by clock identity rather than by
+    # content alone; a genuine same-clock repeat is covered by
+    # test_in_tail_duplicate_guard_refuses_bounded_and_full_revision_accepted.
+    assert snap["prefix_keys"][0] != snap["tail_keys"][0]
+    assert snap["prefix_keys"][0][:3] == snap["tail_keys"][0][:3]
 
 
 def _make_state_db(tmp_path, rows, with_id=True):
@@ -906,7 +910,11 @@ def test_in_tail_duplicate_guard_refuses_bounded_and_full_revision_accepted(monk
             continue
         role = "user" if i % 2 == 0 else "assistant"
         content = "m100" if i == 210 else f"m{i}"
-        rows.append({"role": role, "content": content, "timestamp": 100.0 + i})
+        # #7587: visible identity is occurrence-sensitive, so a genuine in-tail
+        # duplicate has to repeat the CLOCK as well as the content.  Row 210
+        # mirrors row 100 exactly (same role, content and timestamp).
+        timestamp = 200.0 if i == 210 else 100.0 + i
+        rows.append({"role": role, "content": content, "timestamp": timestamp})
     db = _make_state_db(tmp_path, rows)
     monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
 
