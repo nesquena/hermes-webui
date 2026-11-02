@@ -68,6 +68,7 @@ _GATEWAY_MIRROR_TOKEN = "_gateway_mirror_token"
 _GATEWAY_MIRROR_RETAINED = "_gateway_mirror_retained"
 _GATEWAY_ENTRY_DATA_TOKEN_KEY = "_webui_mirror_token"
 _GATEWAY_AGENT_IDENTITY_V1 = "_gateway_agent_identity_v1"
+_GATEWAY_EXECUTION_GENERATION = "_gateway_execution_generation"
 _gateway_relay_owners: dict[tuple[str, str], str] = {}
 _yolo_transition_lock = threading.Lock()
 _yolo_transitions: dict[str, dict] = {}
@@ -649,7 +650,7 @@ def _gateway_mirrored_pending_run_id(session_key: str, approval_id: str) -> str 
     return None
 
 
-def submit_gateway_pending_mirror(session_key: str, approval: dict) -> tuple[dict | None, int]:
+def submit_gateway_pending_mirror(session_key: str, approval: dict, *, cancel_event=None) -> tuple[dict | None, int]:
     """Mirror the live gateway head into WebUI polling state under a typed tag.
 
     Every mirrored entry describes one pending approval to the UI. Run-backed
@@ -675,6 +676,8 @@ def submit_gateway_pending_mirror(session_key: str, approval: dict) -> tuple[dic
     the correct producer's own card reappears on the next reconcile.
     """
     with _lock:
+        if cancel_event is not None and cancel_event.is_set():
+            return None, 0
         run_id = str(approval.get("run_id") or "").strip()
         approval_id = str(approval.get("approval_id") or "").strip()
         live_gateway_queue = _gateway_queues.get(session_key) or []
@@ -779,8 +782,21 @@ def submit_gateway_pending_mirror(session_key: str, approval: dict) -> tuple[dic
                 mirror_entry[_GATEWAY_MIRROR_FLAG] = True
                 mirror_entry[_GATEWAY_MIRROR_TOKEN] = uuid.uuid4().hex
                 mirror_entry[_GATEWAY_MIRROR_RETAINED] = True
-                if not _gateway_pending_mirror_locked(session_key, approval_id=approval_id, run_id=run_id):
+                existing_mirror = _gateway_pending_mirror_locked(
+                    session_key, approval_id=approval_id, run_id=run_id
+                )
+                if existing_mirror is None:
                     _normalize_pending_queue_locked(session_key).append(mirror_entry)
+                elif existing_mirror.get(_GATEWAY_EXECUTION_GENERATION) != mirror_entry.get(
+                    _GATEWAY_EXECUTION_GENERATION
+                ):
+                    # The run re-published this prompt id at a new generation:
+                    # the old mirror's answer is a stale 409, so the live
+                    # payload replaces it (new payload, new mirror token)
+                    # instead of being deduped away by the id alone.
+                    queue = _normalize_pending_queue_locked(session_key)
+                    queue[:] = [entry for entry in queue if entry is not existing_mirror]
+                    queue.append(mirror_entry)
         elif not exact_local_entry:
             if not approval_id:
                 approval_id = uuid.uuid4().hex
