@@ -1560,6 +1560,9 @@ function _setComposerAfterCliOnlyExplainer(value){
 }
 
 async function send(){
+  // Must run before any guard/await: iOS Safari's transient user activation is
+  // only available in the original Send / Enter event handler.
+  if(typeof _primeBrowserTtsFromGesture==='function') _primeBrowserTtsFromGesture(false);
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
   // _defaultMessageMode
