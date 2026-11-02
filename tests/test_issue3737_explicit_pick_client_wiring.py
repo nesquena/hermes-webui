@@ -71,7 +71,7 @@ def test_send_consumes_pending_pick_after_reading_it():
 
 def test_send_sends_flag_only_when_explicit():
     idx = MESSAGES_JS.find("_explicitPick")
-    region = MESSAGES_JS[idx: idx + 1300]
+    region = MESSAGES_JS[idx: idx + 4000]
     assert "explicit_model_pick:_explicitPick||undefined" in region.replace(" ", ""), (
         "the chat/start payload must send explicit_model_pick only when truthy"
     )

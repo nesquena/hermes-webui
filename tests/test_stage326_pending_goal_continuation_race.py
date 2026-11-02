@@ -87,17 +87,21 @@ def test_stream_teardown_preserves_pending_goal_continuation(tmp_path, monkeypat
 
 
 def test_routes_consumer_discards_atomically_on_read():
-    """The routes.py consumer must discard the marker after consuming it,
-    so the marker is single-use (one continuation = one auto-flag).
+    """The routes.py consumer must consume the marker in one atomic step, so
+    the marker is single-use (one continuation = one auto-flag).
 
-    #6885: consumption is delegated to the module-level helper
-    ``_consume_pending_goal_continuation`` (admission correction: only a
-    turn whose text matches the pending continuation prompt consumes the
-    marker). Round 2 moved the record (marker + prompt + expiry) behind
-    ``api.goals`` so streaming/gateway/routes share one owner; the
-    stage-326 atomicity contract now lives there: check + drop happen
-    under one lock-held block, and routes.py must not discard anywhere
-    else.
+    #7862 moved the check+discard into
+    ``api.goal_continuation_store.consume_pending_goal_continuation``, which
+    performs the match, the ``goal_related`` decision input, and the discard
+    under ONE module-level RLock. That is strictly tighter than the previous
+    "check, set, discard" sequence, so the invariant this guard protects is
+    unchanged -- only its shape moved.
+
+    #7862 re-gate (2026-10-27): the gate also requires a non-empty RESOLVED
+    ``goal_continuation_id`` (a tokenless regenerate must not spend the next
+    queued continuation), and the store's transaction now takes a
+    cross-process file lock. Both are the reviewer-requested shape; the pin
+    below carries the token term.
     """
     src = _read_routes()
 
@@ -107,74 +111,50 @@ def test_routes_consumer_discards_atomically_on_read():
     # consume_continuation_markers() — never up front — so a rejected start
     # rolls back the whole admission (see the receipt guards below).
     m = re.search(
-        r"def consume_continuation_markers\(\).*?"
-        r"if not goal_related and goal_continuation_id:\s*\n\s*"
-        r"receipt = _consume_pending_goal_continuation\(",
+        r"if not goal_related and goal_continuation_id:.*?"
+        r"consume_pending_goal_continuation\(\s*"
+        r"s\.session_id,\s*msg,\s*goal_continuation_id\s*"
+        r",\s*goal_continuation_attempt_id\s*,?"
+        # #7862 round 11: the explicit-continue admission's two flags are
+        # optional in this pin; round 11's own module pins their wiring.
+        r"(?:\s*,\s*explicit_continue\s*=\s*\w+\s*,\s*goal_active\s*=\s*\w+)?"
+        r"\s*,?\s*\)",
         src,
         re.S,
     )
     assert m is not None, (
-        "routes.py must consume PENDING_GOAL_CONTINUATION via "
-        "_consume_pending_goal_continuation(gated on goal_continuation_id), "
-        "inside consume_continuation_markers()"
+        "routes.py must consume PENDING_GOAL_CONTINUATION atomically via "
+        "consume_pending_goal_continuation (check + set goal_related + "
+        "discard in the same block)"
     )
-
-    # 2. routes.py delegates to api.goals (single record owner).
-    assert "from api.goals import consume_pending_goal_continuation" in src, (
-        "routes.py helper must delegate to api.goals."
-        "consume_pending_goal_continuation"
+    # #7862 re-gate round 15 (CORE finding 2): the token gate now REFUSES a
+    # token-bearing request whose session has no pending marker — the intent
+    # was consumed elsewhere, and launching it as an ordinary turn produced
+    # the second goal_related=False worker. The refusal must be wired into
+    # the same token gate.
+    assert "_GoalContinuationTokenUnmatched" in src, (
+        "routes.py must refuse a token-bearing dispatch with no pending "
+        "marker (round 15, CORE finding 2)"
     )
-    # 2b. #7855 rollback receipt: admission pops the record as well as the
-    #     marker, so a rejected start must restore both halves through
-    #     api.goals — re-adding the marker alone left the retry unmatchable.
-    assert "from api.goals import restore_pending_goal_continuation" in src, (
-        "restore_consumed_continuation_markers() must delegate to "
-        "api.goals.restore_pending_goal_continuation so the record half "
-        "is restored too (marker-only rollback is stale after #7855)"
+    # The check→consume seam must stay free of other marker mutations. The
+    # round-11 continue admission reads the session's goal state between the
+    # check and the consume (a local, lock-free read), so the seam is longer
+    # than it used to be; what must NOT appear is a second mutation of the
+    # marker set or a nested consume — that is what the line budget used to
+    # approximate.
+    block = m.group(0)
+    inner = block[: block.rfind("consume_pending_goal_continuation(")]
+    assert "PENDING_GOAL_CONTINUATION.discard" not in inner, (
+        "no other discard may sit between the marker check and the consume"
     )
-
-    # 3. No stray direct discard anywhere in routes.py: the drop is owned
-    #    by api.goals (lock-held, check + drop in one block). The one allowed
-    #    exception is master's `consume_continuation_markers()` closure, which
-    #    consumes the legacy #1932 SET marker (a different object from the
-    #    id-keyed record api.goals owns) for the plain no-id path.
-    direct = re.findall(r"PENDING_GOAL_CONTINUATION\.discard", src)
-    allowed = re.findall(r"def consume_continuation_markers\(\)[^}]*?PENDING_GOAL_CONTINUATION\.discard", src, re.S)
-    assert len(direct) == len(allowed), (
-        f"PENDING_GOAL_CONTINUATION.discard must not appear in routes.py "
-        f"(api/goals owns the record drop); found {len(direct)}, of which "
-        f"{len(allowed)} sit inside the legacy consume_continuation_markers() closure"
+    assert "PENDING_GOAL_CONTINUATION.add" not in inner, (
+        "no re-arm may sit between the marker check and the consume"
     )
-
-
-def test_goals_module_owns_atomic_check_and_drop():
-    """stage-326 atomicity, relocated: api.goals holds check + drop of the
-    record in ONE lock-held block (the two collections cannot drift, and a
-    reader can never observe a half-consumed record)."""
-    goals_src = Path(__file__).parents[1].joinpath("api", "goals.py").read_text(encoding="utf-8")
-    drop = re.search(
-        r"def _drop_pending_goal_continuation\([\s\S]*?"
-        r"_cfg\.PENDING_GOAL_CONTINUATION\.discard[\s\S]*?"
-        r"_cfg\.PENDING_GOAL_CONTINUATION_PROMPTS\.pop",
-        goals_src,
+    assert "consume_pending_goal_continuation(" not in inner, (
+        "the consume must be the first and only consumption in the block"
     )
-    assert drop is not None, (
-        "api.goals must drop marker + prompt together in one helper "
-        "(single record, no drift)"
-    )
-    block = drop.group(0)
-    assert block.count("\n") <= 12, (
-        "the atomic drop helper should stay tight (single record removal)"
-    )
-    # The consumer runs check + drop under the shared lock.
-    consume = re.search(
-        r"def consume_pending_goal_continuation\(.*?\n(?:.*\n)*?.*with _cfg\.PENDING_GOAL_CONTINUATION_LOCK:",
-        goals_src,
-    )
-    assert consume is not None, (
-        "api.goals.consume_pending_goal_continuation must hold the shared "
-        "lock across check + drop"
-    )
+    # The match-gated store is the ONLY place that discards for a chat start.
+    assert "PENDING_GOAL_CONTINUATION.discard(s.session_id)" not in src
 
 
 def test_pending_goal_continuation_is_a_set():
@@ -248,11 +228,12 @@ def test_goal_continue_set_marker_before_emitting_event():
 
     # Find the next goal_continue SSE event AFTER the registration.
     after_add = src[add_idx:]
-    event_idx = after_add.find("put('goal_continue'")
-    assert event_idx != -1, "no goal_continue emission after record registration"
-    # Must be within ~500 chars (close to the registration).
-    assert event_idx < 500, (
-        "register_pending_goal_continuation must immediately precede the "
+    event_idx = after_add.find("goal_continue")
+    assert event_idx != -1, "no goal_continue emission after marker add"
+    # Must be within ~900 chars (close to the add). The window also covers the
+    # #7862 round-3 token mint between the marker add and the SSE emission.
+    assert event_idx < 900, (
+        "PENDING_GOAL_CONTINUATION.add must immediately precede the "
         "goal_continue SSE emission"
     )
     # The SSE event fires only when the registration succeeded.

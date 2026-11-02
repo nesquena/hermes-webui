@@ -229,6 +229,28 @@ function _getSessionQueue(sid, create=false){
 function _queueStorageKey(sid){
   return 'hermes-queue-'+sid;
 }
+// #7862 re-gate round 3 (finding 1): per-session resume continuation tokens.
+// ``/goal resume`` returns the pending continuation's identity token and tells
+// the user to "type continue"; that literal control is a new human turn whose
+// text never matches the recorded prompt, so the token has to travel with the
+// next send for the store to admit it. One-shot: the first send after a resume
+// claims the token, so a later unrelated turn never carries a stale identity.
+const _RESUME_GOAL_CONTINUATION_TOKENS={};
+function _setResumeGoalContinuationToken(sid,token){
+  const _sid=String(sid||'');const _tok=String(token||'');
+  if(!_sid) return;
+  if(_tok) _RESUME_GOAL_CONTINUATION_TOKENS[_sid]=_tok;
+  else delete _RESUME_GOAL_CONTINUATION_TOKENS[_sid];
+}
+function _claimResumeGoalContinuationToken(sid){
+  const _sid=String(sid||'');if(!_sid) return '';
+  const _tok=_RESUME_GOAL_CONTINUATION_TOKENS[_sid]||'';
+  delete _RESUME_GOAL_CONTINUATION_TOKENS[_sid];
+  return _tok;
+}
+function _peekResumeGoalContinuationToken(sid){
+  return _RESUME_GOAL_CONTINUATION_TOKENS[String(sid||'')]||'';
+}
 function _clearPersistedSessionQueue(sid){
   if(!sid) return;
   const key=_queueStorageKey(sid);
@@ -11729,12 +11751,17 @@ function _renderQueueChips(sid){
         const liveQ=_getSessionQueue(sid,false);
         const first=snapshot.find(e=>e)||{};
         const firstFiles=(snapshot.find(e=>e&&Array.isArray(e.files)&&e.files.length)||{files:[]}).files;
-        // #7855: the combined entry keeps the FIRST continuation ID among the
-        // merged items. Combining a continuation with later user text still
-        // admits it (its ID is intact) — and a combine of pure user messages
-        // carries no ID, so it stays an ordinary turn.
-        const _contId=(snapshot.find(e=>e&&String(e.goal_continuation_id||'').trim())||{}).goal_continuation_id||'';
-        liveQ.length=0;liveQ.push({text:combined,files:firstFiles,model:first.model||'',model_provider:first.model_provider||null,goal_continuation_id:_contId,_queued_at:Date.now()});
+        // #7862 re-gate round 3 (finding 4): carry the continuation identity
+        // through the merge. A queued goal continuation may be combined with
+        // other queued messages; the merged entry keeps the token so the store
+        // can still admit the turn as the goal continuation instead of running
+        // it as an ordinary turn and stopping the goal loop. The FIRST entry
+        // that carries one wins (queue order = send order, so it is the token
+        // whose continuation the merge actually spends).
+        const _mergedContinuationId=(snapshot.find(e=>e&&e.goal_continuation_id)||{}).goal_continuation_id||'';
+        const _mergedEntry={text:combined,files:firstFiles,model:first.model||'',model_provider:first.model_provider||null,_queued_at:Date.now()};
+        if(_mergedContinuationId) _mergedEntry.goal_continuation_id=String(_mergedContinuationId);
+        liveQ.length=0;liveQ.push(_mergedEntry);
         SESSION_QUEUES[sid]=liveQ;
         _persistSessionQueueStorage(sid,liveQ);
         delete _queueRenderKeys[sid];
