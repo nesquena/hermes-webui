@@ -86,10 +86,13 @@ const _allSessions = [];
 """
 
 
-def _harness(local_row_lands_midflight: bool, tool_cards_in_response=None) -> str:
+def _harness(local_row_lands_midflight: bool, tool_cards_in_response=None, local_row_swapped_midflight=False) -> str:
     """Build the VM source. When *local_row_lands_midflight* the stubbed api()
     appends a local row to S.messages while the append request is in flight —
-    the same row the server's window will carry back. *tool_cards_in_response*
+    the same row the server's window will carry back. When
+    *local_row_swapped_midflight* it REPLACES a row in the middle of the held
+    range with a locally-owned object, leaving the count and the last row
+    untouched (the live-tail swap shape). *tool_cards_in_response*
     is the session-level tool_calls array the append window carries back."""
     midflight = (
         """
@@ -98,7 +101,15 @@ def _harness(local_row_lands_midflight: bool, tool_cards_in_response=None) -> st
     S.messages.push({role: 'assistant', content: 'streamed answer'});
 """
         if local_row_lands_midflight
-        else ""
+        else ("""
+    // The live-tail swap: a locally-owned row replaces one in the MIDDLE of
+    // the held range, so neither the row count nor the last row moves — the
+    // 2026-10-21 shape probe cannot see it, only the per-row proof can.
+    S.messages[Math.floor(S.messages.length / 2)] = {
+      role: 'assistant', content: 'streamed answer', _live: true,
+    };
+"""
+        if local_row_swapped_midflight else "")
     )
     cards_json = json.dumps(tool_cards_in_response or [])
     return (
@@ -116,6 +127,12 @@ let _pendingCarryForwardSnapshot = null;
 // load that established the 601-row view.
 let _sessionPrefixFp = '';
 let _sessionPrefixFpEnd = -1;
+// #7925 re-gate (2026-11-02, proof-gated fast path): the per-row provenance
+// that says WHICH of the held rows are verbatim server rows. The load that
+// established this view vouched for all 601 of them, so the driver seeds the
+// set before the reload; a row the harness writes locally afterwards is not in
+// it, which is exactly the state a streaming turn leaves behind.
+let _prefixProvenRows = new WeakSet();
 // #7925 re-gate (2026-10-27, silent finding): the loaded card list kept
 // across loadSession's metadata replacement (null here: this harness drives
 // _ensureMessagesLoaded directly, so the merge sources S.session.tool_calls).
@@ -125,6 +142,14 @@ let _messageRenderWindowSize = 50;
 const INFLIGHT = {};
 const MESSAGE_RENDER_WINDOW_DEFAULT = 50;
 const apiCalls = [];
+// The server's authoritative transcript: the 601 rows the client holds plus
+// the one row that landed after its last refresh. The full-fetch fallback
+// must answer from HERE (not from the locally-mutated S.messages), or it could
+// not tell a replaced row from a delivered one.
+const SERVER_ROWS = Array.from({length: 601}, (_, i) => ({
+  role: i % 2 === 0 ? 'user' : 'assistant',
+  content: 'm' + i,
+})).concat([{role: 'assistant', content: 'streamed answer'}]);
 const S = {
   session: {
     session_id: 'sid-7925-f2',
@@ -134,10 +159,7 @@ const S = {
     regeneration_revision: null,
     tool_calls: [{tid: 't1', assistant_msg_idx: 5, summary: 'older card'}],
   },
-  messages: Array.from({length: 601}, (_, i) => ({
-    role: i % 2 === 0 ? 'user' : 'assistant',
-    content: 'm' + i,
-  })),
+  messages: SERVER_ROWS.slice(0, 601).map(m => Object.assign({}, m)),
   toolCalls: [{tid: 't1', assistant_msg_idx: 5, summary: 'older card', done: true}],
   busy: false,
 };
@@ -178,18 +200,24 @@ async function api(url) {
     }};
   }
   // Authoritative full document: 601 held rows + the row that landed
-  // (locally and server-side), exactly once.
+  // (locally and server-side), exactly once — never the locally-mutated view.
   return {session: {
     _messages_truncated: false,
     _messages_offset: 0,
     _msg_limit_max: 500,
     message_count: 602,
     visible_message_count: 602,
-    messages: S.messages.map(m => Object.assign({}, m)),
+    messages: SERVER_ROWS.map(m => Object.assign({}, m)),
   }};
 }
 """
         + _fn("_mergeSessionToolCards")
+        + "\n"
+        + _fn("_markPrefixProvenRows")
+        + "\n"
+        + _fn("_heldRowsArePrefixProven")
+        + "\n"
+        + _fn("_adoptPrefixProof")
         + "\n"
         + _fn("_syncToolCallsForLoadedMessages")
         + "\n"
@@ -200,6 +228,9 @@ async function api(url) {
   // like the load that established the view minted it.
   _sessionPrefixFp = 'fp-held-601';
   _sessionPrefixFpEnd = 601;
+  // … and that same load vouched for every one of those rows.
+  _prefixProvenRows = new WeakSet();
+  for (const m of S.messages) _prefixProvenRows.add(m);
   await _ensureMessagesLoaded('sid-7925-f2', {loadGeneration: 1});
   const contents = S.messages.map(m => m.content);
   const dupes = contents.filter((c, i) => contents.indexOf(c) !== i);
@@ -214,6 +245,7 @@ async function api(url) {
     rows: S.messages.length,
     dupes: dupes,
     streamedCount: contents.filter(c => c === 'streamed answer').length,
+    middleRowIsLocal: !!(S.messages[Math.floor(S.messages.length / 2)] && S.messages[Math.floor(S.messages.length / 2)]._live),
     sessionCards: sessionCards,
     liveCards: liveCards,
   }));
@@ -247,6 +279,40 @@ def test_clean_append_still_concats_without_a_second_request():
     )
     assert result["rows"] == 602, result["rows"]
     assert result["dupes"] == [], result["dupes"]
+
+
+@_node_tests
+def test_same_length_local_row_swap_midflight_loses_the_proof():
+    """#7925 re-gate (2026-11-02, finding c): a locally written row that lands
+    while the append fetch is in flight must not be absorbed into the proven
+    prefix — not even when it keeps the shape the old guard probed.
+
+    The live-tail merge (``_dropCurrentTurnAssistantMessages`` +
+    ``_mergeInflightTailMessages``, and the recovered-prompt re-placement inside
+    it) can splice a locally-owned row into the MIDDLE of the held range: the
+    count and the last row both stay put, so a length/last-row/oldestIdx probe
+    reports "no drift" and the server's window is concatenated underneath a row
+    no response ever delivered.
+
+    RED before the proof-gated gate: the shape probe saw nothing, the append
+    was accepted, and the locally-owned row (``_live``) survived in the
+    transcript after only ONE request. The per-row proof re-validates the rows
+    the response would be concatenated onto, so the response routes to the
+    authoritative full fetch and the local row is replaced by the server's.
+    """
+    result = json.loads(_run_node_vm(_harness(
+        local_row_lands_midflight=False,
+        local_row_swapped_midflight=True,
+    )))
+    assert result["apiCalls"] == 2, (
+        f"expected append + full-fallback requests, got {result['apiCalls']} — "
+        "a same-length local row swap was absorbed into the proven prefix"
+    )
+    assert result["middleRowIsLocal"] is False, (
+        "the locally-owned row survived: the full fetch did not replace the view"
+    )
+    assert result["dupes"] == [], result["dupes"]
+    assert result["rows"] == 602, result["rows"]
 
 
 @_node_tests

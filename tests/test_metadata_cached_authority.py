@@ -35,6 +35,12 @@ def _source():
         "_captureSameSessionForceReloadHint",
         "_clearSameSessionForceReloadHint",
         "_messageReloadLimitForSession",
+        # #7925 re-gate (2026-11-02, proof-gated fast path): the reload flow
+        # gates the append-only fast path on per-row provenance, so the three
+        # helpers it calls travel with the extracted loader.
+        "_markPrefixProvenRows",
+        "_heldRowsArePrefixProven",
+        "_adoptPrefixProof",
     )
     functions = [extract_function(sessions, name) for name in names]
     for name in ("loadSession", "_ensureMessagesLoaded", "_ensureAllMessagesLoaded"):
@@ -68,6 +74,10 @@ const c={
   _loadingSessionId:null, _loadSessionGeneration:0,
   _messagesTruncated:spec.offset>0, _oldestIdx:spec.offset, _loadingOlder:false,
   _sameSessionForceReloadHint:null, _pendingCarryForwardSnapshot:null,
+  // #7925 re-gate (2026-11-02): the per-row provenance store the proof-gated
+  // fast path reads. No digest is seeded here, so the fast path stays skipped
+  // and every reload takes the replace path this harness asserts on.
+  _sessionPrefixFp:'', _sessionPrefixFpEnd:-1, _prefixProvenRows:new WeakSet(),
   _INITIAL_MSG_LIMIT:30,_MSG_LIMIT_MAX:500,_msgLimitMax:spec.ceiling||500,
   localStorage:{setItem:(k,v)=>stored.set(k,v),getItem:k=>stored.get(k)||null,removeItem:k=>stored.delete(k)},
   $:id=>id==='msg'?composer:id==='msgInner'?msgInner:null,

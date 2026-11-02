@@ -51,6 +51,79 @@ let _pendingSessionToolCalls = null;
 // reload takes the authoritative full fetch (master's behaviour).
 let _sessionPrefixFp = '';
 let _sessionPrefixFpEnd = -1;
+// #7925 re-gate (2026-11-02, proof-gated fast path): the digest above is an
+// INTERVAL-level statement — the server hashes absolute rows [0, K) — and the
+// client cannot split it into per-row proofs. What it CAN record is, per row
+// it holds, whether that row is a verbatim copy of a server row the interval
+// describes. Provenance is tracked by object identity in a WeakSet: a row that
+// is NOT in here was either synthesised locally (a streamed turn, an INFLIGHT
+// live-tail merge, a recovered prompt, a handoff marker) or delivered through
+// a lossy transport (a `_content_truncated` clipped tool result). Either way
+// the row is not what the proof describes, so the append-only fast path is
+// refused and the reload takes the authoritative full fetch — master's shape.
+// Identity rather than a parallel index array is what makes this both cheap
+// and total: every local append/splice/replace leaves the new object unproven
+// with no hook at the mutation site, and a WeakSet never pins a dropped row.
+// Provenance is per-session, so it is reset (a fresh WeakSet) wherever the
+// held proof is reset.
+let _prefixProvenRows = new WeakSet();
+
+// Rows that may carry the interval proof. Everything else is either
+// client-synthesised or a lossy copy of a server row.
+function _markPrefixProvenRows(rows){
+  const list=Array.isArray(rows)?rows:[];
+  for(const row of list){
+    if(!row||typeof row!=='object') continue;
+    // A display-only row (a recovered prompt parked outside the canonical
+    // window) is drawn by the client, never delivered as a transcript row.
+    if(row._displayOnlyRow) continue;
+    // `_content_truncated` is the bounded-payload clipper's marker: the
+    // server hashes the UNCLIPPED document, so a clipped copy is not the row
+    // the digest describes. It stays unproven and the next reload re-fetches
+    // the full document (the full fetch skips the clipper).
+    if(row._content_truncated) continue;
+    _prefixProvenRows.add(row);
+  }
+}
+
+// True when every row the client holds is a proven server row AND the held
+// interval ends exactly where the held proof's coverage ends: the rows on
+// screen are precisely the ones the digest describes — contiguous, no holes,
+// nothing replaced. This is the fast path's whole admission test.
+function _heldRowsArePrefixProven(){
+  const list=Array.isArray(S.messages)?S.messages:[];
+  if(!list.length) return false;
+  if(_sessionPrefixFp==='' || _sessionPrefixFpEnd!==_oldestIdx+list.length) return false;
+  for(const row of list){
+    if(!row || !_prefixProvenRows.has(row)) return false;
+  }
+  return true;
+}
+
+// Adopt (or keep) the interval proof after a response's rows landed.
+// `coverageEnd` is the absolute end the response's OWN digest covers: the held
+// end when the response delivered every row the client now holds (a
+// full/limited/append load), or the page's own end when it delivered only a
+// head (backward paging). A NARROWER mint never replaces a WIDER proof —
+// paging back must not shrink what the held view can vouch for.
+function _adoptPrefixProof(prefixFp, coverageEnd){
+  const fp=(typeof prefixFp==='string'&&prefixFp)?prefixFp:'';
+  const end=Number(coverageEnd);
+  const heldEnd=_oldestIdx+(Array.isArray(S.messages)?S.messages.length:0);
+  if(fp){
+    if(Number.isFinite(end)&&end>=_sessionPrefixFpEnd){
+      _sessionPrefixFp=fp;
+      _sessionPrefixFpEnd=end;
+    }
+    return;
+  }
+  // No digest in this response (an older server): the held proof stays usable
+  // only while it still covers every row the client holds.
+  if(_sessionPrefixFp!=='' && _sessionPrefixFpEnd<heldEnd){
+    _sessionPrefixFp='';
+    _sessionPrefixFpEnd=-1;
+  }
+}
 
 // ── Composer draft persistence ────────────────────────────────────────────────
 
@@ -2537,6 +2610,10 @@ async function newSession(flash, options={}){
     S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
     // A brand-new session has no rendered prefix to vouch for.
     _sessionPrefixFp='';_sessionPrefixFpEnd=-1;
+    // Provenance is per-session: a fresh WeakSet drops the previous session's
+    // row references (they could otherwise still vouch for rows a later load
+    // of THIS session happens to re-render).
+    _prefixProvenRows=new WeakSet();
     // #8356: New Chat takes the pane without going through loadSession(), so
     // an in-flight loadSession() for the previous session still owns the load
     // (its _loadingSessionId/_loadGeneration match) and its response can write
@@ -2961,6 +3038,9 @@ async function loadSession(sid){
       // fast path still describes the transcript on screen.
       _sessionPrefixFp = '';
       _sessionPrefixFpEnd = -1;
+      // Same reset for the per-row provenance: a different session's rows can
+      // never vouch for the pane that is about to load.
+      _prefixProvenRows = new WeakSet();
     }
     // Close live SSE streams from the session we're leaving. The error
     // handler checks _isSessionActivelyViewed() and won't auto-reconnect
@@ -4512,12 +4592,16 @@ async function _ensureMessagesLoaded(sid, opts) {
     _reloadWidthExceedsCeiling &&
     Array.isArray(S.messages) && S.messages.length > 0 &&
     Number.isFinite(Number(S.session && S.session.transcript_generation)) &&
-    // #7925 re-gate (2026-10-27, finding 4): the append must also vouch for
-    // the PREFIX it holds. The stored digest has to cover exactly the view's
-    // held end ([0, _oldestIdx + length)); any drift (a paged view, a stale
-    // digest) skips the fast path rather than sending an unprovable claim.
-    _sessionPrefixFp !== '' &&
-    _sessionPrefixFpEnd === _oldestIdx + S.messages.length;
+    // #7925 re-gate (2026-11-02, proof-gated fast path): the append must vouch
+    // for the PREFIX it holds, row by row. The digest the client echoes covers
+    // absolute rows [0, K) — an interval it cannot split — so the admission
+    // test is: every row currently held is a verbatim server row from the load
+    // that minted that digest, and the held interval ends exactly where the
+    // digest's coverage ends. A row that arrived any other way (a paged-in row
+    // is fine — it IS a server row; a locally streamed row, a recovered prompt
+    // or a `_content_truncated` clipped tool result is NOT) fails the test, the
+    // fast path is skipped, and the reload takes the authoritative full fetch.
+    _heldRowsArePrefixProven();
   let appendParam = '';
   // #7925 re-gate (2026-10-21, finding 2): rows can land locally while the
   // append fetch is in flight (a streaming turn appending to S.messages, a
@@ -4583,11 +4667,20 @@ async function _ensureMessagesLoaded(sid, opts) {
     // transcript, and concatenating the window would duplicate them. Treat
     // that drift exactly like an over-cap window: re-fetch the authoritative
     // full transcript through the replace path below.
+    // #7925 re-gate (2026-11-02, proof-gated fast path): the shape probe above
+    // is a heuristic — it cannot see a same-length row swap, and a spliced row
+    // that keeps the count and the last row looks clean. Re-validate the ROWS
+    // instead: every row the response would be concatenated onto must still be
+    // a proven server row. This is the same admission test the request passed,
+    // re-run on the live view, so a local write that landed mid-fetch (or any
+    // future shape it takes) can never be silently absorbed into a proven
+    // prefix.
     const _appendConcurrentChange =
       _appendPreLength >= 0 &&
       (S.messages.length !== _appendPreLength ||
         S.messages[S.messages.length - 1] !== _appendPreAnchorRow ||
-        _oldestIdx !== _appendPreOldestIdx);
+        _oldestIdx !== _appendPreOldestIdx ||
+        !_heldRowsArePrefixProven());
     // The append does not change whether OLDER rows exist beyond the window:
     // keep the previous truncation state and OR in the response's signal that
     // more NEWER rows exist beyond the capped append window. Only the newer
@@ -4637,15 +4730,16 @@ async function _ensureMessagesLoaded(sid, opts) {
       // #7925 re-gate (2026-10-27, finding 4): the append response minted a
       // fresh prefix digest over [0, the extended held end) — adopt it so the
       // NEXT append vouches for the longer prefix. A response without one
-      // (older server) invalidates the stored digest: the next reload takes
-      // the authoritative full fetch instead of an unprovable append.
-      if (data.session.prefix_fp) {
-        _sessionPrefixFp = String(data.session.prefix_fp);
-        _sessionPrefixFpEnd = _oldestIdx + S.messages.length;
-      } else {
-        _sessionPrefixFp = '';
-        _sessionPrefixFpEnd = -1;
-      }
+      // (older server) leaves the held proof valid only while it still covers
+      // the extended prefix: otherwise the next reload takes the authoritative
+      // full fetch instead of an unprovable append.
+      // #7925 re-gate (2026-11-02, proof-gated fast path): the rows that just
+      // landed join the proven prefix only when they are verbatim server rows.
+      // A clipped tool result in the window (`_content_truncated`) is the
+      // clipper's preview, not the row the digest describes, so it stays
+      // unproven and the next reload re-fetches the full document.
+      _markPrefixProvenRows(appended);
+      _adoptPrefixProof(data.session.prefix_fp, _oldestIdx + S.messages.length);
       // Clean append: the new rows are all there is — refresh the session
       // metadata that every transcript landing must update, then finish. The
       // regeneration revision is re-adopted from this response (the
@@ -4750,10 +4844,16 @@ async function _ensureMessagesLoaded(sid, opts) {
   // #7925 re-gate (2026-10-27, finding 4): every load response mints the
   // prefix digest over rows [0, coverage end) — store it with the view this
   // response established so the next append-only fast-path request can vouch
-  // for the prefix. A response without one invalidates the stored digest
-  // (the fast path is skipped, the reload already took the full fetch).
-  _sessionPrefixFp = data.session.prefix_fp ? String(data.session.prefix_fp) : '';
-  _sessionPrefixFpEnd = _oldestIdx + (Array.isArray(S.messages) ? S.messages.length : 0);
+  // for the prefix. A response without one leaves the held proof valid only
+  // while it still covers every row now held (an older server costs the fast
+  // path, never correctness).
+  // #7925 re-gate (2026-11-02, proof-gated fast path): the rows this response
+  // delivered are the view, so they are what the proof may vouch for — row by
+  // row. A clipped tool result inside a bounded window is the clipper's
+  // preview rather than the server's row, so it is left unproven and the next
+  // reload re-fetches the full document (which skips the clipper).
+  _markPrefixProvenRows(msgs);
+  _adoptPrefixProof(data.session.prefix_fp, _oldestIdx + (Array.isArray(S.messages) ? S.messages.length : 0));
   // Expand render window to cover all loaded messages so the next
   // renderMessages() doesn't hide most of them behind a tiny window.
   if(typeof _messageRenderableMessageCount==='function'&&typeof _currentMessageRenderWindowSize==='function'){
@@ -5700,6 +5800,25 @@ async function _loadOlderMessages() {
     _messageRenderWindowSize=_currentMessageRenderWindowSize()+Math.max(addedRenderable, MESSAGE_RENDER_WINDOW_DEFAULT);
     _messagesTruncated = !!responseSession._messages_truncated;
     _oldestIdx = responseSession._messages_offset || 0;
+    // #7925 re-gate (2026-11-02, proof-gated fast path): the rows this response
+    // delivered ARE server rows, so they may carry the interval proof — a page
+    // fetched with `msg_before` exactly as much as a cumulative tail window.
+    // Only a CLIPPED page row loses it: the bounded-payload clipper runs on
+    // every bounded window (`msg_before` paging included), and a preview is not
+    // the row the digest describes. Marking them is what keeps the #7899 value
+    // of the fast path after the user pages back — the prepend must not cost a
+    // full re-download on the next focus reload. (Placed after the `_oldestIdx`
+    // update: the adoption below derives the held end from it.)
+    _markPrefixProvenRows(tailMatches ? expandedMsgs : olderMsgs);
+    // Keep the WIDER proof. A paging response mints its digest over
+    // [0, page start + page length) — narrower than the proof that already
+    // covers the held rows' end — so it must never replace what the held view
+    // can vouch for; only a wider-or-equal mint is adopted.
+    _adoptPrefixProof(
+      responseSession.prefix_fp,
+      (Number(responseSession._messages_offset) || 0) +
+        (Array.isArray(responseSession.messages) ? responseSession.messages.length : 0)
+    );
     renderMessages({ preserveScroll: true });
     if (container) {
       // Prepending older messages must not teleport the reader. Anchor to the
@@ -5792,6 +5911,12 @@ async function _ensureAllMessagesLoaded() {
     S.messages = _msgsToAssign;
     _messagesTruncated = false;
     _oldestIdx = 0;
+    // #7925 re-gate (2026-11-02, proof-gated fast path): the full document is
+    // the widest view there is, so it establishes both the interval proof
+    // ([0, len)) and every row's provenance — the jump-to-start reload must not
+    // cost the next focus reload its fast path.
+    _markPrefixProvenRows(msgs);
+    _adoptPrefixProof(data.session.prefix_fp, msgs.length);
     _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
     if (S.session && S.session.session_id === sid) {
       S.session.message_count = Number(data.session.message_count || msgs.length);
