@@ -170,3 +170,34 @@ def test_healthy_catalog_does_not_retry(monkeypatch, tmp_path):
     assert [m["id"] for m in _groups_by_provider(data)["custom:healthy"]["models"]] == [
         "healthy/discovered"
     ]
+
+
+class _ImediatoCondicao:
+    """Condition stand-in that never blocks: a concurrent reader that gives up."""
+
+    def wait_for(self, predicate, timeout=None):  # noqa: D401 - test double
+        return False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def notify_all(self):
+        return None
+
+
+def test_concurrent_reader_gets_preserved_catalog(monkeypatch, tmp_path):
+    """A reader that coalesced behind the retry must not fall back to the static catalog."""
+    _reset_state(monkeypatch, tmp_path)
+    monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0.08, raising=False)
+    monkeypatch.setattr(config, "_cache_build_cv", _ImediatoCondicao())
+    _install_memory_catalog(_catalog([_HEALTHY, _BROKEN]), age_seconds=35.0)
+    monkeypatch.setattr(config, "_cache_build_in_progress", True, raising=False)
+
+    data = config.get_available_models()
+
+    grupos = _groups_by_provider(data)
+    assert "custom:healthy" in grupos
+    assert [m["id"] for m in grupos["custom:healthy"]["models"]] == ["healthy/discovered"]
