@@ -141,21 +141,29 @@ contributor guidance; it does not change runtime behavior or CI gates.
   request fields (`msg_after`, `anchor_fp`, `transcript_generation`,
   `prefix_fp`, and the window-bound-only `msg_limit`), the refusal semantics
   (any failed check answers with the authoritative full transcript — master's
-  shape), the server-computed `prefix_fp` coverage rule (minted over
-  `[0, coverage end)` on every load, recomputed over `[0, msg_after + 1)` on
-  every append; each row hashed as the browser receives it — the whole
-  projected row minus the explicit `_PREFIX_FP_EXCLUDED_FIELDS` set, hydrated
-  anchor scenes included — and seeded with the out-of-row inputs that change a
-  covered row's delivered projection: the prefix's own session-level tool
-  cards, the effective `api_redact_enabled`, and the active-turn token, with
-  the full input inventory and the per-input refusal tests), and reused from
-  the display-merge cache entry on a hit (sidecar-only sessions carry no
-  digest memo — every windowed GET re-hashes the document, a retained gap
-  pending an upstream read-generation of the sidecar/lineage snapshot), and
-  the server/client invariants (one `_limited_display_request`
-  predicate gates the limited-display branch; the append never takes it; the
-  window is the contiguous suffix after the anchor; the client keeps the
-  loaded tool-card list across the metadata replacement). Start here before
+  shape), the by-construction `prefix_fp` rule (the digest hashes the one
+  DELIVERED projection of rows `[0, coverage end)` — scene hydration plus the
+  public projection the response body itself is sliced from, the covered
+  prefix's own session-level tool cards included, domain-separated by the
+  `prefix_fp/3` format tag so an older build's digest never compares equal —
+  so a scene save, a redaction flip, an active-turn boundary or a card edit
+  moves the digest by moving the delivered rows, with no out-of-row seed left
+  to drift; the whole-document projection is computed once per merge and
+  carried on the display-merge cache entry, whose digest is reused when the
+  coverages agree; transport-layer payload clipping stays out of
+  the proof, and the client keeps a clipped row out of the fast path)
+  (sidecar-only sessions carry no digest memo — every windowed GET re-hashes
+  the document, a retained gap pending an upstream read-generation of the
+  sidecar/lineage snapshot), the proof-gated client admission (every held row
+  must be a verbatim server row — a `msg_before` page's rows qualify, a
+  locally synthesised or `_content_truncated` clipped row does not — and the
+  held interval must end exactly where the digest's coverage ends, re-run on
+  the live view when the append response lands), and the server/client
+  invariants (one `_limited_display_request` predicate gates the
+  limited-display branch; the append never takes it; the window is the
+  contiguous suffix after the anchor; one per-request input snapshot feeds
+  the projection, the proof and the cache guard; the client keeps the loaded
+  tool-card list across the metadata replacement). Start here before
   changing the append request/response shape, the state.db loader or
   display-merge cache decisions on that path, or the client-side merge in
   `static/sessions.js` (#7925, #7899).
