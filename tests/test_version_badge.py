@@ -10,9 +10,12 @@ Covers:
   6. static/panels.js: loadSettingsPanel() populates both version badges from settings
   7. server.py: server_version is not the old hardcoded string
 """
-import importlib
+import math
+import pytest
 import subprocess
 import sys
+import threading
+import time
 import types
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -278,6 +281,14 @@ class TestDetectAgentVersion:
         )
         assert result == 'not detected'
 
+    def test_import_or_probe_with_malformed_gateway_url_returns_none(self, monkeypatch):
+        """A malformed HERMES_API_URL must not raise ValueError at import or probe time."""
+        import api.updates as upd
+        monkeypatch.setenv("HERMES_API_URL", "http://[::1")
+        monkeypatch.setenv("HERMES_GATEWAY_HEALTH_URL", "http://[::1")
+        res = upd._detect_agent_version_from_gateway_health()
+        assert res is None
+
 
 # ---------------------------------------------------------------------------
 # 3. WEBUI_VERSION module constant
@@ -379,6 +390,85 @@ class TestSettingsEndpointVersion:
         assert 'password_hash' not in captured.get('data', {}), (
             'password_hash must still be stripped from /api/settings'
         )
+
+    def test_api_settings_prefers_live_gateway_version(self):
+        """When the cached gateway probe returns a live version, /api/settings
+        serves it instead of the import-time AGENT_VERSION (#6150)."""
+        import api.routes as routes
+        import api.updates as upd
+
+        handler = MagicMock()
+        from urllib.parse import urlparse
+        parsed = urlparse('/api/settings')
+
+        captured = {}
+
+        def fake_j(h, data, status=200):
+            captured['data'] = data
+
+        with patch('api.routes.load_settings', return_value={}), \
+             patch('api.routes.j', side_effect=fake_j), \
+             patch.object(upd, '_cached_agent_version_from_gateway',
+                          return_value='v0.80.0'):
+            routes.handle_get(handler, parsed)
+
+        assert captured['data']['agent_version'] == 'v0.80.0', (
+            'route must prefer the live gateway version over AGENT_VERSION'
+        )
+
+    def test_api_settings_falls_back_to_agent_version_when_gateway_none(self):
+        """When the cached gateway probe yields None (unreachable gateway),
+        /api/settings falls back to the import-time AGENT_VERSION."""
+        import api.routes as routes
+        import api.updates as upd
+
+        handler = MagicMock()
+        from urllib.parse import urlparse
+        parsed = urlparse('/api/settings')
+
+        captured = {}
+
+        def fake_j(h, data, status=200):
+            captured['data'] = data
+
+        with patch('api.routes.load_settings', return_value={}), \
+             patch('api.routes.j', side_effect=fake_j), \
+             patch.object(upd, '_cached_agent_version_from_gateway',
+                          return_value=None):
+            routes.handle_get(handler, parsed)
+
+        assert captured['data']['agent_version'] == upd.AGENT_VERSION, (
+            'route must fall back to AGENT_VERSION when the gateway probe '
+            'returns None'
+        )
+
+    def test_api_settings_preserves_agent_version_when_probe_raises(self):
+        """When the live gateway probe raises, /api/settings retains AGENT_VERSION."""
+        import api.routes as routes
+        import api.updates as upd
+
+        handler = MagicMock()
+        from urllib.parse import urlparse
+        parsed = urlparse('/api/settings')
+
+        captured = {}
+
+        def fake_j(h, data, status=200):
+            captured['data'] = data
+
+        def _raising_probe():
+            raise RuntimeError("network failure during live probe")
+
+        with patch('api.routes.load_settings', return_value={}), \
+             patch('api.routes.j', side_effect=fake_j), \
+             patch.object(upd, '_cached_agent_version_from_gateway',
+                          side_effect=_raising_probe):
+            routes.handle_get(handler, parsed)
+
+        assert 'agent_version' in captured['data'], (
+            'route must not drop agent_version when probe raises'
+        )
+        assert captured['data']['agent_version'] == upd.AGENT_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -487,3 +577,689 @@ class TestServerVersionHeader:
         assert 'removeprefix' in src, (
             "server.py must use removeprefix('v') to strip the leading 'v' from the version tag"
         )
+
+
+# ---------------------------------------------------------------------------
+# 8. _cached_agent_version_from_gateway — thread-safe TTL cache
+# ---------------------------------------------------------------------------
+
+class _GenerationTimestamp(float):
+    """A ``completed_at`` value that remembers which generation produced it.
+
+    Production only ever does float arithmetic on the timestamp, so this
+    subclass is transparent to it; ``__sub__`` records every subtraction so a
+    test can prove which generation's timestamp a reader aged out.
+    """
+
+    sub_log = []
+
+    def __new__(cls, value, generation):
+        stamped = super().__new__(cls, value)
+        stamped.generation = generation
+        return stamped
+
+    def __sub__(self, other):
+        type(self).sub_log.append((
+            threading.current_thread().name,
+            getattr(other, 'generation', None),
+        ))
+        return float(self) - float(other)
+
+
+class _ArmedSnapshot:
+    """A cache snapshot that records every consultation and can park a reader.
+
+    Production only ever unpacks the snapshot it captured
+    (``cached, cached_at = snapshot``), so recording ``__iter__`` and
+    ``__getitem__`` observes every read of that generation without relying on
+    interpreter tracing hooks: the previous opcode-offset oracle never fired on
+    3.12+, which left the interleaving unexercised there.  ``parked_thread``
+    names the thread whose FIRST consultation calls ``on_park``.
+    """
+
+    def __init__(self, value, completed_at, parked_thread=None, on_park=None):
+        self._pair = (value, completed_at)
+        self._parked_thread = parked_thread
+        self._on_park = on_park
+        self.parked = False
+        self.accesses = []
+
+    def _consult(self, kind):
+        thread = threading.current_thread().name
+        self.accesses.append((thread, kind))
+        if (self._on_park is not None and not self.parked
+                and thread == self._parked_thread):
+            self.parked = True
+            self._on_park()
+        return self._pair
+
+    def __iter__(self):
+        return iter(self._consult('iter'))
+
+    def __getitem__(self, index):
+        return self._consult('getitem')[index]
+
+    def __len__(self):
+        return len(self._pair)
+
+    def __eq__(self, other):
+        return self._pair == other
+
+    def __hash__(self):
+        return hash(self._pair)
+
+    def __repr__(self):
+        return f'_ArmedSnapshot({self._pair!r})'
+
+
+def _assert_age_relation(label, age, relation, ttl):
+    """Assert the seeded age is exactly the position the test claims."""
+    if relation == 'equal':
+        assert age == ttl, f"{label}: age {age!r} must equal ttl {ttl!r}"
+    elif relation == 'less':
+        assert age < ttl, f"{label}: age {age!r} must be less than ttl {ttl!r}"
+    else:
+        assert age > ttl, f"{label}: age {age!r} must be greater than ttl {ttl!r}"
+
+
+class TestCachedAgentVersionFromGateway:
+
+    def setup_method(self):
+        """Reset the module-level cache to a clean miss state UNDER the
+        production lock, so every test starts deterministically."""
+        import api.updates as upd
+        # Save AND clear under the production lock, mirroring the locked
+        # restoration in teardown_method: a lock-free save can capture a
+        # snapshot that another thread is replacing at the same instant.
+        with upd._gateway_version_lock:
+            self._saved_snapshot = upd._GATEWAY_AGENT_VERSION_CACHE
+            upd._GATEWAY_AGENT_VERSION_CACHE = None
+
+    def teardown_method(self):
+        """Restore the previous cache snapshot under the production lock so
+        a test can never leak cache state into later tests in the process."""
+        import api.updates as upd
+        with upd._gateway_version_lock:
+            upd._GATEWAY_AGENT_VERSION_CACHE = self._saved_snapshot
+
+    def test_single_flight_on_cache_miss(self):
+        """Eight concurrent callers on an empty cache produce exactly one
+        gateway detector call and share the same result.
+
+        The detector is patched ONCE around the whole threaded test and
+        blocks on an event while in flight, so every worker deterministically
+        reaches the miss window while the first probe is still running.  The
+        "exactly one call while blocked" assertion is deterministic: the
+        production lock is held for the whole duration of the first probe.
+        """
+        import api.updates as upd
+
+        call_count = 0
+        call_lock = threading.Lock()
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocking_detector(timeout=0.75):
+            nonlocal call_count
+            with call_lock:
+                call_count += 1
+            entered.set()
+            assert release.wait(timeout=5.0), "first detector call never released"
+            return "v0.60.0"
+
+        result_box = [None] * 8
+        errors = [None] * 8
+        barrier = threading.Barrier(8)
+
+        def worker(idx):
+            try:
+                barrier.wait()
+                result_box[idx] = upd._cached_agent_version_from_gateway()
+            except Exception as e:
+                errors[idx] = e
+
+        with patch.object(upd, '_detect_agent_version_from_gateway_health',
+                          side_effect=blocking_detector):
+            threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+            for t in threads:
+                t.start()
+
+            # The first probe is in flight and blocked: no other worker can
+            # enter the locked section while it runs, so exactly one detector
+            # call is observable right now.
+            assert entered.wait(timeout=5.0), "first detector call never started"
+            # Let the remaining workers pile up on the lock so the test
+            # exercises the contended miss path before the probe finishes.
+            time.sleep(0.2)
+            with call_lock:
+                assert call_count == 1, (
+                    f"Expected exactly 1 detector call while blocked, "
+                    f"got {call_count}"
+                )
+
+            release.set()
+            for t in threads:
+                t.join(timeout=5.0)
+            assert all(not t.is_alive() for t in threads), "worker threads hung"
+
+        for err in errors:
+            assert err is None, f"Worker raised: {err}"
+        assert call_count == 1, (
+            f"Expected exactly 1 detector call, got {call_count}"
+        )
+        assert all(r == "v0.60.0" for r in result_box), (
+            f"All workers must share the same result: {result_box}"
+        )
+
+    def test_positive_ttl_returns_cached(self):
+        """A fresh positive cache entry is returned without re-probing."""
+        import api.updates as upd
+
+        # Seed the cache with a fresh positive entry
+        upd._GATEWAY_AGENT_VERSION_CACHE = ("v0.60.0", time.monotonic())
+
+        call_count = 0
+
+        def counting_detector(timeout=0.75):
+            nonlocal call_count
+            call_count += 1
+            return "v0.61.0"
+
+        with patch.object(upd, '_detect_agent_version_from_gateway_health',
+                          side_effect=counting_detector):
+            result = upd._cached_agent_version_from_gateway()
+
+        assert result == "v0.60.0", f"Expected cached value, got {result}"
+        assert call_count == 0, f"Detector should not be called: {call_count}"
+
+    def test_negative_ttl_returns_cached_none(self):
+        """A fresh negative cache entry (None) is returned without re-probing."""
+        import api.updates as upd
+
+        # Seed the cache with a fresh negative entry
+        upd._GATEWAY_AGENT_VERSION_CACHE = (None, time.monotonic())
+
+        call_count = 0
+
+        def counting_detector(timeout=0.75):
+            nonlocal call_count
+            call_count += 1
+            return "v0.61.0"
+
+        with patch.object(upd, '_detect_agent_version_from_gateway_health',
+                          side_effect=counting_detector):
+            result = upd._cached_agent_version_from_gateway()
+
+        assert result is None, f"Expected None, got {result}"
+        assert call_count == 0, f"Detector should not be called: {call_count}"
+
+    def test_expired_positive_ttl_triggers_refresh(self):
+        """An expired positive cache entry triggers a refresh."""
+        import api.updates as upd
+
+        # Seed the cache with an expired positive entry
+        upd._GATEWAY_AGENT_VERSION_CACHE = (
+            "v0.60.0",
+            time.monotonic() - upd._GATEWAY_AGENT_VERSION_TTL - 0.5,
+        )
+
+        with patch.object(upd, '_detect_agent_version_from_gateway_health',
+                          return_value="v0.62.0"):
+            result = upd._cached_agent_version_from_gateway()
+
+        assert result == "v0.62.0", f"Expected refreshed value, got {result}"
+
+    def test_expired_negative_ttl_triggers_refresh(self):
+        """An expired negative cache entry (None) triggers a refresh."""
+        import api.updates as upd
+
+        # Seed the cache with an expired negative entry
+        upd._GATEWAY_AGENT_VERSION_CACHE = (
+            None,
+            time.monotonic() - upd._GATEWAY_AGENT_VERSION_NEGATIVE_TTL - 0.5,
+        )
+
+        with patch.object(upd, '_detect_agent_version_from_gateway_health',
+                          return_value="v0.63.0"):
+            result = upd._cached_agent_version_from_gateway()
+
+        assert result == "v0.63.0", f"Expected refreshed value, got {result}"
+
+    def test_positive_ttl_boundary_is_exact(self):
+        """Positive TTL boundary with the clock production reads frozen.
+
+        ``api.updates.time.monotonic`` is patched to one exact value, so the
+        three cases sit exactly at the boundary instead of on a real clock that
+        has already moved past it: immediately before (``age < ttl``, served
+        from cache), exactly at (``age == ttl``, must refresh) and immediately
+        after (``age > ttl``, must refresh).  The equality case pins the
+        comparison: relaxing the required strict ``<`` to ``<=`` serves the
+        cached value there and fails this test.
+        """
+        import api.updates as upd
+
+        ttl = upd._GATEWAY_AGENT_VERSION_TTL
+        now = 1000.0
+        boundary = now - ttl  # exact in binary floating point
+        calls = []
+
+        def counting_detector(timeout=0.75):
+            calls.append(1)
+            return "v0.70.0"
+
+        cases = [
+            # label, completed_at, age vs ttl, expected value, detector calls
+            ("immediately before", math.nextafter(boundary, math.inf),
+             'less', "v0.69.0", 0),
+            ("exactly at", boundary, 'equal', "v0.70.0", 1),
+            ("immediately after", math.nextafter(boundary, -math.inf),
+             'greater', "v0.70.0", 2),
+        ]
+
+        with patch.object(upd.time, 'monotonic', lambda: now), \
+                patch.object(upd, '_detect_agent_version_from_gateway_health',
+                             side_effect=counting_detector):
+            for label, cached_at, relation, expected, expected_calls in cases:
+                age = now - cached_at
+                _assert_age_relation(label, age, relation, ttl)
+
+                upd._GATEWAY_AGENT_VERSION_CACHE = ("v0.69.0", cached_at)
+                result = upd._cached_agent_version_from_gateway()
+
+                assert result == expected, (
+                    f"{label}: age {age!r} vs ttl {ttl!r} returned {result!r}, "
+                    f"expected {expected!r} — the TTL comparison must be "
+                    f"strictly less-than"
+                )
+                assert len(calls) == expected_calls, (
+                    f"{label}: detector calls {len(calls)}, "
+                    f"expected {expected_calls}"
+                )
+
+    def test_negative_ttl_boundary_is_exact(self):
+        """Negative TTL boundary with the clock production reads frozen.
+
+        The same three exact positions as the positive case, against
+        ``_GATEWAY_AGENT_VERSION_NEGATIVE_TTL``: immediately before (the cached
+        ``None`` is served), exactly at (``age == nttl``, must refresh — the
+        equality case that fails under a ``<`` to ``<=`` mutation) and
+        immediately after.
+        """
+        import api.updates as upd
+
+        nttl = upd._GATEWAY_AGENT_VERSION_NEGATIVE_TTL
+        now = 1000.0
+        boundary = now - nttl  # exact in binary floating point
+        calls = []
+
+        def counting_detector(timeout=0.75):
+            calls.append(1)
+            return "v0.70.1"
+
+        cases = [
+            # label, completed_at, age vs nttl, expected value, detector calls
+            ("immediately before", math.nextafter(boundary, math.inf),
+             'less', None, 0),
+            ("exactly at", boundary, 'equal', "v0.70.1", 1),
+            ("immediately after", math.nextafter(boundary, -math.inf),
+             'greater', "v0.70.1", 2),
+        ]
+
+        with patch.object(upd.time, 'monotonic', lambda: now), \
+                patch.object(upd, '_detect_agent_version_from_gateway_health',
+                             side_effect=counting_detector):
+            for label, cached_at, relation, expected, expected_calls in cases:
+                age = now - cached_at
+                _assert_age_relation(label, age, relation, nttl)
+
+                upd._GATEWAY_AGENT_VERSION_CACHE = (None, cached_at)
+                result = upd._cached_agent_version_from_gateway()
+
+                assert result == expected, (
+                    f"{label}: age {age!r} vs negative ttl {nttl!r} returned "
+                    f"{result!r}, expected {expected!r} — the TTL comparison "
+                    f"must be strictly less-than"
+                )
+                assert len(calls) == expected_calls, (
+                    f"{label}: detector calls {len(calls)}, "
+                    f"expected {expected_calls}"
+                )
+
+    def test_completed_at_is_probe_completion_time(self):
+        """The published timestamp is the completion time of the probe, not
+        its start time — a slow probe must not shrink the TTL window."""
+        import api.updates as upd
+
+        started = {}
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_detector(timeout=0.75):
+            started["t"] = time.monotonic()
+            entered.set()
+            assert release.wait(timeout=5.0), "detector not released"
+            time.sleep(0.3)  # probe takes a while after being released
+            return "v0.71.0"
+
+        with patch.object(upd, '_detect_agent_version_from_gateway_health',
+                          side_effect=slow_detector):
+            writer = threading.Thread(target=upd._cached_agent_version_from_gateway)
+            writer.start()
+            assert entered.wait(timeout=5.0), "detector never started"
+            release.set()
+            writer.join(timeout=5.0)
+            assert not writer.is_alive(), "writer thread hung"
+
+        value, completed_at = upd._GATEWAY_AGENT_VERSION_CACHE
+        assert value == "v0.71.0"
+        # completed_at must reflect when the probe FINISHED (start + 0.3s),
+        # not when it started.
+        assert completed_at >= started["t"] + 0.3 - 0.05, (
+            f"completed_at {completed_at:.3f} should be >= "
+            f"start {started['t']:.3f} + 0.3 (completion, not start time)"
+        )
+
+    def test_negative_result_does_not_stick(self):
+        """A detector returning None (the caught-exception path) is cached
+        with negative TTL.  After the negative TTL expires, a new caller
+        re-probes and gets an updated value — the cache is not stuck."""
+        import api.updates as upd
+
+        call_log = []
+
+        def two_phase_detector(timeout=0.75):
+            call_log.append("called")
+            if len(call_log) == 1:
+                return None  # simulate internal exception → None
+            return "v0.64.0"
+
+        with patch.object(upd, '_detect_agent_version_from_gateway_health',
+                          side_effect=two_phase_detector):
+            # First call — detector returns None (caught-exception path)
+            result1 = upd._cached_agent_version_from_gateway()
+            assert result1 is None, "First call should return None on failure"
+
+            # Second call within negative TTL — uses cache, no re-probe
+            result2 = upd._cached_agent_version_from_gateway()
+            assert result2 is None, (
+                "Second call should return cached None (negative TTL)"
+            )
+            assert len(call_log) == 1, (
+                f"Detector should be called once within negative TTL, "
+                f"got {len(call_log)}"
+            )
+
+        # Force-expire the negative cache so the next call re-probes
+        upd._GATEWAY_AGENT_VERSION_CACHE = (
+            None,
+            time.monotonic() - upd._GATEWAY_AGENT_VERSION_NEGATIVE_TTL - 0.5,
+        )
+
+        with patch.object(upd, '_detect_agent_version_from_gateway_health',
+                          side_effect=two_phase_detector):
+            # Third call — negative TTL expired, re-probes
+            result3 = upd._cached_agent_version_from_gateway()
+            assert result3 == "v0.64.0", f"Expected refreshed value, got {result3}"
+            assert len(call_log) == 2, (
+                f"Detector should be called twice total (initial fail + retry "
+                f"after expiry), got {len(call_log)}"
+            )
+
+    def test_atomic_snapshot_publication_interleaving(self):
+        """Deterministic old-snapshot/new-publication interleaving.
+
+        The cache slot holds ONE immutable ``(value, completed_at)`` tuple
+        replaced in a single assignment, so a reader that captured the old
+        snapshot can never observe it half-updated with a value from a new
+        publication.  The previous dict-based cache mutated the same object
+        in two steps (``value`` then ``at``); a reader holding the old
+        reference would have observed the new value paired with the old
+        timestamp — the mixed-generation fast path the review flagged.
+        """
+        import api.updates as upd
+
+        # Seed an old, already-expired generation.
+        upd._GATEWAY_AGENT_VERSION_CACHE = (
+            None,
+            time.monotonic() - upd._GATEWAY_AGENT_VERSION_NEGATIVE_TTL - 0.5,
+        )
+        old_snapshot = upd._GATEWAY_AGENT_VERSION_CACHE
+        old_completed_at = old_snapshot[1]
+
+        entered = threading.Event()
+        release = threading.Event()
+        completion_time = {}
+
+        def blocking_detector(timeout=0.75):
+            entered.set()
+            assert release.wait(timeout=5.0), "detector not released"
+            completion_time["t"] = time.monotonic()
+            return "v0.68.0"
+
+        with patch.object(upd, '_detect_agent_version_from_gateway_health',
+                          side_effect=blocking_detector):
+            writer = threading.Thread(target=upd._cached_agent_version_from_gateway)
+            writer.start()
+            assert entered.wait(timeout=5.0), "detector never started"
+
+            # While the new probe is in flight, the cache slot still holds
+            # the SAME old snapshot — no partial publication is observable.
+            assert upd._GATEWAY_AGENT_VERSION_CACHE is old_snapshot, (
+                "reader observed a partial publication while the probe was "
+                "in flight"
+            )
+
+            release.set()
+            writer.join(timeout=5.0)
+            assert not writer.is_alive(), "writer thread hung"
+
+        new_snapshot = upd._GATEWAY_AGENT_VERSION_CACHE
+        assert new_snapshot is not old_snapshot, (
+            "publication must REPLACE the snapshot, never mutate it in place"
+        )
+        value, completed_at = new_snapshot
+        assert value == "v0.68.0"
+        assert completed_at > old_completed_at
+        # The value and its completion timestamp come from the SAME
+        # publication generation.
+        assert abs(completed_at - completion_time["t"]) < 0.1, (
+            "completed_at must be the completion time of the same detector "
+            "call that produced the value"
+        )
+        # The old snapshot a reader captured is untouched — it still pairs
+        # its own value with its own timestamp.
+        assert old_snapshot[0] is None and old_snapshot[1] == old_completed_at
+
+    def test_fast_path_reads_cache_generation_once_under_interleaving(self):
+        """Event-controlled production-reader schedule around a publication.
+
+        ``test_atomic_snapshot_publication_interleaving`` above only compares
+        tuple identity before and after a writer, so a fast path that reads the
+        cache global twice — pairing the value of one generation with the
+        ``completed_at`` of another — stayed green.  This test drives a real
+        concurrent reader through ``_cached_agent_version_from_gateway()`` and
+        freezes the interleaving with events instead of sleeps:
+
+        * the cache global is replaced by ``_ArmedSnapshot``, a snapshot that
+          records every consultation of the generation the reader captured.
+          Production only ever unpacks it, so counting ``__iter__`` /
+          ``__getitem__`` measures the read without depending on interpreter
+          tracing internals (the previous opcode-offset oracle never fired on
+          3.12+);
+        * the reader parks inside that first consultation — the generation it
+          captured is already bound on its own frame stack — and resumes only
+          once a writer thread has published a replacement through the
+          production miss path.  That window is exactly where a double-read
+          fast path picks up a second generation;
+        * timestamps carry the generation they belong to, so returning one
+          generation's value after aging out another's timestamp fails on the
+          recorded tag rather than on timing luck.
+        """
+        import api.updates as upd
+
+        reader_name = 'cr6289-reader'
+        writer_name = 'cr6289-writer'
+        seeded_value = 'v0.61.0'
+        refreshed_value = 'v0.72.0'
+        reader_now = 1000.0
+        writer_now = 2000.0
+        seeded_at = _GenerationTimestamp(999.0, seeded_value)
+        # Fresh for the reader (age 1.0 < 30.0 TTL): it must be served from
+        # cache without ever reaching the locked double-check, so every counted
+        # load belongs to the lock-free fast path.  Expired for the writer
+        # (age 1001.0): its probe goes through the production miss path and
+        # publishes the replacement while the reader is parked.
+        assert reader_now - float(seeded_at) < upd._GATEWAY_AGENT_VERSION_TTL
+        assert writer_now - float(seeded_at) > upd._GATEWAY_AGENT_VERSION_TTL
+
+        reader_read = threading.Event()
+        published = threading.Event()
+        errors = []
+        results = {}
+        detector_calls = []
+
+        def park_reader():
+            # Runs on the reader thread while its first consultation of the
+            # captured generation is in flight: the snapshot is already bound
+            # on this frame's stack, so a publication now is visible to a
+            # double read but can never change what a single read decided.
+            reader_read.set()
+            if not published.wait(timeout=5.0):
+                errors.append('writer never published')
+
+        armed_snapshot = _ArmedSnapshot(
+            seeded_value,
+            seeded_at,
+            parked_thread=reader_name,
+            on_park=park_reader,
+        )
+
+        def frozen_clock():
+            # One exact value per thread; the writer's doubles as the
+            # completion time production publishes, tagged with the generation
+            # it belongs to.
+            if threading.current_thread().name == reader_name:
+                return _GenerationTimestamp(reader_now, seeded_value)
+            return _GenerationTimestamp(writer_now, refreshed_value)
+
+        def counting_detector(timeout=0.75):
+            detector_calls.append(threading.current_thread().name)
+            return refreshed_value
+
+        def reader():
+            try:
+                results['reader'] = upd._cached_agent_version_from_gateway()
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(f'reader raised {type(exc).__name__}: {exc}')
+
+        def writer():
+            try:
+                if not reader_read.wait(timeout=5.0):
+                    errors.append('reader never reached the fast path')
+                    return
+                results['writer'] = upd._cached_agent_version_from_gateway()
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(f'writer raised {type(exc).__name__}: {exc}')
+            finally:
+                published.set()
+
+        _GenerationTimestamp.sub_log.clear()
+
+        with patch.object(upd.time, 'monotonic', frozen_clock), \
+                patch.object(upd, '_detect_agent_version_from_gateway_health',
+                             side_effect=counting_detector):
+            upd._GATEWAY_AGENT_VERSION_CACHE = armed_snapshot
+            seeded_snapshot = upd._GATEWAY_AGENT_VERSION_CACHE
+
+            threads = [
+                threading.Thread(target=reader, name=reader_name),
+                threading.Thread(target=writer, name=writer_name),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10.0)
+                assert not thread.is_alive(), f'{thread.name} hung'
+
+        assert not errors, f'thread errors: {errors}'
+        assert reader_read.is_set(), 'the reader never reached the fast path'
+        assert published.is_set(), 'the writer never published'
+        assert armed_snapshot.parked, (
+            'the reader was never parked inside its first consultation of the '
+            'captured generation, so the interleaving was never exercised'
+        )
+        reader_consults = [
+            kind for thread, kind in armed_snapshot.accesses
+            if thread == reader_name
+        ]
+        assert reader_consults, (
+            'the reader never consulted the snapshot it captured, so this '
+            'test cannot certify a single read'
+        )
+        assert len(reader_consults) == 1, (
+            f"the lock-free fast path must consult "
+            f"_GATEWAY_AGENT_VERSION_CACHE exactly once, but the captured "
+            f"generation was read {len(reader_consults)} times "
+            f"({reader_consults}) by {reader_name} — a second consult lets a "
+            f"reader pair the value of one cache generation with the "
+            f"completed_at of another"
+        )
+        assert results.get('reader') == seeded_value, (
+            f"the reader must serve the generation it loaded ({seeded_value!r}), "
+            f"got {results.get('reader')!r} — it consulted the cache again after "
+            f"the publication instead of using its snapshot"
+        )
+        assert results.get('writer') == refreshed_value
+        assert detector_calls == [writer_name], (
+            f"only the writer may probe the gateway; probes were {detector_calls}"
+        )
+        reader_subtractions = [
+            generation for name, generation in _GenerationTimestamp.sub_log
+            if name == reader_name
+        ]
+        assert reader_subtractions == [seeded_value], (
+            f"the reader returned {results.get('reader')!r} after aging out "
+            f"timestamp generation(s) {reader_subtractions}: the value and the "
+            f"completed_at must come from the same cache generation"
+        )
+        current_snapshot = upd._GATEWAY_AGENT_VERSION_CACHE
+        assert current_snapshot is not seeded_snapshot, (
+            'the publication must REPLACE the snapshot, never mutate it'
+        )
+        assert current_snapshot[0] == refreshed_value
+        assert current_snapshot[1] is not seeded_at
+        assert seeded_snapshot == (seeded_value, seeded_at), (
+            'the generation a reader captured must stay untouched'
+        )
+
+    def test_raising_detector_releases_lock_and_allows_retry(self):
+        """A genuinely raising detector proves the production lock is
+        released and the failure is not cached: the exception propagates, no
+        snapshot is published, and the next call re-probes and succeeds."""
+        import api.updates as upd
+
+        call_log = []
+
+        def flaky_detector(timeout=0.75):
+            call_log.append("called")
+            if len(call_log) == 1:
+                raise RuntimeError("gateway unreachable")
+            return "v0.72.0"
+
+        with patch.object(upd, '_detect_agent_version_from_gateway_health',
+                          side_effect=flaky_detector):
+            # First call: the exception propagates and nothing is cached.
+            with pytest.raises(RuntimeError, match="gateway unreachable"):
+                upd._cached_agent_version_from_gateway()
+            assert upd._GATEWAY_AGENT_VERSION_CACHE is None, (
+                "a raising detector must not poison the cache"
+            )
+
+            # Second call: the lock was released (no deadlock) and, because
+            # nothing was cached, the probe runs again and succeeds.
+            result = upd._cached_agent_version_from_gateway()
+            assert result == "v0.72.0"
+            assert len(call_log) == 2, (
+                f"expected retry after the raised detector, got {len(call_log)} calls"
+            )
+            assert upd._GATEWAY_AGENT_VERSION_CACHE[0] == "v0.72.0"
