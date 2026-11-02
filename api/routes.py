@@ -30715,7 +30715,32 @@ def _handle_chat_sync(handler, body):
         )[:2]
         s.model = model
         s.model_provider = model_provider
-    from api.streaming import _ENV_LOCK
+    from api.streaming import (
+        _ENV_LOCK,
+        _publish_turn_session_profile,
+        _release_turn_session_profile,
+        _reset_turn_session_identity,
+        _set_turn_session_identity,
+    )
+
+    # #8452: resolve this session's profile the same way the streaming worker
+    # does — the session's own record first, then this handler thread's active
+    # profile (set_request_profile TLS IS set on the HTTP handler thread, so
+    # get_active_profile_name() is valid here, unlike the streaming worker).
+    _sync_profile_name = getattr(s, "profile", None)
+    if not _sync_profile_name:
+        try:
+            from api.profiles import get_active_profile_name
+            _sync_profile_name = get_active_profile_name()
+        except Exception:
+            _sync_profile_name = None
+    # Pre-init so the finally can always reset even if the bind below is never
+    # reached (mirrors the streaming worker's pre-init).
+    _sync_session_identity_tokens = None
+    # #8452 (review round 2): pre-init the profile-mirror token the same way —
+    # the finally must be able to release it even if the publish inside the
+    # try below is never reached.
+    _sync_profile_mirror_token = None
 
     with _ENV_LOCK:
         old_cwd = os.environ.get("TERMINAL_CWD")
@@ -30727,7 +30752,32 @@ def _handle_chat_sync(handler, body):
     # #8517 all-r1 finding 4: the session's profile home is held from agent
     # construction through the end of run_conversation (closed in ``finally``).
     _sync_turn_scope = contextlib.ExitStack()
+    # #8452: bind the per-turn session identity — same pairing the streaming
+    # worker uses. Without it the non-streaming path left
+    # gateway.session_context._SESSION_PROFILE unbound, so the Agent's
+    # profile-scoped Docker derivation (terminal_tool._resolve_container_task_id
+    # via _current_session_profile) collapsed a named profile onto the shared
+    # "default" container key — the second, empty sandbox from #8452. An
+    # env-only bind would race under concurrent profiles (#8467), so the
+    # ContextVar goes in here, under the same token/reset lifecycle.
+    # Ordered after the #8517 ExitStack so the scope that owns the profile home
+    # is created first; the two are independent (one holds the profile home,
+    # the other binds the per-turn identity ContextVars).
+    _sync_session_identity_tokens = _set_turn_session_identity(
+        s.session_id, workspace=str(workspace), profile_name=_sync_profile_name,
+    )
     try:
+        # #8452 (review round 2): publish this turn's profile into the process
+        # env through the ownership-safe mirror — NOT a bare save/restore.
+        # Overlapping sync turns share this process-global slot: the old pair
+        # let the last turn to finish restore a completed turn's profile
+        # (A publishes work, B saves work + publishes play, A restores
+        # ambient, B restores work → the fallback keeps a dead turn's value).
+        # The mirror's own lock is held only for its bookkeeping, never across
+        # the agent work below, and this call sits inside the guarded region
+        # so every exit path releases it. It lands before CHAT_LOCK, which is
+        # what makes a concurrently-arriving second turn observe it.
+        _sync_profile_mirror_token = _publish_turn_session_profile(_sync_profile_name)
         AIAgent = require_ai_agent_class()
 
         with CHAT_LOCK:
@@ -30993,19 +31043,31 @@ def _handle_chat_sync(handler, body):
             )
         except Exception:
             logger.debug("Failed to schedule session cwd sync", exc_info=True)
-        with _ENV_LOCK:
-            if old_cwd is None:
-                os.environ.pop("TERMINAL_CWD", None)
-            else:
-                os.environ["TERMINAL_CWD"] = old_cwd
-            if old_exec_ask is None:
-                os.environ.pop("HERMES_EXEC_ASK", None)
-            else:
-                os.environ["HERMES_EXEC_ASK"] = old_exec_ask
-            if old_session_key is None:
-                os.environ.pop("HERMES_SESSION_KEY", None)
-            else:
-                os.environ["HERMES_SESSION_KEY"] = old_session_key
+        try:
+            with _ENV_LOCK:
+                if old_cwd is None:
+                    os.environ.pop("TERMINAL_CWD", None)
+                else:
+                    os.environ["TERMINAL_CWD"] = old_cwd
+                if old_exec_ask is None:
+                    os.environ.pop("HERMES_EXEC_ASK", None)
+                else:
+                    os.environ["HERMES_EXEC_ASK"] = old_exec_ask
+                if old_session_key is None:
+                    os.environ.pop("HERMES_SESSION_KEY", None)
+                else:
+                    os.environ["HERMES_SESSION_KEY"] = old_session_key
+        finally:
+            # #8452: reset-token restore of the per-turn identity ContextVars —
+            # must run on EVERY exit (success, failure) so a reused handler
+            # thread leaks no profile into the next turn.
+            _reset_turn_session_identity(_sync_session_identity_tokens)
+            # #8452 (review round 2): retire this turn's process-env profile
+            # publication. Ownership-tracked: the slot re-publishes the most
+            # recent REMAINING publisher (never a completed turn's profile)
+            # and restores the ambient value exactly when the LAST publisher
+            # leaves — see _release_turn_session_profile.
+            _release_turn_session_profile(_sync_profile_mirror_token)
     # #7237 review round-N+2 finding 2 (nesquena-hermes 2026-10-05): the sync
     # path previously never passed ``compression_authorized`` to
     # ``_dedupe_replayed_context_messages``, so every genuine compression was

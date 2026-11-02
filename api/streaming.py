@@ -3966,12 +3966,23 @@ def _backfill_turn_gateway_routing(messages, *, routing, active_turn_identity):
             msg['_gatewayRouting'] = routing
 
 
-def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str) -> dict:
+def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str, profile_name: str | None = None) -> dict:
     """Build thread-local agent env with per-run values overriding profile defaults.
 
     Profile runtime env may include TERMINAL_CWD from config.yaml. Passing it as
     **kwargs alongside an explicit TERMINAL_CWD raises TypeError before the
     agent starts, so merge into one dict first and let the active workspace win.
+
+    #8452: *profile_name* is the turn's resolved session profile. It is emitted
+    as ``HERMES_SESSION_PROFILE`` because the Agent's Docker derivation reads
+    the profile through ``gateway.session_context.get_session_env`` — the
+    ``_SESSION_PROFILE`` ContextVar first, then this process env — and
+    ``tools.terminal_tool._resolve_container_task_id`` collapses an unreadable
+    profile onto the shared ``"default"`` container key, handing a named-profile
+    (e.g. ``work``) WebUI session a second, empty default-keyed sandbox. It is
+    omitted when unresolved: an explicit ``""`` would MASK the process-env
+    fallback in ``get_session_env`` (a bound ContextVar wins even when empty),
+    which would break CLI/cron consumers that legitimately inherit the var.
     """
     env = dict(profile_runtime_env or {})
     env.update({
@@ -3988,6 +3999,8 @@ def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, se
         'HERMES_SESSION_CHAT_ID': str(session_id),
         'HERMES_HOME': profile_home,
     })
+    if profile_name:
+        env['HERMES_SESSION_PROFILE'] = str(profile_name)
     return env
 
 
@@ -4078,12 +4091,12 @@ def _reset_streaming_hermes_home_override(override_mod, override_token, override
 # the _run_agent_streaming thread (concurrent tool batches use
 # contextvars.copy_context() so children inherit this binding); binding the
 # context-local here makes the capture task/thread-local and race-immune.
-def _set_turn_session_identity(session_id: str, workspace: str = ""):
+def _set_turn_session_identity(session_id: str, workspace: str = "", profile_name: str | None = None):
     """Bind THIS turn's session identity to the current (task/thread-local)
     context and return an opaque token for _reset_turn_session_identity.
 
-    Binds four context-locals so every session-key / UI-owner consumer is
-    covered without a race:
+    Binds five context-locals so every session-key / UI-owner / profile
+    consumer is covered without a race:
       * ``tools.approval._approval_session_key`` — checked FIRST by
         ``get_current_session_key`` (the exact call terminal_tool.py makes for
         a notify_on_complete background spawn: the bug path).
@@ -4093,6 +4106,22 @@ def _set_turn_session_identity(session_id: str, workspace: str = ""):
         return address stamped onto ProcessSession.origin_ui_session_id and
         completion events by modern hermes-agent builds. Authoritative for
         wakeup routing when present (see ``_resolve_completion_target``).
+      * ``gateway.session_context._SESSION_PROFILE`` — THIS turn's Hermes
+        profile (#8452). ``tools.terminal_tool._current_session_profile``
+        reads it through ``get_session_env("HERMES_SESSION_PROFILE")`` before
+        the process env, and ``_resolve_container_task_id`` derives the
+        persistent-Docker container key from it (``profile:<name>``, with the
+        default profile staying literally ``"default"``). WebUI never bound
+        it, so a named-profile session collapsed onto the shared default key
+        and the user saw a second, empty default-keyed sandbox. A truthy
+        *profile_name* binds that name; a falsy one binds the profile the
+        process-env mirror owns for everyone else (the captured ambient while
+        any publisher is live — empty when the ambient was absent — else the
+        current env value, else ``""``), so a default turn running beside a
+        live named turn resolves ``""`` instead of falling through to the
+        named turn's env value. Optional-import guarded — Agents predating
+        the ContextVar simply skip this binding and keep the process-env
+        fallback below.
       * ``agent.runtime_cwd._SESSION_CWD`` — this turn's workspace, when
         *workspace* is given. The WebUI runs the agent IN-PROCESS, so
         ``os.getcwd()`` is the server's launch directory, not the workspace the
@@ -4104,7 +4133,7 @@ def _set_turn_session_identity(session_id: str, workspace: str = ""):
         contributor ``AGENTS.md`` as workspace doctrine. ``TERMINAL_CWD`` is
         already set per turn for the same purpose but is a process-global that
         concurrent turns overwrite; this contextvar is task-local, so it is
-        race-immune for exactly the reason the three bindings above are.
+        race-immune for exactly the reason the bindings above are.
 
     It deliberately does NOT call ``gateway.session_context.set_session_vars``:
     that blanket setter also zeroes the platform/chat_id/user contextvars,
@@ -4132,6 +4161,37 @@ def _set_turn_session_identity(session_id: str, workspace: str = ""):
         tokens["ui_session_id"] = _UI_SID.set(sid)
     except Exception:
         logger.debug("per-turn _SESSION_UI_SESSION_ID bind failed", exc_info=True)
+    try:
+        from gateway.session_context import _SESSION_PROFILE as _SP
+        if profile_name:
+            # #8452: the ContextVar the Agent's profile-scoped Docker derivation
+            # reads FIRST (get_session_env prefers it over the process env). Bound
+            # via the ContextVar directly so the reset below can use reset-token
+            # semantics like every sibling above.
+            tokens["session_profile"] = _SP.set(str(profile_name))
+        else:
+            # #8452 re-gate (round 5): a DEFAULT turn must not leave the
+            # ContextVar unset while a concurrent named turn is live — the
+            # mirror has put that turn's profile in the process env, and an
+            # unset ContextVar makes get_session_env fall through to it, so the
+            # default turn and its readers (children it spawns, the kanban
+            # notifier) would resolve the named turn's profile for the whole
+            # overlap window. Bind the mirror's captured ambient instead:
+            # _PROFILE_MIRROR_AMBIENT when any publisher is live — the "absent"
+            # sentinel maps to "" — else the current env value, else "". The
+            # Agent's own API server binds profile="" for default sessions for
+            # exactly this reason. Read under the mirror lock so a concurrent
+            # publish cannot land between the two reads and smuggle a live
+            # turn's profile in through the env branch.
+            with _PROFILE_MIRROR_LOCK:
+                if _PROFILE_MIRROR_PUBLISHERS:
+                    _ambient = _PROFILE_MIRROR_AMBIENT
+                    fallback = "" if _ambient is _PROFILE_MIRROR_UNSET else _ambient
+                else:
+                    fallback = os.environ.get(_PROFILE_MIRROR_KEY, "")
+            tokens["session_profile"] = _SP.set(str(fallback))
+    except Exception:
+        logger.debug("per-turn _SESSION_PROFILE bind failed", exc_info=True)
     if workspace:
         # Bound via the ContextVar directly, not ``set_session_cwd``, so the
         # reset below can use reset-token semantics like every sibling above.
@@ -4163,6 +4223,13 @@ def _reset_turn_session_identity(tokens) -> None:
             _SCWD.reset(tok)
         except Exception:
             logger.debug("per-turn _SESSION_CWD reset failed", exc_info=True)
+    tok = tokens.get("session_profile")
+    if tok is not None:
+        try:
+            from gateway.session_context import _SESSION_PROFILE as _SP
+            _SP.reset(tok)
+        except Exception:
+            logger.debug("per-turn _SESSION_PROFILE reset failed", exc_info=True)
     tok = tokens.get("ui_session_id")
     if tok is not None:
         try:
@@ -4189,8 +4256,124 @@ def _reset_turn_session_identity(tokens) -> None:
             logger.debug("per-turn approval session-key reset failed", exc_info=True)
 
 
+# ---------------------------------------------------------------------------
+# #8452 review round 2: the process-env profile mirror, with LIFETIME ownership
+# ---------------------------------------------------------------------------
+# Why this is not a plain save/restore pair: HERMES_SESSION_PROFILE in the
+# process env is a single slot that overlapping turns ALL publish into. A
+# per-turn save/restore cannot own a shared slot — the last turn to finish
+# restores whatever IT saved, which is the value a still-running (or already
+# completed) concurrent turn published. nesquena-hermes's deterministic probe:
+# ambient-before; A saves it, publishes work; B saves work, publishes play; A
+# completes and restores ambient-before; B completes and restores work — both
+# turns finished, yet the process fallback still names a dead turn's profile.
+# The per-thread ContextVar binding is race-immune; this mirror is the part
+# that needed ownership.
+#
+# The mirror therefore tracks a publisher stack:
+#   * the ambient value is captured when the FIRST publisher arrives;
+#   * every exit re-publishes the most recent REMAINING publisher that
+#     resolved a profile, so the slot always names a LIVE turn — a
+#     profile-less owner in between (e.g. a background-worker scope whose
+#     .env sets no HERMES_SESSION_PROFILE) cannot hide it;
+#   * when no remaining publisher resolved a profile (or none remains), the
+#     slot falls back to the captured ambient value — absent stays absent,
+#     an inherited value is never masked or deleted;
+#   * only the LAST exit leaves the ambient value in place for good.
+# Two invariants fall out: after every turn finishes the fallback is exactly
+# the ambient value again, and a completed turn's profile is never what a
+# still-running turn (or a later unbound consumer) reads.
+#
+# Locking discipline (the reviewer's two explicit warnings): the individual
+# set/reset pairs being atomic is NOT sufficient — the failure is the
+# LIFETIME, not the atomicity — and holding the plain ``_ENV_LOCK`` across
+# arbitrary Agent work risks re-entry deadlocks with the oauth/providers/
+# profile env writers. So the mirror uses its OWN lock, held only for the
+# stack bookkeeping itself (microseconds), never across agent work, and never
+# nested inside ``_ENV_LOCK``.
+_PROFILE_MIRROR_KEY = "HERMES_SESSION_PROFILE"
+_PROFILE_MIRROR_UNSET = object()  # "the ambient env had no value at all"
+_PROFILE_MIRROR_LOCK = threading.Lock()
+# Active publishers as (token, profile) pairs — most recent LAST. A None
+# profile still registers: such a turn must neither restore a concurrent
+# publisher's value nor mask an inherited ambient one.
+_PROFILE_MIRROR_PUBLISHERS: list = []
+_PROFILE_MIRROR_AMBIENT = _PROFILE_MIRROR_UNSET
+
+
+def _publish_turn_session_profile(profile_name: str | None) -> object:
+    """Publish this turn's profile into the process env under shared ownership.
+
+    Returns an opaque token that MUST be handed to
+    ``_release_turn_session_profile`` on EVERY exit path (success, failure,
+    cancellation). A ``None`` *profile_name* still registers a publisher —
+    the turn simply publishes nothing, leaving the ambient value visible —
+    but it still owns its slot on the stack so its exit cannot restore a
+    concurrent turn's value.
+
+    Consumers: subprocess children (Docker sandbox spawns, background shells)
+    inherit ``os.environ`` at fork/exec time and cannot inherit ContextVars,
+    which is why this process-global mirror exists at all; in-process
+    consumers read the ``_SESSION_PROFILE`` ContextVar first via
+    ``get_session_env``.
+    """
+    token = object()
+    with _PROFILE_MIRROR_LOCK:
+        global _PROFILE_MIRROR_AMBIENT
+        if not _PROFILE_MIRROR_PUBLISHERS:
+            # First publisher of a new generation: remember what the env
+            # looked like BEFORE any turn touched it.
+            _PROFILE_MIRROR_AMBIENT = os.environ.get(_PROFILE_MIRROR_KEY, _PROFILE_MIRROR_UNSET)
+        _PROFILE_MIRROR_PUBLISHERS.append(
+            (token, str(profile_name) if profile_name else None)
+        )
+        if profile_name:
+            os.environ[_PROFILE_MIRROR_KEY] = str(profile_name)
+    return token
+
+
+def _release_turn_session_profile(token) -> None:
+    """Retire one publisher; the mirror never outlives its last owner.
+
+    Safe to call with ``None`` (pre-initialised token on a turn that never
+    published) and with an unknown token (no-op — never touches the env).
+    """
+    if token is None:
+        return
+    with _PROFILE_MIRROR_LOCK:
+        for idx in range(len(_PROFILE_MIRROR_PUBLISHERS) - 1, -1, -1):
+            if _PROFILE_MIRROR_PUBLISHERS[idx][0] is token:
+                _PROFILE_MIRROR_PUBLISHERS.pop(idx)
+                break
+        else:
+            return  # unknown token: not ours to restore
+        for _remaining_token, remaining_profile in reversed(
+            _PROFILE_MIRROR_PUBLISHERS
+        ):
+            if remaining_profile is not None:
+                # A concurrent turn is still running: re-publish the most
+                # recent REMAINING owner that resolved a profile — never a
+                # completed turn's. Profile-less owners in between (a
+                # background-worker scope whose profile's .env sets no
+                # HERMES_SESSION_PROFILE) register as None and must not hide
+                # the live turn's value from context-less readers.
+                os.environ[_PROFILE_MIRROR_KEY] = remaining_profile
+                break
+        else:
+            # Either the last publisher left, or no remaining publisher
+            # resolved a profile: fall back to the ambient value exactly
+            # as it was before any turn touched it — absent stays absent, and
+            # an inherited value is never masked (a profile-less turn must
+            # not delete it either).
+            ambient = _PROFILE_MIRROR_AMBIENT
+            if ambient is _PROFILE_MIRROR_UNSET:
+                os.environ.pop(_PROFILE_MIRROR_KEY, None)
+            else:
+                os.environ[_PROFILE_MIRROR_KEY] = ambient
+
+
 @contextlib.contextmanager
-def _bind_turn_session_identity(session_id: str):
+def _bind_turn_session_identity(session_id: str, workspace: str = "", profile_name: str | None = None):
     """Context-manager form of the per-turn session-identity binding.
 
     The ``_run_agent_streaming`` worker uses the explicit ``_set``/``_reset``
@@ -4199,7 +4382,7 @@ def _bind_turn_session_identity(session_id: str):
     spawn; this wrapper is the canonical single-call API for other callers and
     for tests, and shares the exact same code path.
     """
-    tokens = _set_turn_session_identity(session_id)
+    tokens = _set_turn_session_identity(session_id, workspace=workspace, profile_name=profile_name)
     try:
         yield
     finally:
@@ -14113,6 +14296,11 @@ def _run_agent_streaming(
     old_session_platform = None
     old_hermes_home = None
     old_profile_env = {}
+    # #8452 (review round 2): ownership-safe process-env profile mirror token
+    # (see _publish_turn_session_profile). Pre-initialised so the outer
+    # finally can always release it, even if the turn never reaches the
+    # publish below (mirrors the streaming worker's pre-init pattern).
+    _turn_profile_mirror_token = None
     result = None
     _result_partial_pre_call_context = []
 
@@ -14675,23 +14863,15 @@ def _run_agent_streaming(
         # end_session()/_metering_stop.set() teardown is always paired (#4633/#2476).
         meter().begin_session(stream_id)
         _metering_thread.start()
-        # Bind THIS turn's session identity to the worker thread/context BEFORE
-        # any agent work (so every mid-turn notify_on_complete background spawn
-        # captures THIS session, not a concurrent turn's process-global env).
-        # Co-located with the existing env-restore lifecycle: set here, reset
-        # in the outer finally next to _clear_thread_env().
-        # Resolved the same way as `s.workspace` below so the bound cwd and the
-        # session's own record cannot disagree. Guarded: a turn must not die
-        # here because a workspace path is malformed.
+        # Resolve the workspace cwd BEFORE the identity bind below so the bound
+        # cwd and the session's own record cannot disagree. Guarded: a turn
+        # must not die here because a workspace path is malformed.
         s = get_session(session_id)
         try:
             _turn_workspace_cwd = str(_resolve_path(workspace, profile=getattr(s, 'profile', None)))
         except Exception:
             _turn_workspace_cwd = ""
             logger.debug("per-turn workspace cwd resolve failed", exc_info=True)
-        _turn_session_identity_tokens = _set_turn_session_identity(
-            session_id, workspace=_turn_workspace_cwd
-        )
         _turn_pending_source = getattr(s, 'pending_user_source', None) or 'webui'
         _active_turn_identity = _active_turn_authority(s, stream_id, msg_text)
         update_active_run(stream_id, phase="running", session_id=session_id)
@@ -14759,6 +14939,22 @@ def _run_agent_streaming(
             _streaming_cron_profile_home_token = _STREAMING_CRON_PROFILE_HOME.set(_profile_home)
             _profile_runtime_env = get_profile_runtime_env(_profile_home_path)
             _safe_profile_runtime_env = filter_runtime_env_for_gateway_parity(_profile_runtime_env)
+            # #8452 (review round 3): HERMES_SESSION_PROFILE is owned
+            # EXCLUSIVELY by the per-turn mirror (_publish_turn_session_profile
+            # / _release_turn_session_profile) across setup and teardown, so
+            # the generic profile-env path must never touch it — neither the
+            # apply below nor the snapshot/restore pair that brackets the
+            # agent work. Applying a profile .env's value BEFORE the publish
+            # made the mirror capture that turn-local dotenv value as its
+            # ambient, and the final release then wrote the contaminated
+            # snapshot back after the generic teardown had already restored
+            # the real one; a generic restore could equally overwrite a
+            # SURVIVING concurrent publisher's value mid-overlap. The raw
+            # _profile_runtime_env keeps flowing into _build_agent_thread_env
+            # below, so a profile .env's value still reaches in-process
+            # consumers when the turn resolves no profile — the intended
+            # unresolved-profile fallback.
+            _safe_profile_runtime_env.pop(_PROFILE_MIRROR_KEY, None)
         except ImportError:
             # #8517: never the shared HERMES_HOME env mirror (another profile's
             # worker may hold it); '' turns memory off for the turn.
@@ -14817,12 +15013,39 @@ def _run_agent_streaming(
                 _resolved_profile_name = get_active_profile_name()
             except Exception:
                 _resolved_profile_name = None
-        
+
+        # Bind THIS turn's session identity to the worker thread/context BEFORE
+        # any agent work (so every mid-turn notify_on_complete background spawn
+        # captures THIS session, not a concurrent turn's process-global env).
+        # Co-located with the existing env-restore lifecycle: set here, reset
+        # in the outer finally next to _clear_thread_env().
+        # #8452: the bind sits BELOW the profile resolution on purpose — it now
+        # also pins this turn's resolved profile into
+        # gateway.session_context._SESSION_PROFILE, the ContextVar
+        # tools.terminal_tool._current_session_profile reads before the process
+        # env. Without it the profile-scoped Docker derivation in
+        # _resolve_container_task_id collapses a named profile onto the shared
+        # "default" container key (the second empty sandbox from #8452), and an
+        # env-only bind would be unsafe under concurrent profiles (A publishes,
+        # B replaces, A resolves through B — why #8467 was rejected).
+        # #8452 re-gate (2026-10-27): an UNRESOLVED profile falls back to the
+        # profile .env's HERMES_SESSION_PROFILE. The Agent's get_session_env()
+        # reads ContextVars, then the process env — never WebUI's thread-local
+        # state — so without this fallback only _thread_ctx.env held the dotenv
+        # identity and the Agent resolved the ambient process value instead
+        # (master returns the dotenv value). The process mirror below still
+        # publishes _resolved_profile_name alone, so the ambient restoration
+        # is unchanged.
+        _turn_session_identity_tokens = _set_turn_session_identity(
+            session_id, workspace=_turn_workspace_cwd,
+            profile_name=_resolved_profile_name or _profile_runtime_env.get(_PROFILE_MIRROR_KEY),
+        )
         _thread_env = _build_agent_thread_env(
             _profile_runtime_env,
             str(s.workspace),
             session_id,
             _profile_home,
+            _resolved_profile_name,
         )
         _streaming_hermes_home_override_ctx = _set_streaming_hermes_home_override(_profile_home)
         # #8517 all-r2 finding 2: the override set here is held until the outermost
@@ -14913,6 +15136,16 @@ def _run_agent_streaming(
                 # succeeds for both modules, skip process-cache patching.
                 # If either module is static/missing/raises, the legacy path
                 # above has already snapshotted and patched under this lock.
+        # #8452 (review round 2): publish the turn's profile into the process
+        # env through the ownership-safe mirror. Registered OUTSIDE _ENV_LOCK
+        # on purpose: the mirror's own lock is held only for its bookkeeping,
+        # never across agent work (nesting it under _ENV_LOCK would order the
+        # two locks for no benefit and invite the re-entry deadlock the
+        # reviewer warned about). Released in the outer finally, next to the
+        # per-turn identity reset. Covers consumers that cannot read the
+        # _SESSION_PROFILE ContextVar — subprocess children inherit the env,
+        # not the context.
+        _turn_profile_mirror_token = _publish_turn_session_profile(_resolved_profile_name)
         # Lock released — agent runs without holding it
         # ── MCP Server Discovery (lazy import, idempotent) ──
         # MUST run AFTER the HERMES_HOME mutation above — `discover_mcp_tools()`
@@ -18999,6 +19232,12 @@ def _run_agent_streaming(
         # CLI/cron env fallback resumes — same lifecycle slot as the env
         # restore above.
         _reset_turn_session_identity(_turn_session_identity_tokens)
+        # #8452 (review round 2): retire this turn's process-env profile
+        # publication. Ownership-tracked, so the slot re-publishes the most
+        # recent REMAINING publisher (never a completed turn's profile) and
+        # restores the ambient value exactly when the LAST publisher leaves —
+        # see _release_turn_session_profile.
+        _release_turn_session_profile(_turn_profile_mirror_token)
         with STREAMS_LOCK:
             # ONE list for every per-stream registry (#7302 re-gate): this is the
             # same tuple the chat/start orphan recovery releases, so a registry

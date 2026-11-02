@@ -1475,11 +1475,27 @@ def profile_env_for_background_worker(
     try:
         # Lazy imports avoid a module-load cycle: streaming imports this helper.
         from api.config import _clear_thread_env, _set_thread_env, _thread_ctx
-        from api.streaming import _ENV_LOCK
+        from api.streaming import (
+            _ENV_LOCK,
+            _PROFILE_MIRROR_KEY,
+            _publish_turn_session_profile,
+            _release_turn_session_profile,
+        )
 
         profile_home_path = Path(get_hermes_home_for_profile(profile))
         runtime_env = get_profile_runtime_env(profile_home_path)
         safe_runtime_env = filter_runtime_env_for_gateway_parity(runtime_env)
+        # #8452 re-gate: HERMES_SESSION_PROFILE is owned EXCLUSIVELY by the
+        # shared turn mirror, exactly as on the turn path — the generic
+        # apply/snapshot/restore below must never touch it. A snapshot taken
+        # while a turn is published restores that turn's value AFTER the
+        # mirror released ownership, leaking a completed turn's profile into
+        # the process (title-worker overlap, reproduced 2026-10-27). Publish
+        # and release the dotenv value through the mirror instead.
+        mirror_profile = (
+            str(runtime_env.get(_PROFILE_MIRROR_KEY) or "").strip() or None
+        )
+        safe_runtime_env.pop(_PROFILE_MIRROR_KEY, None)
         secret_env_names = _profile_secret_env_names(profile_home_path)
     except Exception:
         log.debug(
@@ -1493,6 +1509,12 @@ def profile_env_for_background_worker(
 
     thread_env = dict(safe_runtime_env)
     thread_env["HERMES_HOME"] = str(profile_home_path)
+    # The dotenv value still reaches WebUI's thread-local channel for
+    # in-process helpers (the turn path keeps the raw env flowing the same
+    # way); the PROCESS env copy is the mirror's job alone.
+    if mirror_profile:
+        thread_env[_PROFILE_MIRROR_KEY] = mirror_profile
+    _mirror_token = None
     # Hybrid profile routing: keep the broad runtime env in WebUI's thread-local
     # channel for WebUI helpers, and also mirror it into process env for the
     # worker body because several production Hermes readers still call
@@ -1587,8 +1609,21 @@ def profile_env_for_background_worker(
             old_hermes_home = os.environ.get("HERMES_HOME")
             os.environ.update(safe_runtime_env)
             os.environ["HERMES_HOME"] = str(profile_home_path)
+        # Publish the dotenv value through the shared mirror AFTER the
+        # generic apply (which no longer carries the key) so the worker body
+        # — and any subprocess child it spawns — sees it under stack
+        # ownership: a concurrent turn's value is re-published on release,
+        # and the true ambient is restored when the last owner leaves.
+        _mirror_token = _publish_turn_session_profile(mirror_profile)
         yield
     finally:
+        try:
+            _release_turn_session_profile(_mirror_token)
+        except Exception:
+            log.debug(
+                "Failed to release the session-profile mirror for %s", purpose,
+                exc_info=True,
+            )
         try:
             with _ENV_LOCK:
                 for key, old_value in old_runtime_env.items():
