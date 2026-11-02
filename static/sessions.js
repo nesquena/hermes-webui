@@ -9451,7 +9451,7 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
   for(const candidate of [...(rawSessions||[]),...(referenceSessions||[])]){
     if(candidate&&candidate.session_id&&!attachQueueById.has(candidate.session_id)) attachQueueById.set(candidate.session_id,candidate);
   }
-  // Raw sources is_cli_session_row never files as CLI; 'desktop' etc. are ambiguous.
+  // Raw sources is_cli_session_row never files as CLI; any other raw source is ambiguous.
   const nonCliParentSources=['webui','cron','webhook','kanban','tool','api','api_server'];
   const subagentHostHiddenByScope=(leaf)=>{
     const seen=new Set();
