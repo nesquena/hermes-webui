@@ -130,7 +130,7 @@ def test_source_filters_use_the_created_source(tmp_path):
     assert {r['id'] for r in excluded} == {'local-cli', 'telegram'}
 
 
-def _lineage_db(path, rows):
+def _lineage_db(path, rows, model_configs=None):
     """state.db with project + compression-lineage columns.
 
     ``rows`` are (id, source, created_source, project_id, parent, started_at,
@@ -143,7 +143,8 @@ def _lineage_db(path, rows):
             id TEXT PRIMARY KEY, source TEXT, created_source TEXT,
             title TEXT, model TEXT, started_at REAL NOT NULL,
             message_count INTEGER DEFAULT 0, project_id TEXT,
-            parent_session_id TEXT, ended_at REAL, end_reason TEXT
+            parent_session_id TEXT, ended_at REAL, end_reason TEXT,
+            model_config TEXT
         );
         CREATE TABLE messages (
             id TEXT PRIMARY KEY, session_id TEXT, role TEXT,
@@ -161,9 +162,11 @@ def _lineage_db(path, rows):
         )
         for j, role in enumerate(('user', 'assistant')):
             conn.execute(
-                "INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, 'x', ?)",
-                (f"m_{sid}_{j}", sid, role, started + j / 10),
+                "INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+                (f"m_{sid}_{j}", sid, role, f"{sid}-{role}", started + j / 10),
             )
+    for sid, config in (model_configs or {}).items():
+        conn.execute("UPDATE sessions SET model_config = ? WHERE id = ?", (config, sid))
     conn.commit()
     conn.close()
 
@@ -217,3 +220,96 @@ def test_project_filters_unchanged_for_legacy_storage(tmp_path):
     ])
     assert _ids(db, project_assignment='assigned') == _ids(db)
     assert _ids(db, project_assignment='unassigned') == []
+
+
+
+def _patch_active_home(monkeypatch, home):
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: home)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: None)
+
+
+def _texts(messages):
+    return [m.get('content') for m in messages]
+
+
+@pytest.mark.parametrize('surface', ['cli', 'tui', 'acp'])
+def test_opening_the_collapsed_tip_reads_the_root_transcript_too(tmp_path, monkeypatch, surface):
+    """The sidebar shows root + 'local' continuation as one row; opening it must stitch both."""
+    _patch_active_home(monkeypatch, tmp_path)
+    db = tmp_path / 'state.db'
+    _lineage_db(db, [
+        ('root', surface, None, None, None, 100.0, 200.0, 'compression'),
+        ('tip', 'local', surface, None, 'root', 200.0, None, None),
+    ])
+    rows = _sidebar_rows_only(tmp_path, db)
+    assert 'root' not in rows and 'tip' in rows
+    texts = _texts(models.get_cli_session_messages('tip'))
+    assert texts[:2] == ['root-user', 'root-assistant']
+    assert texts[2:] == ['tip-user', 'tip-assistant']
+
+
+def test_transcript_stitch_still_stops_at_another_surface(tmp_path, monkeypatch):
+    """Control: a 'local' row made by another surface does not pull in the root's messages."""
+    _patch_active_home(monkeypatch, tmp_path)
+    db = tmp_path / 'state.db'
+    _lineage_db(db, [
+        ('root', 'tui', None, None, None, 100.0, 200.0, 'compression'),
+        ('tip', 'local', 'cli', None, 'root', 200.0, None, None),
+    ])
+    assert _texts(models.get_cli_session_messages('tip')) == ['tip-user', 'tip-assistant']
+
+
+def _sidebar_rows_only(tmp_path, db):
+    with (
+        unittest.mock.patch('api.models.get_claude_code_sessions', return_value=[]),
+        unittest.mock.patch('api.models.ensure_cron_project', return_value='cron-project-id'),
+    ):
+        rows = models._load_cli_sessions_uncached(tmp_path, db, None)
+    return {row['session_id']: row for row in rows}
+
+
+@pytest.mark.parametrize('child_source, child_created', [('local', 'tui'), ('tui', None)])
+@pytest.mark.parametrize('marker', ['_branched_from', '_delegate_from', '_reset_from'])
+def test_project_filters_stop_at_an_explicit_branch_of_the_root(tmp_path, child_source, child_created, marker):
+    """A branch/delegate/reset of a project root stays its own, unassigned conversation."""
+    db = tmp_path / 'state.db'
+    _lineage_db(db, [
+        ('root', 'tui', None, 'p', None, 100.0, 200.0, 'compression'),
+        ('branch', child_source, child_created, None, 'root', 200.0, None, None),
+    ], model_configs={'branch': '{"%s": "root"}' % marker})
+    assert _ids(db, project_assignment='assigned') == ['root']
+    assert _ids(db, project_assignment='assigned', project_ids=('p',)) == ['root']
+    assert _ids(db, project_assignment='unassigned') == ['branch']
+
+
+@pytest.mark.parametrize('config', [
+    '{"_delegate_from": "older-ancestor"}',  # inherited marker naming someone else
+    '{"_branched_from": null}',
+    '{}',
+    '',
+    None,
+])
+def test_project_filters_keep_real_continuations_with_harmless_model_config(tmp_path, config):
+    """Control: only a marker naming THIS parent is a boundary, as in the listing."""
+    db = tmp_path / 'state.db'
+    _lineage_db(db, [
+        ('root', 'tui', None, 'p', None, 100.0, 200.0, 'compression'),
+        ('tip', 'local', 'tui', None, 'root', 200.0, None, None),
+    ], model_configs={'tip': config})
+    assert _ids(db) == ['tip']  # one collapsed conversation
+    assert _ids(db, project_assignment='assigned') == ['tip']
+    assert _ids(db, project_assignment='unassigned') == []
+
+
+@pytest.mark.parametrize('config', ['not json', '[1, 2]', '{"_branched_from": 7}', '{"_reset_from": " "}'])
+def test_project_filters_fail_closed_on_unreadable_markers(tmp_path, config):
+    """Unreadable lineage evidence is a boundary, matching _branch_markers()."""
+    db = tmp_path / 'state.db'
+    _lineage_db(db, [
+        ('root', 'tui', None, 'p', None, 100.0, 200.0, 'compression'),
+        ('tip', 'local', 'tui', None, 'root', 200.0, None, None),
+    ], model_configs={'tip': config})
+    assert _ids(db, project_assignment='assigned') == ['root']
+    assert _ids(db, project_assignment='unassigned') == ['tip']

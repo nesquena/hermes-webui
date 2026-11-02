@@ -40,6 +40,7 @@ from api.workspace import get_last_workspace, _resolve_path, profile_home_resolv
 from api.usage import prompt_cache_hit_percent
 from api.agent_sessions import (
     _is_continuation_session,
+    _effective_source_sql as _agent_effective_source_sql,
     _source_col as _agent_source_col,
     is_cli_session_row,
     normalize_agent_session_source,
@@ -11363,8 +11364,13 @@ def get_state_db_session_messages(
                         identity_cols.append('model_config')
                     else:
                         identity_cols.append('NULL AS model_config')
+                    # Compare segments by the surface that made them, like
+                    # the sidebar listing, so a 'local' + created_source
+                    # continuation stitches onto its root (#8674).
                     lineage_select = (
-                        "id, source, started_at, parent_session_id, ended_at, end_reason"
+                        "id, "
+                        + _agent_effective_source_sql(session_cols, "sessions")
+                        + " AS source, started_at, parent_session_id, ended_at, end_reason"
                         + ", " + ", ".join(identity_cols)
                     )
                     cur.execute(

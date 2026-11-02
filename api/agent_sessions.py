@@ -227,6 +227,31 @@ def _effective_source_sql(columns: set[str], alias: str = "s") -> str:
     )
 
 
+def _no_branch_marker_sql(child: str = "child", parent: str = "parent") -> str:
+    """SQL twin of the ``model_config`` boundary in ``_is_continuation_session``.
+
+    True only when the child's ``model_config`` carries no ``_branched_from`` /
+    ``_delegate_from`` / ``_reset_from`` marker naming this parent. Like
+    ``_branch_markers``, unreadable evidence (not JSON, not an object, or a
+    marker that is not a non-empty string) fails closed as a boundary.
+    ``child``/``parent`` are fixed internal aliases, never user input.
+    """
+    mc = f"{child}.model_config"
+    checks = []
+    for key in _MODEL_CONFIG_LINEAGE_KEYS:
+        path = f"'$.{key}'"
+        checks.append(
+            f"(json_type({mc}, {path}) IS NULL OR json_type({mc}, {path}) = 'null' "
+            f"OR (json_type({mc}, {path}) = 'text' "
+            f"AND TRIM(json_extract({mc}, {path})) != '' "
+            f"AND TRIM(json_extract({mc}, {path})) != TRIM({parent}.id)))"
+        )
+    return (
+        f"({mc} IS NULL OR TRIM({mc}) = '' OR (json_valid({mc}) "
+        f"AND json_type({mc}) = 'object' AND " + " AND ".join(checks) + "))"
+    )
+
+
 def _source_col(columns: set[str]) -> str:
     return f"{_effective_source_sql(columns)} AS source"
 
@@ -930,6 +955,10 @@ def read_importable_agent_session_rows(
                     continuation_checks.append(
                         "LOWER(TRIM(COALESCE(child.session_source, ''))) != 'fork'"
                     )
+                if 'model_config' in session_cols:
+                    # Explicit branches/delegates/resets of this parent are
+                    # separate conversations, as in the listing (#8674).
+                    continuation_checks.append(_no_branch_marker_sql())
                 continuation_where = " AND ".join(continuation_checks)
                 # An assignment anywhere in a compression lineage assigns the
                 # whole logical conversation, so both filters must key on the
