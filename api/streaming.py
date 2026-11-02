@@ -9362,6 +9362,61 @@ def _register_seen_stable_id(key, msg, seen_stable_by_key) -> None:
         kept.append(stable_id)
 
 
+def _register_retained_owner_slot(key, msg, slot, retained_owner_slots) -> None:
+    """Record the ``deduped`` slot a retained durable owner occupies for ``key``.
+
+    #8574 gate certification RED finding 2 (nesquena-hermes 2026-10-31):
+    ``seen_stable_by_key`` is deliberately append-only — a superseded id must
+    stay registered so a replay of the REPLACED record still collapses against
+    it — so it cannot answer "where does this owner live right now". Without
+    that answer a token-bearing collision had only two moves: replace the one
+    row ``user_exact_index`` happens to name (which may belong to a DIFFERENT
+    owner) or append another copy, and the same durable owner then reached the
+    persisted model context twice. This registry is the slot-side counterpart:
+    one ``(stable_id, slot)`` pair per retained owner, refreshed in place so a
+    replacement republishes the slot the row actually occupies. Nothing is ever
+    removed from ``deduped``, so a published slot stays addressable.
+    """
+    if key is None or not isinstance(slot, int) or isinstance(slot, bool):
+        return
+    stable_id, stable_valid = _stable_message_ownership_id(msg)
+    if not (stable_valid and stable_id is not None):
+        return
+    entries = retained_owner_slots.get(key)
+    if not isinstance(entries, list):
+        entries = []
+        retained_owner_slots[key] = entries
+    entries[:] = [entry for entry in entries if entry[1] != slot]
+    entries.append((stable_id, slot))
+
+
+def _retained_owner_slot_for(key, msg, retained_owner_slots):
+    """Return the slot of the retained same-key owner sharing ``msg``'s id.
+
+    #8574 gate certification RED finding 2: a token-bearing collision must be
+    resolved against EVERY retained same-key durable owner, not just the single
+    row ``user_exact_index`` names (that index tracks the most recent owner, so
+    with history ``(id=1) ... (id=3)`` a replay of id 1 is compared against
+    id 3, judged independently owned, and appended as a second copy of owner
+    1). Returns ``None`` when the row carries no valid ownership id, or when
+    every retained owner for ``key`` carries a different id — the caller then
+    keeps its existing behaviour (replace the indexed row, or append a
+    genuinely new owner).
+    """
+    stable_id, stable_valid = _stable_message_ownership_id(msg)
+    if key is None or not (stable_valid and stable_id is not None):
+        return None
+    entries = retained_owner_slots.get(key)
+    if not isinstance(entries, list):
+        return None
+    for entry_id, entry_slot in entries:
+        if entry_id == stable_id and isinstance(entry_slot, int) and not isinstance(
+            entry_slot, bool
+        ):
+            return entry_slot
+    return None
+
+
 def _deduplicate_context_messages(messages, protected_rows=None):
     """Remove duplicate messages from context by identity, keeping first occurrence.
 
@@ -9385,6 +9440,14 @@ def _deduplicate_context_messages(messages, protected_rows=None):
     # finding 2): lets a content collision distinguish a replayed duplicate
     # from an independently owned occurrence that repeats content verbatim.
     seen_stable_by_key = {}
+    # Slot-side counterpart of ``seen_stable_by_key`` (#8574 gate certification
+    # RED finding 2): ``key -> [(stable_id, slot), ...]`` naming the slot each
+    # RETAINED durable owner for that key occupies. The id registry above is
+    # append-only by design and cannot answer "where is this owner now", so a
+    # token-bearing collision could previously only replace the single row
+    # ``user_exact_index`` names (possibly a different owner) or append another
+    # copy of itself.
+    retained_owner_slots = {}
     for msg in messages:
         if _is_context_compression_marker(msg):
             marker_key = (
@@ -9436,12 +9499,63 @@ def _deduplicate_context_messages(messages, protected_rows=None):
             prior_exact_idx = user_exact_index.get(user_exact_key)
             if msg.get('_active_turn_token'):
                 if prior_exact_idx is not None:
-                    deduped[prior_exact_idx] = msg
-                    _register_seen_stable_id(key, msg, seen_stable_by_key)
-                    continue
+                    # #8574 gate certification RED, finding 1 (nesquena-hermes
+                    # 2026-10-31): a token-bearing user row may be an
+                    # INDEPENDENTLY OWNED turn that repeats an earlier turn's
+                    # prompt verbatim inside one timestamp bucket (identical
+                    # content/timestamp/source/attachments, ``_ts`` absent).
+                    # Replacing the earlier exact-key match here deleted that
+                    # earlier owner outright from the persisted model context
+                    # and moved the later owner ahead of the first answer,
+                    # while the display transcript kept both rows. Preserve
+                    # distinct durable ownership BEFORE any token-preferred
+                    # replacement, using exactly the judgement the adjacent
+                    # tokenless branch already applies: BOTH rows must carry
+                    # valid DISTINCT non-negative integer ids. Every other
+                    # shape — an id-less row, a matching id, or an invalid id —
+                    # keeps the historical replacement unchanged, so the
+                    # token holder still supersedes a mere replay of itself.
+                    # The independently owned pair falls through to the
+                    # stable-id ownership path below, which admits the row and
+                    # registers its id in the same per-key registry.
+                    if not _independently_owned_user_pair(deduped[prior_exact_idx], msg):
+                        deduped[prior_exact_idx] = msg
+                        _register_seen_stable_id(key, msg, seen_stable_by_key)
+                        _register_retained_owner_slot(
+                            key, msg, prior_exact_idx, retained_owner_slots
+                        )
+                        continue
                 if key in seen:
+                    # #8574 gate certification RED finding 2 (nesquena-hermes
+                    # 2026-10-31): before appending a token-bearing collision,
+                    # resolve it against ALL retained same-key durable owners.
+                    # ``user_exact_index`` only names the MOST RECENT owner, so
+                    # with history ``(id=1) ... (id=3)`` a replay of owner 1 was
+                    # compared against owner 3, judged independently owned, and
+                    # appended — owner 1 then reached the persisted model
+                    # context twice while the display kept one. An already
+                    # retained valid id must collapse/update its OWN slot
+                    # (keeping the same-ID token preference), never another
+                    # owner's slot and never a second copy. A row whose id
+                    # matches no retained owner is a genuinely distinct owner
+                    # and keeps the existing append behaviour; a missing or
+                    # invalid id keeps the legacy conservative path untouched.
+                    own_slot = _retained_owner_slot_for(
+                        key, msg, retained_owner_slots
+                    )
+                    if own_slot is not None:
+                        deduped[own_slot] = msg
+                        _register_seen_stable_id(key, msg, seen_stable_by_key)
+                        _register_retained_owner_slot(
+                            key, msg, own_slot, retained_owner_slots
+                        )
+                        user_exact_index[user_exact_key] = own_slot
+                        continue
                     deduped.append(msg)
                     _register_seen_stable_id(key, msg, seen_stable_by_key)
+                    _register_retained_owner_slot(
+                        key, msg, len(deduped) - 1, retained_owner_slots
+                    )
                     user_exact_index[user_exact_key] = len(deduped) - 1
                     continue
             elif prior_exact_idx is not None:
@@ -9491,6 +9605,10 @@ def _deduplicate_context_messages(messages, protected_rows=None):
                 stable_id if (stable_valid and stable_id is not None) else None
             ]
         deduped.append(msg)
+        if key is not None:
+            _register_retained_owner_slot(
+                key, msg, len(deduped) - 1, retained_owner_slots
+            )
         # #6310 bookkeeping: publish the exact-key index only now that the row
         # is retained, and name the slot it actually occupies. A dropped row
         # never reaches this site, so no index can outlive its row.
