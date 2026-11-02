@@ -40,6 +40,7 @@ refused BEFORE ``initialize`` runs and builds without that provider.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import functools
 import importlib
 import inspect
@@ -121,8 +122,11 @@ _profile_homes_seen: set[str] = set()
 _profile_homes_seen_lock = threading.Lock()
 
 
-def serves_single_profile(target_key: Optional[str]) -> bool:
+def serves_single_profile(target_key: Optional[str], *, record: bool = True) -> bool:
     """True only when this WebUI process provably serves ONE profile home.
+
+    ``record=False`` only asks (the memory status a new build would get): the home is
+    not counted as served.
 
     Used where per-profile memory isolation cannot be enforced (an Agent without
     ``claim_instance``): external memory stays on only when no other profile can
@@ -141,8 +145,9 @@ def serves_single_profile(target_key: Optional[str]) -> bool:
     if not target_key:
         return False
     with _profile_homes_seen_lock:
-        _profile_homes_seen.add(target_key)
-        if len(_profile_homes_seen) > 1:
+        if record:
+            _profile_homes_seen.add(target_key)
+        if len(_profile_homes_seen | {target_key}) > 1:
             return False
     try:
         from api.profiles import get_hermes_home_for_profile  # noqa: PLC0415
@@ -231,6 +236,172 @@ def agent_has_memory(agent: Any) -> bool:
         getattr(agent, "_memory_manager", None) is not None
         or getattr(agent, "_memory_store", None) is not None
     )
+
+
+# ── what the user is told (#8517 follow-up) ──────────────────────────────────
+#
+# The reasons above are logged for the operator; the user only sees that memory does
+# not work. The status is server-authoritative and describes the agent actually
+# serving a session: ``construct_profile_scoped_agent`` records on every agent it
+# builds for the life of a session (cacheable) either a lasting reason or healthy;
+# a one-turn fail-closed build records nothing (it is never cached, so it never
+# describes the session). ``session_memory_status`` reports the session's cached
+# agent's record, else what a new build would provably get, else nothing (unknown).
+# The UI renders the notice from the session payload's ``memory_status`` and from the
+# per-turn stream event (``memory_status_event``). Codes only, never paths:
+#
+# * ``agent_outdated``: Agent < v0.18.0, every memory store off for every profile;
+# * ``agent_no_instance_claim``: Agent without ``claim_instance`` serving several
+#   profiles, external memory providers off (built-in memory still on);
+# * ``provider_shared_instance``: the provider handed out one shared instance that
+#   another profile already owns, so it is off for this profile until the WebUI
+#   restarts (built-in memory still on).
+
+MEMORY_OFF_AGENT_OUTDATED = "agent_outdated"
+MEMORY_OFF_AGENT_NO_INSTANCE_CLAIM = "agent_no_instance_claim"
+MEMORY_OFF_PROVIDER_SHARED_INSTANCE = "provider_shared_instance"
+_MEMORY_OFF_SCOPES = {
+    MEMORY_OFF_AGENT_OUTDATED: "all",
+    MEMORY_OFF_AGENT_NO_INSTANCE_CLAIM: "external",
+    MEMORY_OFF_PROVIDER_SHARED_INSTANCE: "external",
+}
+# English text for clients that predate the notice: their ``warning`` listener shows
+# ``message`` as a composer status. The UI proper renders its own i18n copy by code.
+_MEMORY_OFF_MESSAGES = {
+    MEMORY_OFF_AGENT_OUTDATED: (
+        "Memory is off: this version of Hermes Agent cannot keep memory separate per "
+        "profile. Update Hermes Agent to turn it back on."
+    ),
+    MEMORY_OFF_AGENT_NO_INSTANCE_CLAIM: (
+        "Memory providers are off: this version of Hermes Agent cannot keep them separate "
+        "across profiles. Built-in memory still works. Update Hermes Agent to turn them back on."
+    ),
+    MEMORY_OFF_PROVIDER_SHARED_INSTANCE: (
+        "Your memory provider is off for this profile because another profile is already "
+        "using it. Built-in memory still works. Restart WebUI, or update the provider "
+        "(for example mnemosyne-hermes 0.7.2 or later)."
+    ),
+}
+_MEMORY_OK = "ok"
+_MEMORY_STATUS_ATTR = "_webui_memory_status"
+# Shared-instance refusals made by the guard during one construction (same thread:
+# the Agent initialises its memory providers inside ``AIAgent.__init__``).
+_construction_refusals: contextvars.ContextVar[Optional[list]] = contextvars.ContextVar(
+    "webui_issue8517_construction_refusals", default=None,
+)
+
+
+def _set_memory_status(agent: Any, code: str) -> None:
+    try:
+        setattr(agent, _MEMORY_STATUS_ATTR, code)
+    except Exception:
+        logger.debug("[webui] #8517: could not record the memory status on the agent", exc_info=True)
+
+
+def _status_for_code(code: Any) -> Optional[dict]:
+    if code == _MEMORY_OK:
+        return {"state": "ok"}
+    if isinstance(code, str) and code in _MEMORY_OFF_SCOPES:
+        return {"state": "off", "reason": code, "scope": _MEMORY_OFF_SCOPES[code]}
+    return None
+
+
+def memory_status_for_agent(agent: Any) -> Optional[dict]:
+    """The status ``construct_profile_scoped_agent`` recorded on ``agent``:
+    ``{"state": "off", "reason", "scope"}``, ``{"state": "ok"}``, or None (one-turn
+    fail-closed build, or any object this module did not build)."""
+    try:
+        code = vars(agent).get(_MEMORY_STATUS_ATTR) if agent is not None else None
+    except TypeError:  # no instance __dict__ (slots): never built here
+        return None
+    return _status_for_code(code)
+
+
+def _claim_seam_available() -> Optional[bool]:
+    """Whether the Agent has ``agent.memory_manager.claim_instance`` (None: unknown).
+
+    Never imports the Agent runtime from a request thread before it is bound: the first
+    cache-miss GET /api/session after boot would otherwise pull in ~84 modules (including
+    the tools registry singleton). Until then the answer is unknown; the first turn reports
+    the real status."""
+    mm = sys.modules.get("agent.memory_manager")
+    if mm is None:
+        if "run_agent" not in sys.modules:
+            return None
+        try:
+            mm = importlib.import_module("agent.memory_manager")
+        except Exception:
+            return None
+    return callable(getattr(mm, "claim_instance", None))
+
+
+def predicted_memory_status(profile_home: str) -> Optional[dict]:
+    """What a new agent for ``profile_home`` would provably get, without building it
+    and without counting the home as served: ``agent_outdated``, or
+    ``agent_no_instance_claim`` when several profiles exist. Anything else (healthy, a
+    shared-instance refusal, a one-turn failure) is only known by building: None."""
+    target_key = profile_home_key(profile_home)
+    if not target_key:
+        return None
+    mod = _hermes_constants()
+    if mod is None:
+        return None
+    setter = getattr(mod, "set_hermes_home_override", None)
+    resetter = getattr(mod, "reset_hermes_home_override", None)
+    if not (callable(setter) and callable(resetter)):
+        return _status_for_code(MEMORY_OFF_AGENT_OUTDATED)
+    if _claim_seam_available() is False and not serves_single_profile(target_key, record=False):
+        return _status_for_code(MEMORY_OFF_AGENT_NO_INSTANCE_CLAIM)
+    return None
+
+
+def session_memory_status(session_id: str, profile_home: Optional[str] = None, *, session: Any = None) -> Optional[dict]:
+    """The memory status of the agent serving ``session_id``: its cached agent's
+    record when one is cached (a root agent cached before a second profile appeared
+    keeps external memory on, and says so), else ``predicted_memory_status`` for the
+    session's profile home (``profile_home``, or resolved from ``session`` only when
+    needed), else None. Turn-level failures never change it: their agents are never
+    cached and never recorded."""
+    sid = str(session_id or "")
+    if not sid:
+        return None
+    try:
+        from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK  # noqa: PLC0415
+
+        with SESSION_AGENT_CACHE_LOCK:
+            entry = SESSION_AGENT_CACHE.get(sid)
+    except Exception:
+        logger.debug("[webui] #8517: agent cache unavailable for the memory status", exc_info=True)
+        return None
+    if entry:
+        return memory_status_for_agent(entry[0] if isinstance(entry, tuple) else entry)
+    if profile_home is None:
+        profile_home = session_profile_home_or_empty(session) if session is not None else ""
+    return predicted_memory_status(profile_home)
+
+
+def memory_status_event(status: Optional[dict], *, session_id: str, stream_id: str = "") -> Optional[tuple[str, dict]]:
+    """``(event, payload)`` telling the UI a session's memory status during a turn, or
+    None when unknown. Memory off is a ``warning`` of ``type: "memory_off"`` (older
+    clients show its ``message``); healthy is its own ``memory_status`` event (older
+    clients would show any warning as "Warning"). Codes and fixed text only."""
+    if not isinstance(status, dict):
+        return None
+    sid = str(session_id or "")
+    stream = str(stream_id or "")
+    if status.get("state") == "ok":
+        return "memory_status", {"type": "memory_status", "state": "ok", "session_id": sid, "stream_id": stream}
+    reason = status.get("reason")
+    if status.get("state") != "off" or not isinstance(reason, str) or reason not in _MEMORY_OFF_SCOPES:
+        return None
+    return "warning", {
+        "type": "memory_off",
+        "session_id": sid,
+        "stream_id": stream,
+        "reason": reason,
+        "scope": _MEMORY_OFF_SCOPES[reason],
+        "message": _MEMORY_OFF_MESSAGES[reason],
+    }
 
 
 def _enter_profile_home(profile_home: str, target_key: Optional[str]) -> tuple[Callable[[], None], Optional[str]]:
@@ -450,8 +621,18 @@ def construct_profile_scoped_agent(
                 "" if stable_for_process else " and not cached",
             )
             agent = _build_without_memory(agent_cls, agent_kwargs, params, keep_builtin=keep_builtin)
+            if stable_for_process:
+                _set_memory_status(
+                    agent,
+                    MEMORY_OFF_AGENT_NO_INSTANCE_CLAIM if keep_builtin else MEMORY_OFF_AGENT_OUTDATED,
+                )
             return agent, stable_for_process
-        agent = agent_cls(**agent_kwargs)
+        refusals: list = []
+        refusals_token = _construction_refusals.set(refusals)
+        try:
+            agent = agent_cls(**agent_kwargs)
+        finally:
+            _construction_refusals.reset(refusals_token)
         state, bound_key = _bound_memory_home_key(agent)
         if state == "bound" and bound_key != target_key:
             logger.warning(
@@ -473,6 +654,9 @@ def construct_profile_scoped_agent(
                 "memory provider bound; relying on the profile home override set for "
                 "construction. Upgrade the Agent to verify it.",
             )
+        # The guard refused a shared provider instance another profile owns; the Agent
+        # dropped it and kept the rest. Holds until the WebUI restarts.
+        _set_memory_status(agent, MEMORY_OFF_PROVIDER_SHARED_INSTANCE if refusals else _MEMORY_OK)
         return agent, True
     finally:
         restore()
@@ -501,7 +685,8 @@ def profile_home_turn_scope(profile_home: str):
 
 # ── #8517 P3: session-boundary commits run as the session's owner ─────────────
 
-# Logger the Agent's caller-scope check refuses on (agent/memory_caller_scope._refuse).
+# The Agent's caller-scope module and the logger it refuses on (its ``_refuse``).
+_CALLER_SCOPE_MODULE = "agent.memory_caller_scope"
 _CALLER_SCOPE_LOGGER = "agent.memory_caller_scope"
 
 
@@ -523,15 +708,24 @@ def session_owner_profile_home(session_id: str) -> str:
 
 
 class _HookRefusalCapture(logging.Handler):
-    """Notices the Agent refusing ``hook`` on THIS thread. The Agent's lifecycle
-    hooks return nothing when its caller-scope check refuses them; the only
-    signal is its WARNING (agent/memory_caller_scope._refuse)."""
+    """Notices the Agent refusing ``hook`` during one ``call_as_session_owner``. The
+    Agent's lifecycle hooks return nothing when its caller-scope check refuses them;
+    the only signal is its refusal, ``agent/memory_caller_scope._refuse``.
+
+    With that function present the capture is told by ``_install_refusal_hook``'s
+    wrapper (``note_refusal``), whatever the deployer's logging configuration
+    (#8613). Without it (an Agent with no caller-scope check, which never refuses)
+    the capture is the pre-#8613 handler on the refusal logger, for this thread."""
 
     def __init__(self, hook: str):
         super().__init__(logging.WARNING)
         self._needle = f"hook {hook}"
         self._thread = threading.get_ident()
         self.refused = False
+
+    def note_refusal(self, label: Any) -> None:
+        if isinstance(label, str) and self._needle in label:
+            self.refused = True
 
     def emit(self, record: logging.LogRecord) -> None:
         if record.thread != self._thread:
@@ -542,6 +736,67 @@ class _HookRefusalCapture(logging.Handler):
             return
         if "refused" in message and self._needle in message:
             self.refused = True
+
+
+# The captures open in THIS context (thread / task), innermost last. A tuple, replaced
+# and reset, never mutated: a concurrent call on another thread has its own value.
+_refusal_captures: contextvars.ContextVar[tuple[_HookRefusalCapture, ...]] = contextvars.ContextVar(
+    "webui_memory_hook_refusal_captures", default=())
+_refuse_wrap_lock = threading.Lock()
+# Set on the wrapper to the registry it notes into: a reload of this module (a new
+# registry) wraps again; the previous wrapper then notes into nothing and delegates.
+_REFUSE_WRAPPER_MARK = "_webui_8613_refusal_captures"
+
+
+def _wrap_refuse(original: Callable[..., Any], captures: contextvars.ContextVar) -> Callable[..., Any]:
+    def _refuse(*args: Any, **kwargs: Any) -> Any:
+        try:
+            active = captures.get()
+            if active:
+                label = args[0] if args else kwargs.get("label")
+                for capture in active:
+                    capture.note_refusal(label)
+        except Exception:  # noting must never change what the Agent's refusal does
+            pass
+        return original(*args, **kwargs)
+
+    functools.update_wrapper(_refuse, original, updated=())
+    setattr(_refuse, _REFUSE_WRAPPER_MARK, captures)
+    return _refuse
+
+
+def _install_refusal_hook() -> bool:
+    """Wrap the Agent's ``agent.memory_caller_scope._refuse`` once (#8613), so a
+    refused hook is noted before the Agent logs it: no logger level, ``disabled``
+    flag, filter or handler is touched, and what the deployer's handlers receive is
+    unchanged. The wrapper delegates every call unchanged (arguments, return value,
+    exceptions). The Agent's ``caller_scope`` resolves ``_refuse`` from its module
+    globals at each call, so replacing the module attribute reaches every refusal.
+
+    Idempotent and thread-safe; a reload of the Agent module (a fresh ``_refuse``)
+    is wrapped again on the next call. False when the Agent has no ``_refuse``: the
+    caller then uses the pre-#8613 log capture."""
+    mod = sys.modules.get(_CALLER_SCOPE_MODULE)
+    if mod is None:
+        try:
+            mod = importlib.import_module(_CALLER_SCOPE_MODULE)
+        except Exception:
+            return False
+    captures = _refusal_captures
+    current = getattr(mod, "_refuse", None)
+    if getattr(current, _REFUSE_WRAPPER_MARK, None) is captures:
+        return True
+    with _refuse_wrap_lock:
+        current = getattr(mod, "_refuse", None)
+        if not callable(current):
+            return False
+        if getattr(current, _REFUSE_WRAPPER_MARK, None) is not captures:
+            try:
+                setattr(mod, "_refuse", _wrap_refuse(current, captures))  # noqa: B010 (a module attribute set at runtime)
+            except Exception:
+                logger.debug("[webui] #8613: cannot wrap the Agent's memory refusal", exc_info=True)
+                return False
+    return True
 
 
 def _enter_session_owner_scope(agent: Any, session_id: str, owner_home: str) -> tuple[Callable[[], None], Optional[str]]:
@@ -596,12 +851,21 @@ def call_as_session_owner(
         )
         return False
     capture = _HookRefusalCapture(hook)
-    scope_logger = logging.getLogger(_CALLER_SCOPE_LOGGER)
-    scope_logger.addHandler(capture)
+    log_capture: Optional[logging.Logger] = None
+    token: Optional[contextvars.Token] = None
     try:
+        if not _install_refusal_hook():
+            # No ``_refuse`` to wrap: the pre-#8613 capture, which only sees the
+            # refusal when the deployer's logging creates the record.
+            log_capture = logging.getLogger(_CALLER_SCOPE_LOGGER)
+            log_capture.addHandler(capture)
+        token = _refusal_captures.set(_refusal_captures.get() + (capture,))
         fn()
     finally:
-        scope_logger.removeHandler(capture)
+        if token is not None:
+            _refusal_captures.reset(token)
+        if log_capture is not None:
+            log_capture.removeHandler(capture)
         restore()
     if capture.refused:
         logger.warning(
@@ -671,6 +935,9 @@ def _claim_for_profile(original: Callable[[Any, Any], bool], provider: Any, home
                 _instance_owners[pid] = (_instance_ref(provider), key)
             return True
     name = getattr(provider, "name", "?")
+    refusals = _construction_refusals.get()
+    if refusals is not None:
+        refusals.append(name)
     _log_once(
         f"shared:{name}:{owner}:{key}",
         "[webui] #8517: memory provider %r is disabled for profile home %r: the plugin "

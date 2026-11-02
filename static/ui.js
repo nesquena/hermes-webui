@@ -7640,6 +7640,11 @@ function _fitComposerFooter(){
     footer.style.visibility='hidden';
   }
   let next='';
+  // Buttons carry `transition:all`; measured mid-transition they still report
+  // their icon-stage width, so a footer that collapsed to icons could never
+  // re-expand once its labels fit again (#8253 Fable r1). Freeze transitions
+  // for the synchronous strip-and-measure.
+  footer.classList.add('cf-measuring');
   try{
     footer.classList.remove('cf-icons','cf-burger');
     if(overflows()){
@@ -7659,6 +7664,12 @@ function _fitComposerFooter(){
       footer.style.height=prevHeight;
       footer.style.visibility=prevVisibility;
     }
+    // Commit the restored, visible style while transitions are still frozen,
+    // then unfreeze: otherwise every `transition:all` descendant animates its
+    // inherited visibility from the hidden measuring state and blinks out for a
+    // frame on each fit pass (#8253 Fable r2).
+    void footer.offsetWidth;
+    footer.classList.remove('cf-measuring');
   }
   // Post-restore transition check: fire the same composer menu cleanup used
   // by the 640px MediaQueryList boundary listener (see _onPhoneBoundaryChange
@@ -7768,6 +7779,10 @@ function _reasoningEffortContext(){
   const ctx={};
   if(model) ctx.model=model;
   if(provider) ctx.provider=provider;
+  // Reasoning effort is session-owned just like the model selection. Including
+  // the session identity also makes the request-cache key change when two
+  // sessions happen to use the same model/provider pair.
+  if(session&&session.session_id) ctx.session_id=session.session_id;
   return ctx;
 }
 
@@ -7775,6 +7790,103 @@ function _reasoningEffortQuery(){
   const params=new URLSearchParams(_reasoningEffortContext());
   const qs=params.toString();
   return qs?('?'+qs):'';
+}
+
+// Monotonic save counter plus the newest save per profile/session: only the
+// newest save for a chat may update that chat's chip, so an older save resolving
+// late cannot undo a newer pick, and another chat's pick cannot hide this one's.
+let _reasoningSaveSeq=0;
+const _reasoningLatestSaveByOwner=new Map();
+// Effort saves are sent one at a time in pick order, so the threaded server
+// stores the latest pick rather than whichever request it handled last.
+let _reasoningSaveChain=Promise.resolve();
+// Every request carries the profile cookie at send time. A profile switch
+// freezes new picks and drains queued saves before it changes the cookie, so a
+// save queued behind a slow one still lands in the profile it was picked in.
+let _reasoningSavesFrozen=0;
+
+function _reasoningSaveOwner(profile, context){
+  return profile+'\n'+((context&&context.session_id)||'');
+}
+
+// While frozen the effort controls are disabled, so a pick is never accepted
+// by the UI and then dropped; /reasoning still reports the refusal in a toast.
+function _setReasoningControlsFrozen(frozen){
+  ['composerReasoningChip','composerMobileReasoningAction'].forEach(function(id){
+    const btn=$(id);
+    if(btn) btn.disabled=frozen;
+  });
+  if(frozen) closeReasoningDropdown();
+}
+
+async function _beginReasoningProfileSwitch(){
+  ++_reasoningSavesFrozen;
+  _setReasoningControlsFrozen(true);
+  await _reasoningSaveChain;
+}
+
+function _endReasoningProfileSwitch(){
+  if(_reasoningSavesFrozen>0) --_reasoningSavesFrozen;
+  if(!_reasoningSavesFrozen) _setReasoningControlsFrozen(false);
+}
+
+function _saveReasoningEffort(effort){
+  if(_reasoningSavesFrozen){
+    const frozen=new Error('profile switch in progress');
+    frozen.code='profile_switch_in_progress';
+    return Promise.reject(frozen);
+  }
+  const context=_reasoningEffortContext();
+  const profile=(S&&S.activeProfile)||'default';
+  const owner=_reasoningSaveOwner(profile, context);
+  const saveSeq=++_reasoningSaveSeq;
+  _reasoningLatestSaveByOwner.set(owner, saveSeq);
+  const payload=Object.assign({effort:effort},context);
+  const post=function(){
+    return api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)});
+  };
+  const request=_reasoningSaveChain.then(post,post);
+  _reasoningSaveChain=request.catch(function(){});
+  return request.then(function(st){
+    _applyReasoningSaveResult(saveSeq, owner, context, profile, (st&&st.reasoning_effort)||effort, st||{});
+    return st;
+  },function(e){
+    _failReasoningSave(saveSeq, owner);
+    throw e;
+  });
+}
+
+function _isLatestReasoningSave(saveSeq, owner){
+  return _reasoningLatestSaveByOwner.get(owner)===saveSeq;
+}
+
+function _failReasoningSave(saveSeq, owner){
+  // This chat's newest save failed, so an older save (whose result was
+  // suppressed) may be what the server stored. Re-read it now if it is visible.
+  if(!_isLatestReasoningSave(saveSeq, owner)) return;
+  _reasoningLatestSaveByOwner.delete(owner);
+  if(owner===_reasoningSaveOwner((S&&S.activeProfile)||'default', _reasoningEffortContext())) fetchReasoningChip();
+}
+
+function _applyReasoningSaveResult(saveSeq, owner, context, profile, effort, status){
+  // The server saved the originating session. This single-entry UI cache
+  // belongs only to the visible context; revisiting another session refetches.
+  if(!_isLatestReasoningSave(saveSeq, owner)) return;
+  _reasoningLatestSaveByOwner.delete(owner);
+  if(profile!==((S&&S.activeProfile)||'default')) return;
+  const params=new URLSearchParams(context).toString();
+  const key=params?('?'+params):'';
+  if(key!==_reasoningEffortQuery()){
+    // Same chat, different model/provider: a GET for the new key may have
+    // read the pre-save value, so re-read it rather than keep a stale cache.
+    const current=_reasoningEffortContext();
+    if(context.session_id&&current.session_id===context.session_id) fetchReasoningChip();
+    return;
+  }
+  // A GET dispatched before this save must not restore the old effort later.
+  ++_reasoningFetchSeq;
+  _lastReasoningFetchKey=key;
+  _applyReasoningChip(effort, status);
 }
 
 function _applyReasoningOptions(supportedEfforts){
@@ -7850,7 +7962,7 @@ function _applyReasoningChip(eff){
   if(chip){
     const inactive=!effort||effort==='none';
     chip.classList.toggle('inactive',inactive);
-    const labelText='Reasoning effort: '+text;
+    const labelText='Reasoning effort for this chat: '+text;
     chip.title=labelText;
     chip.setAttribute('aria-label',labelText);
   }
@@ -7858,9 +7970,9 @@ function _applyReasoningChip(eff){
   _highlightReasoningOption(effort);
 }
 
-// Tracks the model/provider identity of the last reasoning fetch so routine
-// topbar syncs can serve the cached chip state instead of re-hitting the
-// network. null = never fetched.
+// Tracks the session/model/provider identity of the last reasoning fetch so
+// routine topbar syncs can serve the cached chip state instead of re-hitting
+// the network. null = never fetched.
 let _lastReasoningFetchKey=null;
 // Monotonic dispatch counter. Each fetchReasoningChip() increments it and the
 // async handlers capture their own value; a response (success OR failure) only
@@ -7917,12 +8029,12 @@ function syncReasoningChip(){
   // refetch unconditionally to refresh supported-efforts after a model switch,
   // which turned ordinary syncs into a GET /api/reasoning storm (one per token).
   // Restore the cache short-circuit but keep a9ce2889's intent: only hit the
-  // network when nothing is cached yet OR the model/provider identity changed
-  // since the last fetch (the only inputs that change /api/reasoning's answer).
+  // network when nothing is cached yet OR the session/model/provider identity
+  // changed since the last fetch (the inputs that change /api/reasoning's answer).
   // The user-pick and model-switch paths still update the cache directly.
   const key=_reasoningEffortQuery();
-  // Short-circuit on the KEY alone: if a fetch for this exact model/provider has
-  // already been dispatched (in-flight) or completed, do not dispatch another —
+  // Short-circuit on the KEY alone: if a fetch for this exact session/model/provider
+  // has already been dispatched (in-flight) or completed, do not dispatch another —
   // this is what stops the #4650 storm, including the COLD-cache window where
   // _currentReasoningEffort is still null between the first dispatch and its
   // response (10 syncs before the first GET resolves must produce ONE request,
@@ -7948,6 +8060,7 @@ function toggleReasoningDropdown(){
   if(!dd||!chip) return;
   const open=dd.classList.contains('open');
   if(open){closeReasoningDropdown();return;}
+  if(_reasoningSavesFrozen) return;
   if(typeof closeProfileDropdown==='function') closeProfileDropdown();
   if(typeof closeWsDropdown==='function') closeWsDropdown();
   closeModelDropdown();
@@ -7999,14 +8112,12 @@ document.addEventListener('click',function(e){
     // silently ignore the Default click and leave the toggle one-way off-only.
     // (#6219 round-3)
     if(opt){
-      const payload=Object.assign({effort:effort},_reasoningEffortContext());
-      api('/api/reasoning',{method:'POST',body:JSON.stringify(payload)})
+      _saveReasoningEffort(effort)
         .then(function(st){
           // For Default (effort=''), the returned reasoning_effort is '' (clear)
           // — display 'Default' rather than an empty toast.
-          const display=(st&&st.reasoning_effort)||effort||'Default';
-          _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
-          showToast('🧠 Reasoning effort set to '+display);
+          const display=_formatReasoningEffortLabel((st&&st.reasoning_effort)||effort||'');
+          showToast('🧠 Reasoning effort set to '+display+' for this chat and new chats (applies to next turn)');
         })
         .catch(function(){showToast('🧠 Failed to set effort');});
       closeReasoningDropdown();
@@ -13819,6 +13930,132 @@ function dismissReconnect() {
   clearInflight();
 }
 
+// ── #8517 memory-off notice ──
+// The server reports the memory status of the agent actually serving a session as
+// `memory_status` ({state:'ok'} or {state:'off',reason,scope}; codes only) in every
+// session payload it knows it for (GET /api/session, the `session` of stream `done`
+// and `apperror`, a compression continuation's own payload), and per turn as a stream
+// event for that session. The notice renders ONLY from the session on screen
+// (S.session.memory_status): there is no per-session client state and nothing to hand
+// over between sessions, so session switch, reload, continuation, redirect and
+// clearing the selected session all follow from the assignment of S.session below.
+// A dismissal is remembered per profile and reason (it applies to every conversation
+// of that profile); an explicit `ok` for the profile forgets its dismissals, so a
+// later recurrence is shown and announced again. No status (healthy sessions, older
+// servers): the element stays `hidden`, so normal sessions never see a layout change.
+const MEMORY_OFF_NOTICE_KEYS={
+  agent_outdated:'memory_off_agent_outdated',
+  agent_no_instance_claim:'memory_off_agent_no_instance_claim',
+  provider_shared_instance:'memory_off_provider_shared_instance',
+};
+const MEMORY_OFF_DISMISS_PREFIX='hermes-webui-memory-off-dismissed:';
+const _memoryOffAnnounced=new Set(); // `${profile}:${reason}` announced on this page
+function _memoryNoticeProfile(session){return String((session&&session.profile)||'default');}
+function _memoryOffDismissKey(profile,reason){return MEMORY_OFF_DISMISS_PREFIX+profile+':'+reason;}
+function _memoryOffDismissed(profile,reason){
+  try{return localStorage.getItem(_memoryOffDismissKey(profile,reason))==='1';}catch(_){return false;}
+}
+function _memoryOffReason(session){
+  const status=session&&session.memory_status;
+  if(!status||typeof status!=='object'||status.state!=='off') return '';
+  const reason=String(status.reason||'');
+  return Object.prototype.hasOwnProperty.call(MEMORY_OFF_NOTICE_KEYS,reason)?reason:'';
+}
+// The server says memory is on for this profile's agent: what was dismissed for the
+// profile is news again when it recurs.
+function _forgetMemoryOffDismissals(profile){
+  for(const reason of Object.keys(MEMORY_OFF_NOTICE_KEYS)){
+    try{localStorage.removeItem(_memoryOffDismissKey(profile,reason));}catch(_){}
+    _memoryOffAnnounced.delete(profile+':'+reason);
+  }
+}
+function syncMemoryOffNotice(){
+  const notice=$('memoryOffNotice');
+  const text=$('memoryOffNoticeText');
+  if(!notice||!text) return;
+  const session=(typeof S!=='undefined'&&S)?S.session:null;
+  const profile=_memoryNoticeProfile(session);
+  if(session&&session.memory_status&&session.memory_status.state==='ok') _forgetMemoryOffDismissals(profile);
+  const reason=_memoryOffReason(session);
+  if(!reason||_memoryOffDismissed(profile,reason)){
+    notice.hidden=true;
+    notice.dataset.reason='';
+    return;
+  }
+  const copy=t(MEMORY_OFF_NOTICE_KEYS[reason]);
+  if(text.textContent!==copy) text.textContent=copy;
+  notice.dataset.reason=reason;
+  const wasHidden=notice.hidden;
+  notice.hidden=false;
+  // Appearing (often mid-turn) shrinks the transcript viewport by the notice's height; keep a
+  // reader pinned to the tail pinned, gated like the chat-todos tray (the helper itself no-ops
+  // for a reader who scrolled away).
+  if(wasHidden&&!(typeof window!=='undefined'&&window._autoScrollFollow===false)&&typeof _repinMessagesAfterComposerResize==='function') _repinMessagesAfterComposerResize();
+  // A live region that was `hidden` is not reliably announced when it appears, so
+  // say it once per profile and reason through the shared polite announcer as well.
+  const announceKey=profile+':'+reason;
+  if(!_memoryOffAnnounced.has(announceKey)){
+    _memoryOffAnnounced.add(announceKey);
+    const announcer=$('a11yAnnouncer');
+    if(announcer) announcer.textContent=copy;
+  }
+}
+// A stream event about session `sid` (warning memory_off / memory_status ok). Only the
+// session on screen is updated; any other session gets its status from its own
+// payload when it is opened. Returns true when the session on screen was updated.
+function noteSessionMemoryStatus(sid,status){
+  if(typeof S==='undefined'||!S||!S.session||!sid||String(S.session.session_id||'')!==String(sid)) return false;
+  if(!status||typeof status!=='object') return false;
+  S.session.memory_status=status;
+  syncMemoryOffNotice();
+  return true;
+}
+function dismissMemoryOffNotice(){
+  const notice=$('memoryOffNotice');
+  const session=(typeof S!=='undefined'&&S)?S.session:null;
+  const reason=_memoryOffReason(session);
+  if(reason){try{localStorage.setItem(_memoryOffDismissKey(_memoryNoticeProfile(session),reason),'1');}catch(_){}}
+  if(notice){notice.hidden=true;notice.dataset.reason='';}
+  // The dismiss button disappears with the notice; keep focus somewhere useful.
+  const composer=$('msg');
+  if(composer&&typeof composer.focus==='function') composer.focus();
+}
+// Render from the session on screen: every assignment of S.session (load, switch,
+// reload, continuation, redirect, new chat, delete -> null) repaints the notice once,
+// after the assigning code has finished. A payload for the SAME session from an
+// endpoint that does not report memory (rename, toolsets, ...) keeps what the server
+// last said about that session; another session never inherits it.
+(function _renderMemoryOffNoticeFromSessionOnScreen(){
+  if(typeof S==='undefined'||!S) return;
+  const desc=Object.getOwnPropertyDescriptor(S,'session');
+  if(!desc||!desc.configurable||!('value' in desc)) return;
+  let current=desc.value;
+  let queued=false;
+  const later=typeof queueMicrotask==='function'?queueMicrotask:(fn=>Promise.resolve().then(fn));
+  Object.defineProperty(S,'session',{
+    configurable:true,
+    enumerable:true,
+    get(){return current;},
+    set(next){
+      if(next&&current&&next!==current&&typeof next==='object'&&!('memory_status' in next)
+        &&current.memory_status&&String(next.session_id||'')===String(current.session_id||'')){
+        next.memory_status=current.memory_status;
+      }
+      current=next;
+      if(queued) return;
+      queued=true;
+      later(()=>{queued=false;syncMemoryOffNotice();});
+    },
+  });
+})();
+if(typeof window!=='undefined'&&typeof window.addEventListener==='function'){
+  // Another tab dismissed (or an ok forgot) a notice: repaint now, not at the next sync.
+  window.addEventListener('storage',e=>{
+    if(e&&typeof e.key==='string'&&e.key.startsWith(MEMORY_OFF_DISMISS_PREFIX)) syncMemoryOffNotice();
+  });
+}
+// ── end #8517 memory-off notice ──
+
 // ── Live host resource health panel (#693) ──
 const SYSTEM_HEALTH_INTERVAL_MS=5000;
 let _systemHealthTimer=null;
@@ -14562,8 +14799,9 @@ function _activeRunsUpdateText(key,count,fallback){
 // runs are active (restart_blocked + force_available). Offer one explicit,
 // confirmed override that re-sends the same request with
 // force_active_runs:true; the server then saves those runs as interrupted
-// before it restarts. Gateway runs that a restart can reattach are not counted
-// and keep running in the Gateway.
+// before it restarts. For a WebUI update, Gateway runs that a restart can
+// reattach are not counted and keep running in the Gateway. An Agent update
+// cycles the Gateway, so it counts them too (#8660).
 function _renderActiveRunsForceOffer(target,res,resend){
   const errEl=$('updateError');
   if(!errEl||typeof resend!=='function') return;
@@ -15599,6 +15837,27 @@ function _worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, visi
   const thinkingText=_assistantReasoningPayloadText(m);
   const visibleTexts=Array.isArray(turnVisibleContents)?turnVisibleContents:[];
   return _stripVisibleAssistantEchoFromThinking(thinkingText, visibleContent, turnFinalVisibleContent, ...visibleTexts);
+}
+// A delegated subagent's whole task is one turn; split its worklog at each interim text.
+function _isDelegatedSubagentTranscript(){
+  return !S.busy&&!!S.session&&_isDelegatedSubagentRow(S.session);
+}
+function _worklogGroupKey(anchorRow, anchorTurn, placedAfterAnchor){
+  if(!_isDelegatedSubagentTranscript()) return anchorTurn;
+  if(placedAfterAnchor) return anchorRow;
+  for(let el=anchorRow.previousElementSibling;el;el=el.previousElementSibling){
+    if(el.classList&&el.classList.contains('assistant-segment')&&!el.classList.contains('assistant-segment-worklog-source')) return el;
+  }
+  return anchorTurn;
+}
+// Only the subagent's last turn opens: while it runs, or after it ended with no answer.
+function _subagentOpenWorklogTurn(inner){
+  if(!_isDelegatedSubagentTranscript()) return null;
+  const turns=inner.querySelectorAll('.assistant-turn'), lastTurn=turns[turns.length-1]||null;
+  if(!lastTurn||S.session.active===true) return lastTurn;
+  const last=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role!=='tool').pop();
+  const answered=!!last&&last.role==='assistant'&&!(Array.isArray(last.tool_calls)&&last.tool_calls.length)&&!!String(msgContent(last)||'').trim();
+  return answered?null:lastTurn;
 }
 function _worklogDetailsExpandedDefault(){
   return window._worklogDetailsExpandedByDefault===true;
@@ -17040,6 +17299,8 @@ function _toggleActivityGroup(summary){
   // #5839: materialize deferred settled rows on first expand (lazy render).
   if(!collapsed) _materializeDeferredWorklogRows(group);
   _writeActivityDisclosureState(group.getAttribute('data-activity-disclosure-key'), !collapsed);
+  // The cached transcript HTML predates this click; drop it so a switch-back rebuilds.
+  if(typeof S!=='undefined'&&S.session&&S.session.session_id&&typeof _sessionHtmlCache!=='undefined') _sessionHtmlCache.delete(S.session.session_id);
   if(typeof _onLiveActivityToggle==='function') _onLiveActivityToggle(group);
 }
 function _toggleToolWorklogGroup(summary){
@@ -19297,6 +19558,7 @@ function ensureActivityGroup(inner, opts){
     else if(live && _liveActivityUserExpanded === false) collapsed=true;
     if(live && savedState==='open') collapsed=false;
     else if(live && savedState==='closed') collapsed=true;
+    else if(opts.honourSavedDisclosure===true && savedState) collapsed=savedState==='closed';
     group.className='agent-activity-group tool-worklog-group activity'+(collapsed?' tool-call-group-collapsed':'');
     group.setAttribute('data-tool-call-group','1');
     group.setAttribute('data-agent-activity-group','1');
@@ -20469,7 +20731,7 @@ function _messageRenderCacheSignature(){
     _addBoundedHash(add, tc.args||{});
   });
   if(S.session){
-    add(S.session.message_count);add(S.session.updated_at);add(S.session.compression_anchor_visible_idx);
+    add(S.session.message_count);add(S.session.updated_at);add(S.session.active);add(S.session.compression_anchor_visible_idx);
     _addBoundedHash(add, S.session.compression_anchor_message_key||null);
     add(S.session.compression_anchor_summary||'');
   }
@@ -21731,6 +21993,15 @@ function _insertSegmentBlock(seg, html){
   }
   seg.insertAdjacentHTML('beforeend', html);
 }
+function _assistantSegmentIsTurnFinal(row, mi){
+  // True for the row's last assistant segment — the turn's final answer, the one
+  // that owns turn-level footer labels (switch/failover warnings). A turn
+  // without discoverable segments counts as final so its labels still render.
+  if(!row) return true;
+  const segs=row.querySelectorAll('.assistant-segment[data-msg-idx]');
+  const last=segs.length?segs[segs.length-1]:null;
+  return !last||String(last.dataset.msgIdx)===String(mi);
+}
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
   // typeof guard: node harnesses extract renderMessages() without its helpers (#6717).
@@ -22971,6 +23242,7 @@ function renderMessages(options){
     };
     const durationAssignedTurns = new Set();
     const activityByTurn = new Map();
+    let subagentOpenTurn;
     const activityOrder = [];
     const ensureActivityBucket=(key,aIdx,segmentSeq,burstId)=>{
       if(!byActivity.has(key)){
@@ -23052,13 +23324,16 @@ function renderMessages(options){
         // value) so the append path can use the ownership fact the group
         // construction already uses.
         const anchorIsWorklogSource=anchorRow.classList&&anchorRow.classList.contains('assistant-segment-worklog-source');
-        let state=activityByTurn.get(anchorTurn);
+        const groupKey=_worklogGroupKey(anchorRow,anchorTurn,!anchorIsWorklogSource&&!thinkingText);
+        let state=activityByTurn.get(groupKey);
+        if(subagentOpenTurn===undefined) subagentOpenTurn=_subagentOpenWorklogTurn(inner);
         if(!state){
           const includeTurnDuration=!durationAssignedTurns.has(anchorTurn);
           if(includeTurnDuration) durationAssignedTurns.add(anchorTurn);
           const activityKey=`assistant:${aIdx}`;
           const group=ensureActivityGroup(anchorParent,{
-            collapsed:true,
+            collapsed:!subagentOpenTurn||anchorTurn!==subagentOpenTurn,
+            honourSavedDisclosure:_isDelegatedSubagentTranscript(),
             anchor:anchorRow,
             beforeAnchor:!!thinkingText&&!anchorIsWorklogSource,
             syncAnchorReason:anchorIsWorklogSource,
@@ -23071,7 +23346,7 @@ function renderMessages(options){
           if(!list) continue;
           list.innerHTML='';
           state={group,cards:[],seenReasons:new Set(),seenTools:new Set()};
-          activityByTurn.set(anchorTurn,state);
+          activityByTurn.set(groupKey,state);
         }
         state.cards.push(...cards);
         _appendWorklogStep(state.group, anchorRow, cards, thinkingText, {
@@ -23090,7 +23365,13 @@ function renderMessages(options){
           seenTools:state.seenTools,
         });
       }
+      // The running subagent's newest worklog is live work: label it Running, not Processed.
+      let runningGroup=null;
+      if(subagentOpenTurn&&S.session.active===true)
+        activityByTurn.forEach(s=>{ if(s.group.closest('.assistant-turn')===subagentOpenTurn) runningGroup=s.group; });
       activityByTurn.forEach(state=>{
+        if(state.group===runningGroup) state.group.setAttribute('data-subagent-running','1');
+        else state.group.removeAttribute('data-subagent-running');
         _syncToolCallGroupSummary(state.group);
       });
     }else{
@@ -23195,8 +23476,17 @@ function renderMessages(options){
       if(msg.role!=='assistant') continue;
       const routing=msg._gatewayRouting||null;
       const gatewayText=_formatGatewayModelLabel(String(msg._usedModel||'').trim()||(S.session&&S.session.model)||'', '', routing);
-      const failoverText=_gatewayRoutingFailoverText(routing);
-      const modelWarningText=_gatewayModelWarningText(routing);
+      const seg=assistantSegments.get(mi);
+      const row=seg?seg.closest('.assistant-turn'):null;
+      // Switch/failover warnings describe the whole turn, not one segment; the
+      // model label below is per-segment. Render the warnings on the turn's
+      // final assistant segment only, so a routed turn with interim answers
+      // shows each label once instead of once per segment.
+      // typeof guard: node harnesses extract renderMessages() without its
+      // helpers (#6717); without the helper every segment counts as final.
+      const isTurnFinal=typeof _assistantSegmentIsTurnFinal==='function' ? _assistantSegmentIsTurnFinal(row, mi) : true;
+      const failoverText=isTurnFinal?_gatewayRoutingFailoverText(routing):'';
+      const modelWarningText=isTurnFinal?_gatewayModelWarningText(routing):'';
       const hasTurnUsage=!!msg._turnUsage;
       // The Worklog summary owns the "Done in …" duration whenever this
       // assistant message contributes tool or thinking detail to a folded
@@ -23205,9 +23495,11 @@ function renderMessages(options){
       const durationText=compactWorklogForMessage?'':_formatTurnDuration(msg._turnDuration);
       const usedModelText=_usedModelTurnChipLabel(msg);
       if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText&&!usedModelText) continue;
-      const seg=assistantSegments.get(mi);
-      const row=seg?seg.closest('.assistant-turn'):null;
-      const footerRows=row?row.querySelectorAll('.msg-foot'):[];
+      // Scope the footer lookup to this message's own segments. The turn's
+      // last .msg-foot belongs to the turn's final answer, and the duplicate
+      // guard below would then make the final message skip its own labels
+      // after an interim answer wrote into that foot (issue #8287).
+      const footerRows=row?row.querySelectorAll(`.assistant-segment[data-msg-idx="${mi}"] .msg-foot`):[];
       const targetFoot=footerRows.length?footerRows[footerRows.length-1]:null;
       if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline,.msg-used-model-inline')) continue;
       const fragments=[];
@@ -23505,6 +23797,9 @@ function renderMessages(options){
           _materializeDeferredWorklogRows(group);
         }
         if(!(group.textContent||'').trim()) continue; // empty group can't help
+        // A delegated transcript's collapsed chip stays collapsed (it keeps the turn non-blank).
+        if(typeof _isDelegatedSubagentTranscript==='function'&&_isDelegatedSubagentTranscript()&&
+           typeof _readActivityDisclosureState==='function'&&_readActivityDisclosureState(group.getAttribute('data-activity-disclosure-key'))==='closed'){revealed=true;continue;}
         if(group.classList.contains('tool-call-group-collapsed')){
           group.classList.remove('tool-call-group-collapsed');
           group.classList.add('open');
@@ -23747,8 +24042,20 @@ function _toolTargetLabel(tc){
   else if(kind==='memory') raw=a.target||a.name||a.action||'';
   else if(kind==='read'||kind==='write') raw=a.path||a.file_path||a.file||a.target||a.name||'';
   else if(kind==='search'||kind==='web') raw=a.query||a.pattern||a.url||a.uri||'';
+  else if(kind==='delegate') raw=_toolDelegateTargetLabel(tc,a);
   else raw=a.cmd||a.command||a.path||a.file_path||a.file||a.uri||a.url||a.query||a.pattern||a.dir||a.task||a.name||'';
   return _redactToolTargetLabel(_decodeToolLabelEntities(String(raw).split('\n')[0].trim()));
+}
+// delegate_task names its work in goal or a tasks batch; saved args may be a truncated string, so the result's count wins.
+function _toolDelegateTargetLabel(tc,a){
+  if(a.action&&a.action!=='spawn') return `subagents (${a.action})`;
+  const counted=String(tc&&tc.snippet||'').match(/"count"\s*:\s*(\d+)/);
+  let tasks=a.tasks;
+  const n=counted?+counted[1]:Array.isArray(tasks)?tasks.length:(String(tasks||'').match(/['"]goal['"]\s*:/g)||[]).length;
+  if(n>1) return `${n} subagents`;
+  if(Array.isArray(tasks)) tasks=tasks[0]&&tasks[0].goal;
+  else if(typeof tasks==='string') tasks=(tasks.match(/['"]goal['"]\s*:\s*['"]([^'"]+)/)||[])[1];
+  return tasks||a.goal||a.task||'';
 }
 function _toolReadRangeLabel(tc){
   const name=String(tc&&tc.name||'').toLowerCase().replace(/[^a-z0-9]+/g,'_');
@@ -24280,6 +24587,8 @@ function _syncToolCallGroupSummary(group){
         ? _activityProcessedElapsedLabel(group)
         : _activitySettledProcessedLabel(group);
       label.textContent=processedLabel||t('processed_elapsed','');
+      // A running subagent's open worklog is live work, not processed work.
+      if(group.getAttribute('data-subagent-running')==='1') label.textContent=t('gateway_running_label');
     }else{
       const rows=Array.from(group.querySelectorAll('.tool-card-row'));
       // Prefer the live _tcData classification; fall back to the durable data-*
