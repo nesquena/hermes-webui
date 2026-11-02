@@ -79,14 +79,35 @@ def _resolve_workspace(workspace: str) -> str:
     resolved = os.path.realpath(workspace)
     if not os.path.isdir(resolved):
         raise ValueError(f"Workspace does not exist: {workspace}")
-    # Security: confirm workspace is in the known list
+    # Security: picker-visible local/native inventory only. DB-only native
+    # projects appear in the picker via merge_hermes_projects but are absent
+    # from workspaces.json — they must still list checkpoints. Remote
+    # literals stay isolated; unregistered paths stay refused.
     try:
+        from api.profiles import get_active_profile_name
+        from api.projects_bridge import is_remote_workspace_path, merge_hermes_projects
         from api.workspace import load_workspaces
+        profile = get_active_profile_name()
+        try:
+            wss = load_workspaces(profile=profile)
+        except TypeError:
+            wss = load_workspaces()
+        try:
+            merged = merge_hermes_projects(wss, profile=profile)
+        except Exception:
+            merged = wss
         known_paths = set()
-        for ws in load_workspaces():
+        for ws in merged:
             p = ws.get("path", "")
-            if p:
-                known_paths.add(os.path.realpath(p))
+            if not p:
+                continue
+            if (ws.get("workspace_kind") or "") == "remote":
+                continue
+            if (not ws.get("project_mirror")
+                    and ws.get("source") != "hermes_project"
+                    and is_remote_workspace_path(str(p), profile=profile)):
+                continue
+            known_paths.add(os.path.realpath(p))
         if resolved not in known_paths:
             raise ValueError(f"Workspace not in configured list: {workspace}")
     except ImportError:

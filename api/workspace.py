@@ -32,6 +32,50 @@ _ESCAPE_AUTH_TTL_SECONDS = 300
 _ESCAPE_AUTH_LOCK = threading.Lock()
 _ESCAPE_AUTH_TOKENS: dict[str, dict[str, str | int | float]] = {}
 
+# Serializes the load→mutate→save cycle of every workspace mutation route
+# (add/remove/create_project/rename/reorder). See _handle_workspace_* in
+# api/routes.py (deep-audit F3): the projects.db bridge widened the
+# read-modify-write window enough for a concurrent mutation to be lost.
+WORKSPACE_MUTATION_LOCK = threading.RLock()
+
+# #5763 round 14 (omp review F1): a client cannot order catalog snapshots by
+# request send time — GET /api/workspaces reads without WORKSPACE_MUTATION_LOCK
+# (it must not queue behind the up-to-30s create_project subprocess lane), and
+# lock-acquisition order among concurrent mutations is scheduler-determined.
+# So the server stamps every catalog snapshot with a monotonic revision,
+# bumped on every successful save_workspaces write. Clients gate list updates
+# on the revision: a response may replace the cached list only if its revision
+# is not older than the one already applied. Bumps happen under the mutation
+# lock (or any writer); plain int reads are GIL-atomic, and the GET handler
+# re-reads around its snapshot (seqlock pattern) to stay consistent.
+_CATALOG_REV = 0
+# r14 P3-1: `global x; x += 1` is LOAD/ADD/STORE — a bump racing another
+# writer (e.g. the projects/bind save lane, which serializes on a different
+# catalog lock and must NOT take WORKSPACE_MUTATION_LOCK here without a
+# proven lock order) can lose an increment and give two commits the same rev.
+# A dedicated leaf lock makes the bump atomic without introducing any
+# lock-order edge (never acquire another lock while holding this one).
+_CATALOG_REV_LOCK = threading.Lock()
+# Per-process boot token (r14 P1-1): a restart resets _CATALOG_REV to 0,
+# which would make every new-process response look "stale" to a client that
+# published rev N pre-restart. Responses carry this token; a client that sees
+# it change resets its gate.
+_CATALOG_BOOT = secrets.token_hex(8)
+
+
+def catalog_revision() -> int:
+    return _CATALOG_REV
+
+
+def catalog_boot() -> str:
+    return _CATALOG_BOOT
+
+
+def _bump_catalog_revision() -> None:
+    global _CATALOG_REV
+    with _CATALOG_REV_LOCK:
+        _CATALOG_REV += 1
+
 from api.config import (
     WORKSPACES_FILE as _GLOBAL_WS_FILE,
     LAST_WORKSPACE_FILE as _GLOBAL_LW_FILE,
@@ -265,6 +309,57 @@ def profile_home_resolve_cache_scope():
         _PROFILE_HOME_RESOLVE_SCOPE.reset(token)
 
 
+# Call-scoped memo for the per-row remoteness/blocked-root probes (#5763
+# re-gate round 8 perf finding): GET /api/workspaces merges projects.db
+# into the picker and every row asks "is this path remote?" — each ask re-read
+# the profile config.yaml (``_remote_terminal_cwd``) and rebuilds the
+# blocked-roots tables with ~45 ``Path.resolve()`` calls. On SSH/Docker
+# profiles that compounded GET /api/workspaces to 2-4x master latency even
+# with the sync kill switch off. Same rule as the scope above (PR #7636
+# lesson): memo lives for exactly ONE hot-loop invocation, never the process
+# — a retargeted symlink or an edited config.yaml must be visible to the
+# next request.
+_WORKSPACE_CALL_SCOPE: "contextvars.ContextVar[dict | None]" = (
+    contextvars.ContextVar("_WORKSPACE_CALL_SCOPE", default=None)
+)
+
+
+@contextlib.contextmanager
+def workspace_call_scope():
+    """Enable the call-scoped memo for one hot-loop invocation.
+
+    Wrap a loop that repeats the same profile-level probes (remote terminal
+    cwd, blocked system roots, full per-path remoteness) over many rows.
+    ``GET /api/workspaces`` holds one scope around ``load_workspaces`` +
+    ``merge_hermes_projects`` so the two loops share the memo. Merge copies
+    any parent memo into its nested scope instead of wiping it. Outside the
+    scope every probe runs fresh. Nested use restores the outer memo on exit.
+    """
+    token = _WORKSPACE_CALL_SCOPE.set({})
+    try:
+        yield
+    finally:
+        _WORKSPACE_CALL_SCOPE.reset(token)
+
+
+def _call_scoped_memo(key, thunk):
+    """Run ``thunk`` once per active ``workspace_call_scope()``; fresh outside.
+
+    The thunk is invoked lazily and its result cached per ``key`` only while
+    a scope is active, so patched/monkeypatched call targets still see one
+    call per scope instead of one per row.
+    """
+    cache = _WORKSPACE_CALL_SCOPE.get()
+    if cache is None:
+        return thunk()
+    sentinel = object()
+    value = cache.get(key, sentinel)
+    if value is sentinel:
+        value = thunk()
+        cache[key] = value
+    return value
+
+
 def _cached_safe_resolve_profile_home(pre_resolve: Path) -> Path:
     """`_safe_resolve()` for profile-home paths.
 
@@ -363,7 +458,18 @@ def _remote_terminal_cwd(profile: str | Path | None = None) -> str | None:
         return None
 
 
+def cached_remote_workspace_candidate(path, profile=None):
+    # Cache complete classification only for the active call/request.
+    key = ("remote_candidate", type(profile), profile, str(path))
+    return _call_scoped_memo(key, lambda: _remote_terminal_workspace_candidate(path, profile=profile))
+
+
 def _remote_terminal_workspace_candidate(path: str | Path, profile: str | Path | None = None) -> Path | None:
+    key = ("remote_candidate", type(profile), profile, str(path))
+    return _call_scoped_memo(key, lambda: _remote_terminal_workspace_candidate_uncached(path, profile=profile))
+
+
+def _remote_terminal_workspace_candidate_uncached(path: str | Path, profile: str | Path | None = None) -> Path | None:
     """Return a non-stat'ed target-side Path when it is under terminal.cwd for the given profile.
 
     Remote workspace paths live on the target host (e.g., remote SSH/Docker
@@ -373,7 +479,11 @@ def _remote_terminal_workspace_candidate(path: str | Path, profile: str | Path |
     such as macOS synthetic ``/home`` -> ``/System/Volumes/Data/home``).
     """
     try:
-        cwd = _remote_terminal_cwd(profile=profile) if profile is not None else _remote_terminal_cwd()
+        cwd = _call_scoped_memo(
+            ("remote_cwd", str(profile)),
+            lambda: (_remote_terminal_cwd(profile=profile) if profile is not None
+                     else _remote_terminal_cwd()),
+        )
     except TypeError:
         cwd = _remote_terminal_cwd()
     if not cwd:
@@ -502,7 +612,16 @@ def _clean_workspace_list(workspaces: list, profile: str | Path | None = None) -
         # Rename confusing 'default' label to 'Home'
         if name.lower() == 'default':
             name = 'Home'
-        result.append({'path': str(p), 'name': name})
+        # Preserve mirror provenance (#5763): rows created from a
+        # projects.db registration carry project_mirror=True so the merge
+        # can hide exactly the rows whose shared project was archived —
+        # without that flag a plain local re-add at an archived project's
+        # path would be hidden and then refused as a duplicate (re-gate
+        # must-fix 1). Any other extra keys are still dropped on purpose.
+        entry = {'path': str(p), 'name': name}
+        if w.get('project_mirror'):
+            entry['project_mirror'] = True
+        result.append(entry)
     return result
 
 
@@ -603,7 +722,18 @@ def save_workspaces(workspaces: list, profile: str | Path | None = None) -> None
         # (it would land in the default profile's directory via the old clamp).
         raise ValueError(f"cannot save workspaces for invalid profile {profile!r}")
     ws_file.parent.mkdir(parents=True, exist_ok=True)
-    ws_file.write_text(json.dumps(workspaces, ensure_ascii=False, indent=2), encoding='utf-8')
+    # Atomic replace (deep-audit F3): a concurrent reader (or a crash
+    # mid-write) must never observe a torn workspaces.json — a truncated
+    # file makes load_workspaces fall back to [Home] and the next mutation
+    # would persist that fallback, wiping the picker list.
+    tmp = ws_file.with_name(ws_file.name + f".tmp-{os.getpid()}-{threading.get_ident()}")
+    try:
+        tmp.write_text(json.dumps(workspaces, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, ws_file)
+        _bump_catalog_revision()
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
 
 
 def get_profile_default_workspace(profile: str | Path | None = None) -> str:
@@ -888,8 +1018,8 @@ def _is_blocked_workspace_path(candidate: Path, raw_path: str | Path | None = No
     if _is_blocked_posix_workspace_path(posix_probe):
         return True
 
-    exact = _workspace_blocked_exact_roots()
-    if candidate in exact or (raw is not None and raw in _workspace_blocked_roots()):
+    exact = _call_scoped_memo("blocked_exact_roots", _workspace_blocked_exact_roots)
+    if candidate in exact or (raw is not None and raw in _call_scoped_memo("blocked_roots", _workspace_blocked_roots)):
         return True
 
     for tmp in _USER_TMP_PREFIXES:
@@ -898,7 +1028,7 @@ def _is_blocked_workspace_path(candidate: Path, raw_path: str | Path | None = No
 
     # Raw paths under literal roots (e.g. /etc/ssh, /var/db) are always blocked.
     if raw is not None:
-        for blocked in _workspace_blocked_roots():
+        for blocked in _call_scoped_memo("blocked_roots", _workspace_blocked_roots):
             if _is_within(raw, blocked):
                 return True
 
@@ -907,7 +1037,8 @@ def _is_blocked_workspace_path(candidate: Path, raw_path: str | Path | None = No
     # and per-user temporary workspaces; other direct /private/var system data
     # such as /private/var/db and /private/var/log remains blocked.
     allowed_private_var = (Path('/private/var/folders'), Path('/private/var/tmp'))
-    for blocked in _workspace_blocked_resolved_subtrees():
+    for blocked in _call_scoped_memo("blocked_resolved_subtrees",
+                                     _workspace_blocked_resolved_subtrees):
         if blocked == Path('/private/var'):
             if candidate == blocked:
                 return True
@@ -1081,6 +1212,9 @@ def resolve_trusted_workspace(path: str | Path | None = None, profile: str | Pat
           This covers self-hosted deployments where workspaces live outside home
           (e.g. /data/projects, /opt/workspace) — once a workspace is saved by
           an admin, it can be reused without re-validation.
+      (B2) It is a folder owned by a non-archived project in the profile's
+          projects.db (#5763): DB-only projects appear in the picker via the
+          read bridge, so they must also pass trust resolution.
 
     Additionally enforced regardless of (A)/(B):
       1. The path must exist.
@@ -1133,6 +1267,23 @@ def resolve_trusted_workspace(path: str | Path | None = None, profile: str | Pat
         saved = load_workspaces()
         saved_paths = {_resolve_path(w["path"]) for w in saved if w.get("path")}
         if candidate in saved_paths:
+            return candidate
+    except Exception:
+        pass
+
+    # (B2) Trusted if the profile's projects.db owns it (#5763): DB-only
+    # projects (created from Desktop/CLI, never added to workspaces.json)
+    # appear in the picker via the read bridge, so selecting them must pass
+    # the trust check too. Fail-safe: bridge errors widen nothing.
+    try:
+        from api.projects_bridge import load_hermes_project_workspaces
+        profile_home = _resolve_profile_home_param(profile) if profile is not None else None
+        db_paths = {
+            _resolve_path(e["path"], profile) if profile is not None else _resolve_path(e["path"])
+            for e in load_hermes_project_workspaces(profile_home=profile_home)
+            if e.get("path")
+        }
+        if candidate in db_paths:
             return candidate
     except Exception:
         pass

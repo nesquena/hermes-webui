@@ -200,7 +200,9 @@ def test_currentws_is_the_displayed_workspace_of_the_dropdown():
     src = _read("static/panels.js")
     assert "function renderWorkspaceDropdownInto(dd, workspaces, currentWs)" in src
     # ...and both callers compute it from the displayed session's workspace.
-    assert src.count("renderWorkspaceDropdownInto(dd, data.workspaces, S.session?.workspace") == 2
+    # #5763 r14 P3-2: the list arg is the rev-gated cache (_workspaceList),
+    # not the raw response — a rev-rejected snapshot must not reach the DOM.
+    assert src.count("renderWorkspaceDropdownInto(dd, _workspaceList || [], S.session?.workspace") == 2
 
 
 def test_the_explicit_workspace_opt_out_is_still_shipped_in_newSession():
