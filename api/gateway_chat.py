@@ -910,6 +910,49 @@ def _open_gateway_run_events(base_url, headers, run_id, last_seq: int = -1, read
     return urllib.request.urlopen(req, timeout=timeout)
 
 
+_GATEWAY_FAILED_CAUSE_FIELDS = ("turn_exit_reason", "terminal_reason")
+
+
+def _gateway_run_failed_message(payload: dict) -> str:
+    """Name the terminal cause a failed run reported, after its ``error`` text (#8675).
+
+    ``run.failed`` carries ``turn_exit_reason`` (and, on some gateways,
+    ``terminal_reason``) in the SAME payload as ``error``. The relay used to
+    raise only ``error``, so an iteration-budget stop surfaced as the opaque
+    "Gateway run failed" with no way to tell it apart from a transport hiccup
+    — while the direct (non-gateway) path already names it. Compose the cause
+    onto the original text instead of replacing it: ``error`` stays the
+    message prefix because ``_classify_provider_error`` matches that text, and
+    dropping it would make every provider failure fall back to "generic error".
+
+    With no cause in the payload the message is byte-identical to before, so
+    gateways that do not publish the field keep today's behaviour.
+    """
+    base = str(payload.get("error") or "").strip() or "Gateway run failed"
+    causes = []
+    for field in _GATEWAY_FAILED_CAUSE_FIELDS:
+        value = str(payload.get(field) or "").strip()
+        # Gateway-supplied text: bound it so a chatty payload cannot bloat the
+        # error card (and never echo an unbounded blob into the transcript).
+        value = value[:200]
+        if value and value.lower() not in base.lower() and value not in [c[1] for c in causes]:
+            causes.append((field, value))
+    if not causes:
+        return base
+    # Lazy import: api.streaming imports api.gateway_chat, so module-level would cycle.
+    from api.streaming import _agent_result_tool_limit_reached
+
+    if _agent_result_tool_limit_reached(payload):
+        # Same ruler as the direct path: the iteration cap fired, so say what
+        # the user can do about it instead of only quoting the enum.
+        return (
+            f"{base}: {causes[0][1]} — the agent reached its configured tool "
+            "iteration limit before producing a final answer. Start a narrower "
+            "follow-up or increase `agent.max_turns`."
+        )
+    return f"{base} ({'; '.join(f'{field}: {value}' for field, value in causes)})"
+
+
 def _relay_gateway_run_events(
     resp, session_id, stream_id, run_id, base_url, api_key,
     *, put_gateway_event, cancel_event, on_seq=None, final_text="", stop_on_truncated=False,
@@ -1105,7 +1148,7 @@ def _relay_gateway_run_events(
                 run_id,
                 reason="Gateway run failed before approval resolution",
             )
-            raise RuntimeError(str(payload.get("error") or "Gateway run failed"))
+            raise RuntimeError(_gateway_run_failed_message(payload))
         if payload_event == "run.cancelled":
             _relay_gateway_pending_steer(session_id, payload, put_gateway_event)
             from api.route_approvals import settle_gateway_pending_run
