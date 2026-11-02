@@ -1656,8 +1656,15 @@ def _webui_session_personality_prompt(session, config_data: Optional[dict] = Non
     on Gateway-routed turns (#8641).
 
     Returns ``None`` when no personality is selected, when the name is not
-    defined, or when the definition resolves to empty text -- the caller then
-    builds the same prompt it always did.
+    defined, when the definition is malformed, or when the definition resolves
+    to empty text -- the caller then builds the same prompt it always did.
+
+    A malformed definition (a mapping whose ``system_prompt`` is a number, a
+    list-valued ``prompt``, ...) returns ``None`` instead of raising: the
+    Gateway worker wraps the whole prefill assembly in one broad handler that
+    answers ``prefill_messages=[]``, so an exception here would drop every
+    unrelated WebUI instruction with it (#8641 review). The blast radius of a
+    bad personality value is the personality, never the turn's other guidance.
     """
     pname = getattr(session, "personality", None)
     if not pname:
@@ -1670,14 +1677,21 @@ def _webui_session_personality_prompt(session, config_data: Optional[dict] = Non
     if not isinstance(personalities, dict) or pname not in personalities:
         return None
     pval = personalities[pname]
-    if isinstance(pval, dict):
-        parts = [pval.get("system_prompt", "") or pval.get("prompt", "")]
-        if pval.get("tone"):
-            parts.append(f'Tone: {pval["tone"]}')
-        if pval.get("style"):
-            parts.append(f'Style: {pval["style"]}')
-        return "\n".join(p for p in parts if p)
-    return str(pval)
+    try:
+        if isinstance(pval, dict):
+            parts = [pval.get("system_prompt", "") or pval.get("prompt", "")]
+            if pval.get("tone"):
+                parts.append(f'Tone: {pval["tone"]}')
+            if pval.get("style"):
+                parts.append(f'Style: {pval["style"]}')
+            return "\n".join(p for p in parts if p)
+        return str(pval)
+    except Exception:
+        logger.warning(
+            "Ignoring malformed personality definition %r; the turn keeps its other guidance",
+            pname, exc_info=True,
+        )
+        return None
 
 
 def _webui_ephemeral_system_prompt(
