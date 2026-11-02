@@ -2238,17 +2238,27 @@ def _cron_jobs_cross_profile(active_profile: str) -> tuple[list[dict], list[dict
             continue
         seen_homes.add(home_key)
         is_active = _profiles_match(owner_profile, active_profile)
+        rollups: dict = {}
         try:
             # #7295: per-thread store scope, not the global env lock a running
             # in-process cron job holds for its whole run.
             with cron_store_scope_for_home(home), _cron_agent_jobs_lock():
                 jobs = _cron_jobs_for_api(list_jobs(include_disabled=True))
+                from api.cron_health import recent_rollups_for_jobs
+
+                rollups = recent_rollups_for_jobs(
+                    home,
+                    [job.get("id") for job in jobs if job.get("id")],
+                )
         except Exception:
             if not is_active:
                 continue
             raise
         for job in jobs:
             row = dict(job)
+            recent = rollups.get(row.get("id"))
+            if recent:
+                row["recent"] = recent
             row["owner_profile"] = owner_profile
             row["read_only"] = not is_active
             if is_active:
