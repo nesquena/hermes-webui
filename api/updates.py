@@ -174,17 +174,7 @@ def _apply_fetch_failure_message(fetch_out: str, network_message: str) -> str:
     return f'fetch failed: {detail}'
 
 
-def _restart_blocker_snapshot() -> dict:
-    """Return the WebUI-owned chat work that should block a self-restart.
-
-    A Gateway run is excluded only once its resumable run identity is saved
-    (#7293): it runs inside the Hermes Gateway, survives a WebUI restart and is
-    reattached afterwards. Legacy Gateway relays and Gateway launches still
-    awaiting that handoff are counted (see run_drain.webui_owned_active_runs).
-    """
-    from api import run_drain
-
-    runs = run_drain.webui_owned_active_runs()
+def _blocker_snapshot_from_runs(runs: list[dict]) -> dict:
     stream_ids = [r['stream_id'] for r in runs if r.get('registered_stream')]
     run_ids = [r['stream_id'] for r in runs]
     return {
@@ -196,6 +186,20 @@ def _restart_blocker_snapshot() -> dict:
     }
 
 
+def _restart_blocker_snapshot() -> dict:
+    """Return the WebUI-owned chat work that should block a self-restart.
+
+    A Gateway run is excluded only once its resumable run identity is saved
+    (#7293): it runs inside the Hermes Gateway, survives a WebUI restart and is
+    reattached afterwards. Legacy Gateway relays and Gateway launches still
+    awaiting that handoff are counted (see run_drain.webui_owned_active_runs).
+    An update of the Agent counts those runs too (``_update_blocker_snapshot``).
+    """
+    from api import run_drain
+
+    return _blocker_snapshot_from_runs(run_drain.webui_owned_active_runs())
+
+
 def _active_stream_count() -> int:
     """Return the current in-memory chat stream count.
 
@@ -203,6 +207,26 @@ def _active_stream_count() -> int:
     ``_restart_blocker_snapshot()`` so detached worker runs also block updates.
     """
     return int(_restart_blocker_snapshot().get('active_streams') or 0)
+
+
+def _update_blocker_snapshot(target: str) -> dict:
+    """Return the chat work that should block an update of ``target`` (#8660).
+
+    ``_restart_blocker_snapshot`` leaves out Gateway runs whose resumable run
+    identity is saved, because they survive a WebUI restart. An Agent update
+    also cycles the Gateway that executes them
+    (``_ensure_gateway_restart_for_agent_update``), which ends them, so for
+    ``target == 'agent'`` every live run blocks, as every active run did
+    before #7293. That is one pass over the registries with no durability
+    check (``run_drain.all_active_runs``), so no run can be counted twice or
+    missed while its durable mark changes. A WebUI-only update keeps the
+    #7293 exemption.
+    """
+    if target != 'agent':
+        return _restart_blocker_snapshot()
+    from api import run_drain
+
+    return _blocker_snapshot_from_runs(run_drain.all_active_runs())
 
 
 def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict:
@@ -503,7 +527,7 @@ def _run_fenced_update(target: str, force_active_runs: bool, run) -> dict:
     """
     from api import run_drain
 
-    blocker_snapshot = _restart_blocker_snapshot()
+    blocker_snapshot = _update_blocker_snapshot(target)
     if blocker_snapshot.get('restart_blocked') and not force_active_runs:
         return _restart_blocked_response(target, blocker_snapshot)
 
@@ -512,7 +536,7 @@ def _run_fenced_update(target: str, force_active_runs: bool, run) -> dict:
     try:
         token = run_drain.hold_run_admission(f'update:{target}', force=bool(force_active_runs))
         try:
-            blocker_snapshot = _restart_blocker_snapshot()
+            blocker_snapshot = _update_blocker_snapshot(target)
             if blocker_snapshot.get('restart_blocked'):
                 if not force_active_runs:
                     return _restart_blocked_response(target, blocker_snapshot)
@@ -925,13 +949,61 @@ def _channel_tag_glob(channel) -> str:
 _STABLE_DESCRIBE_EXCLUDES = ('--exclude', 'v*+*', '--exclude', 'v*-*')
 
 
-def _channel_describe_filter(channel) -> list:
+def _channel_describe_filter(channel, *, stable_filter: bool = True) -> list:
     """``--match``/``--exclude`` arguments that limit ``git describe`` to the
-    channel's release tags (the tags ``_release_tags`` can list)."""
+    channel's release tags (the tags ``_release_tags`` can list).
+
+    On the stable channel the prerelease excludes apply only under the stable
+    filter policy (``_stable_filter_for_tags``, #8684)."""
     args = ['--match', _channel_tag_glob(channel)]
-    if _normalize_channel(channel) == 'stable':
+    if _normalize_channel(channel) == 'stable' and stable_filter:
         args.extend(_STABLE_DESCRIBE_EXCLUDES)
     return args
+
+
+def _stable_filter_for_tags(tags) -> bool:
+    """The stable filter policy implied by one ``_release_tags`` snapshot.
+
+    ``_release_tags`` lists only stable releases when the repo has one, and
+    only prereleases when it has none, so the snapshot itself says which
+    policy produced it. Every later describe/count/past-tag call in the same
+    check or apply must use this policy rather than re-reading the refs: a
+    concurrent fetch that publishes the first stable release mid-operation
+    would otherwise switch the excludes on between calls, lose the installed
+    canary, and send the apply to the branch tip (#8684 gate). An empty
+    snapshot keeps the #8147 filter.
+    """
+    return not tags or any(_STABLE_RELEASE_TAG_RE.match(t) for t in tags)
+
+
+def _describe_filter_for(path, channel, stable_filter=None) -> list:
+    """Describe filter for ``path``; ``stable_filter=None`` reads the policy from the repo."""
+    if _normalize_channel(channel) != 'stable':
+        return _channel_describe_filter(channel)
+    if stable_filter is None:
+        stable_filter = _repo_has_stable_release(path)
+    return _channel_describe_filter(channel, stable_filter=stable_filter)
+
+
+def _repo_has_stable_release(path) -> bool:
+    """Return True when ``path`` has at least one stable release tag (``v0.52.1``).
+
+    The stable channel leaves prerelease tags (``v0.22.5+canary.1``, ``-rc.1``)
+    out of its release list, its ``describe`` and its ahead-count, so that a
+    canary never outranks the release it precedes (#8147). That filter only
+    makes sense when a stable release exists to fall back on. In a checkout
+    whose tags are ALL prereleases (a mirror or fork that publishes only
+    canaries), filtering leaves no release at all; the check then fell through
+    to the branch comparison and the apply moved the install to the untagged
+    branch tip (#8684). Without a stable release, the stable channel therefore
+    keeps v0.52.544's unfiltered behaviour: the channel's tags in version order,
+    so the installed canary stays current and a newer published canary is
+    still offered. A git failure keeps the filter (the #8147 behaviour).
+    """
+    out, ok = _run_git(['tag', '--list', _channel_tag_glob('stable'), '--sort=-creatordate'], path)
+    if not ok:
+        return True
+    return any(_STABLE_RELEASE_TAG_RE.match(line.strip()) for line in (out or '').splitlines())
 
 
 def _read_update_channel() -> str:
@@ -1020,11 +1092,22 @@ def _release_tags(path, channel=DEFAULT_UPDATE_CHANNEL):
     if not (ok and out):
         return []
     tags = [line.strip() for line in out.splitlines() if line.strip()]
-    tags = [t for t in tags if _STABLE_RELEASE_TAG_RE.match(t)]
-    return _order_stable_tags(tags)
+    releases = [t for t in tags if _STABLE_RELEASE_TAG_RE.match(t)]
+    if not releases:
+        # No stable release at all, only prereleases (#8684): keep v0.52.544's
+        # unfiltered version-order list rather than an empty one, which would
+        # send the check and the apply to the untagged branch tip. Order the
+        # SAME tag set the first read saw: a stable release fetched between the
+        # two reads must not join a prerelease-policy snapshot.
+        seen = set(tags)
+        out, ok = _run_git(['tag', '--list', glob, '--sort=-v:refname'], path)
+        if not (ok and out):
+            return []
+        return [t for t in (line.strip() for line in out.splitlines()) if t and t in seen]
+    return _order_stable_tags(releases)
 
 
-def _current_release_tag(path, channel=DEFAULT_UPDATE_CHANNEL):
+def _current_release_tag(path, channel=DEFAULT_UPDATE_CHANNEL, *, stable_filter=None):
     """Return the latest channel release tag reachable from HEAD, if one exists.
 
     MUST filter by the channel glob (``--match``): a commit tagged BOTH
@@ -1033,7 +1116,7 @@ def _current_release_tag(path, channel=DEFAULT_UPDATE_CHANNEL):
     math resolve to the experimental tag and fall through to the branch firehose.
     """
     out, ok = _run_git(
-        ['describe', '--tags', '--abbrev=0', *_channel_describe_filter(channel)],
+        ['describe', '--tags', '--abbrev=0', *_describe_filter_for(path, channel, stable_filter)],
         path,
     )
     return out if ok and out else None
@@ -1048,7 +1131,7 @@ def _release_gap(tags, current, latest):
     return 1
 
 
-def _count_channel_tags_ahead(path, channel=DEFAULT_UPDATE_CHANNEL):
+def _count_channel_tags_ahead(path, channel=DEFAULT_UPDATE_CHANNEL, *, stable_filter=None):
     """Count channel release tags strictly ahead of HEAD (fast-forwardable).
 
     Used only when NO channel tag is reachable behind HEAD — the channel-scoped
@@ -1066,8 +1149,11 @@ def _count_channel_tags_ahead(path, channel=DEFAULT_UPDATE_CHANNEL):
     if not (ok and out):
         return 0
     tags = [line.strip() for line in out.splitlines() if line.strip()]
-    if _normalize_channel(channel) == 'stable':
-        # Count releases, not the prerelease tags _release_tags drops.
+    if _normalize_channel(channel) == 'stable' and (
+        stable_filter if stable_filter is not None else _repo_has_stable_release(path)
+    ):
+        # Count releases, not the prerelease tags _release_tags drops. With no
+        # stable release at all, _release_tags lists the prereleases (#8684).
         tags = [t for t in tags if _STABLE_RELEASE_TAG_RE.match(t)]
     return len(tags)
 
@@ -1246,7 +1332,7 @@ def _check_webui_published_release_update(channel=DEFAULT_UPDATE_CHANNEL):
     }
 
 
-def _head_is_past_latest_tag(path, current_tag, channel=DEFAULT_UPDATE_CHANNEL):
+def _head_is_past_latest_tag(path, current_tag, channel=DEFAULT_UPDATE_CHANNEL, *, stable_filter=None):
     """Return True when HEAD has moved past the latest reachable channel tag.
 
     `git describe --tags --always --match <glob>` returns the bare tag name
@@ -1262,7 +1348,7 @@ def _head_is_past_latest_tag(path, current_tag, channel=DEFAULT_UPDATE_CHANNEL):
     if not current_tag:
         return False
     full_desc, ok = _run_git(
-        ['describe', '--tags', '--always', *_channel_describe_filter(channel)],
+        ['describe', '--tags', '--always', *_describe_filter_for(path, channel, stable_filter)],
         path,
     )
     return bool(ok and full_desc and full_desc != current_tag)
@@ -1321,7 +1407,9 @@ def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None)
     tags = _release_tags(path, channel)
     if tags:
         latest_tag = tags[0]
-        current_tag = _current_release_tag(path, channel)
+        # One filter policy for the whole selection, taken from this snapshot (#8684 gate).
+        stable_filter = _stable_filter_for_tags(tags)
+        current_tag = _current_release_tag(path, channel, stable_filter=stable_filter)
         behind = _release_gap(tags, current_tag, latest_tag)
         # Mirror the check side exactly: fall through to the branch comparison
         # whenever the checkout has already moved past the release tag that the
@@ -1332,7 +1420,7 @@ def _select_apply_compare_ref(path, channel=DEFAULT_UPDATE_CHANNEL, target=None)
         # or fail fast-forward; branch comparison is the truthful update path.
         # Short-circuit `or` preserves the original minimal git-call pattern.
         if (
-            (behind == 0 and _head_is_past_latest_tag(path, current_tag, channel))
+            (behind == 0 and _head_is_past_latest_tag(path, current_tag, channel, stable_filter=stable_filter))
             or (behind > 0 and _head_contains_ref(path, latest_tag))
             or (behind > 0 and not _can_fast_forward_to(path, latest_tag))
         ):
@@ -1390,7 +1478,9 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
         return None
 
     latest_tag = tags[0]
-    current_tag = _current_release_tag(path, channel)
+    # One filter policy for the whole check, taken from this snapshot (#8684 gate).
+    stable_filter = _stable_filter_for_tags(tags)
+    current_tag = _current_release_tag(path, channel, stable_filter=stable_filter)
     behind = _release_gap(tags, current_tag, latest_tag)
 
     # When NO channel tag is reachable behind HEAD, _current_release_tag returns
@@ -1407,7 +1497,7 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     # tag; may be refined below in the no-channel-tag-behind-HEAD fallback).
     current_sha_ref = current_tag
     if current_tag is None:
-        ahead = _count_channel_tags_ahead(path, channel)
+        ahead = _count_channel_tags_ahead(path, channel, stable_filter=stable_filter)
         if ahead > 0:
             behind = ahead
         # Scope the installed-version fallback to the WebUI repo only.
@@ -1456,7 +1546,7 @@ def _check_repo_release(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     # origin/master (the firehose). Report up-to-date. The AGENT repo and the
     # experimental channel keep the historical fall-through.
     suppress_stable_fallthrough = (channel == 'stable' and name == 'webui')
-    if behind == 0 and _head_is_past_latest_tag(path, current_tag, channel):
+    if behind == 0 and _head_is_past_latest_tag(path, current_tag, channel, stable_filter=stable_filter):
         if suppress_stable_fallthrough:
             return _channel_up_to_date_info(path, name, channel, current_tag, latest_tag)
         return None
@@ -1776,7 +1866,7 @@ def _check_repo(path, name, channel=DEFAULT_UPDATE_CHANNEL):
     _tag_info = None
     if _tags:
         _latest = _tags[0]
-        _current = _current_release_tag(path, channel)
+        _current = _current_release_tag(path, channel, stable_filter=_stable_filter_for_tags(_tags))
         _tag_info = {'latest_tag': _latest, 'current_tag': _current}
 
     branch_info = _check_repo_branch(path, name, fetch=False)

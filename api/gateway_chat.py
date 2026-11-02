@@ -28,7 +28,7 @@ from api.config import (
     _get_session_agent_lock,
     _parse_provider_qualified_model_id,
     clear_session_writeback_owner_if_owned,
-    coerce_reasoning_effort_for_model,
+    resolve_session_reasoning_effort,
     gateway_approval_unavailable_reason,
     gateway_supports_approval,
     peek_stream,
@@ -431,21 +431,39 @@ def _gateway_use_runs_api_enabled(config_data=None, environ: dict[str, str] | No
     return raw in ("1", "true", "yes", "on")
 
 
-def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=None):
-    """Read and coerce user-configured reasoning effort for a gateway request."""
+def _gateway_reasoning_effort_for_request(
+    cfg, *, model=None, model_provider=None, session_effort=None
+):
+    """Resolve and coerce the session effort, falling back to profile config."""
     try:
-        cfg_data = cfg if isinstance(cfg, dict) else {}
-        effort_cfg = cfg_data.get("agent", {}) if isinstance(cfg_data, dict) else {}
-        effort_raw = effort_cfg.get("reasoning_effort") if isinstance(effort_cfg, dict) else None
-        coerced = coerce_reasoning_effort_for_model(
-            effort_raw,
-            model,
+        coerced = resolve_session_reasoning_effort(
+            cfg,
+            session_effort=session_effort,
+            model_id=model,
             provider_id=model_provider,
         )
         # Preserve explicit "none" while still omitting absent or invalid effort.
         return None if not coerced else str(coerced)
     except Exception:
         return None
+
+
+def _gateway_reasoning_body_fields(reasoning_effort) -> dict:
+    """Request-body fields that carry a resolved effort to the Gateway.
+
+    The Gateway decodes effort only from ``model_options`` (structured
+    ``reasoning``, or the legacy ``reasoning_effort`` key inside it) and ignores
+    a top-level ``reasoning_effort``; that key is still sent for any Gateway that
+    reads it. ``None`` or ``""`` (the session's "Default") sends nothing, so the
+    Gateway applies its own profile config: its protocol has no "provider
+    default, ignore config" value, and ``{"enabled": true}`` alone means a
+    medium effort on several providers.
+    """
+    effort = str(reasoning_effort or "").strip().lower()
+    if not effort:
+        return {}
+    reasoning = {"enabled": False} if effort == "none" else {"enabled": True, "effort": effort}
+    return {"reasoning_effort": effort, "model_options": {"reasoning": reasoning}}
 
 
 def _gateway_session_yolo_enabled(session_id: str) -> bool:
@@ -3105,6 +3123,7 @@ def _run_gateway_chat_streaming(
             logger.debug("Failed to put gateway event to queue")
 
     s = None
+    api_key = ""
     final_text = ""
     terminal_error = ""
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
@@ -3114,10 +3133,24 @@ def _run_gateway_chat_streaming(
 
         # Profile-bound like the endpoint below: the worker thread has no request profile TLS.
         cfg = _gateway_config_for_profile(getattr(s, "profile", None)) or get_config()
+        # A legacy session (no stored effort) inherits agent.reasoning_effort from its
+        # own profile's isolated config, as the composer chip and the local worker do:
+        # cfg above still honours an ambient HERMES_CONFIG_PATH for a named profile.
+        session_effort = getattr(s, "reasoning_effort", None)
+        try:
+            from api.config import effective_session_reasoning_effort
+            from api.profiles import get_hermes_home_for_profile
+
+            session_effort = effective_session_reasoning_effort(
+                session_effort, get_hermes_home_for_profile(getattr(s, "profile", None)),
+            )
+        except Exception:
+            logger.warning("isolated reasoning config read failed; using the session config", exc_info=True)
         reasoning_effort = _gateway_reasoning_effort_for_request(
             cfg,
             model=model,
             model_provider=model_provider,
+            session_effort=session_effort,
         )
         # The session's own profile, not the process-active one: this worker thread has no
         # thread-local profile, so get_config()/os.environ describe whichever profile the
@@ -3181,8 +3214,7 @@ def _run_gateway_chat_streaming(
             body_extras = {}
             if model_provider:
                 body_extras["provider"] = model_provider
-            if reasoning_effort is not None:
-                body_extras["reasoning_effort"] = reasoning_effort
+            body_extras.update(_gateway_reasoning_body_fields(reasoning_effort))
             if _gw_overrides.get("service_tier"):
                 body_extras["service_tier"] = _gw_overrides["service_tier"]
             def record_run(run_id, request=None):
@@ -3285,8 +3317,7 @@ def _run_gateway_chat_streaming(
             }
             if model_provider:
                 body["provider"] = model_provider
-            if reasoning_effort is not None:
-                body["reasoning_effort"] = reasoning_effort
+            body.update(_gateway_reasoning_body_fields(reasoning_effort))
             if _gw_overrides.get("service_tier"):
                 body["service_tier"] = _gw_overrides["service_tier"]
             req = urllib.request.Request(
