@@ -4,10 +4,11 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 
 REPO = Path(__file__).resolve().parent.parent
 STREAMING_PY = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
-ROUTES_PY = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
 
 
 def _install_fake_context_resolver(monkeypatch):
@@ -30,6 +31,7 @@ def _install_fake_context_resolver(monkeypatch):
                 "config_context_length": config_context_length,
                 "provider": provider,
                 "custom_providers": custom_providers,
+                "api_key": kwargs.get("api_key"),
             }
         )
         return config_context_length or 256000
@@ -120,8 +122,15 @@ def test_route_resolver_uses_named_custom_provider_base_url(monkeypatch):
 
     custom_providers = [
         {
+            "name": "Other",
+            "base_url": "https://zenmux.example/v1",
+            "api_key": "synthetic-other-key",
+            "models": {"custom-model": {"context_length": 444000}},
+        },
+        {
             "name": "ZenMux",
             "base_url": "https://zenmux.example/v1",
+            "api_key": "synthetic-zenmux-key",
             "models": {
                 "custom-model": {"context_length": "888000"},
             },
@@ -149,7 +158,24 @@ def test_route_resolver_uses_named_custom_provider_base_url(monkeypatch):
     assert calls[-1]["config_context_length"] == 888000
     assert calls[-1]["base_url"] == "https://zenmux.example/v1"
     assert calls[-1]["provider"] == "custom:zenmux"
-    assert calls[-1]["custom_providers"] is custom_providers
+    # A shared URL/model does not grant the sibling's metadata or credential.
+    # Content and owner isolation matter; the raw list's identity does not.
+    assert calls[-1]["custom_providers"] == [custom_providers[1]]
+    assert calls[-1]["api_key"] == "synthetic-zenmux-key"
+
+    assert routes._resolve_context_length_for_session_model(
+        "custom-model", "custom:other",
+    ) == 444000
+    assert calls[-1]["custom_providers"] == [custom_providers[0]]
+    assert calls[-1]["provider"] == "custom:other"
+    assert calls[-1]["api_key"] == "synthetic-other-key"
+
+    assert routes._resolve_context_length_for_session_model(
+        "custom-model", "custom:missing", base_url="https://zenmux.example/v1",
+    ) == 256000
+    assert calls[-1]["config_context_length"] is None
+    assert calls[-1]["custom_providers"] == []
+    assert calls[-1]["api_key"] == ""
 
 
 def test_global_context_length_remains_default_model_only(monkeypatch):
@@ -191,11 +217,33 @@ def test_streaming_fallbacks_use_shared_provider_context_helper():
     assert "_cfg_base_url" in STREAMING_PY
 
 
-def test_route_helper_keeps_all_context_length_sources_aligned():
-    assert "def _context_length_lookup_inputs_for_model" in ROUTES_PY
-    # Hardened against an explicit null ``providers:`` key (salvage of #3967):
-    # ``cfg.get("providers") or {}`` instead of ``cfg.get("providers", {})`` so
-    # a config.yaml with ``providers:`` (None) degrades to an empty mapping.
-    assert 'cfg.get("providers") or {}' in ROUTES_PY
-    assert 'cfg.get("custom_providers")' in ROUTES_PY
-    assert "_model_matches_configured_default" in ROUTES_PY
+@pytest.mark.parametrize("providers_cfg", [None, [], "malformed"])
+def test_route_helper_keeps_all_context_length_sources_aligned(providers_cfg):
+    from api.routes import _context_length_lookup_inputs_for_model
+
+    cfg = {
+        "model": {
+            "provider": "openai",
+            "default": "default-model",
+            "context_length": "123456",
+            "base_url": "https://default.example/v1",
+            "api_key": "synthetic-default-key",
+        },
+        "providers": providers_cfg,
+        "custom_providers": None,
+    }
+    # Explicit null and malformed provider stores must degrade safely without
+    # dropping the profile's default-only override or borrowing its connection.
+    default = _context_length_lookup_inputs_for_model("default-model", "openai", cfg=cfg)
+    assert default.config_context_length == 123456
+    assert default.base_url == "https://default.example/v1"
+    assert default.provider == "openai"
+    assert default.api_key == "synthetic-default-key"
+    assert default.custom_providers == []
+
+    unrelated = _context_length_lookup_inputs_for_model("other-model", "custom:missing", cfg=cfg)
+    assert unrelated.config_context_length is None
+    assert unrelated.base_url == ""
+    assert unrelated.provider == "custom:missing"
+    assert unrelated.api_key == ""
+    assert unrelated.custom_providers == []

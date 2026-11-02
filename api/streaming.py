@@ -23,6 +23,7 @@ import traceback
 import unicodedata
 import copy
 import inspect
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Optional
 
@@ -63,7 +64,8 @@ from api.config import (
     warm_models_catalog_provenance_if_cold,
     load_settings,
     parse_reasoning_effort,
-    coerce_reasoning_effort_for_model,
+    resolve_session_reasoning_effort,
+    effective_session_reasoning_effort,
     _main_model_request_overrides,
     PROCESS_SESSION_INDEX, PROCESS_SESSION_INDEX_LOCK,
 )
@@ -86,6 +88,8 @@ from api.memory_profile_scope import (
     agent_has_memory,
     call_as_session_owner,
     construct_profile_scoped_agent,
+    memory_status_event,
+    session_memory_status,
     session_profile_home_or_empty,
     turn_memory_reason,
 )
@@ -189,6 +193,16 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
         'message_count': len(messages),
     }
     attach_todo_state(raw, messages)
+    # #8517 notice: the memory status of the agent serving THIS session (after a
+    # compression, the continuation and the cached agent moved to it). Omitted when
+    # unknown; codes only.
+    try:
+        _memory_status = session_memory_status(getattr(session, 'session_id', ''), session=session)
+    except Exception:
+        _memory_status = None
+        logger.debug('[webui] #8517: memory status unavailable for the session payload', exc_info=True)
+    if _memory_status:
+        raw['memory_status'] = _memory_status
     if tool_calls is not None:
         raw['tool_calls'] = tool_calls
     try:
@@ -215,6 +229,70 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
     except Exception:
         raw.pop('regeneration_revision', None)
     return raw
+
+
+def _successful_skill_view_name(tool_name, function_result) -> str | None:
+    """Return the canonical name from a successful structured skill_view."""
+    if tool_name != "skill_view":
+        return None
+    result = function_result
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(result, Mapping) or result.get("success") is not True:
+        return None
+    if result.get("error"):
+        return None
+    name = result.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    return name
+
+
+def _record_streaming_skill_usage(
+    session_id,
+    tool_name,
+    function_result,
+    *,
+    stream_id,
+    skill_provenance_generation,
+    ephemeral=False,
+) -> bool:
+    """Persist a successful skill_view result for the live session owner."""
+    if ephemeral or not stream_id or skill_provenance_generation is None:
+        return False
+    name = _successful_skill_view_name(tool_name, function_result)
+    if name is None:
+        return False
+    sid = str(session_id or "").strip()
+    if not sid:
+        return False
+    with _get_session_agent_lock(sid):
+        try:
+            current_session = get_session(sid)
+        except Exception:
+            return False
+        if current_session is None or str(getattr(current_session, "session_id", "")) != sid:
+            return False
+        if stream_id and not _stream_writeback_is_current(current_session, stream_id):
+            return False
+        if (
+            getattr(current_session, "skill_provenance_generation", 0)
+            != skill_provenance_generation
+        ):
+            return False
+        if getattr(current_session, "read_only", False):
+            return False
+        try:
+            if not current_session.record_skill_usage(name):
+                return False
+            current_session.save(touch_updated_at=False, skip_index=True)
+        except Exception:
+            logger.debug("Failed to persist streaming skill usage for %s", sid, exc_info=True)
+            return False
+    return True
 
 
 def _compact_for_echo_compare(value: str) -> str:
@@ -390,6 +468,24 @@ def _ephemeral_session_payload(session_id: str, messages) -> dict:
     return redact_session_data(
         {'session_id': session_id, 'messages': messages if isinstance(messages, list) else []}
     )
+
+
+def _put_session_memory_status(put, session_id: str, stream_id: str, profile_home: str) -> None:
+    """#8517 notice: send the UI the memory status of the agent now serving
+    ``session_id`` (``warning``/``memory_off`` or ``memory_status``/``ok``; nothing when
+    unknown). Called after an agent is registered for the turn, including each
+    credential self-heal replacement, outside the registry locks. A one-turn
+    memoryless agent is never cached, so it never changes the reported status."""
+    try:
+        event = memory_status_event(
+            session_memory_status(session_id, profile_home),
+            session_id=session_id, stream_id=stream_id,
+        )
+    except Exception:
+        logger.debug('[webui] #8517: memory status unavailable for session %s', session_id, exc_info=True)
+        return
+    if event is not None:
+        put(*event)
 
 
 def _cancel_event_payload(
@@ -767,21 +863,27 @@ def _apply_profile_home_context_to_streaming_model(
         return model, provider_context, False
 
     try:
-        from api import yaml_compat as _yaml_pp
+        from api.config import _has_env_ref
+        from api.profiles import load_profile_config
 
         _pp_cfg_path = Path(profile_home) / "config.yaml"
         if not _pp_cfg_path.is_file():
             return model, provider_context, False
 
-        _pp_cfg = _yaml_pp.safe_load(_pp_cfg_path.read_text(encoding="utf-8")) or {}
+        # config.yaml keeps raw ``${VAR}`` references (#8032): expand them under
+        # the session profile's env binding; a provider/default that stays
+        # unresolved is absent, never a provider context or repair target.
+        _pp_cfg = load_profile_config(profile_home)
         if not isinstance(_pp_cfg, dict):
             return model, provider_context, False
 
         _pp = (_pp_cfg.get("model", {}).get("provider") or "").strip()
-        if not _pp:
+        if not _pp or _has_env_ref(_pp):
             return model, provider_context, False
 
         _pp_default = (_pp_cfg.get("model", {}).get("default") or "").strip()
+        if _has_env_ref(_pp_default):
+            _pp_default = ""
         return _apply_profile_provider_context_to_streaming_model(
             model,
             provider_context,
@@ -14727,6 +14829,7 @@ def _run_agent_streaming(
     # once. Sentinel: None=not computed, 0=not applicable/failed, >0=real cap.
     _real_ctx_cache = [None]
     _live_usage_session_cache = [None]
+    _stream_clear_generation = None
 
     def _current_live_usage_session():
         return _live_usage_session_snapshot(
@@ -15301,6 +15404,9 @@ def _run_agent_streaming(
         # session lock before dispatch, so a mismatch here means a newer picker
         # write won the race and must not be clobbered by the worker thread.
         with _agent_lock:
+            _skill_provenance_generation = getattr(
+                s, "skill_provenance_generation", 0,
+            )
             _last_persisted_model = getattr(s, "model", None)
             _last_persisted_provider = getattr(s, "model_provider", None)
             if _last_persisted_provider is not None:
@@ -16513,6 +16619,17 @@ def _run_agent_streaming(
                     put('metering', _tool_stats)
                 except Exception:
                     logger.debug('Failed to update live prompt estimate on tool completion', exc_info=True)
+                try:
+                    _record_streaming_skill_usage(
+                        getattr(s, "session_id", None) or session_id,
+                        name,
+                        function_result,
+                        stream_id=stream_id,
+                        skill_provenance_generation=_skill_provenance_generation,
+                        ephemeral=ephemeral,
+                    )
+                except Exception:
+                    logger.debug('Failed to persist streaming skill usage', exc_info=True)
 
             _AIAgent = _get_ai_agent()
             if _AIAgent is None:
@@ -16701,6 +16818,7 @@ def _run_agent_streaming(
 
             # Per-session toolset override (#493): if the session has
             # enabled_toolsets set, use that instead of the global config.
+            _session_meta = None
             try:
                 from api.models import Session, SESSION_DIR
                 _session_path = SESSION_DIR / f"{session_id}.json"
@@ -16812,16 +16930,25 @@ def _run_agent_streaming(
             except Exception:
                 _max_tokens_cfg = None
 
-            # CLI-parity reasoning effort: read agent.reasoning_effort from the
-            # active profile's config.yaml (the same key the CLI writes via
-            # `/reasoning <level>`) and hand the parsed dict to AIAgent.  When
-            # the key is absent or invalid, pass None → agent uses its default.
+            # Prefer the session-owned effort so switching conversations restores
+            # the same runtime setting shown by the composer. Legacy sessions
+            # without that metadata continue to inherit the profile/CLI value,
+            # read from the same isolated session-profile config as the chip
+            # and the Gateway worker (_cfg stays ambient-aware for toolsets).
+            # The live session `s` is what POST /api/reasoning mutates and what
+            # the Gateway worker reads.
             try:
-                _effort_cfg = _cfg.get('agent', {}) if isinstance(_cfg, dict) else {}
-                _effort_raw = _effort_cfg.get('reasoning_effort') if isinstance(_effort_cfg, dict) else None
-                _effort = coerce_reasoning_effort_for_model(
-                    _effort_raw,
-                    resolved_model,
+                _session_effort = getattr(s, 'reasoning_effort', None)
+                try:
+                    _session_effort = effective_session_reasoning_effort(
+                        _session_effort, _profile_home,
+                    )
+                except Exception:
+                    logger.warning("isolated reasoning config read failed; using session config", exc_info=True)
+                _effort = resolve_session_reasoning_effort(
+                    _cfg,
+                    session_effort=_session_effort,
+                    model_id=resolved_model,
                     provider_id=resolved_provider,
                     base_url=resolved_base_url,
                 )
@@ -17042,6 +17169,8 @@ def _run_agent_streaming(
                     _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
                 put('cancel', _cancel_event_payload('Cancelled by user'))
                 return
+            if not ephemeral:
+                _put_session_memory_status(put, session_id, stream_id, _profile_home)
 
             # Cache publication is already fenced with Stop above. Keep LRU
             # eviction and any memory-provider close outside the stream lock.
@@ -17905,6 +18034,9 @@ def _run_agent_streaming(
                                 _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
                                 put('cancel', _cancel_event_payload('Cancelled by user'))
                                 return
+                            if not ephemeral:
+                                # #8517 notice: the replacement now serves the session.
+                                _put_session_memory_status(put, session_id, stream_id, _profile_home)
                             # Retry the conversation once with fresh credentials
                             _self_healed = True
                             _token_sent = False
@@ -17972,7 +18104,12 @@ def _run_agent_streaming(
                                 _heal_projected_history = _agent_replay_settle_projection(
                                     _heal_kwargs.get("conversation_history") or []
                                 )
-                                _heal_result = agent.run_conversation(**_heal_kwargs)
+                                # Skill completion callbacks persist through this same lock.
+                                _agent_lock.release()
+                                try:
+                                    _heal_result = agent.run_conversation(**_heal_kwargs)
+                                finally:
+                                    _agent_lock.acquire()
                                 _remember_pending_steer_result(_heal_result)
                                 _active_turn_identity = _resolve_active_turn_authority(
                                     _active_turn_identity,
@@ -17997,11 +18134,11 @@ def _run_agent_streaming(
                                 )
                                 _heal_ok = False
                             if cancel_event.is_set():
-                                # This retry runs under _agent_lock, so a Stop or a
-                                # server settle (#7293) could only publish its cancel
-                                # and interrupt it; the turn's terminal state is
-                                # written here. Finalize it as cancelled, keeping the
-                                # streamed partial, never as an auth failure.
+                                # A Stop or a server settle (#7293) during the retry
+                                # publishes its cancel and interrupts it; the turn's
+                                # terminal state is written here. Finalize it as
+                                # cancelled, keeping the streamed partial, never as
+                                # an auth failure.
                                 _finalize_cancelled_turn(
                                     s, ephemeral=ephemeral, stream_id=stream_id,
                                     preserve_partials=True,
@@ -18020,6 +18157,13 @@ def _run_agent_streaming(
                                     except Exception:
                                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                                 put('cancel', _worker_cancel_event_payload(stream_id))
+                                return
+                            if not _stream_writeback_is_current(s, stream_id):
+                                logger.info(
+                                    "Skipping stale credential self-heal result for session %s stream %s",
+                                    getattr(s, 'session_id', session_id),
+                                    stream_id,
+                                )
                                 return
                             if _heal_ok and _heal_result is not None:
                                 # Retry succeeded — replace result and skip error
@@ -19450,6 +19594,9 @@ def _run_agent_streaming(
                             _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
                         put('cancel', _cancel_event_payload('Cancelled by user'))
                         return
+                    if not ephemeral:
+                        # #8517 notice: the replacement now serves the session.
+                        _put_session_memory_status(put, session_id, stream_id, _profile_home)
                     # Retry the conversation
                     _token_sent = False
                     try:
