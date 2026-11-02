@@ -919,7 +919,8 @@ def _explicit_control_common_stubs() -> list:
 
 def _child_count_toggle_snippet() -> str:
     """Extract the production child-count control, including its toggle handler."""
-    start = SESSIONS_JS.index("const childCount=typeof s._child_session_count==='number'")
+    renderer_start = SESSIONS_JS.index("function renderSessionListFromCache(){")
+    start = SESSIONS_JS.index("const childCount=typeof s._child_session_count==='number'", renderer_start)
     end = SESSIONS_JS.index("titleRow.appendChild(childCountEl);", start) + len("titleRow.appendChild(childCountEl);")
     snippet = SESSIONS_JS[start:end]
     assert "_retireProjectPickerForExplicitRepaint" in snippet
@@ -942,13 +943,16 @@ def _explicit_child_count_script() -> str:
         + [
             "const _expandedChildSessionKeys = new Set();",
             "const _sidebarLineageKeyForRow = (s) => 'lineage-' + s.session_id;",
-            "const _sessionChildBadgeTooltip = (label) => label;",
+            _function_source("_sessionChildBadgeTooltip"),
+            _function_source("_sessionAttentionState"),
+            _function_source("_createChildSessionStateIndicator"),
             "window.__parentSession = {session_id: 'parent', _child_sessions: Array.from({length: 20}, (_, i) => ({session_id: 'kid-' + i, session_source: 'fork'}))};",
             "function paintRows(){",
             "  const host = document.getElementById('sessionList');",
             "  const parent = document.createElement('div'); parent.className = 'session-item'; parent.dataset.sid = 'parent';",
             "  const titleRow = document.createElement('div');",
             "  const s = window.__parentSession;",
+            "  const segmentCount = 0; const lineageKey = _sidebarLineageKeyForRow(s); const searchQueryRaw = '';",
             _child_count_toggle_snippet(),
             "  parent.appendChild(titleRow);",
             "  if(_expandedChildSessionKeys.has('lineage-parent')){",
@@ -979,6 +983,7 @@ def _explicit_child_count_script() -> str:
                   flagCleared: _sessionListRepaintDeferredByPicker === false,
                   expanded: _expandedChildSessionKeys.has('lineage-parent'),
                   controlLabel: document.querySelector('.session-child-count').textContent,
+                  accessibleLabel: document.querySelector('.session-child-count').getAttribute('aria-label'),
                 },
               };
             };
@@ -1001,8 +1006,12 @@ def test_child_count_toggle_retires_picker_and_expands_in_browser(width, height)
         )
         page = browser.new_page(viewport={"width": width, "height": height})
         page.set_content('<!doctype html><html><body><div id="sessionList"></div></body></html>')
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
         page.add_script_tag(content=_explicit_child_count_script())
+        assert not errors, errors
         result = page.evaluate("window.__explicitChildCountCase()")
+        assert not errors, errors
         browser.close()
 
     assert result == {
@@ -1015,7 +1024,8 @@ def test_child_count_toggle_retires_picker_and_expands_in_browser(width, height)
             "pickerTeardownCleared": True,
             "flagCleared": True,
             "expanded": True,
-            "controlLabel": "session_meta_children:20",
+            "controlLabel": "20",
+            "accessibleLabel": "session_child_toggle_hint:session_meta_children:20",
         },
     }
 
