@@ -1153,19 +1153,35 @@ class _InstanceHolders:
     """Who holds one provider instance right now, whether a teardown of it is
     running, and which departed agents still have queued memory work on it."""
 
-    __slots__ = ("ref", "home_key", "holders", "teardown", "work")
+    __slots__ = ("ref", "home_key", "holders", "teardown", "work", "claiming")
 
     def __init__(self, ref: Callable[[], Any], home_key: str = ""):
         self.ref = ref                                    # weak reference: identity, never id() alone
         self.home_key = home_key                          # profile home key the instance serves
         self.holders: dict[int, _AgentHolder] = {}        # id(agent) -> its hold
         self.teardown = False                             # a teardown of this instance is running
-        # id(agent) -> weak reference to its manager, for an agent that LEFT the
-        # holder set while its manager still had queued memory work. That work
-        # still writes through this instance, so it holds the instance exactly
-        # like a live holder does — until the work drains, at which point the
-        # weak reference dies with the manager and the hold evaporates.
+        # id(manager) -> weak reference to that manager, for an agent that LEFT
+        # the holder set while its manager still had queued memory work. That
+        # work still writes through this instance, so it holds the instance
+        # exactly like a live holder does — until the work drains, at which
+        # point the weak reference dies with the manager and the hold
+        # evaporates.
+        #
+        # The hold belongs to the MANAGER, never to the agent that happened to
+        # hold the instance (#8613 round 2, finding A): CPython reuses the
+        # id() of a collected agent, so a hold filed under the agent's id was
+        # picked up by a later, unrelated agent that landed on the same id —
+        # and the release then closed the client under the DEPARTED agent's
+        # queued save. Every read and removal below compares the RESOLVED
+        # manager (``manager_ref() is manager``), never a bare id.
         self.work: dict[int, Callable[[], Any]] = {}
+        # How many releases are currently claiming this entry (#8613 round 2,
+        # finding B). A claim removes its agent from the holder set BEFORE it
+        # may wait for the construction fence, so while it waits the entry has
+        # no holders, no teardown flag and no work — and every prune site
+        # deletes an entry in that shape, process-wide. A claiming entry is
+        # kept until its claim settles.
+        self.claiming = 0
 
 
 _provider_holders: dict[int, _InstanceHolders] = {}
@@ -1262,19 +1278,57 @@ def _agent_manager(agent: Any) -> Any:
     return getattr(agent, "_memory_manager", None)
 
 
+def _future_is_done(future: Any) -> bool:
+    """Whether ``future`` has finished, WITHOUT taking the future's condition lock.
+
+    ``concurrent.futures.Future.done()`` acquires the future's own condition
+    lock, and the writer thread holds that same condition inside
+    ``Future.set_result`` while it allocates (``for waiter in self._waiters``),
+    so a gen-0 collection can run inside it. Reading the future's ``_state``
+    attribute answers the same question without any lock (#8613 round 2,
+    finding C): the state is a plain attribute that only ever moves from
+    PENDING/RUNNING to FINISHED/CANCELLED, so reading it without the lock can
+    only ever be a stale-but-conservative answer — a future that is not done
+    yet reads as not done, which is the safe direction (the instance is kept
+    alive for the pending save).
+
+    A future that does not expose ``_state`` at all (a stand-in, or a future
+    from another library) falls back to ``done()``: the answer is then taken
+    under the future's lock, which is the very edge this fix removes — but a
+    foreign future has no writer allocating under a condition this table
+    knows about, and an unreadable answer counts as work pending.
+    """
+    state = getattr(future, "_state", None)
+    if state is None:
+        try:
+            return bool(future.done())
+        except Exception:
+            return False
+    name = getattr(state, "name", state)
+    return name in ("FINISHED", "CANCELLED", "CANCELLED_AND_NOTIFIED")
+
+
 def _manager_has_outstanding_work(manager: Any) -> bool:
     """True when ``manager`` still has queued or running memory work (#8613
     must-fix 1): a background save that has not drained yet. This is the Agent's
     own executor bookkeeping, read defensively; an unreadable answer counts as
     work pending, because a provider that keeps running is the status quo while
-    a save that goes through a client another agent's teardown closed is not."""
+    a save that goes through a client another agent's teardown closed is not.
+
+    The future's state is read WITHOUT taking the future's condition lock
+    (#8613 round 2, finding C): this function runs with
+    ``_provider_holders_lock`` held, and taking the future's lock there
+    inverts the lock order against a writer inside ``Future.set_result`` —
+    a deadlock whose consequence is that every later memory-bearing
+    construction blocks until restart.
+    """
     if manager is None:
         return False
     futures = getattr(manager, "_background_futures", None)
     if not isinstance(futures, dict) or not futures:
         return False
     try:
-        return any(not future.done() for future in list(futures))
+        return any(not _future_is_done(future) for future in list(futures))
     except Exception:
         return True
 
@@ -1393,11 +1447,21 @@ def _forget_agent_holder(agent_pid: int, ref: Callable[[], Any]) -> None:
                 # already queued is not. That manager is still alive — the queued
                 # work holds it — so the hold survives as queued work, weakly, and
                 # evaporates once the work has drained.
-                if _manager_has_outstanding_work(holder.manager()):
-                    entry.work[agent_pid] = holder.manager
+                #
+                # #8613 round 2 (finding A): the hold is filed under the
+                # MANAGER's identity, not the agent's id(). CPython reuses the
+                # id() of a collected object, so a hold filed under the agent's
+                # id was inherited by a later agent that landed on the same id —
+                # and the release then closed the client under this departed
+                # agent's queued save. The manager is a different object with a
+                # different identity, so the two never collide.
+                manager = holder.manager()
+                if manager is not None and _manager_has_outstanding_work(manager):
+                    entry.work[id(manager)] = holder.manager
             # An entry nobody holds any more, with no teardown and no queued work
-            # to protect, leaves the table.
-            if not entry.holders and not entry.teardown and not entry.work:
+            # to protect, leaves the table — unless a release is claiming it
+            # right now (#8613 round 2, finding B).
+            if not entry.holders and not entry.teardown and not entry.work and not entry.claiming:
                 del _provider_holders[key]
 
 
@@ -1489,20 +1553,27 @@ def unregister_provider_holders(agent: Any) -> None:
         for key, entry in list(_provider_holders.items()):
             _forget_holder_locked(entry, agent_pid, manager)
             # An entry nobody holds any more, with no teardown and no queued work
-            # to protect, leaves the table.
-            if not entry.holders and not entry.teardown and not entry.work:
+            # to protect, leaves the table — unless a release is claiming it
+            # right now (#8613 round 2, finding B).
+            if not entry.holders and not entry.teardown and not entry.work and not entry.claiming:
                 del _provider_holders[key]
 
 
 def _forget_holder_locked(entry: _InstanceHolders, agent_pid: int, manager: Any) -> None:
     """Drop ``agent_pid`` from ``entry``'s holders, with ``_provider_holders_lock``
     held, keeping a queued-work hold when its ``manager`` still has outstanding
-    memory work (#8613 must-fix 1)."""
+    memory work (#8613 must-fix 1).
+
+    The hold is filed under the MANAGER's identity (#8613 round 2, finding A):
+    a hold keyed by the agent's id() was inherited by a later agent that landed
+    on the same id(), and the release then closed the client under the departed
+    agent's queued save.
+    """
     holder = entry.holders.pop(agent_pid, None)
     if holder is None:
         return
-    if _manager_has_outstanding_work(manager):
-        entry.work[agent_pid] = holder.manager
+    if manager is not None and _manager_has_outstanding_work(manager):
+        entry.work[id(manager)] = holder.manager
 
 
 def _last_provider_holder_locked(agent: Any, *, self_dropped: bool = False) -> tuple[bool, str, bool]:
@@ -1549,10 +1620,18 @@ def _last_provider_holder_locked(agent: Any, *, self_dropped: bool = False) -> t
         # collected — while its manager still had queued memory work holds this
         # instance exactly like a live holder: that work still writes through it.
         # Its own work is excluded: the release drains the agent it releases.
+        #
+        # #8613 round 2 (finding A): the hold is compared by the MANAGER's
+        # identity, not by the agent's id(). The agent being released is
+        # identified by its own manager, so a hold filed under a RECYCLED agent
+        # id is still counted as another manager's work — which is what keeps
+        # the shared client open for the departed agent's queued save.
+        own_manager = _agent_manager(agent)
         for pid, manager_ref in list(entry.work.items()):
-            if pid == agent_pid:
-                continue
-            if _manager_has_outstanding_work(manager_ref()):
+            held_manager = manager_ref()
+            if held_manager is not None and own_manager is not None and held_manager is own_manager:
+                continue  # its own queued work: the release drains that itself
+            if _manager_has_outstanding_work(held_manager):
                 return False, (
                     f"provider {name!r} of profile home {entry.home_key!r} still has queued "
                     f"memory work from a departed agent"
@@ -1655,26 +1734,49 @@ def _claim_last_held_teardown(agent: Any) -> tuple[bool, str, list]:
             entry = _live_holders_entry(provider)
             if entry is not None:
                 _forget_holder_locked(entry, id(agent), manager)
-        while True:
-            ok, why, fenced = _last_provider_holder_locked(agent, self_dropped=True)
-            if ok:
-                for provider in claimed:
-                    entry = _live_holders_entry(provider)
-                    if entry is not None:
-                        entry.teardown = True
-                return True, "", claimed
-            if not fenced:
-                return False, why, []
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                logger.warning(
-                    "[webui] #8613: waited %.0fs for a construction of the same profile to "
-                    "finish before releasing a memory provider and gave up (%s). The "
-                    "provider keeps its worker until the next session boundary.",
-                    _ACQUISITION_FENCE_WAIT_S, why,
-                )
-                return False, why, []
-            _provider_holders_cond.wait(remaining)
+        # #8613 round 2 (finding B): the claim removes this agent from the
+        # holder sets BEFORE it may wait, so while it waits the entry has no
+        # holders, no teardown flag and no queued work — and every prune site
+        # deletes an entry in that shape, process-wide, not just their own. The
+        # waiting agent's entry would then be gone when the wait ends, and the
+        # proof would answer "not tracked as held by any agent": the client
+        # stays open and untracked, which is the #8613 leak again, now confined
+        # to the wait window.
+        #
+        # The claim is therefore MARKED on the entries it is waiting for: a
+        # claiming entry is never pruned, and the mark is dropped when the claim
+        # settles (success, refusal or timeout).
+        claiming_entries: list[_InstanceHolders] = []
+        for provider in claimed:
+            entry = _live_holders_entry(provider)
+            if entry is not None and entry not in claiming_entries:
+                entry.claiming += 1
+                claiming_entries.append(entry)
+        try:
+            while True:
+                ok, why, fenced = _last_provider_holder_locked(agent, self_dropped=True)
+                if ok:
+                    for provider in claimed:
+                        entry = _live_holders_entry(provider)
+                        if entry is not None:
+                            entry.teardown = True
+                    return True, "", claimed
+                if not fenced:
+                    return False, why, []
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning(
+                        "[webui] #8613: waited %.0fs for a construction of the same profile to "
+                        "finish before releasing a memory provider and gave up (%s). The "
+                        "provider keeps its worker until the next session boundary.",
+                        _ACQUISITION_FENCE_WAIT_S, why,
+                    )
+                    return False, why, []
+                _provider_holders_cond.wait(remaining)
+        finally:
+            for entry in claiming_entries:
+                if entry.claiming > 0:
+                    entry.claiming -= 1
 
 
 def _settle_last_held_teardown(agent: Any, claimed: list, *, released: bool = False) -> list[str]:
@@ -1692,6 +1794,7 @@ def _settle_last_held_teardown(agent: Any, claimed: list, *, released: bool = Fa
     """
     raced: list[str] = []
     agent_pid = id(agent)
+    manager = _agent_manager(agent)
     with _provider_holders_lock:
         for provider in claimed:
             entry = _live_holders_entry(provider)
@@ -1700,13 +1803,22 @@ def _settle_last_held_teardown(agent: Any, claimed: list, *, released: bool = Fa
             entry.teardown = False
             entry.holders.pop(agent_pid, None)
             if released:
-                entry.work.pop(agent_pid, None)
+                # #8613 round 2 (finding A): the spent work hold belongs to the
+                # released agent's MANAGER. Removing it by the agent's id()
+                # removed a DIFFERENT agent's hold when the id had been
+                # recycled, which let that agent's queued save lose the
+                # instance.
+                for pid, manager_ref in list(entry.work.items()):
+                    held_manager = manager_ref()
+                    if manager is not None and held_manager is manager:
+                        del entry.work[pid]
             if any(h.agent() is not None for h in entry.holders.values()) or entry.work:
                 raced.append(str(getattr(provider, "name", "?")))
         # An instance nobody holds any more, with no teardown and no queued work to
-        # protect, leaves the table.
+        # protect, leaves the table — unless a release is claiming it right now
+        # (#8613 round 2, finding B).
         for key, entry in list(_provider_holders.items()):
-            if not entry.holders and not entry.teardown and not entry.work:
+            if not entry.holders and not entry.teardown and not entry.work and not entry.claiming:
                 del _provider_holders[key]
     return raced
 
