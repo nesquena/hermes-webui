@@ -171,6 +171,21 @@ class TestOnboardingGate:
 class TestApplyOnboardingSetupGuard:
     """Fix #2: apply_onboarding_setup must not silently overwrite config.yaml."""
 
+    @pytest.fixture(autouse=True)
+    def _restore_process_env(self, monkeypatch):
+        """apply_onboarding_setup writes the provider key straight into os.environ
+        (and _reload_dotenv records it as profile-loaded); undo both."""
+        import api.profiles as profiles
+
+        monkeypatch.setattr(
+            profiles,
+            "_loaded_profile_env_keys",
+            set(getattr(profiles, "_loaded_profile_env_keys", set())),
+            raising=False,
+        )
+        with mock.patch.dict(os.environ):
+            yield
+
     def _call_setup(self, tmp_path: pathlib.Path, body: dict, config_yaml_exists: bool):
         import api.onboarding as mod
 
@@ -206,14 +221,21 @@ class TestApplyOnboardingSetupGuard:
         import tempfile
 
         fake_config_path = tmp_path / "_test_config_confirm.yaml"
-        fake_config_path.unlink(missing_ok=True)  # start clean
+        # An existing config is what confirm_overwrite has to get past.
+        fake_config_path.write_text(
+            "model:\n  provider: openai\n  default: gpt-4o-mini\n", encoding="utf-8"
+        )
         try:
             with tempfile.TemporaryDirectory() as tmp_home:
                 tmp_home_path = pathlib.Path(tmp_home)
-                # Without patching Path.exists, use a non-existent path so it won't block.
-                # Also redirect _get_active_hermes_home so .env writes go to the temp dir,
-                # never to the real ~/.hermes/.env.
-                with mock.patch.object(mod, "_get_active_hermes_home", return_value=tmp_home_path):
+                # Redirect both the config path and hermes home into temp dirs.
+                # Patching only the home used to send the config.yaml write to the
+                # shared test-state config (this process's HERMES_HOME), leaving
+                # model.provider=openrouter for every later in-process Agent call.
+                with (
+                    mock.patch.object(mod, "_get_config_path", return_value=fake_config_path),
+                    mock.patch.object(mod, "_get_active_hermes_home", return_value=tmp_home_path),
+                ):
                     result = mod.apply_onboarding_setup(
                         {
                             "provider": "openrouter",
@@ -227,6 +249,7 @@ class TestApplyOnboardingSetupGuard:
                 assert result.get("error") != "config_exists", (
                     "confirm_overwrite=True should bypass the config-exists guard."
                 )
+            assert "provider: openrouter" in fake_config_path.read_text(encoding="utf-8")
         finally:
             fake_config_path.unlink(missing_ok=True)
 

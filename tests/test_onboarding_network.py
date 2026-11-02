@@ -163,33 +163,40 @@ class TestOnboardingSetupEndpoint:
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read())
 
+    # Both tests send a setup payload WITHOUT "model". The IP gate runs first (403
+    # when blocked); apply_onboarding_setup() then raises "model is required" before
+    # it writes anything. So a 400 with that message proves the request passed the
+    # gate, and the shared test server is left untouched. A complete payload would
+    # really apply the setup in the server process: write config.yaml/.env AND export
+    # ANTHROPIC_API_KEY into the server's os.environ, which no file restore undoes;
+    # later server-side credential syncs then rewrite the shared test auth.json
+    # (the chain that broke test_quiet_delegation_re_g2's real compressor and
+    # test_ttl_cache::test_mtime_invalidation).
+    _GATE_ONLY_PAYLOAD = {"provider": "anthropic", "api_key": "test-key"}
+
     def test_loopback_request_allowed(self):
         """
         Requests from 127.0.0.1 (which is what the test server sees) should
         pass the IP check. We confirm no 403 is returned.
         """
         # The test server runs on 127.0.0.1:{TEST_PORT} so client_address[0] is 127.0.0.1.
-        # A valid setup payload with a mock provider should not be rejected for IP reasons.
-        # We patch apply_onboarding_setup to avoid actually writing any config.
-        import unittest.mock
-        with unittest.mock.patch("api.onboarding.apply_onboarding_setup", return_value={"ok": True}):
-            status, body = self._post(
-                "/api/onboarding/setup",
-                {"provider": "anthropic", "model": "claude-sonnet-4.6", "api_key": "test-key"},
-            )
-        # Should not be 403 (IP blocked). May be 200 or another error from apply logic.
+        status, body = self._post("/api/onboarding/setup", self._GATE_ONLY_PAYLOAD)
         assert status != 403, f"Got 403 — IP check incorrectly blocked loopback. Body: {body}"
+        assert status == 400 and "model is required" in json.dumps(body), (
+            f"expected the request to pass the gate and stop at validation; got {status}: {body}"
+        )
 
     def test_xff_loopback_header_respected(self):
         """
         Simulated reverse proxy: raw TCP is 127.0.0.1 but X-Forwarded-For is also
         127.0.0.1. Should be allowed.
         """
-        import unittest.mock
-        with unittest.mock.patch("api.onboarding.apply_onboarding_setup", return_value={"ok": True}):
-            status, body = self._post(
-                "/api/onboarding/setup",
-                {"provider": "anthropic", "model": "claude-sonnet-4.6", "api_key": "test-key"},
-                headers={"X-Forwarded-For": "127.0.0.1"},
-            )
+        status, body = self._post(
+            "/api/onboarding/setup",
+            self._GATE_ONLY_PAYLOAD,
+            headers={"X-Forwarded-For": "127.0.0.1"},
+        )
         assert status != 403, f"Got 403 with XFF=127.0.0.1. Body: {body}"
+        assert status == 400 and "model is required" in json.dumps(body), (
+            f"expected the request to pass the gate and stop at validation; got {status}: {body}"
+        )
