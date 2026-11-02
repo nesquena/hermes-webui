@@ -1746,6 +1746,18 @@
   .session-item:has(:focus-visible) .session-time,.session-item.menu-open .session-time{visibility:hidden;}
   @media (hover:hover){
     .session-item:hover .session-time{visibility:hidden;}
+    /* A parent whose CHILD is running hides its own timestamp (sessions.js
+       marks it is-hidden when isStreaming includes _child_session_streaming)
+       but does not get .streaming, because that class is only for the row's
+       own run. Without the 40px lane the actions button covers the child
+       badge on hover. Reserve it here: the :has() argument matches the
+       timestamp's own path, so this selector also outranks the four skins'
+       `.active` padding shorthand (0,5,0 vs 0,4,0). */
+    .session-item:has(> .session-text > .session-title-row > .session-time.is-hidden){padding-right:40px;}
+    /* Short relative stamps ("1m", "2h") are narrower than the 26px action
+       button parked at right:6px; the timestamp's box is what keeps the
+       button off the chips, so give it the button's width. */
+    .session-time{min-width:26px;}
   }
   /* ── Session action trigger + dropdown ── */
   .session-actions{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .15s ease;}
