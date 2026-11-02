@@ -15937,6 +15937,16 @@ def _merge_session_messages_append_only_impl(
         "content_state": lambda msg: _session_message_content_key(
             msg, normalize_workspace_prefix=True
         ),
+        # Occurrence-stripped content identity.  Only the in-window
+        # distinct-tool-call exception compares content this way (see the
+        # ``_tc`` branch in the state loop); every other consumer keeps the
+        # occurrence discriminator #7587 added.
+        "content_only_sidecar": lambda msg: _session_message_content_key(
+            msg, normalize_workspace_prefix=False, include_occurrence=False
+        ),
+        "content_only_state": lambda msg: _session_message_content_key(
+            msg, normalize_workspace_prefix=True, include_occurrence=False
+        ),
         "visible_sidecar": lambda msg: _session_message_visible_key(
             msg, normalize_workspace_prefix=False
         ),
@@ -16080,6 +16090,14 @@ def _merge_session_messages_append_only_impl(
     seen_message_keys = set()
     seen_dedup_keys = set()
     seen_content_keys = set()
+    # Content identity WITHOUT the #7587 occurrence discriminator, kept in
+    # lockstep with seen_content_keys.  Only the in-window distinct-tool-call
+    # exception reads it: that probe pairs a sidecar tool row with the durable
+    # row of a DIFFERENT tool call in the same turn, and the two rows carry
+    # identical (empty) content but legitimately different second-level
+    # clocks.  Requiring clock agreement there dropped the incoming tool call
+    # (#8672 review P2).  Everything else stays occurrence-sensitive.
+    seen_content_only_keys = set()
     seen_visible_keys = set()
     sidecar_visible_sequence = []
     sidecar_visible_messages = []
@@ -16118,6 +16136,7 @@ def _merge_session_messages_append_only_impl(
         seen_dedup_keys.add(_cached_message_key(msg, "dedup"))
         content_key = _cached_message_key(msg, "content_sidecar")
         seen_content_keys.add(content_key)
+        seen_content_only_keys.add(_cached_message_key(msg, "content_only_sidecar"))
         visible_key = _cached_message_key(msg, "visible_sidecar")
         seen_visible_keys.add(visible_key)
         sidecar_visible_keys.add(visible_key)
@@ -16458,6 +16477,9 @@ def _merge_session_messages_append_only_impl(
             seen_message_keys.add(key)
             seen_dedup_keys.add(dedup_key)
             seen_content_keys.add(content_key)
+            seen_content_only_keys.add(
+                _cached_message_key(msg, "content_only_state")
+            )
             seen_visible_keys.add(visible_key)
             _remember_merged_message(msg, source="state")
             continue
@@ -16634,12 +16656,22 @@ def _merge_session_messages_append_only_impl(
                 # Legacy key within sidecar timestamp range.  Normally skip — the
                 # sidecar already has this message.  Exception: if the state.db
                 # message has tool_calls that DIFFER from the sidecar version
-                # (same content_key but different dedup_key because tool_calls
+                # (same content but different dedup_key because tool_calls
                 # differ), preserve it — distinct tool_calls must not be collapsed.
                 _tc = msg.get("tool_calls")
                 if _tc:
-                    _ck = content_key
-                    if _ck in seen_content_keys and dedup_key not in seen_dedup_keys:
+                    # This exception deliberately compares CONTENT identity
+                    # only, without the #7587 occurrence discriminator
+                    # (#8672 review P2): the sidecar tool row and the durable
+                    # row for a DIFFERENT tool call of the same turn are the
+                    # same content (typically empty) one second apart, so an
+                    # occurrence-sensitive membership test never matches and
+                    # the incoming distinct tool call is dropped.  The
+                    # different-dedup_key requirement below still keeps
+                    # genuinely distinct turns apart, so #7587's collapse fix
+                    # for ordinary repeated rows is untouched.
+                    _ck = _cached_message_key(msg, "content_only_state")
+                    if _ck in seen_content_only_keys and dedup_key not in seen_dedup_keys:
                         # Different tool_calls from sidecar — preserve, but keep
                         # the row in timestamp order. Falling through to the
                         # generic append path would move older tool-call-only
@@ -16648,6 +16680,7 @@ def _merge_session_messages_append_only_impl(
                             seen_message_keys.add(key)
                             seen_dedup_keys.add(dedup_key)
                             seen_content_keys.add(content_key)
+                            seen_content_only_keys.add(_ck)
                             seen_visible_keys.add(visible_key)
                             _remember_merged_message(msg, source="state")
                         continue
@@ -16660,6 +16693,9 @@ def _merge_session_messages_append_only_impl(
                             seen_message_keys.add(key)
                             seen_dedup_keys.add(dedup_key)
                             seen_content_keys.add(content_key)
+                            seen_content_only_keys.add(
+                                _cached_message_key(msg, "content_only_state")
+                            )
                             seen_visible_keys.add(visible_key)
                             _remember_merged_message(msg, source="state")
                         continue
@@ -16668,6 +16704,7 @@ def _merge_session_messages_append_only_impl(
         seen_message_keys.add(key)
         seen_dedup_keys.add(dedup_key)
         seen_content_keys.add(content_key)
+        seen_content_only_keys.add(_cached_message_key(msg, "content_only_state"))
         seen_visible_keys.add(visible_key)
         # This terminal path is shared by state.db reconciliation and by ordered
         # sidecar stitching (notably compression continuations). Only the caller
