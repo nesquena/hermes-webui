@@ -13811,19 +13811,88 @@ def _handle_logs(handler, parsed) -> bool:
         st = log_path.stat()
         total_bytes = int(st.st_size)
         read_bytes = min(total_bytes, _LOG_MAX_BYTES)
+        seeked = total_bytes > read_bytes
+        fd_total = None
+        fd_mtime = None
         with log_path.open("rb") as fh:
-            if total_bytes > read_bytes:
-                fh.seek(total_bytes - read_bytes)
-            raw = fh.read(read_bytes)
+            # Use the open fd's own size: the path may have been replaced or
+            # shrunk between stat() and open() (rotation/truncation). The fd
+            # describes what we actually read.
+            try:
+                fd_size = int(os.fstat(fh.fileno()).st_size)
+            except OSError:
+                fd_size = total_bytes
+            if fd_size < 0:
+                fd_size = 0
+            read_bytes = min(fd_size, _LOG_MAX_BYTES)
+            seeked = fd_size > read_bytes
+            at_boundary = True
+            if seeked:
+                offset = fd_size - read_bytes
+                try:
+                    # If the byte just before the window is a newline, the
+                    # window already starts on a complete line: keep it.
+                    fh.seek(max(0, offset - 1))
+                    at_boundary = fh.read(1) == b"\n"
+                except OSError:
+                    at_boundary = False
+                try:
+                    fh.seek(offset)
+                except OSError:
+                    fh.seek(0)
+                    at_boundary = True
+                raw = fh.read(read_bytes)
+            else:
+                try:
+                    fh.seek(0)
+                except OSError:
+                    pass
+                raw = fh.read(read_bytes)
+            # Observe size/mtime from the same open descriptor that produced
+            # the bytes: a later pathname stat could describe a rotated-in
+            # generation instead of the content just returned.
+            try:
+                _st_fd = os.fstat(fh.fileno())
+                fd_total = int(_st_fd.st_size)
+                fd_mtime = _st_fd.st_mtime
+            except OSError:
+                fd_total = None
+                fd_mtime = None
+            if seeked and not at_boundary:
+                # Drop only a genuinely partial first line: the seek offset
+                # landed mid-line (or mid-UTF-8 sequence). Never sacrifice a
+                # valid complete line to hide a fragment. When the whole
+                # window holds one unfinished long line (no newline at all),
+                # drop the fragment entirely instead of rendering it.
+                nl = raw.find(b"\n")
+                raw = raw[nl + 1 :] if nl != -1 else b""
         text = raw.decode("utf-8", errors="replace")
         lines = text.splitlines()[-tail:]
+        if fd_total is not None:
+            total_bytes = fd_total
+            mtime = fd_mtime
+        else:
+            try:
+                # Fallback only: fstat on an open fd effectively never fails,
+                # so reaching here already means an unusual OS error.
+                st_after = log_path.stat()
+                total_bytes = int(st_after.st_size)
+                mtime = st_after.st_mtime
+            except OSError:
+                mtime = st.st_mtime
         return j(handler, {
             "file": file_key,
             "tail": tail,
             "lines": lines,
-            "truncated": total_bytes > read_bytes,
+            # ``truncated`` describes the read that was actually performed:
+            # True only when the window had to skip leading bytes to honor the
+            # byte cap at read time. It is deliberately not derived from a
+            # post-read fstat size -- a file that grows between the read and
+            # the fstat would otherwise be reported as truncated even though
+            # nothing was skipped.
+            "truncated": seeked,
             "total_bytes": total_bytes,
-            "mtime": st.st_mtime,
+            "mtime": mtime,
             "hint": "",
         })
     except Exception as exc:
