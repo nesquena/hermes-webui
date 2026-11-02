@@ -2268,6 +2268,50 @@ def _gateway_config_for_profile(profile_name) -> dict | None:
     return get_config_for_profile_home(_profiles.get_hermes_home_for_profile(name))
 
 
+def _gateway_personality_config_for_session(session) -> dict:
+    """Config that owns a session's ``agent.personalities``: its own profile home.
+
+    ``_gateway_config_for_profile()`` answers the ENDPOINT question and
+    deliberately falls back to the process-active config: it returns ``None``
+    for root/default profiles and ``{}`` for a home it cannot read, and the
+    caller's ``or get_config()`` then selects whichever profile the WebUI
+    process happens to have loaded. Personality definitions must NOT borrow
+    that ambient config (#8641 review): a session owned by ``default`` -- or by
+    a named home that no longer exists -- owns no personalities, and answering
+    from the process-active profile would inject another profile's definition
+    under the very same name. An owned-but-empty config therefore stays empty.
+
+    This is the same resolution the embedded worker uses for the same session
+    (``api/streaming.py``): the session's own profile home, read directly, never
+    the thread-local/process-active resolver. A home that cannot be read owns an
+    empty config rather than the ambient one, so an unusable owner degrades to
+    "no personality" instead of "someone else's personality".
+
+    The reader is called with ``isolate_config_override=True`` because the
+    owner-isolation contract is stronger than the reader's default ambient
+    fast path: with the flag off, a session whose owner home matches the
+    active one is answered by ``get_config()`` — and that resolver honours an
+    authoritative ``HERMES_CONFIG_PATH``, so an UNRELATED override file (root's,
+    another profile's) can supply a same-named personality definition for a
+    home that never defined it. Isolating drops those fast paths, so the
+    definitions always come from the owner home's own file.
+    """
+    from api import profiles as _profiles
+    from api.config import get_config_for_profile_home
+
+    try:
+        home = _profiles.get_hermes_home_for_profile(str(getattr(session, "profile", None) or ""))
+        cfg = get_config_for_profile_home(home, isolate_config_override=True)
+    except Exception:
+        logger.debug(
+            "gateway personality: could not read the config owned by session profile %r; "
+            "treating that owner as defining no personalities",
+            getattr(session, "profile", None), exc_info=True,
+        )
+        return {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
 def _settle_delegation_reservation(session_id, stream_id, accepted: bool) -> None:
     from api.gateway_delegation_wakeup import settle_reservation
 
@@ -3192,8 +3236,15 @@ def _run_gateway_chat_streaming(
             # (same resolver the embedded worker uses) -- it used to be hard-coded
             # to None here, so a personality picked in the browser never reached
             # a Gateway-routed turn.
+            # #8641 review: the personality definitions are resolved from the
+            # session's OWN profile home, not from `cfg`. `cfg` answers the
+            # endpoint question and falls back to the process-active config for
+            # root/default owners and unreadable homes, which would answer a
+            # same-named personality from another profile's definitions; an
+            # owned-but-empty config must stay empty instead of borrowing them.
+            _personality_cfg = _gateway_personality_config_for_session(s)
             _gateway_system_prompt = _webui_ephemeral_system_prompt(
-                _webui_session_personality_prompt(s, config_data=cfg),
+                _webui_session_personality_prompt(s, config_data=_personality_cfg),
                 surface_context={
                     "source": "webui",
                     "session_id": session_id,
