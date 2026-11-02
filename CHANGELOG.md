@@ -5,6 +5,8 @@
 
 ### Added
 
+- **Tasks has a read-only Scripts tab.** Next to Jobs, a Scripts tab lists the active profile's `scripts/` folder (the scripts cron jobs can run) with each file's size, age and the description from its leading comment. The tab only lists (there is no viewer yet; to view or edit a script, open the file on the server); a read-only `GET /api/scripts/raw` returns one file's text for a later viewer. Reads stay inside that folder (no symlinks out, size-capped), a platform that cannot open the folder safely says so instead of showing an empty list, and the tab hides "New job" since it cannot create anything. Thanks @happy5318. (#7685, for #2316)
+
 - **The workspace Artifacts panel shows which skills each conversation used.** A new "Skills used" section lists every skill the session loaded and how many times, counted from successful skill loads (the Agent's `skill_view`, `/use` and bundle commands) and kept per session and profile. Files and skills sit in their own collapsible sections ("Files changed N", "Skills used N"), and the Artifacts badge counts both. Thanks @rodboev. (#6693, for #6593)
 
 - **A notice shows when memory is off for the agent serving the chat.** When memory can't be kept inside one profile, the Agent runs with memory (or just its external provider) switched off, and before this the only trace was a server log line. A dismissible notice above the composer now says which case applies (an Agent too old to scope memory per profile, an Agent that can't claim a provider per profile, or a provider already used by another profile) and how to turn memory back on. Healthy and read-only sessions show nothing. (#8652, refs #8517)
@@ -57,6 +59,8 @@
 
 ### Security
 
+- **Settings saves no longer write secrets from your environment into config.yaml.** Several WebUI settings writers (reasoning display and effort, the default model and its advanced options, auxiliary model slots, the dashboard link, the Kanban settings, `/codex-runtime` and the skills toggle) loaded `config.yaml` with every `${VAR}` / `${env:VAR}` reference already expanded and saved that copy back, so a key or URL kept in the environment ended up on disk in plain text and the reference was lost. Each writer now reads the raw file, changes only what you edited and saves it; re-saving a value the UI displayed from a reference keeps the reference. Reads that resolve references for a profile now use that profile's own `.env` (a named profile never falls back to another profile's variables). A skills toggle whose `disabled` list comes from a variable now writes the explicit names and says so, and refuses with an error rather than reporting success when the result would not take effect. (#8129, fixes #8032 and #8115, reported by @wheelspin and @cellardoorio; salvaged from #7854 by @MuhammadUsamaMX)
+
 - **Each profile's agent memory stays in that profile (#8517).** When one WebUI process served several profiles, an agent could bind its memory to another profile's home, so profile A read and wrote B's external memory bank and built-in `MEMORY.md`/`USER.md`, or had its own memory silently refused. Agents are now built and run inside their session's profile and verified afterwards; helper agents (compression, summaries, commit messages, handoff) run without memory; session-end memory commits run as the session's owner and stay pending if refused. Everything fails closed: if the profile cannot be verified, that turn runs without memory and a warning is logged. Older Agents lose some memory with multiple profiles: shared-instance providers (Mnemosyne up to 0.7.1) stay with the first profile used until restart, Agents without `claim_instance` serving several profiles turn external memory off, and Agents older than v0.18 turn all memory off with a warning to update. Current Agents with per-instance providers are unchanged. Thanks @smoke007 for the report. (#8585)
 
 - **Login rate limiting can no longer be bypassed with forwarded headers (#8591, #8595).** Since exp-v0.52.546, with `HERMES_WEBUI_TRUST_FORWARDED_FOR=1` and a listed proxy, a client could pick a fresh login bucket per attempt by rotating `X-Real-IP`, or by sending its own `X-Forwarded-For` through a proxy that relays it unchanged (a bare nginx `proxy_pass`), which made password guessing unlimited. Both login paths (password and passkey) now key on the socket peer again, as v0.52.544 did. Per-client buckets behind a proxy are an explicit opt-in, `HERMES_WEBUI_LOGIN_RATE_LIMIT_PER_CLIENT=1`, for proxies that append to or overwrite `X-Forwarded-For`; even then `X-Real-IP` alone never selects a bucket. Upgrading from exp .546+ with the two old settings: set the new one to keep per-client buckets. See `docs/remote-access.md`. (#8592)
@@ -76,6 +80,8 @@
   exactly as before. Thanks @ybai08. (#8138, fixes #8126)
 
 ### Fixed
+
+- **The #4856 mobile-transcript guards no longer break when unrelated CSS is added to the mobile stylesheet block.** Both guards looked for the mobile `.messages-inner` rule in a fixed number of characters after the start of the `@media(max-width:640px)` block (8,000 and 12,000). Adding about 1,200 characters of rules earlier in that block made the first one fail although the rule was unchanged. They now read the whole block with a shared scanner (`tests/_css_blocks.py`) that skips braces in comments, strings, escapes and unquoted `url()`, and they still fail if `overflow-x:hidden` returns, `overflow-y:auto` is added, or the rule leaves the mobile block. Test-only; no runtime change. (#8710)
 
 - **The Gateway Status card shows a single separator after "Last active".** Most translations of the label already end in a colon, and the card added another, so it read "Last active: : <date>". The card now keeps the colon the translation chose (a full-width "：" in Chinese, " : " in French) and adds ": " only to a label without one. (#8635, closes #8621, thanks @happy5318)
 
@@ -430,6 +436,8 @@
 - **Documented the gateway approval-runs API opt-in.** `docs/advanced-chat-setup.md` and `docs/docker.md` now explain how to enable and use the gateway approval-runs API. Thanks @rodboev. (#5549, #5269)
 
 ### Changed
+
+- **Slash menu polish.** `/pet` shows its argument hint, every command row uses the same `<required>` / `[optional]` argument notation, and typing a hidden registry command such as `/agents` gets the CLI-only explainer instead of being sent to the model as plain text. `/help` shows every option of a usage hint. Thanks @happy5318. (#7683, fixes #7675)
 
 - **A running subagent's transcript shows its live work.** Opening a delegated subagent while it runs used to show one collapsed, empty "Processed" chip that never updated until a reload. Its last turn now opens with every step's thinking and tool cards, the newest step reads "Running", the page follows the running child, and the steps settle to the usual collapsed chips when it finishes. The parent's delegate card is named by the subagent's goal. Thanks @carlotestor. (#7885)
 
