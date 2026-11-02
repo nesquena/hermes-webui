@@ -2321,6 +2321,132 @@ if (_healthResponseServerIdentity({{ server_started_at: null, uptime_seconds: nu
         )
 
 
+# Update payloads for checkUpdatesNow() and the target list the shared
+# formatter must produce for each of them (#8283). The Settings summary
+# template (settings_updates_available_targets) only wraps that list: the
+# formatter owns the count and the unit ("WebUI: 2 releases").
+SETTINGS_UPDATE_CASES = {
+    'one_release': (
+        {'webui': {'behind': 1, 'release_based': True, 'current_version': 'v0.52.0',
+                   'latest_version': 'v0.52.1', 'latest_tag': 'v0.52.1'},
+         'agent': {'behind': 0}},
+        'WebUI (v0.52.0 -> v0.52.1): 1 release',
+    ),
+    'two_releases': (
+        {'webui': {'behind': 2, 'release_based': True, 'current_version': 'v0.52.0',
+                   'latest_version': 'v0.52.2', 'latest_tag': 'v0.52.2'},
+         'agent': {'behind': 0}},
+        'WebUI (v0.52.0 -> v0.52.2): 2 releases',
+    ),
+    'one_update': (
+        {'webui': {'behind': 1, 'branch': 'origin/master'}, 'agent': {'behind': 0}},
+        'WebUI (origin/master): 1 update',
+    ),
+    'three_updates': (
+        {'webui': {'behind': 0}, 'agent': {'behind': 3, 'branch': 'origin/main'}},
+        'Agent (origin/main): 3 updates',
+    ),
+    'webui_and_agent': (
+        {'webui': {'behind': 2, 'release_based': True, 'current_version': 'v0.52.0',
+                   'latest_version': 'v0.52.2', 'latest_tag': 'v0.52.2'},
+         'agent': {'behind': 3, 'branch': 'origin/main'}},
+        'WebUI (v0.52.0 -> v0.52.2): 2 releases, Agent (origin/main): 3 updates',
+    ),
+    'tag_suffix': (
+        {'webui': {'behind': 1, 'branch': 'origin/master', 'latest_tag': 'v0.52.1'},
+         'agent': {'behind': 0}},
+        'WebUI (origin/master): 1 update',
+    ),
+    'manual_update': (
+        {'webui': {'no_git': True, 'manual_update': True, 'behind': 1, 'release_based': True,
+                   'current_version': 'v0.51.833', 'latest_version': 'v0.51.913'},
+         'agent': None},
+        'WebUI (v0.51.833 -> v0.51.913): 1 release',
+    ),
+    'agent_no_git': (
+        {'webui': {'behind': 1, 'branch': 'origin/master'}, 'agent': {'no_git': True}},
+        'WebUI (origin/master): 1 update',
+    ),
+    'up_to_date': (
+        {'webui': {'behind': 0, 'latest_tag': 'v0.52.1'}, 'agent': {'behind': 0}},
+        None,
+    ),
+}
+
+_SETTINGS_UPDATE_STATUS_DRIVER = r"""
+const fs = require('fs');
+const vm = require('vm');
+const elements = {
+  btnCheckUpdatesNow: { disabled: false },
+  checkUpdatesLabel: { textContent: '' },
+  checkUpdatesSpinner: { style: { display: 'none' } },
+  checkUpdatesStatus: { textContent: '', style: { color: '' } },
+};
+let apiData = null;
+const ctx = {
+  console,
+  window: {},
+  localStorage: { getItem: () => null, setItem: () => {} },
+  document: { documentElement: { lang: '' }, querySelectorAll: () => [] },
+  $: (id) => elements[id] || null,
+  api: async () => JSON.parse(JSON.stringify(apiData)),
+  _showUpdateBanner: () => {},
+};
+vm.createContext(ctx);
+vm.runInContext(fs.readFileSync(__I18N_PATH__, 'utf8'), ctx);
+vm.runInContext(__HELPERS__, ctx);
+const cases = __CASES__;
+(async () => {
+  const out = {};
+  for (const lang of Object.keys(vm.runInContext('LOCALES', ctx))) {
+    vm.runInContext('setLocale(' + JSON.stringify(lang) + ')', ctx);
+    const status = {};
+    for (const [name, payload] of Object.entries(cases)) {
+      apiData = payload;
+      elements.checkUpdatesStatus.textContent = '';
+      await ctx.checkUpdatesNow();
+      status[name] = elements.checkUpdatesStatus.textContent;
+    }
+    const values = vm.runInContext(`({
+      template: t('settings_updates_available_targets'),
+      hasCountKey: Object.prototype.hasOwnProperty.call(LOCALES[${JSON.stringify(lang)}], 'settings_updates_available'),
+      manual: t('settings_update_manual_docker', 'docker pull ghcr.io/nesquena/hermes-webui:latest'),
+      noGit: t('settings_update_no_git'),
+      tag: t('settings_latest_tag_suffix').replace('{0}', 'v0.52.1'),
+      upToDate: t('settings_up_to_date'),
+    })`, ctx);
+    out[lang] = { status, values };
+  }
+  process.stdout.write(JSON.stringify(out));
+})().catch(err => { console.error(err && err.stack || err); process.exit(1); });
+"""
+
+
+def _render_settings_update_status(cases, *, with_formatter=True):
+    """Run the real checkUpdatesNow() with the real static/i18n.js in every locale.
+
+    Returns {locale: {'status': {case: text}, 'values': {...}}}.
+    """
+    ui_src = read('static/ui.js')
+    panels_src = read('static/panels.js')
+    helpers = [
+        extract_js_function(ui_src, '_updateTargetArrowNamesTag'),
+        extract_js_function(ui_src, '_formatManualUpdateInstruction'),
+        extract_js_function(ui_src, '_formatUpdateCheckError'),
+        extract_js_function(panels_src, 'checkUpdatesNow'),
+    ]
+    if with_formatter:
+        helpers.insert(0, extract_js_function(ui_src, '_formatUpdateTargetStatus'))
+    script = (
+        _SETTINGS_UPDATE_STATUS_DRIVER
+        .replace('__I18N_PATH__', json.dumps(str(REPO / 'static' / 'i18n.js')))
+        .replace('__HELPERS__', json.dumps('\n'.join(helpers)))
+        .replace('__CASES__', json.dumps(cases))
+    )
+    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True, encoding='utf-8')
+    return json.loads(proc.stdout)
+
+
 class TestUpdateBannerUx:
     def test_update_banner_includes_release_labels(self):
         src = read('static/ui.js')
@@ -2401,7 +2527,7 @@ function t(key, ...args) {{
   const values = {{
     settings_checking: 'Checking',
     settings_check_now: 'Check now',
-    settings_updates_available: '{{count}} update(s) available',
+    settings_updates_available_targets: '{{0}} available',
     settings_update_no_git: 'Cannot check for updates',
     settings_update_manual_docker: 'Manual update required: run {{0}}, then recreate the container.',
     settings_up_to_date: 'Up to date',
@@ -2463,8 +2589,8 @@ function _showUpdateBanner() {{}}
     def test_check_updates_status_wraps_on_narrow_viewports(self):
         """PR #6859 review — mixed updates-available + tag suffix must wrap.
 
-        The production status (`WebUI: 1 update, Agent: 2 updates update(s)
-        available · Latest tag: v0.51.913`) is wider than a ~296–351 px phone
+        The production status (`WebUI: 1 update, Agent: 2 updates available
+        · Latest tag: v0.51.913`) is wider than a ~296–351 px phone
         content area. Pin
         both the real checkUpdatesNow() string and the CSS wrap rules so a
         later refactor cannot restore nowrap overflow.
@@ -2536,7 +2662,7 @@ function t(key, ...args) {{
   const values = {{
     settings_checking: 'Checking',
     settings_check_now: 'Check now',
-    settings_updates_available: '{{count}} update(s) available',
+    settings_updates_available_targets: '{{0}} available',
     settings_update_no_git: 'Cannot check for updates',
     settings_update_manual_docker: 'Manual update required: run {{0}}, then recreate the container.',
     settings_up_to_date: 'Up to date',
@@ -2555,11 +2681,77 @@ function _showUpdateBanner() {{}}
 (async () => {{
   await checkUpdatesNow();
   const txt = state.checkUpdatesStatus.textContent;
-  const expected = 'WebUI: 1 update, Agent: 2 updates update(s) available · Latest tag: v0.51.913';
+  const expected = 'WebUI: 1 update, Agent: 2 updates available · Latest tag: v0.51.913';
   if(txt !== expected) throw new Error('narrow-viewport production status mismatch: '+txt);
 }})().catch(err => {{ console.error(err.message); process.exit(1); }});
 """
         subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_settings_update_status_names_the_unit_once_in_every_locale(self):
+        """#8283: the formatter's list ("WebUI: 2 releases") used to go into a
+        count template, which rendered "WebUI: 2 releases update(s) available".
+        Run the real checkUpdatesNow() with the real locale strings and check
+        the complete status for one/several releases, one/several branch updates
+        and WebUI plus Agent, keeping the tag-suffix, manual-update, no-git and
+        up-to-date behaviour.
+        """
+        cases = {name: payload for name, (payload, _) in SETTINGS_UPDATE_CASES.items()}
+        rendered = _render_settings_update_status(cases)
+
+        en = rendered['en']['status']
+        assert en['one_release'] == 'WebUI (v0.52.0 -> v0.52.1): 1 release available'
+        assert en['two_releases'] == 'WebUI (v0.52.0 -> v0.52.2): 2 releases available'
+        assert en['one_update'] == 'WebUI (origin/master): 1 update available'
+        assert en['three_updates'] == 'Agent (origin/main): 3 updates available'
+        assert en['webui_and_agent'] == (
+            'WebUI (v0.52.0 -> v0.52.2): 2 releases, Agent (origin/main): 3 updates available'
+        )
+        assert en['tag_suffix'] == (
+            'WebUI (origin/master): 1 update available ·\u00a0Latest\u00a0tag:\u00a0v0.52.1'
+        )
+        assert en['manual_update'] == (
+            'WebUI (v0.51.833 -> v0.51.913): 1 release available · Manual update required: '
+            'run docker pull ghcr.io/nesquena/hermes-webui:latest, then recreate the container.'
+        )
+        assert en['agent_no_git'] == (
+            "WebUI (origin/master): 1 update available · Can't check for updates (not a git checkout)"
+        )
+        assert en['up_to_date'] == 'Up to date \u2713 ·\u00a0Latest\u00a0tag:\u00a0v0.52.1'
+
+        # Every locale: the template wraps the formatter's list once and adds no unit.
+        for lang, data in rendered.items():
+            status, values = data['status'], data['values']
+            template = values['template']
+            assert template.count('{0}') == 1 and '{count}' not in template, (lang, template)
+            assert not values['hasCountKey'], f'{lang} still defines settings_updates_available'
+            # Count-style plural markers ("update(s)", "aggiornamento/i") belong to a count template.
+            assert not re.search(r'\(\w{1,3}\)|/\w\b', template.replace('{0}', '')), (lang, template)
+            expected = {
+                name: template.replace('{0}', targets)
+                for name, (_, targets) in SETTINGS_UPDATE_CASES.items()
+                if targets is not None
+            }
+            for name in ('one_release', 'two_releases', 'one_update', 'three_updates', 'webui_and_agent'):
+                # The formatter's English unit words, one per target, are the only ones in the line.
+                units = re.findall(r'(?i)\b(?:release|update)s?\b', status[name])
+                assert len(units) == SETTINGS_UPDATE_CASES[name][1].count(':'), (lang, status[name])
+            expected['tag_suffix'] += ' ' + values['tag']
+            expected['manual_update'] += ' · ' + values['manual']
+            expected['agent_no_git'] += ' · ' + values['noGit']
+            expected['up_to_date'] = values['upToDate'] + ' ' + values['tag']
+            assert status == expected, lang
+
+    def test_settings_update_status_fallback_formatter_keeps_the_unit(self):
+        """Without ui.js's formatter the panels.js fallback must add the unit
+        itself, since the summary template no longer does (#8283)."""
+        rendered = _render_settings_update_status({
+            'one': {'webui': {'behind': 1}, 'agent': None},
+            'several': {'webui': {'behind': 2}, 'agent': {'behind': 1}},
+        }, with_formatter=False)
+        assert rendered['en']['status'] == {
+            'one': 'WebUI: 1 update available',
+            'several': 'WebUI: 2 updates, Agent: 1 update available',
+        }
 
     def test_manual_webui_no_git_updates_are_bannerable_but_plain_no_git_stays_hidden(self):
         src = read('static/ui.js')
@@ -2755,7 +2947,7 @@ function t(key, ...args) {{
   const values = {{
     settings_checking: 'Checking',
     settings_check_now: 'Check now',
-    settings_updates_available: '{{count}} update(s) available',
+    settings_updates_available_targets: '{{0}} available',
     settings_update_no_git: 'Cannot check for updates',
     settings_update_manual_docker: 'Manual update required: run {{0}}, then recreate the container.',
     settings_up_to_date: 'Up to date',

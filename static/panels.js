@@ -13290,7 +13290,7 @@ async function checkUpdatesNow(channelOverride){
       const parts=[];
       const formatUpdatePart=(typeof _formatUpdateTargetStatus==='function')
         ? _formatUpdateTargetStatus
-        : ((label,info)=>info&&info.behind>0?label+': '+info.behind:null);
+        : ((label,info)=>info&&info.behind>0?label+': '+info.behind+' update'+(info.behind>1?'s':''):null);
       const webuiPart=formatUpdatePart('WebUI',data.webui);
       const agentPart=formatUpdatePart('Agent',data.agent);
       if(webuiPart) parts.push(webuiPart);
@@ -13315,7 +13315,9 @@ async function checkUpdatesNow(channelOverride){
       // The target whose tag is shown. Its own release arrow may already name the tag (#6859 Fable r1).
       const tagOwner=(data.webui&&data.webui.latest_tag)?data.webui:data.agent;
       if(parts.length){
-        let txt=t('settings_updates_available').replace('{count}',parts.join(', '));
+        // Each part already carries its own count and unit ("WebUI: 2 releases"), so the
+        // template only wraps the list and must not add another unit (#8283).
+        let txt=t('settings_updates_available_targets',parts.join(', '));
         if(manualInstruction) txt+=' · '+manualInstruction;
         if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
         if(tagInfo&&!_updateTargetArrowNamesTag(tagOwner,tagInfo)) txt += ' ' + t('settings_latest_tag_suffix').replace('{0}', tagInfo);
