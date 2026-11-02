@@ -189,14 +189,24 @@ def test_atomic_write_preserves_existing_posix_acl(tmp_path: Path) -> None:
 @pytest.mark.skipif(not hasattr(os, "chown"), reason="POSIX ownership semantics")
 def test_atomic_write_preserves_existing_group(tmp_path: Path) -> None:
     """Replacing the inode must not silently reset an existing config's group."""
-    supplementary_groups = [gid for gid in os.getgroups() if gid != os.getegid()]
-    if not supplementary_groups:
-        pytest.skip("requires a supplementary group distinct from the effective gid")
-
     target = tmp_path / "config.yaml"
     target.write_text("model:\n  default: old\n", encoding="utf-8")
-    expected_gid = supplementary_groups[0]
-    os.chown(target, -1, expected_gid)
+    # getgroups() can list groups this process cannot actually assign: inside a
+    # user namespace (bubblewrap/rootless containers) every supplementary group
+    # outside the gid map reads back as the overflow gid (65534) and chown to it
+    # fails with EINVAL. Use the first supplementary group the kernel accepts.
+    expected_gid = None
+    for gid in dict.fromkeys(os.getgroups()):
+        if gid == os.getegid():
+            continue
+        try:
+            os.chown(target, -1, gid)
+        except OSError:
+            continue
+        expected_gid = gid
+        break
+    if expected_gid is None:
+        pytest.skip("requires an assignable supplementary group distinct from the effective gid")
 
     _atomic_write_text(target, "model:\n  default: new\n")
 
