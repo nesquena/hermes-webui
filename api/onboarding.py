@@ -17,6 +17,7 @@ from api.config import (
     DEFAULT_WORKSPACE,
     _FALLBACK_MODELS,
     _HERMES_FOUND,
+    _canonicalise_provider_id,
     invalidate_models_cache,
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
@@ -983,6 +984,29 @@ def get_onboarding_status() -> dict:
     }
 
 
+def _normalise_provider_selector(provider: object) -> str:
+    """Fold a legacy provider selector onto its canonical setup key.
+
+    #6894 renamed the Mistral setup key ``mistralai`` → ``mistral``, so an
+    existing client (or a config written by an earlier build) still posts the
+    legacy spelling. Canonicalise BEFORE any ``_SUPPORTED_PROVIDER_SETUPS``
+    membership test: a legacy selector must take the same setup path as its
+    canonical twin instead of falling through to the unsupported-provider
+    early completion, which marks onboarding done and leaves ``model: {}``
+    untouched (#8664).
+
+    Only a selector whose canonical form is itself a supported setup is
+    folded — every other value passes through unchanged, so genuinely
+    unsupported providers (openai-codex, copilot, …) keep their existing
+    early-completion behaviour.
+    """
+    raw = str(provider or "").strip().lower()
+    if not raw or raw in _SUPPORTED_PROVIDER_SETUPS:
+        return raw
+    canonical = _canonicalise_provider_id(raw)
+    return canonical if canonical in _SUPPORTED_PROVIDER_SETUPS else raw
+
+
 def apply_onboarding_setup(body: dict) -> dict:
     # Hard guard: if the operator set SKIP_ONBOARDING, the wizard should never
     # have appeared.  Even if the frontend somehow calls this endpoint anyway
@@ -994,7 +1018,11 @@ def apply_onboarding_setup(body: dict) -> dict:
         save_settings({"onboarding_completed": True})
         return get_onboarding_status()
 
-    provider = str(body.get("provider") or "").strip().lower()
+    # Normalise the selector first (#8664): a legacy ``mistralai`` request
+    # must reach the Mistral setup below, not the unsupported early
+    # completion — the membership test and the early completion both run on
+    # the normalised value.
+    provider = _normalise_provider_selector(body.get("provider"))
     model = str(body.get("model") or "").strip()
     api_key = str(body.get("api_key") or "").strip()
     base_url = _normalize_base_url(str(body.get("base_url") or ""))

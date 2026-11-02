@@ -1788,6 +1788,42 @@ def _canonicalise_provider_id(name: object) -> str:
     return raw
 
 
+def _raw_provider_key_for_provider_id(provider_id: object) -> str:
+    """Return the ``providers:`` config key that owns *provider_id*'s record.
+
+    Every WebUI surface speaks CANONICAL provider slugs (#6894 folded
+    Mistral onto ``mistral``), while ``config.yaml`` may still carry the raw
+    key an earlier build wrote — ``providers.mistralai`` for the canonical
+    ``mistral``. Resolve the requested id to the record the picker/catalog
+    already selected: the FIRST raw key, in config order, whose canonical
+    form matches. That is the same ``setdefault`` rule the two catalog
+    builders use for their ``canonical_to_raw_provider_key`` map, and
+    mirroring it is what keeps every stage on ONE record — the group's
+    models, its endpoint and its credential provenance all come from the
+    same ``providers:`` entry whether the caller spells the id canonically
+    (``mistral``) or legacy (``mistralai``).
+
+    Deterministic under collision: when both ``providers.mistral`` and
+    ``providers.mistralai`` exist, config order alone decides (first entry
+    wins), and the answer does NOT depend on which spelling was requested —
+    so a canonical picker hint and a legacy session hint can never resolve
+    to different records.
+
+    Returns the requested id unchanged when no ``providers:`` record matches
+    (the caller then treats the provider as unconfigured, exactly as before).
+    """
+    requested = str(provider_id or "").strip()
+    if not requested:
+        return requested
+    canonical = _canonicalise_provider_id(requested)
+    if not canonical:
+        return requested
+    for raw_key in _get_providers_cfg():
+        if _canonicalise_provider_id(raw_key) == canonical:
+            return raw_key
+    return requested
+
+
 def _normalize_base_url_for_match(value: object) -> str:
     url = str(value or "").strip().rstrip("/")
     if not url:
@@ -2931,16 +2967,30 @@ def _get_provider_base_url(provider_id):
          shape (the model block carries both the active provider AND the
          base URL for that provider in a single record).
 
+    Both lookups resolve the record through ``_raw_provider_key_for_provider_id``
+    (and canonicalise both sides of the model-block comparison), so a
+    CANONICAL id still finds the legacy raw record an earlier build wrote —
+    the picker emits ``@mistral:...`` while the config may only carry
+    ``providers.mistralai`` (#6894/#8664). Without that, the exact-key lookup
+    silently dropped the legacy endpoint and the request fell back to the
+    provider default. The rule is config-order deterministic under a
+    canonical+legacy collision, so no stage can select a different record.
+
     Returns the URL stripped of trailing ``/`` if configured, otherwise None.
     """
-    prov_cfg = _get_provider_cfg(provider_id)
+    prov_cfg = _get_provider_cfg(_raw_provider_key_for_provider_id(provider_id))
     explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
     if explicit:
         return explicit
     model_cfg = cfg.get("model", {}) or {}
     if isinstance(model_cfg, dict):
         model_provider = str(model_cfg.get("provider") or "").strip().lower()
-        if model_provider == str(provider_id).strip().lower():
+        requested = str(provider_id or "").strip().lower()
+        if (
+            requested
+            and model_provider
+            and _canonicalise_provider_id(model_provider) == _canonicalise_provider_id(requested)
+        ):
             model_base = (model_cfg.get("base_url") or "").strip().rstrip("/")
             if model_base:
                 return model_base
