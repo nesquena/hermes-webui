@@ -53,6 +53,11 @@ def _extract_fn(src: str, name: str) -> str:
     marker = f"function {name}"
     start = src.find(marker)
     assert start >= 0, f"{name} not found"
+    # Keep the `async` modifier when the declaration has one. The marker matches
+    # inside "async function name", so slicing at `start` would hand the harness
+    # a plain function whose body awaits, which Node rejects at compile time.
+    if src[max(0, start - 6):start] == "async ":
+        start -= 6
     brace = src.find("{", src.find(")", start))
     depth = 0
     for i in range(brace, len(src)):
