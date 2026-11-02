@@ -673,6 +673,10 @@ const _PWA_SIDEBAR_SWIPE_EDGE=80;
 const _PWA_SIDEBAR_SWIPE_CLAIM=10;
 const _PWA_SIDEBAR_SWIPE_TRIGGER=64;
 const _PWA_SIDEBAR_SWIPE_MAX_VERTICAL=56;
+// A press-and-hold is how iOS starts a text selection. A horizontal drag that
+// follows must extend that selection, not open the drawer, so contact older
+// than this belongs to the text even before getSelection() reports a range.
+const _PWA_SIDEBAR_SWIPE_SELECTION_HOLD_MS=260;
 let _pwaSidebarSwipe=null;
 
 function _isPwaStandalone(){
@@ -690,6 +694,13 @@ function _isInteractiveSwipeTarget(target){
   // keys typed in the menu as page-level shortcuts.
   try{return !!(target&&target.closest&&target.closest('input,textarea,select,button,a,[contenteditable="true"],.topbar-chips,.composer-left,.sidebar,.rightpanel,.img-lightbox,.model-dropdown'));}
   catch(_){return false;}
+}
+
+function _hasActiveTextSelection(){
+  try{
+    const selection=window.getSelection&&window.getSelection();
+    return !!(selection&&!selection.isCollapsed&&String(selection).length>0);
+  }catch(_){return false;}
 }
 
 function _pwaSidebarSwipePoint(e){
@@ -727,7 +738,7 @@ function _onPwaSidebarSwipeStart(e){
   if(!point)return;
   if(point.clientX>_PWA_SIDEBAR_SWIPE_EDGE)return;
   if(_isInteractiveSwipeTarget(e.target))return;
-  _pwaSidebarSwipe={startX:point.clientX,startY:point.clientY,active:true,opened:false};
+  _pwaSidebarSwipe={startX:point.clientX,startY:point.clientY,startedAt:Date.now(),active:true,opened:false};
 }
 
 function _onPwaSidebarSwipeMove(e){
@@ -739,6 +750,12 @@ function _onPwaSidebarSwipeMove(e){
   const dx=point.clientX-swipe.startX;
   const dy=point.clientY-swipe.startY;
   if(dx<0||Math.abs(dy)>_PWA_SIDEBAR_SWIPE_MAX_VERTICAL*1.5){_pwaSidebarSwipe=null;return;}
+  // Selection and long-press own the gesture: abandon BEFORE claiming, and never
+  // preventDefault here or iOS cancels the selection and the drawer opens.
+  if(_hasActiveTextSelection()||Date.now()-swipe.startedAt>_PWA_SIDEBAR_SWIPE_SELECTION_HOLD_MS){
+    _pwaSidebarSwipe=null;
+    return;
+  }
   if(dx>=_PWA_SIDEBAR_SWIPE_CLAIM&&dx>Math.abs(dy)*1.2){
     if(e.cancelable)e.preventDefault();
   }

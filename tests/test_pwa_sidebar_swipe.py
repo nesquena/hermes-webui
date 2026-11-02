@@ -59,6 +59,30 @@ def test_pwa_sidebar_edge_guard_is_non_interactive_and_swipe_uses_window_capture
     )
 
 
+def test_pwa_sidebar_swipe_yields_to_text_selection_and_long_press():
+    """The edge swipe must not steal a press-and-hold text selection.
+
+    iOS begins selecting text with a press-and-hold, then a horizontal drag.
+    The swipe handler claims any horizontal movement inside the 80px edge strip,
+    so selecting a line that starts near the left margin opened the drawer and
+    cancelled the selection. The gesture must abandon (without preventDefault)
+    when a selection exists or the contact has been held past the long-press
+    threshold.
+    """
+    assert "function _hasActiveTextSelection" in BOOT_JS
+    assert "_PWA_SIDEBAR_SWIPE_SELECTION_HOLD_MS" in BOOT_JS
+    start = BOOT_JS[BOOT_JS.find("function _onPwaSidebarSwipeStart"):BOOT_JS.find("function _onPwaSidebarSwipeMove")]
+    assert "startedAt:Date.now()" in start.replace(" ", ""), (
+        "the swipe must record when the contact started"
+    )
+    move = BOOT_JS[BOOT_JS.find("function _onPwaSidebarSwipeMove"):BOOT_JS.find("function _onPwaSidebarSwipeEnd")]
+    guard = move.find("_hasActiveTextSelection()")
+    claim = move.find("_PWA_SIDEBAR_SWIPE_CLAIM")
+    assert guard != -1 and claim != -1 and guard < claim, (
+        "the selection/long-press guard must run before the swipe claims the drag"
+    )
+
+
 def test_pwa_sidebar_swipe_opens_existing_mobile_drawer_without_desktop_collapse():
     assert "_openMobileSidebarFromGesture" in BOOT_JS
     assert "sidebar.classList.remove('sidebar-collapsed')" in BOOT_JS
