@@ -21987,6 +21987,10 @@ def handle_post(handler, parsed) -> bool:
         _force_active_runs = isinstance(body, dict) and body.get("force_active_runs") is True
         return j(handler, apply_update(target, _apply_channel, force_active_runs=_force_active_runs))
 
+    # ── Operator-initiated stale-runtime restart (POST) ──
+    if parsed.path == "/api/runtime/restart":
+        return _handle_runtime_restart(handler, body)
+
     if parsed.path == "/api/updates/force":
         target = body.get("target", "")
         if target not in ("webui", "agent"):
@@ -35352,6 +35356,26 @@ def _handle_session_import_cli(handler, body):
             "imported": True,
         },
     )
+
+
+def _handle_runtime_restart(handler, body):
+    """Operator-initiated recovery from the stale-Agent-runtime 409 (#7934).
+
+    Auth is inherited from the shared POST entry point (``check_auth()``
+    verifies the session cookie before any branch runs), so native clients
+    can call this without a browser-only Origin header — the same contract
+    as ``/api/updates/apply``. The route only ever schedules a restart for a
+    genuinely stale runtime; see ``updates.restart_stale_runtime()``.
+    """
+    from api.updates import restart_stale_runtime
+
+    result = restart_stale_runtime()
+    # 409 mirrors the stale-runtime vocabulary the chat routes already use;
+    # a restart-blocked body keeps the /api/updates/apply 200 convention.
+    status = 200
+    if result.get("type") in ("agent_runtime_current", "agent_runtime_stale"):
+        status = 409
+    return j(handler, result, status=status)
 
 
 def _handle_session_import(handler, body):
