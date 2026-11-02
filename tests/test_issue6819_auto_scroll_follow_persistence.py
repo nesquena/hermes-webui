@@ -15,9 +15,7 @@ review on #6856), makes the boot fallback read the mirror instead of
 hardcoding ON, and only overrides the runtime flag when a settings body
 actually owns the key.
 """
-import json
 import pathlib
-import re
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -118,7 +116,6 @@ def test_mirror_helpers_behavior_via_source_extraction():
     import re as _re
     import shutil
     import subprocess
-    import sys
 
     assert shutil.which("node"), "node required for this test"
     src = _read("static/boot.js")
