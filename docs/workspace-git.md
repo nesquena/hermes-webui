@@ -25,7 +25,9 @@ Fetch may update remote-tracking refs, but it does not change the worktree, merg
 commits, or push changes.
 
 Commit-message generation may send staged or selected diff context to the configured model provider.
-The UI labels this before generation.
+The UI labels this before generation. For a generic custom provider, the endpoint and credential
+are taken together from the active profile's runtime resolution. Failure to resolve that runtime
+stops generation rather than using an endpoint retained in a shared config cache.
 
 Diffs for untracked files are size checked before WebUI reads file contents. Large or binary files
 return metadata instead of inline diff text.
