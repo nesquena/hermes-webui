@@ -477,6 +477,335 @@ class TestAcceptanceChain:
         )
 
 
+# ────────────────────────────────────────────────────────────────────────
+# Section 4 — a legacy raw record keeps its endpoint (#8664 review P2)
+# ────────────────────────────────────────────────────────────────────────
+
+_LEGACY_MISTRAL_RECORD = {
+    "api_key": "legacy-record-canary",
+    "base_url": "https://legacy-relay.example/v1",
+    "models": ["mistral-small-latest"],
+}
+# The review's fixture: an unrelated active provider, a Mistral record
+# written under the legacy ``mistralai`` key, and no ambient Mistral key.
+_LEGACY_MISTRAL_CFG = {
+    "model": {"provider": "anthropic", "default": "unrelated-model"},
+    "providers": {"mistralai": dict(_LEGACY_MISTRAL_RECORD)},
+}
+
+
+def _static_catalog(monkeypatch, tmp_path, cfg_extra: dict) -> dict:
+    """Network-free /api/models surface for *cfg_extra* (test cfg only)."""
+    _scrub_provider_env(monkeypatch)
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    _install_fake_hermes_cli(monkeypatch)
+    restore = _swap_in_test_config(cfg_extra)
+    try:
+        return config._static_models_catalog_without_live_probes()
+    finally:
+        restore()
+
+
+class TestLegacyRecordEndpointRetention:
+    """The catalog emits the canonical ``@mistral:`` option; the endpoint it
+    must route to still lives on the legacy ``providers.mistralai`` record."""
+
+    def test_canonical_option_resolves_to_the_legacy_endpoint(self, monkeypatch, tmp_path):
+        catalog = _static_catalog(monkeypatch, tmp_path, _LEGACY_MISTRAL_CFG)
+        groups = _mistral_groups(catalog)
+        assert len(groups) == 1
+        assert groups[0]["provider_id"] == "mistral"
+        option = groups[0]["models"][0]["id"]
+        assert option == "@mistral:mistral-small-latest", (
+            f"static catalog must emit the canonical option, got {option!r}"
+        )
+
+        restore = _swap_in_test_config(_LEGACY_MISTRAL_CFG)
+        try:
+            resolved = config.resolve_model_provider(option)
+        finally:
+            restore()
+        assert resolved == (
+            "mistral-small-latest",
+            "mistral",
+            "https://legacy-relay.example/v1",
+        ), (
+            "the canonical option must keep routing to the legacy record's "
+            f"endpoint, got {resolved!r}"
+        )
+
+    def test_base_url_lookup_finds_the_legacy_record_for_either_spelling(self):
+        restore = _swap_in_test_config(_LEGACY_MISTRAL_CFG)
+        try:
+            for spelling in ("mistral", "mistralai"):
+                assert config._raw_provider_key_for_provider_id(spelling) == "mistralai", (
+                    f"{spelling!r} must resolve to the legacy raw config key"
+                )
+                assert config._get_provider_base_url(spelling) == (
+                    "https://legacy-relay.example/v1"
+                ), f"{spelling!r} lost the legacy record's endpoint"
+        finally:
+            restore()
+
+    def test_legacy_option_from_an_older_build_still_keeps_its_endpoint(self):
+        """A session stored by the frozen base carries ``@mistralai:...``."""
+        restore = _swap_in_test_config(_LEGACY_MISTRAL_CFG)
+        try:
+            resolved = config.resolve_model_provider("@mistralai:mistral-small-latest")
+        finally:
+            restore()
+        assert resolved == (
+            "mistral-small-latest",
+            "mistralai",
+            "https://legacy-relay.example/v1",
+        ), f"the legacy option must keep its endpoint, got {resolved!r}"
+
+    def test_legacy_active_model_block_base_url_survives_canonical_request(self):
+        """``model.provider: mistralai`` + ``model.base_url`` (the historical
+        single-record shape) must still answer a canonical request."""
+        restore = _swap_in_test_config({
+            "model": {
+                "provider": "mistralai",
+                "default": "mistral-small-latest",
+                "base_url": "https://legacy-relay.example/v1",
+            },
+            "providers": {"mistralai": {"api_key": "legacy-record-canary"}},
+        })
+        try:
+            assert config._get_provider_base_url("mistral") == (
+                "https://legacy-relay.example/v1"
+            )
+            assert config._get_provider_base_url("mistralai") == (
+                "https://legacy-relay.example/v1"
+            )
+        finally:
+            restore()
+
+    def test_unrelated_provider_record_is_untouched(self):
+        """The alias-aware lookup must not leak across providers."""
+        restore = _swap_in_test_config({
+            "model": {"provider": "anthropic", "default": "unrelated-model"},
+            "providers": {
+                "mistralai": dict(_LEGACY_MISTRAL_RECORD),
+                "anthropic": {"base_url": "https://anthropic-relay.example/v1"},
+            },
+        })
+        try:
+            assert config._get_provider_base_url("anthropic") == (
+                "https://anthropic-relay.example/v1"
+            )
+            assert config._get_provider_base_url("openai") is None
+        finally:
+            restore()
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Section 5 — canonical+legacy record collision semantics (#8664 review)
+# ────────────────────────────────────────────────────────────────────────
+
+# Documented rule: when BOTH ``providers.mistral`` and ``providers.mistralai``
+# exist, the FIRST record in config order owns the canonical identity — the
+# same ``setdefault`` rule the catalog builders use for
+# ``canonical_to_raw_provider_key`` — and the choice does NOT depend on which
+# spelling the caller used. No stage may select a different record.
+_COLLISION_CFG_LEGACY_FIRST = {
+    "model": {"provider": "anthropic", "default": "unrelated-model"},
+    "providers": {
+        "mistralai": {
+            "api_key": "legacy-record-canary",
+            "base_url": "https://legacy-relay.example/v1",
+            "models": ["mistral-small-latest"],
+        },
+        "mistral": {
+            "api_key": "canonical-record-canary",
+            "base_url": "https://api.mistral.ai/v1",
+            "models": ["mistral-large-latest"],
+        },
+    },
+}
+_COLLISION_CFG_CANONICAL_FIRST = {
+    "model": {"provider": "anthropic", "default": "unrelated-model"},
+    "providers": {
+        "mistral": {
+            "api_key": "canonical-record-canary",
+            "base_url": "https://api.mistral.ai/v1",
+            "models": ["mistral-large-latest"],
+        },
+        "mistralai": {
+            "api_key": "legacy-record-canary",
+            "base_url": "https://legacy-relay.example/v1",
+            "models": ["mistral-small-latest"],
+        },
+    },
+}
+
+
+class TestCanonicalLegacyRecordCollision:
+    """Both records present, different endpoints — behaviour must be defined,
+    deterministic, and identical at every stage."""
+
+    def test_first_config_record_wins_for_both_spellings(self):
+        restore = _swap_in_test_config(_COLLISION_CFG_LEGACY_FIRST)
+        try:
+            for spelling in ("mistral", "mistralai"):
+                assert config._raw_provider_key_for_provider_id(spelling) == "mistralai", (
+                    f"{spelling!r} must resolve to the first config record"
+                )
+                assert config._get_provider_base_url(spelling) == (
+                    "https://legacy-relay.example/v1"
+                ), f"{spelling!r} resolved to a different record's endpoint"
+        finally:
+            restore()
+
+    def test_every_stage_selects_the_same_record(self, monkeypatch, tmp_path):
+        """Catalog record identity, endpoint lookup and routing all land on
+        the first config record — never a mix of the two.
+
+        The catalog MERGES both records' model lists (pre-existing behaviour
+        for two keys that canonicalise to one id), but the record IDENTITY —
+        the raw key the catalog's ``canonical_to_raw_provider_key`` map
+        selects — is the first config entry, and so is the endpoint below.
+        """
+        catalog = _static_catalog(monkeypatch, tmp_path, _COLLISION_CFG_LEGACY_FIRST)
+        groups = _mistral_groups(catalog)
+        assert len(groups) == 1
+        model_ids = [m["id"] for m in groups[0]["models"]]
+        assert model_ids[0] == "@mistral:mistral-small-latest", (
+            "the catalog's record identity must be the first config record "
+            f"(its model leads the group), got {model_ids}"
+        )
+        assert "@mistral:mistral-large-latest" in model_ids
+
+        restore = _swap_in_test_config(_COLLISION_CFG_LEGACY_FIRST)
+        try:
+            resolved = config.resolve_model_provider("@mistral:mistral-small-latest")
+        finally:
+            restore()
+        assert resolved == (
+            "mistral-small-latest",
+            "mistral",
+            "https://legacy-relay.example/v1",
+        ), (
+            "routing must use the SAME record the catalog selected, "
+            f"got {resolved!r}"
+        )
+
+    def test_config_order_decides_not_the_requested_spelling(self):
+        """Reversing config order flips the winner for BOTH spellings —
+        proof the rule is config-order-based and spelling-independent."""
+        restore = _swap_in_test_config(_COLLISION_CFG_CANONICAL_FIRST)
+        try:
+            for spelling in ("mistral", "mistralai"):
+                assert config._raw_provider_key_for_provider_id(spelling) == "mistral"
+                assert config._get_provider_base_url(spelling) == (
+                    "https://api.mistral.ai/v1"
+                )
+        finally:
+            restore()
+
+    def test_single_legacy_record_is_not_a_collision(self):
+        """Legacy-only config: one record, one endpoint, no ambiguity."""
+        restore = _swap_in_test_config(_LEGACY_MISTRAL_CFG)
+        try:
+            assert config._get_provider_base_url("mistral") == (
+                "https://legacy-relay.example/v1"
+            )
+            assert config._get_provider_base_url("mistralai") == (
+                "https://legacy-relay.example/v1"
+            )
+        finally:
+            restore()
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Section 6 — onboarding keeps accepting the legacy selector (#8664 P2)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _run_onboarding_setup(tmp_path, monkeypatch, provider: str, model: str):
+    """Drive the real ``apply_onboarding_setup`` against a real temp
+    config.yaml. Returns (saved_settings_calls, written_config)."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("model: {}\n", encoding="utf-8")
+
+    monkeypatch.setattr("api.onboarding._get_config_path", lambda: config_path)
+    monkeypatch.setattr("api.onboarding._get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr("api.onboarding._write_env_file", lambda p, d: None)
+    monkeypatch.setattr("api.onboarding._provider_api_key_present", lambda *a: True)
+    monkeypatch.setattr("api.onboarding.reload_config", lambda: None)
+    # Keep the test hermetic: the status tail is not what this finding is
+    # about, and it would otherwise re-read the developer's real config.
+    monkeypatch.setattr(
+        "api.onboarding.get_onboarding_status", lambda: {"completed": True}
+    )
+    settings_calls: list[dict] = []
+    monkeypatch.setattr(
+        "api.onboarding.save_settings", lambda s: settings_calls.append(dict(s)) or s
+    )
+
+    onboarding.apply_onboarding_setup({
+        "provider": provider,
+        "model": model,
+        "api_key": "",
+        "confirm_overwrite": True,
+    })
+    written = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    return settings_calls, written
+
+
+class TestLegacyOnboardingSelector:
+    """``mistralai`` used to be a supported setup key; the request must keep
+    taking the real setup path instead of the unsupported early completion."""
+
+    def test_legacy_mistralai_request_writes_provider_and_endpoint(self, tmp_path, monkeypatch):
+        settings_calls, written = _run_onboarding_setup(
+            tmp_path, monkeypatch, "mistralai", "mistral-large-latest"
+        )
+        assert written["model"]["provider"] == "mistral", (
+            f"legacy selector must persist the canonical provider, got "
+            f"{written['model'].get('provider')!r}"
+        )
+        assert written["model"]["default"] == "mistral-large-latest"
+        assert written["model"]["base_url"] == "https://api.mistral.ai/v1"
+        assert settings_calls == [], (
+            "a supported legacy selector must NOT take the unsupported "
+            f"early-completion path, got {settings_calls!r}"
+        )
+
+    def test_legacy_alias_spellings_are_accepted_too(self, tmp_path, monkeypatch):
+        for spelling in ("mistral-ai", "mistral_ai", "MistralAI"):
+            settings_calls, written = _run_onboarding_setup(
+                tmp_path, monkeypatch, spelling, "mistral-large-latest"
+            )
+            assert written["model"]["provider"] == "mistral", (
+                f"{spelling!r} must fold onto the canonical setup"
+            )
+            assert written["model"]["base_url"] == "https://api.mistral.ai/v1"
+            assert settings_calls == []
+
+    def test_canonical_mistral_request_still_writes_endpoint(self, tmp_path, monkeypatch):
+        settings_calls, written = _run_onboarding_setup(
+            tmp_path, monkeypatch, "mistral", "mistral-large-latest"
+        )
+        assert written["model"]["provider"] == "mistral"
+        assert written["model"]["base_url"] == "https://api.mistral.ai/v1"
+        assert settings_calls == []
+
+    def test_genuinely_unsupported_provider_still_early_completes(self, tmp_path, monkeypatch):
+        """Over-normalisation guard: a provider with no supported setup must
+        keep the mark-complete-and-pass-through behaviour."""
+        for provider in ("copilot", "openai-codex"):
+            settings_calls, written = _run_onboarding_setup(
+                tmp_path, monkeypatch, provider, "some-model"
+            )
+            assert written["model"] == {}, (
+                f"{provider!r} must not write a model block, got {written['model']!r}"
+            )
+            assert settings_calls == [{"onboarding_completed": True}], (
+                f"{provider!r} must still early-complete onboarding"
+            )
+
+
 class _FakeHandler:
     """Minimal BaseHTTPRequestHandler stand-in for routes.handle_post."""
 
