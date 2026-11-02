@@ -15,6 +15,15 @@ The shipped `chat_activity_display_mode` setting now has three explicit values:
 - `transparent_stream` — opt-in chronological activity rows;
 - `hide_all_activity` — opt-in **Final answer only** presentation.
 
+Compact Worklog keeps one deliberate exemption to "supporting activity is
+quieter": **substantive interim prose** — a content-bearing segment such as a
+checklist or a direct answer emitted mid-turn (`>=
+_INTERIM_PROSE_SUBSTANTIVE_MIN_CHARS` trimmed characters) — stays visible as
+an inline segment, and the settled rail drops its duplicated prose row.
+Short progress narration keeps folding into the rail exactly as before
+(#3401/#4587); the exemption exists because folding content the final reply
+only points at reads as data loss (#7894, #3875).
+
 All three are render strategies over the same Assistant Turn Anchor and
 `activity_scene_v1`; they do not create separate activity ownership or change
 the final-answer boundary. Final answer only suppresses activity presentation
