@@ -3024,6 +3024,13 @@ function _composerDraftValue(el){
   if(h&&h.sid===sid&&h.shown===value) return String(h.draft||'');
   return value;
 }
+// Leaving the chat ends browsing and puts the unsent draft back in the box.
+function _restorePromptHistoryDraft(el){
+  if(!el||!_promptHistory) return;
+  const draft=_composerDraftValue(el);
+  _promptHistory=null;
+  if(el.value!==draft) el.value=draft;
+}
 // Pure step: returns {state, value} when the key is handled, else null.
 function _promptHistoryStep(state, dir, value, items){
   if(dir<0){

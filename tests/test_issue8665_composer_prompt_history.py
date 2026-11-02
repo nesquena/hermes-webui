@@ -227,3 +227,122 @@ def test_a_real_edit_ends_browsing_even_back_to_the_same_text():
     assert out["downAfterEditBack"]["handled"] is False
     start = BOOT_JS.index("$('msg').addEventListener('input',()=>{")
     assert "_endPromptHistory()" in BOOT_JS[start:start + 200]
+
+
+MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+RESTORE_LINE = "if(currentSid&&currentSid!==sid&&typeof _restorePromptHistoryDraft==='function') _restorePromptHistoryDraft($('msg'));"
+
+
+def _draft_persistence_src() -> str:
+    """The real draft save + serializer from sessions.js."""
+    start = SESSIONS_JS.index("// ── Composer draft persistence")
+    end = SESSIONS_JS.index("// Restore composer draft from server onto #msg textarea.", start)
+    return SESSIONS_JS[start:end]
+
+
+def _binding_src() -> str:
+    """The real goal-continuation binding writer/peek from messages.js."""
+    start = MESSAGES_JS.index("function _normalizeGoalContinuationId(id)")
+    end = MESSAGES_JS.index("function _bgTaskCompleteRingBufferAdd(", start)
+    return MESSAGES_JS[start:end]
+
+
+def _switch_save_src() -> str:
+    """loadSession()'s real lines: draft restore, then binding check and save."""
+    load = SESSIONS_JS.index("async function loadSession(sid){")
+    restore = SESSIONS_JS.index(RESTORE_LINE, load)
+    start = SESSIONS_JS.index("  let _switchContId = '';", restore)
+    end = SESSIONS_JS.index(
+        "      _handleComposerDraftPostFailure(error, currentSid, draftText, draftFiles);", start)
+    return RESTORE_LINE + "\n" + SESSIONS_JS[start:end] + "    }\n  }\n"
+
+
+CONTINUATION = r"""
+let _imeComposing=false;
+const posts=[];
+async function api(url, opts){ posts.push(JSON.parse(opts.body)); return {}; }
+const el={value:'', selectionStart:0, selectionEnd:0, dataset:{},
+  setSelectionRange(a,b){this.selectionStart=a;this.selectionEnd=b;}};
+const $=()=>el;
+var window={};
+const S={session:{session_id:'s1'}, messages:[{role:'user',content:'latest'},{role:'assistant',content:'ok'}], pendingFiles:[]};
+function msgContent(m){return String(m.content||'').trim();}
+function key(k){
+  const e={key:k, shiftKey:false, altKey:false, ctrlKey:false, metaKey:false, isComposing:false, preventDefault(){}};
+  return _handlePromptHistoryKey(e, el);
+}
+const attachment={name:'a.txt', size:3, type:'text/plain', path:'/tmp/a.txt'};
+async function leave(){
+  const currentSid='s1', sid='s2';
+  const _clearQueueCardDisplay=()=>{};
+  SWITCH_SAVE
+}
+(async()=>{
+  const out={};
+  for (const name of ['plain', 'recalled']) {
+    posts.length=0; _promptHistory=null; el.dataset={};
+    el.value='unsent original draft'; el.selectionStart=el.selectionEnd=0;
+    S.pendingFiles=[attachment];
+    _setRestoredGoalContinuationDraft('cont-1', 'unsent original draft');
+    if (name==='recalled') key('ArrowUp');
+    out[name]={shown:el.value};
+    await leave();
+    out[name].post=posts[posts.length-1]||null;
+    out[name].peekAfter=_peekRestoredGoalContinuationDraft();
+  }
+  // A genuinely edited draft still drops the token.
+  posts.length=0; _promptHistory=null; el.dataset={};
+  _setRestoredGoalContinuationDraft('cont-1', 'unsent original draft');
+  el.value='edited draft'; S.pendingFiles=[];
+  await leave();
+  out.edited=posts[posts.length-1]||null;
+  console.log(JSON.stringify(out));
+})().catch(e=>{console.error(e&&e.stack||e); process.exit(1);});
+"""
+
+
+def _run_continuation():
+    if "function _peekRestoredGoalContinuationDraft(" not in MESSAGES_JS:
+        pytest.skip("goal-continuation drafts (#7855) not on this base")
+    src = (_binding_src() + "\n" + _draft_persistence_src() + "\n" + _helpers_src() + "\n"
+           + CONTINUATION.replace("SWITCH_SAVE", _switch_save_src()))
+    res = subprocess.run([NODE, "-e", src], capture_output=True, text=True, timeout=30)
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout)
+
+
+def test_switching_while_recalling_keeps_a_restored_continuation_token():
+    out = _run_continuation()
+    assert out["plain"]["post"]["goal_continuation_id"] == "cont-1"
+    assert out["recalled"]["shown"] == "latest"
+    post = out["recalled"]["post"]
+    assert post["text"] == "unsent original draft"
+    assert post["goal_continuation_id"] == "cont-1"
+    assert [f["name"] for f in post["files"]] == ["a.txt"]
+    # The peek does not consume the binding.
+    assert out["recalled"]["peekAfter"]["id"] == "cont-1"
+
+
+def test_an_edited_draft_still_drops_the_continuation_token():
+    out = _run_continuation()
+    assert out["edited"]["text"] == "edited draft"
+    assert out["edited"]["goal_continuation_id"] == ""
+
+
+def test_leaving_the_chat_puts_the_unsent_draft_back():
+    src = _helpers_src() + r"""
+let _imeComposing=false;
+const S={session:{session_id:'s1'}, messages:[{role:'user',content:'latest'}]};
+function msgContent(m){return String(m.content||'').trim();}
+const el={value:'mine', selectionStart:0, selectionEnd:0, setSelectionRange(){}};
+const $=()=>el;
+_handlePromptHistoryKey({key:'ArrowUp', shiftKey:false, altKey:false, ctrlKey:false, metaKey:false, isComposing:false, preventDefault(){}}, el);
+const shown=el.value;
+const currentSid='s1', sid='s2';
+RESTORE
+console.log(JSON.stringify({shown, after:el.value, browsing:_promptHistory!==null}));
+""".replace("RESTORE", RESTORE_LINE)
+    res = subprocess.run([NODE, "-e", src], capture_output=True, text=True, timeout=30)
+    assert res.returncode == 0, res.stderr
+    assert json.loads(res.stdout) == {"shown": "latest", "after": "mine", "browsing": False}
+    assert RESTORE_LINE in SESSIONS_JS

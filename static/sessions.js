@@ -2668,6 +2668,10 @@ async function loadSession(sid){
   // catalog repaint leaves another provider's identically-valued option
   // selected (the restore syncs the topbar before the catalog refresh).
   if(currentSid&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(currentSid);
+  // #8665: leaving a chat while a sent prompt is recalled with ArrowUp puts the
+  // unsent draft back first, so the draft save below (and anything that checks
+  // the composer text against it) sees what the user typed, not the recall.
+  if(currentSid&&currentSid!==sid&&typeof _restorePromptHistoryDraft==='function') _restorePromptHistoryDraft($('msg'));
   // #7865: also drop the marker for the session being LOADED, not just the one
   // being left. The marker lives in sessionStorage, so it survives a page
   // reload: on a fresh boot S.session is null, so currentSid above is null and
