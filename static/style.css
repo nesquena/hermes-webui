@@ -6514,8 +6514,34 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
 .msg-row[data-role="user"] .msg-body code { color: var(--user-bubble-text); background: rgba(0,0,0,.1); }
 .msg-row[data-role="user"] .msg-body a { color: var(--user-bubble-text); text-decoration: underline; }
 .msg-row[data-role="user"] .msg-files { padding-left: 0; margin-left: 0; justify-content: flex-end; }
-.msg-row[data-role="user"][data-editing="1"] .msg-edit-area { background: var(--user-bubble-bg); border-color: var(--user-bubble-border); color: var(--user-bubble-text); box-shadow: 0 0 0 3px var(--focus-ring); }
+.msg-row[data-role="user"][data-editing="1"] .msg-edit-area { background: var(--user-bubble-bg); border-color: var(--user-bubble-border); color: var(--user-bubble-text); caret-color: var(--user-bubble-text); box-shadow: 0 0 0 3px var(--focus-ring); }
 .msg-row[data-role="user"][data-editing="1"] .msg-edit-area::placeholder { color: var(--user-bubble-placeholder); }
+/* hwc:css-selection — Inline-Edit is a textarea. A ~20% black/white tint
+   sits on the bubble fill (slate accent, translucent dark fills) and the
+   selection disappears. Invert the bubble colors instead. Dark-mode fills
+   are often translucent, so the selected text uses the opaque page background.
+   ::selection and ::-moz-selection must be separate rules: grouping them makes
+   Chromium drop the whole rule, so the faint page ::selection wins. */
+.msg-row[data-role="user"][data-editing="1"] .msg-edit-area::selection {
+  background: var(--user-bubble-text);
+  background-color: var(--user-bubble-text);
+  color: var(--user-bubble-bg);
+}
+.msg-row[data-role="user"][data-editing="1"] .msg-edit-area::-moz-selection {
+  background: var(--user-bubble-text);
+  background-color: var(--user-bubble-text);
+  color: var(--user-bubble-bg);
+}
+:root.dark .msg-row[data-role="user"][data-editing="1"] .msg-edit-area::selection {
+  background: var(--user-bubble-text);
+  background-color: var(--user-bubble-text);
+  color: var(--bg);
+}
+:root.dark .msg-row[data-role="user"][data-editing="1"] .msg-edit-area::-moz-selection {
+  background: var(--user-bubble-text);
+  background-color: var(--user-bubble-text);
+  color: var(--bg);
+}
 
 /* Turn boundary: right alignment already separates user turns — keep only vertical spacing */
 .msg-row + .msg-row[data-role="user"] {
