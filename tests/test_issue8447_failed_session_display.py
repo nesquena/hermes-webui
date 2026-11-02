@@ -994,3 +994,924 @@ def test_list_backfill_does_not_wait_out_a_writer_lock(tmp_path, monkeypatch):
     # An unreadable database is "unknown", never "known zero": no row invents
     # a verdict, and none of them silently claims a healthy session.
     assert all("failure_summary" not in row for row in rows)
+
+
+# ── #8603 review round 3 ───────────────────────────────────────────────────
+#
+# Round 2 of this PR was reviewed against a real server, a real Agent
+# SessionDB and a master comparison. Seven findings came back; each one below
+# names the finding it closes and drives the producer's real shapes (a locked
+# state.db, a production-shaped messages table with its (session_id, id)
+# index, pre-#8447 sidecars and index rows, an imported CLI duplicate, the
+# Agent's interim row forms, a fail → fail sequence).
+
+import threading  # noqa: E402  (test-module local import, grouped with the r3 tests)
+
+
+def _make_production_shaped_state_db(path):
+    """A state.db shaped like the installed Agent's.
+
+    The bounded tail read is only cheap because ``(session_id, id)`` is
+    indexed, and the settled-success discriminator only sees the interim
+    markers that are actually columns, so a regression for either has to run
+    against the real schema rather than the reduced one above.
+    """
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        """
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT,
+            tool_calls TEXT,
+            tool_name TEXT,
+            timestamp REAL NOT NULL,
+            finish_reason TEXT,
+            reasoning TEXT,
+            codex_message_items TEXT,
+            active INTEGER NOT NULL DEFAULT 1,
+            display_kind TEXT,
+            display_metadata TEXT
+        )
+        """
+    )
+    conn.execute("CREATE INDEX idx_messages_session_id ON messages(session_id, id)")
+    conn.commit()
+    conn.close()
+
+
+def _insert_message(conn, *, sid, role, content, ts, tool_calls=None,
+                    display_kind=None, display_metadata=None, finish_reason=None,
+                    codex_message_items=None, reasoning=None):
+    columns = ["session_id", "role", "content", "timestamp"]
+    values = [sid, role, content, ts]
+    for key, value in (
+        ("tool_calls", tool_calls),
+        ("display_kind", display_kind),
+        ("display_metadata", display_metadata),
+        ("finish_reason", finish_reason),
+        ("codex_message_items", codex_message_items),
+        ("reasoning", reasoning),
+    ):
+        if value is not None:
+            columns.append(key)
+            values.append(value)
+    placeholders = ",".join("?" for _ in columns)
+    conn.execute(
+        f"INSERT INTO messages ({', '.join(columns)}) VALUES ({placeholders})",
+        values,
+    )
+
+
+def _failed_turn_metadata(layer="billing", code="billing", retryable=False):
+    return json.dumps({
+        "error": "HTTP 402: out of credits at https://secret-provider.example/billing",
+        "error_surface": {"layer": layer, "code": code, "retryable": retryable,
+                          "provider": "custom", "model": "qwen3.8-max"},
+    })
+
+
+class _RecordingCursor:
+    """Cursor wrapper that records every statement the reader issues."""
+
+    def __init__(self, real, sink):
+        self._real = real
+        self._sink = sink
+
+    def execute(self, sql, parameters=()):
+        self._sink.append((sql, tuple(parameters or ())))
+        return self._real.execute(sql, parameters or ())
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+class _VmStepCountingConnection:
+    """Read-only state.db wrapper counting SQLite VM instructions.
+
+    ``set_progress_handler(handler, 1)`` invokes the handler once per VM
+    instruction, which is the same cost metric the reviewer measured (2.9M
+    steps for the row-numbering batch form on a 500 × 1000 store).
+    """
+
+    def __init__(self, real):
+        object.__setattr__(self, "_real", real)
+        object.__setattr__(self, "vm_steps", 0)
+        object.__setattr__(self, "statements", [])
+        real.set_progress_handler(self._tick, 1)
+
+    def _tick(self):
+        self.vm_steps += 1
+        return 0
+
+    def cursor(self):
+        return _RecordingCursor(self._real.cursor(), self.statements)
+
+    def close(self):
+        self._real.set_progress_handler(None, 1)
+        self._real.close()
+
+    def __setattr__(self, name, value):
+        # Forward connection configuration (row_factory, ...) to the real
+        # connection: the reader sets row_factory on what open() returned.
+        if name in ("_real", "vm_steps", "statements"):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._real, name, value)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _counting_state_db_connections(monkeypatch):
+    """Count VM steps and record statements for every state.db the module opens."""
+    opened = []
+    real_open = models.open_state_db_readonly
+
+    def counting_open(db_path, *args, **kwargs):
+        conn = _VmStepCountingConnection(real_open(db_path, *args, **kwargs))
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(models, "open_state_db_readonly", counting_open)
+    return opened
+
+
+# ── finding 1: the index lock must never wait on state.db ───────────────────
+
+def test_index_rebuild_loads_sessions_outside_the_index_lock(tmp_path, monkeypatch):
+    """A full index rebuild loads sidecars OUTSIDE ``_INDEX_WRITE_LOCK``.
+
+    A cold ``Session.load`` opens the Agent's state.db (the failure-summary
+    acquisition). With the load inside the index lock, a writer holding
+    state.db parked the rebuild — and every other index writer, including an
+    unrelated session's save() — for SQLite's 5s busy timeout.
+    """
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    _point_session_dir_at(monkeypatch, session_dir)
+    _write_legacy_sidecar(session_dir, "sess-1", [
+        {"role": "user", "content": "hi", "timestamp": 1.0},
+    ])
+
+    entered = threading.Event()
+    release = threading.Event()
+    real_loader = models._load_session_from_path
+
+    def blocking_loader(path):
+        entered.set()
+        assert release.wait(10), "loader was never released"
+        return real_loader(path)
+
+    monkeypatch.setattr(models, "_load_session_from_path", blocking_loader)
+
+    errors = []
+
+    def rebuild():
+        try:
+            models._write_session_index(updates=None)
+        except Exception as exc:  # pragma: no cover - surfaced via errors
+            errors.append(exc)
+
+    worker = threading.Thread(target=rebuild, daemon=True)
+    worker.start()
+    try:
+        assert entered.wait(10), "rebuild never reached a session load"
+        # The load is in flight: an unrelated index writer must not be blocked
+        # behind it.
+        assert models._INDEX_WRITE_LOCK.acquire(timeout=2), (
+            "session load ran while _INDEX_WRITE_LOCK was held"
+        )
+        models._INDEX_WRITE_LOCK.release()
+    finally:
+        release.set()
+        worker.join(timeout=10)
+    assert not errors, errors
+    index = json.loads((session_dir / "_index.json").read_text(encoding="utf-8"))
+    assert [e["session_id"] for e in index] == ["sess-1"]
+
+
+def test_cold_load_does_not_wait_out_a_writer_lock(tmp_path, monkeypatch):
+    """A writer holding state.db costs a fast-failed read, not a 5s wait.
+
+    The two single-session readers (tail read and revision probe) inherited
+    sqlite3's 5s default busy timeout; the batched list reader already used
+    50ms. Both now share that budget, so a cold load — and the index rebuild
+    that runs it — cannot be parked behind a writer.
+    """
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    conn = sqlite3.connect(str(db))
+    _insert_failed_turn(conn, session_id="sess-1", row_id=1, ts=1000.0)
+    conn.commit()
+    conn.close()
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    _point_session_dir_at(monkeypatch, session_dir)
+    _write_legacy_sidecar(session_dir, "sess-1", [
+        {"role": "user", "content": "hi", "timestamp": 1.0},
+    ])
+    _point_models_at(monkeypatch, db)
+    _reset_failure_caches(monkeypatch)
+
+    writer = sqlite3.connect(str(db), isolation_level=None)
+    writer.execute("BEGIN EXCLUSIVE")
+    try:
+        started = time.monotonic()
+        session = models.Session.load("sess-1")
+        elapsed = time.monotonic() - started
+    finally:
+        writer.rollback()
+        writer.close()
+
+    assert session is not None
+    # An unreadable database is "unknown", never "known healthy": the load
+    # keeps the sidecar's own (absent) state instead of inventing a verdict.
+    assert session.failure_summary is None
+    assert elapsed < 2.0, elapsed
+
+
+# ── finding 2: the batch read touches tails, not whole transcripts ──────────
+
+def _row_numbered_tail_steps(cur, sids, limit):
+    """The row-numbering batch form this PR replaces (measured baseline)."""
+    placeholders = ",".join("?" for _ in sids)
+    cur.execute(
+        "SELECT session_id, role, content, display_kind, display_metadata, "
+        "tool_calls, id FROM ("
+        "SELECT session_id, role, content, display_kind, display_metadata, "
+        "tool_calls, id, "
+        "ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY id DESC) "
+        "AS _failure_tail_rank "
+        f"FROM messages WHERE session_id IN ({placeholders})"
+        f") WHERE _failure_tail_rank <= ? "
+        "ORDER BY session_id, _failure_tail_rank",
+        (*sids, limit),
+    )
+    return len(cur.fetchall())
+
+
+def test_batch_tail_read_uses_indexed_reverse_reads_and_only_widens_undecided(
+    tmp_path, monkeypatch
+):
+    """The list backfill reads a bounded tail per session, not every row.
+
+    Cost assertions (the finding is a cost finding, so an output assertion
+    alone would not catch a regression):
+
+    * no statement may number rows with ``ROW_NUMBER()``;
+    * every tail statement is a bounded ``ORDER BY <id> DESC LIMIT ?`` read,
+      served by the ``(session_id, id)`` index (verified through
+      ``EXPLAIN QUERY PLAN``);
+    * the VM-step cost must stay an order of magnitude below the
+      row-numbering form, measured on the same database in the same test;
+    * only tails the narrow window could not decide are widened.
+    """
+    sessions = 60
+    messages = 400
+    db = tmp_path / "state.db"
+    _make_production_shaped_state_db(db)
+    conn = sqlite3.connect(str(db))
+    failed = set()
+    undecided = set()
+    for index in range(sessions):
+        sid = "sess-%03d" % index
+        for m in range(messages):
+            _insert_message(
+                conn, sid=sid,
+                role="user" if m % 2 == 0 else "assistant",
+                content="message %d" % m, ts=float(m),
+            )
+        if index % 5 == 0:
+            # A settled failure at the tail: decided by the narrow window.
+            failed.add(sid)
+            _insert_message(
+                conn, sid=sid, role="assistant",
+                content="Your request was not processed.", ts=float(messages),
+                display_kind="failed_turn",
+                display_metadata=_failed_turn_metadata(),
+            )
+        elif index % 7 == 0:
+            # 30 interim tool rows AFTER the failure: only the wide window can
+            # decide this one, so it — and only it — may be widened.
+            undecided.add(sid)
+            _insert_message(
+                conn, sid=sid, role="assistant",
+                content="Your request was not processed.", ts=2.0,
+                display_kind="failed_turn",
+                display_metadata=_failed_turn_metadata(
+                    layer="upstream", code="rate_limit", retryable=True,
+                ),
+            )
+            for m in range(30):
+                _insert_message(
+                    conn, sid=sid, role="assistant", content="", ts=10.0 + m,
+                    tool_calls=json.dumps([{"id": "t%d" % m}]),
+                )
+    conn.commit()
+    conn.close()
+    _reset_failure_caches(monkeypatch)
+
+    sids = ["sess-%03d" % index for index in range(sessions)]
+    opened = _counting_state_db_connections(monkeypatch)
+
+    widen_calls = []
+    real_batch = models._state_db_failure_batch_tails
+
+    def recording_batch(cur, cols, active_clause, order_col, chunk, limit):
+        widen_calls.append((list(chunk), limit))
+        return real_batch(cur, cols, active_clause, order_col, chunk, limit)
+
+    monkeypatch.setattr(models, "_state_db_failure_batch_tails", recording_batch)
+
+    summaries = models._session_failure_summaries_from_state_db(sids, db)
+
+    # Correctness first: every failure is found, and no healthy row invents one.
+    for sid in failed:
+        assert summaries.get(sid) == {
+            "kind": "failed_turn", "layer": "billing", "code": "billing",
+            "retryable": False,
+        }, sid
+    for sid in undecided:
+        assert summaries.get(sid) == {
+            "kind": "failed_turn", "layer": "upstream", "code": "rate_limit",
+            "retryable": True,
+        }, sid
+    for index in range(sessions):
+        sid = "sess-%03d" % index
+        if sid not in failed and sid not in undecided:
+            assert summaries.get(sid) is None, sid
+
+    # One state.db open for the whole page.
+    assert len(opened) == 1, opened
+    statements = [sql for conn_proxy in opened for sql, _params in conn_proxy.statements]
+    assert not any("ROW_NUMBER" in sql for sql in statements), statements
+    tail_statements = [
+        sql for sql in statements
+        if "FROM messages" in sql and "WHERE session_id = ?" in sql
+    ]
+    assert len(tail_statements) >= len(sids), len(tail_statements)
+    for sql in tail_statements:
+        assert "ORDER BY id DESC" in sql and "LIMIT ?" in sql, sql
+
+    # Cost: an order of magnitude below the row-numbering form on the same
+    # database, and bounded per session.
+    baseline_steps = 0
+    for conn_proxy in opened:
+        baseline_steps += conn_proxy.vm_steps
+    probe = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        baseline_conn = _VmStepCountingConnection(probe)
+        try:
+            cur = baseline_conn.cursor()
+            _row_numbered_tail_steps(
+                cur, sids, models._SESSION_FAILURE_TAIL_WINDOW
+            )
+        finally:
+            row_numbered_steps = baseline_conn.vm_steps
+    finally:
+        probe.close()
+    assert row_numbered_steps > 0
+    assert baseline_steps * 10 < row_numbered_steps, (
+        baseline_steps, row_numbered_steps,
+    )
+    assert baseline_steps < 3000 * len(sids), (baseline_steps, len(sids))
+
+    # Widening discipline: exactly the undecided tails are re-read wide, and
+    # no settled tail is.
+    widened = {
+        sid for chunk, limit in widen_calls
+        if limit == models._SESSION_FAILURE_TAIL_WINDOW_WIDE
+        for sid in chunk
+    }
+    assert widened == undecided, sorted(widened ^ undecided)
+    narrow_calls = [
+        chunk for chunk, limit in widen_calls
+        if limit == models._SESSION_FAILURE_TAIL_WINDOW
+    ]
+    assert sorted(sid for chunk in narrow_calls for sid in chunk) == sorted(sids)
+
+    # The narrow read is served by the (session_id, id) index, not a scan.
+    plan_conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        plan = plan_conn.execute(
+            "EXPLAIN QUERY PLAN SELECT role, content FROM messages "
+            "WHERE session_id = ? AND (active IS NULL OR active != 0) "
+            "ORDER BY id DESC LIMIT ?",
+            ("sess-000", models._SESSION_FAILURE_TAIL_WINDOW),
+        ).fetchall()
+    finally:
+        plan_conn.close()
+    plan_text = " ".join(str(row[-1]) for row in plan)
+    assert "USING INDEX idx_messages_session_id" in plan_text, plan_text
+    assert "SCAN" not in plan_text, plan_text
+
+
+# ── finding 3: a successful retry outside the WebUI clears the marker ───────
+
+def _write_imported_sidecar(session_dir, sid, *, summary):
+    """A sidecar as ``/api/session/import_cli`` leaves it: summary derived."""
+    payload = {
+        "session_id": sid,
+        "title": "Imported CLI run",
+        "created_at": 1.0,
+        "updated_at": 2.0,
+        "message_count": 2,
+        "is_cli_session": True,
+        "source_tag": "cli",
+        "messages": [{"role": "user", "content": "hi", "timestamp": 1.0}],
+        "failure_summary": summary,
+        "failure_summary_revision": 2,
+    }
+    (session_dir / f"{sid}.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+
+def test_imported_cli_row_summary_clears_after_external_success(
+    tmp_path, monkeypatch
+):
+    """The reviewer's R3 repro, end to end.
+
+    Import a CLI session whose last turn failed, let the Agent append an
+    ordinary successful answer straight into state.db, then read the session
+    three ways: the list row, a cold open, and a save. Every one of them used
+    to keep the stale marker, because a sidecar that already carried a
+    ``failure_summary`` was never checked against the database again.
+    """
+    db = tmp_path / "state.db"
+    _make_production_shaped_state_db(db)
+    conn = sqlite3.connect(str(db))
+    _insert_message(conn, sid="cli-sess", role="user", content="hi", ts=1.0)
+    _insert_message(
+        conn, sid="cli-sess", role="assistant",
+        content="Your request was not processed.", ts=2.0,
+        display_kind="failed_turn", display_metadata=_failed_turn_metadata(),
+    )
+    conn.commit()
+    conn.close()
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    _point_session_dir_at(monkeypatch, session_dir)
+    _point_models_at(monkeypatch, db)
+    _reset_failure_caches(monkeypatch)
+    stale = {"kind": "failed_turn", "layer": "billing", "code": "billing",
+             "retryable": False}
+    _write_imported_sidecar(session_dir, "cli-sess", summary=stale)
+
+    # The Agent advances the session: a plain successful answer, no WebUI save.
+    conn = sqlite3.connect(str(db))
+    _insert_message(conn, sid="cli-sess", role="assistant",
+                    content="recovered", ts=3.0)
+    conn.commit()
+    conn.close()
+    # Force a re-probe so the test observes the advancement immediately
+    # (production tolerates the fingerprint memo's freshness lag).
+    monkeypatch.setattr(models, "_SESSION_FAILURE_FINGERPRINT_TTL", 0.0)
+    _reset_failure_caches(monkeypatch)
+
+    # 1) the sidebar row.
+    rows = [{"session_id": "cli-sess", "failure_summary": dict(stale)}]
+    models._backfill_cli_session_failure_summaries(rows, db)
+    assert "failure_summary" not in rows[0], rows[0]
+
+    # 2) a cold open of the session.
+    session = models.Session.load("cli-sess")
+    assert session is not None
+    assert session.failure_summary is None
+    # ... and the acquisition still never rewrites the sidecar.
+    assert "failure_summary" in json.loads(
+        (session_dir / "cli-sess.json").read_text(encoding="utf-8")
+    )
+
+    # 3) the next save persists the recovery, so a restart sees it too.
+    session.messages = session.messages or []
+    session.save()
+    on_disk = json.loads(
+        (session_dir / "cli-sess.json").read_text(encoding="utf-8")
+    )
+    assert on_disk["failure_summary"] is None
+    # The healthy verdict is stamped with the database revision it was read
+    # at, so a later read can tell "checked at 3, healthy" from "never asked".
+    assert on_disk["failure_summary_revision"] == 3
+
+
+def test_unanswerable_state_db_keeps_the_sidecar_summary(tmp_path, monkeypatch):
+    """"Healthy" and "unavailable" are different answers.
+
+    A database that cannot speak for the session (no rows for it here) must
+    not be read as a recovery: the sidecar keeps its own summary, so a
+    transiently unreadable state.db can neither invent nor erase a verdict.
+    """
+    db = tmp_path / "state.db"
+    _make_production_shaped_state_db(db)
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    _point_session_dir_at(monkeypatch, session_dir)
+    _point_models_at(monkeypatch, db)
+    _reset_failure_caches(monkeypatch)
+    stale = {"kind": "failed_turn", "layer": "billing", "code": "billing",
+             "retryable": False}
+    _write_imported_sidecar(session_dir, "cli-sess", summary=stale)
+
+    session = models.Session.load("cli-sess")
+    assert session.failure_summary == stale
+    rows = [{"session_id": "cli-sess", "failure_summary": dict(stale)}]
+    models._backfill_cli_session_failure_summaries(rows, db)
+    assert rows[0]["failure_summary"] == stale
+    assert "_failure_summary_answered" not in rows[0]
+
+
+# ── finding 4: pre-#8447 index rows and imported duplicates ─────────────────
+
+def test_pre_pr_index_rows_are_marked_and_cleared_from_state_db(
+    tmp_path, monkeypatch
+):
+    """An index row written before #8447 must still surface the failure.
+
+    Such a row carries ``last_message_at`` (so the existing backfill never
+    reloads it) and no ``failure_summary`` (and a healthy row never gains the
+    field), so the index alone cannot tell "never derived" from "derived,
+    healthy". The pre-PR reader also dropped display_kind/display_metadata,
+    so the sidecar transcript no longer holds the failure either — state.db is
+    the only surviving source, and the sidebar must ask it.
+    """
+    db = tmp_path / "state.db"
+    _make_production_shaped_state_db(db)
+    conn = sqlite3.connect(str(db))
+    for index in range(6):
+        sid = "legacy-%d" % index
+        _insert_message(conn, sid=sid, role="user", content="hi", ts=1.0)
+        if index % 2 == 0:
+            _insert_message(
+                conn, sid=sid, role="assistant",
+                content="Your request was not processed.", ts=2.0,
+                display_kind="failed_turn",
+                display_metadata=_failed_turn_metadata(),
+            )
+        else:
+            _insert_message(conn, sid=sid, role="assistant",
+                            content="all good", ts=2.0)
+    conn.commit()
+    conn.close()
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    _point_session_dir_at(monkeypatch, session_dir)
+    _point_models_at(monkeypatch, db)
+    _reset_failure_caches(monkeypatch)
+    # Pre-#8447 sidecars: no failure_summary key at all.
+    for index in range(6):
+        _write_legacy_sidecar(session_dir, "legacy-%d" % index, [
+            {"role": "user", "content": "hi", "timestamp": 1.0},
+        ])
+    # A pre-#8447 index row: complete enough that nothing reloads it.
+    index_rows = []
+    for index in range(6):
+        index_rows.append({
+            "session_id": "legacy-%d" % index,
+            "title": "Legacy %d" % index,
+            "message_count": 2,
+            "updated_at": 2.0,
+            "last_message_at": 2.0,
+            "created_at": 1.0,
+        })
+    (session_dir / "_index.json").write_text(
+        json.dumps(index_rows), encoding="utf-8"
+    )
+
+    first = models.all_sessions()
+    marked = {
+        row["session_id"]: row.get("failure_summary")
+        for row in first
+    }
+    for index in range(6):
+        sid = "legacy-%d" % index
+        if index % 2 == 0:
+            assert marked.get(sid) == {
+                "kind": "failed_turn", "layer": "billing", "code": "billing",
+                "retryable": False,
+            }, (sid, marked.get(sid))
+        else:
+            assert "failure_summary" not in next(
+                row for row in first if row["session_id"] == sid
+            ), sid
+
+    # The Agent recovers one of them: the next list build must clear it.
+    conn = sqlite3.connect(str(db))
+    _insert_message(conn, sid="legacy-0", role="assistant",
+                    content="recovered", ts=3.0)
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(models, "_SESSION_FAILURE_FINGERPRINT_TTL", 0.0)
+    _reset_failure_caches(monkeypatch)
+
+    second = models.all_sessions()
+    recovered = next(row for row in second if row["session_id"] == "legacy-0")
+    assert "failure_summary" not in recovered, recovered
+
+
+def test_merge_carries_the_agent_failure_summary_in_both_directions(
+    tmp_path, monkeypatch
+):
+    """Both CLI→WebUI merge paths must carry the failure state.
+
+    The imported duplicate is suppressed in favour of the WebUI row, so
+    dropping the Agent row's summary there loses the marker forever (R2). The
+    clear direction matters as much as the set direction: a WebUI row whose
+    marker the Agent has since recovered must not keep vouching for it.
+    """
+    import api.routes as routes
+
+    stale = {"kind": "failed_turn", "layer": "billing", "code": "billing",
+             "retryable": False}
+    fresh = {"kind": "failed_turn", "layer": "upstream", "code": "rate_limit",
+             "retryable": True}
+
+    # _merge_cli_sidebar_metadata: the messaging-session path.
+    merged = routes._merge_cli_sidebar_metadata(
+        {"session_id": "s", "title": "Imported"},
+        {"session_id": "s", "failure_summary": dict(fresh),
+         "_failure_summary_answered": True},
+    )
+    assert merged["failure_summary"] == fresh
+
+    # ... and the clear direction: an answered-healthy Agent row.
+    merged = routes._merge_cli_sidebar_metadata(
+        {"session_id": "s", "title": "Imported", "failure_summary": dict(stale)},
+        {"session_id": "s", "_failure_summary_answered": True},
+    )
+    assert "failure_summary" not in merged
+
+    # ... and an Agent row that could not be answered leaves the row alone.
+    merged = routes._merge_cli_sidebar_metadata(
+        {"session_id": "s", "title": "Imported", "failure_summary": dict(stale)},
+        {"session_id": "s"},
+    )
+    assert merged["failure_summary"] == stale
+
+    # The four-field copy path, driven through the real list builder with the
+    # two sources stubbed the way the models layer would have refreshed them.
+    webui_row = {
+        "session_id": "dup", "title": "Imported CLI run",
+        "message_count": 2, "updated_at": 3.0, "last_message_at": 3.0,
+        "created_at": 1.0, "profile": "default",
+    }
+    agent_row = {
+        "session_id": "dup", "title": "Imported CLI run",
+        "message_count": 2, "updated_at": 3.0, "last_message_at": 3.0,
+        "created_at": 1.0, "profile": "default",
+        "source_tag": "cli", "raw_source": "cli", "session_source": "cli",
+        "source_label": "CLI", "is_cli_session": True,
+        "failure_summary": dict(fresh), "_failure_summary_answered": True,
+    }
+    monkeypatch.setattr(routes, "all_sessions",
+                        lambda diag=None, **kwargs: [dict(webui_row)])
+    monkeypatch.setattr(routes, "get_cli_sessions",
+                        lambda source_filter=None, all_profiles=False: [dict(agent_row)])
+    monkeypatch.setattr(routes, "_reconcile_stale_stream_state_for_session_rows",
+                        lambda _rows: False)
+    monkeypatch.setattr(routes, "_prune_orphaned_webui_zero_message_sessions",
+                        lambda rows, **_kwargs: rows)
+    payload = routes._build_session_list_cache_payload(
+        active_profile="default", all_profiles=False, show_cli_sessions=True,
+        show_previous_messaging_sessions=False, show_cron_sessions=False,
+    )
+    rows = routes._session_list_payload_to_response(payload)["sessions"]
+    dup = next(row for row in rows if row["session_id"] == "dup")
+    assert dup["failure_summary"] == fresh
+    assert "_failure_summary_answered" not in dup
+
+    # Healthy Agent answer → the imported duplicate loses its stale marker.
+    healthy_agent = dict(agent_row)
+    healthy_agent.pop("failure_summary")
+    monkeypatch.setattr(
+        routes, "get_cli_sessions",
+        lambda source_filter=None, all_profiles=False: [dict(healthy_agent)],
+    )
+    stale_webui = dict(webui_row)
+    stale_webui["failure_summary"] = dict(stale)
+    monkeypatch.setattr(routes, "all_sessions",
+                        lambda diag=None, **kwargs: [dict(stale_webui)])
+    payload = routes._build_session_list_cache_payload(
+        active_profile="default", all_profiles=False, show_cli_sessions=True,
+        show_previous_messaging_sessions=False, show_cron_sessions=False,
+    )
+    rows = routes._session_list_payload_to_response(payload)["sessions"]
+    dup = next(row for row in rows if row["session_id"] == "dup")
+    assert "failure_summary" not in dup, dup
+
+
+# ── finding 5: interim replies are not recovery ─────────────────────────────
+
+_FAILED_TURN_ROW = {
+    "role": "assistant",
+    "display_kind": "failed_turn",
+    "display_metadata": {"error_surface": {"layer": "billing",
+                                           "retryable": False}},
+}
+
+
+@pytest.mark.parametrize("interim", [
+    # A content part list that carries reasoning only.
+    {"role": "assistant", "content": [
+        {"type": "reasoning", "text": "weighing the retry"},
+    ]},
+    {"role": "assistant", "content": [
+        {"type": "thinking", "thinking": "weighing the retry"},
+    ]},
+    # A Codex commentary row.
+    {"role": "assistant", "content": "",
+     "codex_message_items": [{"type": "message", "text": "commentary"}]},
+    # A provisional verification round.
+    {"role": "assistant", "content": "checking the diff",
+     "finish_reason": "verification_required"},
+    # An unfinished turn.
+    {"role": "assistant", "content": "half an answer",
+     "finish_reason": "incomplete"},
+])
+def test_summary_survives_the_four_interim_forms(interim):
+    """Each interim form used to read as a settled answer and clear the state."""
+    messages = [dict(_FAILED_TURN_ROW), dict(interim)]
+    assert models._session_failure_summary(messages) == {
+        "kind": "failed_turn", "layer": "billing", "retryable": False,
+    }, interim
+
+
+def test_summary_still_clears_on_a_real_answer():
+    """The control group: a genuine answer still clears, and so does an
+    ``_error`` settlement row's absence of any claim."""
+    assert models._session_failure_summary([
+        dict(_FAILED_TURN_ROW),
+        {"role": "assistant", "content": "here is the answer"},
+    ]) is None
+    # A reasoning-only part list followed by the real answer still clears.
+    assert models._session_failure_summary([
+        dict(_FAILED_TURN_ROW),
+        {"role": "assistant", "content": [
+            {"type": "reasoning", "text": "thinking"},
+        ]},
+        {"role": "assistant", "content": "here is the answer"},
+    ]) is None
+    # ... and the interim row alone, with no failure behind it, is not one.
+    assert models._session_failure_summary([
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [
+            {"type": "reasoning", "text": "thinking"},
+        ]},
+    ]) is None
+
+
+@pytest.mark.parametrize("interim", [
+    {"role": "assistant", "content": "",
+     "codex_message_items": json.dumps([{"type": "message", "text": "commentary"}])},
+    {"role": "assistant", "content": "checking the diff",
+     "finish_reason": "verification_required"},
+    {"role": "assistant", "content": "half an answer",
+     "finish_reason": "incomplete"},
+])
+def test_state_db_tail_projector_carries_the_interim_discriminators(
+    tmp_path, monkeypatch, interim
+):
+    """The database tail projector must not drop the interim markers.
+
+    The sidecar path sees ``codex_message_items`` / ``finish_reason`` on the
+    row; the bounded tail read projects its own message shape, and a
+    discriminator lost there turns a Codex commentary row or a
+    ``verification_required`` round into a settled success — clearing a
+    failure that is still open.
+    """
+    db = tmp_path / "state.db"
+    _make_production_shaped_state_db(db)
+    conn = sqlite3.connect(str(db))
+    _insert_message(conn, sid="sess-1", role="user", content="hi", ts=1.0)
+    _insert_message(
+        conn, sid="sess-1", role="assistant",
+        content="Your request was not processed.", ts=2.0,
+        display_kind="failed_turn", display_metadata=_failed_turn_metadata(),
+    )
+    _insert_message(conn, sid="sess-1", ts=3.0, **interim)
+    conn.commit()
+    conn.close()
+    _reset_failure_caches(monkeypatch)
+
+    summary, _revision, answered = (
+        models._session_failure_state_from_state_db("sess-1", db)
+    )
+    assert summary == {
+        "kind": "failed_turn", "layer": "billing", "code": "billing",
+        "retryable": False,
+    }, interim
+    assert answered is True
+
+
+# ── finding 6: fail → fail shows the newest failure ─────────────────────────
+
+def test_save_takes_the_newest_failure_surface_from_state_db(tmp_path, monkeypatch):
+    """A second failure must replace the first one's surface.
+
+    The Agent settles its own boundary rows, so between the second failure and
+    the sidecar write the resident transcript still ends on the FIRST
+    ``failed_turn`` row: the marker kept reporting a retryable rate limit
+    after a billing failure. state.db is authoritative, so the save re-reads
+    it and the newest surface wins.
+    """
+    db = tmp_path / "state.db"
+    _make_production_shaped_state_db(db)
+    conn = sqlite3.connect(str(db))
+    _insert_message(conn, sid="sess-1", role="user", content="first", ts=1.0)
+    _insert_message(
+        conn, sid="sess-1", role="assistant",
+        content="Your request was not processed.", ts=2.0,
+        display_kind="failed_turn",
+        display_metadata=_failed_turn_metadata(
+            layer="upstream", code="rate_limit", retryable=True,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    _point_session_dir_at(monkeypatch, session_dir)
+    _point_models_at(monkeypatch, db)
+    _reset_failure_caches(monkeypatch)
+
+    # The resident transcript as the worker last saved it: the first failure
+    # is settled, the second turn is in flight, and the Agent has already
+    # stamped the second boundary row into state.db.
+    session = models.Session(session_id="sess-1", messages=[
+        {"role": "user", "content": "first", "timestamp": 1.0},
+        {"role": "assistant", "display_kind": "failed_turn", "timestamp": 2.0,
+         "display_metadata": {"error_surface": {"layer": "upstream",
+                                                "code": "rate_limit",
+                                                "retryable": True}}},
+        {"role": "assistant", "content": "**Provider error:** rate limited",
+         "timestamp": 3.0, "_error": True},
+        {"role": "user", "content": "try again", "timestamp": 4.0},
+        {"role": "assistant", "content": "**Provider error:** out of credits",
+         "timestamp": 5.0, "_error": True},
+    ])
+    conn = sqlite3.connect(str(db))
+    _insert_message(
+        conn, sid="sess-1", role="assistant",
+        content="Your request was not processed.", ts=6.0,
+        display_kind="failed_turn",
+        display_metadata=_failed_turn_metadata(),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(models, "_SESSION_FAILURE_FINGERPRINT_TTL", 0.0)
+    _reset_failure_caches(monkeypatch)
+
+    session.save()
+    assert session.failure_summary == {
+        "kind": "failed_turn", "layer": "billing", "code": "billing",
+        "retryable": False,
+    }
+    on_disk = json.loads(
+        (session_dir / "sess-1.json").read_text(encoding="utf-8")
+    )
+    assert on_disk["failure_summary"]["layer"] == "billing"
+    assert on_disk["failure_summary"]["retryable"] is False
+
+
+def test_save_keeps_the_transcript_verdict_while_a_turn_is_in_flight(
+    tmp_path, monkeypatch
+):
+    """The guard on the rule above: an in-flight request is not a recovery.
+
+    The tail ends on a user row, so the database's healthy verdict describes
+    the turn BEFORE it. Clearing there would drop the marker exactly when the
+    session is failing again.
+    """
+    db = tmp_path / "state.db"
+    _make_production_shaped_state_db(db)
+    conn = sqlite3.connect(str(db))
+    _insert_message(conn, sid="sess-1", role="user", content="first", ts=1.0)
+    _insert_message(conn, sid="sess-1", role="assistant",
+                    content="all good", ts=2.0)
+    _insert_message(conn, sid="sess-1", role="user", content="again", ts=3.0)
+    conn.commit()
+    conn.close()
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    _point_session_dir_at(monkeypatch, session_dir)
+    _point_models_at(monkeypatch, db)
+    _reset_failure_caches(monkeypatch)
+
+    session = models.Session(session_id="sess-1", messages=[
+        {"role": "user", "content": "first", "timestamp": 1.0},
+        {"role": "assistant", "display_kind": "failed_turn", "timestamp": 2.0,
+         "display_metadata": {"error_surface": {"layer": "billing",
+                                                "retryable": False}}},
+        {"role": "user", "content": "again", "timestamp": 3.0},
+    ])
+    session.save()
+    assert session.failure_summary == {
+        "kind": "failed_turn", "layer": "billing", "retryable": False,
+    }

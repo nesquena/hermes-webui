@@ -3169,6 +3169,13 @@ def _build_session_list_cache_payload(
                 for key in ("source_tag", "raw_source", "session_source", "source_label"):
                     if not s.get(key) and meta.get(key):
                         s[key] = meta[key]
+                # #8447 / #8603 review round 3, finding 4 (R2): the second merge
+                # path. An imported CLI/messaging duplicate is suppressed in
+                # favour of this WebUI row below, so its Agent-side failure state
+                # has to survive the merge here — set when the Agent row reports
+                # one, cleared when the Agent row reports health, untouched when
+                # the Agent row could not be answered at all.
+                _carry_cli_failure_summary(s, meta)
         webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
         # Apply the same CLI visibility semantics to imported local copies so
         # low-value imported artifacts do not leak into the sidebar.
@@ -12738,6 +12745,31 @@ def _cap_recent_cli_sessions(
     return kept
 
 
+def _carry_cli_failure_summary(ui_session: dict, cli_meta: dict) -> None:
+    """Carry the Agent row's failure state onto a merged sidebar row (#8447).
+
+    ``cli_meta`` was just refreshed from the Agent's state.db, so its summary is
+    the fresher of the two whenever the two disagree. Both directions matter:
+
+    * the Agent row carries a summary → the merged row gets it, so an imported
+      CLI/messaging duplicate stops hiding the failure its Agent row reports;
+    * the Agent row answered "healthy" (``_failure_summary_answered`` set, no
+      summary) → the merged row's stale marker is cleared;
+    * the Agent row could not be answered at all → the merged row keeps its own
+      value, because an unreadable database is not evidence of recovery.
+
+    The private marker is consumed here, so it never reaches a client.
+    """
+    if not isinstance(ui_session, dict) or not isinstance(cli_meta, dict):
+        return
+    if not cli_meta.pop('_failure_summary_answered', False):
+        return
+    if cli_meta.get('failure_summary'):
+        ui_session['failure_summary'] = cli_meta['failure_summary']
+    else:
+        ui_session.pop('failure_summary', None)
+
+
 def _merge_cli_sidebar_metadata(ui_session: dict, cli_meta: dict) -> dict:
     """Merge source-of-truth CLI metadata into a sidebar session row.
 
@@ -12801,6 +12833,10 @@ def _merge_cli_sidebar_metadata(ui_session: dict, cli_meta: dict) -> dict:
     if cli_meta.get("model"):
         if not merged.get("model") or merged.get("model") == "unknown":
             merged["model"] = cli_meta["model"]
+    # #8447 / #8603 review round 3, finding 4 (R2): the failure state is
+    # Agent-derived and refreshed on every list build, so it rides along with
+    # the rest of the source-of-truth metadata — in both directions.
+    _carry_cli_failure_summary(merged, cli_meta)
     return merged
 
 
