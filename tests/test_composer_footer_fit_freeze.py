@@ -118,8 +118,8 @@ function makeFooterDom(opts) {
     });
   }
   const classList = {
-    add() { for (const n of arguments) classes.add(n); layout('classList.add'); },
-    remove() { for (const n of arguments) classes.delete(n); layout('classList.remove'); },
+    add() { for (const n of arguments) classes.add(n); layout('classList.add:' + Array.from(arguments).join(',')); },
+    remove() { for (const n of arguments) classes.delete(n); layout('classList.remove:' + Array.from(arguments).join(',')); },
     toggle(name, force) {
       const on = force === undefined ? !classes.has(name) : !!force;
       if (on) classes.add(name); else classes.delete(name);
@@ -209,7 +209,11 @@ function runFit(fit, opts) {
   const after = dom.snapshot();
   // Samples committed by class mutations and overflow measurements: every one
   // of them happens inside the probe window and must be frozen + hidden.
-  const probe = dom.samples.filter(s => s.reason.startsWith('classList') || s.reason === 'measure');
+  // The freeze contract covers the stage measurement. The cf-measuring
+  // transition guard is removed only AFTER visibility is restored (#8253 Fable
+  // r2), so its own toggle is not a measurement sample.
+  const probe = dom.samples.filter(s => (s.reason.startsWith('classList') && !s.reason.includes('cf-measuring')) || s.reason === 'measure');
+  const guardRemovals = dom.samples.filter(s => s.reason === 'classList.remove:cf-measuring');
   return {
     start: opts.start, outcome: opts.outcome, availableWidth: opts.availableWidth,
     prevHeight: opts.prevHeight, prevVisibility: opts.prevVisibility,
@@ -224,6 +228,8 @@ function runFit(fit, opts) {
     probeSamples: probe.length,
     probeHeights: dedupe(probe.map(s => s.footerHeight)),
     probeAllHidden: probe.length > 0 && probe.every(s => s.hidden),
+    guardRemovals: guardRemovals.length,
+    guardRemovedVisible: guardRemovals.length > 0 && guardRemovals.every(s => !s.hidden),
     styleWrites: dom.styleWrites,
     // #1804 re-gate 9/24: every fit pass pins the busy-mode send
     // button's label to display:none for the duration of the probe so
@@ -397,6 +403,13 @@ def test_footer_border_box_frozen_through_probe(outcome):
             f"{run['probeHeights']} (start {run['startHeight']})"
         )
         assert run["probeAllHidden"], f"{_label(run)}: probe ran with a visible footer"
+        # #8253 Fable r2: the transition guard comes off only after the footer is
+        # visible again, so no descendant animates in from the hidden state.
+        assert run["guardRemovals"] >= 1, f"{_label(run)}: fit never removed the cf-measuring guard"
+        assert run["guardRemovedVisible"], (
+            f"{_label(run)}: cf-measuring was removed while the footer was still hidden "
+            "(descendants would animate visibility from hidden and blink)"
+        )
 
 
 def test_messages_client_height_never_jitters(outcome):

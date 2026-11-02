@@ -21,8 +21,11 @@ config-override args again.
 """
 
 from pathlib import Path
+import copy
 import sys
 import types
+
+import pytest
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -168,21 +171,72 @@ def test_legacy_signature_fallback_present():
     )
 
 
-def test_cfg_custom_providers_resolved_from_cfg_dict():
+@pytest.mark.parametrize("store", ["legacy", "native"])
+def test_cfg_custom_providers_resolved_from_cfg_dict(monkeypatch, store):
     """The kwargs source must be the per-profile config (`_cfg`), not a
     module-level snapshot — otherwise profile switches with different
     custom_providers wouldn't take effect."""
-    # The parsing now lives in the shared route helper so session-load,
-    # session-save, and SSE fallbacks cannot drift.
-    assert "_context_length_lookup_inputs_for_model(" in STREAMING_PY
-    assert 'cfg.get("custom_providers")' in ROUTES_PY, (
-        "_cfg_custom_providers must be sourced from `cfg.get('custom_providers')` "
-        "(per-profile config) so profile-scoped custom_providers entries work."
-    )
-    assert 'cfg.get("model", {})' in ROUTES_PY, (
-        "_cfg_ctx_len must be sourced from `cfg.get('model', {}).get('context_length')` "
-        "(per-profile config) so profile-scoped model.context_length overrides work."
-    )
+    from api import config, routes
+
+    profiles = []
+    for profile, window in (("a", 888000), ("b", 999000)):
+        owners = [
+            {
+                "name": "Other",
+                "base_url": "https://shared.example/v1",
+                "api_key": f"synthetic-{profile}-other-key",
+                "models": {"shared-model": {"context_length": 444000}},
+            },
+            {
+                "name": "ZenMux",
+                "base_url": "https://shared.example/v1",
+                "api_key": f"synthetic-{profile}-owner-key",
+                "models": {"shared-model": {"context_length": str(window)}},
+            },
+        ]
+        cfg = {"model": {"provider": "openai", "default": "default-model", "context_length": window + 1}}
+        if store == "legacy":
+            cfg["custom_providers"] = owners
+        else:
+            cfg["providers"] = {"other": owners[0], "zenmux": owners[1]}
+        profiles.append(cfg)
+
+    before = copy.deepcopy(profiles)
+    # Stand in only for request/profile config acquisition. The production
+    # helper must re-read it on every call, not use a module-global snapshot.
+    monkeypatch.setattr(config, "cfg", {"custom_providers": [{"name": "ZenMux", "api_key": "wrong-global-key"}]})
+    active = [profiles[0]]
+    reads = []
+
+    def get_profile_config():
+        reads.append(active[0])
+        return active[0]
+
+    monkeypatch.setattr(config, "get_config", get_profile_config)
+    for cfg, profile, window in ((profiles[0], "a", 888000), (profiles[1], "b", 999000), (profiles[0], "a", 888000)):
+        active[0] = cfg
+        lookup = routes._context_length_lookup_inputs_for_model("shared-model", "custom:zenmux")
+        assert lookup.config_context_length == window
+        assert lookup.provider == "custom:zenmux"
+        assert lookup.base_url == "https://shared.example/v1"
+        assert lookup.api_key == f"synthetic-{profile}-owner-key"
+        assert len(lookup.custom_providers) == 1
+        selected = lookup.custom_providers[0]
+        assert selected["name"].lower() == "zenmux"
+        assert selected["models"] == {"shared-model": {"context_length": str(window)}}
+        assert selected["api_key"] == f"synthetic-{profile}-owner-key"
+
+        default = routes._context_length_lookup_inputs_for_model("default-model", "openai")
+        assert default.config_context_length == window + 1
+        assert default.custom_providers == []
+        assert default.api_key == ""
+        unrelated = routes._context_length_lookup_inputs_for_model("other-model", "openai")
+        assert unrelated.config_context_length is None
+        assert unrelated.custom_providers == []
+        assert unrelated.api_key == ""
+
+    assert reads == [profiles[0]] * 3 + [profiles[1]] * 3 + [profiles[0]] * 3
+    assert profiles == before
 
 
 # ── Sibling fallback in api/routes.py session-load path ─────────────────────

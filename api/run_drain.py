@@ -180,6 +180,26 @@ def restart_force_requested() -> bool:
         return bool(_RESTART_PENDING_EPOCH is not None and _RESTART_FORCE)
 
 
+def working_tree_may_be_changing() -> bool:
+    """True while this process's checkout may be changing underneath it.
+
+    ``update_hold`` spans a whole apply (fetch / stash / pull / pop, including
+    ``reset --hard`` on the force path) and ``restart_pending`` spans the
+    ``_schedule_restart`` sleep before ``os.execv`` replaces the image. In both
+    windows the OLD process keeps serving ``/static/*`` from a working tree that
+    is already (or is still becoming) the next revision, so a ``?v=``
+    fingerprint no longer identifies the bytes being returned (#6992).
+
+    ``draining`` counts too: the process is being replaced by its supervisor
+    there as well, so the same "do not promise a year" reasoning applies.
+
+    Cheap by design — one uncontended lock plus a string compare, no I/O, no
+    allocation — because the caller is the static-asset hot path.
+    """
+    with _STATE_LOCK:
+        return _phase_locked() != "open"
+
+
 def begin_shutdown_drain() -> None:
     """Close admission for good: this process is stopping."""
     global _DRAINING
@@ -288,6 +308,23 @@ def webui_owned_active_runs() -> list[dict]:
     block updates and are drained/settled like any WebUI run. The decision does
     not depend on the order in which a launch publishes its ownership markers.
     """
+    return _collect_active_runs(include_resumable_gateway=False)
+
+
+def all_active_runs() -> list[dict]:
+    """Return every live agent run, including resumable Gateway runs (#8660).
+
+    The same single pass as ``webui_owned_active_runs`` without its one
+    exclusion. An Agent update also cycles the Hermes Gateway, which ends the
+    resumable Gateway runs that survive a WebUI-only restart, so an Agent
+    update counts every run, as every update did before #7293. No durability
+    check is made, so a run whose durable mark is set or released mid-read is
+    still counted exactly once while its row or stream is registered.
+    """
+    return _collect_active_runs(include_resumable_gateway=True)
+
+
+def _collect_active_runs(*, include_resumable_gateway: bool) -> list[dict]:
     with _config.STREAMS_LOCK:
         stream_ids = [str(k) for k in _config.STREAMS.keys()]
         claimed = {str(k) for k in _config.PRE_ADMISSION_CLAIMS.keys()}
@@ -301,7 +338,7 @@ def webui_owned_active_runs() -> list[dict]:
     runs: list[dict] = []
     for sid, row in run_rows.items():
         backend = str(row.get("backend") or "") or "legacy"
-        if backend == "gateway" and _gateway_run_durably_resumable(sid):
+        if not include_resumable_gateway and backend == "gateway" and _gateway_run_durably_resumable(sid):
             continue
         runs.append({
             "stream_id": sid,
