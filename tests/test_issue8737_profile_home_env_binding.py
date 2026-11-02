@@ -97,7 +97,6 @@ def two_profiles(tmp_path, monkeypatch):
 
 
 def _expand(config_text, home):
-    from api.config import _expand_env_vars
     from api.profiles import expand_profile_config
 
     return expand_profile_config(home, yaml.safe_load(config_text))
