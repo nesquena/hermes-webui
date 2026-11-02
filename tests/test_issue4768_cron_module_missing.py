@@ -52,10 +52,11 @@ def test_api_crons_guards_missing_cron_module():
 
 def test_api_crons_still_lists_jobs_on_happy_path():
     """The guard must not remove the normal behavior: when cron imports fine, the
-    branch still calls list_jobs(include_disabled=True) under cron_profile_context."""
+    branch still calls list_jobs(include_disabled=True) under the per-profile cron
+    store scope (#7295: lock-free on current Agents, lock fallback on older ones)."""
     helper = _cross_profile_helper()
     assert "list_jobs(include_disabled=True)" in helper
-    assert "cron_profile_context_for_home" in helper
+    assert "cron_store_scope_for_home" in helper
     assert "_cron_jobs_for_api(" in helper
     # The import is lazy (inside the function body, not at module level).
     assert "from cron.jobs import list_jobs" in helper

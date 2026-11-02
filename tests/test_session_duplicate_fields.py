@@ -170,6 +170,14 @@ def test_duplicate_copies_model_provider():
         "Duplicate must copy model_provider"
 
 
+def test_duplicate_copies_reasoning_effort():
+    """The duplicate must retain the source conversation's effort preference."""
+    block, _ = _extract_duplicate_block()
+    ctor = _find_session_ctor(block)
+    assert _has_field(ctor, 'reasoning_effort'), \
+        "Duplicate must copy reasoning_effort"
+
+
 def test_duplicate_copies_personality():
     """personality must survive duplication."""
     block, _ = _extract_duplicate_block()
@@ -335,6 +343,14 @@ def test_branch_copies_model_provider():
     ctor = _find_session_ctor(block, 'branch')
     assert _has_field(ctor, 'model_provider'), \
         "Branch must copy model_provider"
+
+
+def test_branch_copies_reasoning_effort():
+    """A branch must retain the source conversation's effort preference."""
+    block, _ = _extract_branch_block()
+    ctor = _find_session_ctor(block, 'branch')
+    assert _has_field(ctor, 'reasoning_effort'), \
+        "Branch must copy reasoning_effort"
 
 
 def test_branch_copies_project_id():

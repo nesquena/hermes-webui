@@ -23,8 +23,8 @@ def test_ssrf_trusted_hosts_populated_from_custom_providers():
     """Trusted hosts are extracted by iterating custom_providers[].base_url."""
     with open("api/config.py") as f:
         src = f.read()
-    # Must read custom_providers from cfg
-    assert 'cfg.get("custom_providers"' in src
+    # Read both legacy and native stores through the shared read-only view.
+    assert '_custom_provider_entries(cfg)' in src
     # Must extract base_url from each entry
     assert '_cp.get("base_url")' in src
     # Must parse hostname with urlparse
