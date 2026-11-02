@@ -342,6 +342,121 @@ def test_the_fenced_entry_survives_a_garbage_collection_during_the_wait(
     assert provider.shutdowns == 1, "the fenced release never ran"
 
 
+# ── the maintainer's non-blocking note: the fence wait stalls a lock holder ──
+#
+# The fence wait (bounded, 15 s) exists so a release does not close an instance
+# a same-profile construction is about to acquire. The compression-migration
+# close runs inside the per-session agent lock, so waiting there holds that
+# lock and stalls the user's next turn. That close must therefore REFUSE the
+# release right away — the provider keeps its worker until the next session
+# boundary — instead of waiting.
+
+
+def test_a_release_that_must_not_block_refuses_instead_of_waiting(
+    hc, homes, holder_registry
+):
+    """The maintainer's note on the fence wait: a caller that holds a lock and
+    must not block refuses the release instead of waiting for the
+    construction.
+
+    The oracle is the WAIT ITSELF: with a same-profile construction in
+    flight, the claim would otherwise sit on the fence for its full 15 s
+    budget.
+    """
+    provider = SharedInstanceProvider()
+    agent = _shared_agent(homes["alpha"], provider, "8613-r2-nowait")
+
+    started = threading.Event()
+    proceed = threading.Event()
+
+    def pause_before_memory():
+        started.set()
+        assert proceed.wait(30), "the fenced construction was never resumed"
+
+    builder = threading.Thread(
+        target=lambda: _build(
+            homes["alpha"], _fresh_instance, "8613-r2-nowait-builder",
+            before_init=pause_before_memory,
+        ),
+        name="8613-r2-nowait-build",
+        daemon=True,
+    )
+    builder.start()
+    assert started.wait(30), "the construction never started"
+
+    # The construction is in flight, so the release is fenced.
+    began = time.monotonic()
+    with scope.release_without_fence_wait():
+        ok, why, claimed = scope._claim_last_held_teardown(agent)
+    waited = time.monotonic() - began
+
+    assert ok is False, "the release must be refused, not granted"
+    assert "acquired by" in why, why
+    assert waited < 5, f"the release waited {waited:.1f}s for the fence"
+
+    # The instance is untouched: no client was closed under a live agent.
+    assert provider.shutdowns == 0
+    assert provider.client.is_closed is False
+
+    proceed.set()
+    builder.join(30)
+    assert not builder.is_alive()
+
+
+def test_the_fence_wait_still_applies_to_a_release_that_may_wait(
+    hc, homes, holder_registry
+):
+    """The refusal above is opt-IN: an ordinary release still waits for the
+    construction, and runs the teardown once it resolves. Without this, the
+    note's fix would silently disable the fence everywhere."""
+    provider = SharedInstanceProvider()
+    agent = _shared_agent(homes["alpha"], provider, "8613-r2-wait-ok")
+
+    started = threading.Event()
+    proceed = threading.Event()
+
+    def pause_before_memory():
+        started.set()
+        assert proceed.wait(30), "the fenced construction was never resumed"
+
+    builder = threading.Thread(
+        target=lambda: _build(
+            homes["alpha"], _fresh_instance, "8613-r2-wait-ok-builder",
+            before_init=pause_before_memory,
+        ),
+        name="8613-r2-wait-ok-build",
+        daemon=True,
+    )
+    builder.start()
+    assert started.wait(30), "the construction never started"
+
+    result: dict = {}
+
+    def claim():
+        ok, why, claimed = scope._claim_last_held_teardown(agent)
+        result.update(ok=ok, why=why, claimed=claimed)
+
+    claimer = threading.Thread(target=claim, name="8613-r2-wait-ok-claim", daemon=True)
+    claimer.start()
+
+    # The claim is waiting on the fence.
+    time.sleep(0.5)
+    assert claimer.is_alive(), "the ordinary release did not wait for the construction"
+
+    proceed.set()
+    builder.join(30)
+    claimer.join(30)
+    assert not builder.is_alive() and not claimer.is_alive()
+    assert result.get("ok") is True, result.get("why")
+
+    claimed = result.get("claimed") or []
+    try:
+        agent._memory_manager.release_soft()
+    finally:
+        scope._settle_last_held_teardown(agent, claimed, released=True)
+    assert provider.shutdowns == 1, "the ordinary release never ran"
+
+
 # ── C. lock-order inversion between the holder lock and Future._condition ────
 #
 # `_manager_has_outstanding_work` calls `future.done()`, which takes the

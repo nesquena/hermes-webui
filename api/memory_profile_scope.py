@@ -1237,6 +1237,37 @@ _provider_holders_cond = threading.Condition(_provider_holders_lock)
 
 _inflight_homes: dict[str, int] = {}
 
+# A release that must NOT block on the construction fence. The
+# compression-migration close runs inside the per-session agent lock, so
+# waiting there for a same-profile construction to finish would stall the
+# user's next turn (#8613 round 2, the maintainer's note). The flag makes the
+# claim REFUSE the release instead of waiting — the provider keeps its worker,
+# exactly as it does when the fence wait times out.
+_skip_fence_wait: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "webui_8613_skip_fence_wait", default=False,
+)
+
+
+@contextlib.contextmanager
+def release_without_fence_wait():
+    """Release the memory provider WITHOUT waiting for the construction fence.
+
+    A release normally waits, bounded, for a same-profile construction that
+    may be about to acquire the very instance the release would close
+    (``_claim_last_held_teardown``). A caller that must not block — the
+    compression-migration close holds the per-session agent lock while it
+    runs — uses this instead: the release is refused right away, and the
+    provider keeps its worker until the next session boundary.
+
+    The flag is construction-scoped (a ContextVar, like the refusal notes
+    beside it), so it applies to the release it wraps and to nothing else.
+    """
+    token = _skip_fence_wait.set(True)
+    try:
+        yield
+    finally:
+        _skip_fence_wait.reset(token)
+
 
 def _reserve_acquisition(home_key: str) -> None:
     """Reserve the acquisition of ``home_key``'s provider instances BEFORE they
@@ -1762,6 +1793,20 @@ def _claim_last_held_teardown(agent: Any) -> tuple[bool, str, list]:
                             entry.teardown = True
                     return True, "", claimed
                 if not fenced:
+                    return False, why, []
+                if _skip_fence_wait.get():
+                    # #8613 round 2 (the maintainer's note): this caller must
+                    # not block — it holds the per-session agent lock, and the
+                    # fence wait would stall the user's next turn. Refuse the
+                    # release now, exactly as the wait's timeout does: the
+                    # provider keeps its worker until the next session
+                    # boundary, and no client is closed under a live agent.
+                    logger.info(
+                        "[webui] #8613: not waiting for a construction of the same "
+                        "profile before releasing a memory provider (%s). The provider "
+                        "keeps its worker until the next session boundary.",
+                        why,
+                    )
                     return False, why, []
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:

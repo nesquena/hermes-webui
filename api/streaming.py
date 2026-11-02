@@ -94,6 +94,9 @@ from api.memory_profile_scope import (
     # #8613: release an unowned eviction's memory provider only when its agent is
     # the last holder of the instance.
     release_unowned_memory_provider,
+    # #8613: refuse the release instead of waiting on the acquisition fence,
+    # for a caller that holds a lock and must not block.
+    release_without_fence_wait,
     session_profile_home_or_empty,
     turn_memory_reason,
     unregister_provider_holders,
@@ -16802,7 +16805,14 @@ def _run_agent_streaming(
                                 )
                     if _skipped_agent_migration_entry is not None:
                         try:
-                            _close_cached_agent_entry_at_session_boundary(old_sid, _skipped_agent_migration_entry)
+                            # #8613: this close runs inside the per-session agent
+                            # lock, so it must NOT wait on the acquisition fence —
+                            # the wait would stall the user's next turn while the
+                            # lock is held. The release is refused right away
+                            # instead, and the provider keeps its worker until the
+                            # next session boundary.
+                            with release_without_fence_wait():
+                                _close_cached_agent_entry_at_session_boundary(old_sid, _skipped_agent_migration_entry)
                         except Exception:
                             logger.debug("Failed to close skipped compression-migration cached agent for session %s", old_sid, exc_info=True)
                     _compressed = True
