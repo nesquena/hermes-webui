@@ -2729,13 +2729,26 @@
   .drop-hint svg{opacity:.85;}
   .attach-tray{display:none;flex-wrap:wrap;gap:6px;padding:10px 14px 0;}
   .attach-tray.has-files{display:flex;}
-  /* hwc: oc-attach-tray-scroll — the tray scrolls, the textarea and footer stay put. */
-  .composer-box{
+  /* hwc: oc-attach-tray-scroll — cap only a tray that actually has files.
+     An empty composer keeps the ordinary content height so a long draft
+     and the send button are not clipped in a short desktop window. */
+  .composer-box:has(.attach-tray.has-files){
     max-height:min(70dvh, calc(100dvh - 52px - var(--app-titlebar-safe-top, 0px) - var(--keyboard-bottom-inset, 0px) - 24px));
     min-height:0;
   }
   .composer-box > textarea#msg,
   .composer-box > .composer-footer{flex-shrink:0;}
+  /* Short windows: a populated long draft must give up height before the
+     footer. The 88px cap below only covers narrow or coarse pointers. */
+  @media (max-height: 599px){
+    .composer-box:has(.attach-tray.has-files) > textarea#msg{
+      flex-shrink:1;
+      min-height:44px;
+    }
+    .composer-box:has(.attach-tray.has-files) > .attach-tray.has-files{
+      flex-shrink:0;
+    }
+  }
   .attach-tray.has-files{
     flex:0 1 auto;
     min-height:0;
