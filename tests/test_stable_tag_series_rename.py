@@ -16,7 +16,12 @@ from api import updates
 
 
 def _fake_git_two_series(args, cwd, timeout=10):
-    if args == ['diff-index', '--quiet', 'HEAD', '--']:
+    # #7679 switched the content-based dirty probe from ``diff-index`` to
+    # ``git diff --quiet HEAD --`` (diff-index keys off the index stat cache
+    # and badges a clean checkout ``-dirty`` after a re-clone/rsync). Accept
+    # both forms so the fake keeps modelling a clean tree either way.
+    if args in (['diff-index', '--quiet', 'HEAD', '--'],
+                ['diff', '--quiet', 'HEAD', '--']):
         return '', True  # clean tree
     if args[:1] == ['--no-optional-locks']:
         return '', True  # dirty probe: clean tree
