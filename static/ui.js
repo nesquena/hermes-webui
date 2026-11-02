@@ -10883,9 +10883,27 @@ function renderMd(raw){
     t=t.replace(/`([^`\n]+)`/g,(_,x)=>{_code_stash.push(`<code>${esc(x)}</code>`);return `\x00C${_code_stash.length-1}\x00`;});
     t=t.replace(/\*\*\*(.+?)\*\*\*/g,(_,x)=>`<strong><em>${esc(x)}</em></strong>`);
     t=t.replace(/\*\*(.+?)\*\*/g,(_,x)=>`<strong>${esc(x)}</strong>`);
+    // Protect the emphasis tags/entities emitted so far from the esc() calls in
+    // the italic and strikethrough passes below: those esc() a just-emitted
+    // <strong>/<em> into literal &lt;strong&gt; text and double-escape an
+    // already-escaped &#39; into &amp;#39;. Only the bare tags/entities are
+    // stashed (never their content) so nested emphasis such as **a *b* c**
+    // still renders. The token carries a per-call random prefix because
+    // renderMd() does not strip NUL from its input: without it, message text
+    // containing a literal \x00I…\x00 sequence would be restored as a tag, and
+    // \x00B is already owned by _al_stash. See PR #8235 review.
+    const _tk='\x00I'+Math.random().toString(36).slice(2,8)+'_';
+    const _tag_re=new RegExp(_tk.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'(\\d+)\x00','g');
+    const _tag_stash=[];
+    const _stashTags=()=>{t=t.replace(/<\/?(?:strong|em|del)>|&(?:amp|lt|gt|quot|#39);/g,m=>{_tag_stash.push(m);return _tk+(_tag_stash.length-1)+'\x00';});};
+    _stashTags();
     t=t.replace(/\*([^\s*](?:[^*\n]*?[^\s*])?)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
+    // The italic pass just emitted <em>/</em>; stash those too, or the
+    // strikethrough pass escapes them (~~*a **b** c*~~ would show <em>).
+    _stashTags();
     // Strikethrough: ~~text~~ → <del>text</del>
     t=t.replace(/~~(.+?)~~/g,(_,x)=>`<del>${esc(x)}</del>`);
+    t=t.replace(_tag_re,(_,i)=>_tag_stash[+i]);
     // #487: Image pass — runs while code stash is active so ![x](url) inside
     // backticks stays protected as a \x00C token and is never rendered as <img>.
     // Must run before _code_stash restore and before _link_stash so the image
@@ -10913,8 +10931,21 @@ function renderMd(raw){
   s=s.replace(/(<code\b[^>]*>[\s\S]*?<\/code>)/g,m=>{_ob_stash.push(m);return `\x00O${_ob_stash.length-1}\x00`;});
   s=s.replace(/\*\*\*(.+?)\*\*\*/g,(_,t)=>`<strong><em>${esc(t)}</em></strong>`);
   s=s.replace(/\*\*(.+?)\*\*/g,(_,t)=>`<strong>${esc(t)}</strong>`);
+  // Same protection as inlineMd above: the italic/strikethrough passes esc()
+  // their captured text, so the tags/entities emitted so far (and by the
+  // italic pass) must be stashed first or they render as literal
+  // &lt;strong&gt; / double-escaped &amp;#39;. The token carries a per-call
+  // random prefix because renderMd() does not strip NUL from its input, and
+  // \x00B is already owned by _al_stash.
+  const _otk='\x00I'+Math.random().toString(36).slice(2,8)+'_';
+  const _otag_re=new RegExp(_otk.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'(\\d+)\x00','g');
+  const _otag_stash=[];
+  const _ostashTags=()=>{s=s.replace(/<\/?(?:strong|em|del)>|&(?:amp|lt|gt|quot|#39);/g,m=>{_otag_stash.push(m);return _otk+(_otag_stash.length-1)+'\x00';});};
+  _ostashTags();
   s=s.replace(/\*([^\s*](?:[^*\n]*?[^\s*])?)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
+  _ostashTags();
   s=s.replace(/~~(.+?)~~/g,(_,t)=>`<del>${esc(t)}</del>`);
+  s=s.replace(_otag_re,(_,i)=>_otag_stash[+i]);
   s=s.replace(/\x00O(\d+)\x00/g,(_,i)=>_ob_stash[+i]);
   s=s.replace(/^###### (.+)$/gm,(_,t)=>`<h6>${inlineMd(t)}</h6>`).replace(/^##### (.+)$/gm,(_,t)=>`<h5>${inlineMd(t)}</h5>`).replace(/^#### (.+)$/gm,(_,t)=>`<h4>${inlineMd(t)}</h4>`).replace(/^### (.+)$/gm,(_,t)=>`<h3>${inlineMd(t)}</h3>`).replace(/^## (.+)$/gm,(_,t)=>`<h2>${inlineMd(t)}</h2>`).replace(/^# (.+)$/gm,(_,t)=>`<h1>${inlineMd(t)}</h1>`);
   s=s.replace(/^---+$/gm,'<hr>');
@@ -11303,6 +11334,8 @@ function renderMd(raw){
   // Stash rendered <pre> blocks (with optional pre-header div) and mermaid/katex
   // divs before paragraph splitting so \n inside code blocks is never replaced
   // with <br>. Token \x00E (next free after B D F G L M C O A).
+  // \x00I is reserved for the emphasis tag/entity stash (random-suffixed
+  // \x00I<rand>_<n>\x00 tokens in inlineMd/renderMd), so it is not free here.
   // Fixes #745: code blocks collapse to single line when not preceded by blank line.
   const _pre_stash=[];
   // #1463 / #1618: regex must match <pre> with ANY attributes — PR #484 added
