@@ -24581,6 +24581,46 @@ def _tts_open(req, *, timeout=30, opener_factory=None):
     return _urlopen(req, timeout=timeout)
 
 
+class _TtsRateLimiter:
+    """Per-client 2 s throttle for the TTS endpoint.
+
+    Keys on the same client identity the login limiter uses
+    (``_login_client_ip``). See ``_get_client_key`` for the trust model.
+    """
+
+    def __init__(self, window_seconds=2.0, prune_interval=50):
+        self.window = window_seconds
+        self.prune_interval = prune_interval
+        self._hits = {}
+        self._lock = threading.Lock()
+        self._checks = 0
+
+    def _get_client_key(self, h):
+        # #8610: parity with the login limiter — the raw socket peer unless
+        # per-client buckets are opted in AND the peer is a listed trusted
+        # proxy (HERMES_WEBUI_TRUSTED_PROXY_CIDRS). The old path trusted ANY
+        # peer's forwarded headers once HERMES_WEBUI_TRUST_FORWARDED_FOR was
+        # set, so a client could pick a fresh bucket (and a log identity) on
+        # every request.
+        return _login_client_ip(h)
+
+    def check(self, handler, session_cookie=None):
+        key = self._get_client_key(handler)
+        if session_cookie and "." in str(session_cookie):
+            key = str(session_cookie).split(".", 1)[0]
+        now = time.time()
+        with self._lock:
+            self._checks += 1
+            if self._checks % self.prune_interval == 0:
+                cutoff = now - (self.window * 10)
+                self._hits = {k: v for k, v in self._hits.items() if v > cutoff}
+            last = self._hits.get(key, 0)
+            if now - last < self.window:
+                return False
+            self._hits[key] = now
+            return True
+
+
 def _handle_tts(handler, parsed):
     """Generate TTS audio via supported server TTS engines. POST JSON body only.
 
@@ -24680,42 +24720,6 @@ def _handle_tts(handler, parsed):
 
     # High-quality per-client rate limiting for TTS.
     if not hasattr(_handle_tts, "_tts_limiter"):
-        import time as _time, threading as _threading
-        class _TtsRateLimiter:
-            def __init__(self, window_seconds=2.0, prune_interval=50):
-                self.window = window_seconds
-                self.prune_interval = prune_interval
-                self._hits = {}
-                self._lock = _threading.Lock()
-                self._checks = 0
-
-            def _get_client_key(self, h):
-                trust_proxy = os.getenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "").strip().lower()
-                if trust_proxy in ("1", "true", "yes", "on"):
-                    for hdr in ("X-Forwarded-For", "X-Real-IP", "Forwarded"):
-                        val = h.headers.get(hdr)
-                        if val:
-                            ip = val.split(",")[0].strip().split(";")[0].strip()
-                            if ip:
-                                return ip
-                return getattr(h, "client_address", ("unknown",))[0]
-
-            def check(self, handler, session_cookie=None):
-                key = self._get_client_key(handler)
-                if session_cookie and "." in str(session_cookie):
-                    key = str(session_cookie).split(".", 1)[0]
-                now = _time.time()
-                with self._lock:
-                    self._checks += 1
-                    if self._checks % self.prune_interval == 0:
-                        cutoff = now - (self.window * 10)
-                        self._hits = {k: v for k, v in self._hits.items() if v > cutoff}
-                    last = self._hits.get(key, 0)
-                    if now - last < self.window:
-                        return False
-                    self._hits[key] = now
-                    return True
-
         _handle_tts._tts_limiter = _TtsRateLimiter(window_seconds=2.0)
 
     limiter = _handle_tts._tts_limiter
