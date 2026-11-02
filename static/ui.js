@@ -11263,7 +11263,9 @@ function renderMd(raw){
     }
     return '';
   }
-  s=s.replace(/<\/?[a-z][^>]*>/gi,tag=>_tag(tag));
+  // Escape unmatched opening delimiters in the same pass. Otherwise removing
+  // a disallowed tag from <<script>img ...> can assemble a new, unchecked tag.
+  s=s.replace(/<\/?[a-z][^>]*>|</gi,tag=>tag==='<'?'&lt;':_tag(tag));
   // Incomplete raw tags must not survive until paragraph wrapping, where the
   // renderer's generated </p> could provide a closing ">" and turn them into
   // executable HTML in innerHTML (for example: <img src=x onerror=...//).

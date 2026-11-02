@@ -994,7 +994,9 @@ Pipeline:
 11. Ordered lists (N. at line start) -> <ol><li> (uses inlineMd())
 12. Links ([text](https://...)) -> <a href target=_blank>
 13. Tables (| col | col |) -> <table>
-14. Safety net: escape any HTML tag not in SAFE_TAGS allowlist via esc()
+14. Safety net: rebuild allowed tags with approved attributes and URL schemes;
+    remove unsupported tags and escape unmatched `<` delimiters in the same pass,
+    so tag removal cannot join text into newly executable markup.
 15. Paragraph wrapping: remaining double-newline-separated blocks -> <p>
 
 inlineMd() helper (v0.18.1):
