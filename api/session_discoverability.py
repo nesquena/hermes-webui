@@ -504,6 +504,9 @@ def _materialize_sidecar_from_state_db(session_dir: Path, state_db_path: Path | 
     if not row:
         return {"session_id": sid, "action": "materialize_sidecar_from_state_db", "applied": False, "skipped": "state_row_not_repairable"}
     payload = _with_marked_message_count(_state_db_row_to_sidecar(row))
+    # Same durable-image projection as Session.save(): this writer bypasses it.
+    from api.session_image_persistence_override import project_message_payloads
+    payload = project_message_payloads(payload)
     _backup_file(state_db_path, backup_dir, backed_up)
     session_dir.mkdir(parents=True, exist_ok=True)
     tmp = target.with_suffix(target.suffix + f".tmp.{os.getpid()}.{threading.get_ident()}")

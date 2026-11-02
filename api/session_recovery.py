@@ -782,6 +782,11 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
         if target.exists():
             continue
         payload = _with_marked_message_count(_state_db_row_to_sidecar(row))
+        # Materializing a sidecar from state.db bypasses Session.save(), so it
+        # must apply the same durable-image projection: state.db rows can carry
+        # inline base64 in messages.content.
+        from api.session_image_persistence_override import project_message_payloads
+        payload = project_message_payloads(payload)
         # Per-process/per-thread tmp suffix to avoid corruption under
         # concurrent reconciliation calls (matches api/models.py:484
         # Session.save() convention).
