@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from tests._css_blocks import css_block
 
 CSS = (Path(__file__).resolve().parent.parent / "static" / "style.css").read_text(encoding="utf-8")
 
@@ -125,8 +126,8 @@ def test_overflow_x_clip_is_the_chosen_horizontal_clip():
     with `clip` (not `hidden`). Anchors the #4856/#4898 resolution."""
     mobile = re.search(r"@media\(max-width:640px\)\{", CSS)
     assert mobile, "@media(max-width:640px) block not found"
-    window = CSS[mobile.start(): mobile.start() + 12000]
-    m = re.search(r"\.messages-inner\{([^}]*)\}", window)
+    block = css_block(CSS, mobile.end() - 1)
+    m = re.search(r"\.messages-inner\{([^}]*)\}", block)
     assert m, "mobile .messages-inner rule not found"
     assert "overflow-x:clip" in m.group(0), (
         "mobile .messages-inner must use overflow-x:clip (the #4856 fix)"
