@@ -151,3 +151,88 @@ def test_copy_file_url_strings_exist_in_every_locale():
     for block in blocks:
         for key in ("copy_file_url", "file_url_copied", "file_url_copy_failed"):
             assert len(re.findall(rf"^\s+{key}: '", block, re.M)) == 1, key
+
+
+PAGE_SCRIPT = r"""
+const S = {session: {session_id: 's'}, currentDir: '.', _escapeGrants: Object.create(null)};
+const t = k => k + (window.__labelSuffix || '');
+function showToast(){}
+async function _copyTextWithFallback(){}
+""" + "\n"
+
+
+def _chromium():
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable")
+    playwright = sync_playwright().start()
+    try:
+        browser = playwright.chromium.launch(
+            headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
+    except Exception as exc:  # pragma: no cover - browser binary missing
+        playwright.stop()
+        pytest.skip(f"chromium is unavailable: {exc}")
+    return playwright, browser
+
+
+# Right-click points near the bottom edge (the reviewer's measurements), a
+# window too short for the whole menu, which must scroll instead, and the right
+# edge with labels as long as the longest locales' (wider than the old guess).
+@pytest.mark.parametrize("width,height,x,y,suffix", [
+    (1440, 900, 1184, 600, ""),
+    (900, 700, 700, 650, ""),
+    (390, 844, 200, 800, ""),
+    (1440, 320, 400, 300, ""),
+    (390, 844, 385, 400, " des Dateibaums"),
+])
+def test_file_menu_near_bottom_edge_keeps_delete_reachable(width, height, x, y, suffix):
+    style_css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    playwright, browser = _chromium()
+    try:
+        page = browser.new_page(viewport={"width": width, "height": height})
+        page.set_content(
+            f"<!doctype html><html><head><style>{style_css}</style></head><body>"
+            f"<script>{PAGE_SCRIPT}{_menu_sources()}</script></body></html>"
+        )
+        state = page.evaluate(
+            """([x, y, suffix]) => {
+              window.__labelSuffix = suffix;
+              _showFileContextMenu({clientX: x, clientY: y},
+                                   {name: 'notes.txt', path: 'docs/notes.txt', type: 'file'});
+              const menu = document.querySelector('.file-ctx-menu');
+              const last = menu.lastElementChild;
+              const before = last.getBoundingClientRect();
+              last.scrollIntoView({block: 'nearest'});
+              const after = last.getBoundingClientRect();
+              const m = menu.getBoundingClientRect();
+              // Every label on one line and none clipped: the menu got its full width.
+              const wide = [...menu.children].filter(c => c.tagName !== 'HR').every(c => {
+                const r = document.createRange();
+                r.selectNodeContents(c);
+                const tops = new Set([...r.getClientRects()].map(q => Math.round(q.top)));
+                return tops.size === 1 && c.scrollWidth <= c.clientWidth;
+              });
+              return {left: m.left, right: m.right, vw: innerWidth, wide,label: last.textContent, items: menu.children.length,
+                      before: [before.top, before.bottom], after: [after.top, after.bottom],
+                      menu: [m.top, m.bottom], scrolls: menu.scrollHeight > menu.clientHeight,
+                      vh: innerHeight};
+            }""",
+            [x, y, suffix],
+        )
+    finally:
+        browser.close()
+        playwright.stop()
+    vh = state["vh"]
+    assert state["label"] == "delete_title" + suffix, state
+    # The whole menu stays inside the viewport at every size.
+    assert 0 <= state["menu"][0] and state["menu"][1] <= vh, state
+    assert 0 <= state["left"] and state["right"] <= state["vw"], state
+    assert state["wide"], state
+    if state["scrolls"]:
+        # Too tall to fit: reachable by scrolling the menu itself.
+        assert state["menu"][0] <= state["after"][0] and state["after"][1] <= state["menu"][1], state
+    else:
+        # Fits: Delete is visible with no scrolling at all.
+        assert 0 <= state["before"][0] and state["before"][1] <= vh, state

@@ -27209,8 +27209,6 @@ function _showFileContextMenu(e, item){
   menu.style.cssText='position:fixed;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 0;z-index:9999;min-width:140px;box-shadow:0 4px 16px rgba(0,0,0,.35);';
   // Keep menu within viewport
   const vw=window.innerWidth,vh=window.innerHeight;
-  menu.style.left=(e.clientX+140>vw?e.clientX-150:e.clientX)+'px';
-  menu.style.top=(e.clientY+100>vh?e.clientY-100:e.clientY)+'px';
   const isDirLike=item.type==='dir'||(item.type==='symlink'&&item.is_dir);
   const isExternalLink=item.type==='symlink'&&!!item.target_outside_workspace;
   const targetDir=isDirLike ? item.path : _workspaceParentDir(item.path);
@@ -27326,7 +27324,8 @@ function _showFileContextMenu(e, item){
         // so an in-workspace symlink is judged by its target.
         const typePath=(item.type==='symlink'&&item.target)||item.path||'';
         const isHtml=HTML_EXTS.has(fileExt(typePath));
-        const url=_workspaceEscapeGrantForPath(item.path)?'':_workspaceRouteForPath(item.path,'raw',isHtml?{inline:true}:{});
+        const grantNow=typeof _workspaceEscapeGrantForPath==='function'&&!!_workspaceEscapeGrantForPath(item.path);
+        const url=grantNow?'':_workspaceRouteForPath(item.path,'raw',isHtml?{inline:true}:{});
         if(!/^https?:\/\//i.test(url)){
           showToast(t('file_url_copy_failed').replace(/[\s:：]+$/,''));
           return;
@@ -27365,6 +27364,18 @@ function _showFileContextMenu(e, item){
   }
 
   document.body.appendChild(menu);
+  // Place it by its real size, now that it is in the DOM: the item count
+  // varies with the target and label widths with the locale. A menu taller
+  // than the viewport scrolls instead of pushing its last items (Delete) off
+  // screen; one that fits gets no scroll container at all.
+  menu.style.boxSizing='border-box';
+  if(menu.getBoundingClientRect().height>vh-16){
+    menu.style.maxHeight=Math.max(0,vh-16)+'px';
+    menu.style.overflowY='auto';
+  }
+  const menuRect=menu.getBoundingClientRect();
+  menu.style.left=Math.max(8,Math.min(e.clientX,vw-menuRect.width-8))+'px';
+  menu.style.top=Math.max(8,Math.min(e.clientY,vh-menuRect.height-8))+'px';
   const dismiss=()=>{menu.remove();document.removeEventListener('click',dismiss);};
   setTimeout(()=>document.addEventListener('click',dismiss),0);
 }
