@@ -132,6 +132,20 @@
   /* ── Skin: Mono (gray) ── */
   :root[data-skin="mono"]{--accent:#666666;--accent-hover:#555555;--accent-bg:rgba(102,102,102,0.08);--accent-bg-strong:rgba(102,102,102,0.15);--accent-text:#555555;}
   :root.dark[data-skin="mono"]{--accent:#CCCCCC;--accent-hover:#999999;--accent-bg:rgba(204,204,204,0.08);--accent-bg-strong:rgba(204,204,204,0.15);--accent-text:#CCCCCC;}
+  /* #7092: dark-mode skins whose --accent is light (mono, catppuccin,
+     hepburn, sienna, geist-contrast, …) rendered hardcoded #fff foregrounds
+     on the light accent fill — white-on-#CCCCCC is ~1.2:1, far below WCAG AA.
+     Instead of another per-skin override, follow #3810's recommendation and
+     paint solid-accent foregrounds with var(--bg): --accent is by design
+     contrasted against --bg, so this is correct for every palette, light or
+     dark, without touching the per-skin overrides that pin specific colors
+     (graphite/codex/terracotta/github keep theirs). */
+  :root.dark button.send-btn:not(:disabled),
+  :root.dark .send-btn:not(:disabled),
+  :root.dark #mainSettings .settings-btn,
+  :root.dark #mainSettings .sm-btn[onclick^="saveSettings"],
+  :root.dark .toolsets-apply-btn,
+  :root.dark .msg-edit-send{color:var(--bg);}
   /* ── Skin: Graphite (neutral workbench) ──
      Full palette rewrite with restrained graphite surfaces, soft contrast,
      and neutral action chrome. Uses native system fonts so it stays local,
@@ -5525,6 +5539,73 @@ main.main > #mainPlugin{display:none;}
 .settings-action-btn.danger:hover{background:color-mix(in srgb,var(--error,#e05) 8%,transparent);border-color:var(--error,#e05);color:var(--error,#e05);}
 .settings-action-btn:disabled,.settings-action-btn.disabled{opacity:.45;cursor:not-allowed;}
 .settings-action-btn:disabled:hover,.settings-action-btn.disabled:hover{background:var(--sidebar);border-color:var(--border);color:var(--text);}
+
+  /* #7827 review: four dark skins regressed on HOVER, because their hover
+     background is NOT `--accent-hover` (the fill `--bg` was contrasted against)
+     but a skin-local surface:
+       geist-contrast  --hover-bg  #111111  (its --bg is #000000 -> 1.11:1)
+       hepburn         #c6246a      (its .send-btn:hover pins its own fill)
+       ares            --accent-hover #CC3333
+       slate           --accent-hover #64748B
+     Each needs its own hover foreground. The fills below are the ones those
+     skins actually paint, so the ratios are measured against the real hover
+     background rather than assumed:
+       geist-contrast  --text #ededed on #111111  -> 16.13:1
+       hepburn         #fff    on #c6246a         ->  5.44:1 (its own pinned rule)
+       ares            #fff    on #CC3333         ->  5.14:1
+       slate           #fff    on #64748B         ->  4.76:1
+     Scoped per skin on purpose: the generic `color:var(--bg)` above stays
+     correct for every other dark palette (mono 7.37:1, catppuccin 10.34:1,
+     sienna 6.73:1, graphite 16.32:1), so this must not widen into a blanket
+     override. Stop/Interrupt/Steer keep their own chrome and are excluded;
+     Queue shares the Send hover fill and is covered by the same rules.
+     The #mainSettings Settings controls (Save + auxiliary) sit under an ID
+     ancestor, and the generic `:root.dark #mainSettings …` foreground rule
+     carries that ID — an ID-free skin hover rule can never outrank it. The
+     Settings overrides below therefore repeat the `#mainSettings` ancestor so
+     they WIN the cascade (the re-gate measured dark-on-dark there). */
+  /* Geist-contrast: the hover fill is --hover-bg (#111111), so the Save
+     button needs the light --text. Only the actual Save
+     (`.sm-btn[onclick^="saveSettings"]`) gets the ID-bearing override — the
+     auxiliary-only `.settings-btn` keeps the winning dark neutral foreground
+     on its own light hover fill (19.12:1); painting it light would be
+     light-on-light. */
+  :root.dark[data-skin="geist-contrast"] #mainSettings .sm-btn[onclick^="saveSettings"]:hover{color:var(--text);}
+  :root.dark[data-skin="hepburn"] button.send-btn:not(:disabled):hover,
+  :root.dark[data-skin="hepburn"] .send-btn:not(:disabled):hover{color:#fff;}
+  /* Hepburn's --accent (#f278ad) and --accent-hover (#f5a0c5) are LIGHT fills, so
+     the composer/toolset controls that keep the accent background on hover need
+     the dark foreground the generic rule already gives them — restoring #fff
+     there drops them to 1.60:1 / 2.60:1. */
+  :root.dark[data-skin="hepburn"] .settings-btn:hover,
+  :root.dark[data-skin="hepburn"] .sm-btn[onclick^="saveSettings"]:hover,
+  :root.dark[data-skin="hepburn"] .msg-edit-send:hover,
+  :root.dark[data-skin="hepburn"] .toolsets-apply-btn:hover{color:var(--bg);}
+  /* Ares's dark --accent (#FF4444) / --accent-hover (#CC3333) are MID fills:
+     white clears 5.14:1 on the hover fill, so the composer Send/Queue and the
+     #mainSettings Save + auxiliary buttons get #fff on hover (the
+     ID-bearing selectors win over the generic var(--bg) rule). But
+     `.msg-edit-send` and `.toolsets-apply-btn` keep the #FF4444 ACCENT fill
+     on hover (they have no hover background of their own), where white is
+     only 3.41:1 — below AA for normal text — so those two keep the dark
+     foreground (5.66:1). */
+  :root.dark[data-skin="ares"] button.send-btn:not(:disabled):hover,
+  :root.dark[data-skin="ares"] .send-btn:not(:disabled):hover,
+  :root.dark[data-skin="ares"] #mainSettings .settings-btn:hover,
+  :root.dark[data-skin="ares"] #mainSettings .sm-btn[onclick^="saveSettings"]:hover{color:#fff;}
+  :root.dark[data-skin="ares"] .toolsets-apply-btn:hover,
+  :root.dark[data-skin="ares"] .msg-edit-send:hover{color:var(--bg);}
+  /* Slate's dark --accent-hover (#64748B) is a MID fill: white gives 4.76:1,
+     which is what the review measured as correct. But slate's --accent
+     (#94A3B8) is much lighter, and the composer/toolset controls keep the
+     ACCENT background on hover (they have no hover rule of their own), where
+     white drops to 2.56:1 — so those two keep the generic dark foreground. */
+  :root.dark[data-skin="slate"] button.send-btn:not(:disabled):hover,
+  :root.dark[data-skin="slate"] .send-btn:not(:disabled):hover,
+  :root.dark[data-skin="slate"] #mainSettings .settings-btn:hover,
+  :root.dark[data-skin="slate"] #mainSettings .sm-btn[onclick^="saveSettings"]:hover{color:#fff;}
+  :root.dark[data-skin="slate"] .toolsets-apply-btn:hover,
+  :root.dark[data-skin="slate"] .msg-edit-send:hover{color:var(--bg);}
 
 /* Primary save buttons (Appearance / Preferences "Save Settings"). */
 #mainSettings .settings-btn,
