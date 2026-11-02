@@ -46,6 +46,25 @@ _CACHE_HIT_FN = (
     + ");}"
 )
 
+# The predicate above is lifted verbatim out of ui.js, so it carries whatever
+# free identifiers the production site reads. #7778 added a fifth conjunct,
+# `cached.prismSig===prismSigNow`, where `prismSigNow` is a local of
+# renderMessages() — a binding this synthetic function cannot see. Bind it
+# here from the SAME production source the site uses, so the predicate stays a
+# copy of production rather than a restatement of it: if the site stops reading
+# the grammar state, or reads it from somewhere else, the lifted predicate and
+# this binding stop agreeing and the cache-hit assertions below fail.
+#
+# `_prismGrammarSignature` is the production helper the site calls. When it is
+# absent (a tree without #7778) the site falls back to 0, and so must this.
+_PRISM_SIG = "const prismSigNow=(typeof _prismGrammarSignature==='function')?_prismGrammarSignature():0;"
+assert _PRISM_SIG in UI_JS, (
+    "the Prism grammar-signature binding the cache-hit predicate reads was not "
+    "found in static/ui.js — the predicate and its binding must be lifted from "
+    "the same production source"
+)
+
+
 _EXTRACT = r"""
 function extractFunc(name) {
   const start = src.search(new RegExp('function\\s+' + name + '\\s*\\('));
@@ -93,7 +112,10 @@ globalThis.S = state(null);
 const baseAgain = _messageRenderCacheSignature();
 
 // 1) Cache-hit control: an unchanged state must reuse the cached HTML.
-const cacheEntry = { msgCount: 2, renderWindowKey: 'k', signature: base };
+// The published entry carries the Prism grammar state it was captured under,
+// exactly as the production publisher writes it (#7778); the lifted predicate
+// compares that against the current state, so the fixture must carry it too.
+const cacheEntry = { msgCount: 2, renderWindowKey: 'k', signature: base, prismSig: prismSigNow };
 const hitUnchanged = _cacheHit(cacheEntry, 2, 'k', baseAgain);
 
 // 2) Swapping the unrendered screenshot must NOT invalidate the cache: the
@@ -113,7 +135,7 @@ const sigDataTextA = _messageRenderCacheSignature();
 globalThis.S = state((S) => { S.messages[0] = userMsg(TEXT_B, null); });
 const sigDataTextB = _messageRenderCacheSignature();
 const hitDataTextMiddleEdit = _cacheHit(
-  { msgCount: 2, renderWindowKey: 'k', signature: sigDataTextA }, 2, 'k', sigDataTextB);
+  { msgCount: 2, renderWindowKey: 'k', signature: sigDataTextA, prismSig: prismSigNow }, 2, 'k', sigDataTextB);
 
 // 5) Tool snippet and nested tool-argument middle-only edits, both data: strings.
 globalThis.S = state((S) => { S.toolCalls[0].snippet = SNIP_B; });
@@ -164,6 +186,10 @@ def _run() -> dict:
         "eval(extractFunc('_addMessageRenderHash'));\n"
         "eval(extractFunc('_addBoundedHash'));\n"
         "eval(extractFunc('_hashObjectInto'));\n"
+        # The production helper the cache-hit site's grammar binding calls.
+        "try{ eval(extractFunc('_prismGrammarSignature')); }catch(_){}\n"
+        # The grammar binding itself, lifted from the production site verbatim.
+        f"{_PRISM_SIG}\n"
         f"{_CACHE_HIT_FN}\n"
         f"{_BODY}"
     )
