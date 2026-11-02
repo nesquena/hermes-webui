@@ -66,6 +66,7 @@ from api.config import (
     parse_reasoning_effort,
     resolve_session_reasoning_effort,
     effective_session_reasoning_effort,
+    openai_runtime_api_mode,
     _main_model_request_overrides,
     PROCESS_SESSION_INDEX, PROCESS_SESSION_INDEX_LOCK,
 )
@@ -15946,6 +15947,15 @@ def _run_agent_streaming(
                     model_id=resolved_model,
                     provider_id=resolved_provider,
                     base_url=resolved_base_url,
+                    # The runtime THIS turn uses — `_agent_kwargs['api_mode']`
+                    # below is this same value. The session profile may opt
+                    # into (or out of) the Codex app-server runtime
+                    # independently of the ambient profile. When the runtime
+                    # RESOLVER failed (no api_mode in the bundle) fall back to
+                    # reading the SESSION's profile — an ambient read here
+                    # would answer for the wrong profile on this worker.
+                    api_mode=_runtime_bundle.get('api_mode')
+                    or openai_runtime_api_mode(_profile_home or None),
                 )
                 _reasoning_config = parse_reasoning_effort(_effort)
             except Exception:

@@ -1094,11 +1094,31 @@ def test_root_ignores_symlinked_override_file_under_named_profile(tmp_path, monk
 
 @pytest.mark.parametrize(
     "imported, expected",
-    [("ultra", None), ({"effort": "high"}, None), ("High", "high"), ("", ""), (None, None)],
+    [
+        # 'hyper' stands in for a level neither this WebUI nor the agent ladder
+        # knows; 'ultra' is a known level (the ladder is sourced from the
+        # agent's hermes_constants) and must survive an import verbatim.
+        ("hyper", None),
+        ({"effort": "high"}, None),
+        ("High", "high"),
+        ("ultra", "ultra"),
+        ("", ""),
+        (None, None),
+    ],
 )
-def test_session_import_keeps_transcript_with_unknown_effort(imported, expected):
+def test_session_import_keeps_transcript_with_unknown_effort(imported, expected, monkeypatch):
     # An export from a CLI with a level this WebUI doesn't know must still import.
     import api.routes as routes
+
+    # Pin an explicit ladder (not the host's): 'ultra' is a known level here
+    # and must survive an import verbatim; 'hyper' stays unknown even if a
+    # future Agent adds it to hermes_constants on this host.
+    import api.config as _config
+    monkeypatch.setattr(
+        _config,
+        "VALID_REASONING_EFFORTS",
+        ("minimal", "low", "medium", "high", "xhigh", "max", "ultra"),
+    )
 
     captured = {}
 
