@@ -14570,7 +14570,7 @@ function _gatewayLocalUnprovenNoteHtml(lifecycle){
   if(cut<0) return template;  // no placeholder: nothing for this machine to run
   const before=template.slice(0,cut).trim();
   const after=template.slice(cut+5).trim();
-  const codeStyle='display:block;font-family:var(--font-mono,monospace);font-size:11px;background:var(--code-bg);padding:4px 6px;border-radius:4px;white-space:pre-wrap;overflow-wrap:anywhere';
+  const codeStyle='display:block;font-family:var(--font-mono,monospace);font-size:11px;background:var(--code-inline-bg);color:var(--code-text);padding:4px 6px;border-radius:4px;white-space:pre-wrap;overflow-wrap:anywhere';
   // Keep each `--flag` whole when the chip wraps: a break inside `--profile`
   // left a bare `--` at the line end, which reads as the end-of-options marker.
   // The pattern only matches `--` plus letters/hyphens in the already escaped
@@ -14640,7 +14640,7 @@ function _renderGatewayStatus(r){
   if(r.platforms&&r.platforms.length){
     badges=r.platforms.map(p=>{
       const icon=platformIcons[p.name]||'📡';
-      return `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;background:var(--code-bg);border:1px solid var(--border2);border-radius:12px;font-size:12px;font-weight:500">${icon} ${esc(p.label)}</span>`;
+      return `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;background:var(--code-inline-bg);color:var(--code-text);border:1px solid var(--border2);border-radius:12px;font-size:12px;font-weight:500">${icon} ${esc(p.label)}</span>`;
     }).join(' ');
   }
   // #8621: the card shows one separator, and it is the one the translator

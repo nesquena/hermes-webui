@@ -1417,6 +1417,46 @@ def test_renderer_external_note_offers_no_start_command_or_copy_button():
     assert "<button" not in html
 
 
+# ── #8639 (3): the card's chips use the inline-code colours ──────────────────
+#
+# The command chip and the platform badges painted themselves with --code-bg,
+# the fenced-block background. Chat inline code reads --code-inline-bg for the
+# background and --code-text for the text, and the themes define those two as a
+# pair, so the card only matches chat across the theme pairs if it reads both.
+
+
+def test_renderer_start_command_chip_uses_the_inline_code_colours():
+    html = _unproven_card()
+    code = re.search(r'<code style="([^"]*)"', html)
+    assert code, html
+    style = code.group(1).replace(" ", "")
+    assert "background:var(--code-inline-bg)" in style
+    assert "color:var(--code-text)" in style
+    assert "--code-bg" not in style
+
+
+def test_renderer_platform_badges_use_the_inline_code_colours():
+    html = _render_gateway_card(
+        {
+            **_STATUS_BRANCHES["running"],
+            "lifecycle": _LOCAL,
+            "platforms": [
+                {"name": "telegram", "label": "Telegram"},
+                {"name": "web", "label": "Web"},
+            ],
+        }
+    )
+
+    badges = re.findall(r'<span style="display:inline-flex;align-items:center;gap:4px;[^"]*">', html)
+    assert len(badges) == 2, html
+    for badge in badges:
+        style = badge.replace(" ", "")
+        assert "background:var(--code-inline-bg)" in style, badge
+        assert "color:var(--code-text)" in style, badge
+        assert "--code-bg" not in style, badge
+    assert "Telegram" in html and "Web" in html
+
+
 def _locale_blocks() -> dict[str, str]:
     blocks: dict[str, list[str]] = {}
     current = None
