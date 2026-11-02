@@ -2209,8 +2209,9 @@ async function send(){
     _releaseDepartingUploadOp(_uploadOp);
   }catch(e){
     // Failure returns above keep the op for the deferred persist. An unexpected
-    // throw still drops it. This is not a finally: the first finally in this
-    // file is the send-lock cleanup, and it must not own the /use directive.
+    // throw still drops it. Release in this catch. A trailing cleanup clause
+    // here would precede the /use consume site, and that site must stay above
+    // the send-lock cleanup.
     if(!_holdDepartingUploadOp) _releaseDepartingUploadOp(_uploadOp);
     throw e;
   }
