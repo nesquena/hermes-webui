@@ -65,7 +65,7 @@ def _page(browser):
         window.$ = id => document.getElementById(id);
         window.esc = value => String(value).replace(/[&<>\"']/g, c =>
           ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]));
-        window.t = key => key;
+        window.t = key => key === 'workspace_artifact_files_changed' ? 'Files changed' : key;
         window.switchWorkspacePanelTab = tab => { window.activeTab = tab; };
         window.setStatus = value => { window.lastStatus = value; };
         window.openFile = value => { window.openedPath = value; };
