@@ -96,6 +96,14 @@ def test_eager_wal_repair_does_not_duplicate_checkpointed_user_message(_isolate_
     s.pending_user_message = "survive"
     s.active_stream_id = "dead_stream"
     s.pending_started_at = 789.0
+    # Round 5 (2026-09-08 re-gate): missing timestamps now FAIL CLOSED toward
+    # appending — a duplicate row is recoverable, a lost prompt is not. The
+    # production eager checkpoint (routes._checkpoint_user_message_for_eager_session_save)
+    # always stamps full-precision timestamp + active-turn token, so simulate
+    # that real shape; the pre-fix fail-open contract matched this tokenless,
+    # timestamp-less fixture only through the removed defect.
+    s.messages[-1]["timestamp"] = 789.0
+    s.messages[-1]["_active_turn_token"] = models.build_active_turn_token("dead_stream", 789.0)
     s.save()
 
     repaired = models._repair_stale_pending(s)

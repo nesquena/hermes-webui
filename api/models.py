@@ -50,6 +50,7 @@ from api.agent_sessions import (
     read_session_lineage_metadata,
 )
 from api.process_event_utils import (
+    build_active_turn_token,
     stamp_message_source,
     is_hidden_transcript_row,
     attach_wakeup_display_meta,
@@ -1148,8 +1149,18 @@ def _append_recovered_context_projection(
     recovered_text = _normalize_journal_recovery_text(recovered.get('content'))
     if recovered_text:
         if recovered.get('role') == 'user':
-            if _message_matches_pending_checkpoint(
-                context_messages[-1] if context_messages else None,
+            # Token-aware first (review fix 4): the raw checkpoint comparison
+            # below cannot see the session's active-turn token, so a tokened
+            # current row could be misjudged here. Route through the shared
+            # ownership helper and only fall back to the checkpoint predicate
+            # when the session has no authoritative token.
+            _projection_tail = context_messages[-1] if context_messages else None
+            if isinstance(_projection_tail, dict) and _message_owns_current_turn(
+                _projection_tail, session
+            ):
+                return
+            if _current_turn_token(session) is None and _message_matches_pending_checkpoint(
+                _projection_tail,
                 recovered.get('content'),
                 recovered.get('timestamp'),
                 recovered.get('_source'),
@@ -1220,6 +1231,38 @@ def _append_recovered_pending_turn(session, *, timestamp: int | float | None = N
     if getattr(session, 'truncation_watermark', None):
         session.truncation_watermark = recovered_ts
     return recovered
+
+
+def _backfill_pending_metadata_onto_reused_row(session, matched_row) -> None:
+    """Copy the pending turn's attachments/source onto a REUSED user row.
+
+    #7167 re-gate (2026-10-13): both repair branches can prove the pending
+    prompt is already in the transcript (matched on text + timestamp) and
+    therefore reuse the existing row instead of materializing a new one. That
+    row may have been written by a path that carried no ``attachments`` /
+    ``_source`` (state.db reconciliation, cancel-journal recovery). The pending
+    state is cleared right after, so the pending copy was the ONLY copy of that
+    metadata and it was lost for good — the turn's uploads and its origin
+    (cli / wakeup / …) silently disappeared from the transcript, and the loss
+    survives a cold reload.
+
+    Copy the metadata onto the matched row BEFORE the pending cleanup runs, and
+    only where it is actually missing, so an already-populated row keeps its own
+    values and the dedupe behaviour is unchanged.
+    """
+    if not isinstance(matched_row, dict):
+        return
+    if not getattr(session, 'pending_user_message', None):
+        return
+    pending_attachments = getattr(session, 'pending_attachments', None)
+    if pending_attachments and not matched_row.get('attachments'):
+        matched_row['attachments'] = list(pending_attachments)
+    if not matched_row.get('_source'):
+        stamp_message_source(
+            matched_row,
+            getattr(session, 'pending_user_source', None),
+            active_turn_token=_pending_active_turn_token(session),
+        )
 
 
 def _is_streaming_session(active_stream_id, active_stream_ids):
@@ -3317,6 +3360,16 @@ def _interrupted_recovery_marker(
         'type': 'interrupted',
         'interruption_cause': interruption_cause,
     }
+    if stream_id:
+        # #7167 review 2026-10-10: the marker's durable same-stream ownership
+        # (``_journal_marker_stream_id``, written unconditionally and kept even
+        # after the marker is resolved) is separate from its retry capability
+        # (``_journal_retry_stream_id``, written only while still pending and
+        # stripped on resolution). ``_recovered_stream_id`` remains forbidden on
+        # a marker — that field is the provenance tag a RECOVERED ROW wears.
+        marker['_journal_marker_stream_id'] = str(stream_id)
+        if pending_retry and not recovered_output:
+            marker['_journal_retry_stream_id'] = str(stream_id)
     if pending_retry and not recovered_output:
         marker['_pending_journal_recovery'] = True
     return marker
@@ -3339,18 +3392,66 @@ def _normalize_journal_recovery_text(value) -> str:
 def _message_matches_pending_checkpoint(message, pending_text, timestamp, source, attachments):
     if not isinstance(message, dict) or message.get('role') != 'user':
         return False
+    raw_message_timestamp = message.get('timestamp')
+    raw_expected_timestamp = timestamp
+    if raw_message_timestamp is None or raw_expected_timestamp is None:
+        # Missing timestamps must FAIL CLOSED toward appending: this predicate
+        # gates decisions that can suppress a row or clear pending state, and
+        # a lost user prompt is not recoverable while a duplicate row is.
+        # Legacy rows and replay paths may omit a timestamp; treating absence
+        # as a match let an unrelated turn consume the current prompt.
+        return False
     try:
-        message_timestamp = int(message.get('timestamp'))
-        expected_timestamp = int(timestamp)
+        message_timestamp = float(str(raw_message_timestamp))
+        expected_timestamp = float(str(raw_expected_timestamp))
     except (TypeError, ValueError):
         return False
-    return (
+    if not math.isfinite(message_timestamp) or not math.isfinite(expected_timestamp):
+        # NaN/inf must not compare equal to anything.
+        return False
+    if message_timestamp != expected_timestamp:
+        # Exact full-precision equality only. The historical whole-second
+        # allowance (int-vs-float same-second match) let a tokenless row at
+        # 500.0 win ownership of a 500.9 current turn after the callers
+        # truncated — suppressing the row and clearing pending state.
+        return False
+    if (
         _normalize_journal_recovery_text(message.get('content'))
-        == _normalize_journal_recovery_text(pending_text)
-        and message_timestamp == expected_timestamp
-        and (message.get('_source') or 'webui') == (source or 'webui')
-        and list(message.get('attachments') or []) == list(attachments or [])
-    )
+        != _normalize_journal_recovery_text(pending_text)
+    ):
+        return False
+    # Optional identity fields: a core-transcript projection carries the
+    # authoritative turn text + timestamp but may omit ``_source`` /
+    # ``attachments`` entirely (the projection does not persist them).
+    # Requiring strict field equality then rejected a row that IS the
+    # pending turn, the caller appended a duplicate user row after the
+    # existing assistant, and turn-scoped replay re-emitted the answer
+    # (2026-09-23 re-gate). So: absent/empty fields on EITHER side are
+    # non-conflicting evidence — accept; only a CONFLICT (both present and
+    # different) is negative evidence.
+    if _source_conflicts(message.get('_source'), source):
+        return False
+    if _attachments_conflict(message.get('attachments'), attachments):
+        return False
+    return True
+
+
+def _source_conflicts(message_source, expected_source) -> bool:
+    """True only when both sources are present AND differ."""
+    msg = str(message_source or '').strip()
+    exp = str(expected_source or '').strip()
+    if not msg or not exp:
+        return False
+    return msg != exp
+
+
+def _attachments_conflict(message_attachments, expected_attachments) -> bool:
+    """True only when both attachment lists are non-empty AND differ."""
+    msg = message_attachments if isinstance(message_attachments, (list, tuple)) else []
+    exp = expected_attachments if isinstance(expected_attachments, (list, tuple)) else []
+    if not msg or not exp:
+        return False
+    return [str(a) for a in msg] != [str(a) for a in exp]
 
 
 def _message_matches_pending_text(message, pending_text):
@@ -3360,6 +3461,86 @@ def _message_matches_pending_text(message, pending_text):
         _normalize_journal_recovery_text(message.get('content'))
         == _normalize_journal_recovery_text(pending_text)
     )
+
+
+def _current_turn_token(session) -> str | None:
+    """Return the authoritative active-turn token for the session's pending turn."""
+    return build_active_turn_token(
+        getattr(session, 'active_stream_id', None),
+        getattr(session, 'pending_started_at', None),
+    )
+
+
+def _message_owns_current_turn(message: dict, session) -> bool:
+    """Return True when ``message`` is part of the session's active pending turn.
+
+    The check is hierarchical:
+    * If the session has an authoritative active-turn token, require the
+      message to carry the same ``_active_turn_token``.  This is the
+      preferred signal because it is written by ``stamp_message_source``
+      at the single authoritative checkpoint and is stable across
+      recovery, eager-merge, and retry paths.
+    * When the token is unavailable (legacy sidecars, missing pending
+      state, or interrupted turns before token stamping), fall back to
+      the existing ``_message_matches_pending_checkpoint`` comparison
+      which checks text + timestamp + source + attachments.
+    * Pure text equality is intentionally **not** used here — identical
+      prompts in earlier turns must not be mistaken for the current turn.
+    """
+    if not isinstance(message, dict):
+        return False
+    current_token = _current_turn_token(session)
+    message_token = message.get('_active_turn_token')
+    if current_token is not None and message_token is not None:
+        return message_token == current_token
+    pending_text = _normalize_journal_recovery_text(getattr(session, 'pending_user_message', None))
+    if not pending_text:
+        return False
+    return _message_matches_pending_checkpoint(
+        message,
+        session.pending_user_message,
+        getattr(session, 'pending_started_at', None),
+        getattr(session, 'pending_user_source', None),
+        getattr(session, 'pending_attachments', None),
+    )
+
+
+def _pending_user_row_already_materialized(session, candidate, timestamp) -> bool:
+    """Return True only when ``candidate`` provably IS the pending user turn.
+
+    Used to decide whether ``_append_recovered_pending_turn`` may be skipped.
+    Historical text equality is deliberately NOT accepted: when an earlier turn
+    used the identical prompt, a text-only test treats that older row as the
+    pending turn, the current prompt is never materialized, and pending state is
+    then cleared — losing the current user prompt outright (CORE#3).
+
+    Accepted proofs, in order:
+
+    * the row carries the session's active-turn token;
+    * full pending-checkpoint identity (text + timestamp + source + attachments).
+
+    Anything less returns False so the caller PRESERVES/APPENDS the recovered
+    pending turn rather than suppressing it.
+    """
+    if not isinstance(candidate, dict):
+        return False
+    current_token = _current_turn_token(session)
+    candidate_token = candidate.get('_active_turn_token')
+    if current_token is not None and candidate_token is not None:
+        # An explicit token conflict is authoritative negative evidence; do not
+        # let a coincidentally equal checkpoint override it.
+        return candidate_token == current_token
+    if _message_matches_pending_checkpoint(
+        candidate,
+        session.pending_user_message,
+        timestamp,
+        session.pending_user_source,
+        session.pending_attachments,
+    ):
+        return True
+    if current_token is not None and candidate_token == current_token:
+        return _message_matches_pending_text(candidate, session.pending_user_message)
+    return False
 
 
 def _latest_user_matches_pending_text(messages, pending_text):
@@ -3614,6 +3795,7 @@ def _find_existing_assistant_for_journal_content(
     min_index: int | None = None,
     max_index: int | None = None,
     excluded_indexes: set[int] | None = None,
+    stream_id: str | None = None,
 ) -> int | None:
     candidate = _normalize_journal_recovery_text(content)
     if not candidate:
@@ -3630,6 +3812,10 @@ def _find_existing_assistant_for_journal_content(
             continue
         if message.get('_error'):
             continue
+        if stream_id:
+            msg_stream = message.get('_recovered_stream_id') or message.get('_stream_id')
+            if msg_stream and str(msg_stream) != str(stream_id):
+                continue
         existing = _normalize_journal_recovery_text(message.get('content'))
         if not existing:
             continue
@@ -3640,7 +3826,24 @@ def _find_existing_assistant_for_journal_content(
     return substring_match
 
 
-def _journal_tool_already_present(
+def _is_own_stream_recovery_artifact(message, stream_id: str | None) -> bool:
+    """Return True when ``message`` is a recovery artifact of THIS stream.
+
+    Provenance is the only safe basis for reusing a row outside the
+    ownership-gated dedupe: the row must carry both the recovery marker and
+    this exact stream id. A live (untagged) row can never satisfy this, so a
+    genuine current-turn answer is never suppressed — it keeps appending.
+    """
+    if not stream_id or not isinstance(message, dict):
+        return False
+    if message.get('role') != 'assistant':
+        return False
+    if not message.get('_recovered_from_run_journal'):
+        return False
+    return str(message.get('_recovered_stream_id') or '') == str(stream_id)
+
+
+def _find_journal_tool_match(
     session,
     name: str,
     preview: str,
@@ -3649,65 +3852,223 @@ def _journal_tool_already_present(
     tool_id: str | None = None,
     min_assistant_idx: int | None = None,
     max_assistant_idx: int | None = None,
-) -> bool:
-    """Return True when an equivalent tool card already exists.
+    consumed_indexes: set[int] | None = None,
+    event_id: str | None = None,
+) -> int | None:
+    """Return the index of the ONE existing card this journal event consumes.
 
-    Matching rule:
+    Consumption is one-to-one (re-gate 2026-09-23 SILENT 3):
+    ``consumed_indexes`` holds the ``session.tool_calls`` indexes already
+    claimed by earlier journal events on this recovery pass. An
+    already-consumed card cannot satisfy a second identical event, so N
+    identical journaled tool calls need N distinct persisted cards; the
+    surplus appends. Without that bookkeeping one persisted
+    ``terminal: running`` card absorbed every identical tool event and the
+    surplus journaled calls vanished.
 
-    * If the existing tool card carries ``_recovered_stream_id``, that means a
-      previous journal-recovery run materialized it.  The retry can safely
-      collapse against it only when both stream ids match — otherwise a
-      legitimately-repeated tool (e.g. a second ``terminal: ls`` in a
-      different turn) would be dropped.
-    * If the existing tool card has no ``_recovered_stream_id`` (a live tool
-      card, or a tool card carried over from a core transcript that pre-dates
-      stream-id tagging), the legacy name+preview match still wins.  This
-      preserves the "core transcript already has this tool, don't duplicate
-      it" invariant the original repair path established.
-    * When ``stream_id`` is omitted, the helper degrades cleanly to its
-      pre-fix session-wide behaviour.
+    Matching is stream-scoped when ``stream_id`` is supplied.  For untagged
+    cards, a supplied current-turn boundary must prove ownership with a valid
+    assistant anchor; unknown ownership defaults to append so an old card
+    cannot suppress the current recovery.
+
+    ``event_id`` is the journal event's immutable identity (stream + seq).
+    It is checked BEFORE the preview, because the live journal shape
+    (api/streaming.py: ``tool`` carries ``preview: None`` and a real ``tid``,
+    then ``tool_complete`` overwrites the card's preview with the result
+    snippet) means the card's preview has usually been replaced by the time a
+    repair runs. Comparing the start preview against a completion-updated card
+    fails, so one journaled event grew into three cards over three repair
+    cycles, and a matched card was skipped by the completion handler and
+    stayed ``done=False`` with no result. Identity first, preview as a
+    fallback for cards that pre-date event stamping.
     """
+    candidate_tool_id = str(tool_id or '').strip() or None
     candidate_name = str(name or '')
     candidate_preview = _normalize_journal_recovery_text(preview)
     candidate_stream = str(stream_id) if stream_id else None
-    candidate_tool_id = str(tool_id or '').strip() or None
-    for tool_call in session.tool_calls or []:
+    candidate_event = str(event_id) if event_id else None
+    for tool_idx, tool_call in enumerate(session.tool_calls or []):
+        if consumed_indexes and tool_idx in consumed_indexes:
+            # Already consumed by an earlier journal event on this pass:
+            # one-to-one consumption, no card satisfies two events.
+            continue
         if not isinstance(tool_call, dict):
             continue
         if str(tool_call.get('name') or '') != candidate_name:
             continue
+        # Immutable identity first: same stream + same journal event seq is
+        # the same card the completion handler must also be able to update.
+        if candidate_event is not None:
+            card_event = tool_call.get('_recovered_event_id')
+            if card_event is not None:
+                if str(card_event) != candidate_event:
+                    continue
+                return tool_idx
         existing_preview = _normalize_journal_recovery_text(
             tool_call.get('preview') or tool_call.get('snippet') or ''
         )
         if existing_preview != candidate_preview:
             continue
+        # #7167: a tool id mismatch is authoritative — a genuinely different
+        # tool never collapses against this candidate, whatever else matches.
         if candidate_tool_id is not None:
             existing_tool_id = str(
                 tool_call.get('tid') or tool_call.get('tool_call_id') or ''
             ).strip()
             if existing_tool_id and existing_tool_id != candidate_tool_id:
                 continue
-        if candidate_stream is not None:
-            existing_stream = tool_call.get('_recovered_stream_id')
-            # A tool card explicitly tagged with a recovered_stream_id that
-            # differs from ours belongs to another retry's turn — don't let
-            # it pre-empt this retry. An exact tagged retry remains globally
-            # eligible for idempotence even if later transcript edits moved
-            # its owner outside the original positional window.
-            if existing_stream:
-                if str(existing_stream) != candidate_stream:
-                    continue
-                return True
+        if candidate_stream is None:
+            return tool_idx
+        existing_stream = tool_call.get('_recovered_stream_id') or tool_call.get('_stream_id')
+        if existing_stream:
+            if str(existing_stream) == candidate_stream:
+                return tool_idx
+            continue
         if min_assistant_idx is not None or max_assistant_idx is not None:
-            owner_idx = tool_call.get('assistant_msg_idx')
-            if type(owner_idx) is not int:
+            # Untagged card (a live-recorded tool, or one carried over from a
+            # core transcript that pre-dates stream-id tagging): it has no
+            # stream tag to prove ownership with, so prove it from its
+            # assistant anchor inside the caller-supplied window instead.
+            anchor = tool_call.get('assistant_msg_idx')
+            if isinstance(anchor, bool) or not isinstance(anchor, int):
+                # Unknown/invalid anchor must NOT match (fail closed toward
+                # appending): an unprovable card cannot suppress the current
+                # recovered tool.
                 continue
-            if min_assistant_idx is not None and owner_idx < min_assistant_idx:
+            if min_assistant_idx is not None and anchor < min_assistant_idx:
                 continue
-            if max_assistant_idx is not None and owner_idx >= max_assistant_idx:
+            if max_assistant_idx is not None and anchor >= max_assistant_idx:
                 continue
-        return True
-    return False
+            _messages = session.messages or []
+            if not (0 <= anchor < len(_messages)):
+                continue
+            anchor_message = _messages[anchor]
+            if not isinstance(anchor_message, dict) or anchor_message.get('role') != 'assistant':
+                continue
+        else:
+            # No window supplied: the caller asked for session-wide
+            # eligibility, but an untagged card can still only suppress this
+            # journal event when its assistant anchor provably belongs to the
+            # turn being recovered. An older untagged card that merely shares
+            # name + preview must not swallow the current turn's tool, so fall
+            # through to the same turn-ownership check below instead of
+            # matching unconditionally.
+            anchor = tool_call.get('assistant_msg_idx')
+            _messages = session.messages or []
+            if isinstance(anchor, bool) or not isinstance(anchor, int):
+                # No usable anchor at all: the card is either a live-recorded
+                # tool or one carried over from the core transcript.
+                # * When the session has an authoritative active-turn token we
+                #   ARE inside a real recovery pass, so an anchorless card has
+                #   unknown ownership and must not swallow the current turn's
+                #   journaled tool (fail closed toward appending).
+                # * With no token (a plain lookup, e.g. the "is this tool
+                #   already in the core transcript?" invariant check) nothing
+                #   contradicts the match, so keep the session-wide behaviour.
+                if _current_turn_token(session) is not None:
+                    continue
+                return tool_idx
+            if not (0 <= anchor < len(_messages)):
+                continue
+            anchor_message = _messages[anchor]
+            if not isinstance(anchor_message, dict) or anchor_message.get('role') != 'assistant':
+                continue
+        anchor_token = anchor_message.get('_active_turn_token')
+        current_token = _current_turn_token(session)
+        pending_text = _normalize_journal_recovery_text(
+            getattr(session, 'pending_user_message', None)
+        )
+        if current_token is not None and anchor_token is not None:
+            if anchor_token != current_token:
+                continue
+        elif current_token is not None:
+            # Tokenless anchor vs an authoritative session token: the in-range
+            # bounds check above plus a provable-owning nearest user row
+            # (the row just before the anchor) is enough to accept this anchor
+            # as the current turn's — mirroring the content_match_owned_by_*
+            # family of helpers. Without this, a current-turn tool card
+            # anchored at the current assistant row that was persisted BEFORE
+            # the dead stream journal could be replayed (the ordinary
+            # ``_extract_tool_calls_from_messages`` shape: untagged, with
+            # ``assistant_msg_idx`` pointing at the live assistant row) would
+            # fall through to ``return False`` and the journal would append a
+            # duplicate card, plus the caller would then see no dedupe hit and
+            # emit a false "Response interrupted" marker (SILENT bug from the
+            # 2026-09-23 re-gate).
+            #
+            # Legacy lazy-retry after reopen (pending identity cleared) still
+            # falls through to the tail ``return True`` via the ``else`` arm
+            # below — that path is unchanged.
+            if pending_text:
+                owner_user = next(
+                    (
+                        message
+                        for message in reversed((session.messages or [])[:anchor])
+                        if isinstance(message, dict) and message.get('role') == 'user'
+                    ),
+                    None,
+                )
+                if owner_user is None or not _message_owns_current_turn(owner_user, session):
+                    continue
+        elif pending_text:
+            # No authoritative token but pending metadata exists: the owning
+            # user row must provably belong to the current turn.
+            if not _message_owns_current_turn(
+                next(
+                    (
+                        message
+                        for message in reversed((session.messages or [])[:anchor])
+                        if isinstance(message, dict) and message.get('role') == 'user'
+                    ),
+                    {},
+                ),
+                session,
+            ):
+                continue
+        # else: legacy replay mode (no authoritative token, no pending
+        # metadata — e.g. the lazy retry after reopen). The bounds check above
+        # already proved the anchor sits at/after the current-turn boundary
+        # hint, mirroring the content dedupe rule in
+        # content_match_owned_by_current_turn — accept as duplicate so the
+        # retry does not re-append the persisted card.
+        return tool_idx
+    return None
+
+
+def _journal_tool_already_present(
+    session,
+    name: str,
+    preview: str,
+    *,
+    stream_id: str | None = None,
+    min_assistant_idx: int | None = None,
+    max_assistant_idx: int | None = None,
+    consumed_indexes: set[int] | None = None,
+    event_id: str | None = None,
+    current_turn_min_idx: int | None = None,
+) -> bool:
+    """Bool wrapper over :func:`_find_journal_tool_match` (back-compat)."""
+    # ``current_turn_min_idx`` is the name the recovery call sites and their
+    # tests use for "the current turn starts at this assistant index".
+    # It is an alias for ``min_assistant_idx`` so an untagged card is only
+    # allowed to suppress this journal event when its assistant anchor lies
+    # inside the current turn; an out-of-range anchor must fall through to
+    # append instead of dropping the journaled tool.
+    if current_turn_min_idx is not None and min_assistant_idx is None:
+        min_assistant_idx = current_turn_min_idx
+    return (
+        _find_journal_tool_match(
+            session,
+            name,
+            preview,
+            stream_id=stream_id,
+            min_assistant_idx=min_assistant_idx,
+            max_assistant_idx=max_assistant_idx,
+            consumed_indexes=consumed_indexes,
+            event_id=event_id,
+        )
+        is not None
+    )
 
 
 def _run_journal_has_visible_output(session, stream_id: str | None) -> bool:
@@ -3923,15 +4284,29 @@ def _pending_recovery_turn_start(session) -> int | None:
     pending_text = getattr(session, 'pending_user_message', None)
     if not pending_text:
         return None
+    current_token = _current_turn_token(session)
     for idx in range(len(session.messages or []) - 1, -1, -1):
         message = session.messages[idx]
-        if _message_matches_pending_checkpoint(
-            message,
-            pending_text,
-            session.pending_started_at,
-            session.pending_user_source,
-            session.pending_attachments,
-        ) or _message_matches_pending_text(message, pending_text):
+        if not isinstance(message, dict) or message.get('role') != 'user':
+            continue
+        message_token = message.get('_active_turn_token')
+        if current_token is not None and message_token is not None:
+            if message_token == current_token:
+                return idx
+            continue
+        # Token-aware ownership (re-gate 2026-09-23 SILENT 2): a row that does
+        # NOT carry the session token is still the current turn when it fully
+        # matches the pending checkpoint (text + exact full-precision timestamp
+        # + source + attachments). The previous "token suppresses checkpoint"
+        # rule rejected every tokenless row whenever the session had a token,
+        # so a fully-matching current-turn row was not recognized and
+        # `_materialize_unsaved_gateway_terminal_error` duplicated the turn.
+        # `_message_owns_current_turn` is the shared predicate used by the
+        # other ownership sites (token first, then full checkpoint identity);
+        # an explicit token conflict is authoritative negative evidence and a
+        # fallback checkpoint match cannot override it — that conflict already
+        # returned above.
+        if _message_owns_current_turn(message, session):
             return idx
     return None
 
@@ -3990,27 +4365,60 @@ def _recover_journaled_output_and_terminal_error(
     stream_id: str | None,
     *,
     dedupe_existing: bool = False,
+    dedupe_tools: bool | None = None,
     terminal_recovery: dict | None = None,
     append_context: bool = True,
     dedupe_min_index: int | None = None,
     dedupe_max_index: int | None = None,
-) -> tuple[bool, bool]:
-    """Recover readable activity first, then append its authoritative terminal error."""
-    recovered_output = _append_journaled_partial_output(
+    authorize_core_rows: bool = False,
+    # #7167 re-gate (2026-10-12): the no-cancel-hook lazy retry replays a
+    # journal whose answer is ALREADY SAVED as an ordinary session row. The
+    # projection does not carry that row's provenance, so the ownership gate
+    # rejects it and the lazy in-place retry appends a duplicate. Opt in to
+    # authorizing already-saved turn rows on that path only.
+    authorize_saved_turn_rows: bool = False,
+) -> tuple[bool, bool, bool]:
+    """Recover readable activity first, then append its authoritative terminal error.
+
+    Returns ``(recovered_output, terminal_error_recovered, output_accounted_for)``:
+
+    * ``recovered_output`` — True only when ``_append_journaled_partial_output``
+      appended a FRESH recovered row on this pass. Deliberately kept as the
+      pure append signal: callers that decide whether to raise an
+      ``_interrupted_recovery_marker`` key off it, and a pure dedupe reuse
+      must not re-raise an interruption marker (2026-09-23 re-gate regression).
+    * ``terminal_error_recovered`` — True when a specific gateway terminal
+      error was materialized for this turn.
+    * ``output_accounted_for`` — True when the journal's visible output was
+      either freshly appended OR already represented via a content/reasoning/
+      tool dedupe hit. Callers that decide whether to arm the lazy reload
+      hint (``_pending_journal_recovery``) key off THIS: a dedupe reuse means
+      the output IS in the transcript, so no reload hint is needed — this is
+      the split the re-gate asked for ("track journal output accounted for
+      separately from session mutated").
+    """
+    appended_any, output_accounted_for = _append_journaled_partial_output(
         session,
         stream_id,
         dedupe_existing=dedupe_existing,
+        # #7167: pass the caller's INDEPENDENT tool-dedupe mode through
+        # instead of re-coupling it to dedupe_existing.
+        dedupe_tools=dedupe_tools,
         dedupe_min_index=dedupe_min_index,
         dedupe_max_index=dedupe_max_index,
         append_context=append_context,
         display_only=not append_context,
+        authorize_core_rows=authorize_core_rows,
+        authorize_saved_turn_rows=authorize_saved_turn_rows,
     )
     terminal_error_recovered = _materialize_unsaved_gateway_terminal_error(
         session,
         stream_id,
         terminal_recovery,
     )
-    return recovered_output, terminal_error_recovered
+    # Pure append signal — NOT folded with output_accounted_for (see docstring).
+    recovered_output = bool(appended_any)
+    return recovered_output, terminal_error_recovered, output_accounted_for
 
 
 def _journal_is_still_arriving(session, stream_id: str | None) -> bool:
@@ -4051,21 +4459,64 @@ def _append_journaled_partial_output(
     stream_id: str | None,
     *,
     dedupe_existing: bool = False,
+    # #7167: ``dedupe_tools`` is independent of the CONTENT dedupe mode.
+    # ``None`` preserves the historical coupling to ``dedupe_existing``; the
+    # stale-pending caller passes True so tool cards dedupe by same-stream
+    # provenance even when the content path uses its own provenance-reuse mode.
+    dedupe_tools: bool | None = None,
     dedupe_min_index: int | None = None,
     dedupe_max_index: int | None = None,
     append_context: bool = True,
     display_only: bool = False,
-) -> bool:
+    # #7167: when True, a candidate row that came from the authoritative core
+    # transcript is accepted as proof the journal output is already
+    # represented. Default False keeps every existing caller byte-identical;
+    # only the core-sync repair path opts in.
+    authorize_core_rows: bool = False,
+    # #7167 CORE (2026-10-10): exact-stream completion proves the journal
+    # output is already saved. When True, an ownership-proven current-turn
+    # row is authorized for reuse even though it is not a recovery artifact;
+    # only the completed-stream branch opts in.
+    authorize_completed_turn_rows: bool = False,
+    # #7167 re-gate (2026-10-12): authorize an already-SAVED ordinary turn row
+    # as the journal's output when the caller has proven the retry owns it
+    # (no-cancel-hook lazy retry). The projection drops the row's provenance,
+    # so the gate would otherwise reject it and duplicate the answer.
+    authorize_saved_turn_rows: bool = False,
+) -> tuple[bool, bool]:
     """Recover already-emitted visible output from a dead stream journal.
+
+    Returns ``(appended_any, output_accounted_for)`` — the re-gate split the
+    pure "did we add a fresh row" signal from "is the journal's visible
+    output represented in the transcript either way", so callers can arm a
+    lazy reload hint only for a genuine nothing-to-recover case.
 
     This repair path is intentionally conservative: it restores user-visible
     assistant text, display-only reasoning, and tool-card metadata that had
     already been emitted over SSE before the WebUI process died. Restored
     reasoning stays out of ``context_messages`` so it cannot become provider-
     facing history. The repair does not try to continue execution.
+
+    Returns ``(session_mutated, output_accounted_for)``:
+
+    * ``session_mutated`` — True when the recovery actually appended fresh
+      rows to the session (kept for back-compat with the legacy single-bool
+      contract; tests assert it for "fresh append" semantics).
+    * ``output_accounted_for`` — True when the journal's visible output was
+      attached to an existing row (a content/reasoning/tool dedupe hit) OR
+      freshly appended. This is the signal callers use to decide whether the
+      journal's partial output was already represented in the transcript: a
+      False here means there was nothing visible to recover (no journal
+      events, or events for content that did not dedupe and did not get
+      appended — the rare ownership-uncertain path). ``False`` here is the
+      only condition that justifies appending a fresh
+      ``_pending_journal_recovery`` reload marker; previously a content or
+      tool dedupe hit returned ``appended_any=False`` which the caller read
+      as "nothing recovered" and used to append a spurious reload marker
+      (SILENT bug from the 2026-09-23 re-gate).
     """
     if not stream_id:
-        return False
+        return False, False
 
     try:
         from api.run_journal import read_run_events
@@ -4077,13 +4528,14 @@ def _append_journaled_partial_output(
             stream_id,
             exc_info=True,
         )
-        return False
+        return False, False
 
     events = [event for event in journal.get('events') or [] if isinstance(event, dict)]
     if not events:
-        return False
+        return False, False
 
     appended_any = False
+    output_accounted_for = False
     assistant_parts: list[str] = []
     reasoning_parts: list[str] = []
     assistant_started_at: float | None = None
@@ -4091,6 +4543,151 @@ def _append_journaled_partial_output(
     recovered_tool_calls: list[dict] = []
     initial_message_count = len(session.messages or [])
     claimed_existing_assistant_indexes: set[int] = set()
+    # One-to-one journal-event consumption (re-gate 2026-09-23 SILENT 3):
+    # each existing tool card counts once, so N identical journaled tool
+    # events need N distinct persisted cards.
+    consumed_tool_card_indexes: set[int] = set()
+    # Tool cards this pass claimed, in JOURNAL START ORDER — reused (deduped)
+    # persisted cards AND freshly built cards alike, one per replayed ``tool``
+    # start event, appended as each start is replayed. A later
+    # ``tool_complete`` must complete reused cards too, not only the cards
+    # freshly appended this pass, and an id-less completion has no identity
+    # to match with, so the journal's start order is the only ordering signal
+    # it has. Pooling every reused card ahead of every fresh one regardless
+    # of start order let a later-started reused tool consume the earlier
+    # tool's completion (#7167 review 2026-10-27, SILENT: two same-name
+    # id-less tools swapped results after a cold reload).
+    journaled_tool_cards: list[dict] = []
+    # Indexes into ``journaled_tool_cards`` that a ``tool_complete`` event has
+    # already consumed during THIS replay. Consumption must be tracked here,
+    # not inferred from the card's persisted ``done`` flag: a card can be
+    # already done before the replay reaches its completion (a previous pass
+    # completed it and the start still deduped against it). Filtering the
+    # completion pool by ``not done`` then retargeted that completion onto the
+    # next unfinished card and discarded the later one (#7167 review
+    # 2026-10-28, SILENT: journal [start 1, start 2, complete 1, complete 2]
+    # with card 1 persisted done and card 2 unfinished showed command 1's
+    # output under command 2).
+    completion_consumed_cards: set[int] = set()
+
+    messages_list = session.messages or []
+    current_turn_min_idx = 0
+    current_turn_boundary_authoritative = False
+    # Derive the current-turn boundary from an AUTHORITATIVE ownership signal
+    # first (active-turn token, else the full pending checkpoint identity:
+    # text + timestamp + source + attachments).  Plain text equality is NOT an
+    # ownership proof: when an earlier turn used the identical prompt, a
+    # text-only backward scan walks PAST the current turn and pins the boundary
+    # at the older duplicate, letting that older turn's assistant row consume
+    # the current journal output (the CORE#1 data loss).
+    #
+    # Among CONSECUTIVE provably-owned user rows keep the EARLIEST: the WebUI
+    # can persist the same turn twice (an eager checkpoint plus a ``_recovered``
+    # echo), and rows between those copies still belong to this turn.  Stopping
+    # at the latest copy would exclude a legitimate same-turn core row from
+    # reasoning backfill.  Any older DUPLICATE prompt is separated from this run
+    # by an intervening assistant/user turn that is not owned, so the walk stops
+    # before reaching it.
+    for idx in range(initial_message_count - 1, -1, -1):
+        msg = messages_list[idx]
+        if not isinstance(msg, dict) or msg.get('role') != 'user':
+            continue
+        if _message_owns_current_turn(msg, session):
+            current_turn_min_idx = idx
+            current_turn_boundary_authoritative = True
+            continue
+        if current_turn_boundary_authoritative:
+            # Walked off the top of the owned run: previous idx was the start.
+            break
+        break
+    if not current_turn_boundary_authoritative:
+        # No provable current-turn user row.  Fall back to the latest user row
+        # as a non-authoritative hint so an in-turn match can still collapse,
+        # but leave ``current_turn_boundary_authoritative`` False so callers
+        # default to APPEND instead of collapsing on unproven ownership.
+        for idx in range(initial_message_count - 1, -1, -1):
+            msg = messages_list[idx]
+            if isinstance(msg, dict) and msg.get('role') == 'user':
+                current_turn_min_idx = idx
+                break
+
+    def content_match_owned_by_current_turn(existing_idx: int) -> bool:
+        """Return True when the assistant row at ``existing_idx`` provably
+        belongs to the current turn.
+
+        Every content match must clear this gate — including reasoning-free
+        ones.  The previous ``not reasoning or ...`` short-circuit skipped the
+        ownership check entirely whenever the journal produced no reasoning,
+        which let an older identical answer consume the current turn's output
+        and emit a false ``_pending_journal_recovery`` marker (CORE#1).
+
+        Ownership is proven two ways:
+
+        * the assistant row itself carries the active-turn token, or
+        * the row sits at/after an AUTHORITATIVE current-turn boundary and its
+          owning user row is provably the current turn.
+
+        When ownership cannot be proven, return False so the caller APPENDS
+        instead of collapsing.
+        """
+        messages = session.messages or []
+        if not (0 <= existing_idx < len(messages)):
+            return False
+        existing = messages[existing_idx]
+        current_token = _current_turn_token(session)
+        if current_token is not None and isinstance(existing, dict):
+            if existing.get('_active_turn_token') == current_token:
+                return True
+        # 2026-10-19 re-gate, finding 1: when the caller narrowed the search
+        # window to its own proven owner->marker slice, a candidate inside
+        # that window whose owner is the user at ``dedupe_min_index - 1`` is
+        # owned BY CONSTRUCTION — the caller already proved that owner is
+        # the journal's turn (the no-hook lazy retry walks back from the
+        # marker to the nearest user row). Requiring that owner to ALSO be
+        # the session's current turn fails on every successor shape: the
+        # gate then judges the in-window answer against the LATEST user
+        # (the successor B), excludes the saved row, and the journal output
+        # is appended as a second copy. The window itself is the ownership
+        # proof, independent of the pending turn.
+        owner_idx = None
+        for candidate_idx in range(existing_idx - 1, -1, -1):
+            candidate = messages[candidate_idx]
+            if isinstance(candidate, dict) and candidate.get('role') == 'user':
+                owner_idx = candidate_idx
+                break
+        if owner_idx is None:
+            return False
+        if (
+            dedupe_min_index is not None
+            and dedupe_max_index is not None
+            and owner_idx == dedupe_min_index - 1
+            and dedupe_min_index <= existing_idx < dedupe_max_index
+        ):
+            return True
+        if _message_owns_current_turn(messages[owner_idx], session):
+            return True
+        # Legacy journal replay has no pending turn metadata.  In that mode,
+        # the latest user row is the only available ownership boundary; this
+        # preserves replay idempotence without weakening active-turn checks.
+        # The same relaxation is REQUIRED when the pending turn carries no
+        # timestamp and no active-turn token: ``_message_matches_pending_
+        # checkpoint`` cannot prove anything then, so an already-recovered
+        # same-stream row sitting inside the current-turn window would be
+        # re-appended on every repair pass (5 rows after 5 cycles instead
+        # of 1 — tests/test_issue7167_stale_pending_content_reuse.py).
+        _pending_text = _normalize_journal_recovery_text(
+            getattr(session, 'pending_user_message', None)
+        )
+        _pending_ts = getattr(session, 'pending_started_at', None)
+        _has_turn_identity = (
+            _current_turn_token(session) is not None or _pending_ts is not None
+        )
+        if (
+            (not _pending_text or not _has_turn_identity)
+            and owner_idx >= current_turn_min_idx
+        ):
+            return True
+        return False
 
     def content_match_can_receive_reasoning(existing_idx: int) -> bool:
         messages = session.messages or []
@@ -4104,12 +4701,18 @@ def _append_journaled_partial_output(
             return False
 
         pending_text = _normalize_journal_recovery_text(session.pending_user_message)
-        if pending_text and not _message_matches_pending_checkpoint(
-            messages[owner_idx],
-            session.pending_user_message,
-            session.pending_started_at,
-            session.pending_user_source,
-            session.pending_attachments,
+        # Same relaxation as the ownership gate above: without an active-turn
+        # token or a pending timestamp there is no way to prove the owner row,
+        # so a same-stream recovered row inside the current-turn window must be
+        # reusable instead of re-appended every repair pass.
+        _has_turn_identity = (
+            _current_turn_token(session) is not None
+            or getattr(session, 'pending_started_at', None) is not None
+        )
+        if (
+            pending_text
+            and _has_turn_identity
+            and not _message_owns_current_turn(messages[owner_idx], session)
         ):
             return False
 
@@ -4118,12 +4721,22 @@ def _append_journaled_partial_output(
             if not isinstance(candidate, dict) or candidate.get('role') != 'user':
                 continue
             candidate_text = _normalize_journal_recovery_text(candidate.get('content'))
-            candidate_matches_checkpoint = pending_text and _message_matches_pending_checkpoint(
-                candidate,
-                session.pending_user_message,
-                session.pending_started_at,
-                session.pending_user_source,
-                session.pending_attachments,
+            # Token-aware (review fix 4): route through the shared ownership
+            # helper so a tokened row is judged by its token, not by the raw
+            # checkpoint comparison which cannot see it. The raw checkpoint
+            # predicate only runs when the session has no authoritative token.
+            candidate_matches_checkpoint = pending_text and (
+                _message_owns_current_turn(candidate, session)
+                or (
+                    _current_turn_token(session) is None
+                    and _message_matches_pending_checkpoint(
+                        candidate,
+                        session.pending_user_message,
+                        session.pending_started_at,
+                        session.pending_user_source,
+                        session.pending_attachments,
+                    )
+                )
             )
             if candidate_matches_checkpoint and candidate.get('_recovered'):
                 continue
@@ -4149,7 +4762,8 @@ def _append_journaled_partial_output(
         return True
 
     def flush_assistant() -> int | None:
-        nonlocal appended_any, assistant_parts, reasoning_parts
+        nonlocal appended_any, output_accounted_for
+        nonlocal assistant_parts, reasoning_parts
         nonlocal assistant_started_at, current_assistant_idx
         content = ''.join(assistant_parts).strip()
         reasoning = ''.join(reasoning_parts).strip()
@@ -4157,6 +4771,37 @@ def _append_journaled_partial_output(
         reasoning_parts = []
         if not content and not reasoning:
             return current_assistant_idx
+        # Resolve THIS stream's own recovery artifact for the flushed content
+        # BEFORE any ownership-gated search. The stale-pending call site
+        # appends the recovered user row first, which shifts the turn boundary
+        # past earlier artifacts so the ownership gate rejects them; keying on
+        # provenance instead keeps the reuse idempotent there. See the guard
+        # below for the full contract.
+        self_stream_same_stream_artifact_idx = None
+        if content and not dedupe_existing and stream_id:
+            # The finder only EXCLUDES rows tagged for a different stream; an
+            # untagged live row is still matchable and is returned first.
+            # Reuse is justified only by provenance, so walk the matches until
+            # one IS a recovery artifact this same stream already produced and
+            # keep rejecting anything else (fail closed toward appending).
+            _search_excluded = set(claimed_existing_assistant_indexes)
+            while True:
+                _candidate_idx = _find_existing_assistant_for_journal_content(
+                    session,
+                    content,
+                    min_index=0,
+                    max_index=initial_message_count,
+                    excluded_indexes=_search_excluded,
+                    stream_id=stream_id,
+                )
+                if _candidate_idx is None:
+                    break
+                if _is_own_stream_recovery_artifact(
+                    session.messages[_candidate_idx], stream_id
+                ):
+                    self_stream_same_stream_artifact_idx = _candidate_idx
+                    break
+                _search_excluded.add(_candidate_idx)
         if dedupe_existing and content:
             search_excluded = set(claimed_existing_assistant_indexes)
             existing_idx = None
@@ -4164,16 +4809,63 @@ def _append_journaled_partial_output(
                 candidate_idx = _find_existing_assistant_for_journal_content(
                     session,
                     content,
-                    min_index=dedupe_min_index,
+                    # #7167 scope + master's parametrisation: the caller can
+                    # narrow the window via dedupe_min_index/dedupe_max_index;
+                    # when it does not, fall back to the current-turn window
+                    # (nearest preceding user row) instead of searching the
+                    # whole transcript and stealing another turn's assistant row.
+                    min_index=(
+                        dedupe_min_index
+                        if dedupe_min_index is not None
+                        else current_turn_min_idx
+                    ),
                     max_index=(
                         initial_message_count
                         if dedupe_max_index is None
                         else min(initial_message_count, dedupe_max_index)
                     ),
                     excluded_indexes=search_excluded,
+                    stream_id=stream_id,
                 )
                 if candidate_idx is None:
                     break
+                # Ownership gate applies to EVERY match, reasoning or not.
+                # Unproven ownership => fall through to append.
+                if not content_match_owned_by_current_turn(candidate_idx):
+                    search_excluded.add(candidate_idx)
+                    continue
+                # #7167: ownership alone is NOT authorization to reuse a row.
+                # Only provenance (this same stream already recovered the row)
+                # or, when the caller opts in, the authoritative core
+                # transcript proves the journal output is already represented.
+                # An ordinary session row that merely shares the text is the
+                # journal's own output and must still be appended.
+                _cand = session.messages[candidate_idx]
+                _authorized = (
+                    _is_own_stream_recovery_artifact(_cand, stream_id)
+                    or authorize_saved_turn_rows
+                    or (
+                        authorize_core_rows
+                        and _cand.get('_from_core_transcript') is True
+                    )
+                    or (
+                        authorize_completed_turn_rows
+                        and content_match_owned_by_current_turn(candidate_idx)
+                    )
+                    # The core transcript is also projected into
+                    # context_messages; a row the projection already carries is
+                    # the durable copy the journal is replayed against.
+                    or any(
+                        isinstance(_cm, dict)
+                        and _cm.get('role') == 'assistant'
+                        and _normalize_journal_recovery_text(_cm.get('content'))
+                        == _normalize_journal_recovery_text(_cand.get('content'))
+                        for _cm in (session.context_messages or [])
+                    )
+                )
+                if not _authorized:
+                    search_excluded.add(candidate_idx)
+                    continue
                 if not reasoning or content_match_can_receive_reasoning(candidate_idx):
                     existing_idx = candidate_idx
                     break
@@ -4184,9 +4876,30 @@ def _append_journaled_partial_output(
                 assistant_started_at = None
                 if 0 <= existing_idx < len(session.messages):
                     existing_message = session.messages[existing_idx]
+                    # #7167 round-6: an authorized legacy recovery row
+                    # (journal provenance without a stream tag — written
+                    # before stream tagging existed) is invisible to the
+                    # stream-scoped rehome and to the cancel-journal
+                    # ownership gates, so it stays below its marker or reads
+                    # as another stream's row. Stamp it with the proven
+                    # stream id BEFORE the context projection below.
+                    if (
+                        existing_message.get('_recovered_from_run_journal') is True
+                        and not existing_message.get('_recovered_stream_id')
+                    ):
+                        existing_message['_recovered_stream_id'] = str(stream_id)
                     append_context_projection(existing_message)
                     if attach_display_reasoning(existing_message, reasoning):
                         appended_any = True
+                # Content dedupe hit: the journal's token stream was already
+                # represented by this existing assistant row, so the journal
+                # output IS accounted for (reused) — record that even when
+                # ``attach_display_reasoning`` returned False because the row
+                # already carried reasoning. Without this, callers read
+                # ``session_mutated=False`` as "nothing recovered" and
+                # appended a false ``_pending_journal_recovery`` reload
+                # marker on every repeated repair cycle.
+                output_accounted_for = True
                 return existing_idx
         if dedupe_existing and reasoning and not content:
             reasoning_start = (
@@ -4200,6 +4913,9 @@ def _append_journaled_partial_output(
                 else max(reasoning_start, min(initial_message_count, dedupe_max_index))
             )
             for existing_idx in range(reasoning_start, reasoning_stop):
+            # Bounded by the caller's dedupe window when supplied: an
+            # empty-anchor reuse must never escape past the current turn.
+            # (re-gate #7167 CI fix — see the re-gate note above.)
                 if existing_idx in claimed_existing_assistant_indexes:
                     continue
                 existing_message = session.messages[existing_idx]
@@ -4215,7 +4931,41 @@ def _append_journaled_partial_output(
                     claimed_existing_assistant_indexes.add(existing_idx)
                     current_assistant_idx = existing_idx
                     assistant_started_at = None
+                    # Reasoning-only dedupe hit: same rationale as the
+                    # content-dedupe branch above. The journal's reasoning
+                    # text was already attached to this row, so the
+                    # caller must NOT treat ``session_mutated=False`` as
+                    # "nothing recovered".
+                    output_accounted_for = True
                     return existing_idx
+        # Unconditional reuse of THIS stream's own recovery artifacts — the
+        # content/tool counterpart of the guard above. Reusing an artifact is
+        # safe precisely because provenance identifies it: only rows this
+        # recovery itself wrote for this exact stream (``_recovered_from_run_
+        # journal`` + matching ``_recovered_stream_id``) can match, so it can
+        # never consume a live current-turn row or an ordinary history row.
+        # Without it, the stale-pending call site (which passes
+        # ``dedupe_existing=False``) re-appends the journal output on every
+        # repair cycle for the same dead stream, because that site appends the
+        # recovered user row FIRST: the ownership-gated searches then refuse
+        # every earlier artifact and each pass grows the transcript by another
+        # answer row (greptile P1, #7167).
+        if self_stream_same_stream_artifact_idx is not None:
+            existing_idx = self_stream_same_stream_artifact_idx
+            claimed_existing_assistant_indexes.add(existing_idx)
+            current_assistant_idx = existing_idx
+            assistant_started_at = None
+            # The journal's visible output is already represented by the row
+            # we just claimed, so the caller must NOT treat
+            # ``session_mutated=False`` as "nothing recovered". If the
+            # claimed row still lacks the journal's display-only reasoning,
+            # attach it now — that mutation is a real backfill, not a
+            # duplicate, and keeps a content-only artifact from masking a
+            # reasoning-bearing journal.
+            if attach_display_reasoning(session.messages[existing_idx], reasoning):
+                appended_any = True
+            output_accounted_for = True
+            return existing_idx
         timestamp = int(assistant_started_at or time.time())
         recovered_assistant = {
             'role': 'assistant',
@@ -4232,6 +4982,7 @@ def _append_journaled_partial_output(
         current_assistant_idx = len(session.messages) - 1
         assistant_started_at = None
         appended_any = True
+        output_accounted_for = True
         return current_assistant_idx
 
     def ensure_assistant_anchor(created_at: float | None = None) -> int:
@@ -4283,7 +5034,8 @@ def _append_journaled_partial_output(
 
     for event in events:
         event_name = str(event.get('event') or event.get('type') or '')
-        payload = event.get('payload') if isinstance(event.get('payload'), dict) else {}
+        _raw_payload = event.get('payload')
+        payload: dict = _raw_payload if isinstance(_raw_payload, dict) else {}
         created_at = event.get('created_at') if isinstance(event.get('created_at'), (int, float)) else None
         if event_name == 'reasoning':
             text = str(
@@ -4318,32 +5070,81 @@ def _append_journaled_partial_output(
             flush_assistant()
             continue
         if event_name == 'tool':
-            anchor_idx = flush_assistant()
-            if anchor_idx is None:
-                anchor_idx = ensure_assistant_anchor(created_at)
+            # Resolve the tool identity and run dedupe BEFORE allocating an
+            # empty assistant anchor (review SILENT fix): ensure_assistant_anchor()
+            # used to run unconditionally before the dedupe check, so a
+            # tool-only replay whose card was already present still grew the
+            # transcript by one orphan empty assistant row while the tool
+            # count stayed flat. Pending text is still flushed first when it
+            # exists — only the anchor allocation is deferred.
             name = str(payload.get('name') or 'tool')
             preview = str(payload.get('preview') or '')
             tool_id = str(
                 payload.get('tid') or payload.get('tool_call_id') or ''
             ).strip()
-            if dedupe_existing and _journal_tool_already_present(
-                session,
-                name,
-                preview,
-                stream_id=stream_id,
-                tool_id=tool_id or None,
-                min_assistant_idx=dedupe_min_index,
-                max_assistant_idx=dedupe_max_index,
-            ):
+            # Immutable identity of this journal event (stream + seq). The live
+            # journal shape sends ``tool`` with preview None and a real tid and
+            # then overwrites the CARD's preview via ``tool_complete``, so the
+            # start preview is useless for matching a card that has already
+            # completed. Identity is what survives; preview stays as a fallback
+            # for cards persisted before event stamping existed.
+            _event_seq = event.get('seq')
+            _event_id = (
+                f"{(stream_id or '')}:{_event_seq}"
+                if _event_seq is not None
+                else None
+            )
+            # #7167: ``dedupe_tools`` is independent of the CONTENT dedupe
+            # mode. ``None`` (the default) preserves the historical coupling
+            # to ``dedupe_existing``; the stale-pending caller passes True so
+            # tool cards dedupe by same-stream provenance even though the
+            # content path uses its own provenance-reuse mode.
+            _tools_dedupe = dedupe_existing if dedupe_tools is None else dedupe_tools
+            tool_match_idx = (
+                _find_journal_tool_match(
+                    session, name, preview, stream_id=stream_id,
+                    tool_id=tool_id or None,
+                    min_assistant_idx=dedupe_min_index,
+                    max_assistant_idx=dedupe_max_index,
+                    consumed_indexes=consumed_tool_card_indexes,
+                    event_id=_event_id,
+                )
+                if _tools_dedupe
+                else None
+            )
+            tool_already_present = tool_match_idx is not None
+            # Flush any buffered assistant text first: the anchor index is what
+            # both branches below key the recovered tool card off.
+            anchor_idx = flush_assistant()
+            if tool_already_present:
+                # The card was reused via dedupe, so the journal's tool
+                # output IS represented in the transcript — but no FRESH row
+                # was appended, so session_mutated stays False.
                 current_assistant_idx = anchor_idx
+                output_accounted_for = True
+                # Claim the matched card so a later identical journal event
+                # cannot dedupe against the very same card again (#7167 review
+                # 2026-10-10: the unreachable duplicate was removed; the
+                # reachable claim must stay, or two distinct idless starts
+                # consume one legacy fallback card).
+                consumed_tool_card_indexes.add(tool_match_idx)
+                # Remember the reused card so a later ``tool_complete`` for the
+                # same event updates IT (not only freshly built cards): a card
+                # reused while ``done=False`` used to stay incomplete and
+                # result-less forever, because the completion handler only
+                # walked ``recovered_tool_calls``.
+                if isinstance(session.tool_calls, list) and 0 <= tool_match_idx < len(session.tool_calls):
+                    journaled_tool_cards.append(session.tool_calls[tool_match_idx])
                 continue
-            recovered_tool_calls.append({
+            if anchor_idx is None:
+                anchor_idx = ensure_assistant_anchor(created_at)
+            _tool_card = {
                 'name': name,
                 'preview': preview,
                 'snippet': preview,
                 'tid': (
                     tool_id
-                    or f"journal-{event.get('seq') or len(recovered_tool_calls) + 1}"
+                    or f"journal-{_event_seq or len(recovered_tool_calls) + 1}"
                 ),
                 '_journal_synthetic_tid': not bool(tool_id),
                 'assistant_msg_idx': anchor_idx,
@@ -4351,34 +5152,69 @@ def _append_journaled_partial_output(
                 'done': False,
                 '_recovered_from_run_journal': True,
                 '_recovered_stream_id': stream_id,
-            })
+            }
+            if _event_id:
+                _tool_card['_recovered_event_id'] = _event_id
+            recovered_tool_calls.append(_tool_card)
+            journaled_tool_cards.append(_tool_card)
             appended_any = True
+            output_accounted_for = True
             current_assistant_idx = anchor_idx
             continue
         if event_name == 'tool_complete':
             name = str(payload.get('name') or '')
+            # Reused cards must be completed too. Before this, a card matched
+            # by identity while ``done=False`` was skipped by the completion
+            # handler (which only walked ``recovered_tool_calls``) and stayed
+            # permanently incomplete with no result.
             completion_tool_id = str(
                 payload.get('tid') or payload.get('tool_call_id') or ''
             ).strip()
-            unfinished = [call for call in reversed(recovered_tool_calls) if not call.get('done')]
+            # Walk the pool in JOURNAL START ORDER — reused and freshly
+            # created cards interleaved exactly as the journal's ``tool``
+            # start events replayed — matching by exact tool id first. The
+            # journal's start order is the only ordering signal an id-less
+            # completion has: pooling every reused card ahead of every fresh
+            # one reversed a same-name pair and attached each tool's result
+            # to the other tool's card (#7167 review 2026-10-27, SILENT).
+            #
+            # Candidates are filtered by what THIS replay already consumed,
+            # never by the card's persisted ``done`` flag: a start can dedupe
+            # against an already-completed card, and filtering on ``done``
+            # retargeted its completion onto the next unfinished card
+            # (#7167 review 2026-10-28, SILENT). A matched done card is
+            # consumed without rewriting its already-final result.
+            _candidates = [
+                (idx, call)
+                for idx, call in enumerate(journaled_tool_cards)
+                if idx not in completion_consumed_cards
+            ]
+            matched_idx = None
             matched_tool = None
             if completion_tool_id:
-                matched_tool = next((
-                    call for call in unfinished
-                    if str(call.get('tid') or '') == completion_tool_id
-                ), None)
+                for idx, call in _candidates:
+                    if str(call.get('tid') or '') == completion_tool_id:
+                        matched_idx, matched_tool = idx, call
+                        break
                 if matched_tool is None:
-                    matched_tool = next((
-                        call for call in unfinished
-                        if call.get('_journal_synthetic_tid')
-                        and name and call.get('name') == name
-                    ), None)
+                    for idx, call in _candidates:
+                        if (call.get('_journal_synthetic_tid')
+                                or str(call.get('tid') or '').startswith('journal-')) \
+                                and name and call.get('name') == name:
+                            matched_idx, matched_tool = idx, call
+                            break
             else:
-                matched_tool = next((
-                    call for call in unfinished
-                    if not name or call.get('name') == name
-                ), None)
-            if matched_tool is not None:
+                for idx, call in _candidates:
+                    if not name or call.get('name') == name:
+                        matched_idx, matched_tool = idx, call
+                        break
+            if matched_tool is not None and matched_idx is not None:
+                completion_consumed_cards.add(matched_idx)
+                if matched_tool.get('done'):
+                    # The card's result was final before this replay. Consume
+                    # the completion so the NEXT id-less completion cannot
+                    # retarget onto it, but keep the persisted result.
+                    continue
                 tool_call = matched_tool
                 tool_call['done'] = True
                 if payload.get('preview'):
@@ -4397,7 +5233,8 @@ def _append_journaled_partial_output(
             tool_call.pop('_journal_synthetic_tid', None)
         session.tool_calls = list(session.tool_calls or []) + recovered_tool_calls
         appended_any = True
-    return appended_any
+        output_accounted_for = True
+    return appended_any, output_accounted_for
 
 
 # ── Lazy run-journal recovery (read-side self-heal) ─────────────────────────
@@ -4449,9 +5286,18 @@ def _journal_retry_lock_for_sid(sid: str) -> threading.Lock:
 
 def _build_recovery_marker_with_retry_hook(
     *, recovered_output: bool, stream_id: str | None, pending_started_at=None,
+    retry_kind: str | None = None,
 ) -> dict:
     """Build an interrupted-turn marker, arming the lazy-retry hook when
-    visible output was not recovered yet but a stream id is available."""
+    visible output was not recovered yet but a stream id is available.
+
+    ``retry_kind`` records WHICH interruption this marker stands for. The
+    cancel-journal recovery passes ``'cancelled'`` so the owner lookup can
+    still recognise the segment as a user Stop even though the
+    interrupted-recovery path re-words the carrier and stamps
+    ``type='interrupted'`` (the agent *process* is what stopped). A real
+    crash/provider interruption leaves it unset and stays excluded.
+    """
     if recovered_output:
         return _interrupted_recovery_marker(
             recovered_output=True,
@@ -4471,6 +5317,8 @@ def _build_recovery_marker_with_retry_hook(
     marker['_journal_retry_stream_id'] = str(stream_id)
     marker['_journal_retry_attempts'] = 0
     marker['_journal_retry_first_seen_ts'] = int(time.time())
+    if retry_kind:
+        marker['_journal_retry_kind'] = str(retry_kind)
     return marker
 
 
@@ -4712,11 +5560,79 @@ def _rehome_interrupted_journal_context(session, context_owner, stream_id: str, 
     # provider calls from the journal's truncated display-only tool metadata.
     insert_at = next((i for i in range(owner_positions[0] + 1, len(context))
                       if isinstance(context[i], dict) and context[i].get('role') == 'user'), len(context))
-    session.context_messages = context[:insert_at] + recovered + context[insert_at:]
+    # 2026-10-19 re-gate, finding 2: a dedupe-only resolution reaches this
+    # rehome (``output_accounted_for`` is accepted as recovery now), and the
+    # round-6 stamp above tags legacy untagged rows on reuse — so a projection
+    # whose row is ALREADY in the owner->successor slice would be re-inserted
+    # on every pass, adding one more copy to provider history each time (a
+    # recovered row survived two cold loads as 3 context copies). Consume the
+    # slice one-to-one: drop each projection that already has an equal row
+    # (role + normalized content + tool_call_id) in the slice, and insert only
+    # what is genuinely missing. Removing just the stream-tagged rows fixes
+    # the exact-stream case but not the legacy one — that context copy has no
+    # stream tag either, so the match must be by identity, not provenance.
+    def _context_row_key(r) -> tuple:
+        if not isinstance(r, dict):
+            return ('non-dict',)
+        return (
+            r.get('role'),
+            _normalize_journal_recovery_text(r.get('content')),
+            r.get('tool_call_id'),
+        )
+
+    present_keys = [
+        _context_row_key(r)
+        for r in context[owner_positions[0] + 1:insert_at]
+        if isinstance(r, dict)
+    ]
+    missing_projections = []
+    for row in recovered:
+        row_key = _context_row_key(row)
+        if row_key in present_keys:
+            present_keys.remove(row_key)
+        else:
+            missing_projections.append(row)
+    session.context_messages = context[:insert_at] + missing_projections + context[insert_at:]
 
 
-def _rehome_cancel_journal_rows(session, marker_idx: int, stream_id: str) -> None:
-    """Move only this cancelled stream's recovered rows before its marker."""
+def _rehome_cancel_journal_rows(
+    session,
+    marker_idx: int,
+    stream_id: str,
+    *,
+    proven_owner_index: int | None = None,
+) -> None:
+    """Move only this cancelled stream's recovered rows before its marker.
+
+    #7167 round-7: an owned marker does not prove its user was materialized.
+    The shared repair appends the current turn's user row AFTER the marker
+    (``_append_recovered_pending_turn``), while this rehome hoists the
+    journaled answer above it — leaving the answer before its own prompt
+    (the ordering variant from the 2026-10-14 re-gate: ``old answer → new
+    answer → marker → new prompt``). Before hoisting, resolve the marker's
+    exact current user ownership:
+
+    * a user row after the marker carrying the active-turn token whose
+      stream component is THIS stream IS the current turn's user — move it
+      up WITH the recovered rows so they stay ordered together;
+    * a user row after the marker that was itself recovered by this repair
+      (``_recovered`` set, no token) is the newly appended current-turn
+      prompt whose ownership is exactly what cannot be established —
+      hoisting the answer above it reproduces the ordering bug, so FAIL
+      CLOSED and do not hoist at all — UNLESS the marker's exact pre-marker
+      owner was already proven: ``proven_owner_index`` (the cancel-hook arm
+      resolves it through ``_cancel_journal_retry_owner_index`` before
+      recovery) proves the cancelled turn's prompt IS materialized before
+      the marker, so a later tokenless ``_recovered`` row is an unrelated
+      recovered successor, not the missing prompt, and must not veto the
+      hoist (2026-10-15 re-gate);
+    * a tokenless, non-recovered user row after the marker belongs to a
+      LATER turn's ordinary history (it sits there because the cancelled
+      turn's rows were tail-appended by a previous pass) — hoist normally
+      and leave it in place;
+    * rows carrying an explicit FOREIGN token stream stay put: they are
+      provably another turn's users, never this marker's.
+    """
     messages = getattr(session, 'messages', None)
     if not isinstance(messages, list) or not (0 <= marker_idx < len(messages)):
         return
@@ -4732,6 +5648,47 @@ def _rehome_cancel_journal_rows(session, marker_idx: int, stream_id: str) -> Non
     ]
     if not recovered:
         return
+    # #7167 round-7 ownership resolution (see docstring).
+    target_stream = str(stream_id)
+    owned_user_rows = []
+    for index, row in enumerate(before):
+        if index <= marker_idx or not isinstance(row, dict) or row.get('role') != 'user':
+            continue
+        token = str(row.get('_active_turn_token') or '').strip()
+        if token:
+            # Token-bearing rows are judged by their stream component: this
+            # stream's token proves current-turn ownership (move together);
+            # a foreign token proves another turn's (leave in place).
+            token_stream = token.rsplit(':', 1)[0] if ':' in token else token
+            if token_stream == target_stream:
+                owned_user_rows.append(row)
+            continue
+        if row.get('_recovered') is True or row.get('_recovered_from_run_journal') is True:
+            # A recovered user row without a token: when its journal
+            # provenance names this stream it rises with the answer;
+            # otherwise it is the freshly appended current-turn prompt —
+            # ownership undecidable, fail closed — UNLESS the marker's
+            # exact pre-marker owner was already proven by token
+            # (proven_owner_index from _cancel_journal_retry_owner_index),
+            # in which case a later tokenless _recovered row is an
+            # unrelated recovered successor that must not veto the hoist
+            # (2026-10-15 re-gate).
+            if (
+                row.get('_recovered_from_run_journal') is True
+                and str(row.get('_recovered_stream_id') or '') == target_stream
+            ):
+                owned_user_rows.append(row)
+            elif row.get('_recovered') is True and proven_owner_index is None:
+                return
+            continue
+        # Tokenless, non-recovered user row: ordinary later-turn history —
+        # the hoist above it is the intended recovery behaviour.
+    if owned_user_rows:
+        # Preserve relative transcript order among everything being moved:
+        # the owned user(s) and the recovered rows rise together, user first
+        # (its original position precedes the tail-appended recovered rows).
+        moved_ids = {id(row) for row in recovered} | {id(row) for row in owned_user_rows}
+        recovered = [row for row in before if id(row) in moved_ids]
     recovered_ids = {id(row) for row in recovered}
     remaining = [row for row in before if id(row) not in recovered_ids]
     try:
@@ -4878,6 +5835,9 @@ def _strip_journal_retry_meta(marker: dict) -> None:
     marker.pop('_journal_retry_kind', None)
     marker.pop('_journal_retry_owner_token', None)
     marker.pop('_journal_retry_process_token', None)
+    # ``_journal_marker_stream_id`` is DURABLE ownership (#7167 review
+    # 2026-10-10) and is deliberately not cleaned here: a resolved marker must
+    # still be reusable by stream identity, so it survives resolution.
 
 
 def _reorder_journal_tail_above_marker(session, marker_idx: int) -> None:
@@ -4911,16 +5871,32 @@ def _reorder_journal_tail_above_marker(session, marker_idx: int) -> None:
     )
     # Rebase any tool_calls.assistant_msg_idx values that pointed into the
     # journaled rows when they were appended at the tail.
-    old_journaled_idx_base = marker_idx + 1
-    new_journaled_idx_base = marker_idx
-    shift = new_journaled_idx_base - old_journaled_idx_base  # = -1
+    #
+    # Rebase by IDENTITY, not by a contiguous shift. The old code mapped
+    # ``[marker_idx+1, marker_idx+1+len(journaled))`` as if the journaled rows
+    # were consecutive, but a stale-pending cycle can interleave them with a
+    # recovered user prompt, so a card anchored to a journaled row past that
+    # interleaving kept a stale index that ended up pointing at a USER row.
+    # Map each old index to its new one via object identity instead.
+    new_index_of_old: dict[int, int] = {}
+    for offset, row in enumerate(journaled):
+        # Identity by object, not by ==: two identical transcript rows would
+        # otherwise both resolve to the first occurrence's index.
+        try:
+            tail_offset = next(
+                i for i, r in enumerate(tail) if r is row
+            )
+        except StopIteration:  # pragma: no cover - row always comes from tail
+            continue
+        new_index_of_old[marker_idx + 1 + tail_offset] = marker_idx + offset
     for tool_call in session.tool_calls or []:
         if not isinstance(tool_call, dict):
             continue
         idx = tool_call.get('assistant_msg_idx')
-        if isinstance(idx, int) and idx >= old_journaled_idx_base \
-                and idx < old_journaled_idx_base + len(journaled):
-            tool_call['assistant_msg_idx'] = idx + shift
+        if isinstance(idx, bool) or not isinstance(idx, int):
+            continue
+        if idx in new_index_of_old:
+            tool_call['assistant_msg_idx'] = new_index_of_old[idx]
     session.messages = new_messages
 
 
@@ -4999,6 +5975,7 @@ def _retry_journal_recovery_in_place(
             idx = None
             msg = None
             cancel_hook = False
+            owner_index = None
             if cancel_candidates:
                 # Multiple cancelled turns may remain pending in one transcript.
                 # A newer hook that is still owned by a live worker (or by a
@@ -5109,31 +6086,45 @@ def _retry_journal_recovery_in_place(
                 owner_index = _cancel_journal_retry_owner_index(session, idx, msg)
                 if owner_index is None:
                     continue
-                recovered_output = _append_journaled_partial_output(
-                    session,
-                    stream_id,
-                    dedupe_existing=True,
-                    dedupe_min_index=owner_index + 1,
-                    dedupe_max_index=idx,
-                    append_context=False,
-                    display_only=True,
+                # #7167 MUST-FIX (2026-10-09 re-gate): ONE display-only hop,
+                # exactly as master runs it. The previous head ran the
+                # display-only hop HERE *and* a second windowed hop further
+                # down (the ``if cancel_hook:`` block after the verdict
+                # binding), so the cancellation journal was replayed twice —
+                # the retry arms were inverted relative to master, and the
+                # distinct-turn test saw four identical replies instead of
+                # three. The windowed hop below now belongs to the no-hook
+                # arm only; it is the arm that actually needs context
+                # placement, and running it for a cancel hook re-consumed an
+                # already-replayed journal.
+                recovered_output, terminal_error_recovered, output_accounted_for = (
+                    _recover_journaled_output_and_terminal_error(
+                        session,
+                        stream_id,
+                        dedupe_existing=True,
+                        dedupe_min_index=owner_index + 1,
+                        dedupe_max_index=idx,
+                        # append_context=False is what makes the cancel-marker
+                        # replay REPRESENT the journal's visible output without
+                        # appending a second copy into session.messages:
+                        # _recover_journaled_output_and_terminal_error forwards
+                        # ``display_only=not append_context`` to
+                        # _append_journaled_partial_output. Do NOT pass
+                        # display_only here — this wrapper does not accept it.
+                        append_context=False,
+                    )
                 )
-                terminal_error_recovered = False
             else:
-                if not stream_id:
-                    # No stream id to retry against; demote immediately.
-                    msg['content'] = _INTERRUPTED_NEUTRAL_WORDING
-                    _strip_journal_retry_meta(msg)
-                    try:
-                        session.save(touch_updated_at=False)
-                    except Exception:
-                        logger.debug(
-                            "save() failed while demoting marker for session %s",
-                            getattr(session, 'session_id', '?'),
-                            exc_info=True,
-                        )
-                    return False
+                # No cancel hook on this marker. Bind the three verdicts first —
+                # an unbound name raised UnboundLocalError, which the outer
+                # handler swallowed into a silent ``return False`` and left
+                # every no-hook marker unresolvable
+                # (tests/test_session_sidecar_repair.py).
                 if give_up:
+                    # Expired and no cancel hook: retire the marker to neutral
+                    # wording now. Keep this INSIDE the no-hook arm — moving the
+                    # generic give_up demote above the success check made the
+                    # WSL race tests shorten their retry budget and fail.
                     msg['content'] = _INTERRUPTED_NEUTRAL_WORDING
                     _strip_journal_retry_meta(msg)
                     try:
@@ -5145,11 +6136,79 @@ def _retry_journal_recovery_in_place(
                             exc_info=True,
                         )
                     return False
-                # Display successors alone do not establish context placement.
-                has_successor = any(
-                    isinstance(row, dict) and row.get('role') == 'user'
-                    for row in messages[idx + 1:]
-                )
+                recovered_output = False
+                terminal_error_recovered = False
+                output_accounted_for = False
+                # #7167 MUST-FIX (2026-10-10 re-gate): the no-hook arm runs ONE
+                # windowed hop, exactly as master does. The previous head ran
+                # an unwindowed plain hop HERE and then a second windowed hop
+                # further down (after the owner/successor proof), so the same
+                # journal was replayed twice in a single pass and the recovered
+                # rows landed in the transcript twice — which is what
+                # test_newer_cancel_hook_does_not_block_older_interrupted_recovery
+                # and 250 other cases saw. Everything the second hop adds (the
+                # owner/successor proof, the snapshot, append_context) is taken
+                # BEFORE this single replay below, in the arm that owns it.
+                if give_up:
+                    # Expired and no cancel hook: retire the marker to neutral
+                    # wording now. Keep this INSIDE the no-hook arm — moving the
+                    # generic give_up demote above the success check made the
+                    # WSL race tests shorten their retry budget and fail.
+                    msg['content'] = _INTERRUPTED_NEUTRAL_WORDING
+                    _strip_journal_retry_meta(msg)
+                    try:
+                        session.save(touch_updated_at=False)
+                    except Exception:
+                        logger.debug(
+                            "save() failed while demoting marker for session %s",
+                            getattr(session, 'session_id', '?'),
+                            exc_info=True,
+                        )
+                    return False
+            # A dedupe hit (no fresh row appended this pass) still means the
+            # journal's visible output is represented in the transcript, so
+            # the marker is resolved: keeping "reload to retry" visible would
+            # spend a retry budget on every read for output that is already
+            # on screen (2026-09-23 re-gate, api/models.py:3789). Only a
+            # genuine "nothing visible to recover" (all three False) may
+            # leave the marker armed for the next lazy pass.
+            # Fail-closed: ``output_accounted_for`` is NOT accepted as recovery
+            # here. An "already represented" hit can come from rows an EARLIER
+            # repair pass reordered or from ordinary history that happens to
+            # sit inside the stream-scoped window — neither proves THIS journal
+            # produced visible output. Accepting it consumed the marker without
+            # replaying the journal, so a stale ``CANCELLED_REPLAY`` row
+            # survived into the merged transcript and the durable saved
+            # successors lost their admission (tests/
+            # test_cancelled_journal_owner_occurrences.py).
+            # #7167 MUST-FIX (2026-10-09 re-gate): ONE verdict block, exactly
+            # as master has it. The previous head ran this tag+rehome+save
+            # sequence here AND again in the block below, so a single pass
+            # rehomed the same recovered rows twice and the second save
+            # re-persisted them: the cancellation journal was effectively
+            # replayed twice before its rows moved into the dedupe window
+            # (the distinct-turn test saw four identical replies instead of
+            # three, and master's own file lost 270 tests). Everything this
+            # block did is done once, below, by the arm that owns it.
+            has_successor = any(
+                isinstance(row, dict) and row.get('role') == 'user'
+                for row in messages[idx + 1:]
+            )
+            # Defaults for the no-cancel-hook arm: the context hop below is
+            # gated on cancel_hook, but its results are consumed
+            # unconditionally, so they must always be bound.
+            context_owner = None
+            interrupted_snapshot = None
+            # #7167 MUST-FIX (2026-10-09 re-gate): the windowed hop runs for
+            # the NO-HOOK arm only. A cancel hook already replayed this
+            # journal above with its exact window, and replaying it again
+            # here re-consumed an already-empty journal and overwrote the
+            # True verdict with False. The owner/successor proof is taken
+            # BEFORE the replay so an interrupted turn cannot reorder the
+            # next send's history (plain recovery used to append context
+            # before checking for a successor: [old user, old answer, new
+            # user] became [old user, new user, old answer]).
+            if not cancel_hook:
                 owner_index = next((
                     index for index in range(idx - 1, -1, -1)
                     if isinstance(messages[index], dict)
@@ -5160,7 +6219,17 @@ def _retry_journal_recovery_in_place(
                     if has_successor else None
                 )
                 interrupted_snapshot = snapshot_cancel_projection() if context_owner is not None else None
-                recovered_output, terminal_error_recovered = (
+                # The single replay for this arm: windowed by the owner/marker
+                # pair, with append_context decided by the successor proof
+                # taken just above. #7167 re-gate (2026-10-12):
+                # ``output_accounted_for`` is now KEPT — the lazy retry proves
+                # the journal's answer is already saved as an ordinary row, and
+                # a dedupe hit must consume this marker (the closing verdict
+                # block accepts ``recovered_output or terminal_error_recovered
+                # or output_accounted_for``). ``authorize_saved_turn_rows=True``
+                # lets that saved row pass the ownership gate so the answer is
+                # not appended a second time.
+                recovered_output, terminal_error_recovered, output_accounted_for = (
                     _recover_journaled_output_and_terminal_error(
                         session,
                         stream_id,
@@ -5168,10 +6237,11 @@ def _retry_journal_recovery_in_place(
                         append_context=not has_successor,
                         dedupe_min_index=owner_index + 1 if owner_index is not None else idx,
                         dedupe_max_index=idx,
+                        authorize_saved_turn_rows=True,
                     )
                 )
 
-            if recovered_output or terminal_error_recovered:
+            if recovered_output or terminal_error_recovered or output_accounted_for:
                 if cancel_hook:
                     # Only this successful cancellation action can authorize
                     # scans past its exact-stream recovered assistant rows.
@@ -5184,7 +6254,18 @@ def _retry_journal_recovery_in_place(
                             and str(row.get('_recovered_stream_id') or '') == str(stream_id)
                         ):
                             row['_recovered_from_cancel_journal'] = True
-                    _rehome_cancel_journal_rows(session, idx, str(stream_id))
+                    _rehome_cancel_journal_rows(
+                        session,
+                        idx,
+                        str(stream_id),
+                        # The cancellation retry already proved this
+                        # marker's exact pre-marker user owner by token
+                        # (_cancel_journal_retry_owner_index above), so a
+                        # later tokenless _recovered successor is an
+                        # unrelated turn, never the missing prompt — it
+                        # must not veto the rehome (2026-10-15 re-gate).
+                        proven_owner_index=owner_index,
+                    )
                     _rehome_cancel_journal_context(
                         session,
                         owner_token=owner_token,
@@ -5207,7 +6288,7 @@ def _retry_journal_recovery_in_place(
                     # interrupted wording or replacing it with a specific terminal
                     # error from that same stream.
                     _rehome_cancel_journal_rows(session, idx, str(stream_id))
-                    if context_owner is not None:
+                    if context_owner is not None and owner_index is not None:
                         _rehome_interrupted_journal_context(session, context_owner, str(stream_id), display_owner=messages[owner_index])
                     if terminal_error_recovered:
                         before_removal = session.messages
@@ -5285,6 +6366,192 @@ def _retry_journal_recovery_in_place(
         return False
 
 
+def _promote_or_refresh_reused_marker(
+    session,
+    marker_idx: int,
+    *,
+    resolved: bool,
+    terminal_error: bool,
+    stream_id: str | None = None,
+) -> None:
+    """Update a reused same-stream marker in place instead of leaving it stale.
+
+    Two reuse shapes (2026-09-23 re-gate, ``api/models.py``):
+
+    * ``resolved`` — this repair pass proved the marker's journal output is
+      accounted for (freshly appended, or dedupe-reused) or materialized a
+      terminal error. The stale marker must be PROMOTED: retry meta
+      stripped, wording switched to the recovered/terminal form, and any
+      journaled rows recovered after it reordered above it so the user does
+      not see "reload to retry" sitting underneath recovered output.
+    * not resolved — the marker stays armed, but a later pass that found
+      journal output still needs the marker REORDERED above those rows
+      (otherwise the recovered output renders after the "reload to retry"
+      notice), and its retry metadata refreshed so the budget reflects the
+      latest attempt.
+    """
+    if marker_idx < 0 or marker_idx >= len(session.messages or []):
+        return
+    marker = session.messages[marker_idx]
+    if not isinstance(marker, dict):
+        return
+    if resolved:
+        if not terminal_error:
+            marker['content'] = _INTERRUPTED_RECOVERED_WORDING
+        _strip_journal_retry_meta(marker)
+        # Recovered rows may have landed below the marker (appended at the
+        # tail by this pass or an earlier one) — hoist them above it.
+        # #7167 round-6: rehome ONLY this stream's recovered rows. The
+        # unscoped reorder moved every recovered row after the marker
+        # (including another stream's answer) and rebased the tool indexes
+        # of the moved rows alone, so a later-arriving recovered answer
+        # landed before its own user turn and an ordinary answer's tool
+        # index could end up pointing at a USER row.
+        if stream_id:
+            _rehome_cancel_journal_rows(session, marker_idx, str(stream_id))
+        else:
+            _reorder_journal_tail_above_marker(session, marker_idx)
+    else:
+        # Refresh the retry budget on the reused marker: the previous
+        # attempt counter would otherwise keep counting from a stale base.
+        marker['_journal_retry_attempts'] = int(
+            marker.get('_journal_retry_attempts') or 0
+        ) + 1
+        if stream_id and not marker.get('_journal_retry_stream_id'):
+            marker['_journal_retry_stream_id'] = str(stream_id)
+        # #7167 round-6: same stream-scoped rehome as the resolved arm above
+        # (see the note there) — an unscoped reorder moved another stream's
+        # recovered rows above this marker and left this stream's own rows
+        # below it.
+        if stream_id:
+            _rehome_cancel_journal_rows(session, marker_idx, str(stream_id))
+        else:
+            _reorder_journal_tail_above_marker(session, marker_idx)
+
+
+def _marker_reuse_index(session, stream_id: str | None) -> int | None:
+    """Return the index of an interruption marker owned by ``stream_id``.
+
+    Reuse sites must require EXPLICIT same-stream identity: only a marker whose
+    recorded stream id equals ``str(stream_id)`` may stand in for the marker the
+    repair is about to write. Identity resolution consults, in order,
+    ``_journal_marker_stream_id`` (durable ownership — written unconditionally
+    and kept after resolution), then ``_journal_retry_stream_id`` (the retry
+    hook's capability field, stripped when the marker is resolved), then the
+    legacy ``_recovered_stream_id``. An identity-less marker — a legacy marker
+    written before stream tagging, or a demoted retry marker whose
+    ``_journal_retry_meta`` was stripped — proves nothing about which stream it
+    belongs to, so reusing it for the current stream appends no notice of its
+    own and the user loses the only signal for THIS stream's interruption
+    (SILENT finding from the 2026-09-23 re-gate).
+    """
+    if stream_id is None:
+        return None
+    target = str(stream_id)
+    for idx, message in enumerate(session.messages or []):
+        if not isinstance(message, dict):
+            continue
+        is_interrupted = message.get('type') == 'interrupted' and bool(message.get('_error'))
+        is_pending_retry = bool(message.get('_pending_journal_recovery'))
+        if not (is_interrupted or is_pending_retry):
+            continue
+        marker_stream = (
+            message.get('_journal_marker_stream_id')
+            or message.get('_journal_retry_stream_id')
+            or message.get('_recovered_stream_id')
+        )
+        if not marker_stream or str(marker_stream) != target:
+            # Never reuse an identity-less or other-stream marker.
+            continue
+        return idx
+    return None
+
+
+def _pending_turn_marker_present(session, stream_id) -> bool:
+    """#7167: True when this stream's pending turn is already fully recovered.
+
+    A stale-pending repair is re-run on every cache-miss read, so the same
+    dead stream can be repaired several times in one session's life. Once a
+    pass has replayed the journal and left the interruption marker, the
+    transcript for that turn is DONE — the prompt is materialized, the
+    journaled output is there, and the marker closes the turn.
+
+    Materiality is not provable by row position in that shape, and that is the
+    point: neither of the caller's predicates can affirmatively identify the
+    row. ``_latest_user`` stops at whichever user row happens to be last, but
+    the pending row now sits *before* the journaled answer and the marker, so
+    after the first cycle the "latest user" belongs to an older turn. The
+    token-bound check cannot help either when ``pending_started_at`` was never
+    persisted on this path. The consequence was a dangling prompt: each repeat
+    re-appended the recovered user row *after* the marker, leaving the chat
+    reading as unanswered.
+
+    So the durable evidence is the pair, recorded per stream:
+
+    1. this stream owns an interruption marker (explicit stream identity, via
+       ``_marker_reuse_index`` — an identity-less or foreign marker proves
+       nothing and is never accepted); and
+    2. the pending prompt already has a user row at or before that marker.
+
+    Both halves are required. A bare marker is NOT sufficient: the same stream
+    can legitimately submit the same prompt text again later, and that fresh
+    turn's prompt must be materialized even though an interrupted turn with
+    identical text sits earlier in the transcript. Requiring the row to be at
+    or before the marker is what distinguishes "this turn was already
+    recovered" from "an older turn with the same text was".
+
+    Text-only matching is safe here *only* for identity-less legacy pending
+    state (neither ``pending_started_at`` nor an active-turn token was ever
+    persisted): the gate can then only suppress a prompt whose row sits
+    inside a turn this stream already closed. Once the pending turn carries
+    a token/timestamp identity, text equality can match an OLDER turn that
+    reused the same prompt (CORE #7167 review 2026-10-27) — the current
+    prompt and its attachment are then never materialized and pending state
+    is cleared, losing the prompt across a cold reload. Identity-bearing
+    pending state therefore requires ``_message_owns_current_turn``
+    (token equality, else full checkpoint identity) instead of pure text
+    equality.
+    """
+    marker_idx = _marker_reuse_index(session, stream_id)
+    if marker_idx is None:
+        return False
+    pending_text = getattr(session, 'pending_user_message', None)
+    if not pending_text:
+        return False
+    # #7167 review (2026-10-27): text equality alone cannot tell the current
+    # turn from an OLDER turn that reused the same prompt. When the pending
+    # turn carries an identity (active-turn token or pending_started_at),
+    # require the row to OWN the current turn instead: token equality first,
+    # then the full pending-checkpoint identity (text + timestamp + source +
+    # attachments). An identity-less legacy dead-stream sidecar (neither
+    # field persisted) keeps the pure-text fallback so old behaviour is
+    # preserved.
+    # ``pending_started_at`` only counts as turn identity when it is a
+    # finite positive number: 0, a negative, NaN/inf or a string is
+    # malformed authority that no row can ever own, and honouring it would
+    # suppress the current prompt forever (#7167 review 2026-10-27,
+    # should-fix).
+    _pending_started = getattr(session, 'pending_started_at', None)
+    has_turn_identity = (
+        _current_turn_token(session) is not None
+        or (
+            isinstance(_pending_started, (int, float))
+            and not isinstance(_pending_started, bool)
+            and math.isfinite(_pending_started)
+            and _pending_started > 0
+        )
+    )
+    for message in (session.messages or [])[: marker_idx + 1]:
+        if not isinstance(message, dict) or message.get('role') != 'user':
+            continue
+        if has_turn_identity:
+            if _message_owns_current_turn(message, session):
+                return True
+        elif _message_matches_pending_text(message, pending_text):
+            return True
+    return False
+
+
 def _apply_core_sync_or_error_marker(
     session,
     core_path,
@@ -5331,26 +6598,87 @@ def _apply_core_sync_or_error_marker(
     # prompt submitted just before a server restart, so materialize it before
     # clearing runtime stream state.
     if len(session.messages) != 0:
-        _recovered_ts = _recovered_pending_timestamp(session.pending_started_at)
-        _already_checkpointed = _message_matches_pending_checkpoint(
-            session.messages[-1],
+        # Display timestamp only — truncation is fine for chronology, but the
+        # ownership identity below uses the ORIGINAL full-precision
+        # pending_started_at (int() truncation let a tokenless historical row
+        # at the same whole second win the ownership check for a sub-second
+        # current turn, suppressing/losing the prompt), and the recovered row
+        # persists full precision too because its timestamp IS the turn's
+        # identity after pending state is cleared.
+        _recovered_ts = int(time.time())
+        if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
+            _recovered_ts = int(session.pending_started_at)
+        _recovered_row_ts = (
+            session.pending_started_at
+            if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0
+            else time.time()
+        )
+        # Ownership identity must use the ORIGINAL full-precision
+        # pending_started_at: truncating to int() here let a tokenless
+        # historical row at the same whole second (500.0) win the
+        # ownership check for a sub-second current turn (500.9),
+        # suppressing the recovered prompt and clearing pending state.
+        _latest_user = next(
+            (
+                message
+                for message in reversed(session.messages or [])
+                if isinstance(message, dict) and message.get('role') == 'user'
+            ),
+            None,
+        )
+        # ``_already_checkpointed`` is the TOKEN-bound identity proof: it may
+        # only be used for decisions that suppress appending a recovered row
+        # (safe only when the row provably IS the pending turn). The tail
+        # predicate, however, has always been a *textual* tail check against
+        # the transcript's LAST message (master behaviour): the pending user
+        # row itself, with no assistant answer after it, must take the normal
+        # recovery branch. Reusing the token-bound value here made the
+        # "pending row + genuine final answer" case look like "tail already
+        # checkpointed" and skipped the #6366 transcript-advance suppression
+        # (test_full_recovery_suppresses_duplicates_on_turn_journal_completion).
+        _already_checkpointed = _pending_user_row_already_materialized(
+            session,
+            _latest_user,
+            session.pending_started_at,
+        )
+        # #7167 round-6: the textual tail predicates below are a pure TEXT
+        # match against the transcript's last message. They stay as-is for
+        # the append gate, but they are NOT an identity proof: an earlier
+        # UNRELATED turn that reused the same prompt would otherwise be
+        # stamped with this turn's attachment/source/turn token.
+        _tail_message = session.messages[-1] if session.messages else None
+        _tail_user_already_checkpointed = _message_matches_pending_checkpoint(
+            _tail_message,
             session.pending_user_message,
-            _recovered_ts,
+            session.pending_started_at,
             session.pending_user_source,
             session.pending_attachments,
-        )
-        _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
-            session.messages[-1],
+        ) or _message_matches_pending_text(
+            _tail_message,
             session.pending_user_message,
         )
+        # #7167 round-6: the backfill may run ONLY on the token-bound proof
+        # (``_already_checkpointed``). The textual tail predicate above is a
+        # pure text match, so gating on it let an earlier UNRELATED turn that
+        # used the same prompt receive the pending turn's
+        # attachments/source/pending-turn token — and the genuinely recovered
+        # row received them too, leaving two user rows sharing one
+        # ``_active_turn_token`` (SILENT round-6 finding).
         _pending_started_at = session.pending_started_at
         if _run_journal_terminal_state(session, _stream_id) == 'completed':
-            if not (_already_checkpointed or _latest_user_matches_pending_text(session.messages, session.pending_user_message)):
-                _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+            if not _already_checkpointed:
+                _append_recovered_pending_turn(session, timestamp=_recovered_row_ts)
+            else:
+                # Completed-stream repair that REUSES the checkpointed row
+                # instead of materializing a new one: the pending state is
+                # cleared right below, so this is the last chance to copy the
+                # turn's metadata onto the reused row.
+                _backfill_pending_metadata_onto_reused_row(session, _latest_user)
             _append_journaled_partial_output(
                 session,
                 _stream_id,
                 dedupe_existing=True,
+                authorize_completed_turn_rows=True,
             )
             session.active_stream_id = None
             session.pending_user_message = None
@@ -5364,36 +6692,58 @@ def _apply_core_sync_or_error_marker(
                 _stream_id,
             )
             return True
-        if not _tail_user_already_checkpointed:
-            # #6366 re-gate: when the durable transcript has already
-            # advanced past this pending turn into a newer settled
-            # user/assistant boundary, the recovery path must NOT
-            # append a recovered user row + ``_partial`` clone +
-            # journal replay + generic no-response error after the
-            # valid final answer. The tail-only check above misses
-            # that case (the tail is a newer assistant row that can
-            # never match the pending user checkpoint). Clear only
-            # the stale pending fields and return; the transcript is
-            # already correct and durable.
-            if _transcript_already_advanced_past_pending(session):
-                session.active_stream_id = None
-                session.pending_user_message = None
-                session.pending_attachments = []
-                session.pending_started_at = None
-                session.pending_user_source = None
-                session.save(touch_updated_at=touch_updated_at)
-                logger.info(
-                    "Session %s: cleared stale pending state for stream %s — transcript already advanced past this turn",
-                    sid,
-                    _stream_id,
-                )
-                return True
-            _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+        # #7167 round-6: the non-completed arm keeps its own reuse backfill,
+        # but only on the token-bound proof. The textual tail predicate can
+        # name an earlier UNRELATED turn that reused the same prompt, and
+        # stamping that row would steal the pending turn's
+        # attachments/source/turn token. Placed here — AFTER the
+        # completed-stream branch's return and BEFORE the #6366
+        # advanced-past check — so the completed arm is unaffected.
+        if _already_checkpointed:
+            _backfill_pending_metadata_onto_reused_row(session, _latest_user)
+        # #6366 re-gate: when the durable transcript has already
+        # advanced past this pending turn into a newer settled
+        # user/assistant boundary, the recovery path must NOT
+        # append a recovered user row + ``_partial`` clone +
+        # journal replay + generic no-response error after the
+        # valid final answer. This is a pure CLEANUP path — it must run
+        # regardless of the append gate below, because "the transcript
+        # already advanced past this turn" is itself proof that the turn's
+        # row exists somewhere earlier. Gating it on materiality made the
+        # already-checkpointed case fall through to the append branch and
+        # duplicate a turn that is visibly finished.
+        if _transcript_already_advanced_past_pending(session):
+            session.active_stream_id = None
+            session.pending_user_message = None
+            session.pending_attachments = []
+            session.pending_started_at = None
+            session.pending_user_source = None
+            session.save(touch_updated_at=touch_updated_at)
+            logger.info(
+                "Session %s: cleared stale pending state for stream %s — transcript already advanced past this turn",
+                sid,
+                _stream_id,
+            )
+            return True
+        # #7167 re-gate: the prompt may only be APPENDED when neither it nor
+        # its turn is already in the transcript. The textual tail check alone
+        # cannot see that case — after the first cycle the pending row sits
+        # *before* the journaled answer and the marker, so the tail is the
+        # marker itself, which no user-row predicate can match. Appending then
+        # left a dangling prompt AFTER the interruption marker and the chat
+        # reads as unanswered. ``_already_checkpointed`` covers the tail case;
+        # ``_pending_turn_marker_present`` covers the already-repaired turn.
+        # Both are conservative: when neither proves materiality, the prompt
+        # is recovered rather than dropped.
+        if not _tail_user_already_checkpointed and not (
+            _already_checkpointed or _pending_turn_marker_present(session, _stream_id)
+        ):
+            _append_recovered_pending_turn(session, timestamp=_recovered_row_ts)
         else:
             recovered = {
                 'role': 'user',
                 'content': session.pending_user_message,
-                'timestamp': _recovered_ts,
+                'timestamp': _recovered_row_ts,
                 '_recovered': True,
             }
             pending_source = getattr(session, 'pending_user_source', None)
@@ -5401,10 +6751,32 @@ def _apply_core_sync_or_error_marker(
             if session.pending_attachments:
                 recovered['attachments'] = list(session.pending_attachments)
             _append_recovered_turn_to_context(session, recovered)
-        recovered_output, terminal_error_recovered = (
+        recovered_output, terminal_error_recovered, _output_accounted_for = (
             _recover_journaled_output_and_terminal_error(
                 session,
                 _stream_id,
+                # #7167: TOOL CARDS must dedupe by same-stream provenance at
+                # this caller even though the CONTENT path stays on its
+                # provenance-reuse mode (``dedupe_existing=False``): the two
+                # are independent. With content dedupe off, every repair
+                # cycle re-appended one recovered card per journaled tool
+                # event — three stale-pending cycles left three cards for a
+                # single ``terminal: ls -la`` event, all tid ``journal-1``,
+                # stream A. ``dedupe_tools`` runs the stream-scoped
+                # one-to-one matcher, so identical calls from DISTINCT
+                # streams still keep a card each, ownership-unknown cards
+                # still append, and an older untagged live card is never
+                # swallowed.
+                # Content dedupe is REQUIRED here: without it every repair
+                # cycle re-appended the journal's reasoning, which produced the
+                # 1024-duplicate transcript observed in the wild
+                # (tests/test_issue_dedupe_call_site_recovery.py::
+                #  test_repair_reuses_existing_empty_recovered_rows).
+                # ``dedupe_tools`` keeps the tool-card matcher stream-scoped and
+                # one-to-one, so identical calls from DISTINCT streams still
+                # keep a card each and ownership-unknown cards still append.
+                dedupe_existing=True,
+                dedupe_tools=True,
                 terminal_recovery=_terminal_recovery,
             )
         )
@@ -5414,13 +6786,64 @@ def _apply_core_sync_or_error_marker(
         session.pending_started_at = None
         session.pending_user_source = None
         if not terminal_error_recovered:
-            session.messages.append(
-                _build_recovery_marker_with_retry_hook(
-                    recovered_output=recovered_output,
+            # Same-stream marker: REUSE the existing same-stream marker
+            # (either a pending-retry reload hint OR an interrupted/_error
+            # marker for this same stream) instead of appending a fresh one.
+            # Without this, repeated cache-miss repair cycles against the same
+            # dead stream accumulated a fresh marker each pass (the SILENT bug
+            # from the 2026-09-23 re-gate: Codex saw 2+ stacked markers after
+            # 3 cycles). A dedupe hit means the journal output IS already in
+            # the transcript, so no new interruption marker is warranted —
+            # reuse the one already present. Cross-stream markers are left
+            # untouched (a different stream's marker still needs its own).
+            _existing_marker_idx = _marker_reuse_index(session, _stream_id)
+            if _existing_marker_idx is not None:
+                # Reuse: do not append. The marker stays in place (its retry
+                # budget still guards this stream), but it must be UPDATED,
+                # not left stale: when this pass proved the journal output is
+                # accounted for, promote the marker (strip the retry meta and
+                # recovered wording) and hoist any journaled rows recovered
+                # after it; otherwise refresh its retry counter so the next
+                # lazy pass budgets correctly (2026-09-23 re-gate:
+                # "update and reorder the reused marker instead of leaving it").
+                _promote_or_refresh_reused_marker(
+                    session,
+                    _existing_marker_idx,
+                    # Same fail-closed rule as the cancel-marker path: only a
+                    # FRESH append or a materialized terminal error proves this
+                    # journal produced output. Counting ``_output_accounted_for``
+                    # promoted a marker whose journal never appended anything,
+                    # which hoisted rows above it and broke the saved-successor
+                    # admission the owner-occurrence tests assert.
+                    resolved=bool(
+                        recovered_output
+                        or terminal_error_recovered
+                        or _output_accounted_for
+                    ),
+                    terminal_error=bool(terminal_error_recovered),
                     stream_id=_stream_id,
-                    pending_started_at=_pending_started_at,
                 )
-            )
+            else:
+                session.messages.append(
+                    _build_recovery_marker_with_retry_hook(
+                        # Arm the reload hint only when the journal's output
+                        # was NOT accounted for (neither freshly appended nor
+                        # dedupe-reused). A dedupe reuse means the output IS
+                        # in the transcript, so no reload hint — this is the
+                        # re-gate's "accounted for separately from mutated"
+                        # split applied to the reload-marker decision.
+                        recovered_output=recovered_output or _output_accounted_for,
+                        stream_id=_stream_id,
+                        pending_started_at=_pending_started_at,
+                        # #7167 review 2026-10-10: a crash/process-restart
+                        # repair is NOT a user Stop. ``retry_kind='cancelled'``
+                        # here made the cancel-hook predicate
+                        # (``_is_cancel_journal_retry_marker``) mis-identify
+                        # this marker as a genuine Stop; cancellation kind is
+                        # only stamped by the real Stop/cancel call site
+                        # (api/streaming.py cancel marker).
+                    )
+                )
         session.save(touch_updated_at=touch_updated_at)
         logger.info(
             "Session %s: recovered pending user turn (messages non-empty), added error marker",
@@ -5436,23 +6859,47 @@ def _apply_core_sync_or_error_marker(
         core_messages = core.get('messages', [])
         if core_messages:
             session.messages = core_messages
+            # #7167: these rows come from the authoritative core transcript,
+            # so a journal event whose text is already here is a genuine
+            # duplicate. Tag them so the recovery dedupe can tell "the core
+            # transcript already holds this output" (dedupe) from "the session
+            # merely contains the same text" (append — a turn whose completion
+            # can no longer be proven, tests/test_issue6366_stale_cancel_recovery.py::
+            # test_full_recovery_appends_rows_on_turn_journal_completion_loss).
+            for _row in session.messages:
+                if isinstance(_row, dict):
+                    _row['_from_core_transcript'] = True
             session.tool_calls = core.get('tool_calls', [])
             for field in ('input_tokens', 'output_tokens', 'estimated_cost'):
                 if core.get(field) is not None:
                     setattr(session, field, core[field])
             _pending_text = _normalize_journal_recovery_text(session.pending_user_message)
+            # #7167: resolve the timestamp through master's helper, then
+            # walk back to the nearest user row rather than assuming the
+            # tail IS one. On master this was session.messages[-1], which
+            # silently misses a checkpointed prompt that is no longer last
+            # (a tool card or assistant row can follow it) — that is the
+            # dangling-prompt case the review asked to fix.
             _recovered_ts = _recovered_pending_timestamp(session.pending_started_at)
-            _already_checkpointed = _message_matches_pending_checkpoint(
-                session.messages[-1] if session.messages else None,
-                session.pending_user_message,
-                _recovered_ts,
-                session.pending_user_source,
-                session.pending_attachments,
+            # Full-precision identity for the recovered pending row (see the
+            # display-vs-identity note in the first repair branch).
+            _recovered_row_ts = _recovered_pending_timestamp(session.pending_started_at)
+            _last_user = None
+            for _m in reversed(session.messages or []):
+                if isinstance(_m, dict) and _m.get('role') == 'user':
+                    _last_user = _m
+                    break
+            _tail_user_already_checkpointed = _pending_user_row_already_materialized(
+                session,
+                _last_user,
+                session.pending_started_at,
             )
-            _tail_user_already_checkpointed = _already_checkpointed or _message_matches_pending_text(
-                session.messages[-1] if session.messages else None,
-                session.pending_user_message,
-            )
+            # #7167 re-gate: same backfill as the first branch — this path also
+            # reuses the matched row instead of materializing a new one. Gated
+            # on the ownership proof (and on a pending turn existing) so a
+            # save-failure rollback leaves memory byte-identical.
+            if _pending_text and _tail_user_already_checkpointed:
+                _backfill_pending_metadata_onto_reused_row(session, _last_user)
             if (
                 _pending_text
                 and not _tail_user_already_checkpointed
@@ -5461,13 +6908,18 @@ def _apply_core_sync_or_error_marker(
                     or _terminal_recovery is not None
                 )
             ):
-                _append_recovered_pending_turn(session, timestamp=_recovered_ts)
-            recovered_output, terminal_error_recovered = (
+                _append_recovered_pending_turn(session, timestamp=_recovered_row_ts)
+            recovered_output, terminal_error_recovered, _output_accounted_for = (
                 _recover_journaled_output_and_terminal_error(
                     session,
                     _stream_id,
                     dedupe_existing=True,
                     terminal_recovery=_terminal_recovery,
+                    # #7167: this branch has just synced session.messages FROM
+                    # the core transcript, so a journal event already present
+                    # there is a genuine duplicate. Ordinary callers keep the
+                    # stricter default.
+                    authorize_core_rows=True,
                 )
             )
             _pending_started_at = session.pending_started_at
@@ -5476,14 +6928,39 @@ def _apply_core_sync_or_error_marker(
             session.pending_attachments = []
             session.pending_started_at = None
             session.pending_user_source = None
+            # Same-stream interruption marker: REUSE the matching marker
+            # from the prior repair rather than append a fresh one. The
+            # original `_apply_core_sync_or_error_marker` was the only
+            # site that wrote a marker here, and it would stack one marker
+            # per repair cycle on a session that is being re-recovered
+            # from the same core transcript + same dead stream (the
+            # SILENT bug from the 2026-09-23 re-gate). The marker is
+            # the only signal the user gets in this branch, so the reuse
+            # must skip the append when the existing marker advertises
+            # the same stream and recovery state.
             if recovered_output and not terminal_error_recovered:
-                session.messages.append(
-                    _interrupted_recovery_marker(
-                        recovered_output=True,
-                        stream_id=_stream_id,
-                        pending_started_at=_pending_started_at,
+                _existing_marker_idx = _marker_reuse_index(session, _stream_id)
+                if _existing_marker_idx is None:
+                    session.messages.append(
+                        _interrupted_recovery_marker(
+                            recovered_output=True,
+                            stream_id=_stream_id,
+                            pending_started_at=_pending_started_at,
+                        )
                     )
-                )
+                else:
+                    # Reuse instead of stacking — but promote the existing
+                    # marker: this pass recovered fresh output, so a stale
+                    # retry/pending marker underneath it must be resolved
+                    # and the recovered rows reordered above it (2026-09-23
+                    # re-gate, "update and reorder the reused marker").
+                    _promote_or_refresh_reused_marker(
+                        session,
+                        _existing_marker_idx,
+                        resolved=True,
+                        terminal_error=False,
+                        stream_id=_stream_id,
+                    )
             # NOTE: when the core transcript was synced in but the run journal
             # is not yet visible, intentionally do NOT append a lazy-retry
             # marker here. In this branch the canonical history is the core
@@ -5509,12 +6986,21 @@ def _apply_core_sync_or_error_marker(
     if session.pending_user_message:
         # Use the original send time if available so the recovered turn
         # appears in the correct chronological position.
-        _recovered_ts = _recovered_pending_timestamp(session.pending_started_at)
-        _append_recovered_pending_turn(session, timestamp=_recovered_ts)
-    recovered_output, terminal_error_recovered = (
+        # Display timestamp only — truncation is fine for chronology, but the
+        # ownership identity below uses the ORIGINAL full-precision
+        # pending_started_at (int() truncation let a tokenless historical row
+        # at the same whole second win the ownership check for a sub-second
+        # current turn, suppressing/losing the prompt), and the recovered row
+        # persists full precision too because its timestamp IS the turn's
+        # identity after pending state is cleared.
+        _recovered_ts = int(_recovered_pending_timestamp(session.pending_started_at))
+        _recovered_row_ts = _recovered_pending_timestamp(session.pending_started_at)
+        _append_recovered_pending_turn(session, timestamp=_recovered_row_ts)
+    recovered_output, terminal_error_recovered, _output_accounted_for = (
         _recover_journaled_output_and_terminal_error(
             session,
             _stream_id,
+            dedupe_existing=True,
             terminal_recovery=_terminal_recovery,
         )
     )
@@ -5527,7 +7013,9 @@ def _apply_core_sync_or_error_marker(
     if not terminal_error_recovered:
         session.messages.append(
             _build_recovery_marker_with_retry_hook(
-                recovered_output=recovered_output,
+                # Same split as above: no reload hint when the journal output
+                # was already accounted for via dedupe reuse.
+                recovered_output=recovered_output or _output_accounted_for,
                 stream_id=_stream_id,
                 pending_started_at=_pending_started_at,
             )
@@ -14574,8 +16062,45 @@ def _cancelled_journal_turn_owner(
             continue
         segment = messages[owner_idx + 1:error_idx]
         has_partial = any(row.get('_partial') for row in segment)
+        # #7167 re-gate: the interrupted-recovery path RE-WORDS an existing
+        # user-Stop carrier in place (``msg['content'] =
+        # _INTERRUPTED_RECOVERED_WORDING``) and then strips its retry meta, so
+        # neither ``type`` nor ``_journal_retry_kind`` survives to say "this
+        # was a user Stop". The rows it recovered DO carry
+        # ``_recovered_from_run_journal``, which is never stripped — treat that
+        # as the durable proof and keep the segment admissible. Without it the
+        # owner lookup skipped the segment, the merge never proved the cancel
+        # bounds, and the state.db replay row survived into the merged
+        # transcript while the durable saved successors lost their admission
+        # (tests/test_cancelled_journal_owner_occurrences.py).
+        # A real crash/provider interruption recovers no run-journal rows, so
+        # the exemption cannot admit one.
+        segment_recovers_run_journal = any(
+            row.get('_recovered_from_run_journal') is True for row in segment
+        )
+        # #7167 MUST-FIX (2026-10-10 re-gate): the exemption must NOT let a
+        # typed crash/provider interruption through. The previous head exempted
+        # any segment whose rows recover a run journal, so a carrier typed
+        # 'interrupted' with ``_recovered_from_run_journal`` rows was admitted
+        # as a user Stop and the state.db successors were merged over it
+        # (tests/test_run_journal_process_and_sqlite_recovery.py::
+        #  test_real_sqlite_new_turn_after_recovered_journal[live-partial-control]).
+        # The exemption exists only for the interrupted-recovery path that
+        # RE-WORDS a user-Stop carrier in place and strips its retry meta: that
+        # carrier's ``type`` is 'interrupted' but it is not a crash, and its
+        # segment proves it with recovered rows AND no live partial. A live
+        # ``_partial`` row is the opposite signal — the stream was still
+        # writing — so the two shapes must be told apart, not merged into one
+        # rule.
+        carrier_is_typed_crash = carrier.get('type') not in (None, '', 'cancelled')
+        segment_has_live_partial = has_partial
+        rewrote_cancel_carrier = (
+            carrier_is_typed_crash
+            and segment_recovers_run_journal
+            and not segment_has_live_partial
+        )
         if has_partial and (not include_live_partial
-                            or carrier.get('type') not in (None, '', 'cancelled')):
+                            or (carrier_is_typed_crash and not rewrote_cancel_carrier)):
             continue  # A typed crash/provider interruption is not a user Stop.
         if (has_partial or any(row.get('_recovered_from_cancel_journal') is True for row in segment)):
             return messages[owner_idx], carrier
