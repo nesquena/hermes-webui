@@ -12,6 +12,7 @@ Both tag families live on the SAME linear master line; a channel is only a tag
 glob. The critical property under test: a STABLE user with an unpromoted
 `exp-v*` tag ahead of them reports up-to-date, NOT the master firehose.
 """
+import os
 import subprocess
 
 import pytest
@@ -422,3 +423,190 @@ def test_stable_pinned_experimental_current_sha_is_verified_ref_only(stable_pinn
     # ...but current_sha is the git-verified exact tag, NOT the dirty display string.
     assert info['current_sha'] == 'v0.52.0'
     assert 'dirty' not in (info['current_sha'] or '')
+
+
+# ── Stable ordering: creatordate is the OUTER key only ───────────────────────
+# Two hazards that pure `--sort=-creatordate` ordering gets wrong. Both were
+# reproduced in real git repositories during the re-gate of #8147:
+#
+#   1. git breaks creatordate TIES by refname ascending, so two releases
+#      tagged in the same second rank the OLDER one first;
+#   2. creatordate is the TAGGER date for an annotated tag but the COMMIT date
+#      for a lightweight one, so a mixed pair can rank an older release ahead
+#      of a newer one even with no tie at all.
+#
+# In both cases the update check reports behind=0 on an install that is one
+# release behind: the banner and the Update button disappear.
+def _tag_repo_at(tmp_path, name, tags):
+    """Build a repo whose stable tags carry EXACTLY the given creation dates.
+
+    Each entry is `(tag, commit_date, tag_date)`. `tag_date` is applied as the
+    tagger date for annotated tags (`-a`) and as the commit date for lightweight
+    ones, matching how `creatordate` is derived for each tag type.
+    """
+    repo = tmp_path / name
+    repo.mkdir()
+    _git(repo, 'init', '-q')
+    _git(repo, 'config', 'user.email', 't@t.co')
+    _git(repo, 'config', 'user.name', 'Test')
+    for tag, commit_date, tag_date in tags:
+        env = dict(os.environ, GIT_AUTHOR_DATE=commit_date, GIT_COMMITTER_DATE=commit_date)
+        subprocess.run(
+            ['git', 'commit', '-q', '--allow-empty', '-m', tag],
+            cwd=str(repo), check=True, env=env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        if tag_date:
+            # Annotated: the tagger date IS the tag's creatordate.
+            env = dict(os.environ, GIT_COMMITTER_DATE=tag_date)
+            subprocess.run(
+                ['git', 'tag', '-a', tag, '-m', tag],
+                cwd=str(repo), check=True, env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        else:
+            # Lightweight: the tag inherits its COMMIT's date.
+            _git(repo, 'tag', tag)
+    return repo
+
+
+def test_stable_tags_tagged_in_the_same_second_rank_the_newer_release_first(tmp_path):
+    """creatordate ties break by refname ASCENDING — the version is the tie-break."""
+    repo = _tag_repo_at(tmp_path, 'tied', [
+        # Both tagged within the same second; git lists v0.52.113 first.
+        ('v0.52.113', '2026-10-10T12:00:00Z', None),
+        ('v0.52.114', '2026-10-10T12:00:02Z', None),
+    ])
+    same_second = _tag_repo_at(tmp_path, 'tied-same', [
+        ('v0.52.113', '2026-10-10T12:00:00Z', None),
+        ('v0.52.114', '2026-10-10T12:00:00Z', None),
+    ])
+
+    # The tie is real: git's own ordering puts the OLDER release first.
+    raw = subprocess.run(
+        ['git', 'tag', '--list', 'v*', '--sort=-creatordate'],
+        cwd=str(same_second), check=True, capture_output=True, text=True,
+    ).stdout.split()
+    assert raw[0] == 'v0.52.113', f'fixture must reproduce the tie, got {raw}'
+
+    assert updates._release_tags(repo, 'stable') == ['v0.52.114', 'v0.52.113']
+    assert updates._release_tags(same_second, 'stable') == ['v0.52.114', 'v0.52.113']
+
+
+def test_stable_annotated_and_lightweight_tags_rank_by_version_not_by_date(tmp_path):
+    """An OLDER annotated release with a NEWER tagger date must not outrank a
+    newer lightweight release whose commit date is earlier."""
+    repo = _tag_repo_at(tmp_path, 'mixed', [
+        # v0.52.1 is OLDER but was annotated on Oct 3 (tagger date = Oct 3).
+        ('v0.52.1', '2026-10-03T09:00:00Z', '2026-10-03T09:00:00Z'),
+        # v0.52.2 is NEWER, on a descendant commit, but lightweight: its
+        # creatordate is the commit date, Oct 2 — earlier than v0.52.1's.
+        ('v0.52.2', '2026-10-02T08:00:00Z', None),
+    ])
+
+    raw = subprocess.run(
+        ['git', 'tag', '--list', 'v*', '--sort=-creatordate'],
+        cwd=str(repo), check=True, capture_output=True, text=True,
+    ).stdout.split()
+    assert raw[0] == 'v0.52.1', f'fixture must reproduce the inversion, got {raw}'
+
+    assert updates._release_tags(repo, 'stable') == ['v0.52.2', 'v0.52.1']
+
+
+def test_stable_cross_major_tied_timestamp_ranks_higher_major_first(tmp_path):
+    """Cross-major releases with tied timestamp or default refname ordering must rank higher major first."""
+    repo = _tag_repo_at(tmp_path, 'cross-major-tied', [
+        ('v0.52.113', '2026-10-10T12:00:00Z', None),
+        ('v1.0.0', '2026-10-10T12:00:00Z', None),
+    ])
+    assert updates._release_tags(repo, 'stable') == ['v1.0.0', 'v0.52.113']
+
+    _git(repo, 'checkout', '-q', 'v0.52.113')
+    info = updates._check_repo_release(repo, 'webui', 'stable')
+    assert info is not None
+    assert info['behind'] == 1
+    assert info['current_version'] == 'v0.52.113'
+    assert info['latest_version'] == 'v1.0.0'
+    assert updates._select_apply_compare_ref(repo, 'stable', 'webui') == 'v1.0.0'
+
+
+def test_stable_cross_major_older_major_annotated_later_ranks_higher_major_first(tmp_path):
+    """An older-major annotated tag dated later must not outrank a descendant higher-major lightweight release."""
+    repo = _tag_repo_at(tmp_path, 'cross-major-annotated', [
+        ('v0.52.113', '2026-10-10T10:00:00Z', '2026-10-11T12:00:00Z'),
+        ('v1.0.0', '2026-10-10T12:00:00Z', None),
+    ])
+    assert updates._release_tags(repo, 'stable') == ['v1.0.0', 'v0.52.113']
+
+    _git(repo, 'checkout', '-q', 'v0.52.113')
+    info = updates._check_repo_release(repo, 'webui', 'stable')
+    assert info is not None
+    assert info['behind'] == 1
+    assert info['current_version'] == 'v0.52.113'
+    assert info['latest_version'] == 'v1.0.0'
+    assert updates._select_apply_compare_ref(repo, 'stable', 'webui') == 'v1.0.0'
+
+
+@pytest.mark.parametrize('extra_tag', ['v0.22.5+canary.1', 'v0.22.5-rc.1'])
+def test_stable_release_cotagged_with_a_prerelease_is_up_to_date(tmp_path, extra_tag):
+    """A canary or ``-`` prerelease tag on the SAME commit as the latest stable
+    release must not become the installed tag: ``git describe`` prefers the
+    annotated prerelease, which the stable list drops, and the resulting false
+    gap sent check and apply to the branch head (#8147 release gate)."""
+    repo = tmp_path / 'cotag'
+    repo.mkdir()
+    _git(repo, 'init', '-q', '-b', 'main')
+    _git(repo, 'config', 'user.email', 't@t.co')
+    _git(repo, 'config', 'user.name', 'Test')
+    _git(repo, 'commit', '-q', '--allow-empty', '-m', 'r4')
+    _git(repo, 'tag', 'v0.22.4')
+    _git(repo, 'commit', '-q', '--allow-empty', '-m', 'r5')
+    _git(repo, 'tag', 'v0.22.5')
+    _git(repo, 'tag', '-a', '-m', 'prerelease build', extra_tag)
+    _git(repo, 'commit', '-q', '--allow-empty', '-m', 'untagged development work')
+    _git(repo, 'remote', 'add', 'origin', str(_local_origin(repo, tmp_path)))
+    _git(repo, 'fetch', '-q', 'origin')
+    _git(repo, 'checkout', '-q', 'v0.22.5')
+
+    raw = subprocess.run(
+        ['git', 'describe', '--tags', '--abbrev=0', '--match', 'v*'],
+        cwd=str(repo), check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert raw == extra_tag, f'fixture must reproduce the prerelease preference, got {raw}'
+
+    assert updates._release_tags(repo, 'stable') == ['v0.22.5', 'v0.22.4']
+    assert updates._current_release_tag(repo, 'stable') == 'v0.22.5'
+    assert updates._head_is_past_latest_tag(repo, 'v0.22.5', 'stable') is False
+    info = updates._check_repo_release(repo, 'agent', 'stable')
+    assert info is not None
+    assert info['behind'] == 0
+    apply_ref = updates._select_apply_compare_ref(repo, 'stable', 'agent')
+    assert apply_ref in ('v0.22.5', None)
+
+
+def test_stable_install_whose_only_reachable_tag_is_a_canary(tmp_path):
+    """No release tag behind HEAD, only a canary (a shallow clone of a canary
+    build): the update count counts releases only, and the installed version and
+    compare ref still name the canary (#8147 release gate)."""
+    repo = tmp_path / 'canary-only'
+    repo.mkdir()
+    _git(repo, 'init', '-q', '-b', 'main')
+    _git(repo, 'config', 'user.email', 't@t.co')
+    _git(repo, 'config', 'user.name', 'Test')
+    _git(repo, 'commit', '-q', '--allow-empty', '-m', 'canary build')
+    _git(repo, 'tag', '-a', '-m', 'canary', 'v0.22.5+canary.1')
+    _git(repo, 'commit', '-q', '--allow-empty', '-m', 'release')
+    _git(repo, 'tag', 'v0.22.5')
+    _git(repo, 'tag', '-a', '-m', 'canary', 'v0.22.5+canary.2')
+    _git(repo, 'remote', 'add', 'origin', str(_local_origin(repo, tmp_path)))
+    _git(repo, 'fetch', '-q', 'origin')
+    _git(repo, 'checkout', '-q', 'v0.22.5+canary.1')
+
+    assert updates._current_release_tag(repo, 'stable') is None
+    assert updates._count_channel_tags_ahead(repo, 'stable') == 1
+    info = updates._check_repo_release(repo, 'agent', 'stable')
+    assert info is not None
+    assert info['behind'] == 1
+    assert info['latest_version'] == 'v0.22.5'
+    assert info['current_version'] == 'v0.22.5+canary.1'
+    assert info['current_sha'] == 'v0.22.5+canary.1'

@@ -129,16 +129,24 @@ every request through a same-host proxy arrives from a loopback address and is
 treated as local, whoever the client is. Set `HERMES_WEBUI_TRUST_FORWARDED_FOR=1`
 whenever a same-host proxy serves clients on other machines.
 
-Login rate limiting is the exception. It keys on the forwarded client address
-only when `HERMES_WEBUI_TRUST_FORWARDED_FOR=1` is set **and** the proxy's
-address is listed explicitly in `HERMES_WEBUI_TRUSTED_PROXY_CIDRS`; implicit
-loopback trust does not count. Without both, every user behind a same-host
-proxy shares the proxy's single login bucket, so repeated failed logins from
-one client lock out the others. To give each client its own bucket:
+Login rate limiting is the exception. By default it keys on the socket peer,
+so every user behind a proxy shares the proxy's single login bucket, and
+repeated failed logins from one client can lock out the others. Per-client
+buckets are an explicit opt-in, because they are only safe when the proxy
+writes `X-Forwarded-For` (see below). They need all three of:
+
+- `HERMES_WEBUI_LOGIN_RATE_LIMIT_PER_CLIENT=1`;
+- `HERMES_WEBUI_TRUST_FORWARDED_FOR=1`;
+- the proxy's address listed explicitly in `HERMES_WEBUI_TRUSTED_PROXY_CIDRS`
+  (implicit loopback trust does not count).
 
 ```bash
-HERMES_WEBUI_TRUST_FORWARDED_FOR=1 HERMES_WEBUI_TRUSTED_PROXY_CIDRS=127.0.0.1 ./start.sh
+HERMES_WEBUI_LOGIN_RATE_LIMIT_PER_CLIENT=1 HERMES_WEBUI_TRUST_FORWARDED_FOR=1 \
+  HERMES_WEBUI_TRUSTED_PROXY_CIDRS=127.0.0.1 ./start.sh
 ```
+
+Experimental builds from v0.52.546 to this change gave per-client buckets with
+only the last two settings. If you relied on that, add the first one.
 
 With only loopback listed, WebUI prints a startup warning that
 `HERMES_WEBUI_TRUSTED_PROXY_CIDRS` lists no proxy outside this host. For this
@@ -149,8 +157,15 @@ setup that is expected, as the warning itself says. If WebUI listens on IPv6
 Listing a loopback address trusts every local client (an SSH tunnel, another
 process on the host) exactly like the proxy, because the address cannot tell
 them apart. Only do it when the proxy is the sole local client that reaches
-WebUI. Appending to `X-Forwarded-For` (nginx's `$proxy_add_x_forwarded_for`)
-is fine, because WebUI walks the chain from the right. Have the proxy overwrite
+WebUI. With the opt-in, per-client buckets need `X-Forwarded-For`. A request carrying only
+`X-Real-IP` keys on the proxy's shared bucket, because nginx relays a
+client-supplied `X-Real-IP` unless the config overwrites it, and that would let
+a client pick a fresh bucket on every attempt. The same holds for
+`X-Forwarded-For` itself: list a proxy only if it appends to the chain (nginx's
+`$proxy_add_x_forwarded_for`) or overwrites it. A bare `proxy_pass` relays the
+client's own `X-Forwarded-For` unchanged, so a listed proxy that does not write
+the header lets every client choose its login bucket. Appending is fine, because
+WebUI walks the chain from the right. Have the proxy overwrite
 `X-Real-IP` (`proxy_set_header X-Real-IP $remote_addr;`). If it relays a
 client-supplied value that disagrees with the chain, or one that is not an
 address, WebUI falls back to the shared bucket.

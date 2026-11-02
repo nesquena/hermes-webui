@@ -9,6 +9,7 @@ import tempfile
 import pytest
 
 from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
+from tests.scripts_fallback_keys import scripts_fallback_keys
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -17,6 +18,7 @@ NODE = shutil.which("node")
 PROFILE_CONCEPT_FALLBACK_KEYS = {
     *PROFILE_CONCEPT_KEYS,
     "workspace_artifact_source_session",
+    *scripts_fallback_keys('cs'),
 }
 
 

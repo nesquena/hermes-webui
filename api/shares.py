@@ -9,6 +9,7 @@ links do not leak local workspace paths, profile details, or raw tool payloads.
 from __future__ import annotations
 
 import base64
+import errno
 import html
 import io
 import json
@@ -352,11 +353,21 @@ def _placeholder_inline_data_uris(text: str) -> str:
 def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> str:
     """Find local MEDIA: references and replace them with inline <img> tags.
 
-    Only relative paths that resolve inside at least one of *allowed_roots*
-    are honoured.  Absolute paths, ``file://`` URIs, paths that traverse
-    outside the allowed directories via ``..`` or symlinks, non-image MIME
-    types, and files larger than ``_SHARE_EMBED_MAX_BYTES`` are all replaced
-    with a static placeholder — no file content leaves the server.
+    Only paths that name a regular file inside at least one of
+    *allowed_roots* are honoured.  Absolute paths outside the roots,
+    ``file://`` URIs, ``..`` components, ANY symlinked component below a
+    root, non-image MIME types, and files larger than
+    ``_SHARE_EMBED_MAX_BYTES`` are all replaced with a static placeholder —
+    no file content leaves the server.
+
+    On POSIX the file is opened by walking from ``/`` through the resolved
+    allowed root and on to the file one component at a time with
+    ``O_NOFOLLOW``; its type, size and bytes all come from that SAME
+    descriptor, so a concurrent writer inside a root cannot swap a directory
+    or the file between validation and read (#6126).  On Windows the file is
+    opened once and the OPENED handle's final path must lie inside the
+    resolved root before anything is read from it.  Anything unverifiable
+    fails closed.
 
     This runs BEFORE :func:`_redact_share_paths` so the concrete file path
     is still available for the allowed-roots check.
@@ -364,54 +375,10 @@ def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> st
     if not isinstance(text, str) or not text:
         return text
 
-    allowed = tuple(Path(r).resolve() for r in allowed_roots if r)
-
-    def _resolve_against_roots(raw: str) -> Path | None:
-        """Resolve *raw* against each allowed root, returning the first valid
-        absolute Path that lives inside one of them, or ``None``.
-
-        - ``file://`` is always rejected (absolute, un-scoped).
-        - Absolute paths (``/…``, ``~…``) are resolved as-is and checked
-          against the allowed-roots allow-list via ``is_relative_to()``.
-        - Relative paths are joined with each allowed root in turn so they
-          don't silently anchor to the server's process CWD.
-        """
-        if raw.startswith("file://"):
-            return None
-
-        # Defensive length / newline guard (#7949). A real local attachment
-        # path is short; an over-long or newline-bearing token (e.g. a
-        # data:...;base64,<blob> URI that slipped past the caller) is never a
-        # valid file and must never be handed to the filesystem — a stat() on
-        # an over-length path raises OSError ENAMETOOLONG (errno 36), and that
-        # stat happens inside .is_file() below, OUTSIDE the resolve()
-        # try/except, so the error would otherwise escape and 500 the caller.
-        # 4096 comfortably exceeds any real PATH_MAX-bounded attachment path.
-        if len(raw) > 4096 or "\n" in raw or "\x00" in raw:
-            return None
-
-        # --- Absolute paths: resolve as-is, then allow-list check ------------
-        if raw.startswith("/") or raw.startswith("~"):
-            try:
-                p = Path(raw).expanduser().resolve(strict=False)
-                if not allowed or not any(p.is_relative_to(r) for r in allowed):
-                    return None
-                return p if p.is_file() else None
-            except (OSError, ValueError, RuntimeError):
-                return None
-
-        # --- Relative paths: try each allowed root as the anchor -------------
-        for root in allowed:
-            try:
-                candidate = (root / raw).resolve(strict=False)
-                # Path traversal guard: resolved path must still be under root.
-                if not candidate.is_relative_to(root):
-                    continue
-                if candidate.is_file():
-                    return candidate
-            except (OSError, ValueError, RuntimeError):
-                continue
-        return None
+    windows = _share_platform_is_windows()
+    configured = tuple(r for r in allowed_roots if r)
+    allowed = tuple(Path(r).resolve() for r in configured)
+    root_spellings = _share_root_spellings(configured, allowed, windows=windows)
 
     def _replace_ref(m: re.Match) -> str:
         parts = split_media_token_ref(text, m)
@@ -427,27 +394,24 @@ def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> st
             return _INLINE_DATA_PLACEHOLDER + suffix
 
         # --- Resolve and validate against allowed roots -----------------------
-        p = _resolve_against_roots(raw)
-        if p is None:
+        candidates = _share_ref_candidates(raw, allowed, root_spellings, windows=windows)
+        if not candidates:
             return _PLACEHOLDER + suffix
-
-        # --- Size guard -------------------------------------------------------
-        try:
-            size = p.stat().st_size
-        except OSError:
-            return _PLACEHOLDER + suffix
-
-        if size > _SHARE_EMBED_MAX_BYTES:
-            return _PLACEHOLDER + suffix
+        first_root, first_names = candidates[0]
+        name = first_names[-1]
 
         # --- MIME allow-list (images only) ------------------------------------
-        mime_type, _ = mimetypes.guess_type(str(p))
+        mime_type, _ = mimetypes.guess_type(os.path.join(str(first_root), *first_names))
         if not mime_type or mime_type not in _SHARE_ALLOWED_MIME_TYPES:
+            return _PLACEHOLDER + suffix
+
+        # --- Size guard + bounded read from ONE verified descriptor (#6126) ---
+        data = _read_share_media(candidates, _SHARE_EMBED_MAX_BYTES, windows=windows)
+        if data is None:
             return _PLACEHOLDER + suffix
 
         # --- Embed as base64 <img> -------------------------------------------
         try:
-            data = p.read_bytes()
             # Content-based MIME validation: verify the actual file header
             # matches the claimed MIME type — catches extension-spoofed files
             # (e.g. a script renamed to .png).
@@ -462,7 +426,7 @@ def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> st
             # HTML-escape the filename so a crafted name like
             # '"><script>alert(1)</script>' cannot break out of the
             # attribute and inject script into the share page.
-            safe_name = html.escape(p.name, quote=True)
+            safe_name = html.escape(name, quote=True)
             return (
                 f'<img src="data:{mime_type};base64,{b64}"'
                 f' class="msg-media-img" alt="{safe_name}"'
@@ -472,6 +436,516 @@ def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> st
             return _PLACEHOLDER + suffix
 
     return _SHARE_MEDIA_RE.sub(_replace_ref, text)
+
+
+def _share_platform_is_windows() -> bool:
+    """True on native Windows, where shares use the verify-after-open reader."""
+    return os.name == "nt"
+
+
+def _share_root_spellings(configured, allowed, *, windows: bool = False) -> list[tuple[Path, list[str]]]:
+    """Lexical spellings of each allowed root as ``(resolved root, components)``.
+
+    The resolved spelling and the configured absolute spelling both map onto
+    the resolved root, so an absolute ref written against either works.  The
+    root itself is trusted configuration; only names BELOW it are
+    attacker-influenced, and those are never followed.  On Windows the
+    components are ``normcase``-d (matching is case-insensitive, as before)
+    and a ``\\\\?\\`` spelling is also accepted without its prefix.
+    """
+    import ntpath
+
+    abspath = ntpath.abspath if windows else os.path.abspath
+    spellings: list[tuple[Path, list[str]]] = []
+    for conf, root in zip(configured, allowed, strict=True):
+        texts = [str(root), abspath(str(conf))]
+        if windows:
+            texts += [plain for plain in map(_share_win_plain_path, texts) if plain]
+        for text in texts:
+            parts = _share_path_components(text, windows=windows)
+            if parts is None or (windows and not ntpath.splitdrive(text)[0]):
+                continue  # never widen a root to "/" on an odd spelling
+            if windows:
+                parts = [ntpath.normcase(part) for part in parts]
+            if (root, parts) not in spellings:
+                spellings.append((root, parts))
+    return spellings
+
+
+def _share_ref_candidates(raw: str, allowed, root_spellings, *, windows: bool = False) -> list[tuple[Path, list[str]]]:
+    """Map *raw* to ``(allowed root, component names)`` pairs, lexically.
+
+    No filesystem access happens here; the file is opened by
+    :func:`_read_share_media`.
+
+    - ``file://`` is always rejected (absolute, un-scoped).
+    - Absolute paths (``/…``, ``~…``; on Windows also ``C:\\…`` and UNC)
+      must sit lexically under a root spelling, by whole components.
+    - Relative paths are anchored at each allowed root in turn so they
+      don't silently anchor to the server's process CWD.
+    - ``..`` refuses the whole ref; empty and ``.`` components are dropped.
+    """
+    import ntpath
+
+    if raw.startswith("file://"):
+        return []
+
+    # Defensive length / newline guard (#7949). A real local attachment
+    # path is short; an over-long or newline-bearing token (e.g. a
+    # data:...;base64,<blob> URI that slipped past the caller) is never a
+    # valid file and must never be handed to the filesystem (an
+    # over-length name raises OSError ENAMETOOLONG, errno 36).
+    # 4096 comfortably exceeds any real PATH_MAX-bounded attachment path.
+    if len(raw) > 4096 or "\n" in raw or "\x00" in raw:
+        return []
+
+    if windows:
+        absolute = raw[:1] in ("/", "\\", "~") or bool(ntpath.splitdrive(raw)[0])
+    else:
+        absolute = raw.startswith("/") or raw.startswith("~")
+
+    # --- Absolute paths: lexical allow-list check against root spellings ----
+    if absolute:
+        try:
+            # ``~user`` expansion looks the name up in the password
+            # database; a malformed name (e.g. a lone surrogate) raises
+            # UnicodeEncodeError, which must become the placeholder, not
+            # fail the whole share snapshot (#6126 round 1).
+            expanded = (ntpath.expanduser if windows else os.path.expanduser)(raw)
+        except (OSError, ValueError, RuntimeError):
+            return []
+        if windows:
+            if expanded.replace("/", "\\").startswith(("\\\\?\\", "\\\\.\\")):
+                # ``\\?\C:\…`` / ``\\?\UNC\…`` -> plain; device namespaces -> refuse.
+                expanded = _share_win_plain_path(expanded) or ""
+            drive, rest = ntpath.splitdrive(expanded)
+            anchored = bool(drive) and rest[:1] in ("/", "\\")
+        else:
+            anchored = os.path.isabs(expanded)
+        parts = _share_path_components(expanded, windows=windows) if anchored else None
+        if not parts:
+            return []
+        key = [ntpath.normcase(part) for part in parts] if windows else parts
+        candidates = []
+        for root, root_parts in root_spellings:
+            depth = len(root_parts)
+            if len(parts) > depth and key[:depth] == root_parts:
+                candidates.append((root, parts[depth:]))
+        return candidates
+
+    # --- Relative paths: try each allowed root as the anchor -----------------
+    parts = _share_path_components(raw, windows=windows)
+    if not parts:
+        return []
+    return [(root, parts) for root in allowed]
+
+
+def _share_path_components(path: str, *, windows: bool = False) -> list[str] | None:
+    """Split a path into plain names for a descriptor walk.
+
+    Empty and ``.`` components are dropped.  Any ``..`` refuses the whole
+    path (``None``): it is never resolved, lexically or by the kernel (#6126).
+    On Windows both separators split and a drive (``C:``) or UNC share
+    (``\\\\server\\share``) is kept as the first component.
+    """
+    if windows:
+        import ntpath
+
+        drive, rest = ntpath.splitdrive(path)
+        names = re.split(r"[\\/]", rest)
+    else:
+        drive, names = "", path.split("/")
+    parts = [part for part in names if part not in ("", ".")]
+    if ".." in parts:
+        return None
+    return [drive, *parts] if drive else parts
+
+
+def _share_nofollow_open_supported() -> bool:
+    """True when a rooted, descriptor-relative, no-follow open is available.
+
+    The public-share embedder refuses every local file when this is False
+    instead of falling back to a racy pathname read (#6126).  Evaluated per
+    call (it is cheap) so it always reflects the live ``os`` module.
+    """
+    return (
+        hasattr(os, "O_NOFOLLOW")
+        and hasattr(os, "O_DIRECTORY")
+        and os.open in getattr(os, "supports_dir_fd", ())
+    )
+
+
+# Open errors that mean "nothing usable is there" and may fall through to the
+# next allowed root: missing, not a directory, a symlink refused by O_NOFOLLOW
+# (ELOOP; EMLINK on FreeBSD), or a name this filesystem cannot hold
+# (ENAMETOOLONG, e.g. eCryptfs encrypted names; #6126 round 4).  Anything else (EMFILE, ENFILE, EIO,
+# ESTALE, ...) means something may be there that we failed to read, so it is
+# terminal: falling through would substitute another root's namesake
+# (#6126 round 3).
+_SHARE_MISS_ERRNOS = frozenset(
+    e
+    for e in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.ENAMETOOLONG, getattr(errno, "EMLINK", None))
+    if e is not None
+)
+
+
+class _ShareMediaRefused(Exception):
+    """Terminal refusal of a share media ref: emit the placeholder and do NOT
+    try the ref under another allowed root (#6126 round 1)."""
+
+
+def _share_dir_open_flags() -> int:
+    """Open flags for the directory descriptors of the no-follow walk.
+
+    On Linux these are ``O_PATH`` descriptors: they need only SEARCH
+    permission on the parent, exactly like a pathname lookup, so an image
+    beneath an execute-only (``0111``) directory or root still embeds.  They
+    can only serve as ``dir_fd`` anchors; the final file is still opened with
+    read flags.  Elsewhere (no ``O_PATH``) the directory must be readable
+    (#6126 round 1).
+    """
+    import sys
+
+    flags = os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    if sys.platform.startswith("linux") and hasattr(os, "O_PATH"):
+        return flags | os.O_PATH
+    # macOS defines O_SEARCH (search-only directory open); prefer it so an
+    # execute-only directory keeps working without read permission (#6126 r2).
+    o_search = getattr(os, "O_SEARCH", 0)
+    if o_search:
+        return flags | o_search
+    return flags | os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+
+
+def _share_openat_dir(dir_fd: int, name: str, dir_flags: int) -> int:
+    """Open directory *name* relative to *dir_fd* and return the new descriptor.
+
+    *dir_fd* is closed only once the new descriptor exists, so on an exception
+    the caller still owns (and closes) exactly one descriptor.
+    """
+    next_fd = os.open(name, dir_flags, dir_fd=dir_fd)
+    try:
+        os.close(dir_fd)
+    except OSError:
+        pass
+    return next_fd
+
+
+def _open_share_file_nofollow(root: Path, names: list[str], dir_flags: int, file_flags: int) -> int | None:
+    """Open ``root/names...`` without following any symlink at or below *root*.
+
+    *root* is the already-resolved (realpath) allowed root.  It is NOT opened
+    by pathname: the walk starts at ``/`` and opens every component of the
+    resolved root relative to the previous directory descriptor with
+    ``O_NOFOLLOW``, so an ancestor of a nested root (an attachments root inside
+    a writable workspace) swapped for a symlink after resolution fails the
+    walk instead of redirecting the root descriptor (#6126 round 1).  A root
+    configured through a symlink still works because its realpath has none.
+    The names below the root are then walked the same way.  Returns the final
+    descriptor (caller closes it) or ``None``.
+    """
+    root_text = str(root)
+    root_names = _share_path_components(root_text)
+    if root_names is None or not root_text.startswith("/"):
+        return None
+    try:
+        dir_fd = os.open("/", dir_flags)
+    except PermissionError:
+        return None
+    except OSError as exc:
+        if exc.errno in _SHARE_MISS_ERRNOS:
+            return None
+        raise _ShareMediaRefused from None  # EMFILE, EIO, ...: terminal (#6126 r4)
+    except ValueError:
+        return None
+    try:
+        try:
+            for name in root_names:
+                dir_fd = _share_openat_dir(dir_fd, name, dir_flags)
+            # An O_PATH/O_SEARCH descriptor opens even a root we cannot SEARCH
+            # (mode 000).  Probe "." through the pinned root so an unsearchable
+            # root stays a miss that falls through to the next allowed root, as
+            # pathname reads did; denials BELOW a searchable root remain
+            # terminal (#6126 r2).
+            probe_fd = os.open(".", dir_flags, dir_fd=dir_fd)
+        except PermissionError:
+            return None  # root unreachable or unsearchable: a miss
+        except OSError as exc:
+            if exc.errno in _SHARE_MISS_ERRNOS:
+                return None  # root missing or redirected: a miss
+            raise _ShareMediaRefused from None  # EMFILE, EIO, ...: terminal (#6126 r3)
+        except ValueError:
+            return None
+        try:
+            os.close(probe_fd)
+        except OSError:
+            pass  # a close failure is not a lookup result
+        try:
+            for name in names[:-1]:
+                dir_fd = _share_openat_dir(dir_fd, name, dir_flags)
+            if os.stat in os.supports_dir_fd and os.stat in os.supports_follow_symlinks:
+                # Skip a socket, FIFO, device or symlink without opening it, as
+                # master's is_file() probe did: opening a socket fails (ENXIO,
+                # EOPNOTSUPP) and opening a device can have side effects.  The
+                # no-follow open + fstat below stay authoritative (#6126 r4).
+                import stat as _stat
+
+                if not _stat.S_ISREG(os.stat(names[-1], dir_fd=dir_fd, follow_symlinks=False).st_mode):
+                    return None
+            return os.open(names[-1], file_flags, dir_fd=dir_fd)
+        except PermissionError:
+            # EACCES/EPERM below the root: something is there but cannot be
+            # read.  Terminal, so a namesake in a later root is never
+            # substituted for it (#6126 round 1).
+            raise _ShareMediaRefused from None
+        except OSError as exc:
+            if exc.errno in _SHARE_MISS_ERRNOS:
+                return None  # missing, or a symlinked component: a miss
+            raise _ShareMediaRefused from None  # EMFILE, EIO, ...: terminal (#6126 r3)
+        except ValueError:
+            return None
+    finally:
+        try:
+            os.close(dir_fd)
+        except OSError:
+            pass
+
+
+def _read_share_media_nofollow(candidates, limit: int) -> bytes | None:
+    """Return the bytes of the first regular file among *candidates*.
+
+    Each candidate is ``(allowed root, component names)``.  The file is opened
+    with :func:`_open_share_file_nofollow`; type and size come from ``fstat``
+    on that descriptor and at most ``limit + 1`` bytes are read from it, so a
+    file that grows after ``fstat`` is refused rather than embedded (#6126).
+    Like the old ``is_file()`` probe, an entry that cannot be opened (missing,
+    symlinked component) or is not a regular file falls through to the next
+    root.  Permission denied below a root is terminal (never substitute a
+    later root's namesake); an unsupported platform, an oversize file or a
+    read error also return ``None`` and the caller emits the placeholder.
+    """
+    if not _share_nofollow_open_supported():
+        return None
+    import stat as _stat
+
+    common = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+    dir_flags = _share_dir_open_flags()
+    file_flags = common | getattr(os, "O_NOCTTY", 0)  # O_NONBLOCK: never block on a FIFO
+    for root, names in candidates:
+        if not names:
+            continue
+        try:
+            fd = _open_share_file_nofollow(root, names, dir_flags, file_flags)
+        except _ShareMediaRefused:
+            return None
+        if fd is None:
+            continue
+        try:
+            st = os.fstat(fd)
+            if not _stat.S_ISREG(st.st_mode):
+                continue
+            return _share_read_fd_capped(fd, st.st_size, limit)
+        except (OSError, MemoryError):
+            return None
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    return None
+
+
+def _share_read_fd_capped(fd: int, size: int, limit: int) -> bytes | None:
+    """Read a regular file of ``fstat`` size *size* from *fd*, at most *limit* bytes.
+
+    Refuses (``None``) when *size* is over the cap, and reads at most
+    ``limit + 1`` bytes from the SAME descriptor so a file that grows after
+    ``fstat`` is refused rather than embedded (#6126).
+    """
+    if size > limit:
+        return None
+    chunks = []
+    remaining = limit + 1
+    while remaining > 0:
+        chunk = os.read(fd, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    data = b"".join(chunks)
+    return data if len(data) <= limit else None
+
+
+def _read_share_media(candidates, limit: int, *, windows: bool = False) -> bytes | None:
+    """Platform switch for the share media reader (#6126)."""
+    if windows:
+        return _read_share_media_windows(candidates, limit)
+    return _read_share_media_nofollow(candidates, limit)
+
+
+# --- Windows: verify-after-open (#6126 round 1) --------------------------------
+#
+# Windows has no ``dir_fd``/``O_NOFOLLOW`` walk.  Instead the file is opened ONCE
+# (following whatever junctions/symlinks the path holds), and the path of the
+# object that was ACTUALLY opened -- ``GetFinalPathNameByHandleW`` on the
+# descriptor's handle -- must lie inside the trusted resolved root by whole
+# components before ``fstat`` and the capped read happen on that same
+# descriptor.  A swap before the open is caught by the final-path check; a swap
+# after it cannot change the opened object.  Anything unverifiable (API
+# failure, device or volume-GUID namespace, unexpected shape, any exception)
+# fails closed to the placeholder.
+
+_SHARE_WIN_DRIVE_RE = re.compile(r"[A-Za-z]:\\")
+# DOS device names are devices in every directory (``C:\\ws\\nul.png`` is NUL
+# on older Windows); never open them.
+_SHARE_WIN_DEVICE_STEM_RE = re.compile(
+    r"(?i)(con|prn|aux|nul|clock\$|conin\$|conout\$|(com|lpt)[0-9\u00b9\u00b2\u00b3])"
+)
+
+
+def _share_win_plain_path(path: str) -> str | None:
+    """Return a Win32 path as a plain ``C:\\…`` or ``\\\\server\\share\\…`` path.
+
+    Strips the ``\\\\?\\`` prefix (``\\\\?\\UNC\\`` maps to ``\\\\``).  Returns
+    ``None`` for device (``\\\\.\\``), volume-GUID, ``GLOBALROOT``, NT
+    (``\\??\\``), relative, drive-relative or rooted-without-drive paths,
+    and for any ``.``/``..`` component: those are unverifiable.
+    """
+    if not isinstance(path, str) or not path or "\x00" in path:
+        return None
+    path = path.replace("/", "\\")
+    if path.startswith("\\\\?\\UNC\\"):
+        path = "\\\\" + path[8:]
+    elif path.startswith("\\\\?\\"):
+        path = path[4:]
+        if not _SHARE_WIN_DRIVE_RE.match(path):
+            return None  # \\?\Volume{…}\, \\?\GLOBALROOT\…: not a DOS path
+    if path.startswith("\\\\"):
+        server, _, rest = path[2:].partition("\\")
+        share = rest.partition("\\")[0]
+        if server in ("", ".", "?") or not share:
+            return None  # \\.\device, a leftover namespace, or a bare server
+    elif not _SHARE_WIN_DRIVE_RE.match(path):
+        return None
+    if any(part in (".", "..") for part in path.split("\\")):
+        return None
+    return path
+
+
+def _share_win_canonical(path: str) -> str | None:
+    """``normcase``-d plain form of *path* without a trailing separator, or None."""
+    import ntpath
+
+    plain = _share_win_plain_path(path)
+    if plain is None:
+        return None
+    # ntpath.normcase IS os.path.normcase on Windows; named explicitly so the
+    # comparison is identical when the Windows branch is unit-tested elsewhere.
+    return ntpath.normcase(plain).rstrip("\\")
+
+
+def _share_win_is_within(final_path: str, trusted_root: str) -> bool:
+    """True when *final_path* lies strictly inside canonical *trusted_root*.
+
+    Component boundary: ``C:\\a\\bc\\x.png`` is NOT inside ``C:\\a\\b``.
+    """
+    final = _share_win_canonical(final_path)
+    return bool(final) and final.startswith(trusted_root + "\\") and len(final) > len(trusted_root) + 1
+
+
+def _share_win_name_ok(name: str) -> bool:
+    """A single plain file/dir name: no separator, drive/stream colon or device."""
+    if not name or any(ch in name for ch in ("\\", "/", ":")):
+        return False
+    return not _SHARE_WIN_DEVICE_STEM_RE.fullmatch(name.split(".", 1)[0].rstrip(" "))
+
+
+def _share_win_final_path_api():
+    """``kernel32.GetFinalPathNameByHandleW`` with explicit prototypes."""
+    import ctypes
+    from ctypes import wintypes
+
+    fn = ctypes.WinDLL("kernel32", use_last_error=True).GetFinalPathNameByHandleW
+    fn.argtypes = (wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD)
+    fn.restype = wintypes.DWORD
+    return fn
+
+
+def _share_win_final_path(handle) -> str | None:
+    """Final normalized DOS path of an open handle, or ``None`` on any failure.
+
+    ``FILE_NAME_NORMALIZED | VOLUME_NAME_DOS`` (flags ``0``): junctions and
+    symlinks are resolved and the result usually carries a ``\\\\?\\`` prefix.
+    """
+    import ctypes
+
+    fn = _share_win_final_path_api()
+    size = 512
+    for _ in range(3):
+        buf = ctypes.create_unicode_buffer(size)
+        needed = int(fn(handle, buf, size, 0))
+        if needed <= 0:
+            return None  # API failure
+        if needed < size:
+            return buf[:needed]
+        if needed > 65536:
+            return None
+        size = needed + 1  # too small: ``needed`` includes the terminator
+    return None
+
+
+def _read_share_media_windows(candidates, limit: int) -> bytes | None:
+    """Windows reader: open once, verify the OPENED file, read the same fd.
+
+    For each ``(resolved root, names)`` candidate the file is opened with
+    ``O_RDONLY|O_BINARY``.  A missing file, or an entry an advisory ``stat``
+    shows is not a regular file (a directory: ``_wopen`` reports EACCES for
+    one), falls through to the next root without being opened; every other
+    outcome is final: the handle's final path must be inside the
+    root (component boundary, ``normcase`` on both sides), ``fstat`` must
+    report a regular file, and then at most ``limit + 1`` bytes are read from
+    that descriptor.  Any exception or unverifiable result returns ``None``
+    (placeholder); the descriptor is always closed.
+    """
+    import stat as _stat
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0)
+    for root, names in candidates:
+        if not names:
+            continue
+        root_text = str(root)
+        trusted = _share_win_canonical(root_text)
+        if trusted is None or not all(_share_win_name_ok(name) for name in names):
+            return None
+        path = root_text.rstrip("\\/") + "\\" + "\\".join(names)
+        try:
+            # Advisory only: containment, type and size are verified on the
+            # OPENED handle below (#6126 r5).
+            if not _stat.S_ISREG(os.stat(path).st_mode):
+                continue  # a directory or device where the image should be: a miss
+            fd = os.open(path, flags)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except Exception:
+            return None  # permission denied, invalid name, ...: terminal
+        try:
+            import msvcrt
+
+            final_path = _share_win_final_path(msvcrt.get_osfhandle(fd))
+            if final_path is None or not _share_win_is_within(final_path, trusted):
+                return None
+            st = os.fstat(fd)
+            if not _stat.S_ISREG(st.st_mode):
+                continue
+            return _share_read_fd_capped(fd, st.st_size, limit)
+        except Exception:
+            return None
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    return None
 
 
 def _sanitize_message(message: dict, *, redact_paths=(), allowed_roots: tuple[Path, ...] = ()) -> dict | None:

@@ -298,6 +298,7 @@ function makeNode(tag) {
     addEventListener(type, handler) { this._listeners[type] = handler; },
     querySelector(selector) { return this._qs ? this._qs[selector] || null : null; },
     setAttribute(name, value) { this[name] = value; },
+    hasAttribute(name) { return this[name] !== undefined && this[name] !== null; },
     focus() { this._focused = true; },
     click() {
       const event = { stopPropagation() {}, preventDefault() {} };
@@ -645,6 +646,7 @@ function makeNode(tag) {
       return querySelectorAllImpl(this, selector);
     },
     setAttribute(name, value) { this[name] = value; },
+    hasAttribute(name) { return this[name] !== undefined && this[name] !== null; },
     focus() { this._focused = true; },
     click() {
       const event = { stopPropagation() {}, preventDefault() {} };
@@ -981,6 +983,7 @@ function makeNode(tag) {
     addEventListener(type, handler) { this._listeners[type] = handler; },
     querySelector(selector) { return this._qs ? this._qs[selector] || null : null; },
     setAttribute(name, value) { this[name] = value; },
+    hasAttribute(name) { return this[name] !== undefined && this[name] !== null; },
     focus() { this._focused = true; },
     click() {
       const event = { stopPropagation() {}, preventDefault() {} };
@@ -1231,6 +1234,7 @@ function makeNode(tag) {
       return querySelectorAllImpl(this, selector);
     },
     setAttribute(name, value) { this[name] = value; },
+    hasAttribute(name) { return this[name] !== undefined && this[name] !== null; },
     focus() { this._focused = true; },
     click() {
       const event = { stopPropagation() {}, preventDefault() {} };
@@ -1628,6 +1632,7 @@ function makeNode(tag) {
       return querySelectorAllImpl(this, selector);
     },
     setAttribute(name, value) { this[name] = value; },
+    hasAttribute(name) { return this[name] !== undefined && this[name] !== null; },
     focus() { this._focused = true; },
     click() {
       const event = { stopPropagation() {}, preventDefault() {} };
@@ -2822,6 +2827,7 @@ function makeNode(tag) {
       return querySelectorAllImpl(this, selector);
     },
     setAttribute(name, value) { this[name] = value; },
+    hasAttribute(name) { return this[name] !== undefined && this[name] !== null; },
     focus() { this._focused = true; },
     click() {
       const event = { stopPropagation() {}, preventDefault() {} };
