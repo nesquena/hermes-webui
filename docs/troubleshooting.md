@@ -607,6 +607,27 @@ python3 -c "import hermes_constants; print(hasattr(hermes_constants, 'pin_proces
 
 ---
 
+## Skills list shows another profile's external skills, or omits them
+
+**Symptom.** With several profiles, the Skills panel of profile A lists skills from profile B's `skills.external_dirs`, or some of the external roots configured for profile A do not appear. `/api/skills` may report `runtime_scope: "unavailable"`.
+
+**Why.** The WebUI resolves external roots for the request profile itself (`ARCHITECTURE.md` §4.13): it reads that profile's `skills.external_dirs` directly, and expands variables from its runtime environment with `HERMES_HOME` fixed to the profile home. Relative paths start at that home; `~` and `$HOME` use the stable shell home. The root profile also accepts variables captured at server launch, with its `.env` taking precedence. Named profiles use only their own runtime environment, including when the server is pinned to a named profile. A variable missing from those sources stays literal text, as in the Agent, and is never resolved from another streaming profile's process environment; such an entry usually names no directory and is skipped, while the other entries still list. Listing another profile's skills is expected when that profile's directory is named in `external_dirs`: the Agent supports sharing skills between profiles this way. If the profile's `config.yaml` cannot be read, every external root is withheld and the lookup is retried. Local skills remain usable in panels, cron, and slash suggestions; incomplete lists are retried on the next lookup. An accepted profile switch clears the previous profile's skill selection and edit form immediately. Delayed list, detail, linked-file, toggle, save, and delete responses cannot repaint the new profile or reopen an old form; select a skill again in the new profile.
+
+**Diagnostic commands.**
+
+```bash
+# runtime_scope: "profile" (resolved from the request profile),
+# "unavailable" (config.yaml could not be read; roots withheld, retried next lookup)
+curl -s -b "hermes_profile=<profile>" http://127.0.0.1:8787/api/skills | python3 -m json.tool | grep -E '"(name|runtime_scope)"'
+grep -A6 '^skills:' <profile-home>/config.yaml
+```
+
+**Fix.** If no external root appears, check that `config.yaml` parses and that `skills.external_dirs` is a list (or one string) under a `skills:` mapping: like the Agent, a malformed section lists none. `unavailable` means `config.yaml` exists but could not be read (for example, a permission error); fix its permissions. A single missing root usually means its path variable is not defined in that profile's `.env` (or, for the root profile, in the server's launch environment), or that a `.env` replacement value relies on another `$VAR` / `${VAR}` (expansion is a single pass, so that token stays literal). Confirm the external path is listed under `skills.external_dirs` in that profile's `config.yaml` and exists on disk. Switching profiles retires both panel and cron skill caches, including pending responses; a late response must never restore the previous profile's list.
+
+**When to file a bug.** File a WebUI bug if `runtime_scope` is `"profile"` and `/api/skills` lists a root that only another profile's `config.yaml` names, or omits a root that the Agent loads for this profile.
+
+---
+
 ## Memory is off, or a memory provider is disabled for a profile (#8517)
 
 **Symptom.** Agents stop recalling or saving memory (the built-in MEMORY.md/USER.md, an external provider such as Hindsight or Mnemosyne, or both), on some profiles or once more than one profile is in use. The WebUI server log has a `[webui] #8517:` warning.

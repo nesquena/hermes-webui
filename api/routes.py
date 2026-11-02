@@ -1231,15 +1231,34 @@ def _skill_category_from_path(
     return None
 
 
-def _active_skill_search_dirs(skills_dir: Path) -> list[Path]:
+def _active_skill_search_dirs_scoped(skills_dir: Path) -> tuple[list[Path], str]:
+    """Return the local skills root plus this request profile's external roots.
+
+    ``skills_dir`` is already resolved from the request's active profile, but the
+    Agent helper expands ``skills.external_dirs`` through the process environment.
+    Resolve external roots from the request profile's own ``config.yaml`` and
+    environment instead (root included). Returns the existing directories and the
+    scope label (``profile`` / ``unavailable``) for the caller to report; external
+    roots are withheld only when the profile's config cannot be read.
+    """
+    from api.profiles import get_active_hermes_home
+    from api.skill_runtime import (
+        SCOPE_PROFILE, SCOPE_UNAVAILABLE, profile_external_skill_dirs,
+    )
+
     dirs = [skills_dir]
     try:
-        from agent.skill_utils import get_external_skills_dirs
-
-        dirs.extend(Path(p) for p in get_external_skills_dirs())
+        dirs.extend(profile_external_skill_dirs(Path(get_active_hermes_home())))
+        scope = SCOPE_PROFILE
     except Exception:
-        pass
-    return [p for p in dirs if p.exists()]
+        logger.debug("External skill-directory lookup failed", exc_info=True)
+        scope = SCOPE_UNAVAILABLE
+    return [p for p in dirs if p.exists()], scope
+
+
+def _active_skill_search_dirs(skills_dir: Path) -> list[Path]:
+    """Dirs-only view of :func:`_active_skill_search_dirs_scoped`."""
+    return _active_skill_search_dirs_scoped(skills_dir)[0]
 
 
 def _worktree_retained_payload(session) -> dict:
@@ -1406,19 +1425,15 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
 
     sort_skills = _resolve_agent_sort_skills(importlib.import_module("tools.skills_tool"))
 
+    created_local_dir = False
     if not skills_dir.exists():
         skills_dir.mkdir(parents=True, exist_ok=True)
-        return {
-            "success": True,
-            "skills": [],
-            "categories": [],
-            "message": f"No skills found. Skills directory created at {skills_dir}/",
-        }
+        created_local_dir = True
 
     all_skills = []
     seen_names: set[str] = set()
     disabled = _get_disabled_skill_names_for_profile()
-    search_dirs = _active_skill_search_dirs(skills_dir)
+    search_dirs, runtime_scope = _active_skill_search_dirs_scoped(skills_dir)
 
     for scan_dir in search_dirs:
         for skill_md in iter_skill_index_files(scan_dir, "SKILL.md"):
@@ -1469,9 +1484,12 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
         "skills": all_skills,
         "categories": categories,
         "count": len(all_skills),
+        "runtime_scope": runtime_scope,
     }
     if all_skills:
         result["hint"] = "Use skill_view(name) to see full content, tags, and linked files"
+    elif created_local_dir:
+        result["message"] = f"No skills found. Skills directory created at {skills_dir}/"
     else:
         result["message"] = "No skills found in skills/ directory."
     return result
@@ -17881,7 +17899,10 @@ def handle_get(handler, parsed) -> bool:
         qs = parse_qs(parsed.query)
         category = qs.get("category", [None])[0]
         data = _skills_list_from_dir(_active_skills_dir(), category=category)
-        return j(handler, {"skills": data.get("skills", [])})
+        return j(handler, {
+            "skills": data.get("skills", []),
+            "runtime_scope": data.get("runtime_scope"),
+        })
 
     if parsed.path == "/api/skills/usage":
         from api.skill_usage import read_skill_usage
