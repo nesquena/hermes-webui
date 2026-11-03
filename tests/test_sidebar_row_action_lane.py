@@ -24,7 +24,10 @@ The source-level tests pin the selectors and the renderer condition they mirror.
 The browser tests measure the real stylesheet on rows shaped like the
 renderer's output: nothing may move when the pointer enters a row or a children
 list expands, the button may not intersect the badge or the chip left of the
-timestamp, and a fork's kebab must belong to the fork.
+timestamp, and a fork's kebab must belong to the fork. The fork label is pinned
+from both ends — a long label must keep a readable content box, and a short one
+must not be clipped even though it fits — because a squeezed label box only
+becomes visible as a bug in the short case.
 """
 import re
 from pathlib import Path
@@ -248,14 +251,23 @@ def test_short_timestamp_keeps_the_button_off_the_chip_left_of_it():
 # `.session-child-session-state` slot and their own `.session-actions`.
 
 
-def _fork_row(n, *, running=True):
+def _fork_row(n, *, running=True, short=False):
     state = " is-streaming" if running else ""
     streaming = " streaming" if running else ""
+    # Two label lengths, one bug class: a long label proves the row does not
+    # collapse its text to nothing, a short one ("-> F1 - 1m") proves the label
+    # box is not clipped even when the text would fit — the same width bug the
+    # other way round, and the shape a `max-width:calc(...)` "fix" breaks.
+    label = (
+        f"-&gt; F{n} - {n}m"
+        if short
+        else f"-&gt; Fork {n} that also fills the whole row - {n}m"
+    )
     return (
         f'<div class="session-child-session session-child-session-fork{streaming}"'
         f' id="fork{n}" data-sid="fork{n}">'
         f'<button type="button" class="session-child-session-main" id="fork{n}-main"'
-        f' title="Open forked session">-&gt; Fork {n} that also fills the whole row - {n}m</button>'
+        f' title="Open forked session">{label}</button>'
         f'<span class="session-state-indicator session-child-session-state{state}"'
         f' aria-hidden="true"></span>'
         f'<div class="session-actions"><button type="button" class="session-actions-trigger"'
@@ -264,7 +276,8 @@ def _fork_row(n, *, running=True):
     )
 
 
-def _expanded_scene(width, *, detailed=False, running=True, nested="children"):
+def _expanded_scene(width, *, detailed=False, running=True, nested="children",
+                    short_label=False):
     """The renderer's real row markup, at a given sidebar width."""
     meta = (
         '<div class="session-meta">12 messages · 2 children · deepseek-v4</div>'
@@ -275,8 +288,8 @@ def _expanded_scene(width, *, detailed=False, running=True, nested="children"):
         kids = (
             '<button type="button" class="session-child-session" id="plain-child">'
             "-&gt; A plain child conversation row - 6m</button>"
-            + _fork_row(1, running=running)
-            + _fork_row(2, running=running)
+            + _fork_row(1, running=running, short=short_label)
+            + _fork_row(2, running=running, short=short_label)
         )
         kids_class = "session-child-sessions"
     else:
@@ -376,6 +389,8 @@ EXPANDED_MEASURE = """() => {
     fork1MainContent: main
       ? rect(main).width - parseFloat(mainStyle.paddingLeft) - parseFloat(mainStyle.paddingRight)
       : 0,
+    fork1LabelClipped: main ? main.scrollWidth > main.clientWidth + 0.5 : true,
+    fork1LabelText: main ? main.textContent.trim() : null,
     nestedPaddingRight: parseFloat(getComputedStyle(kids).paddingRight),
     expanded: expanded,
     collapsed: collapsed,
@@ -412,7 +427,7 @@ TOUCH_MEASURE = """() => {
 
 
 def _measure_expanded(width=280, *, detailed=False, running=True, nested="children",
-                      touch=False, click=False):
+                      touch=False, click=False, short_label=False):
     pw = pytest.importorskip("playwright.sync_api")
     with pw.sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -425,7 +440,8 @@ def _measure_expanded(width=280, *, detailed=False, running=True, nested="childr
                 context = browser.new_context(viewport={"width": 1280, "height": 800})
             page = context.new_page()
             page.set_content(
-                _expanded_scene(width, detailed=detailed, running=running, nested=nested)
+                _expanded_scene(width, detailed=detailed, running=running, nested=nested,
+                                short_label=short_label)
             )
             page.add_style_tag(path=str(REPO / "static" / "style.css"))
             page.wait_for_timeout(100)
@@ -567,6 +583,35 @@ def test_minimum_sidebar_width_keeps_the_fork_label_readable():
         assert m["plainChildOwner"] == "plain-child", (
             f"{label}: the plain child row's centre resolves to "
             f"{m['plainChildOwner']!r}, not the row"
+        )
+
+
+def test_a_short_fork_label_is_never_clipped_by_the_lane():
+    # The twin fixture of the long label above: "-> F1 - 1m" is 59px of text at
+    # the fork row's 11px font, so from a 200px sidebar up it fits and must be
+    # shown whole. A long label hides this half of the bug — it ellipsizes
+    # either way — while a label box that has been squeezed (the removed 40px
+    # nested gutter, or a `max-width:calc(...)` on a width:auto flex row, which
+    # collapses instead of clamping) cuts a short label that would have fit.
+    for width in (200, 240, 320):
+        m = _measure_expanded(width, running=True, short_label=True)
+        assert m["fork1LabelText"] == "-> F1 - 1m", (
+            f"{width}px: the fork label fixture is not the short one: "
+            f"{m['fork1LabelText']!r}"
+        )
+        assert not m["fork1LabelClipped"], (
+            f"{width}px: the short fork label is clipped (button content "
+            f"{m['fork1MainContent']}px): a label that fits is being cut"
+        )
+        assert not m["parentTriggerOverFork"], (
+            f"{width}px: the parent's trigger reaches the fork's kebab"
+        )
+        assert m["fork1Owner"] == "fork1", (
+            f"{width}px: the first fork's kebab resolves to {m['fork1Owner']!r}"
+        )
+        assert m["nestedPaddingRight"] == pytest.approx(0, abs=0.05), (
+            f"{width}px: the nested list reserves {m['nestedPaddingRight']}px "
+            "for the parent's button, which comes out of the fork's label"
         )
 
 
