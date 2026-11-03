@@ -277,6 +277,9 @@ does not match the touched subsystem.
   failures.
 - [`docs/EXTENSIONS.md`](EXTENSIONS.md): administrator-controlled WebUI
   extension injection.
+- [`docs/scripts-panel.md`](scripts-panel.md): the Tasks panel's Scripts
+  subtab — the active profile's `~/.hermes/scripts/` directory, the
+  read-only endpoints, and the containment rules.
 
 ## Quick redline checklist
 
