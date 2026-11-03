@@ -230,7 +230,8 @@ def _run_helper_in_node(
         function _rememberComposerPendingFiles(sid, files, ownerProfile){
           state.remembered.push({sid, files, ownerProfile});
         }
-        function _saveComposerDraftNow(sid, text, files, ownerProfile){
+        function _saveComposerDraftNow(sid, text, files, _contId, opts){
+          const ownerProfile=(opts&&opts.ownerProfile)||null;
           state.saved = {sid, text, files};
           if(ownerProfile) state.saved.ownerProfile = ownerProfile;
         }

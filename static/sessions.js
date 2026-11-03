@@ -2897,7 +2897,7 @@ async function newSession(flash, options={}){
           sourceComposerText,
           sourceComposerFiles,
           '',
-          {ownerProfile:previousProfile}
+          {rejectOnError:true, ownerProfile:previousProfile}
         );
       }
     }catch(error){
@@ -3458,7 +3458,7 @@ async function loadSession(sid){
       // #7855 (round 7): the departing session's restored continuation token
       // must travel with the exact text it belongs to, or a return to this
       // session restores an ordinary draft and the retry loses the goal.
-      await _saveComposerDraftNow(currentSid, draftText, draftFiles, _switchContId);
+      await _saveComposerDraftNow(currentSid, draftText, draftFiles, _switchContId, {});
     } catch (error) {
       _handleComposerDraftPostFailure(error, currentSid, draftText, draftFiles);
     }
