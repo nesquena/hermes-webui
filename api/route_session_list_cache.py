@@ -92,6 +92,9 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "parent_title",
     "parent_source",
     "parent_is_cli_session",
+    # #8245: the server's derived sidebar bucket (full scoped payload, before
+    # source filtering and archive pagination); the client trusts it.
+    "sidebar_is_cli_session",
     "relationship_type",
     "pre_compression_snapshot",
     "_lineage_root_id",

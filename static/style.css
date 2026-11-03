@@ -1414,6 +1414,7 @@
   :root:not(.dark) .sidebar-search input{border-color:rgba(0,0,0,.1);background:rgba(0,0,0,.03);}
   :root:not(.dark) .sidebar-search input:focus{border-color:var(--accent);background:rgba(0,0,0,.02);}
   :root:not(.dark) .cron-item{border-color:rgba(0,0,0,.08);background:rgba(0,0,0,.02);}
+  :root:not(.dark) .scripts-item{border-color:rgba(0,0,0,.08);background:rgba(0,0,0,.02);}
   :root:not(.dark) .sm-btn{border-color:rgba(0,0,0,.1);}
   :root:not(.dark) .sm-btn:hover{background:rgba(0,0,0,.06);border-color:rgba(0,0,0,.15);}
   :root:not(.dark) select{border-color:rgba(0,0,0,.12);}
@@ -1993,6 +1994,20 @@
   .agent-health-dismiss{flex-shrink:0;padding:6px 12px;border-radius:8px;border:1px solid color-mix(in srgb,var(--error) 45%,var(--surface));background:color-mix(in srgb,var(--error) 10%,var(--surface));color:var(--error);font-size:12px;font-weight:600;cursor:pointer;}
   .agent-health-dismiss:hover{background:color-mix(in srgb,var(--error) 18%,var(--surface));}
   .agent-health-actions{display:flex;gap:8px;flex-shrink:0;}
+  /* #8517: quiet, dismissible notice above the composer when this session's memory is off. */
+  .memory-off-notice{display:flex;align-items:center;gap:8px;margin:10px auto 0;max-width:var(--msg-max);width:calc(100% - 40px);box-sizing:border-box;padding:4px 4px 4px 12px;border:1px solid var(--border);border-radius:10px;background:var(--surface-subtle,var(--hover-bg));color:var(--muted);font-size:13px;line-height:1.4;}
+  .memory-off-notice[hidden]{display:none;}
+  .memory-off-notice-icon{flex:0 0 auto;width:14px;height:14px;}
+  .memory-off-notice-text{flex:1 1 auto;min-width:0;padding:4px 0;overflow-wrap:anywhere;}
+  .memory-off-notice-dismiss{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;padding:0;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer;}
+  .memory-off-notice-dismiss:hover{background:var(--hover-bg);color:var(--text);}
+  .memory-off-notice-dismiss:focus-visible{outline:2px solid var(--focus-ring-strong);outline-offset:2px;}
+  /* #8517: the composer's top fade only ever covers the notice when the notice is shown */
+  .memory-off-notice:not([hidden])+.composer-wrap::before{display:none;}
+  /* #8517: a composer flyout (queue, approval, clarify) rises over the notice and already reserves
+     its own space, so collapse the notice instead of keeping its band (a double blank above the card) */
+  .memory-off-notice:has(+ .composer-wrap :is(.queue-card,.approval-card,.clarify-card).visible){display:none;}
+  @media(max-width:700px),(pointer:coarse){.memory-off-notice-dismiss{width:44px;height:44px;}.memory-off-notice{width:calc(100% - 24px);}}
   .agent-health-restart{flex-shrink:0;padding:6px 12px;border-radius:8px;border:1px solid color-mix(in srgb,var(--accent) 55%,var(--surface));background:color-mix(in srgb,var(--accent) 15%,var(--surface));color:var(--accent);font-size:12px;font-weight:600;cursor:pointer;transition:background-color .15s;}
   .agent-health-restart:hover{background:color-mix(in srgb,var(--accent) 25%,var(--surface));}
   .agent-health-restart:disabled{opacity:0.5;cursor:not-allowed;}
@@ -2200,7 +2215,26 @@
   .panel-view.active{display:flex;}
   /* Cron panel */
   .cron-list{flex:1;overflow-y:auto;padding:8px;}
+  /* #2316: Scripts subtab styles. Layout mirrors .cron-list so the
+     subtab swap feels native; .scripts-item mirrors .cron-item with a
+     simpler header (no status badge -- read-only, no run state). */
+  /* The Jobs/Scripts switcher reuses the workspace panel's Files/Artifacts pill
+     tabs (sentence case, 12 px) so it reads as an in-panel view switch, not a
+     second panel heading (#7685 UX review). Touch gets 44 px rows. */
+  .tasks-subtab{display:flex;gap:4px;padding:6px 8px;border-bottom:1px solid var(--border);}
+  .tasks-subtab-btn{flex:1;border:1px solid transparent;background:transparent;color:var(--muted);border-radius:7px;padding:5px 8px;font-size:12px;cursor:pointer;}
+  .tasks-subtab-btn:hover{color:var(--text);}
+  .tasks-subtab-btn.active{background:var(--surface-subtle);color:var(--text);border-color:var(--border2);}
+  @media (pointer:coarse){.tasks-subtab-btn{min-height:44px;}}
+  .scripts-list{flex:1;overflow-y:auto;padding:8px;}
+  .scripts-item{width:100%;min-width:0;box-sizing:border-box;border-radius:10px;border:1px solid var(--border);margin-bottom:6px;padding:10px 12px;background:rgba(255,255,255,.02);}
+  .scripts-item-head{display:flex;align-items:center;gap:8px;margin-bottom:4px;}
+  .scripts-item-name{flex:1;font-size:13px;color:var(--text);font-weight:500;font-family:var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .scripts-item-size{font-size:10px;color:var(--muted);font-weight:600;flex-shrink:0;padding:2px 6px;background:var(--surface-subtle);border:1px solid var(--border);border-radius:99px;}
+  .scripts-item-desc{font-size:12px;color:var(--muted);line-height:1.4;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;}
+  .scripts-dir-caption{font-size:11px;color:var(--muted);font-family:var(--font-mono);padding:0 4px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .cron-gateway-notice{margin:8px 8px 0;}
+  #panelTasks[data-tasks-subtab="scripts"] #cronGatewayNotice{display:none!important;}
   .cron-item{width:100%;min-width:0;box-sizing:border-box;border-radius:10px;border:1px solid var(--border);margin-bottom:6px;overflow:hidden;transition:border-color .15s,background .15s;background:rgba(255,255,255,.02);cursor:pointer;}
   .cron-item:hover{border-color:var(--border2);}
   .cron-paused-section{margin:8px 0 0;border-top:1px solid var(--border);padding-top:6px;}
@@ -2846,6 +2880,8 @@
   .composer-workspace-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .composer-reasoning-chip{display:inline-flex;align-items:center;gap:5px;max-width:none;padding:8px 10px;border-radius:999px;border:1px solid transparent;background-color:transparent;color:var(--muted);font-weight:500;cursor:pointer;transition:color .15s,background-color .15s,border-color .15s;}
   .composer-reasoning-chip.inactive{opacity:.78;}
+  .composer-reasoning-chip:disabled,.composer-mobile-config-action:disabled{opacity:.65;cursor:wait;}
+  .composer-footer.cf-measuring,.composer-footer.cf-measuring *{transition:none!important;}
   .composer-reasoning-chip:hover{color:var(--text);background-color:var(--hover-bg);}
   .composer-reasoning-chip.active{color:var(--text);background:var(--accent-bg);border-color:var(--accent-bg);}
   .composer-reasoning-icon,.composer-reasoning-chevron{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1;}
@@ -4065,11 +4101,22 @@ body.resizing .sidebar{transition:none!important;}
   font-weight:400;
   opacity:.82;
 }
+/* Running chip: the live label must not inherit the settled muted grey (2.86:1 light). */
+.tool-worklog-group[data-tool-worklog-group="1"][data-subagent-running="1"] .tool-worklog-label{color:var(--accent-text);opacity:1;}
 .tool-worklog-group[data-tool-worklog-group="1"]:not([data-run-activity-group="1"]) .tool-worklog-summary:hover{
   background:transparent;
 }
 .tool-worklog-group[data-tool-worklog-group="1"]:not([data-run-activity-group="1"]) .as-dot{
   display:none;
+}
+/* Running subagent: a solid accent dot with master's compositor-only ring pulse
+   (@keyframes wlring, as on the tool-card running dot), not a paint pulse. The
+   dot is --accent-text on purpose, to match its "Running" label (5.17:1 in light
+   theme), not the tool-card dot's --accent. */
+.tool-worklog-group[data-tool-worklog-group="1"][data-subagent-running="1"] .as-dot{display:block;position:relative;background:var(--accent-text);opacity:1;}
+.tool-worklog-group[data-tool-worklog-group="1"][data-subagent-running="1"] .as-dot::after{content:"";position:absolute;inset:0;border-radius:50%;background:var(--accent-text);animation:wlring 1.3s ease-out infinite;pointer-events:none;}
+@media (prefers-reduced-motion: reduce){
+  .tool-worklog-group[data-tool-worklog-group="1"][data-subagent-running="1"] .as-dot::after{animation:none;opacity:0;}
 }
 .tool-worklog-running-label{display:none;color:var(--accent-text);font-family:var(--font-mono);font-size:12px;font-weight:600;line-height:1.4;}
 .tool-worklog-group[data-tool-worklog-running="1"] .tool-worklog-running-label{display:inline-flex;}
@@ -5301,6 +5348,9 @@ main.main > #mainPlugin{display:none;}
 .panel-head-btn{width:24px;height:24px;padding:0;display:inline-flex;align-items:center;justify-content:center;border:none;background:transparent;border-radius:6px;color:var(--muted);cursor:pointer;transition:background .15s,color .15s;flex-shrink:0;}
 .mobile-sidebar-close{display:none;}
 .panel-head-btn:hover{background:var(--accent-bg);color:var(--accent-text);}
+/* The author display:inline-flex above outranks the UA [hidden] rule; a head
+   button hidden for one tab (Tasks > Scripts has no "New job") must vanish. */
+.panel-head-btn[hidden]{display:none;}
 .panel-head-btn:disabled,.panel-head-btn[aria-busy="true"]{opacity:.5;cursor:wait;}
 .panel-head-btn:disabled:hover,.panel-head-btn[aria-busy="true"]:hover{background:transparent;color:var(--muted);}
 .app-titlebar-new-chat:disabled,.app-titlebar-new-chat[aria-busy="true"]{opacity:.5;cursor:wait;}
@@ -6654,6 +6704,14 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
 .msg-row[data-role="assistant"]:hover .msg-foot-with-usage .msg-actions {
   opacity: 1;
 }
+/* Touch devices cannot hover: keep the timestamp and actions of a footer that
+   carries usage or a model label visible there (#8287 UX gate). */
+@media (hover: none), (max-width: 640px) {
+  .msg-foot-with-usage .msg-time,
+  .msg-foot-with-usage .msg-actions {
+    opacity: 1;
+  }
+}
 
 /* Hide footer while editing to keep the edit bar the only footer-level affordance */
 .msg-row[data-editing="1"] .msg-foot { display: none; }
@@ -6887,7 +6945,16 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
   .workspace-artifact-directory{display:flex;min-width:0;overflow:hidden;white-space:nowrap;font-family:var(--font-mono);font-size:11px;color:var(--muted);}
   .workspace-artifact-directory-head{min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;}
   .workspace-artifact-directory-tail{flex:0 0 auto;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;}
-  .workspace-artifact-meta{display:inline-block;margin-top:4px;padding:1px 5px;border:1px solid var(--border);border-radius:999px;color:var(--muted);font-size:11px;line-height:1.3;}
+.workspace-artifact-meta{display:inline-block;margin-top:4px;padding:1px 5px;border:1px solid var(--border);border-radius:999px;color:var(--muted);font-size:11px;line-height:1.3;}
+.workspace-artifact-files>summary,.workspace-artifact-skills>summary{cursor:pointer;color:var(--text);font-size:12px;font-weight:500;}
+.workspace-artifact-skills{margin-top:10px;border-top:1px solid var(--border);padding-top:8px;}
+.workspace-artifact-skills-only{margin-top:0;border-top:0;padding-top:0;}
+.workspace-artifact-file-count,.workspace-artifact-skill-count{margin-left:6px;color:var(--muted);}
+@media(pointer:coarse){.workspace-artifact-files>summary,.workspace-artifact-skills>summary{min-height:44px;box-sizing:border-box;padding:14px 0;}}
+.workspace-artifact-skill-list{margin-top:4px;}
+.workspace-artifact-skill-row{display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:5px 0;border-top:1px solid var(--border);font-size:11px;}
+.workspace-artifact-skill-name{min-width:0;overflow-wrap:anywhere;font-family:var(--font-mono);}
+.workspace-artifact-skill-uses{flex:0 0 auto;color:var(--muted);text-align:right;white-space:nowrap;}
 .workspace-artifacts-count{opacity:.65;font-size:11px;}
 .rightpanel[data-active-tab="artifacts"] .breadcrumb-bar,.rightpanel[data-active-tab="artifacts"] .file-tree,.rightpanel[data-active-tab="artifacts"] #wsEmptyState{display:none!important;}
 .rightpanel[data-active-tab="artifacts"] .workspace-artifacts{display:block;}
