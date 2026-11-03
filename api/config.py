@@ -4255,6 +4255,27 @@ def _agent_expands_env_ref(value: object) -> bool:
     return False
 
 
+def _agent_expanded_text(value: object) -> str | None:
+    """String ``value`` as the installed Agent's ``load_config()`` expands it here, else None.
+
+    Calls the Agent's own expander (``hermes_cli.config._expand_env_vars``: ``${VAR}`` /
+    ``${env:VAR}`` from the current profile secret scope, else the process env; an unset
+    or non-env reference stays verbatim), in the same worker or request context as the
+    Agent's resolver, so a record is judged by the value that resolver sees. None when
+    the expander is unavailable or fails: callers keep their fail-closed reading.
+    """
+    try:
+        from hermes_cli.config import _expand_env_vars as agent_expand_env_vars
+    except ImportError:
+        return None
+    try:
+        expanded = agent_expand_env_vars(value)
+    except Exception:
+        logger.debug("provider name check: Agent env expansion failed", exc_info=True)
+        return None
+    return expanded if isinstance(expanded, str) else None
+
+
 def _claiming_value(keys: tuple, values: tuple, names: set) -> str | None:
     """The first identity in ``keys`` / ``values`` whose spellings include one of ``names``.
 
@@ -4333,8 +4354,10 @@ def provider_name_ambiguity_verdict(provider: object, config: object = None) -> 
     and shares one credential pool between such records, so the endpoint and key
     it returns can belong to different records depending on config order. The
     route fails closed instead. Purely name-based (no URL is read); a record
-    claims in any spelling the Agent accepts, enabled or not (the Agent's legacy
-    view still selects disabled rows).
+    claims in any spelling the Agent accepts. A keyed record the Agent treats as
+    disabled claims nothing (its ``enabled`` flag judged after the Agent's env
+    expansion); a legacy row counts enabled or not (the Agent's legacy view still
+    selects disabled rows).
 
     * Bare built-in ``X``: ambiguous when any record other than ``providers.X``
       claims ``X``, or two keys are ``X``. Without ``providers.X`` the built-in
@@ -4371,6 +4394,17 @@ def _provider_name_ambiguity_in(source: dict, route: str, builtin: str, explicit
     for key, record in (providers.items() if isinstance(providers, dict) else ()):
         key_text = str(key or "").strip()
         if not key_text or not isinstance(record, dict):
+            continue
+        # The Agent skips a keyed record whose ``enabled`` is false in both of its views
+        # (``_match_new_style_provider`` and ``providers_dict_to_custom_providers``), so a
+        # disabled one claims nothing. Legacy ``custom_providers`` rows stay counted below:
+        # the Agent's legacy view still selects a row the user switched off. A templated
+        # flag is judged as the Agent expands it; unknown keeps the record (fail closed).
+        flag = record.get("enabled", True)
+        if _agent_expands_env_ref(flag):
+            expanded = _agent_expanded_text(flag)
+            flag = flag if expanded is None else expanded
+        if not _raw_provider_record_enabled({"enabled": flag}):
             continue
         # The Agent's identities for a keyed record: its ``name`` (or key) and its key.
         claimed_by = _claiming_value((key_text,), (record.get("name"),), names)

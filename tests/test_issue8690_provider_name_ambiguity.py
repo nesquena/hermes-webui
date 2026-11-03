@@ -8,7 +8,8 @@ NAMED record's endpoint with the BUILT-IN record's key. Both WebUI connection-bu
 helpers passed that pair through.
 
 The fix is name-based (no URL comparison): when a bare built-in route ``X`` and any
-other record claiming ``X`` coexist (any spelling, enabled or disabled), or the
+other record claiming ``X`` coexist (any spelling; a keyed record the Agent treats as
+disabled claims nothing, a legacy row counts either way), or the
 explicit ``custom:X`` selector is used while ``providers.X`` exists, the route
 returns a terminal verdict naming the records. The runtime dicts below are the ones
 the installed Agent returns for these configs (captured with synthetic keys and
@@ -49,6 +50,9 @@ def isolated(monkeypatch, tmp_path):
     pkg.__path__ = []
     monkeypatch.setitem(sys.modules, "hermes_cli", pkg)
     monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", types.ModuleType("hermes_cli.runtime_provider"))
+    # Also when a real Agent was imported earlier in the run: its ``hermes_cli.config``
+    # (env expander, managed scope) is installed only by the tests that need a stand-in.
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", types.ModuleType("hermes_cli.config"))
     monkeypatch.setattr(config._thread_ctx, "env", {}, raising=False)
     monkeypatch.setattr(config._thread_ctx, "block_process_env_fallback", True, raising=False)
 
@@ -183,7 +187,6 @@ def test_every_claimant_is_named(monkeypatch):
     {"custom_providers": [{"name": "openai", "baseUrl": NAMED_URL, "api_key": NAMED_KEY}]},
     {"custom_providers": [{"name": "openai", "base_url": NAMED_URL, "api_key": NAMED_KEY, "enabled": False}]},
     {"custom_providers": [{"name": "  OpenAI ", "base_url": NAMED_URL, "api_key": NAMED_KEY}]},
-    {"providers": {"custom:openai": {"base_url": NAMED_URL, "api_key": NAMED_KEY, "enabled": "false"}}},
     {"providers": {"custom:OpenAI": {"base_url": NAMED_URL, "api_key": NAMED_KEY}}},
     {"providers": {" custom:openai ": {"base_url": NAMED_URL, "api_key": NAMED_KEY}}},
     {"providers": {"my-proxy": {"name": "openai", "base_url": NAMED_URL, "api_key": NAMED_KEY}}},
@@ -192,7 +195,7 @@ def test_every_claimant_is_named(monkeypatch):
     {"providers": {"OpenAI": {"base_url": NAMED_URL, "api_key": NAMED_KEY}}},
 ], ids=[
     "legacy-base_url", "legacy-url", "legacy-api", "legacy-baseUrl", "legacy-disabled",
-    "legacy-case-whitespace", "keyed-disabled", "keyed-case",
+    "legacy-case-whitespace", "keyed-case",
     "keyed-whitespace", "display-name", "display-name-custom-prefix", "generic-custom-named",
     "second-builtin-spelling",
 ])
@@ -204,6 +207,106 @@ def test_any_record_claiming_the_builtin_name_is_a_sibling(monkeypatch, extra):
     _bind(monkeypatch, data)
     runtime = _agent_runtime(NAMED_URL, NAMED_KEY)
     _both_refused("openai", runtime, "the built-in 'openai'", configured_base_url=BUILTIN_URL)
+
+
+@pytest.mark.parametrize("flag", [False, "false", "off", "no", 0, "0"])
+def test_a_disabled_keyed_record_claims_nothing(monkeypatch, flag):
+    """Release-lane gate r1103 (senior): the Agent skips a keyed ``providers`` record whose
+    ``enabled`` is false in both of its views, so the built-in route stays consistent and must
+    not be refused. A disabled legacy ``custom_providers`` row still counts (the Agent's legacy
+    view selects it), covered by ``legacy-disabled`` above."""
+    data = _config("openai", {
+        "custom:openai": {"base_url": NAMED_URL, "api_key": NAMED_KEY, "enabled": flag},
+        "openai": {"base_url": BUILTIN_URL, "api_key": BUILTIN_KEY},
+    })
+    _bind(monkeypatch, data)
+    assert config.provider_name_ambiguity_verdict("openai") is None
+    _both_route("openai", _agent_runtime(BUILTIN_URL, BUILTIN_KEY), ("openai", BUILTIN_URL, BUILTIN_KEY))
+
+
+def _install_agent_expander(monkeypatch):
+    """A stand-in for the installed Agent's ``hermes_cli.config._expand_env_vars``.
+
+    Same contract as the Agent (``_env_expand_match``): ``${VAR}`` / ``${env:VAR}`` read
+    the environment, an unset or non-env (``${file:...}``) reference stays verbatim.
+    """
+    import re as _re
+
+    def expand(obj):
+        def one(match):
+            inner = match.group(1).strip()
+            if inner.startswith("env:"):
+                name = inner[len("env:"):].strip()
+            elif _re.match(r"^[a-z][a-z0-9_-]*:", inner):
+                name = None
+            else:
+                name = inner
+            value = os.environ.get(name) if name else None
+            return match.group(0) if value is None else value
+        return _re.sub(r"\$\{([^}]+)\}", one, obj) if isinstance(obj, str) else obj
+
+    module = sys.modules.get("hermes_cli.config") or types.ModuleType("hermes_cli.config")
+    monkeypatch.setattr(module, "_expand_env_vars", expand, raising=False)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", module)
+
+
+def _templated_flag_config():
+    return _config("openai", {
+        "custom:openai": {"base_url": NAMED_URL, "api_key": NAMED_KEY, "enabled": "${PROXY_ENABLED}"},
+        "openai": {"base_url": BUILTIN_URL, "api_key": BUILTIN_KEY},
+    })
+
+
+@pytest.mark.parametrize("value", ["false", "off", "0", "no", " FALSE "])
+def test_a_keyed_record_whose_templated_flag_expands_false_claims_nothing(monkeypatch, tmp_path, value):
+    """Gate r1103b/c (Codex CORE): ``enabled: ${PROXY_ENABLED}`` with PROXY_ENABLED=false.
+
+    The Agent expands the flag before ``is_provider_enabled`` and skips the record, so the
+    built-in pair is consistent. Both views hold the unexpanded flag (the raw file always
+    does; a cache that could not expand it does too) and must judge it the Agent's way.
+    """
+    _install_agent_expander(monkeypatch)
+    monkeypatch.setenv("PROXY_ENABLED", value)
+    _write_profile_config(tmp_path / "profile" / "config.yaml", _templated_flag_config())
+    _bind(monkeypatch, _templated_flag_config())
+    assert config.provider_name_ambiguity_verdict("openai") is None
+    _both_route("openai", _agent_runtime(BUILTIN_URL, BUILTIN_KEY), ("openai", BUILTIN_URL, BUILTIN_KEY))
+
+
+@pytest.mark.parametrize("value", ["true", "yes", "1", "maybe", "", None], ids=[
+    "true", "yes", "1", "garbage", "empty", "unset"])
+def test_a_keyed_record_whose_templated_flag_the_agent_keeps_enabled_still_claims(monkeypatch, tmp_path, value):
+    """The Agent's ``is_provider_enabled`` treats anything but a false word as enabled,
+    including an unset reference it keeps verbatim: the sibling claims and is refused."""
+    _install_agent_expander(monkeypatch)
+    if value is None:
+        monkeypatch.delenv("PROXY_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("PROXY_ENABLED", value)
+    _write_profile_config(tmp_path / "profile" / "config.yaml", _templated_flag_config())
+    _bind(monkeypatch, _templated_flag_config())
+    _both_refused("openai", _agent_runtime(NAMED_URL, BUILTIN_KEY), "'custom:openai'")
+
+
+def test_a_templated_flag_without_the_agents_expander_keeps_the_record(monkeypatch, tmp_path):
+    """No Agent expander (older Agent, or none installed): the flag's value is unknown, so
+    the record keeps claiming (fail closed), whatever WebUI's own environment says."""
+    monkeypatch.setenv("PROXY_ENABLED", "false")
+    _write_profile_config(tmp_path / "profile" / "config.yaml", _templated_flag_config())
+    _bind(monkeypatch, _templated_flag_config())
+    _both_refused("openai", _agent_runtime(NAMED_URL, BUILTIN_KEY), "'custom:openai'")
+
+
+def test_a_disabled_legacy_row_still_claims_with_the_agents_expander(monkeypatch, tmp_path):
+    """Legacy rows are untouched by the flag rule: the Agent's legacy view selects them."""
+    _install_agent_expander(monkeypatch)
+    monkeypatch.setenv("PROXY_ENABLED", "false")
+    data = _config("openai", {"openai": {"base_url": BUILTIN_URL, "api_key": BUILTIN_KEY}})
+    data["custom_providers"] = [{"name": "openai", "base_url": NAMED_URL, "api_key": NAMED_KEY,
+                                 "enabled": "${PROXY_ENABLED}"}]
+    _write_profile_config(tmp_path / "profile" / "config.yaml", data)
+    _bind(monkeypatch, data)
+    _both_refused("openai", _agent_runtime(NAMED_URL, BUILTIN_KEY), "custom_providers entry 'openai'")
 
 
 def test_an_env_templated_sibling_url_is_refused_without_reading_it(monkeypatch):
