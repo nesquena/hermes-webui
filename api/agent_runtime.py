@@ -442,6 +442,11 @@ def require_ai_agent_class():
     from run_agent import AIAgent  # noqa: PLC0415
 
     _capture_loaded_agent_revision()
+    # Every WebUI construction site resolves the class here: refuse a memory provider
+    # instance shared across profiles before any of them initialises it (#8517).
+    from api.memory_profile_scope import install_shared_provider_instance_guard  # noqa: PLC0415
+
+    install_shared_provider_instance_guard()
     return AIAgent
 
 

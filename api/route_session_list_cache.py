@@ -53,6 +53,7 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "model",
     "model_provider",
     "message_count",
+    "visible_message_count",
     "transcript_generation",
     "transcript_generation_baseline",
     "user_message_count",
@@ -90,6 +91,7 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "parent_session_id",
     "parent_title",
     "parent_source",
+    "parent_is_cli_session",
     "relationship_type",
     "pre_compression_snapshot",
     "_lineage_root_id",
@@ -107,6 +109,7 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "read_only",
     "is_read_only",
     "gateway_routing",
+    "last_used_model",
 }
 
 

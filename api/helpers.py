@@ -25,6 +25,13 @@ _PUBLIC_MESSAGE_INTERNAL_FIELDS = frozenset({
     "_active_turn_token",
     "_active_turn_user",
     "_fork_child_turn",
+    "_pending_journal_recovery",
+    "_journal_retry_stream_id",
+    "_journal_retry_attempts",
+    "_journal_retry_first_seen_ts",
+    "_journal_retry_kind",
+    "_journal_retry_owner_token",
+    "_journal_retry_process_token",
     "_webui_trusted_agent_input_text",
     "_webui_unmatched_native_image_mirror",
 })
@@ -681,9 +688,14 @@ def _json_response_body(payload, *, pretty: bool = True) -> bytes:
     the public helper default stable for existing tests/callers; hot paths can
     opt into compact JSON with ``pretty=False``.
     """
-    if pretty:
-        return _json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
-    return _json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    formatting = {'indent': 2} if pretty else {'separators': (',', ':')}
+    body = _json.dumps(payload, ensure_ascii=False, **formatting)
+    try:
+        return body.encode('utf-8')
+    except UnicodeEncodeError:
+        # Recovery preserves provider surrogate halves losslessly. Keep the
+        # same payload/format while making its JSON safe for UTF-8 transport.
+        return _json.dumps(payload, ensure_ascii=True, **formatting).encode('utf-8')
 
 
 def j(handler, payload, status: int=200, extra_headers: dict=None, *, pretty: bool = True) -> None:
@@ -827,6 +839,9 @@ def _build_redact_fn():
     def _restore_code_env_key_literals(original: str, redacted: str) -> str:
         if not isinstance(original, str) or not isinstance(redacted, str):
             return redacted
+        # Both assignment-prefix patterns require '=' in the original text.
+        if "=" not in original:
+            return redacted
         literal_occurrences: dict[tuple[str, int], str] = {}
         original_counts: dict[str, int] = {}
         for match in _ENV_KEY_PREFIX_RE.finditer(original):
@@ -865,7 +880,9 @@ def _build_redact_fn():
         text = _CRED_RE.sub(lambda m: _mask(m.group(1)), text)
         text = _EMBEDDED_AWS_ACCESS_KEY_RE.sub(lambda m: _mask(m.group(0)), text)
         text = _AUTH_HDR_RE.sub(lambda m: m.group(1) + _mask(m.group(2)), text)
-        text = _ENV_RE.sub(_env_replacement, text)
+        # Earlier passes may remove delimiters; test the text actually scanned.
+        if "=" in text:
+            text = _ENV_RE.sub(_env_replacement, text)
         text = _PRIVKEY_RE.sub("[REDACTED PRIVATE KEY]", text)
         return text
 
@@ -1924,18 +1941,12 @@ def get_profile_cookie(handler) -> str | None:
     impersonate another profile. In no-auth deployments, keep the historical
     plain profile-name cookie behavior.
     """
-    cookie_header = handler.headers.get('Cookie', '')
-    if not cookie_header:
-        return None
-    import http.cookies as _hc
-    cookie = _hc.SimpleCookie()
-    try:
-        cookie.load(cookie_header)
-    except _hc.CookieError:
-        return None
-    cookie_name = get_profile_cookie_name()
-    morsel = cookie.get(cookie_name)
-    if not (morsel and morsel.value):
+    # Same tolerant read as the auth cookie: a foreign cookie on a shared host/domain must
+    # not hide this one, or a profile switch silently does not stick (see read_cookie).
+    from api.auth import read_cookie
+
+    raw_val = read_cookie(handler, get_profile_cookie_name())
+    if not raw_val:
         return None
 
     from api.profiles import _PROFILE_ID_RE
@@ -1943,7 +1954,6 @@ def get_profile_cookie(handler) -> str | None:
     def _valid_profile_name(val: str) -> bool:
         return val == 'default' or bool(_PROFILE_ID_RE.fullmatch(val))
 
-    raw_val = morsel.value
     try:
         from api.auth import is_auth_enabled, parse_cookie, verify_profile_cookie_value
         if is_auth_enabled():

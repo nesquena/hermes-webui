@@ -138,7 +138,11 @@ def test_dropdown_escapes_footer_containing_block_when_open_on_phone():
             this.scrollHeight = 0; this.offsetHeight = 0;
             this.offsetWidth = 0; this.clientWidth = 0;
             this.offsetParent = null;
+            this.attributes = {{}};
           }}
+          // A real element answers setAttribute: the close path sets aria-expanded on the chip.
+          setAttribute(k, v) {{ this.attributes[k] = String(v); }}
+          getAttribute(k) {{ return Object.prototype.hasOwnProperty.call(this.attributes, k) ? this.attributes[k] : null; }}
           _detach(child) {{
             const i = this.children.indexOf(child);
             if (i >= 0) this.children.splice(i, 1);

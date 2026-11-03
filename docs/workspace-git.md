@@ -63,9 +63,18 @@ Before any Git subprocess starts, WebUI removes inherited `GIT_DIR`, `GIT_WORK_T
 `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_COUNT`, `GIT_CONFIG_PARAMETERS`, and injected
 `GIT_CONFIG_KEY_*` / `GIT_CONFIG_VALUE_*` values from the environment. It also removes inherited
 `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_SSH`, and `GIT_SSH_COMMAND` values, then sets
-`GIT_TERMINAL_PROMPT=0` so remote authentication failures fail fast instead of blocking on an
-interactive prompt. Those variables can redirect Git to a different repository, inject config, or run
+`GIT_TERMINAL_PROMPT=0` to disable Git's terminal authentication fallback.
+Those variables can redirect Git to a different repository, inject config, or run
 helper commands, so WebUI does not trust them from the parent process.
+
+Remote fetch, pull, push, and `ls-remote` also receive `GCM_INTERACTIVE=never` and
+`credential.interactive=false`. GCM honors these controls, and Git itself honors
+`credential.interactive` starting in 2.47. Cached credentials from trusted
+system/global helpers remain usable. On a cache miss, Git 2.47+ may report
+`unable to get password from user` rather than `could not read Username`; both
+map to the workspace API's `auth_failed` code. Other credential helpers may
+ignore these controls and still open their own browser or GUI; this is not a
+universal guarantee that every helper is noninteractive.
 
 `GIT_INDEX_FILE` is the intentional exception. Selected-file commits use a temporary index so WebUI
 can commit only the requested files, then remove the temporary index afterward.

@@ -104,11 +104,19 @@ class TestBlankLiveTurnPreserveGuard:
         assert "m._live" in guard and "_activityBurstId" in guard and "_liveSegmentSeq" in guard, (
             "live-assistant evidence must accept the client-side live markers"
         )
-        # The assignment must be inside the new conditional.
+        # The assignment must be inside the new conditional — extended by #7676:
+        # terminal settlement owns the turn, so a SETTLED pane (idle, no live
+        # stream ownership) is ineligible even when the projection still carries
+        # live markers. A reconnecting pane (S.busy, no active stream) keeps the
+        # #3877 preserve.
         assert re.search(
-            r"if\(S\.activeStreamId\s*\|\|\s*_hasLiveAssistantProjection\)\{\s*_preservedLiveTurn=_lt;",
+            r"if\(S\.activeStreamId\s*\|\|\s*\(_hasLiveAssistantProjection"
+            r"\s*&&\s*!_paneSettled\)\)\{\s*_preservedLiveTurn=_lt;",
             guard,
-        ), "preserve assignment must be gated by (activeStreamId || live projection)"
+        ), (
+            "preserve assignment must be gated by (activeStreamId || "
+            "(live projection && !settled pane))"
+        )
         # DOM-content presence must NOT act as authority (#6948 regression guard).
         assert "_hasRealLiveContent" not in guard, (
             "bare .msg-body presence must not prove liveness — a contentful dead "

@@ -48,8 +48,10 @@ def test_recent_handler_reuses_dispatcher_cron_context_without_nesting():
     handler_end = ROUTES_PY.index("\ndef ", handler_start + 1)
     handler = ROUTES_PY[handler_start:handler_end]
 
-    assert "with cron_profile_context():" in dispatch
+    # #7295: the dispatcher owns the (lock-free) per-thread cron store scope.
+    assert "with cron_store_scope():" in dispatch
     assert "cron_profile_context_for_home" not in handler
+    assert "cron_store_scope" not in handler
 
 
 def test_successful_profile_switch_resets_unread_cron_state():
@@ -80,6 +82,7 @@ let _cronPollSince=10;
 let _cronUnreadCount=1;
 let _cronPollGeneration=0;
 const _cronNewJobIds=new Set(['old-profile-job']);
+const _cronPendingToasts=[];
 global.S={{activeProfile:'default'}};
 global.api=async()=>({{active:'alternate',is_default:false}});
 global.localStorage={{removeItem(){{}}}};
@@ -112,6 +115,7 @@ function _clearCronSessionCompletionUnreadForInactiveProfiles(){{}}
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_poll_started_before_switch_cannot_recreate_unread_state():
     polling = _extract_function(PANELS_JS, "startCronPolling")
+    tick = _extract_function(PANELS_JS, "_runCronPollTick")
     reset = _extract_function(PANELS_JS, "_resetCronUnreadForProfileSwitch")
     script = f"""
 let _cronPollSince=10;
@@ -119,6 +123,8 @@ let _cronPollTimer=null;
 let _cronUnreadCount=0;
 let _cronPollGeneration=0;
 const _cronNewJobIds=new Set();
+const _cronPendingToasts=[];
+let _cronPollInFlight=false;
 let intervalCallback=null;
 let resolveApi;
 global.document={{hidden:false}};
@@ -129,6 +135,7 @@ global.t=(key)=>key;
 global.updateCronBadge=()=>{{ _cronUnreadCount=_cronNewJobIds.size; }};
 function _clearCronSessionCompletionUnreadForInactiveProfiles(){{}}
 {polling}
+{tick}
 {reset}
 startCronPolling();
 (async()=>{{
@@ -191,6 +198,7 @@ let _cronPollSince=10;
 let _cronUnreadCount=0;
 let _cronPollGeneration=0;
 const _cronNewJobIds=new Set(['old-cron-job']);
+const _cronPendingToasts=[];
 let renders=0;
 global.S={{activeProfile:'profile-a',activeProfileIsDefault:false}};
 global._allSessions=[];
@@ -261,12 +269,15 @@ function _clearSessionCompletionUnread(sid){{
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_cron_poll_tags_persisted_markers_with_active_profile():
     polling = _extract_function(PANELS_JS, "startCronPolling")
+    tick = _extract_function(PANELS_JS, "_runCronPollTick")
     script = f"""
 let _cronPollSince=10;
 let _cronPollTimer=null;
 let _cronUnreadCount=0;
 let _cronPollGeneration=0;
 const _cronNewJobIds=new Set();
+const _cronPendingToasts=[];
+let _cronPollInFlight=false;
 const markCalls=[];
 let intervalCallback=null;
 global.document={{hidden:false}};
@@ -288,6 +299,7 @@ function _markSessionCompletionUnreadIfBackground(sid, count, meta){{
   markCalls.push([sid, count, meta]);
 }}
 {polling}
+{tick}
 startCronPolling();
 (async()=>{{
   await intervalCallback();
@@ -695,6 +707,7 @@ let _cronPollGeneration=0;
 let _cronPollSince=10;
 let _cronUnreadCount=0;
 const _cronNewJobIds=new Set(['old-job']);
+const _cronPendingToasts=[];
 let _allSessions=[];
 let _allSessionsScope=null;
 let _sidebarReferenceSessions=[];
@@ -715,6 +728,7 @@ const _sessionListSnapshotById=new Map([['old-cron', {{message_count:1, last_mes
 const _sessionListSourceById=new Map();
 global.S={{activeProfile:'profile-a',activeProfileIsDefault:false}};
 global.renderSessionListFromCache=()=>{{}};
+global._repaintSidebarForBackgroundChurn=()=>{{ renderSessionListFromCache(); }};
 global.updateCronBadge=()=>{{ _cronUnreadCount=_cronNewJobIds.size; }};
 function _getSessionViewedCounts(){{ return _sessionViewedCounts; }}
 function _setSessionViewedCount(){{}}
@@ -842,6 +856,7 @@ const _sessionListSnapshotById=new Map([['new-cron', {{message_count:1, last_mes
 const _sessionListSourceById=new Map();
 global.S={{activeProfile:'profile-b',activeProfileIsDefault:false}};
 global.renderSessionListFromCache=()=>{{}};
+global._repaintSidebarForBackgroundChurn=()=>{{ renderSessionListFromCache(); }};
 function _getSessionViewedCounts(){{ return _sessionViewedCounts; }}
 function _setSessionViewedCount(){{}}
 function _getSessionObservedStreaming(){{ return {{}}; }}

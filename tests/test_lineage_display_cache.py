@@ -325,3 +325,21 @@ def test_sessions_without_lineage_do_not_pollute_cache(lineage):
     out = routes._webui_sidecar_lineage_messages_for_display(solo)
     assert len(out) == 1
     assert "lineage_solo" not in routes._lineage_display_cache
+
+
+def test_lineage_cache_copies_preserve_independent_exact_owner_map(lineage):
+    routes, Session, child = lineage
+    cold_owners = {}
+    cold = routes._webui_sidecar_lineage_messages_for_display(child, owner_positions=cold_owners)
+    assert cold_owners == {0: 40, 1: 41}
+    assert cold[41] is not child.messages[1]
+    cold_owners[1] = 0
+    cold[41]["content"] = "caller mutation"
+    warm_owners = {}
+    warm = routes._webui_sidecar_lineage_messages_for_display(child, owner_positions=warm_owners)
+    assert warm_owners == {0: 40, 1: 41}
+    assert warm[41]["content"] == child.messages[1]["content"]
+    # Equal prose never transfers an absent exact owner to another row.
+    lookalike = dict(warm[41])
+    assert routes._display_projected_owner_positions(warm, [lookalike], warm_owners) == {}
+    assert routes._display_projected_owner_positions(warm, [lookalike, warm[41]], warm_owners) == {1: 1}

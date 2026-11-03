@@ -143,7 +143,10 @@ def test_csv_loadCsvInline_called_after_render():
     csv_pos = open_file.find("} else if(ext==='.csv'){")
     generic_pos = open_file.find("} else {\n    // Plain code / text -- but fall back to download if server signals binary")
     branch = open_file[csv_pos:generic_pos]
-    assert "if(renderCsvPreviewContent(path, data.content)) return;" in branch
+    # The CSV branch reports whether it actually rendered a preview: openFile()'s
+    # return value is consumed by openArtifactPath(), which must not treat a
+    # download-only or unreadable file as a successful reveal.
+    assert "if(renderCsvPreviewContent(path, data.content)) return true;" in branch
     assert "renderCodePreviewContent(path, data.content);" in branch
     assert "showPreview('csv');" in WORKSPACE_JS
     assert "$('previewMd').innerHTML=preview.html;" in WORKSPACE_JS

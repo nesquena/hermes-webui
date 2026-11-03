@@ -18,10 +18,10 @@ MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 # An awaited list render that follows the awaited newSession(): on the same line,
 # on the next one, after the guard's closing brace, or behind a typeof check.
 AWAITED_RENDER_AFTER_NEW_SESSION = re.compile(
-    r"await\s+newSession\s*\(\s*\)\s*;?\s*\}?\s*"
+    r"await\s+newSession\s*\([^)]*\)\s*;?\s*\}?\s*"
     r"(?:if\s*\([^)]*\)\s*)?await\s+renderSessionList\s*\("
 )
-NO_SESSION_GUARD = re.compile(r"if\s*\(\s*!\s*S\.session\s*\)\s*\{\s*await\s+newSession\s*\(\s*\)")
+NO_SESSION_GUARD = re.compile(r"if\s*\(\s*!\s*S\.session\s*\)\s*\{\s*await\s+newSession\s*\([^)]*\)")
 
 
 def _send_body():

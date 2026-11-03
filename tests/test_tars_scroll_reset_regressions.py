@@ -200,7 +200,11 @@ def test_pinned_preserve_scroll_uses_bottom_distance_before_viewport_anchor():
     same_frame = _function_body(UI_JS, "function _restoreMessageScrollSnapshotSameFrame")
 
     assert "snapshot.pinned!==true||snapshot.userUnpinned===true" in helper
-    assert "maxTop-Math.max(0,bottom)" in helper
+    # Bounce fix (Sep 6 2026): pinned restore targets the POST-rebuild tail
+    # (maxTop) exactly — the pre-rebuild `bottom` gap is stale after the
+    # rebuild grew content, and restoring to maxTop-bottom raced the follow
+    # writer's bottom snap across paint frames (visible bounce mid-stream).
+    assert "const target=maxTop;" in helper
     assert "_messageUserUnpinned=false;" in helper
     assert "_scrollPinned=true;" in helper
     assert "_nearBottomCount=2;" in helper

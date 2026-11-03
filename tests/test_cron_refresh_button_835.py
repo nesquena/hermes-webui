@@ -41,8 +41,15 @@ class TestCronRefreshButtonHtml:
         m = re.search(r'<button[^>]*id="cronRefreshBtn"[^>]*>', html)
         assert m
         tag = m.group(0)
-        assert 'loadCrons(true)' in tag, (
-            "#cronRefreshBtn must call loadCrons(true) to enable the dim-while-fetching animation"
+        # #7685 UX must-fix 3: the Tasks Refresh button reloads whichever
+        # subtab is active — Scripts refreshes the script list, Jobs the cron
+        # list — so the handler moved to refreshTasksPanel(). The dim-while-
+        # fetching animation must still be enabled for the cron list.
+        assert "loadCrons(true)" in tag or "refreshTasksPanel()" in tag, (
+            "#cronRefreshBtn must enable the dim-while-fetching animation: "
+            "either call loadCrons(true) directly or go through "
+            "refreshTasksPanel(), which passes animate=true to the active "
+            "subtab's loader"
         )
 
     def test_refresh_button_sits_next_to_new_job_button(self):
@@ -65,7 +72,7 @@ class TestLoadCronsAnimateFlag:
 
     def test_load_crons_accepts_animate_param(self):
         js = _read("static/panels.js")
-        assert re.search(r'async function loadCrons\s*\(\s*animate\s*\)', js), (
+        assert re.search(r'async function loadCrons\s*\(\s*animate\s*(?:,\s*options\s*)?\)', js), (
             "loadCrons must accept an `animate` parameter"
         )
 

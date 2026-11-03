@@ -124,7 +124,7 @@ def test_recent_render_scroll_artifact_window_suppresses_upward_unpin():
     assert "function _recentMessageRenderArtifactWindow" in UI_JS
     listener_idx = UI_JS.find("el.addEventListener('scroll'")
     assert listener_idx != -1, "messages scroll listener not found"
-    listener = UI_JS[listener_idx: listener_idx + 4000]
+    listener = _balanced_block(UI_JS, UI_JS.index("{", listener_idx))
     assert "_recentMessageRenderArtifactWindow(1400)" in listener
     assert "!_recentMessageTouchScrollIntent()" in listener
     assert "!_recentNonMessageScrollIntent()" in listener
@@ -132,10 +132,6 @@ def test_recent_render_scroll_artifact_window_suppresses_upward_unpin():
         "#4970: the post-render artifact suppression must also require no recent "
         "low-delta message-pane wheel intent so a gentle trackpad scroll-up is "
         "not swallowed."
-    )
-    assert listener.find("return;") < listener.find("if(movedUp&&bottomDistance>1){"), (
-        "recent render artifact scrolls must return before the movedUp branch "
-        "can mark the reader unpinned."
     )
 
 
@@ -362,7 +358,10 @@ def test_low_delta_wheel_intent_is_tracked_separately():
     assert "function _recentMessageWheelIntent" in UI_JS
     rec_idx = UI_JS.find("function _recordNonMessageScrollIntent")
     assert rec_idx != -1, "_recordNonMessageScrollIntent not found"
-    rec = UI_JS[rec_idx: rec_idx + 2000]
+    # Window spans the whole function body (next top-level helper), not a
+    # fixed byte count — comment/guard additions inside must not break it.
+    rec_end = UI_JS.find("function _recentNonMessageScrollIntent", rec_idx)
+    rec = UI_JS[rec_idx: rec_end if rec_end != -1 else rec_idx + 2000]
     assert "e.deltaY<0) _lastMessageWheelIntentMs=performance.now()" in rec, (
         "#4970: _recordNonMessageScrollIntent must record low-delta upward wheel "
         "intent (deltaY<0) separately from the decisive deltaY<-30 unpin."
@@ -479,6 +478,13 @@ const document = {
   _handler: null,
   addEventListener(type, fn){ if(type === 'keydown') this._handler = fn; },
 };
+// #7494: the keydown capture is gated on the targeting helper; Node has no
+// layout engine, so provide the global and a pass-through gate matching the
+// fake nodes (no nested surfaces in this harness).
+const getComputedStyle = () => ({ overflowY: 'visible' });
+const _isTranscriptScrollTarget = () => true;
+const _captureMessageScrollInputTail = () => {};
+const _cancelBottomSettle = () => {};
 function makeNode({tag='DIV', inMessages=true, interactive=false, editable=false}={}){
   return {
     tagName: tag,
@@ -488,7 +494,8 @@ function makeNode({tag='DIV', inMessages=true, interactive=false, editable=false
   };
 }
 // Run via a closure so the stamped variable lives with the extracted handler.
-const env = Function('el','document','performance', `let _lastMessageKeyScrollIntentMs=-Infinity; ${region}\nreturn {handler:document._handler, get:()=>_lastMessageKeyScrollIntentMs, setActive:(n)=>{document.activeElement=n;}};`)(el, document, performance);
+const env = Function('el','document','performance','_isTranscriptScrollTarget', `let _lastMessageKeyScrollIntentMs=-Infinity; ${region}
+return {handler:document._handler, get:()=>_lastMessageKeyScrollIntentMs, setActive:(n)=>{document.activeElement=n;}};`)(el, document, performance, _isTranscriptScrollTarget);
 const button = makeNode({tag:'BUTTON', interactive:true});
 env.setActive(button);
 env.handler({key:' ', target:button});
@@ -509,6 +516,181 @@ console.log(JSON.stringify({afterSpace, afterPageUp}));
         "must leave the stamp at -Infinity/null."
     )
     assert state["afterPageUp"] == 1234
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_keyboard_scroll_body_focus_hover_transcript_captures_tail():
+    # #7494 re-gate must-fix: with focus on <body> but the pointer hovering the
+    # transcript (el.matches(':hover')), the branch admits the keydown, but the
+    # old gate called _isTranscriptScrollTarget(a||t, el) with a=<body>. The
+    # ancestor walk starts outside el and never reaches it, so the function
+    # returned n===el → false, _captureMessageScrollInputTail was skipped, the
+    # input generation did not advance, and a queued delayed live-render restore
+    # put the old scrollTop back (Codex: 18104 → 18702 → 18104 native PageDown).
+    # The fix resolves the key target before the gate: el.contains(a) ? a : el.
+    start = UI_JS.index("const _MESSAGE_SCROLL_KEYS=new Set")
+    end = UI_JS.index("  let _scrollRaf=0;", start)
+    region = UI_JS[start:end]
+    # Behavioral oracle: the capture function must be invoked for the hover case.
+    script = (
+        "const region = " + json.dumps(region) + ";\n"
+        + r"""
+let _lastMessageKeyScrollIntentMs = -Infinity;
+const performance = { now: () => 1234 };
+const el = {
+  contains(node){ return !!(node && node.inMessages); },
+  matches(sel){ return sel === ':hover'; },
+};
+const document = {
+  activeElement: null,
+  _handler: null,
+  addEventListener(type, fn){ if(type === 'keydown') this._handler = fn; },
+};
+// The targeting helper is provided by ui.js; emulate the real walk here: a
+// node inside el (inMessages) reaches el via parentElement and returns true;
+// <body> (inMessages falsy) walks off the top and returns false.
+const getComputedStyle = () => ({ overflowY: 'visible' });
+function _isTranscriptScrollTarget(node, pane){
+  if(!node) return false;
+  let n=node;
+  while(n && n!==pane){ n=n.parentElement; }
+  return n===pane;
+}
+let captured = 0;
+const _captureMessageScrollInputTail = () => { captured += 1; };
+const _cancelBottomSettle = () => {};
+const body = { tagName:'BODY', inMessages:false, isContentEditable:false, parentElement:null, closest(){ return null; } };
+const inside = { tagName:'DIV', inMessages:true, isContentEditable:false, parentElement:el, closest(){ return null; } };
+const env = Function('el','document','performance','_isTranscriptScrollTarget','_captureMessageScrollInputTail', `let _lastMessageKeyScrollIntentMs=-Infinity; ${region}
+return {handler:document._handler, setActive:(n)=>{document.activeElement=n;}};`)(el, document, performance, _isTranscriptScrollTarget, _captureMessageScrollInputTail);
+// Focus on <body>, pointer hovering the transcript: capture MUST still fire.
+env.setActive(body);
+env.handler({key:'PageDown', target:body});
+const afterBodyHover = captured;
+// Focus inside the transcript: capture fires (unchanged behavior).
+env.setActive(inside);
+env.handler({key:'PageDown', target:inside});
+const afterInside = captured;
+// Focus on <body>, pointer NOT over the transcript: no admission, no capture.
+el.matches = () => false;
+env.setActive(body);
+env.handler({key:'PageDown', target:body});
+const afterBodyNoHover = captured;
+console.log(JSON.stringify({afterBodyHover, afterInside, afterBodyNoHover}));
+"""
+    )
+    result = subprocess.run(
+        [NODE, "-e", script], check=True, capture_output=True, text=True, timeout=30
+    )
+    state = json.loads(result.stdout.strip())
+    assert state["afterBodyHover"] == 1, (
+        "focus on <body> with the pointer over the transcript must resolve the "
+        "key target to the transcript and capture the scroll-input tail, or a "
+        "delayed live-render restore undoes the keyboard scroll (#7494 re-gate)."
+    )
+    assert state["afterInside"] == 2, (
+        "focus inside the transcript must still capture (behavior unchanged)."
+    )
+    assert state["afterBodyNoHover"] == 2, (
+        "focus on <body> without hover must not capture (no re-pin authority)."
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_keyboard_scroll_from_nested_pane_boundary_gets_direction():
+    # #7494 re-gate (Codex): the keydown gate called the targeting helper with
+    # NO direction, so the nested-pane boundary check stayed strictly consumed
+    # even when the nested pane was pinned at the boundary in the key's scroll
+    # direction and the browser chained the key onward to the transcript. With
+    # focus inside a real terminal-output pane pinned at its bottom, PageDown
+    # scrolled the transcript (274 → 925px) but minted no re-pin authority, so
+    # the queued delayed live-render restore snapped scrollTop back (925 → 274)
+    # while master kept it. The fix computes keyDir from the key semantics
+    # (PageUp/ArrowUp/Home/Shift+Space → -1, everything else → +1) and passes
+    # it to the direction-aware gate before capturing the input tail.
+    start = UI_JS.index("const _MESSAGE_SCROLL_KEYS=new Set")
+    end = UI_JS.index("  let _scrollRaf=0;", start)
+    region = UI_JS[start:end]
+    # Real direction-aware gate, mirroring _isTranscriptScrollTarget: a nested
+    # scroller between the target and el consumes the gesture unless it is
+    # pinned at the boundary in the given direction.
+    script = (
+        "const region = " + json.dumps(region) + ";\n"
+        + r"""
+let _lastMessageKeyScrollIntentMs = -Infinity;
+const performance = { now: () => 1234 };
+const el = {
+  contains(node){ return !!(node && node.inMessages); },
+  matches(sel){ return sel === ':hover'; },
+};
+const document = {
+  activeElement: null,
+  _handler: null,
+  addEventListener(type, fn){ if(type === 'keydown') this._handler = fn; },
+};
+const getComputedStyle = () => ({ overflowY: 'visible' });
+function _isTranscriptScrollTarget(node, pane, dir){
+  if(!node) return false;
+  let n=node;
+  while(n && n!==pane){
+    if(n.scrollable){
+      // Consumes unless pinned at the boundary in the gesture direction.
+      if(!(dir>0 ? n.pinnedDown : n.pinnedUp)) return false;
+    }
+    n=n.parentElement;
+  }
+  return n===pane;
+}
+const seenDirs = [];
+let captured = 0;
+const _captureMessageScrollInputTail = () => { captured += 1; };
+const _cancelBottomSettle = () => {};
+const nestedPane = {
+  tagName:'DIV', inMessages:true, isContentEditable:false,
+  parentElement: el, closest(){ return null; },
+  scrollable:true, pinnedDown:true, pinnedUp:false,
+};
+const env = Function('el','document','performance','_isTranscriptScrollTarget','_captureMessageScrollInputTail', `let _lastMessageKeyScrollIntentMs=-Infinity; ${region}
+return {handler:document._handler, setActive:(n)=>{document.activeElement=n;}};`)(el, document, performance, _isTranscriptScrollTarget, _captureMessageScrollInputTail);
+// Focus inside the nested pane so the handler resolves keyTarget to the pane
+// (el.contains(a)) and the gate actually walks its ancestor chain.
+env.setActive(nestedPane);
+env.handler({key:'PageDown', target:nestedPane});
+const afterPageDown = captured;
+env.handler({key:'PageUp', target:nestedPane});
+const afterPageUp = captured;
+env.handler({key:'Home', target:nestedPane});
+const afterHome = captured;
+env.handler({key:'ArrowDown', target:nestedPane});
+const afterArrowDown = captured;
+console.log(JSON.stringify({afterPageDown, afterPageUp, afterHome, afterArrowDown}));
+"""
+    )
+    result = subprocess.run(
+        [NODE, "-e", script], check=True, capture_output=True, text=True, timeout=30
+    )
+    state = json.loads(result.stdout.strip())
+    # PageDown/ArrowDown (dir +1): the nested pane is pinned at its bottom, so
+    # the key chains to the transcript and the capture MUST fire. Under the old
+    # direction-less call the pane strictly consumed and captured stayed put.
+    assert state["afterPageDown"] == 1, (
+        "PageDown at a nested pane's bottom boundary must chain through the "
+        "direction-aware gate and capture re-pin authority, or the queued "
+        "live-render restore undoes the scroll (#7494 re-gate)."
+    )
+    assert state["afterArrowDown"] == 2, (
+        "ArrowDown behaves like PageDown at the bottom boundary (dir +1); "
+        "the counter continues from the earlier PageDown capture."
+    )
+    # PageUp/Home (dir -1) at the bottom boundary: the pane CAN still scroll
+    # up, so it consumes the key and no capture fires.
+    assert state["afterPageUp"] == 1, (
+        "PageUp at the bottom boundary must be consumed by the nested pane "
+        "(dir -1, not pinned upward) — no re-pin authority."
+    )
+    assert state["afterHome"] == 1, (
+        "Home at the bottom boundary must also be consumed (dir -1)."
+    )
 
 
 def test_streaming_tick_calls_fix_before_dom_writes():

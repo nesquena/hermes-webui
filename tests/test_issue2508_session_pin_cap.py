@@ -80,6 +80,7 @@ def _configure_pin_route(monkeypatch, sessions, persisted, source, active_profil
     monkeypatch.setattr(routes, "SESSIONS", OrderedDict(by_id if source == "memory" else {}))
     monkeypatch.setattr(routes, "all_sessions", lambda: list(persisted) if source == "persisted" else [])
     monkeypatch.setattr(routes, "get_session", lambda sid, **_: by_id[sid])
+    monkeypatch.setattr(routes, "get_session_profile_readonly", lambda sid: by_id[sid].profile)
     monkeypatch.setattr(routes, "list_profiles_api", lambda **_: [
         {"name": name, "is_default": name == "default"} for name in names])
     monkeypatch.setattr(profiles, "_root_profile_name_cache", set(root_names or {"default"}))
@@ -513,7 +514,9 @@ def test_session_rows_open_action_menu_from_right_click():
     assert 'el.oncontextmenu=(e)=>{' in SESSIONS_JS
     context_idx = SESSIONS_JS.find('el.oncontextmenu=(e)=>{')
     assert context_idx != -1
-    block = SESSIONS_JS[context_idx:SESSIONS_JS.find('};', context_idx) + 2]
+    context_end = SESSIONS_JS.find('// Use release events', context_idx)
+    assert context_end != -1
+    block = SESSIONS_JS[context_idx:context_end]
     assert 'e.preventDefault();' in block
     assert 'e.stopPropagation();' in block
     assert '_openSessionActionMenu(s, actions||el);' in block

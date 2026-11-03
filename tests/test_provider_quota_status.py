@@ -3,21 +3,29 @@
 from __future__ import annotations
 
 import base64
+import http.client
+import http.server
 import json
 import inspect
 import os
 import re
+import shutil
+import subprocess
 import sys
 import threading
 import types
 import urllib.error
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import api.config as config
 import api.profiles as profiles
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -32,8 +40,13 @@ class _FakeResponse:
     def __exit__(self, *exc):
         return False
 
-    def read(self):
-        return self._payload
+    def read(self, size=-1):
+        return self._payload if size is None or size < 0 else self._payload[:size]
+
+
+def _patch_bearer_quota_open(monkeypatch, providers, urlopen):
+    """Usage-API quotas go through a no-redirect opener, not urllib.request.urlopen."""
+    monkeypatch.setattr(providers, "_BEARER_QUOTA_OPENER", SimpleNamespace(open=urlopen))
 
 
 def _with_config(model=None, providers=None):
@@ -159,6 +172,725 @@ def test_openrouter_quota_invalid_key_and_timeout_are_sanitized(monkeypatch, tmp
         _restore_config(old_cfg, old_mtime)
 
 
+def test_commandcode_quota_exposes_sanitized_windows(monkeypatch, tmp_path):
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setenv("COMMANDCODE_API_KEY", "private-commandcode-key")
+    old_cfg, old_mtime = _with_config(model={"provider": "commandcode"})
+    import api.providers as providers
+
+    # commandcode's env var comes from the agent's bundled provider plugin; pin it so the test
+    # does not depend on hermes-agent being importable.
+    real_env_var_for = providers._provider_env_var_for
+    monkeypatch.setattr(
+        providers, "_provider_env_var_for",
+        lambda pid: "COMMANDCODE_API_KEY" if pid == "commandcode" else real_env_var_for(pid),
+    )
+
+    def fake_urlopen(req, timeout):
+        assert req.full_url == "https://api.commandcode.ai/alpha/billing/credits"
+        assert req.headers["Authorization"] == "Bearer private-commandcode-key"
+        assert timeout == 3.0
+        return _FakeResponse(json.dumps({
+            "credits": {"monthlyCredits": 7, "purchasedCredits": 2, "freeCredits": 1, "secret": "no"},
+            "windowLimits": {
+                "fiveHour": {"used": 3, "cap": 12, "resetAt": "2030-03-17T17:30:00Z"},
+                "weekly": {"used": 12, "cap": 30, "resetAt": "2030-03-24T12:30:00Z"},
+            },
+        }).encode())
+
+    _patch_bearer_quota_open(monkeypatch, providers, fake_urlopen)
+    monkeypatch.setattr(providers, "_local_pool_snapshot", lambda pid: None)
+    try:
+        result = providers.get_provider_quota()
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    assert result["status"] == "available"
+    assert [w["remaining_percent"] for w in result["account_limits"]["windows"]] == [75.0, 60.0]
+    assert result["account_limits"]["details"] == ["Credits remaining: $10.00"]
+    assert "private-commandcode-key" not in repr(result)
+    assert "secret" not in repr(result)
+
+
+def test_opencode_go_quota_accepts_triple_window_response(monkeypatch, tmp_path):
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "private-opencode-key")
+    old_cfg, old_mtime = _with_config(model={"provider": "opencode-go"})
+    import api.providers as providers
+
+    def fake_urlopen(req, timeout):
+        assert req.full_url == "https://opencode.ai/zen/go/v1/usage"
+        assert req.headers["User-agent"] == "curl/8.5.0"
+        return _FakeResponse(json.dumps({"usage": {
+            "rolling": {"percent": 50, "status": "ok", "resetsAt": "2030-03-17T17:30:00Z"},
+            "weekly": {"percent": 30, "status": "ok", "resetsAt": "2030-03-24T12:30:00Z"},
+            "monthly": {"percent": 25, "status": "ok", "resetsAt": "2030-04-01T00:00:00Z"},
+        }}).encode())
+
+    _patch_bearer_quota_open(monkeypatch, providers, fake_urlopen)
+    monkeypatch.setattr(providers, "_local_pool_snapshot", lambda pid: None)
+    try:
+        result = providers.get_provider_quota()
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    assert result["status"] == "available"
+    assert [w["remaining_percent"] for w in result["account_limits"]["windows"]] == [50.0, 70.0, 75.0]
+    assert "private-opencode-key" not in repr(result)
+
+
+
+# ── usage-API providers: untrusted numbers and failure statuses ─────────────
+
+_USAGE_API_KEYS = {
+    "commandcode": "COMMANDCODE_API_KEY",
+    "commandcode-anthropic": "COMMANDCODE_API_KEY",
+    "opencode-go": "OPENCODE_GO_API_KEY",
+}
+# Shared bridge keys that also satisfy these providers (_PROVIDER_ENV_VAR_ALIASES).
+_USAGE_API_KEY_ALIASES = ("OPENCODE_API_KEY",)
+
+
+_REAL_POOL = object()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_credential_pool_cache():
+    """The pool cache is process-wide and lives 24h: never let one test's pool reach another."""
+    config._CREDENTIAL_POOL_CACHE.clear()
+    yield
+    config._CREDENTIAL_POOL_CACHE.clear()
+
+
+def _usage_api_quota(monkeypatch, tmp_path, provider, urlopen, *, key="private-usage-key", pool=None):
+    """Run get_provider_quota() for a usage-API provider.
+
+    ``pool`` is the local credential-pool snapshot: None pins "no pool" (the result
+    must not depend on whether the Agent is importable, which seeds a pool entry from
+    the env key), a snapshot pins that pool, and _REAL_POOL leaves the real lookup.
+    """
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    for env_var in (*_USAGE_API_KEYS.values(), *_USAGE_API_KEY_ALIASES):
+        monkeypatch.delenv(env_var, raising=False)
+    if key:
+        monkeypatch.setenv(_USAGE_API_KEYS[provider], key)
+    old_cfg, old_mtime = _with_config(model={"provider": provider})
+    import api.providers as providers
+
+    real_env_var_for = providers._provider_env_var_for
+    monkeypatch.setattr(
+        providers, "_provider_env_var_for",
+        lambda pid: _USAGE_API_KEYS.get(pid) or real_env_var_for(pid),
+    )
+    _patch_bearer_quota_open(monkeypatch, providers, urlopen)
+    if pool is not _REAL_POOL:
+        monkeypatch.setattr(providers, "_local_pool_snapshot", lambda pid: pool)
+    try:
+        return providers.get_provider_quota()
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+
+def _respond(body):
+    raw = body if isinstance(body, bytes) else body.encode()
+    return lambda req, timeout: _FakeResponse(raw)
+
+
+def _assert_strict_json_safe(result):
+    text = json.dumps(result, allow_nan=False)  # raises on NaN/Infinity floats
+    assert not re.search(r"\b(nan|inf|infinity)\b", text, re.IGNORECASE), text
+
+
+_NON_FINITE = ['"NaN"', '"Infinity"', '"-Infinity"', "NaN", "Infinity", "-Infinity", "1" + "0" * 400]
+
+
+@pytest.mark.parametrize("bad", _NON_FINITE)
+def test_opencode_go_quota_drops_non_finite_percent(monkeypatch, tmp_path, bad):
+    body = (
+        '{"usage": {"rolling": {"percent": %s}, "weekly": {"percent": 30},'
+        ' "monthly": {"percent": -5}}}' % bad
+    )
+    result = _usage_api_quota(monkeypatch, tmp_path, "opencode-go", _respond(body))
+
+    assert result["status"] == "available"
+    assert [w["label"] for w in result["account_limits"]["windows"]] == ["Weekly"]
+    _assert_strict_json_safe(result)
+
+
+@pytest.mark.parametrize("bad", _NON_FINITE)
+@pytest.mark.parametrize("field", ["used", "cap"])
+def test_commandcode_quota_drops_non_finite_window_numbers(monkeypatch, tmp_path, bad, field):
+    five_hour = {"used": "3", "cap": "12"}
+    five_hour[field] = "@BAD@"
+    body = json.dumps({
+        "credits": {"monthlyCredits": "@BAD@", "purchasedCredits": 2},
+        "windowLimits": {"fiveHour": five_hour, "weekly": {"used": 12, "cap": 30}},
+    }).replace('"@BAD@"', bad)
+    result = _usage_api_quota(monkeypatch, tmp_path, "commandcode", _respond(body))
+
+    assert result["status"] == "available"
+    windows = result["account_limits"]["windows"]
+    assert [w["label"] for w in windows] == ["Weekly"]
+    assert result["account_limits"]["details"] == ["Credits remaining: $2.00"]
+    _assert_strict_json_safe(result)
+
+
+def test_commandcode_quota_rejects_negative_used(monkeypatch, tmp_path):
+    body = json.dumps({"windowLimits": {
+        "fiveHour": {"used": -4, "cap": 12}, "weekly": {"used": 12, "cap": 30}}})
+    result = _usage_api_quota(monkeypatch, tmp_path, "commandcode", _respond(body))
+
+    assert [w["label"] for w in result["account_limits"]["windows"]] == ["Weekly"]
+    assert "-4" not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    "provider, body",
+    [
+        ("opencode-go", '{"usage": {"rolling": {"percent": "NaN"}, "weekly": {"percent": Infinity}}}'),
+        ("commandcode", '{"windowLimits": {"fiveHour": {"used": NaN, "cap": 12},'
+                        ' "weekly": {"used": 1, "cap": "Infinity"}}}'),
+    ],
+)
+def test_usage_api_quota_all_windows_invalid_is_unavailable(monkeypatch, tmp_path, provider, body):
+    result = _usage_api_quota(monkeypatch, tmp_path, provider, _respond(body))
+
+    assert result["status"] == "unavailable"
+    assert result["account_limits"] is None
+    _assert_strict_json_safe(result)
+
+
+
+def test_commandcode_quota_omits_credit_detail_when_the_sum_overflows(monkeypatch, tmp_path):
+    body = json.dumps({
+        "credits": {"monthlyCredits": 1e308, "purchasedCredits": 1e308},
+        "windowLimits": {"weekly": {"used": 12, "cap": 30}},
+    })
+    result = _usage_api_quota(monkeypatch, tmp_path, "commandcode", _respond(body))
+
+    assert result["status"] == "available"
+    assert result["account_limits"]["details"] == []
+    _assert_strict_json_safe(result)
+
+
+@pytest.mark.parametrize(
+    "provider, body",
+    [
+        ("commandcode", '{"windowLimits": {"weekly": {"used": 12, "cap": 30, "resetAt": 1%s}}}' % ("0" * 400)),
+        ("opencode-go", '{"usage": {"weekly": {"percent": 30, "resetsAt": 1%s}}}' % ("0" * 400)),
+    ],
+)
+def test_usage_api_quota_oversized_reset_keeps_the_window(monkeypatch, tmp_path, provider, body):
+    result = _usage_api_quota(monkeypatch, tmp_path, provider, _respond(body))
+
+    assert result["status"] == "available"
+    [window] = result["account_limits"]["windows"]
+    assert window["label"] == "Weekly"
+    assert window["reset_at"] is None
+    _assert_strict_json_safe(result)
+
+@pytest.mark.parametrize("provider", sorted(_USAGE_API_KEYS))
+def test_usage_api_quota_without_key_reports_no_key_and_skips_fetch(monkeypatch, tmp_path, provider):
+    def fail_urlopen(req, timeout):
+        raise AssertionError("must not fetch without a key")
+
+    result = _usage_api_quota(monkeypatch, tmp_path, provider, fail_urlopen, key=None)
+
+    assert result["status"] == "no_key"
+    assert result["account_limits"] is None
+
+
+def _raiser(exc):
+    def urlopen(req, timeout):
+        raise exc
+    return urlopen
+
+
+def _http_error(code):
+    return urllib.error.HTTPError("https://example.invalid", code, "err", {}, BytesIO(b"private body"))
+
+
+@pytest.mark.parametrize("provider", sorted(_USAGE_API_KEYS))
+@pytest.mark.parametrize(
+    "urlopen, expected",
+    [
+        (lambda: _raiser(_http_error(401)), "invalid_key"),
+        (lambda: _raiser(_http_error(403)), "unavailable"),
+        (lambda: _raiser(_http_error(302)), "unavailable"),
+        (lambda: _raiser(_http_error(500)), "unavailable"),
+        (lambda: _raiser(TimeoutError("timed out")), "unavailable"),
+        (lambda: _raiser(urllib.error.URLError("down")), "unavailable"),
+        (lambda: _raiser(http.client.BadStatusLine("garbage")), "unavailable"),
+        (lambda: _raiser(http.client.IncompleteRead(b"private body")), "unavailable"),
+        (lambda: _respond(b'{"pad": "' + b"x" * (256 * 1024) + b'"}'), "unavailable"),
+        (lambda: _respond(b"[" * 100_000 + b"]" * 100_000), "unavailable"),
+        (lambda: _respond(b"not json {"), "unavailable"),
+        (lambda: _respond(b'{"unexpected": true}'), "unavailable"),
+    ],
+    ids=[
+        "401", "403", "302", "500", "timeout", "urlerror", "bad-status-line", "incomplete-read",
+        "oversized-body", "nested-json", "malformed-json", "unrecognized-shape",
+    ],
+)
+def test_usage_api_quota_failures_map_to_sanitized_status(monkeypatch, tmp_path, provider, urlopen, expected):
+    result = _usage_api_quota(monkeypatch, tmp_path, provider, urlopen(), key="private-usage-key")
+
+    assert result["status"] == expected
+    assert result["ok"] is False
+    assert result["account_limits"] is None
+    assert "private-usage-key" not in repr(result)
+    assert "private body" not in repr(result)
+
+
+_COMMANDCODE_BODY = json.dumps({"windowLimits": {"weekly": {"used": 12, "cap": 30}}})
+_OPENCODE_GO_BODY = json.dumps({"usage": {"weekly": {"percent": 30}}})
+_USAGE_API_BODIES = {
+    "commandcode": _COMMANDCODE_BODY,
+    "commandcode-anthropic": _COMMANDCODE_BODY,
+    "opencode-go": _OPENCODE_GO_BODY,
+}
+
+
+def _pool_snapshot(*statuses):
+    """A local credential-pool snapshot shaped like _local_pool_snapshot()'s result."""
+    rows = [{"label": f"entry-{i}", "status": status, "windows": [], "details": []}
+            for i, status in enumerate(statuses, start=1)]
+    available = sum(1 for status in statuses if status == "available")
+    return SimpleNamespace(
+        provider="pooled", source="credential_pool", title="Credential pool", plan=None,
+        windows=(), details=(f"{available}/{len(rows)} credentials available",),
+        available=bool(available), unavailable_reason=None, fetched_at=None,
+        pool={"total_credentials": len(rows), "available_credentials": available, "credentials": rows},
+    )
+
+
+@pytest.mark.parametrize("provider", sorted(_USAGE_API_KEYS))
+def test_usage_api_quota_success_keeps_the_credential_pool(monkeypatch, tmp_path, provider):
+    result = _usage_api_quota(
+        monkeypatch, tmp_path, provider, _respond(_USAGE_API_BODIES[provider]),
+        pool=_pool_snapshot("available", "exhausted"),
+    )
+
+    assert result["status"] == "available"
+    assert [w["label"] for w in result["account_limits"]["windows"]] == ["Weekly"]
+    assert result["account_limits"]["source"] == "usage_api"
+    assert result["account_limits"]["pool"]["total_credentials"] == 2
+    assert [row["status"] for row in result["account_limits"]["pool"]["credentials"]] == ["available", "exhausted"]
+
+
+@pytest.mark.parametrize("provider", sorted(_USAGE_API_KEYS))
+@pytest.mark.parametrize(
+    "urlopen",
+    [
+        lambda: _raiser(_http_error(403)), lambda: _raiser(_http_error(500)),
+        lambda: _raiser(TimeoutError("timed out")), lambda: _raiser(urllib.error.URLError("down")),
+        lambda: _respond(b"not json {"), lambda: _respond(b"[" * 100_000 + b"]" * 100_000),
+        # Parsed, but not the provider's quota document: an error envelope or unknown
+        # shape (also what an outage answering HTTP 200 looks like) is not an answer.
+        lambda: _respond(b'{"error": "temporarily unavailable"}'), lambda: _respond(b"[]"), lambda: _respond(b"null"),
+    ],
+    ids=[
+        "403", "500", "timeout", "urlerror", "malformed-json", "nested-json",
+        "error-envelope", "json-list", "json-null",
+    ],
+)
+def test_usage_api_quota_transient_failure_falls_through_to_the_credential_pool(monkeypatch, tmp_path, provider, urlopen):
+    result = _usage_api_quota(
+        monkeypatch, tmp_path, provider, urlopen(), pool=_pool_snapshot("available", "exhausted"),
+    )
+
+    assert result["status"] == "available"
+    assert result["ok"] is True
+    assert result["account_limits"]["pool"]["total_credentials"] == 2
+    assert "credential pool" in result["message"]
+    assert "private-usage-key" not in repr(result)
+
+
+@pytest.mark.parametrize("provider", sorted(_USAGE_API_KEYS))
+@pytest.mark.parametrize(
+    "urlopen, expected",
+    [
+        (lambda: _raiser(_http_error(401)), "invalid_key"),
+        (lambda: _respond(b'{"usage": {"weekly": {"percent": "NaN"}}, "windowLimits": {"weekly": {"used": -1, "cap": 30}}}'), "unavailable"),
+    ],
+    ids=["401", "all-windows-invalid"],
+)
+def test_usage_api_quota_definitive_failure_is_reported_next_to_the_pool(monkeypatch, tmp_path, provider, urlopen, expected):
+    """A rejected key or an answer with no usable window must not be hidden behind an available pool."""
+    result = _usage_api_quota(
+        monkeypatch, tmp_path, provider, urlopen(), pool=_pool_snapshot("available", "exhausted"),
+    )
+
+    assert result["status"] == expected
+    assert result["ok"] is False
+    assert result["account_limits"]["pool"]["total_credentials"] == 2
+    assert result["account_limits"]["windows"] == []
+    assert "private-usage-key" not in repr(result)
+
+
+@pytest.mark.parametrize("provider", sorted(_USAGE_API_KEYS))
+@pytest.mark.parametrize("pool", [None, "pooled"])
+@pytest.mark.parametrize(
+    "urlopen, expected",
+    [
+        (lambda: _raiser(_http_error(401)), "rejected the configured API key. Update the key in the provider card below."),
+        (lambda: _respond(b'{"usage": {"weekly": {"percent": "NaN"}}, "windowLimits": {"weekly": {"used": -1, "cap": 30}}}'), "returned no usable quota windows."),
+    ],
+    ids=["401", "all-windows-invalid"],
+)
+def test_usage_api_quota_definitive_failure_message_says_what_happened(monkeypatch, tmp_path, provider, pool, urlopen, expected):
+    result = _usage_api_quota(
+        monkeypatch, tmp_path, provider, urlopen(), pool=_pool_snapshot("available") if pool else None,
+    )
+
+    assert expected in result["message"]
+    assert "temporarily unavailable" not in result["message"]
+    assert "private-usage-key" not in repr(result)
+
+
+@pytest.mark.parametrize("provider", sorted(_USAGE_API_KEYS))
+def test_usage_api_quota_transient_failure_without_a_pool_stays_temporarily_unavailable(monkeypatch, tmp_path, provider):
+    result = _usage_api_quota(monkeypatch, tmp_path, provider, _raiser(_http_error(500)))
+
+    assert result["status"] == "unavailable"
+    assert result["message"].endswith("quota status is temporarily unavailable.")
+
+
+def _install_env_seeding_agent_pool(monkeypatch, provider):
+    """Stand in for the Agent's credential pool, which seeds one entry from the provider env key.
+
+    This models the production state for a user with a single API key. The WebUI side
+    is real (_local_pool_snapshot() -> _pool_entry_payloads() -> load_pool(), with its
+    cache); the Agent's own seeding is stubbed, so this does not prove Agent behaviour.
+    """
+    calls = []
+
+    def load_pool(pid):
+        calls.append(pid)
+        # Only the provider under test has a pool, and only while its env key is set.
+        if pid != provider or not os.environ.get(_USAGE_API_KEYS[provider]):
+            return None
+        entry = SimpleNamespace(
+            label="env", source=f"env:{_USAGE_API_KEYS[provider]}", key_source="", last_status="ok",
+            last_status_at=None, last_error_code=None, last_error_reset_at=None,
+        )
+        return SimpleNamespace(entries=lambda: [entry])
+
+    if "agent" not in sys.modules:
+        package = types.ModuleType("agent")
+        package.__path__ = []
+        monkeypatch.setitem(sys.modules, "agent", package)
+    module = types.ModuleType("agent.credential_pool")
+    module.load_pool = load_pool
+    monkeypatch.setitem(sys.modules, "agent.credential_pool", module)
+    return calls
+
+
+@pytest.mark.parametrize("provider", sorted(_USAGE_API_KEYS))
+@pytest.mark.parametrize(
+    "urlopen, expected",
+    [
+        (lambda: _raiser(_http_error(401)), "invalid_key"),
+        (lambda: _respond(b'{"usage": {"weekly": {"percent": "NaN"}}, "windowLimits": {"weekly": {"used": -1, "cap": 30}}}'), "unavailable"),
+        (lambda: _respond(b'{"unexpected": true}'), "available"),
+        (lambda: _raiser(TimeoutError("timed out")), "available"),
+    ],
+    ids=["401", "all-windows-invalid", "unrecognized-shape", "timeout"],
+)
+def test_usage_api_quota_with_a_single_env_seeded_pool_entry(monkeypatch, tmp_path, provider, urlopen, expected):
+    """Real pool path, one env-seeded key: a 401 is invalid_key, only a transient failure shows the pool."""
+    calls = _install_env_seeding_agent_pool(monkeypatch, provider)
+
+    result = _usage_api_quota(monkeypatch, tmp_path, provider, urlopen(), pool=_REAL_POOL)
+
+    assert calls == [provider], "the real credential-pool lookup must run once, for this provider"
+    assert (config._credential_pool_profile_tag(), provider) in config._CREDENTIAL_POOL_CACHE
+    assert result["status"] == expected
+    assert result["account_limits"]["pool"]["total_credentials"] == 1
+    assert "private-usage-key" not in repr(result)
+
+
+def test_usage_api_reset_rejects_booleans():
+    import api.providers as providers
+
+    assert providers._usage_api_reset_at(True) is None
+    assert providers._usage_api_reset_at(False) is None
+    assert providers._usage_api_reset_at(1_900_000_000) == "2030-03-17T17:46:40Z"
+
+
+@pytest.mark.parametrize("provider", sorted(_USAGE_API_KEYS))
+def test_usage_api_quota_pool_without_a_key_shows_the_pool_and_skips_fetch(monkeypatch, tmp_path, provider):
+    def fail_urlopen(req, timeout):
+        raise AssertionError("must not fetch without a key")
+
+    available = _usage_api_quota(
+        monkeypatch, tmp_path, provider, fail_urlopen, key=None, pool=_pool_snapshot("available", "dead"),
+    )
+    assert available["status"] == "available"
+    assert available["account_limits"]["pool"]["total_credentials"] == 2
+
+    revoked = _usage_api_quota(
+        monkeypatch, tmp_path, provider, fail_urlopen, key=None, pool=_pool_snapshot("dead", "dead"),
+    )
+    # An all-revoked pool is the pool's "unavailable" state, not "no key configured".
+    assert revoked["status"] == "unavailable"
+    assert revoked["account_limits"]["pool"]["total_credentials"] == 2
+
+
+def test_commandcode_anthropic_uses_the_commandcode_key_and_endpoint(monkeypatch, tmp_path):
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setenv("COMMANDCODE_API_KEY", "private-commandcode-key")
+    old_cfg, old_mtime = _with_config(model={"provider": "commandcode-anthropic"})
+    import api.providers as providers
+
+    # Only "commandcode" resolves an env var here, as when the agent plugin exposes no
+    # separate profile for the anthropic route: the shared key must still be found.
+    real_env_var_for = providers._provider_env_var_for
+    monkeypatch.setattr(
+        providers, "_provider_env_var_for",
+        lambda pid: {"commandcode": "COMMANDCODE_API_KEY", "commandcode-anthropic": None}.get(pid, real_env_var_for(pid)),
+    )
+    monkeypatch.setattr(providers, "_local_pool_snapshot", lambda pid: None)
+
+    def fake_urlopen(req, timeout):
+        assert req.full_url == "https://api.commandcode.ai/alpha/billing/credits"
+        assert req.headers["Authorization"] == "Bearer private-commandcode-key"
+        return _FakeResponse(_COMMANDCODE_BODY.encode())
+
+    _patch_bearer_quota_open(monkeypatch, providers, fake_urlopen)
+    try:
+        result = providers.get_provider_quota()
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    assert result["status"] == "available"
+    assert result["supported"] is True
+    assert result["provider"] == "commandcode-anthropic"
+    assert [w["remaining_percent"] for w in result["account_limits"]["windows"]] == [60.0]
+    assert "private-commandcode-key" not in repr(result)
+
+
+@pytest.mark.parametrize("pool_statuses", [("dead", "dead"), ("exhausted", "exhausted")])
+def test_usage_api_quota_success_with_an_unavailable_pool_still_reports_the_windows(monkeypatch, tmp_path, pool_statuses):
+    result = _usage_api_quota(
+        monkeypatch, tmp_path, "opencode-go", _respond(_OPENCODE_GO_BODY), pool=_pool_snapshot(*pool_statuses),
+    )
+
+    assert result["status"] == "available"
+    assert [w["label"] for w in result["account_limits"]["windows"]] == ["Weekly"]
+    assert result["account_limits"]["pool"]["available_credentials"] == 0
+
+
+@pytest.mark.parametrize(
+    "provider, body",
+    [
+        ("opencode-go", {"usage": {"weekly": {
+            "percent": 30, "status": "Bearer private-usage-key", "resetsAt": "private-usage-key"}}}),
+        ("commandcode", {"windowLimits": {"weekly": {"used": 12, "cap": 30, "resetAt": "private-usage-key"}}}),
+    ],
+)
+def test_usage_api_quota_does_not_echo_free_text_from_the_response(monkeypatch, tmp_path, provider, body):
+    result = _usage_api_quota(monkeypatch, tmp_path, provider, _respond(json.dumps(body)))
+
+    assert result["status"] == "available"
+    (window,) = result["account_limits"]["windows"]
+    assert window["reset_at"] is None
+    assert window["detail"] is None or "private" not in window["detail"]
+    assert "private-usage-key" not in repr(result)
+
+
+def test_usage_api_quota_humanizes_status_words_and_keeps_iso_reset_times(monkeypatch, tmp_path):
+    body = {"usage": {"weekly": {"percent": 30, "status": "rate_limited", "resetsAt": "2030-03-24T12:30:00Z"}}}
+    result = _usage_api_quota(monkeypatch, tmp_path, "opencode-go", _respond(json.dumps(body)))
+
+    (window,) = result["account_limits"]["windows"]
+    assert window["detail"] == "Rate limited"
+    assert window["reset_at"] == "2030-03-24T12:30:00Z"
+
+
+@pytest.mark.parametrize("status", ["ok", "OK", " Ok "])
+def test_opencode_go_quota_hides_a_healthy_status_word(monkeypatch, tmp_path, status):
+    body = {"usage": {"weekly": {"percent": 30, "status": status}}}
+    result = _usage_api_quota(monkeypatch, tmp_path, "opencode-go", _respond(json.dumps(body)))
+
+    (window,) = result["account_limits"]["windows"]
+    assert window["detail"] is None
+
+
+def test_opencode_go_quota_labels_the_rolling_window_with_its_duration(monkeypatch, tmp_path):
+    body = {"usage": {key: {"percent": 10} for key in ("rolling", "weekly", "monthly")}}
+    result = _usage_api_quota(monkeypatch, tmp_path, "opencode-go", _respond(json.dumps(body)))
+
+    assert [w["label"] for w in result["account_limits"]["windows"]] == ["5-hour", "Weekly", "Monthly"]
+
+
+@pytest.mark.parametrize("provider", sorted(_USAGE_API_BODIES))
+def test_usage_api_quota_reports_no_plan_so_the_card_subtitle_is_the_provider_once(monkeypatch, tmp_path, provider):
+    result = _usage_api_quota(monkeypatch, tmp_path, provider, _respond(_USAGE_API_BODIES[provider]))
+
+    assert result["status"] == "available"
+    assert result["account_limits"]["plan"] is None
+
+
+def test_commandcode_quota_formats_money_with_two_decimals(monkeypatch, tmp_path):
+    body = json.dumps({
+        "credits": {"monthlyCredits": 1234567.5},
+        "windowLimits": {"weekly": {"used": 3.5, "cap": 12.5}},
+    })
+    result = _usage_api_quota(monkeypatch, tmp_path, "commandcode", _respond(body))
+
+    (window,) = result["account_limits"]["windows"]
+    assert window["detail"] == "$3.50 used of $12.50"
+    assert result["account_limits"]["details"] == ["Credits remaining: $1234567.50"]
+
+
+@pytest.mark.parametrize("credits", [None, {}, {"monthlyCredits": None}, {"monthlyCredits": "n/a"}, "none"])
+def test_commandcode_quota_omits_an_unknown_credit_balance(monkeypatch, tmp_path, credits):
+    body = {"windowLimits": {"weekly": {"used": 12, "cap": 30}}}
+    if credits is not None:
+        body["credits"] = credits
+    result = _usage_api_quota(monkeypatch, tmp_path, "commandcode", _respond(json.dumps(body)))
+
+    assert result["status"] == "available"
+    assert result["account_limits"]["details"] == []
+
+
+def test_commandcode_quota_does_not_print_absurdly_large_amounts(monkeypatch, tmp_path):
+    body = '{"credits": {"monthlyCredits": 1e308}, "windowLimits": {"weekly": {"used": 1e300, "cap": 1e308}}}'
+    result = _usage_api_quota(monkeypatch, tmp_path, "commandcode", _respond(body))
+
+    (window,) = result["account_limits"]["windows"]
+    assert window["detail"] is None
+    assert result["account_limits"]["details"] == []
+    assert len(json.dumps(result)) < 2000
+
+
+def test_commandcode_quota_reports_a_real_zero_credit_balance(monkeypatch, tmp_path):
+    body = {"credits": {"monthlyCredits": 0}, "windowLimits": {"weekly": {"used": 12, "cap": 30}}}
+    result = _usage_api_quota(monkeypatch, tmp_path, "commandcode", _respond(json.dumps(body)))
+
+    assert result["account_limits"]["details"] == ["Credits remaining: $0.00"]
+
+
+def test_quota_card_failure_message_is_coloured_by_state_and_takes_its_own_row():
+    css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    # Scoped to the card body: the cost chart's empty state reuses the class and is not a failure.
+    assert ".provider-quota-card-invalid_key .provider-quota-body>.provider-quota-message{color:var(--error);}" in css
+    assert (
+        ".provider-quota-card-unavailable:not(.provider-quota-card-neutral) .provider-quota-body>.provider-quota-message"
+        "{color:color-mix(in srgb,var(--warning) 55%,var(--text));}"
+    ) in css
+    # "No active provider is configured." is neutral, not a failure: the card is tagged and stays muted.
+    js = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    assert "if(!status.provider) card.classList.add('provider-quota-card-neutral');" in js
+    assert not re.search(r"provider-quota-card-\w+ \.provider-quota-message\{", css)
+    assert ".provider-quota-body>.provider-quota-message{width:100%;}" in css
+
+
+def test_quota_card_unavailable_badge_matches_its_warning_message():
+    """Fable UX gate r2 (2026-10-06): the unavailable card coloured its message but its badge
+    fell back to the accent gold; it now shares the warning badge rule with no_key/unsupported."""
+    css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    rules = re.findall(r"([^{}]*)\{background:rgba\(234,179,8,\.12\);color:color-mix\(in srgb,var\(--warning\) 55%,var\(--text\)\);\}", css)
+    badge_rules = [{s.strip() for s in group.split(",")} for group in rules
+                   if ".provider-quota-card-no_key .provider-quota-badge" in group]
+    assert len(badge_rules) == 1, "warning badge rule missing or duplicated"
+    selectors = badge_rules[0]
+    assert ".provider-quota-card-unavailable .provider-quota-badge" in selectors
+    assert ".provider-quota-card-unsupported .provider-quota-badge" in selectors
+    # Release gate (2026-10-29): pure --warning on the 12% pill measured 2.37:1 on the default light
+    # theme (master's accent-text badge was 5.17:1), so the badge uses the message's mixed hue.
+    assert not re.search(r"provider-quota-badge\{[^}]*color:var\(--warning\)", css)
+    # The pool row's Exhausted pill sits on the same card and the same 12% amber (2.13:1 measured).
+    assert not re.search(r"provider-quota-pool-row-exhausted [^{]*\{[^}]*color:var\(--warning\)", css)
+
+
+def test_quota_card_shows_the_failure_message_above_a_pool_breakdown():
+    panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    assert (
+        "else if(status.status!=='available'&&status.message) "
+        "body=`<div class=\"provider-quota-message\">${esc(status.message)}</div>`+body;"
+    ) in panels
+
+
+def test_quota_card_keeps_usage_api_details_next_to_a_pool():
+    panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    assert "(!accountLimits.pool||accountLimits.source==='usage_api')?accountLimits.details:[]" in panels
+
+
+def _serve(handler_cls):
+    server = http.server.HTTPServer(("127.0.0.1", 0), handler_cls)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+def test_bearer_quota_fetch_never_sends_the_key_across_a_redirect(monkeypatch, code):
+    """Real sockets: a 30x from the usage API must not carry the bearer key to another origin."""
+    import api.providers as providers
+
+    seen = {"first": [], "second": []}
+
+    class Second(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen["second"].append(self.headers.get("Authorization"))
+            body = _OPENCODE_GO_BODY.encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    second = _serve(Second)
+
+    class First(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen["first"].append(self.headers.get("Authorization"))
+            self.send_response(code)
+            self.send_header("Location", f"http://127.0.0.1:{second.server_address[1]}/usage")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    first = _serve(First)
+    # Loopback must be reached directly even when the environment configures a proxy.
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    monkeypatch.setenv("no_proxy", "127.0.0.1")
+    try:
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            providers._fetch_bearer_quota(
+                f"http://127.0.0.1:{first.server_address[1]}/usage", "private-redirect-key",
+            )
+    finally:
+        first.shutdown(); first.server_close()
+        second.shutdown(); second.server_close()
+
+    assert excinfo.value.code == code
+    assert seen["first"] == ["Bearer private-redirect-key"]
+    assert seen["second"] == []
+
+
+def test_bearer_quota_fetch_bounds_the_response_read(monkeypatch):
+    import api.providers as providers
+
+    sizes = []
+
+    class _Response(_FakeResponse):
+        def read(self, size=-1):
+            sizes.append(size)
+            return super().read(size)
+
+    _patch_bearer_quota_open(monkeypatch, providers, lambda req, timeout: _Response(b"x" * (2 * 1024 * 1024)))
+    with pytest.raises(ValueError):
+        providers._fetch_bearer_quota("https://example.invalid/usage", "private-usage-key")
+
+    assert sizes == [providers._PROVIDER_QUOTA_MAX_BYTES + 1]
+
+
 def test_unsupported_provider_reports_followup_state(monkeypatch, tmp_path):
     """Providers without safe quota APIs should return a clear unsupported state."""
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
@@ -245,6 +977,7 @@ def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, t
                 "remaining_percent": 85.0,
                 "reset_at": "2030-03-17T17:30:00Z",
                 "detail": None,
+                "limit_window_seconds": None,
             },
             {
                 "label": "Weekly",
@@ -252,6 +985,7 @@ def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, t
                 "remaining_percent": 60.0,
                 "reset_at": "2030-03-24T12:30:00Z",
                 "detail": None,
+                "limit_window_seconds": None,
             },
         ],
         "details": ["Credits balance: $12.50"],
@@ -357,8 +1091,16 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
         payload = {
             "plan_type": "pro" if headers.get("chatgpt-account-id") == "acct-primary" else "plus",
             "rate_limit": {
-                "primary_window": {"used_percent": 15 if headers.get("chatgpt-account-id") == "acct-primary" else 95, "reset_at": 1_900_000_000},
-                "secondary_window": {"used_percent": 40, "reset_at": "2030-03-24T12:30:00Z"},
+                "primary_window": {
+                    "used_percent": 15 if headers.get("chatgpt-account-id") == "acct-primary" else 95,
+                    "reset_at": 1_900_000_000,
+                    "limit_window_seconds": 18_000,
+                },
+                "secondary_window": {
+                    "used_percent": 40,
+                    "reset_at": "2030-03-24T12:30:00Z",
+                    "limit_window_seconds": 604_800,
+                },
             },
             "credits": {"has_credits": True, "balance": 12.5},
         }
@@ -390,6 +1132,8 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
     assert snapshot["source"] == "usage_api_pool"
     assert snapshot["windows"][0]["label"] == "Session"
     assert snapshot["windows"][0]["used_percent"] == 15
+    assert snapshot["windows"][0]["limit_window_seconds"] == 18_000
+    assert snapshot["windows"][1]["limit_window_seconds"] == 604_800
     assert snapshot["details"] == ["1/2 credentials available", "1 exhausted", "Plans: Pro"]
     assert snapshot["available"] is True
     assert snapshot["pool"] == {
@@ -407,6 +1151,7 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
                 "used_percent": 15.0,
                 "reset_at": "2030-03-17T17:46:40Z",
                 "detail": None,
+                "limit_window_seconds": 18_000,
                 "credential_label": "Team primary",
             },
             {
@@ -415,6 +1160,7 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
                 "used_percent": 40.0,
                 "reset_at": "2030-03-24T12:30:00Z",
                 "detail": None,
+                "limit_window_seconds": 604_800,
                 "credential_label": "Team primary",
             },
         ],
@@ -430,6 +1176,7 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
                         "remaining_percent": 85.0,
                         "reset_at": "2030-03-17T17:46:40Z",
                         "detail": None,
+                        "limit_window_seconds": 18_000,
                     },
                     {
                         "label": "Weekly",
@@ -437,6 +1184,7 @@ def test_codex_account_usage_subprocess_reports_read_only_credential_pool(monkey
                         "remaining_percent": 60.0,
                         "reset_at": "2030-03-24T12:30:00Z",
                         "detail": None,
+                        "limit_window_seconds": 604_800,
                     },
                 ],
                 "details": ["Credits balance: $12.50"],
@@ -603,7 +1351,15 @@ def test_codex_account_usage_subprocess_probes_pool_entries_concurrently(monkeyp
         payload = {
             "plan_type": "team",
             "rate_limit": {
-                "primary_window": {"used_percent": used, "reset_at": "2030-03-17T17:30:00Z"},
+                "primary_window": {
+                    "used_percent": used,
+                    "reset_at": "2030-03-17T17:30:00Z",
+                    "limit_window_seconds": 604_800 if account_id == "acct-a" else 18_000,
+                },
+                "secondary_window": {
+                    "used_percent": 70 if account_id == "acct-a" else 30,
+                    "reset_at": "2030-03-24T12:30:00Z",
+                },
             },
         }
         return _FakeResponse(json.dumps(payload).encode("utf-8"))
@@ -625,8 +1381,14 @@ def test_codex_account_usage_subprocess_probes_pool_entries_concurrently(monkeyp
     assert [event[0] for event in events[:first_exit]] == ["enter", "enter"]
     assert snapshot["pool"]["queried_credentials"] == 2
     assert [row["label"] for row in snapshot["pool"]["credentials"]] == ["Slow A", "Slow B"]
-    assert snapshot["pool"]["best_remaining_by_window"][0]["credential_label"] == "Slow B"
-    assert snapshot["pool"]["best_remaining_by_window"][0]["remaining_percent"] == 90.0
+    assert [
+        (window["label"], window["limit_window_seconds"], window["credential_label"], window["remaining_percent"])
+        for window in snapshot["pool"]["best_remaining_by_window"]
+    ] == [
+        ("Weekly", 604_800, "Slow A", 20.0),
+        ("Weekly", None, "Slow B", 70.0),
+        ("Session", 18_000, "Slow B", 90.0),
+    ]
     assert token_a not in output
     assert token_b not in output
 
@@ -742,6 +1504,203 @@ def test_codex_account_usage_subprocess_keeps_legacy_reason_when_pool_misses(mon
     assert snapshot["fetched_at"] == "2030-03-17T12:30:00Z"
 
 
+def test_codex_singleton_duration_reaches_quota_payload_and_production_labels(monkeypatch, capsys, tmp_path):
+    """The no-pool probe must recover durations dropped by the installed Agent parser."""
+    import api.providers as providers
+
+    provider_payload = {
+        "plan_type": "pro",
+        "rate_limit": {
+            "primary_window": {
+                "used_percent": 15,
+                "reset_at": "2030-03-17T17:30:00Z",
+                "limit_window_seconds": 18_000,
+            },
+            "secondary_window": {
+                "used_percent": 40,
+                "reset_at": "2030-03-24T12:30:00Z",
+                "limit_window_seconds": 604_800,
+            },
+        },
+    }
+
+    @dataclass(frozen=True)
+    class AccountUsageWindow:
+        label: str
+        used_percent: float | None = None
+        reset_at: datetime | None = None
+        detail: str | None = None
+
+    @dataclass(frozen=True)
+    class AccountUsageSnapshot:
+        provider: str
+        source: str
+        fetched_at: datetime
+        title: str = "Account limits"
+        plan: str | None = None
+        windows: tuple[AccountUsageWindow, ...] = ()
+        details: tuple[str, ...] = ()
+        unavailable_reason: str | None = None
+
+        @property
+        def available(self):
+            return bool(self.windows or self.details) and not self.unavailable_reason
+
+    parsed_snapshots = []
+
+    def fake_fetch_account_usage(provider, *, base_url=None, api_key=None):
+        windows = []
+        rate_limit = provider_payload["rate_limit"]
+        for key, fallback in (("primary_window", "Session"), ("secondary_window", "Weekly")):
+            window = rate_limit.get(key)
+            if not isinstance(window, dict) or window.get("used_percent") is None:
+                continue
+            seconds = window.get("limit_window_seconds")
+            numeric = isinstance(seconds, (int, float)) and not isinstance(seconds, bool)
+            label = {18000: "Session", 604800: "Weekly"}.get(int(seconds), fallback) if numeric else fallback
+            windows.append(AccountUsageWindow(
+                label=label,
+                used_percent=float(window["used_percent"]),
+                reset_at=datetime.fromisoformat(window["reset_at"].replace("Z", "+00:00")),
+            ))
+        snapshot = AccountUsageSnapshot(
+            provider=provider,
+            source="usage_api",
+            fetched_at=datetime(2030, 3, 17, 12, 30, tzinfo=timezone.utc),
+            plan="Pro",
+            windows=tuple(windows),
+        )
+        parsed_snapshots.append(snapshot)
+        return snapshot
+
+    def fake_resolve_codex_usage_credentials(base_url, api_key):
+        assert base_url is None
+        assert api_key is None
+        return "singleton-token", "https://chatgpt.com/backend-api/codex", "acct-singleton"
+
+    class EmptyPool:
+        def entries(self):
+            return []
+
+        def select(self):
+            raise AssertionError("the no-pool quota probe must not rotate credential selection")
+
+    seen_requests = []
+
+    def fake_urlopen(req, timeout):
+        seen_requests.append((req, timeout))
+        return _FakeResponse(json.dumps(provider_payload).encode("utf-8"))
+
+    agent_mod = types.ModuleType("agent")
+    agent_mod.__path__ = []
+    account_usage_mod = types.ModuleType("agent.account_usage")
+    account_usage_mod.AccountUsageWindow = AccountUsageWindow
+    account_usage_mod.AccountUsageSnapshot = AccountUsageSnapshot
+    account_usage_mod.fetch_account_usage = fake_fetch_account_usage
+    account_usage_mod._resolve_codex_usage_credentials = fake_resolve_codex_usage_credentials
+    credential_pool_mod = types.ModuleType("agent.credential_pool")
+    credential_pool_mod.load_pool = lambda provider: EmptyPool()
+    monkeypatch.setitem(sys.modules, "agent", agent_mod)
+    monkeypatch.setitem(sys.modules, "agent.account_usage", account_usage_mod)
+    monkeypatch.setitem(sys.modules, "agent.credential_pool", credential_pool_mod)
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(sys, "argv", ["quota-probe", "openai-codex", ""])
+
+    worker = {"__name__": "__main__"}
+    exec(providers._ACCOUNT_USAGE_SUBPROCESS_CODE, worker)
+
+    worker_payload = json.loads(capsys.readouterr().out.strip())
+    assert len(parsed_snapshots) == 1
+    assert [window["limit_window_seconds"] for window in worker_payload["windows"]] == [18_000, 604_800]
+    assert len(seen_requests) == 1
+    request, timeout = seen_requests[0]
+    assert request.full_url == "https://chatgpt.com/backend-api/wham/usage"
+    assert request.headers["Authorization"] == "Bearer singleton-token"
+    assert request.headers["Chatgpt-account-id"] == "acct-singleton"
+    assert timeout == 4.0
+
+    def _joined(rate_limit):
+        provider_payload["rate_limit"] = rate_limit
+        raw = worker["_codex_snapshot_from_usage_payload"]({"rate_limit": rate_limit})
+        worker["_fetch_codex_singleton_snapshot"] = lambda *_a, **_k: raw
+        windows = worker["_codex_singleton_payload"](fake_fetch_account_usage("openai-codex"))["windows"]
+        return [(w["label"], w["used_percent"], w["limit_window_seconds"]) for w in windows]
+
+    primary = {"used_percent": 42, "reset_at": "2030-03-17T17:30:00Z", "limit_window_seconds": 604_800}
+    secondary = {"used_percent": 7, "reset_at": "2030-03-24T12:30:00Z", "limit_window_seconds": 18_000}
+    assert _joined({"primary_window": primary}) == [("Weekly", 42.0, 604_800)]
+    assert _joined({"primary_window": primary, "secondary_window": secondary}) == [
+        ("Weekly", 42.0, 604_800), ("Session", 7.0, 18_000),
+    ]
+    fractional = worker["_codex_snapshot_from_usage_payload"]({
+        "rate_limit": {
+            "primary_window": {
+                "used_percent": 42,
+                "reset_at": "2030-03-17T17:30:00Z",
+                "limit_window_seconds": 604800.9,
+            },
+        },
+    })
+    assert [window.label for window in fractional.windows] == ["Weekly"]
+
+    def _window(label, used, seconds):
+        return SimpleNamespace(label=label, used_percent=used, reset_at=None, detail=None, limit_window_seconds=seconds)
+
+    account_usage_mod.fetch_account_usage = lambda provider, **_k: SimpleNamespace(
+        provider=provider, source="usage_api", title="Account limits", plan=None, fetched_at=None,
+        available=True, details=(), unavailable_reason=None,
+        windows=(_window("Session", 15.0, 18_000), _window("Weekly", 40.0, 604_800)),
+    )
+    seen_requests.clear()
+    exec(providers._ACCOUNT_USAGE_SUBPROCESS_CODE, {"__name__": "__main__"})
+    skipped = json.loads(capsys.readouterr().out.strip())
+    assert seen_requests == [], "probe must be skipped when agent windows already carry durations"
+    assert [w["limit_window_seconds"] for w in skipped["windows"]] == [18_000, 604_800]
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        providers,
+        "_agent_fetch_account_usage_for_home",
+        lambda *_args, **_kwargs: providers._account_usage_payload_to_snapshot(worker_payload),
+    )
+    old_cfg, old_mtime = _with_config(model={"provider": "openai-codex"})
+    try:
+        result = providers.get_provider_quota(refresh=True)
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    windows = result["account_limits"]["windows"]
+    assert [window["limit_window_seconds"] for window in windows] == [18_000, 604_800]
+
+    node = shutil.which("node")
+    if node is not None:
+        panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+        start = panels.index("function _formatProviderQuotaWindowLabel")
+        end = panels.index("\nfunction _formatProviderQuotaLastChecked", start)
+        helper = panels[start:end]
+        script = f"""
+const translations = {{
+  provider_quota_session_limit: '5-hour limit',
+  provider_quota_weekly_limit: 'Weekly limit',
+  provider_quota_usage_limit: 'Usage limit',
+  provider_quota_window_fallback: 'Window'
+}};
+function t(key) {{ return translations[key] || key; }}
+{helper}
+const limits = {json.dumps(result["account_limits"])};
+process.stdout.write(JSON.stringify(limits.windows.map(window =>
+  _formatProviderQuotaWindowLabel(limits, window)
+)));
+"""
+        rendered = subprocess.run(
+            [node, "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert json.loads(rendered.stdout) == ["5-hour limit", "Weekly limit"]
+
+
 def test_account_usage_pool_payload_round_trips_to_provider_quota_status():
     """Parent process serialization must preserve pooled credential summaries."""
     import api.providers as providers
@@ -752,7 +1711,13 @@ def test_account_usage_pool_payload_round_trips_to_provider_quota_status():
         "title": "Account limits",
         "plan": None,
         "windows": [
-            {"label": "Session", "used_percent": 25, "reset_at": "2030-03-17T17:30:00Z", "detail": "Best of 2"},
+            {
+                "label": "Weekly",
+                "used_percent": 25,
+                "reset_at": "2030-03-17T17:30:00Z",
+                "detail": "Best of 2",
+                "limit_window_seconds": 604_800,
+            },
         ],
         "details": ["2/3 credentials available"],
         "available": True,
@@ -763,8 +1728,32 @@ def test_account_usage_pool_payload_round_trips_to_provider_quota_status():
             "available_credentials": 2,
             "exhausted_credentials": 1,
             "failed_credentials": 0,
+            "best_remaining_by_window": [
+                {
+                    "label": "Weekly",
+                    "remaining_percent": 75.0,
+                    "used_percent": 25,
+                    "reset_at": "2030-03-17T17:30:00Z",
+                    "detail": "Best of 2",
+                    "limit_window_seconds": 604_800,
+                    "credential_label": "Credential 1",
+                }
+            ],
             "credentials": [
-                {"label": "Credential 1", "status": "available", "windows": []},
+                {
+                    "label": "Credential 1",
+                    "status": "available",
+                    "windows": [
+                        {
+                            "label": "Weekly",
+                            "used_percent": 25,
+                            "remaining_percent": 75.0,
+                            "reset_at": "2030-03-17T17:30:00Z",
+                            "detail": None,
+                            "limit_window_seconds": 604_800,
+                        }
+                    ],
+                },
                 {
                     "label": "Credential 2",
                     "status": "exhausted",
@@ -779,7 +1768,103 @@ def test_account_usage_pool_payload_round_trips_to_provider_quota_status():
     serialized = providers._serialize_account_usage_snapshot(snapshot)
 
     assert serialized["windows"][0]["remaining_percent"] == 75.0
+    assert serialized["windows"][0]["used_percent"] == 25
+    assert serialized["windows"][0]["reset_at"] == "2030-03-17T17:30:00Z"
+    assert serialized["windows"][0]["limit_window_seconds"] == 604_800
     assert serialized["pool"] == payload["pool"]
+
+
+def test_account_usage_snapshot_without_window_duration_remains_compatible():
+    """Older Agent windows load successfully with an explicit nullable duration."""
+    import api.providers as providers
+
+    snapshot = SimpleNamespace(
+        provider="openai-codex",
+        source="usage_api",
+        title="Account limits",
+        plan=None,
+        windows=(
+            SimpleNamespace(
+                label="Session",
+                used_percent=35,
+                reset_at="2030-03-17T17:30:00Z",
+                detail=None,
+            ),
+        ),
+        details=(),
+        available=True,
+        unavailable_reason=None,
+        fetched_at="2030-03-17T12:30:00Z",
+    )
+
+    serialized = providers._serialize_account_usage_snapshot(snapshot)
+
+    assert serialized["windows"] == [
+        {
+            "label": "Session",
+            "used_percent": 35,
+            "remaining_percent": 65.0,
+            "reset_at": "2030-03-17T17:30:00Z",
+            "detail": None,
+            "limit_window_seconds": None,
+        }
+    ]
+
+
+def test_codex_agent_snapshot_with_duration_propagates_limit_window_seconds(monkeypatch, tmp_path):
+    """Agent windows with limit_window_seconds propagate duration through the singleton path.
+
+    When the Agent provides limit_window_seconds on AccountUsageWindow objects,
+    the WebUI must preserve that duration metadata in the serialized response.
+    This covers the non-pool path where the Agent is the authoritative source.
+    """
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    old_cfg, old_mtime = _with_config(model={"provider": "openai-codex"})
+
+    import api.providers as providers
+
+    def fake_fetch(provider, home, api_key=None):
+        return SimpleNamespace(
+            provider="openai-codex",
+            source="usage_api",
+            title="Account limits",
+            plan="Pro",
+            fetched_at=datetime(2030, 3, 17, 12, 30, tzinfo=timezone.utc),
+            available=True,
+            windows=(
+                SimpleNamespace(
+                    label="Session",
+                    used_percent=15.0,
+                    reset_at=datetime(2030, 3, 17, 17, 30, tzinfo=timezone.utc),
+                    detail=None,
+                    limit_window_seconds=18_000,
+                ),
+                SimpleNamespace(
+                    label="Weekly",
+                    used_percent=40.0,
+                    reset_at=datetime(2030, 3, 24, 12, 30, tzinfo=timezone.utc),
+                    detail=None,
+                    limit_window_seconds=604_800,
+                ),
+            ),
+            details=("Credits balance: $12.50",),
+            unavailable_reason=None,
+        )
+
+    monkeypatch.setattr(providers, "_agent_fetch_account_usage_for_home", fake_fetch)
+    try:
+        result = providers.get_provider_quota()
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    assert result["ok"] is True
+    assert result["provider"] == "openai-codex"
+    windows = result["account_limits"]["windows"]
+    assert len(windows) == 2
+    assert windows[0]["label"] == "Session"
+    assert windows[0]["limit_window_seconds"] == 18_000
+    assert windows[1]["label"] == "Weekly"
+    assert windows[1]["limit_window_seconds"] == 604_800
 
 
 def test_anthropic_oauth_usage_unavailable_reason_is_reported(monkeypatch, tmp_path):
@@ -1240,7 +2325,59 @@ def test_provider_quota_card_is_rendered_in_providers_panel():
     assert "provider_quota_weekly_limit" in panels
     assert "_providerQuotaUnavailableReason" in panels
     assert "provider_quota_retry_after" in panels
-    assert "accountLimits.details)&&!accountLimits.pool" in panels
+    assert "accountLimits.details)&&(!accountLimits.pool||accountLimits.source==='usage_api')" in panels
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required")
+def test_codex_quota_window_labels_use_duration_not_position():
+    """The production helper must label Codex windows from truthful duration metadata."""
+    panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+    start = panels.index("function _formatProviderQuotaWindowLabel")
+    end = panels.index("\nfunction _formatProviderQuotaLastChecked", start)
+    helper = panels[start:end]
+    cases = [
+        [{"provider": "openai-codex"}, {"label": "Weekly", "limit_window_seconds": 18_000}],
+        [{"provider": "openai-codex"}, {"label": "Session", "limit_window_seconds": 604_800}],
+        [{"provider": "openai-codex"}, {"label": "Session"}],
+        [{"provider": "openai-codex"}, {"label": "Weekly", "limit_window_seconds": "invalid"}],
+        [{"provider": "openai-codex"}, {"label": "Session", "limit_window_seconds": 86_400}],
+        [{"provider": "openai-codex"}, {"label": "Daily", "limit_window_seconds": 86_400}],
+        [{"provider": "anthropic"}, {"label": "Session", "limit_window_seconds": 604_800}],
+        [{"provider": "openai-codex"}, {"label": "Session", "limit_window_seconds": 604800.9}],
+    ]
+    translations = {
+        "provider_quota_session_limit": "5-hour limit",
+        "provider_quota_weekly_limit": "Weekly limit",
+        "provider_quota_usage_limit": "Usage limit",
+        "provider_quota_window_fallback": "Window",
+    }
+    script = f"""
+const translations = {json.dumps(translations)};
+function t(key) {{ return translations[key] || key; }}
+{helper}
+const cases = {json.dumps(cases)};
+process.stdout.write(JSON.stringify(cases.map(([limits, window]) =>
+  _formatProviderQuotaWindowLabel(limits, window)
+)));
+"""
+
+    result = subprocess.run(
+        [shutil.which("node"), "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(result.stdout) == [
+        "5-hour limit",
+        "Weekly limit",
+        "5-hour limit",
+        "Usage limit",
+        "Usage limit",
+        "Daily",
+        "Session",
+        "Weekly limit",
+    ]
 
 
 def test_provider_quota_card_has_manual_refresh_control():
@@ -1699,3 +2836,270 @@ def test_account_usage_semaphore_caps_concurrency(monkeypatch, tmp_path):
     finally:
         unblock.set()
         _restore_config(old_cfg, old_mtime)
+
+
+def test_codex_singleton_probe_sends_residency_and_keeps_account_override(monkeypatch):
+    """The singleton probe must send the residency header the installed Agent sends.
+
+    ``chatgpt_data_residency`` wins over ``chatgpt_compute_residency``. The explicit
+    account id from credential resolution still replaces the JWT account id.
+    """
+    import api.providers as providers
+
+    def b64url(payload: bytes) -> str:
+        return base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
+
+    def token_for(auth: dict) -> str:
+        return ".".join((
+            b64url(b'{"alg":"none","typ":"JWT"}'),
+            b64url(json.dumps({"https://api.openai.com/auth": auth}).encode("utf-8")),
+            b64url(b"signature"),
+        ))
+
+    agent_mod = types.ModuleType("agent")
+    agent_mod.__path__ = []
+    account_usage_mod = types.ModuleType("agent.account_usage")
+    account_usage_mod.fetch_account_usage = lambda *_a, **_k: None
+    monkeypatch.setitem(sys.modules, "agent", agent_mod)
+    monkeypatch.setitem(sys.modules, "agent.account_usage", account_usage_mod)
+
+    source = providers._ACCOUNT_USAGE_SUBPROCESS_CODE
+    definitions = source.split("if len(sys.argv) > 1")[0]
+    namespace = {"__name__": "__not_main__"}
+    exec(definitions, namespace)
+
+    seen = []
+
+    def fake_urlopen(req, timeout):
+        seen.append((req, timeout))
+        payload = {
+            "plan_type": "pro",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 15,
+                    "reset_at": "2030-03-17T17:30:00Z",
+                    "limit_window_seconds": 18_000,
+                },
+            },
+        }
+        return _FakeResponse(json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr(namespace["urllib_request"], "urlopen", fake_urlopen)
+
+    def install(token, account_id):
+        def resolve(base_url, api_key):
+            assert base_url is None
+            assert api_key is None
+            return token, "https://chatgpt.com/backend-api/codex", account_id
+        account_usage_mod._resolve_codex_usage_credentials = resolve
+
+    def probe():
+        seen.clear()
+        snapshot = namespace["_fetch_codex_singleton_snapshot"](None)
+        assert snapshot is not None
+        assert len(seen) == 1
+        request, timeout = seen[0]
+        assert request.full_url == "https://chatgpt.com/backend-api/wham/usage"
+        assert timeout == 4.0
+        return {key.lower(): value for key, value in request.header_items()}
+
+    install(token_for({
+        "chatgpt_account_id": "acct-from-jwt",
+        "chatgpt_data_residency": " eu ",
+        "chatgpt_compute_residency": "us",
+    }), "acct-override")
+    headers = probe()
+    assert headers["x-openai-internal-codex-residency"] == "eu"
+    assert headers["chatgpt-account-id"] == "acct-override"
+    assert headers["authorization"].startswith("Bearer ")
+
+    install(token_for({
+        "chatgpt_account_id": "acct-from-jwt",
+        "chatgpt_data_residency": "",
+        "chatgpt_compute_residency": "  us  ",
+    }), None)
+    headers = probe()
+    assert headers["x-openai-internal-codex-residency"] == "us"
+    assert headers["chatgpt-account-id"] == "acct-from-jwt"
+
+    install(token_for({"chatgpt_account_id": "acct-from-jwt"}), "acct-override")
+    headers = probe()
+    assert "x-openai-internal-codex-residency" not in headers
+    assert headers["chatgpt-account-id"] == "acct-override"
+
+    install(token_for({
+        "chatgpt_data_residency": "   ",
+        "chatgpt_compute_residency": "eu",
+    }), "acct-override")
+    headers = probe()
+    assert "x-openai-internal-codex-residency" not in headers
+    assert headers["chatgpt-account-id"] == "acct-override"
+
+
+def test_codex_singleton_backfill_matches_windows_by_label_not_position(monkeypatch):
+    """The Agent object and the WebUI probe are two separate requests.
+
+    If the Agent skipped a window (used_percent missing) its list is shorter, so a
+    positional join would hand the Session duration to the Weekly window. That is the
+    same mislabeling this change exists to prevent, so the join is keyed on label.
+    """
+    import api.providers as providers
+    from types import SimpleNamespace
+
+    # The embedded worker imports the Agent at module scope; stub it so the
+    # source can be exec'd here the same way the other worker tests do.
+    agent_pkg = types.ModuleType("agent")
+    account_usage_mod = types.ModuleType("agent.account_usage")
+    account_usage_mod.fetch_account_usage = lambda *_a, **_k: None
+    monkeypatch.setitem(sys.modules, "agent", agent_pkg)
+    monkeypatch.setitem(sys.modules, "agent.account_usage", account_usage_mod)
+
+    # Exec only the definitions: the worker source ends with a CLI driver that
+    # reads sys.argv and would run a real fetch.
+    source = providers._ACCOUNT_USAGE_SUBPROCESS_CODE
+    definitions = source.split('if len(sys.argv) > 1')[0]
+    assert "_codex_singleton_payload" in definitions
+    namespace = {"__name__": "__not_main__"}
+    exec(definitions, namespace)
+
+    # Agent dropped the Session window entirely and carries no duration.
+    agent_snapshot = SimpleNamespace(
+        provider="openai-codex",
+        windows=(SimpleNamespace(label="Weekly", used_percent=42.0, reset_at=None, detail=None),),
+    )
+    # The WebUI's own probe still sees both windows, Session first.
+    raw_snapshot = SimpleNamespace(
+        provider="openai-codex",
+        windows=(
+            SimpleNamespace(
+                label="Session", used_percent=7.0, reset_at=None, detail=None,
+                limit_window_seconds=18_000,
+            ),
+            SimpleNamespace(
+                label="Weekly", used_percent=42.0, reset_at=None, detail=None,
+                limit_window_seconds=604_800,
+            ),
+        ),
+    )
+    namespace["_fetch_codex_singleton_snapshot"] = lambda *_a, **_k: raw_snapshot
+
+    payload = namespace["_codex_singleton_payload"](agent_snapshot)
+    windows = payload["windows"]
+
+    assert [window["label"] for window in windows] == ["Weekly"]
+    # A positional join would have written 18000 here, mislabeling Weekly as 5-hour.
+    assert windows[0]["limit_window_seconds"] == 604_800
+
+    for payload_count, probe_count in ((2, 2), (1, 2), (2, 1)):
+        agent_snapshot.windows = (SimpleNamespace(label="Session"),) * payload_count
+        raw_snapshot.windows = (raw_snapshot.windows[0],) * probe_count
+        payload = namespace["_codex_singleton_payload"](agent_snapshot)
+        assert [w["limit_window_seconds"] for w in payload["windows"]] == [None] * payload_count
+
+
+def test_codex_singleton_raw_durations_survive_failed_probe(monkeypatch):
+    """Durations already on snapshot.raw survive a failed usage probe.
+
+    The installed Agent window has no duration field, but snapshot.raw is the
+    usage body. Once that backfill supplies every duration the probe must not
+    run; a 503 after a partial backfill must not clear the Weekly duration raw
+    already supported (Weekly limit / 5-hour limit).
+    """
+    import api.providers as providers
+
+    agent_pkg = types.ModuleType("agent")
+    account_usage_mod = types.ModuleType("agent.account_usage")
+    account_usage_mod.fetch_account_usage = lambda *_a, **_k: None
+    monkeypatch.setitem(sys.modules, "agent", agent_pkg)
+    monkeypatch.setitem(sys.modules, "agent.account_usage", account_usage_mod)
+
+    source = providers._ACCOUNT_USAGE_SUBPROCESS_CODE
+    namespace = {"__name__": "__not_main__"}
+    exec(source.split("if len(sys.argv) > 1")[0], namespace)
+
+    probe_calls = []
+
+    def fail_probe(*_args, **_kwargs):
+        probe_calls.append(1)
+        return None
+
+    namespace["_fetch_codex_singleton_snapshot"] = fail_probe
+
+    def _window(label, used):
+        return SimpleNamespace(label=label, used_percent=used, reset_at=None, detail=None)
+
+    both = SimpleNamespace(
+        provider="openai-codex",
+        windows=(_window("Weekly", 40.0), _window("Session", 15.0)),
+        raw={
+            "rate_limit": {
+                "primary_window": {"used_percent": 40, "limit_window_seconds": 604_800},
+                "secondary_window": {"used_percent": 15, "limit_window_seconds": 18_000},
+            },
+        },
+    )
+    payload = namespace["_codex_singleton_payload"](both)
+    assert probe_calls == []
+    assert [(w["label"], w["limit_window_seconds"]) for w in payload["windows"]] == [
+        ("Weekly", 604_800),
+        ("Session", 18_000),
+    ]
+
+    duplicate = SimpleNamespace(
+        provider="openai-codex", windows=(_window("Session", 42), _window("Session", 7)),
+        raw={"rate_limit": {
+            "primary_window": {"used_percent": 42, "limit_window_seconds": 86400},
+            "secondary_window": {"used_percent": 7, "limit_window_seconds": 18000},
+        }},
+    )
+    payload = namespace["_codex_singleton_payload"](duplicate)
+    assert [w["limit_window_seconds"] for w in payload["windows"]] == [86400, 18000]
+    assert probe_calls == []
+
+    shifted = SimpleNamespace(
+        provider="openai-codex", windows=(_window("Weekly", 40.0), _window("Session", 15.0)),
+        raw={"rate_limit": {"secondary_window": {"used_percent": 15, "limit_window_seconds": 18000}}},
+    )
+    payload = namespace["_codex_singleton_payload"](shifted)
+    assert [w["limit_window_seconds"] for w in payload["windows"]] == [None, None]
+    probe_calls.clear()
+
+    partial = SimpleNamespace(
+        provider="openai-codex",
+        windows=(_window("Weekly", 40.0), _window("Session", 15.0)),
+        raw={
+            "rate_limit": {
+                "primary_window": {"used_percent": 40, "limit_window_seconds": 604_800},
+            },
+        },
+    )
+    payload = namespace["_codex_singleton_payload"](partial)
+    assert probe_calls == [1]
+    assert [(w["label"], w["limit_window_seconds"]) for w in payload["windows"]] == [
+        ("Weekly", 604_800),
+        ("Session", None),
+    ]
+
+    node = shutil.which("node")
+    if node is not None:
+        panels = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+        start = panels.index("function _formatProviderQuotaWindowLabel")
+        end = panels.index("\nfunction _formatProviderQuotaLastChecked", start)
+        both_windows = namespace["_codex_singleton_payload"](both)["windows"]
+        script = f"""
+const translations = {{
+  provider_quota_session_limit: '5-hour limit',
+  provider_quota_weekly_limit: 'Weekly limit',
+  provider_quota_usage_limit: 'Usage limit',
+  provider_quota_window_fallback: 'Window'
+}};
+function t(key) {{ return translations[key] || key; }}
+{panels[start:end]}
+const limits = {{provider: 'openai-codex'}};
+const windows = {json.dumps(both_windows)};
+process.stdout.write(JSON.stringify(windows.map(window =>
+  _formatProviderQuotaWindowLabel(limits, window)
+)));
+"""
+        rendered = subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+        assert json.loads(rendered.stdout) == ["Weekly limit", "5-hour limit"]

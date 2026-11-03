@@ -14,8 +14,11 @@ def test_pin_action_updates_local_cache_and_renders_before_refetch():
     cached_idx = snippet.find("const cached=(_allSessions||[]).find(s=>s&&s.session_id===session.session_id);")
     update_idx = snippet.find("if(cached) cached.pinned=newPinned;")
     active_idx = snippet.find("if(S.session&&S.session.session_id===session.session_id) S.session.pinned=newPinned;")
-    cache_render_idx = snippet.find("renderSessionListFromCache();")
-    refetch_idx = snippet.find("void renderSessionList();")
+    # Pin's response lands after an await, so the cached repaint ships the
+    # immediate keep-picker contract (gate L2): the pinned row moves now while
+    # a newer project picker is kept, instead of retiring it or deferring.
+    cache_render_idx = snippet.find("_repaintSidebarKeepingProjectPicker();")
+    refetch_idx = snippet.find("void renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});")
 
     assert cached_idx != -1, "pin action must find the cached sidebar row"
     assert update_idx != -1, "pin action must update cached row.pinned"

@@ -68,11 +68,30 @@ the exception explicitly as `relationship_type='reset_successor'` without
 emitting child-session metadata for a reset successor. Compression
 continuations remain one visible conversation, while explicit branch and
 delegate sessions remain nested children. The canonical reset marker is
-`_reset_from == parent_session_id`; compatibility inference for older rows must
-require a reset end reason, the same non-empty `session_key`, and finite timestamps
-proving `child.started_at >= parent.ended_at`. Missing or invalid timestamps do
-not establish a legacy reset. The presence of `_branched_from` or `_delegate_from`
-blocks reset classification even if its value is empty. A `source=tool` child
+`_reset_from == parent_session_id`, including when the parent is outside the
+query window or has been reopened. A valid `_branched_from` or `_delegate_from`
+that names an earlier ancestor is inherited provenance, not a branch of this
+parent. A marker naming the current parent, an empty or malformed marker, a
+mismatched reset marker, or explicit `session_source='fork'` blocks reset
+classification before any fallback.
+When a matching parent is known to be a messaging `session_reset`, its source
+boundary also applies before canonical intent: a different or unknown child
+source is not that messaging reset successor. Canonical classification still
+works with a missing parent or after a same-source parent has been reopened.
+
+For older messaging `session_reset` rows, the existing messaging rule remains
+authoritative: sources must match, and either both non-empty `session_key`
+values match or chat/user/thread identity matches when a key is absent. Chat
+and user identity may come from `origin_chat_id`/`origin_user_id`; empty chat or
+user identity is not evidence. If the parent's end timestamp is present, the
+child cannot predate it. Valid ancestor branch/delegate markers do not block
+this messaging compatibility rule. A failed messaging check cannot fall through
+to the generic same-key inference and bypass its source boundary.
+
+Other legacy reset inference requires a reset end reason, the same non-empty
+`session_key`, no branch/delegate marker, and finite timestamps proving
+`child.started_at >= parent.ended_at`. Missing or invalid timestamps do not
+establish this generic legacy reset. A `source=tool` child
 always remains delegated work, even with a matching routing key, timestamps, or
 reset marker. Invalid model-config
 JSON (including excessive nesting) must not abort projection of other sessions.
@@ -89,6 +108,10 @@ not repair or rewrite that provenance; fixing it requires an Agent-owned durable
 discriminator. The production-composed regression in
 `tests/test_reset_lineage_agent_integration.py` records this remaining expected
 failure; passing ordinary WebUI tests is not evidence that it is resolved.
+The maintainer accepted shipping this limitation with a release note on
+[2026-11-02](https://github.com/nesquena/hermes-webui/pull/7179#issuecomment-6583312535),
+with a separate Agent-side provenance issue to follow. That decision does not
+turn the expected failure into a passing provenance contract.
 
 Sidebar source reconciliation keeps the state.db source authoritative for used
 WebUI branches. A plain `source='webui'` mirror must normalize the response to

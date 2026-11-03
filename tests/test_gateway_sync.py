@@ -102,6 +102,11 @@ def _ensure_state_db(profile=None):
             timestamp REAL NOT NULL
         );
     """)
+    # These fixtures model sessions whose titles may repeat (compression chains, parallel sessions). A state.db
+    # that a real Agent SessionDB created earlier in the run carries the Agent's unique title index, which would
+    # turn the INSERT OR REPLACE below into silent deletes of same-title rows (#8277). Drop it so the fixture
+    # always gets the schema it declares, whoever created the file first.
+    conn.execute("DROP INDEX IF EXISTS idx_sessions_title_unique")
     for column, ddl in (
         ('user_id', 'ALTER TABLE sessions ADD COLUMN user_id TEXT'),
         ('chat_id', 'ALTER TABLE sessions ADD COLUMN chat_id TEXT'),
@@ -115,6 +120,8 @@ def _ensure_state_db(profile=None):
         ('parent_session_id', 'ALTER TABLE sessions ADD COLUMN parent_session_id TEXT'),
         ('ended_at', 'ALTER TABLE sessions ADD COLUMN ended_at REAL'),
         ('end_reason', 'ALTER TABLE sessions ADD COLUMN end_reason TEXT'),
+        ('model_config', 'ALTER TABLE sessions ADD COLUMN model_config TEXT'),
+        ('session_source', 'ALTER TABLE sessions ADD COLUMN session_source TEXT'),
     ):
         existing = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
         if column not in existing:
@@ -624,15 +631,15 @@ def test_reopen_then_recompress_reset_child_stays_independent_across_readers(
         )
 
     # (a) Sidebar projection: both rows visible; the child keeps its own
-    # title and is a plain child_session, never a hidden continuation.
+    # title and an independent reset root, never a nested child/continuation.
     projected = read_importable_agent_session_rows(db_path, limit=None, exclude_sources=None)
     projected_by_id = {row['id']: row for row in projected}
     assert set(projected_by_id) == {parent_id, child_id}
     child_row = projected_by_id[child_id]
     assert child_row['title'] == 'Reset child conversation'
-    assert child_row['relationship_type'] == 'child_session'
+    assert child_row['relationship_type'] == 'reset_successor'
     assert child_row['parent_session_id'] == parent_id
-    assert '_lineage_root_id' not in child_row
+    assert child_row['_lineage_root_id'] == child_id
     parent_row = projected_by_id[parent_id]
     assert parent_row['title'] == 'Reset parent conversation'
     assert '_lineage_tip_id' not in parent_row
@@ -640,8 +647,8 @@ def test_reopen_then_recompress_reset_child_stays_independent_across_readers(
 
     # (b) Lineage metadata and report.
     metadata = read_session_lineage_metadata(db_path, {parent_id, child_id})
-    assert metadata[child_id]['relationship_type'] == 'child_session'
-    assert '_lineage_root_id' not in metadata[child_id]
+    assert metadata[child_id]['relationship_type'] == 'reset_successor'
+    assert metadata[child_id]['_lineage_root_id'] == child_id
     assert '_lineage_tip_id' not in metadata.get(parent_id, {})
     child_report = read_session_lineage_report(db_path, child_id)
     assert child_report['lineage_key'] == child_id
@@ -650,11 +657,10 @@ def test_reopen_then_recompress_reset_child_stays_independent_across_readers(
     parent_report = read_session_lineage_report(db_path, parent_id)
     assert parent_report['tip_session_id'] == parent_id
     assert parent_report['total_segments'] == 1
-    assert [child['session_id'] for child in parent_report['children']] == [child_id]
-    assert parent_report['children'][0]['role'] == 'child_session'
+    assert parent_report['children'] == []
 
-    # (c) Watcher publication: the SSE payload carries both conversations
-    # with their own titles.
+    # (c) Watcher publication: its compact refresh payload carries both
+    # conversations with their own titles (lineage is on the list API).
     watcher = GatewayWatcher(state_db_path=db_path)
     subscriber = watcher.subscribe()
     assert watcher._poll_once(now=1.0) is True
@@ -1200,6 +1206,8 @@ def test_agent_session_source_normalization_contract():
         'slack': ('messaging', 'Slack'),
         'matrix': ('messaging', 'Matrix'),
         'signal': ('messaging', 'Signal'),
+        'feishu': ('messaging', 'Feishu'),
+        'dingtalk': ('messaging', 'DingTalk'),
         'cron': ('cron', 'Cron'),
         'webhook': ('webhook', 'Webhook'),
         'tool': ('tool', 'Tool'),
@@ -1225,7 +1233,7 @@ def test_sessions_js_treats_email_as_messaging_source():
     raw_section = src[src.find("_MESSAGING_RAW_SOURCES"):src.find("function _isMessagingSession")]
     label_section = src[src.find("_MESSAGING_SOURCE_LABELS"):src.find("function _isMessagingSession")]
 
-    for raw_source in ("email", "wecom", "wecom_callback", "matrix", "signal"):
+    for raw_source in ("email", "wecom", "wecom_callback", "matrix", "signal", "feishu", "dingtalk"):
         assert f"'{raw_source}'" in raw_section, f"Missing raw source {raw_source!r} in _MESSAGING_RAW_SOURCES"
 
     assert "email: 'Email'" in label_section
@@ -1233,6 +1241,8 @@ def test_sessions_js_treats_email_as_messaging_source():
     assert "wecom_callback: 'WeCom Callback'" in label_section
     assert "matrix: 'Matrix'" in label_section
     assert "signal: 'Signal'" in label_section
+    assert "feishu: 'Feishu'" in label_section
+    assert "dingtalk: 'DingTalk'" in label_section
 
 
 def test_sessions_js_treats_messaging_sidecars_behaviorally():
@@ -1250,6 +1260,8 @@ const cases = [
   {{ session_source: 'other', source: 'matrix' }},
   {{ session_source: 'other', source: 'signal' }},
   {{ session_source: 'other', raw_source: 'signal' }},
+  {{ session_source: 'other', source: 'feishu' }},
+  {{ session_source: 'other', raw_source: 'dingtalk' }},
   {{ session_source: 'messaging', source: 'anything' }},
 ];
 for (const c of cases) {{
@@ -1515,6 +1527,274 @@ def test_cross_source_parent_child_is_not_collapsed_into_root_metadata(cleanup_t
     finally:
         try:
             _remove_test_sessions(conn, root_sid, webui_sid)
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_messaging_reset_successor_stays_toplevel(cleanup_test_sessions):
+    """A Telegram session_reset successor is its own top-level sidebar row.
+
+    The new DM segment keeps parent_session_id for lineage, but it must not be
+    nested as a child_session under the reset parent — that sorts it by the
+    parent's old timestamp, so today's chat disappears from the top. A different
+    Telegram key and a WebUI continuation of the same parent stay nested.
+    """
+    from api.agent_sessions import read_importable_agent_session_rows, read_session_lineage_metadata
+
+    conn = _ensure_state_db()
+    parent_sid = 'tg_reset_parent_001'
+    child_sid = 'tg_reset_child_001'
+    other_sid = 'tg_reset_other_key_001'
+    webui_sid = 'webui_reset_child_001'
+    now = time.time()
+    key = 'agent:main:telegram:dm:264339801'
+    cleanup_test_sessions.extend([parent_sid, child_sid, other_sid, webui_sid])
+    try:
+        _insert_agent_session_row(
+            conn,
+            session_id=parent_sid,
+            source='telegram',
+            title='Earlier DM Segment',
+            started_at=now - 50,
+            ended_at=now - 20,
+            end_reason='session_reset',
+            messages=2,
+        )
+        _insert_agent_session_row(
+            conn,
+            session_id=child_sid,
+            source='telegram',
+            title='Today DM Segment',
+            started_at=now - 10,
+            parent_session_id=parent_sid,
+            messages=2,
+        )
+        _insert_agent_session_row(
+            conn,
+            session_id=other_sid,
+            source='telegram',
+            title='Other Telegram Chat',
+            started_at=now - 9,
+            parent_session_id=parent_sid,
+            messages=2,
+        )
+        _insert_agent_session_row(
+            conn,
+            session_id=webui_sid,
+            source='webui',
+            title='WebUI Continuation',
+            started_at=now - 8,
+            parent_session_id=parent_sid,
+            messages=2,
+        )
+        conn.execute(
+            "UPDATE sessions SET session_key = ?, user_id = ?, chat_id = ? WHERE id IN (?, ?)",
+            (key, '264339801', '264339801', parent_sid, child_sid),
+        )
+        conn.execute(
+            "UPDATE sessions SET session_key = ?, user_id = ?, chat_id = ? WHERE id = ?",
+            ('agent:main:telegram:dm:other', '999', '999', other_sid),
+        )
+        conn.commit()
+
+        rows = read_importable_agent_session_rows(_get_state_db_path(), exclude_sources=None)
+        by_id = {row['id']: row for row in rows}
+
+        child = by_id[child_sid]
+        assert child.get('title') == 'Today DM Segment'
+        assert child.get('source') == 'telegram'
+        assert child.get('relationship_type') != 'child_session'
+        assert by_id[other_sid].get('relationship_type') == 'child_session'
+        # Cross-surface continuation must never be collapsed by this rule.
+        assert by_id[webui_sid].get('relationship_type') == 'child_session'
+        assert by_id[webui_sid].get('title') == 'WebUI Continuation'
+
+        lineage = read_session_lineage_metadata(
+            _get_state_db_path(),
+            [parent_sid, child_sid, other_sid, webui_sid],
+        )
+        assert lineage.get(child_sid, {}).get('relationship_type') != 'child_session'
+        assert lineage.get(other_sid, {}).get('relationship_type') == 'child_session'
+        assert lineage.get(webui_sid, {}).get('relationship_type') == 'child_session'
+    finally:
+        try:
+            _remove_test_sessions(conn, parent_sid, child_sid, other_sid, webui_sid)
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_messaging_reset_successor_without_session_key(cleanup_test_sessions):
+    """Chat/user identity is the fallback when session_key is missing.
+
+    Matching chat+user (or origin_chat_id+origin_user_id) stays top-level.
+    Empty identity and a different thread_id stay nested — fail closed.
+    """
+    from api.agent_sessions import read_importable_agent_session_rows, read_session_lineage_metadata
+
+    conn = _ensure_state_db()
+    now = time.time()
+    cases = (
+        # (parent, child, updates parent, updates child, expect_toplevel)
+        (
+            'tg_reset_nokey_parent',
+            'tg_reset_nokey_child',
+            {'chat_id': '100', 'user_id': '200'},
+            {'chat_id': '100', 'user_id': '200'},
+            True,
+        ),
+        (
+            'tg_reset_origin_parent',
+            'tg_reset_origin_child',
+            {'origin_chat_id': '300', 'origin_user_id': '400'},
+            {'origin_chat_id': '300', 'origin_user_id': '400'},
+            True,
+        ),
+        (
+            'tg_reset_empty_parent',
+            'tg_reset_empty_child',
+            {},
+            {},
+            False,
+        ),
+        (
+            'tg_reset_thread_parent',
+            'tg_reset_thread_child',
+            {'chat_id': '500', 'user_id': '600', 'thread_id': 'thread_a'},
+            {'chat_id': '500', 'user_id': '600', 'thread_id': 'thread_b'},
+            False,
+        ),
+    )
+    ids = [sid for parent, child, *_rest in cases for sid in (parent, child)]
+    cleanup_test_sessions.extend(ids)
+    try:
+        for index, (parent_sid, child_sid, parent_fields, child_fields, _toplevel) in enumerate(cases):
+            _insert_agent_session_row(
+                conn,
+                session_id=parent_sid,
+                source='telegram',
+                title=f'Parent {index}',
+                started_at=now - 50 - index,
+                ended_at=now - 20,
+                end_reason='session_reset',
+                messages=2,
+            )
+            _insert_agent_session_row(
+                conn,
+                session_id=child_sid,
+                source='telegram',
+                title=f'Child {index}',
+                started_at=now - 10,
+                parent_session_id=parent_sid,
+                messages=2,
+            )
+            for sid, fields in ((parent_sid, parent_fields), (child_sid, child_fields)):
+                if not fields:
+                    continue
+                assignments = ', '.join(f'{column} = ?' for column in fields)
+                conn.execute(
+                    f'UPDATE sessions SET {assignments} WHERE id = ?',
+                    [*fields.values(), sid],
+                )
+        conn.commit()
+
+        rows = read_importable_agent_session_rows(_get_state_db_path(), exclude_sources=None)
+        by_id = {row['id']: row for row in rows}
+        lineage = read_session_lineage_metadata(_get_state_db_path(), ids)
+        for parent_sid, child_sid, _parent_fields, _child_fields, toplevel in cases:
+            for reader in (by_id, lineage):
+                relationship = reader[child_sid].get('relationship_type')
+                if toplevel:
+                    assert relationship != 'child_session', child_sid
+                else:
+                    assert relationship == 'child_session', child_sid
+    finally:
+        try:
+            _remove_test_sessions(conn, *ids)
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_messaging_reset_keeps_explicit_branch_provenance(cleanup_test_sessions):
+    """A same-key branch of a reset parent stays nested.
+
+    ``_reset_from`` naming this parent, and a ``_branched_from`` that names an
+    earlier ancestor, are still the reset segment. An unreadable marker and a
+    WebUI fork are not.
+    """
+    from api.agent_sessions import read_importable_agent_session_rows, read_session_lineage_metadata
+
+    conn = _ensure_state_db()
+    now = time.time()
+    key = 'agent:main:telegram:dm:reset-branch'
+    parent_sid = 'tg_reset_branch_parent'
+    cases = (
+        ('tg_reset_direct_branch', json.dumps({'_branched_from': parent_sid}), None, False),
+        ('tg_reset_direct_delegate', json.dumps({'_delegate_from': parent_sid}), None, False),
+        ('tg_reset_ordinary', None, None, True),
+        ('tg_reset_marker', json.dumps({'_reset_from': parent_sid}), None, True),
+        ('tg_reset_inherited', json.dumps({'_branched_from': 'older-ancestor'}), None, True),
+        ('tg_reset_unknown_marker', '{', None, False),
+        ('tg_reset_fork', None, 'fork', False),
+        ('tg_reset_legacy_branch', json.dumps({'_branched_from': parent_sid}), None, False),
+    )
+    ids = [parent_sid, *[child for child, *_rest in cases]]
+    cleanup_test_sessions.extend(ids)
+    try:
+        _insert_agent_session_row(
+            conn,
+            session_id=parent_sid,
+            source='telegram',
+            title='Reset parent',
+            started_at=now - 50,
+            ended_at=now - 20,
+            end_reason='session_reset',
+            messages=2,
+        )
+        conn.execute(
+            'UPDATE sessions SET session_key = ?, user_id = ?, chat_id = ? WHERE id = ?',
+            (key, '264339801', '264339801', parent_sid),
+        )
+        for index, (child_sid, model_config, session_source, _toplevel) in enumerate(cases):
+            _insert_agent_session_row(
+                conn,
+                session_id=child_sid,
+                source='telegram',
+                title=child_sid,
+                started_at=now - 10,
+                parent_session_id=parent_sid,
+                messages=2,
+            )
+            if child_sid == 'tg_reset_legacy_branch':
+                conn.execute(
+                    'UPDATE sessions SET user_id = ?, chat_id = ?, model_config = ? WHERE id = ?',
+                    ('264339801', '264339801', model_config, child_sid),
+                )
+            else:
+                conn.execute(
+                    '''UPDATE sessions
+                       SET session_key = ?, user_id = ?, chat_id = ?,
+                           model_config = ?, session_source = ?
+                       WHERE id = ?''',
+                    (key, '264339801', '264339801', model_config, session_source, child_sid),
+                )
+        conn.commit()
+
+        rows = read_importable_agent_session_rows(_get_state_db_path(), exclude_sources=None)
+        by_id = {row['id']: row for row in rows}
+        lineage = read_session_lineage_metadata(_get_state_db_path(), ids)
+        for child_sid, _config, _source, toplevel in cases:
+            for reader in (by_id, lineage):
+                relationship = reader[child_sid].get('relationship_type')
+                if toplevel:
+                    assert relationship != 'child_session', child_sid
+                else:
+                    assert relationship == 'child_session', child_sid
+    finally:
+        try:
+            _remove_test_sessions(conn, *ids)
             conn.close()
         except Exception:
             pass

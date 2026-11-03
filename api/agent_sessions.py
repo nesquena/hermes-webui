@@ -92,7 +92,9 @@ def open_state_db_readonly(db_path: Path, log: logging.Logger | None = None) -> 
 
 MESSAGING_SOURCES = {
     'discord',
+    'dingtalk',
     'email',
+    'feishu',
     'wecom',
     'wecom_callback',
     'slack',
@@ -138,8 +140,11 @@ SOURCE_LABELS = {
     'api_server': 'API',
     'cli': 'CLI',
     'cron': 'Cron',
+    'desktop': 'Desktop',
+    'dingtalk': 'DingTalk',
     'discord': 'Discord',
     'email': 'Email',
+    'feishu': 'Feishu',
     'kanban': 'Kanban',
     'wecom': 'WeCom',
     'wecom_callback': 'WeCom Callback',
@@ -166,12 +171,12 @@ def normalize_agent_session_source(raw_source: str | None) -> dict:
 
     if raw == 'webui':
         session_source = 'webui'
-    elif raw in {'acp', 'cli', 'tui'}:
-        # 'acp' (Agent Client Protocol adapter — Zed, external device bridges)
-        # is a local interactive agent client like the CLI/TUI: its sessions
-        # live only in state.db, so classifying it 'other' would leave them
-        # invisible in both sidebar buckets (webui skips the state.db
-        # projection; cli keeps only CLI-classified rows).
+    elif raw in {'acp', 'cli', 'desktop', 'tui'}:
+        # ACP adapters and Hermes Desktop are interactive clients like the
+        # CLI/TUI. Their sessions live only in state.db, so classifying them
+        # as 'other' would leave them invisible in both sidebar buckets
+        # (webui skips the state.db projection; cli keeps only interactive
+        # rows).
         session_source = 'cli'
     elif raw in MESSAGING_SOURCES:
         session_source = 'messaging'
@@ -323,10 +328,10 @@ def is_cli_session_row(row: dict) -> bool:
     if source in {"external_agent", "external-agent"}:
         return True
     if (
-        source_tag in {"acp", "cli", "tui"}
-        or raw_source in {"acp", "cli", "tui"}
-        or source_name in {"acp", "cli", "tui"}
-        or source_label in {"acp", "cli", "tui"}
+        source_tag in {"acp", "cli", "desktop", "tui"}
+        or raw_source in {"acp", "cli", "desktop", "tui"}
+        or source_name in {"acp", "cli", "desktop", "tui"}
+        or source_label in {"acp", "cli", "desktop", "tui"}
     ):
         return True
 
@@ -370,11 +375,13 @@ def is_cli_session_row_visible(row: dict) -> bool:
     }
     if "tui" in interactive_sources:
         return True
-    if "acp" in interactive_sources:
-        # Like TUI rows, user-driven ACP sessions stay visible even when
-        # ended/untitled. Unlike TUI, an ACP connection can record only
-        # assistant/tool/system rows (e.g. a replayed or aborted turn), so
-        # require at least one user turn before surfacing the row.
+    if {"acp", "desktop"} & interactive_sources:
+        # Like TUI rows, user-driven ACP/Desktop sessions stay visible even
+        # when ended/untitled. Unlike TUI, these clients can leave connection
+        # records containing only assistant/tool/system rows, so require at
+        # least one user turn when roles are known. The database projection
+        # preserves a positive-message fallback for legacy Desktop history
+        # whose roles are unavailable.
         return _count_user_turns(row) > 0
 
     if _has_cli_lineage(row):
@@ -439,6 +446,68 @@ def _branch_markers(row: dict | None) -> tuple[str, dict[str, str]]:
             return 'unknown', {}
         markers[key] = value.strip()
     return ('markers', markers) if markers else ('none', {})
+
+
+def _is_messaging_reset_successor(parent: dict | None, child: dict | None) -> bool:
+    """Return True when ``child`` is the next segment of the same messaging chat.
+
+    A Gateway ``session_reset`` keeps ``parent_session_id`` so the DM has a
+    lineage. That link is not a subagent or a fork: nesting the new segment
+    under the reset parent would sort it by the parent's old timestamp, so
+    today's chat disappears from the top of the sidebar. Same source plus the
+    same ``session_key`` (or the same chat and user, when no key is stored)
+    stays its own top-level row.
+    """
+    if not parent or not child:
+        return False
+    if str(parent.get('end_reason') or '').strip().lower() != 'session_reset':
+        return False
+    messaging = MESSAGING_SOURCES | {'signal', 'messaging'}
+    parent_source = _safe_lower(parent.get('source'))
+    child_source = _safe_lower(child.get('source'))
+    # Never collapse across surfaces: a WebUI continuation of a reset DM stays
+    # its own surface-owned conversation.
+    if parent_source not in messaging or parent_source != child_source:
+        return False
+    ended_at = parent.get('ended_at')
+    if ended_at is not None:
+        try:
+            if float(child.get('started_at') or 0) < float(ended_at):
+                return False
+        except (TypeError, ValueError):
+            return False
+    # An explicit branch or delegate of this parent is not the reset segment,
+    # even when it shares the chat key and starts after the reset. A WebUI
+    # fork and an unreadable marker fail closed the same way. ``_reset_from``
+    # naming this parent is the reset segment itself. A branch marker that
+    # names an earlier ancestor was inherited and does not block the exemption.
+    if str(child.get('session_source') or '').strip().lower() == 'fork':
+        return False
+    marker_state, child_markers = _branch_markers(child)
+    if marker_state == 'unknown':
+        return False
+    parent_id = str(parent.get('id') or '').strip()
+    if parent_id and child_markers.get('_branched_from') == parent_id:
+        return False
+    if parent_id and child_markers.get('_delegate_from') == parent_id:
+        return False
+    parent_key = str(parent.get('session_key') or '').strip()
+    child_key = str(child.get('session_key') or '').strip()
+    if parent_key and child_key:
+        return parent_key == child_key
+
+    def _chat_identity(row: dict) -> tuple[str, str, str]:
+        return (
+            str(row.get('chat_id') or row.get('origin_chat_id') or '').strip(),
+            str(row.get('user_id') or row.get('origin_user_id') or '').strip(),
+            str(row.get('thread_id') or '').strip(),
+        )
+
+    parent_ident = _chat_identity(parent)
+    # An empty chat/user is not evidence of "same chat" — fail closed.
+    if not parent_ident[0] or not parent_ident[1]:
+        return False
+    return parent_ident == _chat_identity(child)
 
 
 def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
@@ -537,8 +606,9 @@ def _is_user_visible_reset_successor(parent: dict | None, child: dict | None) ->
     Agent reset successors retain ``parent_session_id`` as durable lineage, but
     unlike compression segments, delegates, and branches they are distinct
     conversations in the sidebar. Prefer the canonical modern marker so a
-    bounded query need not include the parent; only use the conservative
-    same-session-key fallback for older Agent rows.
+    bounded query need not include the parent. Older messaging resets keep
+    their source/chat identity rule; other legacy resets require the same
+    session key and a proved timestamp boundary.
     """
     if not child:
         return False
@@ -549,14 +619,31 @@ def _is_user_visible_reset_successor(parent: dict | None, child: dict | None) ->
     # inherited reset marker. Match Agent's reopen/continuation boundary.
     if str(child.get('source') or '').strip().lower() == 'tool':
         return False
+    if str(child.get('session_source') or '').strip().lower() == 'fork':
+        return False
 
     config = _parse_model_config(child.get('model_config'))
     if config is None:
         return False
 
-    # An explicit branch/delegate marker wins over reset metadata. In a
-    # conflict, fail closed and preserve the historical child projection.
-    if '_branched_from' in config or '_delegate_from' in config:
+    # Markers describe an edge, not every descendant. A valid ancestor marker
+    # may be inherited by a reset, but a branch/delegate of THIS parent (or
+    # malformed provenance) must never be promoted by either reset rule.
+    for key in ('_branched_from', '_delegate_from'):
+        if key in config:
+            value = config[key]
+            if not isinstance(value, str) or not value.strip() or value.strip() == parent_id:
+                return False
+
+    messaging_reset = bool(
+        parent
+        and str(parent.get('id') or '').strip() == parent_id
+        and _safe_lower(parent.get('source')) in MESSAGING_SOURCES | {'messaging'}
+        and _safe_lower(parent.get('end_reason')) == 'session_reset'
+    )
+    if messaging_reset and _safe_lower(child.get('source')) != _safe_lower(parent.get('source')):
+        # A canonical marker cannot bypass master's known messaging-reset
+        # surface boundary. Missing/reopened parents still use durable intent.
         return False
 
     if '_reset_from' in config:
@@ -564,6 +651,12 @@ def _is_user_visible_reset_successor(parent: dict | None, child: dict | None) ->
         return isinstance(reset_from, str) and reset_from == parent_id
 
     if not parent or str(parent.get('id') or '').strip() != parent_id:
+        return False
+    if messaging_reset:
+        # This is the complete messaging compatibility rule, not an OR with
+        # the generic fallback: that would bypass its cross-surface refusal.
+        return _is_messaging_reset_successor(parent, child)
+    if '_branched_from' in config or '_delegate_from' in config:
         return False
     if parent.get('end_reason') not in _RESET_END_REASONS:
         return False
@@ -780,6 +873,7 @@ def read_importable_agent_session_rows(
     project_assignment: str | None = None,
     project_ids: tuple[str, ...] | None = None,
     return_window_exhaustion: bool = False,
+    session_ids: tuple[str, ...] | None = None,
 ) -> list[dict] | tuple[list[dict], bool]:
     """Return agent sessions projected as importable conversations.
 
@@ -823,6 +917,10 @@ def read_importable_agent_session_rows(
     result can exceed ``limit`` by the number of such anchors. Callers must
     therefore iterate the result rather than assume ``len(rows) <= limit``.
 
+    ``session_ids`` narrows the query to exactly those rows, so a caller can
+    resolve a conversation the user asked for by id without depending on any
+    recency window. An empty narrowing selects nothing.
+
     ``return_window_exhaustion=True`` returns ``(rows, exhausted)`` instead of
     just ``rows``. ``exhausted`` is true only when the final bounded raw-candidate
     window was full while its logical projection still under-delivered ``limit``.
@@ -854,6 +952,13 @@ def read_importable_agent_session_rows(
         if not wanted_project_ids:
             # An empty narrowing selects nothing. Returning [] keeps that exact
             # instead of degrading to "every assigned conversation".
+            return _result([])
+    wanted_session_ids: tuple[str, ...] = ()
+    if session_ids is not None:
+        wanted_session_ids = tuple(
+            cleaned for value in session_ids if (cleaned := str(value or '').strip())
+        )
+        if not wanted_session_ids:
             return _result([])
     db_path = Path(db_path)
     if not db_path.exists():
@@ -926,8 +1031,18 @@ def read_importable_agent_session_rows(
         if use_messages_join:
             actual_count_expr = f"COUNT(m.{count_col})"
             if 'role' in message_cols:
-                user_message_count_expr = "COUNT(CASE WHEN LOWER(m.role) = 'user' THEN 1 END)"
+                # NULL-only roles carry no evidence about who spoke. Keep the
+                # legacy message-count fallback for that Desktop session only;
+                # known assistant/tool-only sessions must still stay hidden.
+                user_message_count_expr = (
+                    "CASE WHEN LOWER(COALESCE(s.source, '')) = 'desktop' "
+                    "AND COUNT(m.role) = 0 "
+                    f"THEN COUNT(m.{count_col}) "
+                    "ELSE COUNT(CASE WHEN LOWER(m.role) = 'user' THEN 1 END) END"
+                )
             else:
+                # Legacy schemas cannot prove message roles. Preserve their
+                # positive-message fallback instead of hiding Desktop history.
                 user_message_count_expr = f"COUNT(m.{count_col})"
             last_activity_expr = "MAX(m.timestamp)" if messages_has_timestamp else "NULL"
             join_clause = "LEFT JOIN messages m ON m.session_id = s.id"
@@ -959,6 +1074,10 @@ def read_importable_agent_session_rows(
                 placeholders = ", ".join("?" for _ in excluded)
                 where_clauses.append(f"s.source NOT IN ({placeholders})")
                 params.extend(excluded)
+        if wanted_session_ids:
+            placeholders = ", ".join("?" for _ in wanted_session_ids)
+            where_clauses.append(f"s.id IN ({placeholders})")
+            params.extend(wanted_session_ids)
         if project_assignment is not None:
             wanted = str(project_assignment).strip().lower()
             if wanted not in PROJECT_ASSIGNMENT_FILTERS:
@@ -1203,22 +1322,38 @@ def read_importable_agent_session_rows(
             # NOTE: this can return more than ``limit`` rows (see docstring).
             have = {row.get('id') for row in selected}
             by_id = {row.get('id'): row for row in projected if row.get('id')}
+            # A compressed parent is projected under its tip id; a child delegated before the
+            # compression names the old segment, so resolve it through the lineage root too.
+            by_root = {row['_lineage_root_id']: row for row in projected if row.get('_lineage_root_id')}
+            def _is_subagent(row):
+                return str(row.get('raw_source') or row.get('source') or '').strip().lower() == 'subagent'
+
+            def _parent_of(row):
+                parent_id = row.get('parent_session_id')
+                return by_id.get(parent_id) or by_root.get(row.get('_parent_lineage_root_id') or parent_id)
+
             pending = list(selected)
             while pending:
                 row = pending.pop()
-                if str(row.get('raw_source') or row.get('source') or '').strip().lower() != 'subagent':
+                if not _is_subagent(row) or not row.get('parent_session_id'):
                     continue
-                parent_id = row.get('parent_session_id')
-                if not parent_id or parent_id in have:
-                    continue
-                parent = by_id.get(parent_id)
-                if parent is None:
-                    continue
-                if str(parent.get('raw_source') or parent.get('source') or '').strip().lower() != 'subagent':
+                parent = _parent_of(row)
+                if parent is None or parent.get('id') in have or not _is_subagent(parent):
                     continue
                 selected.append(parent)
-                have.add(parent_id)
+                have.add(parent.get('id'))
                 pending.append(parent)
+            # The sidebar reads parent_source as "the parent is in this payload". A delegated child whose
+            # parent row is not returned here must not claim that, or the child vanishes. No WebUI exemption:
+            # a WebUI parent may have no sidecar; when it has one, the route stamps parent_is_cli_session
+            # from that row, which the client checks before parent_source.
+            for row in selected:
+                if not _is_subagent(row) or not row.get('parent_session_id'):
+                    continue
+                parent = _parent_of(row)
+                if parent is not None and parent.get('id') in have:
+                    continue
+                row['parent_source'] = None
             return _result(selected, window_exhausted)
 
         cur.execute(
@@ -1360,7 +1495,11 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
             ended_expr = _optional_col('ended_at', session_cols)
             end_reason_expr = _optional_col('end_reason', session_cols)
             parent_expr = _optional_col('parent_session_id', session_cols)
-            session_key_expr = _optional_col('session_key', session_cols)
+            identity_exprs = ", ".join(
+                _optional_col(column, session_cols)
+                for column in ('session_key', 'user_id', 'chat_id', 'thread_id',
+                               'origin_chat_id', 'origin_user_id')
+            )
 
             def fetch_one(row_id: str | None) -> dict | None:
                 if not row_id:
@@ -1374,7 +1513,7 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
                            {title_expr},
                            {started_expr},
                            {parent_expr},
-                           {session_key_expr},
+                           {identity_exprs},
                            {ended_expr},
                            {end_reason_expr}
                     FROM sessions s
@@ -1422,7 +1561,7 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
                            {title_expr},
                            {started_expr},
                            {parent_expr},
-                           {session_key_expr},
+                           {identity_exprs},
                            {ended_expr},
                            {end_reason_expr}
                     FROM sessions s
@@ -1499,9 +1638,18 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                 return {}
             session_source_expr = _optional_col('session_source', session_cols)
             source_expr = _optional_col('source', session_cols)
-            session_key_expr = _optional_col('session_key', session_cols)
             model_config_expr = _optional_col('model_config', session_cols)
             message_count_expr = _optional_col('message_count', session_cols, '0')
+            # Identity columns let a session_reset successor stay a top-level
+            # sidebar row instead of being nested under its reset parent.
+            identity_exprs = ", ".join((
+                _optional_col('session_key', session_cols),
+                _optional_col('user_id', session_cols),
+                _optional_col('chat_id', session_cols),
+                _optional_col('thread_id', session_cols),
+                _optional_col('origin_chat_id', session_cols),
+                _optional_col('origin_user_id', session_cols),
+            ))
             # Scoped fetch via PRIMARY KEY + idx_sessions_parent rather than a
             # full table scan. The sessions table grows unbounded over time
             # (1000+ rows is normal, 10000+ for power users), and this function
@@ -1537,7 +1685,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                     placeholders = ','.join('?' * len(chunk))
                     cur.execute(
                         f"""
-                        SELECT s.id, {source_expr}, {session_source_expr}, s.title, s.started_at, s.parent_session_id, {session_key_expr}, {model_config_expr}, s.ended_at, s.end_reason, {message_count_expr}
+                        SELECT s.id, {source_expr}, {session_source_expr}, {model_config_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}, {identity_exprs}
                         FROM sessions s
                         WHERE s.id IN ({placeholders})
                         """,
@@ -1566,7 +1714,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                     placeholders = ','.join('?' * len(chunk))
                     cur.execute(
                         f"""
-                        SELECT s.id, {source_expr}, {session_source_expr}, s.title, s.started_at, s.parent_session_id, {session_key_expr}, {model_config_expr}, s.ended_at, s.end_reason, {message_count_expr}
+                        SELECT s.id, {source_expr}, {session_source_expr}, {model_config_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}, {identity_exprs}
                         FROM sessions s
                         WHERE s.parent_session_id IN ({placeholders})
                         """,
