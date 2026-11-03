@@ -1977,26 +1977,45 @@ async function send(){
       // picker.
       let _pluginSkillResolved=false;
       if(_parsedCmd.name.includes(':')&&!_bundleCmd){
+        // #7781 [CORE]: both fetches below park this send across awaits while
+        // the user is free to switch chats. Reuse the #8718 _slashOwner
+        // snapshot — captured before send()'s first metadata await — and stop
+        // WITHOUT touching the composer or the transcript as soon as the
+        // viewed session is no longer the chat that issued the command.
+        // Without the guard a send started in chat A finished in chat B: the
+        // forced-skill directive POSTed into B and B's composer draft was
+        // wiped, and a failed content fetch wrote its "Plugin skill error"
+        // bubble into whichever chat happened to be open.
+        //
+        // #7781 should-fix: the listing fetch gets its OWN try. A /api/skills
+        // outage must fall through to master's behaviour (forward the literal
+        // text) instead of answering "Plugin skill error" and swallowing the
+        // command — the previous single try wrapped the listing fetch too.
+        let _match=null;
         try{
-          let _match=null;
           const _skillsData=await api('/api/skills');
           _match=(Array.isArray(_skillsData&&_skillsData.skills)?_skillsData.skills:[])
             .find(s=>String(s.name||'').toLowerCase()===_parsedCmd.name.toLowerCase()&&s.source==='plugin')||null;
-          if(_match){
+        }catch(e){_match=null;}
+        if((S.session&&S.session.session_id||null)!==_slashOwner.sid){hideCmdDropdown();return;}
+        if(_match){
+          try{
             const _detail=await api('/api/skills/content?name='+encodeURIComponent(_match.name));
+            if((S.session&&S.session.session_id||null)!==_slashOwner.sid){hideCmdDropdown();return;}
             const _content=_detail&&typeof _detail.content==='string'?_detail.content.trim():'';
             if(!_content) throw new Error(`Skill \`${_match.name}\` has no readable content.`);
-            _forcedSkillDirectivePending={sessionId:S.session&&S.session.session_id||null,promise:Promise.resolve({name:_match.name,directive:`[USER OVERRIDE] You MUST follow the skill '${_match.name}' content provided below before responding to the next message.`,content:_content})};
+            _forcedSkillDirectivePending={sessionId:_slashOwner.sid,promise:Promise.resolve({name:_match.name,directive:`[USER OVERRIDE] You MUST follow the skill '${_match.name}' content provided below before responding to the next message.`,content:_content})};
             _slashDisplayTextOverride=text;
             text=_parsedCmd.args||'';
             _pluginSkillResolved=true;
+          }catch(e){
+            if((S.session&&S.session.session_id||null)!==_slashOwner.sid){hideCmdDropdown();return;}
+            if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
+            S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+            S.messages.push({role:'assistant',content:`Plugin skill error: ${e&&e.message||e}`,_ts:Date.now()/1000});
+            renderMessages();
+            $('msg').value='';autoResize();hideCmdDropdown();return;
           }
-        }catch(e){
-          if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
-          S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
-          S.messages.push({role:'assistant',content:`Plugin skill error: ${e&&e.message||e}`,_ts:Date.now()/1000});
-          renderMessages();
-          $('msg').value='';autoResize();hideCmdDropdown();return;
         }
       }
       // #7683 [CORE]: the fail-closed guard runs LAST, after every dispatch
