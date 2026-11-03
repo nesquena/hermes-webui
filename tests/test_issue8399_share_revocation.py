@@ -326,3 +326,24 @@ def test_share_write_keeps_a_concurrent_save(isolated_state, path, skip_index):
         assert stored["share_token"] is not None
     else:
         assert stored["share_token"] is None
+
+
+def test_revoke_reports_an_error_while_the_link_still_resolves(isolated_state, monkeypatch):
+    """The revoke handler reports success only once the snapshot no longer
+    resolves. With the snapshot revocation stubbed out, the published link stays
+    live, so the handler must answer 500 and keep the token on the session rather
+    than clearing it and claiming the link is dead (nesquena review of #8399, M4)."""
+    import api.routes as routes
+    import api.shares as shares
+
+    sid = _make_session()
+    status, body = _post("/api/share/create", {"session_id": sid})
+    assert status == 200, body
+    token = body["share"]["token"]
+    assert shares.load_share(token) is not None
+
+    monkeypatch.setattr(routes, "revoke_share", lambda session: None)
+    status, body = _post("/api/share/revoke", {"session_id": sid})
+    assert status == 500, body
+    assert shares.load_share(token) is not None
+    assert _sidecar(sid)["share_token"] == token, "a failed revoke cleared the session's token"
