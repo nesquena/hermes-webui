@@ -342,7 +342,7 @@ class TestCheckRepoDirtyFlag:
                 return '', False  # dirty
             if args == ['fetch', 'origin', '--tags', '--force']:
                 return 'network unavailable', False  # fail fast
-            if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+            if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
                 return '', True
             raise AssertionError(f'unexpected git args: {args!r}')
 

@@ -137,6 +137,7 @@ SOURCE_LABELS = {
     'api_server': 'API',
     'cli': 'CLI',
     'cron': 'Cron',
+    'desktop': 'Desktop',
     'dingtalk': 'DingTalk',
     'discord': 'Discord',
     'email': 'Email',
@@ -167,12 +168,12 @@ def normalize_agent_session_source(raw_source: str | None) -> dict:
 
     if raw == 'webui':
         session_source = 'webui'
-    elif raw in {'acp', 'cli', 'tui'}:
-        # 'acp' (Agent Client Protocol adapter — Zed, external device bridges)
-        # is a local interactive agent client like the CLI/TUI: its sessions
-        # live only in state.db, so classifying it 'other' would leave them
-        # invisible in both sidebar buckets (webui skips the state.db
-        # projection; cli keeps only CLI-classified rows).
+    elif raw in {'acp', 'cli', 'desktop', 'tui'}:
+        # ACP adapters and Hermes Desktop are interactive clients like the
+        # CLI/TUI. Their sessions live only in state.db, so classifying them
+        # as 'other' would leave them invisible in both sidebar buckets
+        # (webui skips the state.db projection; cli keeps only interactive
+        # rows).
         session_source = 'cli'
     elif raw in MESSAGING_SOURCES:
         session_source = 'messaging'
@@ -336,10 +337,10 @@ def is_cli_session_row(row: dict) -> bool:
     if source in {"external_agent", "external-agent"}:
         return True
     if (
-        source_tag in {"acp", "cli", "tui"}
-        or raw_source in {"acp", "cli", "tui"}
-        or source_name in {"acp", "cli", "tui"}
-        or source_label in {"acp", "cli", "tui"}
+        source_tag in {"acp", "cli", "desktop", "tui"}
+        or raw_source in {"acp", "cli", "desktop", "tui"}
+        or source_name in {"acp", "cli", "desktop", "tui"}
+        or source_label in {"acp", "cli", "desktop", "tui"}
     ):
         return True
 
@@ -407,14 +408,16 @@ def is_cli_session_row_visible(row: dict) -> bool:
     # gate.
     user_turn_count_unknown = bool(row.get("user_message_count_unknown"))
 
-    if "acp" in interactive_sources:
-        # Like TUI rows, user-driven ACP sessions stay visible even when
-        # ended/untitled. Unlike TUI, an ACP connection can record only
-        # assistant/tool/system rows (e.g. a replayed or aborted turn), so
-        # require at least one user turn before surfacing the row — unless the
-        # count is unknown, in which case requiring one would read a missing
-        # `role` column as a confident zero and drop a real session (#7681
-        # finding 2).
+    if {"acp", "desktop"} & interactive_sources:
+        # Like TUI rows, user-driven ACP/Desktop sessions stay visible even
+        # when ended/untitled. Unlike TUI, these clients can leave connection
+        # records containing only assistant/tool/system rows, so require at
+        # least one user turn when roles are known. The database projection
+        # preserves a positive-message fallback for legacy Desktop history
+        # whose roles are unavailable — and when even that fallback cannot
+        # prove a role (no `role` column at all), the count arrives explicitly
+        # unknown rather than a confident zero, which must surface the row
+        # instead of hiding it (#7681 finding 2).
         if user_turn_count_unknown:
             return True
         return _count_user_turns(row) > 0
@@ -1100,13 +1103,25 @@ def read_importable_agent_session_rows(
                         f" AND TRIM({content_expr}, ' ' || char(9)"
                         " || char(10) || char(13)) != ''"
                     )
-                    user_message_count_expr = (
+                    role_user_count_expr = (
                         "COUNT(CASE WHEN LOWER(m.role) = 'user'"
                         f"{marker_guard}"
                         f"{display_kind_guard}"
                         f"{content_guard}"
                         f" AND NOT ({internal_exclusions})"
                         " THEN 1 END)"
+                    )
+                    # Upstream (preserve legacy Desktop histories): a Desktop
+                    # session whose message roles are ALL NULL carries no
+                    # evidence about who spoke, so keep the positive-message
+                    # fallback for that session only; a known assistant/tool
+                    # only session (COUNT(m.role) > 0) still counts real user
+                    # turns and stays hidden without one.
+                    user_message_count_expr = (
+                        "CASE WHEN LOWER(COALESCE(s.source, '')) = 'desktop' "
+                        "AND COUNT(m.role) = 0 "
+                        f"THEN COUNT(m.{count_col}) "
+                        f"ELSE {role_user_count_expr} END"
                     )
                 else:
                     # No ``content`` column (minimal/legacy schema): every
