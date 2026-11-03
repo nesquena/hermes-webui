@@ -2111,15 +2111,23 @@ class Session:
         # #8399: the share pair carries the same stale-snapshot class, and a
         # writer that resolved its copy before a share create/revoke and saves
         # after it puts its own older pair back -- orphaning a live snapshot on
-        # create, or restoring a revoked token on revoke. Adopt the on-disk pair
-        # when this object has not changed it since its baseline.
-        if (
-            self.share_token == getattr(self, '_share_token_saved', self.share_token)
-            and self.share_created_at
-            == getattr(self, '_share_created_at_saved', self.share_created_at)
-        ):
-            on_disk_share = _persisted_share_fields(self.path)
-            if on_disk_share is not _SHARE_FIELDS_ABSENT:
+        # create, or restoring a revoked token on revoke. The durable pair is
+        # owned by the share lifecycle (update_session_share_fields, under this
+        # same lock), so adopt it unless this object changed the pair itself
+        # AND the durable pair is still the one it last loaded or saved. A pair
+        # the lifecycle moved since that baseline always wins: a stale copy (a
+        # paused rename, an evicted resident) can never put a revoked token
+        # back over a newer link that a later revoke then cannot reach.
+        on_disk_share = _persisted_share_fields(self.path)
+        if on_disk_share is not _SHARE_FIELDS_ABSENT:
+            share_baseline = (
+                getattr(self, '_share_token_saved', self.share_token),
+                getattr(self, '_share_created_at_saved', self.share_created_at),
+            )
+            if (
+                (self.share_token, self.share_created_at) == share_baseline
+                or tuple(on_disk_share) != share_baseline
+            ):
                 self.share_token, self.share_created_at = on_disk_share
                 self._share_token_saved = self.share_token
                 self._share_created_at_saved = self.share_created_at

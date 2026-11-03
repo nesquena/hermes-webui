@@ -7087,6 +7087,15 @@ def _mirror_share_fields_to_cached_session(sid: str, source) -> None:
     the live copy after the save, a checkpoint landing in that window would write
     ``share_token: None`` back over the sidecar and the published link would stay
     live with nothing left for revoke to find.
+
+    The mirrored pair is the share lifecycle's, never the resident's own change,
+    so its stale-save baseline moves with it. Moving only the fields made the
+    pair look like the resident's own edit: a writer already holding that object
+    (a paused rename) whose object was evicted before
+    ``_commit_share_fields_to_cached_session`` ran later saved the mirrored token
+    over the durable pair -- putting a revoked token back, or orphaning a newer
+    link that revoke could then no longer reach. With the baseline moved, every
+    later save of the object adopts the durable pair instead.
     """
     try:
         with LOCK:
@@ -7095,6 +7104,8 @@ def _mirror_share_fields_to_cached_session(sid: str, source) -> None:
                 return
             cached.share_token = getattr(source, "share_token", None)
             cached.share_created_at = getattr(source, "share_created_at", None)
+            cached._share_token_saved = cached.share_token
+            cached._share_created_at_saved = cached.share_created_at
     except Exception:
         logger.debug("Failed to mirror share fields for session %s", sid, exc_info=True)
 
@@ -7142,14 +7153,20 @@ def _persist_share_fields(sid: str, session, *, share_token, share_created_at) -
     and ``save()`` re-entering it is expected.
     """
     with _session_persist_lock(sid):
-        if not _update_session_share_fields(
-            sid,
-            share_token=share_token,
-            share_created_at=share_created_at,
-        ):
-            session.share_token = share_token
-            session.share_created_at = share_created_at
-            session.save(touch_updated_at=False)
+        try:
+            if not _update_session_share_fields(
+                sid,
+                share_token=share_token,
+                share_created_at=share_created_at,
+            ):
+                session.share_token = share_token
+                session.share_created_at = share_created_at
+                session.save(touch_updated_at=False)
+        except Exception:
+            _return_mirrored_share_pair_to_resident(
+                sid, session, share_token=share_token, share_created_at=share_created_at,
+            )
+            raise
         # Still under the persistence lock, so no save can land between the
         # patch and this step (#8399 review, release fold).
         _commit_share_fields_to_cached_session(
@@ -7157,11 +7174,39 @@ def _persist_share_fields(sid: str, session, *, share_token, share_created_at) -
         )
 
 
+def _return_mirrored_share_pair_to_resident(sid: str, session, *, share_token, share_created_at) -> None:
+    """Undo the mirror's baseline move when the share pair never reached disk.
+
+    The pre-save mirror moves the resident's stale-save baseline with the pair,
+    so the pair is never the resident's own change. When the persist then fails,
+    the resident would adopt the old durable pair on its next save and drop a
+    snapshot that is already published (or put back a token revoke already
+    tombstoned). Hand the pair back as the resident's own change against the
+    durable pair the handler read, so the resident's next save still writes it.
+    The caller holds ``_session_persist_lock(sid)``.
+    """
+    try:
+        with LOCK:
+            cached = SESSIONS.get(sid)
+            if cached is None or cached is session:
+                return
+            pair = (share_token, share_created_at)
+            if (cached.share_token, cached.share_created_at) != pair or (
+                getattr(cached, "_share_token_saved", None),
+                getattr(cached, "_share_created_at_saved", None),
+            ) != pair:
+                return
+            cached._share_token_saved = getattr(session, "_share_token_saved", None)
+            cached._share_created_at_saved = getattr(session, "_share_created_at_saved", None)
+    except Exception:
+        logger.debug("Failed to restore the share baseline of session %s", sid, exc_info=True)
+
+
 def _commit_share_fields_to_cached_session(sid: str, *, share_token, share_created_at) -> None:
     """Set the resident session's share pair AND its stale-save baseline to the
     pair that was just persisted. The caller holds ``_session_persist_lock(sid)``.
 
-    The pre-save mirror moves only the fields. A resident save in the
+    The pre-save mirror moved only the fields at first. A resident save in the
     mirror/patch window is then back at its baseline and adopts the pre-patch
     pair from disk, so the cached copy kept serving a revoked token. Moving the
     fields again without the baseline is worse: a copy that a writer reloaded
