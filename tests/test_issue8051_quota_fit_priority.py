@@ -28,7 +28,7 @@ def test_quota_is_the_first_composer_control_removed():
     assert "cf-no-quota" in fit
     assert fit.index("cf-no-quota") < fit.index("cf-icons")
     assert ".composer-footer.cf-no-quota .provider-quota-chip" in css
-    assert ".composer-footer.cf-icons .provider-quota-chip" in css
+    assert ".composer-footer.cf-icons .provider-quota-chip" not in css
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -75,7 +75,10 @@ function run(available, initial) {
   };
   global.document = {querySelector() { return footer; }};
   _fitComposerFooter();
-  return Array.from(classes).sort();
+  return {
+    classes: Array.from(classes).sort(),
+    quotaVisible: !classes.has('cf-no-quota') && !classes.has('cf-burger'),
+  };
 }
 
 process.stdout.write(JSON.stringify({
@@ -92,30 +95,56 @@ process.stdout.write(JSON.stringify({
         [NODE, str(driver), str(UI)], capture_output=True, text=True, check=True
     )
     assert json.loads(result.stdout) == {
-        "full": [],
-        "quotaOnly": ["cf-no-quota"],
-        "icons": ["cf-icons"],
-        "burger": ["cf-burger", "cf-icons"],
-        "expands": [],
+        "full": {"classes": [], "quotaVisible": True},
+        "quotaOnly": {"classes": ["cf-no-quota"], "quotaVisible": False},
+        "icons": {"classes": ["cf-icons"], "quotaVisible": True},
+        "burger": {
+            "classes": ["cf-burger", "cf-icons"],
+            "quotaVisible": False,
+        },
+        "expands": {"classes": [], "quotaVisible": True},
     }
 
 
-def test_phone_panel_omits_the_optional_quota_action():
+def test_phone_panel_keeps_quota_as_a_full_width_row_after_primary_actions():
     css = CSS.read_text(encoding="utf-8")
+    index = INDEX.read_text(encoding="utf-8")
+    panel = index.split('id="composerMobileConfigPanel"', 1)[1].split(
+        '<div class="profile-dropdown"', 1
+    )[0]
+
     assert re.search(
         r"@media\(max-width:640px\)\s*\{[\s\S]*?#composerMobileQuotaAction"
-        r"\s*\{\s*display:none!important;\s*\}",
+        r"\s*\{\s*flex:1 0 100%;\s*\}",
+        css,
+    )
+    assert panel.index('id="composerMobileWorkspaceAction"') < panel.index(
+        'id="composerMobileModelAction"'
+    ) < panel.index('id="composerMobileReasoningAction"') < panel.index(
+        'id="composerMobileQuotaAction"'
+    ) < panel.index('id="composerMobileContextAction"')
+
+
+def test_fit_driven_burger_keeps_quota_in_the_config_panel():
+    css = CSS.read_text(encoding="utf-8")
+    assert ".composer-footer.cf-burger .composer-mobile-config-panel.open" in css
+    assert not re.search(
+        r"\.composer-footer\.cf-burger[^{}]*#composerMobileQuotaAction"
+        r"\s*\{[^}]*display\s*:\s*none",
         css,
     )
 
 
-def test_quota_setting_copy_does_not_claim_a_fixed_viewport_gate():
+def test_quota_setting_copy_describes_compact_and_phone_access():
     copies = re.findall(
         r"settings_desc_quota_chip:\s*(['\"])(.*?)\1,",
         I18N.read_text(encoding="utf-8"),
     )
     assert len(copies) == 15
     assert all("1400" not in text for _, text in copies)
-    assert "1400" not in INDEX.read_text(encoding="utf-8").split(
+    english = copies[0][1]
+    assert "compact and phone layouts keep the balance" in english
+    fallback = INDEX.read_text(encoding="utf-8").split(
         'data-i18n="settings_desc_quota_chip"', 1
     )[1].split("</div>", 1)[0]
+    assert english in fallback

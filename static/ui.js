@@ -7258,7 +7258,8 @@ if(window.visualViewport){
 // ── Fit-based composer footer collapse ──────────────────────────────────────
 // Stage classes on .composer-footer:
 //   (none) full labels · .cf-no-quota full labels without the optional quota
-//   chip · .cf-icons icon chips · .cf-icons.cf-burger hamburger.
+//   chip · .cf-icons icon chips with quota restored · .cf-icons.cf-burger
+//   hamburger with quota available in its configuration panel.
 let _composerFitScheduled=false;
 let _composerFitResizeObserver=null;
 let _composerFitMutationObserver=null;
