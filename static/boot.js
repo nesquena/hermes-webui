@@ -2972,29 +2972,6 @@ window._isImeEnter=_isImeEnter;
 function _hasFinePointerCoexisting(){
   try{ return matchMedia('(any-pointer:fine)').matches; }catch(_){ return false; }
 }
-// Detect phone software keyboards without undoing #3076's hardware-input
-// guard for tablets. Some iOS Safari versions report (any-pointer:fine) on a
-// plain iPhone, so phone UAs bypass that unreliable signal. Tablets and
-// touch-capable desktop UAs still require a coarse pointer with no fine pointer.
-function _isTouchOnlyDevice(){
-  const ua=navigator.userAgent||'';
-  if(/iPhone|iPod/i.test(ua)) return true;
-  if(/Android.*Mobile/i.test(ua)) return true;
-  try{
-    return matchMedia('(pointer:coarse)').matches&&!_hasFinePointerCoexisting();
-  }catch(_){}
-  return false;
-}
-function _isNumpadEnter(e){
-  return e.key==='Enter'&&(e.code==='NumpadEnter'||e.location===KeyboardEvent.DOM_KEY_LOCATION_NUMPAD);
-}
-// Initialise _sendKey synchronously from the localStorage cache so the keydown
-// handler below has the correct value before the async /api/settings call
-// (line ~3231) resolves. Without this, on slow mobile networks the race window
-// leaves _sendKey=undefined, _mobileDefault evaluates false, and plain Enter
-// falls through to the `else { send() }` branch — sending the message instead
-// of inserting a newline (issue: mobile Enter sends on fresh page load).
-try{ window._sendKey=localStorage.getItem('hermes-pref-send_key')||'enter'; }catch(_){ window._sendKey='enter'; }
 // Prompt history (#8665): ArrowUp recalls prompts already sent in this chat,
 // like a terminal. It starts only with the caret at the very start of the
 // text, so normal multiline editing keeps its arrow keys. While browsing, Up
@@ -3073,6 +3050,29 @@ function _handlePromptHistoryKey(e, el){
   if(typeof autoResize==='function') autoResize();
   return true;
 }
+// Detect phone software keyboards without undoing #3076's hardware-input
+// guard for tablets. Some iOS Safari versions report (any-pointer:fine) on a
+// plain iPhone, so phone UAs bypass that unreliable signal. Tablets and
+// touch-capable desktop UAs still require a coarse pointer with no fine pointer.
+function _isTouchOnlyDevice(){
+  const ua=navigator.userAgent||'';
+  if(/iPhone|iPod/i.test(ua)) return true;
+  if(/Android.*Mobile/i.test(ua)) return true;
+  try{
+    return matchMedia('(pointer:coarse)').matches&&!_hasFinePointerCoexisting();
+  }catch(_){}
+  return false;
+}
+function _isNumpadEnter(e){
+  return e.key==='Enter'&&(e.code==='NumpadEnter'||e.location===KeyboardEvent.DOM_KEY_LOCATION_NUMPAD);
+}
+// Initialise _sendKey synchronously from the localStorage cache so the keydown
+// handler below has the correct value before the async /api/settings call
+// (line ~3231) resolves. Without this, on slow mobile networks the race window
+// leaves _sendKey=undefined, _mobileDefault evaluates false, and plain Enter
+// falls through to the `else { send() }` branch — sending the message instead
+// of inserting a newline (issue: mobile Enter sends on fresh page load).
+try{ window._sendKey=localStorage.getItem('hermes-pref-send_key')||'enter'; }catch(_){ window._sendKey='enter'; }
 $('msg').addEventListener('keydown',e=>{
   // Autocomplete navigation when dropdown is open
   const dd=$('cmdDropdown');

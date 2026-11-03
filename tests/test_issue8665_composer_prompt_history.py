@@ -18,7 +18,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
 
 def _helpers_src() -> str:
     start = BOOT_JS.index("let _promptHistory=null;")
-    end = BOOT_JS.index("$('msg').addEventListener('keydown',e=>{", start)
+    end = BOOT_JS.index("// Detect phone software keyboards", start)
     return BOOT_JS[start:end]
 
 
