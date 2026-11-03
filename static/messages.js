@@ -5476,7 +5476,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdMediaTailFlushEntry(entry){
     const chunk=_smdMediaTailEntryChunk(entry);
     if(!chunk) return;
-    const m=/^MEDIA:([^\s\)\]]+)$/.exec(String(chunk));
+    const m=/^MEDIA: ?([^\s\)\]]+)$/.exec(String(chunk));
     const parts=m&&typeof _mediaTokenParts==='function'?_smdMediaTokenParts(String(chunk),0,m[1],entry&&entry.parent):null;
     const emitted=!!(parts && entry && entry.parent && _smdAppendMediaNode(entry.parent, parts[0]));
     if(emitted&&parts[1]) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, parts[1]);
@@ -5526,7 +5526,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Prose runs go through the owning text writer. MEDIA tokens go through
     // the single-token DOMParser helper only after a grammar delimiter or
     // authoritative parser finalization proves the ref is complete.
-    const re=/MEDIA:([^\s\)\]]+)/g;
+    const re=/MEDIA: ?([^\s\)\]]+)/g;
     let last=0, m;
     let unmatchedTail=null;
     while((m=re.exec(combined))){
@@ -5562,7 +5562,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // MEDIA prefix; flush any prose before the partial MEDIA suffix.
     const rest = combined.slice(last);
     if(rest){
-      const tailMatch = /MEDIA:[^\s\)\]]*$/.exec(rest);
+      const tailMatch = /MEDIA: ?[^\s\)\]]*$/.exec(rest);
       const prefixTail = tailMatch ? '' : _smdMediaPrefixTail(rest);
       const tailValue = tailMatch ? tailMatch[0] : prefixTail;
       if(tailValue && rest.length < _MEDIA_TAIL_MAX){

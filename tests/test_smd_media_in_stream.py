@@ -482,7 +482,7 @@ class TestSmdMediaInStream(unittest.TestCase):
         # Final parser shutdown is authoritative even when the token has no
         # trailing whitespace or other grammar delimiter.
         self.assertIn("function _smdMediaTailFlush", MESSAGES_JS)
-        self.assertIn("/^MEDIA:([^", MESSAGES_JS)
+        self.assertIn("/^MEDIA: ?([^", MESSAGES_JS)
         self.assertIn("_smdMediaTailFlush(_smdParser)", MESSAGES_JS)
 
     def test_tail_buffer_size_cap(self):
