@@ -48,6 +48,8 @@ function extractFunc(name) {{
   }}
   return src.slice(start, i);
 }}
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_sessionLineageKey'));
@@ -110,6 +112,8 @@ function extractFunc(name) {{
   }}
   return src.slice(start, i);
 }}
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_sessionLineageKey'));
@@ -150,6 +154,8 @@ function extractFunc(name) {{
   }}
   return src.slice(start, i);
 }}
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_sessionLineageKey'));
@@ -192,6 +198,8 @@ function extractFunc(name) {{
   }}
   return src.slice(start, i);
 }}
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_sessionLineageKey'));
@@ -236,6 +244,8 @@ function extractFunc(name) {{
   }}
   return src.slice(start, i);
 }}
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_sessionLineageKey'));
@@ -278,6 +288,8 @@ function extractFunc(name) {{
   }}
   return src.slice(start, i);
 }}
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_sessionLineageKey'));
@@ -324,6 +336,8 @@ var _allSessions = [
   {{session_id:'child', title:'Duplicate Assistant Text Blocks', parent_session_id:'parent', message_count:86, updated_at:200, last_message_at:200, _lineage_root_id:'parent', _compression_segment_count:2}},
   {{session_id:'other', title:'Other', message_count:4, updated_at:100, last_message_at:100}},
 ];
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_sessionLineageKey'));
@@ -354,6 +368,8 @@ function extractFunc(name) {{
   }}
   return src.slice(start, i);
 }}
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
@@ -393,6 +409,8 @@ function extractFunc(name) {{
   }}
   return src.slice(start, i);
 }}
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
@@ -918,6 +936,8 @@ var _activeProject;
 var _sidebarReferenceSessions = [{{session_id:'parent', title:'Archived parent', archived:true, updated_at:10, last_message_at:10, source:'webui'}}];
 function _isMessagingSession(s) {{ return false; }}
 function _isCliSession(s) {{ return !!(s && (s.source === 'cli' || s.raw_source === 'cli')); }}
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
@@ -969,6 +989,8 @@ var _activeProject = 'projA';
 var _sidebarReferenceSessions = [{{session_id:'parent', title:'Archived parent (projB)', archived:true, project_id:'projB', updated_at:10, last_message_at:10, source:'webui'}}];
 function _isMessagingSession(s) {{ return false; }}
 function _isCliSession(s) {{ return !!(s && (s.source === 'cli' || s.raw_source === 'cli')); }}
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
@@ -1009,6 +1031,8 @@ function extractFunc(name) {{
   return src.slice(start, i);
 }}
 var _showArchived = false;
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
@@ -1052,6 +1076,8 @@ function extractFunc(name) {{
   return src.slice(start, i);
 }}
 var _showArchived = false;
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
@@ -1087,6 +1113,8 @@ function extractFunc(name) {{
   return src.slice(start, i);
 }}
 var _showArchived = false;
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
@@ -1125,6 +1153,8 @@ function extractFunc(name) {{
   return src.slice(start, i);
 }}
 var _showArchived = false;
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
@@ -1169,6 +1199,8 @@ function extractFunc(name) {{
   return src.slice(start, i);
 }}
 var _showArchived = false;
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
@@ -1218,6 +1250,8 @@ function extractFunc(name) {{
   }}
   return src.slice(start, i);
 }}
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
@@ -1263,6 +1297,8 @@ function extractFunc(name) {{
   }}
   return src.slice(start, i);
 }}
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
@@ -1296,6 +1332,8 @@ function extractFunc(name) {{
   }}
   return src.slice(start, i);
 }}
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
@@ -1327,6 +1365,8 @@ function extractFunc(name) {{
   }}
   return src.slice(start, i);
 }}
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
@@ -1359,6 +1399,8 @@ function extractFunc(name) {{
   }}
   return src.slice(start, i);
 }}
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
@@ -1403,6 +1445,8 @@ function _isSessionEffectivelyStreaming(session) {{
 function _hasUnreadForSession(session) {{
   return !!(session && session.has_unread);
 }}
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
@@ -1466,6 +1510,8 @@ function _isSessionEffectivelyStreaming(session) {{
 function _hasUnreadForSession(session) {{
   return !!(session && session.has_unread);
 }}
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
@@ -1528,6 +1574,8 @@ function _isSessionEffectivelyStreaming(session) {{
 function _hasUnreadForSession(session) {{
   return !!(session && session.has_unread);
 }}
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
@@ -1591,6 +1639,8 @@ function _isSessionEffectivelyStreaming(session) {{
 function _hasUnreadForSession(session) {{
   return !!(session && session.has_unread);
 }}
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
@@ -1654,6 +1704,8 @@ function _isSessionEffectivelyStreaming(session) {{
 function _hasUnreadForSession(session) {{
   return !!(session && session.has_unread);
 }}
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
@@ -1699,6 +1751,8 @@ function _isSessionEffectivelyStreaming(session) {{
 function _hasUnreadForSession(session) {{
   return !!(session && session.has_unread);
 }}
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));
@@ -1743,6 +1797,8 @@ function extractFunc(name) {{
   }}
   return src.slice(start, i);
 }}
+let _serverTimeDelta = 0;
+eval(extractFunc('_serverNowMs'));
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
 eval(extractFunc('_isForkWithResolvableParent'));

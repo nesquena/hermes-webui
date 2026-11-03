@@ -8848,13 +8848,15 @@ function filterSessions(){
 
 function _sessionTimestampMs(session) {
   // Milliseconds stored as seconds, NaN, and a clock more than two days ahead
-  // sort as "1 minute ago": the label clamps a negative age to one minute.
-  // Reject that candidate and try the next field. Small positive fixtures stay
-  // valid.
+  // of the server sort as "1 minute ago": the label clamps a negative age to
+  // one minute. The cutoff is _serverNowMs(), the clock _applySessionListPayload
+  // syncs from /api/sessions server_time. A raw browser Date.now() drops a real
+  // session when that clock is behind the server. Reject the candidate and try
+  // the next field. Small positive fixtures stay valid.
   function saneSeconds(raw) {
     const n = Number(raw);
     if (!Number.isFinite(n) || n <= 0 || n >= 4e9) return 0;
-    if (n > Date.now() / 1000 + 48 * 3600) return 0;
+    if (n > _serverNowMs() / 1000 + 48 * 3600) return 0;
     return n;
   }
   if (!session) return 0;
@@ -8870,7 +8872,7 @@ function _sessionSortTimestampMs(session) {
   const base = _sessionTimestampMs(session);
   const pending = Number(session && session.pending_started_at);
   const pendingOk = Number.isFinite(pending) && pending > 0 && pending < 4e9
-    && pending <= Date.now() / 1000 + 48 * 3600;
+    && pending <= _serverNowMs() / 1000 + 48 * 3600;
   return Math.max(base, pendingOk ? pending * 1000 : 0);
 }
 

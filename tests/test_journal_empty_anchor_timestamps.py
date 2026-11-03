@@ -197,9 +197,13 @@ def test_compact_last_message_at_uses_the_answer_not_the_empty_anchor():
 
 
 def test_sidebar_timestamp_falls_through_insane_candidates_and_keeps_fixtures():
-    sessions = _extract_function(SESSIONS_JS, "_sessionTimestampMs")
+    sessions = "\n".join(
+        _extract_function(SESSIONS_JS, name)
+        for name in ("_serverNowMs", "_sessionTimestampMs")
+    )
     result = _run_node(
         f"""
+        let _serverTimeDelta = 0;
         {sessions}
         const nowSec = Date.now() / 1000;
         const sane = 1776441972;
@@ -290,9 +294,13 @@ def test_date_separators_skip_empty_recovered_anchors_and_garbage_times():
         "_messageDateSepDayKey",
         "_nextDateSepText",
     )
-    functions = "\n\n".join(_extract_function(UI_JS, name) for name in names)
+    functions = "\n\n".join(
+        [_extract_function(SESSIONS_JS, "_serverNowMs")]
+        + [_extract_function(UI_JS, name) for name in names]
+    )
     result = _run_node(
         f"""
+        let _serverTimeDelta = 0;
         {functions}
         function labels(messages) {{
           const out = [];
@@ -359,3 +367,172 @@ def test_date_separators_skip_empty_recovered_anchors_and_garbage_times():
 
 def test_render_loop_uses_the_date_separator_helper():
     assert "_nextDateSepText(m, _prevSepKey)" in UI_JS
+
+
+def _payload_apply_prelude() -> str:
+    """Real list-apply plus the clocks and day-key helpers it has to feed."""
+    sessions_names = (
+        "_serverNowMs",
+        "_sessionTimestampMs",
+        "_sessionSortTimestampMs",
+        "_applySessionListPayload",
+    )
+    ui_names = (
+        "_recoveredAnchorText",
+        "_isEmptyRecoveredJournalAnchor",
+        "_messageDateSepDayKey",
+    )
+    parts = [_extract_function(SESSIONS_JS, name) for name in sessions_names]
+    parts.extend(_extract_function(UI_JS, name) for name in ui_names)
+    return "\n".join(parts)
+
+
+@pytest.mark.parametrize("skew_hours", [-72, 0, 72])
+def test_payload_server_clock_keeps_recent_and_pending_timestamps(skew_hours):
+    """A real /api/sessions payload must sync the +48h boundary to the server.
+
+    Browser clocks 72h behind, level, and 72h ahead all used to be fine on
+    master. The new cutoff compared against raw Date.now(), so a client 72h
+    behind rejected a session the server had just stamped.
+    """
+    result = _run_node(
+        f"""
+        let _serverTimeDelta = 0;
+        let _serverTz = '';
+        let _otherProfileCount = 0;
+        let _archivedWebuiCount = 0;
+        let _archivedCliCount = 0;
+        let _serverWebuiSessionCount = null;
+        let _serverCliSessionCount = null;
+        let _optimisticallyRemovedSessionIds = new Set();
+        let _allSessions = [];
+        let _sidebarReferenceSessions = [];
+        let _allSessionsScope = null;
+        let _allProjects = [];
+        let _sessionListLoadError = null;
+        let _sessionListHasLoadedOnce = false;
+        let _sessionListFirstRenderAnimated = true;
+        let _sessionListSkeletonActive = false;
+        let _sessionListRefreshAnimationPending = false;
+        let _lastSessionListRenderSig = null;
+        let _activeProject = null;
+        let _showAllProfiles = false;
+        let _sessionSourceFilter = 'webui';
+        let _renamingSid = null;
+        let _sessionActionMenu = null;
+        let _cronPollGeneration = 0;
+        const S = {{ activeProfile: 'default' }};
+        function _reconcileActiveSessionIdleStateFromList(rows) {{ return rows; }}
+        function _mergeOptimisticFirstTurnSessions(rows) {{ return rows; }}
+        function _requestedSessionSidebarSource() {{ return 'webui'; }}
+        function _sessionListExcludeHiddenEnabled() {{ return false; }}
+        function _recordSessionProfileCount() {{}}
+        function _syncSessionAttentionSoundState() {{}}
+        function _pruneLineageReportCacheToVisibleSessions() {{}}
+        function _markPollingCompletionUnreadTransitions() {{}}
+        function _isSessionEffectivelyStreaming() {{ return false; }}
+        function startStreamingPoll() {{}}
+        function stopStreamingPoll() {{}}
+        function ensureSessionTimeRefreshPoll() {{}}
+        function ensureActiveSessionExternalRefreshPoll() {{}}
+        function ensureSessionEventsSSE() {{}}
+        function animateNextSessionListRefresh() {{}}
+        function _sessionListRenderSignature() {{ return 'sig'; }}
+        function _purgeStaleInflightEntries() {{}}
+        function _repaintSidebarForBackgroundChurn() {{}}
+        function _repaintSidebarKeepingProjectPicker() {{}}
+        {_payload_apply_prelude()}
+        const serverNowSec = Math.floor(Date.now() / 1000);
+        const serverNowMs = serverNowSec * 1000;
+        const skewMs = {skew_hours} * 3600 * 1000;
+        Date.now = () => serverNowMs + skewMs;
+        const recent = serverNowSec - 120;
+        const pending = recent + 40;
+        const within48h = serverNowSec + 30 * 3600;
+        const beyond = serverNowSec + 10 * 24 * 3600;
+        const saneOld = 1776441972;
+        const recentSession = {{
+          session_id: 'recent',
+          last_message_at: recent,
+          updated_at: saneOld,
+          pending_started_at: pending,
+        }};
+        const pendingAhead = {{
+          session_id: 'pending-ahead',
+          last_message_at: recent,
+          updated_at: saneOld,
+          pending_started_at: within48h,
+        }};
+        const fallbackSession = {{
+          session_id: 'fallback',
+          last_message_at: 5e12,
+          updated_at: recent,
+          pending_started_at: 5e12,
+        }};
+        const corruptSession = {{
+          session_id: 'corrupt',
+          last_message_at: beyond,
+          updated_at: 4e9,
+          created_at: -5,
+          pending_started_at: beyond,
+        }};
+        const aheadOk = {{
+          session_id: 'ahead-ok',
+          last_message_at: within48h,
+          updated_at: saneOld,
+        }};
+        _applySessionListPayload({{
+          server_time: serverNowSec,
+          server_tz: '+0000',
+          sessions: [recentSession, pendingAhead, fallbackSession, corruptSession, aheadOk],
+          other_profile_count: 0,
+          archived_count: 0,
+          active_profile: 'default',
+          webui_session_count: 5,
+          cli_session_count: 0,
+        }}, {{ projects: [] }});
+        process.stdout.write(JSON.stringify({{
+          applied: _allSessions.length,
+          delta: _serverTimeDelta,
+          serverNow: _serverNowMs(),
+          recent: _sessionTimestampMs(recentSession),
+          recentSort: _sessionSortTimestampMs(recentSession),
+          pendingAheadSort: _sessionSortTimestampMs(pendingAhead),
+          fallback: _sessionTimestampMs(fallbackSession),
+          fallbackSort: _sessionSortTimestampMs(fallbackSession),
+          corrupt: _sessionTimestampMs(corruptSession),
+          corruptSort: _sessionSortTimestampMs(corruptSession),
+          ahead: _sessionTimestampMs(aheadOk),
+          fixture: _sessionTimestampMs({{ last_message_at: 10, updated_at: 20 }}),
+          dayKey: _messageDateSepDayKey({{ role: 'user', content: 'hi', timestamp: recent }}),
+          dayKeyAhead: _messageDateSepDayKey({{ role: 'user', content: 'soon', timestamp: within48h }}),
+          dayKeyBeyond: _messageDateSepDayKey({{ role: 'user', content: 'nope', timestamp: beyond }}),
+          emptyAnchor: _messageDateSepDayKey({{
+            role: 'assistant', content: '', timestamp: recent, _recovered_from_run_journal: true,
+          }}),
+          expectedDay: new Date(recent * 1000).toDateString(),
+          expectedAheadDay: new Date(within48h * 1000).toDateString(),
+          expectedRecent: recent * 1000,
+          expectedPending: pending * 1000,
+          expectedWithin: within48h * 1000,
+          expectedDelta: skewMs,
+          expectedServerNow: serverNowMs,
+        }}));
+        """
+    )
+    assert result["applied"] == 5
+    assert result["delta"] == result["expectedDelta"] == skew_hours * 3600 * 1000
+    assert result["serverNow"] == result["expectedServerNow"]
+    assert result["recent"] == result["expectedRecent"]
+    assert result["recentSort"] == result["expectedPending"]
+    assert result["pendingAheadSort"] == result["expectedWithin"]
+    assert result["ahead"] == result["expectedWithin"]
+    assert result["fallback"] == result["expectedRecent"]
+    assert result["fallbackSort"] == result["expectedRecent"]
+    assert result["corrupt"] == 0
+    assert result["corruptSort"] == 0
+    assert result["fixture"] == 10_000
+    assert result["dayKey"] == result["expectedDay"]
+    assert result["dayKeyAhead"] == result["expectedAheadDay"]
+    assert result["dayKeyBeyond"] == ""
+    assert result["emptyAnchor"] == ""

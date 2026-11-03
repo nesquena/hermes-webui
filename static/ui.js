@@ -15618,8 +15618,9 @@ function _isEmptyRecoveredJournalAnchor(m){
 function _messageDateSepDayKey(m){
   if(!m||_isEmptyRecoveredJournalAnchor(m)) return '';
   const n=Number(m._ts||m.timestamp);
-  // Outside 2001–2096, or more than two days ahead: salvage residue, not a day.
-  if(!Number.isFinite(n)||n<=1e9||n>=4e9||n>Date.now()/1000+48*3600) return '';
+  // Outside 2001–2096, or more than two days ahead of the server clock
+  // (_serverNowMs, synced from /api/sessions server_time): salvage residue, not a day.
+  if(!Number.isFinite(n)||n<=1e9||n>=4e9||n>_serverNowMs()/1000+48*3600) return '';
   const d=new Date(n*1000);
   if(Number.isNaN(d.getTime())) return '';
   return d.toDateString();
