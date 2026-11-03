@@ -274,3 +274,79 @@ def test_a_failed_share_persist_leaves_the_resident_owning_the_new_pair(monkeypa
         status, body = _post('/api/share/revoke', {'session_id': sid})
         assert status == 200, body
         assert shares.load_share(token) is None, 'the published link must stay revocable'
+
+
+@pytest.mark.usefixtures('isolated_state')
+@pytest.mark.parametrize('operation', ['create', 'revoke'])
+@pytest.mark.parametrize('window', ['checkpoint', 'evicted', 'replaced'])
+def test_a_failed_share_persist_returns_the_pair_to_the_mirrored_object(monkeypatch, window, operation):
+    """Codex stage-2 CORE. The share-field patch raises after the handler mirrored
+    the new pair onto the resident. Between the mirror and the failure, that
+    exact object is checkpointed (the save adopts the old durable pair), evicted
+    by the LRU, or replaced by a reload, while a writer still holds it. When the
+    writer resumes and saves, the new pair must reach disk: after a create the
+    published link stays revocable (a revoke that returns 200 really takes it
+    down), after a revoke the tombstoned token stays out of the sidecar."""
+    import api.models as models
+    import api.routes as routes
+    import api.shares as shares
+    import api.streaming as streaming
+
+    sid = _make_session('failed_persist_' + window)
+    filler_sid = _make_session('failed_persist_filler')
+    held = models.get_session(sid)  # the resident; a paused writer holds this object
+    old_token = None
+    if operation == 'revoke':
+        status, created = _post('/api/share/create', {'session_id': sid})
+        assert status == 200, created
+        old_token = created['share']['token']
+        assert held.share_token == old_token
+
+    real_persist = routes._persist_share_fields
+    real_patch = routes._update_session_share_fields
+    seen = {}
+
+    def window_then_failing_persist(*args, **kw):
+        seen['token'] = kw['share_token']
+        assert held.share_token == kw['share_token'], 'the mirror reached the held resident'
+        if window == 'checkpoint':
+            streaming._save_streaming_checkpoint(held)
+        elif window == 'evicted':
+            models.get_session(filler_sid)
+            with models.LOCK:
+                assert models._evict_sessions_over_cap(cap=1) == 1
+                assert sid not in models.SESSIONS
+        else:
+            replacement = models.Session.load(sid)
+            with models.LOCK:
+                models.SESSIONS[sid] = replacement
+        return real_persist(*args, **kw)
+
+    def failing_patch(*args, **kw):
+        raise OSError('transient disk error')
+
+    monkeypatch.setattr(routes, '_persist_share_fields', window_then_failing_persist)
+    monkeypatch.setattr(routes, '_update_session_share_fields', failing_patch)
+    try:
+        status, _ = _post('/api/share/' + operation, {'session_id': sid})
+    except OSError:
+        status = 500
+    assert status != 200
+    monkeypatch.setattr(routes, '_persist_share_fields', real_persist)
+    monkeypatch.setattr(routes, '_update_session_share_fields', real_patch)
+
+    # The paused writer resumes and saves the object it holds.
+    held.title = 'writer resumed after the failed share persist'
+    held.save()
+    stored = _sidecar(sid)
+    assert stored['title'] == 'writer resumed after the failed share persist'
+
+    if operation == 'create':
+        token = seen['token']
+        assert token and shares.load_share(token) is not None, 'the create published its snapshot'
+        status, body = _post('/api/share/revoke', {'session_id': sid})
+        assert status == 200, body
+        assert _public_status(token) == 404, 'revoke returned 200 but the published link is still public'
+    else:
+        assert stored['share_token'] is None, 'the revoked token came back into the sidecar'
+        assert _public_status(old_token) == 404
