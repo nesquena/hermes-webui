@@ -29,3 +29,9 @@ The fallback remains routable. It does not add or replace a catalog option with 
 ## Selection and live-catalog updates
 
 Option deduplication, live-catalog merging, and selected-row rendering use the same provider-aware route identity. A later catalog update must not collapse or select a punctuation-distinct OpenRouter sibling.
+
+## Configured badges and the Configured section
+
+The configured-badge lookup, the configured-row dedup and the Configured section key share one identity: within a provider, the `@provider:` routing prefix and then that provider's own `provider/` segment are peeled, and any other leading segment (for example `anthropic/` under OpenRouter) stays part of the model ID. With no provider on either side, the legacy normalized key applies.
+
+A typed or custom option is sent as typed, less only `@provider:`, so a typed `provider/<model>` alias never stands in for the configured `<model>`. The native configured ID is synthesized and preferred. Spellings that the backend links to one configured entry (same provider, role and label) are one Configured row.
