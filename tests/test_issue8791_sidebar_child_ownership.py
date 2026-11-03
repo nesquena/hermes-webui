@@ -95,6 +95,32 @@ elif scenario == "renamed":
                    messages=[{"role": "user", "content": "x", "timestamp": ts}], created_at=ts, updated_at=ts,
                    session_source="webui").save(touch_updated_at=False)
     opened.append(("proj-kid", "proj-host", add(db, "proj-kid", "subagent", parent="proj-host", delegate="proj-host")))
+elif scenario == "root-alias":
+    # The root renamed to "work" while another profile is active and the profile roster isn't loaded: an archived
+    # pre-compression snapshot tagged the legacy "default" and its continuation tagged "work" are one conversation.
+    from api import profiles
+    profiles._root_profile_name_cache = {"default", "work"}
+    profiles._root_profile_name_cache_loaded = True
+    ts = add(db, "old", "webui", end_reason="compression")
+    models.Session("old", title="Old snapshot", workspace=workspace, profile="default", pre_compression_snapshot=True,
+                   archived=True, messages=[{"role": "user", "content": "x", "timestamp": ts}] * 3, created_at=ts,
+                   updated_at=ts, session_source="webui").save(touch_updated_at=False)
+    ts = add(db, "tip", "webui", parent="old")
+    models.Session("tip", title="New continuation", workspace=workspace, profile="work", parent_session_id="old",
+                   messages=[{"role": "user", "content": "x", "timestamp": ts}], created_at=ts, updated_at=ts,
+                   session_source="webui").save(touch_updated_at=False)
+elif scenario == "copy-root":
+    # An opened, compressed delegated row whose pre-compression id is also a plain session in another profile.
+    add(db, "host", "cli")
+    add(db, "old", "subagent", parent="host", delegate="host", end_reason="compression")
+    opened.append(("tip", "old", add(db, "tip", "subagent", parent="old", delegate="host")))
+    beta = home / "profiles" / "beta"
+    beta.mkdir(parents=True)
+    db2 = sqlite3.connect(beta / "state.db")
+    db2.executescript(SCHEMA)
+    add(db2, "old", "cli")
+    db2.commit()
+    db2.close()
 elif scenario == "shared-root":
     # Two profiles whose compressed conversations share a pre-compression id but not a current one.
     add(db, "shared-root", "cli", end_reason="compression")
@@ -135,8 +161,9 @@ models.clear_cli_sessions_cache()
 payloads = {}
 for group in ("webui", "cli"):
     payloads[group] = routes._session_list_payload_to_response(routes._build_session_list_cache_payload(
-        active_profile="work" if scenario == "renamed" else "default",
-        all_profiles=scenario in ("profiles", "shared-root"), show_cli_sessions=True,
+        active_profile={"renamed": "work", "root-alias": "beta"}.get(scenario, "default"),
+        all_profiles=scenario in ("profiles", "shared-root", "copy-root", "root-alias"), show_cli_sessions=True,
+        include_archived=scenario == "root-alias",
         show_previous_messaging_sessions=False, show_cron_sessions=False, show_claude_code_sessions=False,
         sidebar_source=group,
     ))["sessions"]
@@ -171,6 +198,7 @@ Object.assign(global, {
 const extra = JSON.parse(process.argv[2] || '{}');
 Object.assign(global.S, extra.S || {});
 if ('_activeProject' in extra) global._activeProject = extra._activeProject;
+if ('_showArchived' in extra) global._showArchived = extra._showArchived;
 const key = r => (r.profile || 'default') + ':' + r.session_id;
 const out = {};
 for (const group of ['webui', 'cli']) {
@@ -179,6 +207,10 @@ for (const group of ['webui', 'cli']) {
   const rendered = {};
   const visit = (row, parent) => {
     rendered[key(row)] = parent;
+    // A collapsed compression lineage shows its other segments inside the row.
+    for (const seg of row._lineage_segments || []) {
+      if (key(seg) !== key(row) && !(key(seg) in rendered)) rendered[key(seg)] = 'segment:' + key(row);
+    }
     for (const child of row._child_sessions || []) visit(child, key(row));
   };
   for (const row of _renderSidebarRowsFromPartition(_partitionSidebarSessionRows(payloads[group], null))) visit(row, null);
@@ -188,7 +220,7 @@ console.log(JSON.stringify(out));
 """
 
 
-def _render(scenario: str, tmp_path: Path, ui: dict | None = None) -> dict:
+def _payloads(scenario: str, tmp_path: Path) -> dict:
     home = tmp_path / "home"
     state = tmp_path / "webui"
     (state / "sessions").mkdir(parents=True)
@@ -210,7 +242,11 @@ def _render(scenario: str, tmp_path: Path, ui: dict | None = None) -> dict:
         cwd=REPO, env=env, capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stderr[-4000:]
-    payloads = json.loads(proc.stdout.strip().splitlines()[-1])
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def _render(scenario: str, tmp_path: Path, ui: dict | None = None) -> dict:
+    payloads = _payloads(scenario, tmp_path)
     proc = subprocess.run(
         [NODE, "-e", _SIDEBAR, str(SESSIONS_JS), json.dumps(ui or {})],
         input=json.dumps(payloads), cwd=REPO, capture_output=True, text=True, timeout=60,
@@ -278,6 +314,21 @@ def test_a_renamed_roots_legacy_child_stays_in_its_parents_project(tmp_path):
     ui = {"S": {"activeProfile": "work", "activeProfileIsDefault": True}, "_activeProject": "proj"}
     rendered = _render("renamed", tmp_path, ui)
     assert rendered["webui"].get("default:proj-kid") == "work:proj-host", rendered
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_a_renamed_roots_legacy_snapshot_stays_in_its_conversation_before_the_roster_loads(tmp_path):
+    # Active profile "beta", roster not loaded: the server's profile group keeps "default" and "work" together.
+    ui = {"S": {"activeProfile": "beta", "activeProfileIsDefault": False}, "_showArchived": True}
+    rendered = _render("root-alias", tmp_path, ui)
+    assert rendered["webui"] == {"work:tip": None, "default:old": "segment:work:tip"}, rendered
+
+
+def test_an_opened_sidecars_lineage_ids_do_not_hide_another_profiles_session(tmp_path):
+    # The sidecar's own pre-compression id ("old") must not dedupe away beta's unrelated session "old".
+    payloads = _payloads("copy-root", tmp_path)
+    sent = {(row.get("profile") or "default") + ":" + row["session_id"] for group in payloads.values() for row in group}
+    assert {"beta:old", "default:tip", "default:host"} <= sent, sent
 
 
 # Server half on crafted rows: the bucket derivation itself, independent of the browser.

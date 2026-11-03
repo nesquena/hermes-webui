@@ -10375,12 +10375,15 @@ function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw, pa
   // compressed conversations into one row. When any of those ids is shared across profiles, project each
   // profile on its own; otherwise keep the single pass unchanged. Callers sort (_sessionSidebarSortCompare)
   // or only count/search the result, so concatenating the groups changes nothing on screen.
-  // A row's profile group: ''/missing and 'default' are the root profile, and so is the root under its
-  // renamed name (the active profile when it is the root, or a roster entry flagged is_default) —
-  // mirroring routes._sidebar_profile_group_key, _profileMatchesActiveProfile and
-  // _cronProfileNameIsRootAlias.
+  // A row's profile group: the server publishes it (sidebar_profile_group, renamed-root aliases folded onto
+  // 'default'), so rows of one profile stay together even before the profile roster loads. For a row without
+  // it: ''/missing and 'default' are the root profile, and so is the root under its renamed name (the active
+  // profile when it is the root, or a roster entry flagged is_default) — mirroring
+  // routes._sidebar_profile_group_key, _profileMatchesActiveProfile and _cronProfileNameIsRootAlias.
   const roster=(typeof _profilesCache!=='undefined'&&_profilesCache&&Array.isArray(_profilesCache.profiles))?_profilesCache.profiles:[];
   const groupOf=(s)=>{
+    const published=s&&typeof s.sidebar_profile_group==='string'?s.sidebar_profile_group.trim():'';
+    if(published) return published;
     const profile=String((s&&(s.profile||s.profile_name))||'').trim();
     if(!profile||profile==='default') return 'default';
     if(typeof S!=='undefined'&&S&&S.activeProfileIsDefault&&profile===String(S.activeProfile||'').trim()) return 'default';

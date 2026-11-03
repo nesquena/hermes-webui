@@ -3180,25 +3180,19 @@ def _build_session_list_cache_payload(
                     if not s.get(key) and meta.get(key):
                         s[key] = meta[key]
                 # #8791: an opened delegated child's sidecar carries neither its
-                # relationship nor its own or its parent's compression lineage
-                # until the lineage enrichment, which runs after the sidebar
-                # bucket is derived. Its own state.db row has all of them.
-                # Without them a child naming an intermediate compression
-                # segment of its parent resolved no parent, and a child naming
-                # an opened compressed delegated row lost that row; either kept
-                # its WebUI bucket while its host sat in the CLI group and
-                # rendered in neither. Only for delegated (subagent) rows, and
-                # only from the same profile's row.
-                if (
-                    str(s.get("raw_source") or s.get("source_tag") or "").strip().lower() == "subagent"
-                    and _profiles_match(meta.get("profile"), s.get("profile"))
-                ):
+                # relationship nor its parent's compression lineage until the
+                # lineage enrichment, which runs after the sidebar bucket is
+                # derived. Its own state.db row has both. Without them a child
+                # naming an intermediate compression segment of its parent
+                # resolved no parent, kept its WebUI bucket while its host sat
+                # in the CLI group, and rendered in neither. The row's OWN
+                # lineage ids are copied later, after the dedupe below, so the
+                # represented-id set stays exactly what it was.
+                if _sidebar_subagent_copy_matches(s, meta):
                     for key in (
                         "relationship_type",
                         "_parent_lineage_root_id",
                         "_parent_lineage_tip_id",
-                        "_lineage_root_id",
-                        "_lineage_tip_id",
                     ):
                         if not s.get(key) and meta.get(key):
                             s[key] = meta[key]
@@ -3243,6 +3237,17 @@ def _build_session_list_cache_payload(
             show_kanban_sessions=show_kanban_sessions,
             source_filter=source_filter,
         )
+        # #8791: now that the dedupe has run on the same ids as before, give an
+        # opened delegated sidecar its own compression-lineage ids from its
+        # state.db row, so a child naming its pre-compression id finds it when
+        # the sidebar bucket is derived. Copying them earlier widened the
+        # profile-blind represented-id set and hid another profile's row.
+        for s in webui_sessions:
+            meta = cli_by_id.get(s.get("session_id"))
+            if meta and _sidebar_subagent_copy_matches(s, meta):
+                for key in ("_lineage_root_id", "_lineage_tip_id"):
+                    if not s.get(key) and meta.get(key):
+                        s[key] = meta[key]
     else:
         webui_sessions = _prune_orphaned_desktop_sidecar_sessions(
             webui_sessions,
@@ -3402,6 +3407,10 @@ def _build_session_list_cache_payload(
         item = dict(row)
         if row.get("session_id"):
             item["sidebar_is_cli_session"] = bool(_sidebar_bucket_is_cli(row))
+            # #8791: the canonical profile group (renamed-root aliases folded),
+            # so the browser keeps one profile's rows together without the
+            # profile roster, which may not have loaded yet.
+            item["sidebar_profile_group"] = _sidebar_profile_group_key(row.get("profile"))
         return item
 
     archived_webui_count = sum(
@@ -12719,6 +12728,19 @@ def _is_delegated_subagent_child(row: dict) -> bool:
         or row.get("session_source") or row.get("source") or ""
     ).strip().lower()
     return raw_source == "subagent"
+
+
+def _sidebar_subagent_copy_matches(row: dict, state_row: dict) -> bool:
+    """True when ``state_row`` is the state.db twin of a delegated (subagent) WebUI copy in the same profile.
+
+    Used to fill an opened delegated child's relationship and lineage ids from
+    its own state.db row before the sidebar bucket is derived (#8791). Never
+    for other rows, and never across profiles: two profiles can share an id.
+    """
+    if not (isinstance(row, dict) and isinstance(state_row, dict)):
+        return False
+    source = str(row.get("raw_source") or row.get("source_tag") or "").strip().lower()
+    return source == "subagent" and _profiles_match(state_row.get("profile"), row.get("profile"))
 
 
 def _sidebar_profile_group_key(profile) -> str:

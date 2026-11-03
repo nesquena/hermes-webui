@@ -95,6 +95,9 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     # #8245: the server's derived sidebar bucket (full scoped payload, before
     # source filtering and archive pagination); the client trusts it.
     "sidebar_is_cli_session",
+    # #8791: the row's canonical profile group (renamed-root aliases folded onto
+    # "default"); the client groups rows by it without needing the profile roster.
+    "sidebar_profile_group",
     "relationship_type",
     "pre_compression_snapshot",
     "_lineage_root_id",
