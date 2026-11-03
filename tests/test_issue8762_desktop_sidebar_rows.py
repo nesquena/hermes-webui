@@ -320,6 +320,24 @@ def test_copy_never_borrows_another_profiles_state_row(monkeypatch):
     assert [(row["session_id"], row["profile"], row["pinned"]) for row in rows] == [("shared", "personal", False)]
 
 
+def test_copy_for_an_id_two_profiles_share_keeps_both_state_rows(monkeypatch):
+    # The dedupe is by id, so keeping the work copy would hide the personal profile's session too. The work row
+    # comes last, so it is the one cli_by_id holds for the id.
+    rows = _build(monkeypatch, [_copy_row("cloned", profile="work", message_count=2)],
+                  [_state_row("cloned", profile="personal"), _state_row("cloned", profile="work")],
+                  all_profiles=True)
+    assert sorted((row["session_id"], row["profile"]) for row in rows) == [("cloned", "personal"), ("cloned", "work")]
+
+
+def test_copy_matches_its_state_row_through_the_renamed_root_alias(monkeypatch):
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name in ("default", "kinni"))
+    rows = _build(monkeypatch, [_copy_row("legacy", profile="default", message_count=2)],
+                  [_state_row("legacy", profile="kinni")])
+    assert [(row["session_id"], row["pinned"]) for row in rows] == [("legacy", True)]
+
+
 def test_empty_copy_leaves_the_state_row_in_place(monkeypatch):
     rows = _build(monkeypatch, [_copy_row("empty", profile="default", message_count=0)],
                   [_state_row("empty", profile="default")])
