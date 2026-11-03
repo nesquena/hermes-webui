@@ -202,6 +202,30 @@ _ENTER_CASES = {
     "edit-guard-flag": _HOLD,
     "edit-guard-plain": _SEND,
 }
+# Clarify is a single-line input with no newline to insert, so every Enter but an
+# IME one submits it, whatever the send key or device (#8769). clarify-guard-*
+# removes window._isImeEnter so only the handler's own fallback can stop an IME Enter.
+_CLARIFY_SEND = {"prevented": True, "sends": 1}
+_CLARIFY_HOLD = {"prevented": False, "sends": 0}
+_CLARIFY_CASES = {
+    "enter": _CLARIFY_SEND,
+    "shift": _CLARIFY_SEND,
+    "ime-composing": _CLARIFY_HOLD,
+    "ime-229": _CLARIFY_HOLD,
+    "ime-flag": _CLARIFY_HOLD,
+    "shift-mode-plain": _CLARIFY_SEND,
+    "shift-mode-shift": _CLARIFY_SEND,
+    "shift-mode-ime": _CLARIFY_HOLD,
+    "ctrl-mode-plain": _CLARIFY_SEND,
+    "ctrl-mode-ctrl": _CLARIFY_SEND,
+    "ctrl-mode-numpad": _CLARIFY_SEND,
+    "mobile-plain": _CLARIFY_SEND,
+    "mobile-ctrl": _CLARIFY_SEND,
+    "other-key": _CLARIFY_HOLD,
+    "clarify-guard-composing": _CLARIFY_HOLD,
+    "clarify-guard-229": _CLARIFY_HOLD,
+    "clarify-guard-plain": _CLARIFY_SEND,
+}
 
 
 def _drive_enter_handlers() -> list:
@@ -263,7 +287,7 @@ function check(label, spec, handlers){
   _imeComposing = !!spec.imeFlag;
   window._sendKey = spec.sendKey || 'enter';
   navigator.userAgent = spec.mobile ? IPHONE : DESKTOP;
-  window._isImeEnter = _isImeEnter;
+  window._isImeEnter = spec.noIme ? undefined : _isImeEnter;
   window._composerShouldSendOnKey = spec.noHelper ? undefined : _composerShouldSendOnKey;
   for(const name of handlers){
     editSends = 0;
@@ -298,6 +322,9 @@ check('edit-guard-composing', {composing: true, noHelper: true}, ['edit']);
 check('edit-guard-229', {keyCode: 229, noHelper: true}, ['edit']);
 check('edit-guard-flag', {imeFlag: true, noHelper: true}, ['edit']);
 check('edit-guard-plain', {noHelper: true}, ['edit']);
+check('clarify-guard-composing', {composing: true, noIme: true}, ['clarify']);
+check('clarify-guard-229', {keyCode: 229, noIme: true}, ['clarify']);
+check('clarify-guard-plain', {noIme: true}, ['clarify']);
 console.log(JSON.stringify(results));
 """
     result = subprocess.run(
@@ -352,28 +379,29 @@ def test_message_edit_uses_windowed_helper():
     assert fallback["prevented"] is True and fallback["sends"] == 1, fallback
 
 
-def test_clarify_and_edit_follow_shared_enter_predicate():
-    """Clarify and inline edit follow `_composerShouldSendOnKey`, including IME.
+def test_edit_follows_shared_enter_predicate_and_clarify_submits_every_enter():
+    """Inline edit follows `_composerShouldSendOnKey`, including IME; clarify does not.
 
-    Shift+Enter / Ctrl+Enter / the mobile newline default must not be collapsed
-    back to plain Enter-without-Shift. Clarify stays a single-line field: a held
-    submission only means respondClarify is not called.
+    For the edit textarea, Shift+Enter / Ctrl+Enter / the mobile newline default
+    must not be collapsed back to plain Enter-without-Shift. Clarify is a
+    single-line field, so a held Enter would do nothing at all: every Enter but an
+    IME one submits it, whatever the send key or device (#8769).
     """
     clarify = _clarify_keydown()
-    assert "window._composerShouldSendOnKey" in clarify
+    assert "_composerShouldSendOnKey" not in clarify
     assert "respondClarify()" in clarify
     rows = _drive_enter_handlers()
     seen = {(row["handler"], row["label"]) for row in rows}
-    expected_keys = set()
     for label, expect in _ENTER_CASES.items():
-        handlers = ("edit",) if label.startswith("edit-guard-") else ("edit", "clarify")
-        for handler in handlers:
-            expected_keys.add((handler, label))
-            row = _enter_row(rows, handler, label)
-            assert row["predicate"] is expect["predicate"], row
-            assert row["prevented"] is expect["prevented"], row
-            assert row["sends"] == expect["sends"], row
-    assert seen == expected_keys
+        row = _enter_row(rows, "edit", label)
+        assert row["predicate"] is expect["predicate"], row
+        assert row["prevented"] is expect["prevented"], row
+        assert row["sends"] == expect["sends"], row
+    for label, expect in _CLARIFY_CASES.items():
+        row = _enter_row(rows, "clarify", label)
+        assert row["prevented"] is expect["prevented"], row
+        assert row["sends"] == expect["sends"], row
+    assert seen == {("edit", label) for label in _ENTER_CASES} | {("clarify", label) for label in _CLARIFY_CASES}
 
 
 def test_workspace_rename_uses_windowed_helper():

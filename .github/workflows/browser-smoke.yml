@@ -152,6 +152,10 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_approval_enter_shortcut.py
 
+      - name: Run clarify Enter-submit gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_clarify_enter_submit.py
+
       - name: Run session-row activation gate
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_session_row_activation.py

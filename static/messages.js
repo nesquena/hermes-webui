@@ -10249,12 +10249,16 @@ function showClarifyCard(pending) {
     input.disabled = false;
     input.removeAttribute('readonly');
     input.onkeydown = (e) => {
-      if (typeof window._composerShouldSendOnKey === 'function'
-          ? window._composerShouldSendOnKey(e)
-          : (e.key === 'Enter')) {
-        e.preventDefault();
-        respondClarify();
-      }
+      // A single-line answer has no newline to insert, so every Enter submits it,
+      // whatever the composer's send key is. Routing it through the composer's
+      // decision left Enter doing nothing on phones and with a Shift/Ctrl+Enter
+      // send key (#8769). An IME Enter that commits a composition never submits.
+      if (e.key !== 'Enter') return;
+      if (typeof window._isImeEnter === 'function'
+          ? window._isImeEnter(e)
+          : (e.isComposing || e.keyCode === 229)) return;
+      e.preventDefault();
+      respondClarify();
     };
   }
   if (typeof lockComposerForClarify === "function") {
