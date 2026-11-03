@@ -20,6 +20,15 @@ the display reconciliation (``/api/session``) and the context
 reconciliation (the ``prefer_context=True`` function the streaming worker
 builds the agent history from).  Same-second and pre-window controls pin
 the behaviour that must NOT change.
+
+The round-2 P2 regression added the EMPTY-ANCHOR shape to every path:
+journal recovery stores the recovered tool cards on the session against
+an EMPTY assistant anchor that carries NO inline tool_calls, so the
+content-only membership set behind the in-window exception must be seeded
+from every row -- excluding such anchors from the set dropped the
+incoming tool call.  The fix derives the occurrence-free membership key
+from the already-computed content key (occurrence slot cleared) instead
+of narrowing the set or adding a second normalisation pass.
 """
 
 import json
@@ -48,6 +57,17 @@ def _assistant_tool_call(tc_id: str, fn_name: str, timestamp) -> dict:
 
 def _final_answer(timestamp) -> dict:
     return {"role": "assistant", "content": "final answer", "timestamp": timestamp}
+
+
+def _empty_anchor(timestamp) -> dict:
+    """Journal-recovery anchor: empty assistant content, no inline tool_calls.
+
+    Journal recovery deliberately stores the recovered tool cards on the
+    session against such an anchor instead of inline tool_calls, so the
+    in-window distinct-tool-call exception must still be able to match it
+    (#8672 review P2).
+    """
+    return {"role": "assistant", "content": "", "timestamp": timestamp}
 
 
 def _tool_call_ids(messages) -> list:
@@ -177,6 +197,69 @@ def test_distinct_tool_calls_at_different_seconds_both_survive_merge():
     assert merged[-1]["content"] == "final answer"
 
 
+def test_distinct_tool_calls_after_empty_anchor_both_survive_merge():
+    """P2 repro (reviewer's minimal clock schedule): empty-anchor sidecar.
+
+    The matching sidecar row carries NO inline tool_calls -- journal
+    recovery anchors the recovered tool cards on the session against an
+    empty assistant row.  The incoming durable tool call must still find
+    its content-equivalent anchor and survive the merge.
+    """
+    from api.models import merge_session_messages_append_only
+
+    sidecar = [
+        _empty_anchor(1000.0),
+        _final_answer(1002.0),
+    ]
+    state = [
+        _assistant_tool_call("call_recovered", "terminal", 1001.0),
+    ]
+
+    merged = merge_session_messages_append_only(sidecar, state)
+
+    assert _tool_call_ids(merged) == ["call_recovered"], (
+        "the incoming distinct tool call was dropped: "
+        f"{[m.get('content') for m in merged]}"
+    )
+    assert merged[-1]["content"] == "final answer"
+
+
+def test_same_second_distinct_tool_calls_after_empty_anchor_survive():
+    """Control: same-second + empty anchor also keeps the tool call."""
+    from api.models import merge_session_messages_append_only
+
+    sidecar = [
+        _empty_anchor(1000),
+        _final_answer(1001),
+    ]
+    state = [
+        _assistant_tool_call("call_recovered", "terminal", 1000),
+    ]
+
+    merged = merge_session_messages_append_only(sidecar, state)
+
+    assert _tool_call_ids(merged) == ["call_recovered"]
+    assert merged[-1]["content"] == "final answer"
+
+
+def test_pre_window_tool_call_after_empty_anchor_is_still_dropped():
+    """Control: pre-window + empty anchor stays excluded (master behaviour)."""
+    from api.models import merge_session_messages_append_only
+
+    sidecar = [
+        _empty_anchor(1000.0),
+        _final_answer(1002.0),
+    ]
+    state = [
+        _assistant_tool_call("call_recovered", "terminal", 999.0),
+    ]
+
+    merged = merge_session_messages_append_only(sidecar, state)
+
+    assert merged == sidecar
+    assert _tool_call_ids(merged) == []
+
+
 def test_same_second_distinct_tool_calls_still_both_survive_merge():
     """Control: the same-second shape (old tests) must stay green."""
     from api.models import merge_session_messages_append_only
@@ -289,6 +372,51 @@ def test_distinct_tool_calls_survive_real_sqlite_projection_then_merge(monkeypat
     assert merged[-1]["content"] == "final answer"
 
 
+def test_distinct_tool_calls_after_empty_anchor_survive_real_sqlite_projection_then_merge(monkeypatch, tmp_path):
+    """The durable row must survive the real state.db projection, then merge.
+
+    Same empty-anchor shape as the P2 repro, walked through the real
+    SQLite projection so the failure cannot be an artefact of hand-built
+    state rows.
+    """
+    import api.models as models
+    from api.models import merge_session_messages_append_only
+
+    sid = "webui_8672_projection_anchor"
+    db_path = tmp_path / "state.db"
+    _make_state_db(
+        db_path,
+        sid,
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "timestamp": 1001.0,
+                "tool_calls": json.dumps(
+                    [{"id": "call_recovered", "function": {"name": "terminal", "arguments": "{}"}}]
+                ),
+            },
+        ],
+    )
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path, raising=False)
+
+    projected = models.get_state_db_session_messages(sid)
+    assert _tool_call_ids(projected) == ["call_recovered"]
+
+    sidecar = [
+        _empty_anchor(1000.0),
+        _final_answer(1002.0),
+    ]
+
+    merged = merge_session_messages_append_only(sidecar, projected)
+
+    assert _tool_call_ids(merged) == ["call_recovered"], (
+        "the projected distinct tool call was dropped: "
+        f"{[m.get('content') for m in merged]}"
+    )
+    assert merged[-1]["content"] == "final answer"
+
+
 # ── 3. Display reconciliation (/api/session) ─────────────────────────────────
 
 
@@ -324,6 +452,44 @@ def test_display_reconciliation_keeps_distinct_tool_calls(monkeypatch, tmp_path)
     messages = handler.response_json["session"]["messages"]
     assert _tool_call_ids(messages) == ["call_1", "call_2"], (
         "display reconciliation dropped the distinct tool call: "
+        f"{[m.get('content') for m in messages]}"
+    )
+    assert messages[-1]["content"] == "final answer"
+    assert handler.response_json["session"]["message_count"] == 3
+
+
+def test_display_reconciliation_keeps_tool_calls_after_empty_anchor(monkeypatch, tmp_path):
+    """GET /api/session must keep the recovered tool call after an empty anchor."""
+    import api.routes as routes
+
+    sid = "webui_8672_display_anchor"
+    sidecar_messages = [
+        _empty_anchor(1000.0),
+        _final_answer(1002.0),
+    ]
+    _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "timestamp": 1001.0,
+                "tool_calls": json.dumps(
+                    [{"id": "call_recovered", "function": {"name": "terminal", "arguments": "{}"}}]
+                ),
+            },
+        ],
+    )
+
+    handler = _GetHandler(f"/api/session?session_id={sid}&messages=1&resolve_model=0")
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    messages = handler.response_json["session"]["messages"]
+    assert _tool_call_ids(messages) == ["call_recovered"], (
+        "display reconciliation dropped the recovered tool call: "
         f"{[m.get('content') for m in messages]}"
     )
     assert messages[-1]["content"] == "final answer"
@@ -379,6 +545,54 @@ def test_context_reconciliation_keeps_distinct_tool_calls(monkeypatch, tmp_path)
 
     assert _tool_call_ids(reconciled) == ["call_1", "call_2"], (
         "context reconciliation dropped the distinct tool call: "
+        f"{[m.get('content') for m in reconciled]}"
+    )
+    assert reconciled[-1]["content"] == "final answer"
+
+
+def test_context_reconciliation_keeps_tool_calls_after_empty_anchor(monkeypatch, tmp_path):
+    """The next-turn context reconciliation must keep the recovered tool call.
+
+    ``reconciled_state_db_messages_for_session(..., prefer_context=True)``
+    is the exact function the streaming worker calls to build the agent's
+    conversation_history; the empty anchor is the shape journal recovery
+    persists.
+    """
+    import api.models as models
+
+    sid = "webui_8672_context_anchor"
+    sidecar_messages = [
+        _empty_anchor(1000.0),
+        _final_answer(1002.0),
+    ]
+    session = _install_test_session(
+        monkeypatch,
+        tmp_path,
+        sid,
+        sidecar_messages,
+        context_messages=sidecar_messages,
+    )
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "timestamp": 1001.0,
+                "tool_calls": json.dumps(
+                    [{"id": "call_recovered", "function": {"name": "terminal", "arguments": "{}"}}]
+                ),
+            },
+        ],
+    )
+
+    reconciled = models.reconciled_state_db_messages_for_session(
+        session, prefer_context=True
+    )
+
+    assert _tool_call_ids(reconciled) == ["call_recovered"], (
+        "context reconciliation dropped the recovered tool call: "
         f"{[m.get('content') for m in reconciled]}"
     )
     assert reconciled[-1]["content"] == "final answer"

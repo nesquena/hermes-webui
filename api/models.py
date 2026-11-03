@@ -14788,6 +14788,49 @@ def _visible_key_without_occurrence(key) -> tuple:
     return (role, content, tool_calls, "", sidecar)
 
 
+# Layout of a content key:
+# (role, content, tool_call_id, tool_name, occurrence[, sidecar]).
+# ``occurrence`` is the second-truncated timestamp added by #7587; the
+# provider sidecar, when present, is appended after it by
+# ``_session_message_key_with_sidecar``.
+_CONTENT_KEY_OCCURRENCE_INDEX = 4
+_CONTENT_KEY_SIDECAR_INDEX = 5
+
+
+def _content_key_without_occurrence(key) -> tuple:
+    """Return ``key`` with the #7587 occurrence discriminator removed.
+
+    Content keys already carry an occurrence-free variant
+    (``_session_message_content_key(..., include_occurrence=False)``); this
+    helper derives that SAME identity from an already-computed content key by
+    clearing the occurrence slot, so the occurrence-free membership set can be
+    seeded for every row without a second normalisation pass.
+
+    Seeding every row matters (#8672 review P2): the in-window
+    distinct-tool-call exception pairs an incoming durable tool row with ANY
+    content-equivalent sidecar assistant row, and journal recovery
+    deliberately anchors recovered tool cards on an EMPTY assistant row that
+    carries no inline tool_calls.  Excluding such anchors from the set made
+    the membership test fail and silently dropped the incoming tool call.
+
+    Re-running the key builder per row instead would add a third content-key
+    derivation per message and break the bounded-normalisation invariant
+    (test_merge_append_only_normalization_cache).  Like
+    :func:`_visible_key_without_occurrence`, the result keeps the full
+    six-slot shape when a provider sidecar is present so the two stores keep
+    comparing like with like.
+    """
+    if not isinstance(key, tuple) or not key:
+        return key
+    stripped = list(key[:_CONTENT_KEY_SIDECAR_INDEX])
+    while len(stripped) <= _CONTENT_KEY_OCCURRENCE_INDEX:
+        stripped.append("")
+    stripped[_CONTENT_KEY_OCCURRENCE_INDEX] = ""
+    if len(key) > _CONTENT_KEY_SIDECAR_INDEX:
+        stripped.append(key[_CONTENT_KEY_SIDECAR_INDEX])
+    return tuple(stripped)
+
+
 def _session_message_replay_visible_key(msg, *, normalize_workspace_prefix: bool = False) -> tuple:
     """Visible key with the #7587 occurrence discriminator removed.
 
@@ -15937,16 +15980,10 @@ def _merge_session_messages_append_only_impl(
         "content_state": lambda msg: _session_message_content_key(
             msg, normalize_workspace_prefix=True
         ),
-        # Occurrence-stripped content identity.  Only the in-window
-        # distinct-tool-call exception compares content this way (see the
-        # ``_tc`` branch in the state loop); every other consumer keeps the
-        # occurrence discriminator #7587 added.
-        "content_only_sidecar": lambda msg: _session_message_content_key(
-            msg, normalize_workspace_prefix=False, include_occurrence=False
-        ),
-        "content_only_state": lambda msg: _session_message_content_key(
-            msg, normalize_workspace_prefix=True, include_occurrence=False
-        ),
+        # The occurrence-free content identity the in-window
+        # distinct-tool-call exception needs is derived from these keys via
+        # _content_key_without_occurrence instead of a second builder pass
+        # (see its docstring and the #8672 P2 fix in the state loop).
         "visible_sidecar": lambda msg: _session_message_visible_key(
             msg, normalize_workspace_prefix=False
         ),
@@ -16091,12 +16128,17 @@ def _merge_session_messages_append_only_impl(
     seen_dedup_keys = set()
     seen_content_keys = set()
     # Content identity WITHOUT the #7587 occurrence discriminator, kept in
-    # lockstep with seen_content_keys.  Only the in-window distinct-tool-call
-    # exception reads it: that probe pairs a sidecar tool row with the durable
-    # row of a DIFFERENT tool call in the same turn, and the two rows carry
-    # identical (empty) content but legitimately different second-level
-    # clocks.  Requiring clock agreement there dropped the incoming tool call
-    # (#8672 review P2).  Everything else stays occurrence-sensitive.
+    # lockstep with seen_content_keys and seeded from EVERY row.  Only the
+    # in-window distinct-tool-call exception reads it: that probe pairs the
+    # durable row of a DIFFERENT tool call with ANY content-equivalent sidecar
+    # assistant row -- including the EMPTY anchor journal recovery stores
+    # recovered tool cards against -- and the two rows carry identical (often
+    # empty) content but legitimately different second-level clocks.  Requiring
+    # clock agreement there dropped the incoming tool call (#8672 review P2).
+    # Everything else stays occurrence-sensitive.  The keys are derived by
+    # clearing the occurrence slot of the already-computed content keys
+    # (_content_key_without_occurrence), so seeding every row costs no extra
+    # normalisation pass.
     seen_content_only_keys = set()
     seen_visible_keys = set()
     sidecar_visible_sequence = []
@@ -16136,15 +16178,16 @@ def _merge_session_messages_append_only_impl(
         seen_dedup_keys.add(_cached_message_key(msg, "dedup"))
         content_key = _cached_message_key(msg, "content_sidecar")
         seen_content_keys.add(content_key)
-        # #8672: the content-only set exists solely for the in-window
-        # distinct-tool-call exception, so only tool-call rows feed it. Deriving
-        # it for every row would add a third content-key derivation per message
-        # and break the bounded-normalisation invariant
-        # (test_merge_append_only_normalization_cache).
-        if msg.get("tool_calls"):
-            seen_content_only_keys.add(
-                _cached_message_key(msg, "content_only_sidecar")
-            )
+        # #8672: every row feeds the content-only set.  The in-window
+        # distinct-tool-call exception pairs an incoming durable tool row with
+        # ANY content-equivalent sidecar assistant row, and journal recovery
+        # deliberately anchors recovered tool cards on an EMPTY assistant row
+        # that carries no inline tool_calls -- excluding such anchors (or any
+        # other row) drops the incoming tool call.  The key is derived from
+        # the already-computed content key by clearing the occurrence slot,
+        # so no extra normalisation pass runs and the bounded-normalisation
+        # invariant (test_merge_append_only_normalization_cache) holds.
+        seen_content_only_keys.add(_content_key_without_occurrence(content_key))
         visible_key = _cached_message_key(msg, "visible_sidecar")
         seen_visible_keys.add(visible_key)
         sidecar_visible_keys.add(visible_key)
@@ -16485,10 +16528,7 @@ def _merge_session_messages_append_only_impl(
             seen_message_keys.add(key)
             seen_dedup_keys.add(dedup_key)
             seen_content_keys.add(content_key)
-            if msg.get("tool_calls"):
-                seen_content_only_keys.add(
-                    _cached_message_key(msg, "content_only_state")
-                )
+            seen_content_only_keys.add(_content_key_without_occurrence(content_key))
             seen_visible_keys.add(visible_key)
             _remember_merged_message(msg, source="state")
             continue
@@ -16671,15 +16711,19 @@ def _merge_session_messages_append_only_impl(
                 if _tc:
                     # This exception deliberately compares CONTENT identity
                     # only, without the #7587 occurrence discriminator
-                    # (#8672 review P2): the sidecar tool row and the durable
-                    # row for a DIFFERENT tool call of the same turn are the
-                    # same content (typically empty) one second apart, so an
-                    # occurrence-sensitive membership test never matches and
-                    # the incoming distinct tool call is dropped.  The
-                    # different-dedup_key requirement below still keeps
+                    # (#8672 review P2): the matching sidecar row and the
+                    # durable row for a DIFFERENT tool call of the same turn
+                    # are the same content (typically empty) one second
+                    # apart, so an occurrence-sensitive membership test never
+                    # matches and the incoming distinct tool call is dropped.
+                    # The matching sidecar row is NOT required to carry inline
+                    # tool_calls -- journal recovery anchors recovered tool
+                    # cards on an empty assistant row -- so the content-only
+                    # set is seeded from every row (see the seeding sites).
+                    # The different-dedup_key requirement below still keeps
                     # genuinely distinct turns apart, so #7587's collapse fix
                     # for ordinary repeated rows is untouched.
-                    _ck = _cached_message_key(msg, "content_only_state")
+                    _ck = _content_key_without_occurrence(content_key)
                     if _ck in seen_content_only_keys and dedup_key not in seen_dedup_keys:
                         # Different tool_calls from sidecar — preserve, but keep
                         # the row in timestamp order. Falling through to the
@@ -16710,10 +16754,7 @@ def _merge_session_messages_append_only_impl(
         seen_message_keys.add(key)
         seen_dedup_keys.add(dedup_key)
         seen_content_keys.add(content_key)
-        if msg.get("tool_calls"):
-            seen_content_only_keys.add(
-                _cached_message_key(msg, "content_only_state")
-            )
+        seen_content_only_keys.add(_content_key_without_occurrence(content_key))
         seen_visible_keys.add(visible_key)
         # This terminal path is shared by state.db reconciliation and by ordered
         # sidecar stitching (notably compression continuations). Only the caller
