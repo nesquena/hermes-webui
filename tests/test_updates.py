@@ -1856,7 +1856,7 @@ def _assert_lock_conflict_result(result):
 def test_apply_update_fetch_lock_error_returns_lock_conflict(tmp_path):
     """Fetch failure caused by .git/index.lock returns lock_conflict: True."""
     (tmp_path / '.git').mkdir()
-    from api import updates as mod
+    mod = updates
     with patch(f'{_MODULE}.REPO_ROOT', tmp_path), \
          patch(f'{_MODULE}._run_git') as mock_run_git:
         mock_run_git.side_effect = [
@@ -1869,7 +1869,7 @@ def test_apply_update_fetch_lock_error_returns_lock_conflict(tmp_path):
 def test_apply_update_fetch_lock_error_does_not_attempt_pull(tmp_path):
     """If fetch fails with a lock error, no further git calls are made."""
     (tmp_path / '.git').mkdir()
-    from api import updates as mod
+    mod = updates
     with patch(f'{_MODULE}.REPO_ROOT', tmp_path), \
          patch(f'{_MODULE}._run_git') as mock_run_git:
         mock_run_git.side_effect = [
@@ -1882,7 +1882,7 @@ def test_apply_update_fetch_lock_error_does_not_attempt_pull(tmp_path):
 def test_apply_update_status_lock_error_returns_lock_conflict(tmp_path):
     """Status failure caused by .git/index.lock returns lock_conflict: True."""
     (tmp_path / '.git').mkdir()
-    from api import updates as mod
+    mod = updates
     with patch(f'{_MODULE}.REPO_ROOT', tmp_path), \
          patch(f'{_MODULE}._select_apply_compare_ref', return_value='origin/main'), \
          patch(f'{_MODULE}._run_git') as mock_run_git:
@@ -1897,7 +1897,7 @@ def test_apply_update_status_lock_error_returns_lock_conflict(tmp_path):
 def test_apply_update_pull_lock_error_returns_lock_conflict(tmp_path):
     """Pull failure caused by .git/index.lock returns lock_conflict: True."""
     (tmp_path / '.git').mkdir()
-    from api import updates as mod
+    mod = updates
     with patch(f'{_MODULE}.REPO_ROOT', tmp_path), \
          patch(f'{_MODULE}._select_apply_compare_ref', return_value='origin/main'), \
          patch(f'{_MODULE}.STREAMS', {}), \
@@ -1914,7 +1914,7 @@ def test_apply_update_pull_lock_error_returns_lock_conflict(tmp_path):
 def test_apply_update_non_lock_fetch_failure_does_not_include_lock_conflict(tmp_path):
     """A non-lock fetch failure does NOT return lock_conflict."""
     (tmp_path / '.git').mkdir()
-    from api import updates as mod
+    mod = updates
     with patch(f'{_MODULE}.REPO_ROOT', tmp_path), \
          patch(f'{_MODULE}._run_git') as mock_run_git:
         mock_run_git.side_effect = [
