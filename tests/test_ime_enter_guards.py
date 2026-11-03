@@ -115,10 +115,38 @@ def test_clarify_input_binds_composition_tracking():
 
 def test_clarify_keydown_routes_through_windowed_ime_helper():
     handler = _extract_clarify_keydown_handler(MESSAGES_JS)
-    assert re.search(
-        r"if\s*\(\s*window\._isImeEnter\s*&&\s*window\._isImeEnter\s*\(\s*e\s*\)\s*\)\s*return\s*;",
+    # Two accepted shapes, both from real history:
+    #   * this PR's original direct call —
+    #       `if (window._isImeEnter && window._isImeEnter(e)) return;`
+    #   * upstream #8769's hardened form — the same call behind a
+    #     `typeof window._isImeEnter === 'function'` check that falls back to
+    #     the state-free test when boot.js never published the helper.
+    # Upstream rewrote the expression while explicitly keeping the guard, so a
+    # merge that lands the #8769 body must still satisfy this test.
+    guard = re.search(
+        r"if\s*\(\s*window\._isImeEnter\s*&&\s*window\._isImeEnter\s*\(\s*e\s*\)\s*\)"
+        r"\s*return\s*;",
         handler,
-    ), "clarify Enter handler must use window._isImeEnter (issue #1443 convention)"
+    ) or re.search(
+        r"if\s*\(\s*typeof\s+window\._isImeEnter\s*===\s*['\"]function['\"]\s*\?"
+        r"\s*window\._isImeEnter\s*\(\s*e\s*\)\s*:"
+        r"\s*\(\s*e\.isComposing\s*\|\|\s*e\.keyCode\s*===\s*229\s*\)\s*\)"
+        r"\s*return\s*;",
+        handler,
+    )
+    assert guard, (
+        "clarify Enter handler must route through window._isImeEnter "
+        "(issue #1443 convention) — either directly or behind a "
+        "typeof-guarded isComposing/keyCode-229 fallback"
+    )
+    prevent_default = handler.find("e.preventDefault()")
+    assert prevent_default != -1, (
+        "clarify Enter handler must still preventDefault on a plain Enter"
+    )
+    assert guard.end() < prevent_default, (
+        "the IME guard must return BEFORE preventDefault(): cancelling the "
+        "default is what breaks the IME commit itself"
+    )
     assert re.search(
         r"if\s*\(\s*_clarifyImeComposing\s*\)\s*return\s*;",
         handler,
