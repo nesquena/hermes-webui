@@ -738,6 +738,81 @@ def test_a_named_profile_chat_route_judges_templated_records_under_its_secret_sc
     assert chat_profiles.current_secret_scope() is None  # restored after the turn's resolution
 
 
+# Codex optA-gate CORE (reproduced with the installed Agent's real resolver, synthetic keys,
+# network blocked): a guard that re-reads the shared process env after the Agent's resolver
+# can be raced. A concurrent named-profile worker mirrors its .env into os.environ while the
+# default profile's resolver expands the record, then restores it before the guard runs.
+# The writer's values make the templated record claim ``openai``; the root's do not.
+_RACE_WRITER_ENV = {"PROXY_NAME": "openai", "PROXY_ENABLED": "true"}
+_RACE_TEMPLATE = {"templated-name": "${PROXY_NAME}", "templated-flag": "${PROXY_ENABLED}"}
+
+
+def _resolver_expansion(template):
+    """What the Agent's resolver reads for the record: its own expander, no scope bound."""
+    return sys.modules["hermes_cli.config"]._expand_env_vars(template)
+
+
+def _resolver_runtime(kind, expansion):
+    """The runtime the installed Agent's ``resolve_runtime_provider(requested='openai')``
+    returned in that reproduction: the templated record answers the bare name when it
+    expands to ``openai`` (name) or enabled (flag), and its URL and key come back."""
+    claims = expansion == "openai" if kind == "templated-name" else expansion == "true"
+    return _agent_runtime(NAMED_URL, NAMED_KEY) if claims else _agent_runtime(BUILTIN_URL, BUILTIN_KEY)
+
+
+@pytest.mark.parametrize("kind", sorted(_RACE_TEMPLATE))
+def test_a_concurrent_profile_env_between_the_resolver_and_the_guard_cannot_unlock_a_templated_record(
+        monkeypatch, tmp_path, chat_profiles, kind):
+    """The default profile binds no secret scope, so the guard must not judge a templated
+    name or flag by re-reading os.environ: here the resolver reads the writer worker's
+    values (the record claims ``openai`` and its key comes back), the worker restores the
+    root values (``myproxy`` / ``false``) and only then does the guard run. Re-reading
+    would approve and pair the named key with the built-in URL; the route fails closed."""
+    import threading
+
+    from api import profiles
+
+    (tmp_path / ".hermes" / "profiles" / "writer" / ".env").write_text(
+        "".join(f"{key}={value}\n" for key, value in _RACE_WRITER_ENV.items()), encoding="utf-8")
+    claimant = _bind_chat_config(monkeypatch, tmp_path, kind)
+    root_env = dict(os.environ)
+    entered, release, errors = threading.Event(), threading.Event(), []
+
+    def writer_worker():
+        try:
+            with profiles.profile_env_for_background_worker("writer", scope_skill_modules=False):
+                entered.set()
+                if not release.wait(10):
+                    errors.append("release barrier timed out")
+        except BaseException as exc:  # surfaced by the assertions below
+            errors.append(repr(exc))
+            entered.set()
+
+    worker = threading.Thread(target=writer_worker, name="issue8690-writer-worker")
+    worker.start()
+    try:
+        assert entered.wait(10) and not errors, errors
+        # 1. The Agent's resolver, in the default profile's turn: no scope, the writer's env.
+        assert chat_profiles.current_secret_scope() is None
+        resolver_read = _resolver_expansion(_RACE_TEMPLATE[kind])
+        assert resolver_read == _RACE_WRITER_ENV["PROXY_NAME" if kind == "templated-name" else "PROXY_ENABLED"]
+        runtime = _resolver_runtime(kind, resolver_read)
+        assert (runtime["base_url"], runtime["api_key"]) == (NAMED_URL, NAMED_KEY)
+    finally:
+        release.set()
+        worker.join(10)
+    assert not worker.is_alive() and not errors, errors
+    # 2. The worker restored the root env: a re-read now sees a value that claims nothing.
+    assert dict(os.environ) == root_env
+    assert _resolver_expansion(_RACE_TEMPLATE[kind]) != resolver_read
+    # 3. The guard: the chat route's bundle resolution for the default profile.
+    bundle = _chat_route_bundle("openai", runtime, "default", configured_base_url=BUILTIN_URL)
+    assert NAMED_KEY not in bundle.values() and BUILTIN_URL not in bundle.values(), (
+        bundle["base_url"], bundle["api_key"])
+    _assert_refused(bundle, claimant)
+    assert chat_profiles.current_secret_scope() is None
+
+
 # ── Codex r1 (deferred): title generation calls the Agent with a provider name ──
 
 TITLE_REFUSED = "provider_name_ambiguous_aux"

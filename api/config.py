@@ -4281,7 +4281,9 @@ def _agent_expanded_text(value: object) -> str | None:
         # Without a bound profile secret scope the expander reads the shared process env,
         # which a concurrent worker for another profile can hold: keep the reading closed.
         # This is the default/root profile's case on every route, the chat route included.
-        # Not relieved here: judging it against the profile's own environment is a follow-up.
+        # Re-reading that env after the resolver could see another value than the resolver
+        # read (test_a_concurrent_profile_env_between_the_resolver_and_the_guard_...).
+        # Follow-up: judge against the exact value the Agent resolver read for this request.
         if current_secret_scope() is None:
             return None
         expanded = agent_expand_env_vars(value)
