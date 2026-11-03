@@ -81,6 +81,8 @@
 
 ### Fixed
 
+- **Integration runs started with `--source tool` no longer push your conversations out of the sidebar.** Hermes Agent tags third-party integration sessions `tool` and keeps them out of its own session lists; WebUI's 20-row interactive sidebar window still counted them, so a script running one integration session per batch could hide real conversations. Tool sessions are now kept out of that window like oneshot runs, and stay reachable by id, under their project, and with the `tool` source filter. (#8731, thanks @grzezlo)
+
 - **Hermes Desktop conversations show up in the sidebar's CLI sessions.** WebUI filed sessions with the `desktop` source as "other" and left them out of the interactive sidebar. They are now listed with CLI, TUI and ACP sessions under a Desktop label, and like those they follow the interactive-sessions toggle. Desktop sessions with no user turn are hidden, older histories whose message roles cannot be read stay visible, and only the strict owning-profile check can remove a Desktop session's sidebar entry. Sessions that current Agents store as `source='local'` are not covered yet (#8674). Thanks @nomadjames. (#7415)
 
 - **Stopping read-aloud cancels the request that was still loading.** Pressing stop, or starting another read-aloud, left the abandoned `/api/tts` request running in the browser, which downloaded and decoded a response nobody would hear. Each request now carries its own abort signal and is cancelled on stop, on replacement and when a chunk fails, without showing an error. The server still finishes the synthesis it started and the rate window still applies. Thanks @webtecnica. (#8647, refs #6541)

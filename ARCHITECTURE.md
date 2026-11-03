@@ -295,6 +295,8 @@ passes so a high-volume worker source cannot consume that interactive window:
   chips, so the assigned recovery pass still reaches one filed under a project.
   An explicit `source_filter="oneshot"` lists the newest ones, and a session
   the user opens by id resolves through `get_cli_session_by_id()`.
+- Tool (`--source tool`): handled like one-shot runs. Hermes Agent uses this
+  tag for integration sessions that should stay out of user session lists.
 
 Source-specific views still use their dedicated bounds, and the later sidebar
 visibility stage decides whether recovered background rows are shown. In
