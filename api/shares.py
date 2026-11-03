@@ -1066,16 +1066,40 @@ def build_share_snapshot(session) -> dict:
     }
 
 
-def create_or_refresh_share(session) -> dict:
-    snapshot = build_share_snapshot(session)
+def write_share_snapshot(snapshot: dict, *, token: str = "", source_session_id: str = "") -> dict:
+    """Persist a prebuilt share snapshot under ``token`` (or a fresh one).
+
+    Split out of :func:`create_or_refresh_share` so the caller can build the
+    snapshot outside a lock (redaction and media embedding can take seconds on a
+    large session) and take the lock only around token resolution, this write and
+    the token persist (#8255 review).
+    """
     with _SHARE_LOCK:
         _ensure_share_dir()
-        existing_token = str(getattr(session, "share_token", "") or "").strip()
-        token = existing_token or secrets.token_urlsafe(18)
+        token = str(token or "").strip()
+        existing = None
+        path = _share_path(token) if token else None
+        if path is not None and path.exists():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                logger.debug("Ignoring malformed share snapshot at %s", path, exc_info=True)
+                existing = None
+            if isinstance(existing, dict) and existing.get("revoked_at"):
+                # The link was revoked: republishing this token would bring the
+                # old URL back to life for anyone who kept it, without issuing a
+                # new one. Keep the tombstone and mint a fresh token instead
+                # (#8399 review).
+                token = ""
+                path = None
+                existing = None
+        if path is None:
+            token = secrets.token_urlsafe(18)
+            path = _share_path(token)
         now = time.time()
         payload = {
             "token": token,
-            "source_session_id": str(getattr(session, "session_id", "") or ""),
+            "source_session_id": str(source_session_id or ""),
             "title": snapshot["title"],
             "messages": snapshot["messages"],
             "message_count": snapshot["message_count"],
@@ -1083,14 +1107,8 @@ def create_or_refresh_share(session) -> dict:
             "updated_at": now,
             "revoked_at": None,
         }
-        path = _share_path(token)
-        if path.exists():
-            try:
-                existing = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(existing, dict):
-                    payload["created_at"] = existing.get("created_at") or now
-            except Exception:
-                logger.debug("Ignoring malformed share snapshot at %s", path, exc_info=True)
+        if isinstance(existing, dict):
+            payload["created_at"] = existing.get("created_at") or now
         _write_json_atomic(path, payload)
     return {
         "share_token": token,
@@ -1099,6 +1117,15 @@ def create_or_refresh_share(session) -> dict:
         "share_created_at": payload["created_at"],
         "share_updated_at": payload["updated_at"],
     }
+
+
+def create_or_refresh_share(session) -> dict:
+    snapshot = build_share_snapshot(session)
+    return write_share_snapshot(
+        snapshot,
+        token=str(getattr(session, "share_token", "") or ""),
+        source_session_id=str(getattr(session, "session_id", "") or ""),
+    )
 
 
 def load_share(token: str) -> dict | None:
