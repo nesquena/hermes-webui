@@ -429,7 +429,7 @@ def test_named_profile_derives_the_profile_scoped_container_key(monkeypatch):
 # Streaming worker — bind during the turn, restore on EVERY exit path
 # ---------------------------------------------------------------------------
 
-def _install_mcp_discovery_stub(monkeypatch, mode="dotenv"):
+def _install_mcp_discovery_stub(monkeypatch, mode="dotenv", on_discovery=None):
     """Make `discover_mcp_tools()` deterministic inside a scene.
 
     Release-stage finding (review 2026-11-02). The scene fakes ``hermes_cli``
@@ -462,6 +462,11 @@ def _install_mcp_discovery_stub(monkeypatch, mode="dotenv"):
 
     def _stub_discover_mcp_tools():
         calls.append(str(os.environ.get("HERMES_HOME") or ""))
+        # Optional hook: lets a test pause INSIDE discovery (the exact boundary
+        # where a sibling turn can publish between this turn's publish and its
+        # post-discovery re-assert).
+        if on_discovery is not None:
+            on_discovery()
         if mode == "none":
             return []
         home = os.environ.get("HERMES_HOME") or ""
@@ -500,7 +505,7 @@ class _StreamingScene:
     resolution, identity lifecycle, env mutation and teardown all run for real.
     """
 
-    def __init__(self, monkeypatch, tmp_path, *, profile, active_profile_name=None, on_run=None, tag="", real_profile_env=False, mcp_discovery="dotenv"):
+    def __init__(self, monkeypatch, tmp_path, *, profile, active_profile_name=None, on_run=None, tag="", real_profile_env=False, mcp_discovery="dotenv", on_discovery=None, real_native_chain=False):
         from typing import Callable, Optional
 
         from api import config as cfg
@@ -625,16 +630,29 @@ class _StreamingScene:
         import sys
         import types
 
-        fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
-        fake_runtime_module.resolve_runtime_provider = (
-            lambda requested=None, **_kw: {
-                "provider": requested or "test-provider",
-                "api_key": "synthetic-key",
-                "base_url": None,
-            }
-        )
-        fake_hermes_cli = types.ModuleType("hermes_cli")
-        fake_hermes_cli.runtime_provider = fake_runtime_module
+        # Review 2026-11-03, requirement 2: `real_native_chain=True` preserves
+        # the REAL hermes_cli package identity and runs the REAL
+        # `discover_mcp_tools() → _load_mcp_config() → load_hermes_dotenv()`
+        # chain — the native writer the release stage found writing the profile
+        # `.env` into the process env behind the mirror's back. Every other
+        # scene intercepts that lookup with the simplified dotenv parser
+        # (`_install_mcp_discovery_stub`), which keeps worker assertions
+        # deterministic but no longer exercises the native chain. These scenes
+        # keep the sentinel Agent/provider stubs (initialisation, session db,
+        # oauth) — only the MCP discovery lookup must be real.
+        if not real_native_chain:
+            fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+            fake_runtime_module.resolve_runtime_provider = (
+                lambda requested=None, **_kw: {
+                    "provider": requested or "test-provider",
+                    "api_key": "synthetic-key",
+                    "base_url": None,
+                }
+            )
+            fake_hermes_cli = types.ModuleType("hermes_cli")
+            fake_hermes_cli.runtime_provider = fake_runtime_module
+            monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+            monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
         fake_hermes_state = types.ModuleType("hermes_state")
         fake_hermes_state.SessionDB = FakeSessionDB
 
@@ -667,8 +685,6 @@ class _StreamingScene:
         monkeypatch.setattr("api.config.get_config", lambda: {})
         monkeypatch.setattr("api.config._resolve_cli_toolsets", lambda _cfg: [])
         monkeypatch.setattr("api.config.load_settings", lambda: {})
-        monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
-        monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
         monkeypatch.setitem(sys.modules, "hermes_state", fake_hermes_state)
         # Release-stage finding (review 2026-11-02): MCP discovery must be
         # DETERMINISTIC here. The fake `hermes_cli` above is not a package, so
@@ -678,8 +694,11 @@ class _StreamingScene:
         # stand-in instead: by default it faithfully emulates the real
         # `discover_mcp_tools() → _load_mcp_config() → load_hermes_dotenv()`
         # chain (see `_install_mcp_discovery_stub`), so every scene exercises
-        # the same code shape the release suite hits.
-        _install_mcp_discovery_stub(monkeypatch, mcp_discovery)
+        # the same code shape the release suite hits. `real_native_chain=True`
+        # keeps the REAL chain (review 2026-11-03, requirement 2) and skips
+        # this stand-in entirely.
+        if not real_native_chain:
+            _install_mcp_discovery_stub(monkeypatch, mcp_discovery, on_discovery=on_discovery)
 
         for registry in (
             "STREAMS", "CANCEL_FLAGS", "AGENT_INSTANCES", "STREAM_PARTIAL_TEXT",
@@ -2075,3 +2094,536 @@ def test_mcp_discovery_dotenv_write_does_not_clobber_a_live_named_turn(
         )
     finally:
         _streaming_mod._release_turn_session_profile(token)
+
+
+# ---------------------------------------------------------------------------
+# Review 2026-11-03 (source re-review of c204b44bf), requirement 1:
+# the NAMED reassert branch must use the SAME stack policy as the release tail.
+#
+# Permitted sequence: streaming A publishes `work` and pauses INSIDE discovery;
+# B publishes `play`; A resumes and its `finally` re-asserts. The newest live
+# NAMED publisher is B (`play`), so the shared resolver picks `play`. Writing
+# A's own `work` directly hands the slot to a non-newest owner.
+#
+# The observation point must be INSIDE A's turn — after the discovery-boundary
+# re-assert but BEFORE the outer finally releases A — because the outer release
+# re-publishes the surviving owner and would mask a wrong mid-turn write.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("a_finishes_first", [True, False])
+def test_named_reassert_uses_the_shared_stack_policy_at_the_discovery_boundary(
+    monkeypatch, tmp_path, a_finishes_first,
+):
+    """Delayed-A / later-B at the discovery boundary, both completion orders.
+
+    A publishes `work` and pauses inside discovery. B publishes `play`. When A
+    resumes, its discovery-boundary re-assert must use the SAME stack policy as
+    the release tail: the newest live non-None/ambient resolver picks B's
+    `play`, never A's stale `work`. A released/unknown token is a no-op, and no
+    publisher is retired or reordered. After both leave, the original ambient
+    (absent) returns.
+
+    The observation point is the env IMMEDIATELY after the re-assert returns,
+    still inside A's thread at the discovery boundary — NOT the agent body:
+    A's own turn later enters ``profile_scope_for_detached_worker`` (model +
+    credential resolution), whose background-worker scope re-publishes the
+    newest remaining publisher on exit. That late participant would mask a
+    wrong mid-turn write with the correct value, exactly as the turn's outer
+    release would. Wrapping the re-assert reads the env before any other
+    participant can re-publish. The A thread is ALWAYS released (hold_after +
+    join) even when an assertion fails, so a killed test can never leave a
+    zombie publisher on the shared mirror stack for the next test.
+    """
+    from api import streaming as S
+
+    # CI installs no hermes-agent: the scene's sentinel Agent imports
+    # ``gateway.session_context`` for real, so the faithful stand-in must be
+    # installed where the agent package is absent (locally this is a no-op —
+    # the REAL module is returned).
+    _session_context(monkeypatch)
+    monkeypatch.delenv("HERMES_SESSION_PROFILE", raising=False)
+
+    a_in_discovery = threading.Event()
+    a_release = threading.Event()
+    # Set by A's agent body: discovery's re-assert has already run at that point.
+    a_past_reassert = threading.Event()
+    a_hold_after = threading.Event()
+    a_mid_turn: dict[str, object] = {}
+
+    def _a_on_discovery():
+        a_in_discovery.set()
+        assert a_release.wait(20), "A was never released from discovery"
+
+    def _a_on_run():
+        a_past_reassert.set()
+        assert a_hold_after.wait(20), "A was never released from its body"
+
+    scene_a = _StreamingScene(
+        monkeypatch, tmp_path, profile="work", active_profile_name=None,
+        on_run=_a_on_run, on_discovery=_a_on_discovery,
+        tag="stack-A", mcp_discovery="none",
+    )
+
+    # Observe the env at the discovery boundary: immediately after the real
+    # re-assert returns, before any other mirror participant (background-worker
+    # scopes inside this same turn, the outer release) can re-publish.
+    _real_reassert = S._reassert_turn_session_profile
+
+    def _observing_reassert(tok):
+        result = _real_reassert(tok)
+        a_mid_turn["env_after_reassert"] = os.environ.get("HERMES_SESSION_PROFILE")
+        return result
+
+    monkeypatch.setattr(S, "_reassert_turn_session_profile", _observing_reassert)
+
+    token_b = None
+    try:
+        def _run_a():
+            scene_a.run()
+
+        t_a = threading.Thread(target=_run_a)
+        t_a.start()
+        assert a_in_discovery.wait(20), "A never reached discovery"
+
+        # While A is paused in discovery, A is still the newest live named
+        # publisher.
+        assert os.environ.get("HERMES_SESSION_PROFILE") == "work", (
+            "A must have published `work` before discovery"
+        )
+
+        token_b = S._publish_turn_session_profile("play")
+        assert os.environ.get("HERMES_SESSION_PROFILE") == "play", (
+            "B must become the newest live named publisher"
+        )
+
+        if a_finishes_first:
+            # A resumes past discovery; its re-assert must yield to B (the
+            # newest live named publisher) — never resurrect A's stale `work`.
+            a_release.set()
+            assert a_past_reassert.wait(20), "A never got past discovery"
+            assert a_mid_turn["env_after_reassert"] == "play", (
+                "A's named re-assert wrote its own stale profile over the newest "
+                f"live named publisher: {a_mid_turn['env_after_reassert']!r}"
+            )
+            a_hold_after.set()
+            t_a.join(timeout=20)
+            assert not t_a.is_alive(), "A did not finish"
+            # A's outer release must keep B's value: B is still live.
+            assert os.environ.get("HERMES_SESSION_PROFILE") == "play"
+        else:
+            # B leaves first; A is the surviving publisher and must own the
+            # slot after its own re-assert.
+            S._release_turn_session_profile(token_b)
+            token_b = None
+            assert os.environ.get("HERMES_SESSION_PROFILE") == "work", (
+                "after B leaves, the surviving publisher A must own the slot"
+            )
+            a_release.set()
+            assert a_past_reassert.wait(20), "A never got past discovery"
+            assert a_mid_turn["env_after_reassert"] == "work", (
+                "with B gone, A's re-assert must restore its own profile"
+            )
+            a_hold_after.set()
+            t_a.join(timeout=20)
+            assert not t_a.is_alive(), "A did not finish"
+    finally:
+        # ALWAYS release A's body and B's publisher, even on assertion failure,
+        # so no zombie mirror participant outlives the test.
+        a_hold_after.set()
+        if a_in_discovery.is_set() and not a_past_reassert.is_set():
+            a_release.set()
+        if token_b is not None:
+            S._release_turn_session_profile(token_b)
+        if "t_a" in locals():
+            t_a.join(timeout=20)
+    assert os.environ.get("HERMES_SESSION_PROFILE") is None, (
+        "the ambient (absent) must be restored after both turns leave"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Review 2026-11-03 (source re-review of c204b44bf), requirement 2:
+# the REAL native discovery composition regression.
+#
+# Every _StreamingScene above intercepts the discovery lookup with the
+# simplified dotenv parser (`_install_mcp_discovery_stub`), so preloading the
+# real `tools.mcp_tool` no longer exercises native discovery through them —
+# `real_profile_env=True` preserves the WebUI loader, NOT the native
+# discovery/config/`load_hermes_dotenv` chain. These tests DO run the real
+# chain: real `discover_mcp_tools()` → real `_load_mcp_config()` → real
+# `load_hermes_dotenv()` (which writes the profile `.env` into `os.environ`
+# with override=True), and assert the turn's published slot is re-asserted
+# mid-turn and the ambient is restored afterwards.
+#
+# The native-writer entry is PROVEN, not assumed: `load_hermes_dotenv` is
+# wrapped with a recorder that captures the env immediately after the real
+# load returns — still INSIDE discovery, before the worker's `finally`
+# re-asserts — so it observes the `.env` value the native writer published.
+# All five regressions fail if discovery is stubbed (the recorder never
+# fires), and they fail on the pre-finally release head (60b4bb7f) because
+# the `.env` value then stuck mid-turn.
+# ---------------------------------------------------------------------------
+
+
+def _real_native_chain_guard():
+    """Skip when the REAL native discovery chain is not importable (CI)."""
+    _streaming()  # api.config appends the agent dir to sys.path on import
+    pytest.importorskip(
+        "tools.mcp_tool_discovery",
+        reason="hermes-agent tools.mcp_tool_discovery not importable here (CI)",
+    )
+    import hermes_cli.env_loader  # noqa: F401  — the native writer module
+    import tools.mcp_tool  # noqa: F401  — the lazy-reexport module the worker resolves
+
+
+def _install_native_loader_recorder(monkeypatch, *, pause_cb=None, pause_home=None):
+    """Wrap the REAL ``hermes_cli.env_loader.load_hermes_dotenv``.
+
+    Proves the native writer entry is reached: every call records the HOME the
+    loader resolved (the turn's mirrored profile home) and the
+    ``HERMES_SESSION_PROFILE`` value in ``os.environ`` immediately after the
+    real load returns — BEFORE the worker's ``finally`` re-assert runs — so the
+    recorded value is the native writer's own publication, not the repair.
+
+    ``pause_cb`` (optional, only for calls whose ``HERMES_HOME`` at call time
+    equals *pause_home*) lets a test hold a turn INSIDE discovery, after the
+    native write and before the post-discovery re-assert.
+    """
+    from hermes_cli import env_loader as _env_loader
+
+    _real_load = _env_loader.load_hermes_dotenv
+    calls: list[dict] = []
+
+    def _recording_load(*args, **kwargs):
+        result = _real_load(*args, **kwargs)
+        home = os.environ.get("HERMES_HOME") or ""
+        calls.append(
+            {
+                "hermes_home": home,
+                "env_after_load": os.environ.get("HERMES_SESSION_PROFILE"),
+                "loaded": list(result),
+            }
+        )
+        if pause_cb is not None and (pause_home is None or home == str(pause_home)):
+            pause_cb()
+        return result
+
+    monkeypatch.setattr(_env_loader, "load_hermes_dotenv", _recording_load)
+    return calls
+
+
+@pytest.mark.parametrize("ambient", [None, "inherited-ambient"])
+def test_real_native_discovery_chain_named_turn_mid_turn_and_cleanup(
+    monkeypatch, tmp_path, ambient,
+):
+    """Real chain, NAMED turn: the native writer's `.env` value must be
+    re-asserted to the published slot mid-turn and the ambient restored after.
+
+    The recorder proves the REAL ``load_hermes_dotenv`` ran against the turn's
+    mirrored home and published ``dotenv-profile``; the sentinel Agent then
+    observes the repaired slot (`work`), and post-turn the process env is the
+    original ambient. Fails on the pre-finally head and whenever discovery is
+    stubbed (recorder never fires).
+    """
+    _real_native_chain_guard()
+    _session_context(monkeypatch)
+    if ambient is None:
+        monkeypatch.delenv("HERMES_SESSION_PROFILE", raising=False)
+    else:
+        monkeypatch.setenv("HERMES_SESSION_PROFILE", ambient)
+
+    scene = _StreamingScene(
+        monkeypatch, tmp_path,
+        profile="work", active_profile_name=None,
+        tag=f"realchain-named-{'absent' if ambient is None else 'inherited'}",
+        real_profile_env=True, real_native_chain=True,
+    )
+    # The REAL native loader reads this file through the mirrored HERMES_HOME;
+    # the REAL WebUI loader reads it through get_profile_runtime_env.
+    (scene.profile_home / ".env").write_text(
+        "HERMES_SESSION_PROFILE=dotenv-profile\n", encoding="utf-8"
+    )
+
+    recorder = _install_native_loader_recorder(monkeypatch)
+    scene.run()
+
+    # Native writer entry PROVEN: the real loader ran against the mirrored
+    # home and wrote the profile .env value before any repair ran.
+    assert recorder, "the native load_hermes_dotenv was never reached"
+    assert recorder[0]["hermes_home"] == str(scene.profile_home), recorder[0]
+    assert recorder[0]["env_after_load"] == "dotenv-profile", (
+        "the native writer must have published the .env value (observed "
+        f"immediately after load, before the re-assert): {recorder[0]}"
+    )
+    # Mid-turn: the published slot is authoritative — never the .env value.
+    assert scene.observed["env_profile"] == "work", scene.observed
+    assert scene.observed["thread_env_profile"] == "work", scene.observed
+    assert scene.observed["ctx_profile"] == "work", scene.observed
+    # Cleanup: the ambient is restored exactly (absent stays absent).
+    assert os.environ.get("HERMES_SESSION_PROFILE") == ambient, (
+        f"process env kept {os.environ.get('HERMES_SESSION_PROFILE')!r} after "
+        f"the real-chain turn; ambient was {ambient!r}"
+    )
+
+
+@pytest.mark.parametrize("ambient", [None, "inherited-ambient"])
+def test_real_native_discovery_chain_unresolved_turn_mid_turn_and_cleanup(
+    monkeypatch, tmp_path, ambient,
+):
+    """Real chain, UNRESOLVED turn: the native write must be repaired to the
+    ambient/survivor value mid-turn while the dotenv identity stays bound in
+    the ContextVar (the intended unresolved fallback), and the ambient returns
+    after the turn. Same recorder proof of the native writer entry.
+    """
+    _real_native_chain_guard()
+    _session_context(monkeypatch)
+    if ambient is None:
+        monkeypatch.delenv("HERMES_SESSION_PROFILE", raising=False)
+    else:
+        monkeypatch.setenv("HERMES_SESSION_PROFILE", ambient)
+
+    scene = _StreamingScene(
+        monkeypatch, tmp_path,
+        profile=None, active_profile_name=None,
+        tag=f"realchain-unresolved-{'absent' if ambient is None else 'inherited'}",
+        real_profile_env=True, real_native_chain=True,
+    )
+    (scene.profile_home / ".env").write_text(
+        "HERMES_SESSION_PROFILE=dotenv-profile\n", encoding="utf-8"
+    )
+
+    recorder = _install_native_loader_recorder(monkeypatch)
+    scene.run()
+
+    assert recorder, "the native load_hermes_dotenv was never reached"
+    assert recorder[0]["hermes_home"] == str(scene.profile_home), recorder[0]
+    assert recorder[0]["env_after_load"] == "dotenv-profile", (
+        f"the native writer must have published the .env value: {recorder[0]}"
+    )
+    # Mid-turn: the dotenv identity lives in the ContextVar (master parity),
+    # while the process env shows the ambient — never the .env value the
+    # native writer published.
+    assert scene.observed["ctx_profile"] == "dotenv-profile", scene.observed
+    assert scene.observed["resolved_profile"] == "dotenv-profile", scene.observed
+    assert scene.observed["thread_env_profile"] == "dotenv-profile", scene.observed
+    assert scene.observed["env_profile"] == ambient, (
+        f"an unresolved real-chain turn left {scene.observed['env_profile']!r} "
+        f"in the process env mid-turn; ambient was {ambient!r}"
+    )
+    assert os.environ.get("HERMES_SESSION_PROFILE") == ambient
+
+
+@pytest.mark.parametrize("a_finishes_first", [True, False])
+def test_real_native_discovery_chain_concurrent_named_publisher_survives(
+    monkeypatch, tmp_path, a_finishes_first,
+):
+    """Real chain + the requirement-1 stack policy, both completion orders.
+
+    A (`work`) pauses INSIDE native discovery right after the native writer
+    published `dotenv-profile`; B (`play`) becomes the newest live named
+    publisher. When A resumes, its post-discovery re-assert must pick the
+    newest live named publisher (`play`) — never resurrect A's stale `work`
+    over B. When B leaves first, A (the survivor) must own the slot. After
+    both leave, the ambient (absent) returns.
+
+    As in the stub-driven requirement-1 regression, the env is observed
+    IMMEDIATELY after the re-assert returns (wrapped), because A's own turn
+    later enters ``profile_scope_for_detached_worker`` whose background-worker
+    scope re-publishes the newest remaining publisher — it would mask a wrong
+    mid-turn write. The A thread is always released on failure so no zombie
+    publisher outlives the test.
+    """
+    _real_native_chain_guard()
+    from api import streaming as S
+
+    _session_context(monkeypatch)
+    monkeypatch.delenv("HERMES_SESSION_PROFILE", raising=False)
+
+    a_in_loader = threading.Event()
+    a_release = threading.Event()
+    a_past_reassert = threading.Event()
+    a_hold_after = threading.Event()
+    a_mid_turn: dict[str, object] = {}
+
+    scene_a = _StreamingScene(
+        monkeypatch, tmp_path,
+        profile="work", active_profile_name=None,
+        tag="realchain-stack-A", real_profile_env=True, real_native_chain=True,
+    )
+    (scene_a.profile_home / ".env").write_text(
+        "HERMES_SESSION_PROFILE=dotenv-profile\n", encoding="utf-8"
+    )
+
+    def _pause_after_native_write():
+        a_in_loader.set()
+        a_release.wait(20)
+
+    recorder = _install_native_loader_recorder(
+        monkeypatch, pause_cb=_pause_after_native_write, pause_home=scene_a.profile_home,
+    )
+
+    def _a_on_run():
+        a_past_reassert.set()
+        a_hold_after.wait(20)
+
+    scene_a.on_run = _a_on_run
+
+    # Observe the env at the discovery boundary, immediately after the real
+    # re-assert returns (see the stub-driven test for why the agent body is not
+    # a valid observation point for the requirement-1 bug).
+    _real_reassert = S._reassert_turn_session_profile
+
+    def _observing_reassert(tok):
+        result = _real_reassert(tok)
+        a_mid_turn["env_after_reassert"] = os.environ.get("HERMES_SESSION_PROFILE")
+        return result
+
+    monkeypatch.setattr(S, "_reassert_turn_session_profile", _observing_reassert)
+
+    token_b = None
+    try:
+        def _run_a():
+            scene_a.run()
+
+        t_a = threading.Thread(target=_run_a)
+        t_a.start()
+        assert a_in_loader.wait(20), "A never paused inside native discovery"
+        assert recorder, "the native loader never ran inside A's discovery"
+        # INSIDE discovery, after the native write, before the re-assert: the
+        # .env value is live — this is the exact window the finally must close.
+        assert recorder[-1]["env_after_load"] == "dotenv-profile", recorder[-1]
+        assert os.environ.get("HERMES_SESSION_PROFILE") == "dotenv-profile"
+
+        token_b = S._publish_turn_session_profile("play")
+        assert os.environ.get("HERMES_SESSION_PROFILE") == "play"
+
+        if a_finishes_first:
+            # A resumes past discovery while B is still the newest live
+            # publisher: the re-assert must yield to B (never A's stale work).
+            a_release.set()
+            assert a_past_reassert.wait(20), "A never got past discovery"
+            assert a_mid_turn["env_after_reassert"] == "play", (
+                "A's named re-assert wrote its own stale profile over the "
+                f"newest live named publisher: {a_mid_turn['env_after_reassert']!r}"
+            )
+            a_hold_after.set()
+            t_a.join(timeout=20)
+            assert not t_a.is_alive(), "A did not finish"
+            # A's outer release must keep B's value: B is still live.
+            assert os.environ.get("HERMES_SESSION_PROFILE") == "play"
+        else:
+            # B leaves first; A is the surviving publisher and must own the
+            # slot after its own re-assert.
+            S._release_turn_session_profile(token_b)
+            token_b = None
+            assert os.environ.get("HERMES_SESSION_PROFILE") == "work"
+            a_release.set()
+            assert a_past_reassert.wait(20), "A never got past discovery"
+            assert a_mid_turn["env_after_reassert"] == "work", a_mid_turn
+            a_hold_after.set()
+            t_a.join(timeout=20)
+            assert not t_a.is_alive(), "A did not finish"
+    finally:
+        # ALWAYS release A's body and B's publisher, even on assertion failure,
+        # so no zombie mirror participant outlives the test.
+        a_hold_after.set()
+        if a_in_loader.is_set() and not a_past_reassert.is_set():
+            a_release.set()
+        if token_b is not None:
+            S._release_turn_session_profile(token_b)
+        if "t_a" in locals():
+            t_a.join(timeout=20)
+    assert os.environ.get("HERMES_SESSION_PROFILE") is None, (
+        "the ambient (absent) must be restored after both turns leave"
+    )
+
+
+def test_real_native_discovery_chain_write_then_exception_is_repaired(
+    monkeypatch, tmp_path,
+):
+    """Write-then-exception control: the native discovery writes the profile
+    .env into `os.environ` and THEN raises; the worker's `finally` must still
+    re-assert the turn's published slot (the exception is swallowed as a
+    non-fatal discovery failure) and the ambient must return afterwards.
+    """
+    _real_native_chain_guard()
+    import tools.mcp_tool_discovery as _discovery
+
+    _session_context(monkeypatch)
+    monkeypatch.delenv("HERMES_SESSION_PROFILE", raising=False)
+
+    scene = _StreamingScene(
+        monkeypatch, tmp_path,
+        profile="work", active_profile_name=None,
+        tag="realchain-boom", real_profile_env=True, real_native_chain=True,
+    )
+    (scene.profile_home / ".env").write_text(
+        "HERMES_SESSION_PROFILE=dotenv-profile\n", encoding="utf-8"
+    )
+
+    recorder = _install_native_loader_recorder(monkeypatch)
+
+    _real_discover = _discovery.discover_mcp_tools
+
+    def _discover_then_raise(*args, **kwargs):
+        _real_discover(*args, **kwargs)  # the native env write happens first
+        raise RuntimeError("synthetic discovery failure after env write")
+
+    monkeypatch.setattr(_discovery, "discover_mcp_tools", _discover_then_raise)
+
+    scene.run()
+
+    assert recorder, "the native loader must have run before the raise"
+    assert recorder[0]["env_after_load"] == "dotenv-profile", recorder[0]
+    # The finally repaired the slot even though discovery raised after writing.
+    assert scene.observed["env_profile"] == "work", scene.observed
+    assert os.environ.get("HERMES_SESSION_PROFILE") is None, (
+        f"ambient not restored after the write-then-exception turn: "
+        f"{os.environ.get('HERMES_SESSION_PROFILE')!r}"
+    )
+
+
+def test_real_native_discovery_chain_cached_native_first_import_order(
+    monkeypatch, tmp_path,
+):
+    """Cached-native-first import order (the release-suite scenario).
+
+    The release gate found the scene behavior depended on whether an earlier
+    test had already imported (cached) the real native MCP modules. Here the
+    real modules are imported FIRST on purpose; the real-chain scene must
+    still (a) run the REAL discovery chain — the recorder proves the native
+    writer entry — and (b) repair the write mid-turn with the published slot,
+    restoring the ambient afterwards. Deterministic regardless of cache order.
+    """
+    _real_native_chain_guard()
+    import sys
+
+    import tools.mcp_tool  # noqa: F401  — cache the lazily-reexporting module
+
+    assert "tools.mcp_tool" in sys.modules, "native module pre-import failed"
+    assert "tools.mcp_tool_discovery" in sys.modules
+
+    _session_context(monkeypatch)
+    monkeypatch.delenv("HERMES_SESSION_PROFILE", raising=False)
+
+    scene = _StreamingScene(
+        monkeypatch, tmp_path,
+        profile="work", active_profile_name=None,
+        tag="realchain-cached-first", real_profile_env=True, real_native_chain=True,
+    )
+    (scene.profile_home / ".env").write_text(
+        "HERMES_SESSION_PROFILE=dotenv-profile\n", encoding="utf-8"
+    )
+
+    recorder = _install_native_loader_recorder(monkeypatch)
+    scene.run()
+
+    assert recorder, (
+        "with the native modules cached first, the REAL discovery chain must "
+        "still run (the recorder proves the native writer entry)"
+    )
+    assert recorder[0]["hermes_home"] == str(scene.profile_home), recorder[0]
+    assert recorder[0]["env_after_load"] == "dotenv-profile", recorder[0]
+    assert scene.observed["env_profile"] == "work", scene.observed
+    assert os.environ.get("HERMES_SESSION_PROFILE") is None
