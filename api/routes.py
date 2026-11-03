@@ -2834,6 +2834,9 @@ _SESSION_LIST_CACHE_HELD = _route_session_list_cache._SESSION_LIST_CACHE_HELD
 _SESSION_LIST_CACHE_STALE_SOURCE = _route_session_list_cache._SESSION_LIST_CACHE_STALE_SOURCE
 _SESSION_LIST_CACHE_STALE_AGE = _route_session_list_cache._SESSION_LIST_CACHE_STALE_AGE
 _session_list_cache_probe = _route_session_list_cache._session_list_cache_probe
+_session_list_cache_resolved_source_stamp = (
+    _route_session_list_cache._session_list_cache_resolved_source_stamp
+)
 _session_list_cache_invalidation_stamp = _route_session_list_cache._session_list_cache_invalidation_stamp
 _route_session_list_cache_key = _route_session_list_cache._session_list_cache_key
 _session_list_cache_overlay_runtime_rows = _route_session_list_cache._session_list_cache_overlay_runtime_rows
@@ -3838,6 +3841,26 @@ def _hidden_archived_sidebar_reference_sessions(
     return references
 
 
+def _session_list_cache_source_stamp_snapshot(key: tuple):
+    """Stamp read BEFORE a build, so the payload is certified by what it saw.
+
+    A cache entry is a (stamp, payload) pair, and the pair is only meaningful if
+    the stamp was taken no later than the rows the payload was built from. With
+    the stamp taken after the builder returns, a commit that lands mid-build is
+    folded into the stored stamp: the old payload is then certified against a
+    NEWER snapshot, served as FRESH for a full TTL, and stays wrong even once
+    the source moves again. Taking the snapshot first makes that commit visible
+    on the next request instead. ``None`` means the producer itself failed —
+    unknown evidence, so the payload is returned to this caller uncached rather
+    than certified with a later stamp. (#8694)
+    """
+    try:
+        return _session_list_cache_resolved_source_stamp(key)
+    except Exception:
+        logger.debug("session list source stamp snapshot failed", exc_info=True)
+        return None
+
+
 def _get_cached_session_list_payload(
     *,
     key: tuple,
@@ -3897,6 +3920,12 @@ def _get_cached_session_list_payload(
                     rebuild_attempts = 0
                     while True:
                         invalidation_stamp = _session_list_cache_invalidation_stamp(key)
+                        source_stamp = _session_list_cache_source_stamp_snapshot(key)
+                        if source_stamp is None:
+                            # Unknown pre-build evidence: serve this request from a
+                            # fresh build but certify nothing. Retrying cannot
+                            # produce a snapshot the producer just failed to read.
+                            return
                         try:
                             payload = builder()
                         except Exception:
@@ -3910,6 +3939,7 @@ def _get_cached_session_list_payload(
                                 key,
                                 payload,
                                 expected_invalidation_stamp=invalidation_stamp,
+                                source_stamp=source_stamp,
                             )
                         ):
                             return
@@ -3946,13 +3976,20 @@ def _get_cached_session_list_payload(
             rebuild_attempts = 0
             while True:
                 invalidation_stamp = _session_list_cache_invalidation_stamp(key)
+                source_stamp = _session_list_cache_source_stamp_snapshot(key)
                 payload = builder()
+                if source_stamp is None:
+                    # Unknown pre-build evidence: correct for this request, never
+                    # certified. Retrying cannot produce a snapshot the producer
+                    # just failed to read.
+                    return payload
                 if (
                     _session_list_cache_invalidation_stamp(key) == invalidation_stamp
                     and _session_list_cache_set(
                         key,
                         payload,
                         expected_invalidation_stamp=invalidation_stamp,
+                        source_stamp=source_stamp,
                     )
                 ):
                     if diag is not None:
@@ -4011,12 +4048,17 @@ def _get_cached_session_list_payload(
         except Exception:
             pass
     invalidation_stamp = _session_list_cache_invalidation_stamp(key)
+    source_stamp = _session_list_cache_source_stamp_snapshot(key)
     payload = builder()
-    if _session_list_cache_invalidation_stamp(key) == invalidation_stamp:
+    if (
+        source_stamp is not None
+        and _session_list_cache_invalidation_stamp(key) == invalidation_stamp
+    ):
         _session_list_cache_set(
             key,
             payload,
             expected_invalidation_stamp=invalidation_stamp,
+            source_stamp=source_stamp,
         )
     return payload
 

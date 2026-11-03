@@ -398,36 +398,54 @@ def _session_list_cache_key(
 
 
 # Positions in the idle source stamp (an 8-tuple, see
-# `_session_list_cache_source_stamp`) whose movement means COMMITTED ROWS changed
-# rather than a file merely being touched: the content fingerprint and the
-# all-profiles stamp. The stat components (state.db, its WAL, gateway metadata,
-# the session index) can move without any new row.
-_STAMP_ROW_CONTENT_INDEXES = (5, 6)
+# `_session_list_cache_source_stamp`) the rebuild-rate floor compares before it
+# holds an entry: the state.db and state.db-WAL stat pair, the content
+# fingerprint, and the all-profiles stamp.
+#
+# The stat pair is NOT an optimisation detail here. `_sqlite_content_fingerprint`
+# is `MAX(rowid)` of `sessions`/`messages`, i.e. an APPEND POSITION: it does not
+# move for an UPDATE (a title or message_count written by `state_sync`/the
+# Desktop App) and it does not move for the DELETE of any row that is not the
+# current maximum. Every commit of any kind, however, touches the database file
+# (rollback journal) or appends frames to the WAL, so the stat pair is the only
+# cheap witness that "a commit happened at all". Comparing the fingerprint alone
+# is what let a committed rename/delete stay hidden for the whole floor: master
+# was always saved by this same stat movement, and the floor suppressed it.
+# (#8694)
+_STAMP_HOLD_EVIDENCE_INDEXES = (0, 1, 5, 6)
 
 
-def _session_list_cache_stamp_row_content(stamp, all_profiles: bool = False):
-    """Return the row-bearing part of a source stamp, or ``None`` when unknown.
+def _session_list_cache_stamp_hold_evidence(stamp, all_profiles: bool = False):
+    """Return the evidence a floor hold may rely on, or ``None`` when unknown.
 
-    The rebuild-rate floor may only hold an entry whose ROW CONTENT is provably
-    unchanged: a settled message landing in state.db — the official Desktop App
-    continuing a WebUI-origin session, a CLI turn — has to be visible on the very
-    next request. That is the reconciliation contract pinned by
+    The rebuild-rate floor may only hold an entry whose committed ROW CONTENT is
+    provably unchanged: a settled message landing in state.db — the official
+    Desktop App continuing a WebUI-origin session, a CLI turn — and equally a
+    rename or a delete has to be visible on the very next request. That is the
+    reconciliation contract pinned by
     ``tests/test_webui_state_db_reconciliation.py``, not an optional freshness
     window. ``None`` (the streaming freeze marker's shorter tuple, a stubbed
     stamp, or an UNREADABLE fingerprint) is unknown, and unknown never holds.
 
-    "Unreadable" is the important case: ``_sqlite_content_fingerprint`` degrades
-    to ``None`` (total failure) or the ``_CONTENT_FINGERPRINT_UNREADABLE``
+    "Unreadable" is the first degeneracy: ``_sqlite_content_fingerprint``
+    degrades to ``None`` (total failure) or the ``_CONTENT_FINGERPRINT_UNREADABLE``
     sentinel (per-table lock/timeout) instead of blocking the hot path. Two such
     stamps compare EQUAL, so without this check an unknown state.db would hold
     for the whole floor and suppress the file-stat fallback that used to force
-    reconciliation. (#8694)
+    reconciliation.
+
+    "Append-only" is the second: an unchanged ``MAX(rowid)`` is not an unchanged
+    table (see ``_STAMP_HOLD_EVIDENCE_INDEXES``), so the stat pair is part of the
+    evidence and any commit inside the floor revalidates instead of holding.
+    Only movement a state.db commit cannot produce — the session index and the
+    gateway metadata being rewritten — is coalesced, which is what the floor is
+    for. (#8694)
     """
     if not isinstance(stamp, tuple) or len(stamp) != 8:
         return None
     if not _session_list_cache_stamp_fingerprints_readable(stamp, all_profiles):
         return None
-    return tuple(stamp[index] for index in _STAMP_ROW_CONTENT_INDEXES)
+    return tuple(stamp[index] for index in _STAMP_HOLD_EVIDENCE_INDEXES)
 
 
 def _session_list_cache_stamp_fingerprints_readable(stamp, all_profiles: bool) -> bool:
@@ -485,14 +503,16 @@ def _session_list_cache_probe(
         if stamp != current_stamp:
             # Rebuild-rate floor: while a writer keeps touching state.db/index the
             # stamp differs on almost every poll. Inside the floor, serve what we
-            # have instead of paying another full rebuild — but only when the ROW
-            # CONTENT is provably unchanged. A committed message (Desktop app,
-            # CLI turn) breaks the reconciliation contract if it waits for the
-            # floor, so row-content movement always rebuilds now.
-            row_content = _session_list_cache_stamp_row_content(stamp, bool(key[1]))
+            # have instead of paying another full rebuild — but only when the
+            # committed row content AND the stat pair are provably unchanged. A
+            # committed message, rename or delete (Desktop app, CLI turn) breaks
+            # the reconciliation contract if it waits for the floor, so any
+            # movement a state.db commit can produce always rebuilds now.
+            hold_evidence = _session_list_cache_stamp_hold_evidence(stamp, bool(key[1]))
             if (
-                row_content is not None
-                and row_content == _session_list_cache_stamp_row_content(current_stamp, bool(key[1]))
+                hold_evidence is not None
+                and hold_evidence
+                == _session_list_cache_stamp_hold_evidence(current_stamp, bool(key[1]))
                 and (now - ts) < _SESSIONS_CACHE_MIN_REFRESH_SECONDS
             ):
                 _SESSIONS_CACHE.move_to_end(key)
@@ -541,10 +561,27 @@ def _session_list_cache_set(
     payload: dict,
     *,
     expected_invalidation_stamp: tuple[int, int] | None = None,
+    source_stamp=None,
 ) -> bool:
+    """Store a built payload under the source stamp it was certified against.
+
+    ``source_stamp`` is the stamp the CALLER read *before* it invoked the
+    builder. Storing the stamp read here instead — after the builder returned —
+    certifies the payload with evidence the builder never saw: a commit that
+    lands between the builder's row read and this insertion is folded into the
+    stored stamp, so the pair "old payload, new stamp" is then served as FRESH
+    for a full TTL, and the reconciliation contract is violated even after the
+    source moves again. Callers that build pass the pre-build stamp; callers
+    that already hold a consistent snapshot (tests, direct seed) may omit it, in
+    which case the current stamp is used. (#8694)
+    """
     if not isinstance(payload, dict):
         return False
-    stamp = _session_list_cache_resolved_source_stamp(key)
+    stamp = (
+        _session_list_cache_resolved_source_stamp(key)
+        if source_stamp is None
+        else source_stamp
+    )
     bounded = _session_list_cache_bounded_payload(payload)
     with _SESSIONS_CACHE_LOCK:
         # Projection intentionally happens outside the lock so large source rows
