@@ -162,33 +162,30 @@ def test_server_lists_webui_sessions_with_a_desktop_marker_as_webui(server_paylo
         assert sid not in _ids(server_payloads["cli"])
 
 
-_SIDEBAR = r"""
-const src = require('fs').readFileSync(process.argv[1], 'utf8');
-const payloads = JSON.parse(require('fs').readFileSync(0, 'utf8'));
-// Extract a top-level function declaration, skipping braces inside strings, template literals and comments.
-function extractFunc(name) {
+_EXTRACT_FUNC = r"""
+// Extract a top-level function declaration from `src`: the shortest slice ending in '}' that the JS parser accepts
+// as a whole function. The parser, not a hand scanner, decides where strings, template literals (with nested
+// interpolation), regex literals and comments end, so a brace inside any of them cannot cut the function short.
+function extractFunc(src, name) {
+  const vm = require('vm');
   const start = src.search(new RegExp('^function\\s+' + name + '\\s*\\(', 'm'));
   if (start < 0) throw new Error(name + ' not found');
-  let i = src.indexOf('{', start), depth = 0, quote = null;
-  for (; i < src.length; i++) {
-    const c = src[i];
-    if (quote) {
-      if (c === '\\') i++;
-      else if (c === quote) quote = null;
-    } else if (c === '/' && src[i + 1] === '/') {
-      i = src.indexOf('\n', i);
-    } else if (c === '/' && src[i + 1] === '*') {
-      i = src.indexOf('*/', i) + 1;
-    } else if (c === "'" || c === '"' || c === '`') {
-      quote = c;
-    } else if (c === '{') {
-      depth++;
-    } else if (c === '}' && --depth === 0) {
-      return src.slice(start, i + 1);
+  for (let i = src.indexOf('}', start); i !== -1; i = src.indexOf('}', i + 1)) {
+    const body = src.slice(start, i + 1);
+    try {
+      new vm.Script('(' + body + '\n)');
+      return body;
+    } catch (e) {
+      if (!(e instanceof SyntaxError)) throw e;
     }
   }
   throw new Error('unbalanced ' + name);
 }
+"""
+
+_SIDEBAR = _EXTRACT_FUNC + r"""
+const src = require('fs').readFileSync(process.argv[1], 'utf8');
+const payloads = JSON.parse(require('fs').readFileSync(0, 'utf8'));
 // Load the real partition/render entry points plus every top-level helper they reach, so the harness follows
 // the sidebar code as it changes instead of pinning a list of helper names.
 const topLevel = new Set([...src.matchAll(/^function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map(m => m[1]));
@@ -198,7 +195,7 @@ const queue = ['_partitionSidebarSessionRows', '_renderSidebarRowsFromRawSession
 while (queue.length) {
   const name = queue.pop();
   if (loaded.has(name) || stubbed.has(name)) continue;
-  const body = extractFunc(name);
+  const body = extractFunc(src, name);
   eval(body.replace('function ' + name, 'global.' + name + ' = function'));
   loaded.add(name);
   for (const m of body.matchAll(/[A-Za-z_$][\w$]*/g)) if (topLevel.has(m[0]) && !loaded.has(m[0])) queue.push(m[0]);
@@ -249,6 +246,38 @@ def test_sidebar_renders_every_server_row_in_its_own_group(server_payloads):
         assert rendered["webui"][sid]["parent"] is None
 
 
+_TRICKY_JS = r"""
+function tricky(a) {
+  const re = /\}/;  // a } in a line comment
+  /* and } in a block comment */
+  const s = '}' + "{" + `${ {k: '}'}.k }` + `${`${'}'}`}`;
+  return re.test(s) ? {done: true, s} : {};
+}
+function after() { return {}; }
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_function_extractor_ends_where_the_parser_does(tmp_path):
+    # The harness loads sidebar helpers by name; a brace inside a regex, string, template or comment must not end a
+    # function early (a hand-written brace scanner did on the regex and the nested template).
+    source = tmp_path / "tricky.js"
+    source.write_text(_TRICKY_JS, encoding="utf-8")
+    script = _EXTRACT_FUNC + r"""
+const src = require('fs').readFileSync(process.argv[1], 'utf8');
+const tricky = extractFunc(src, 'tricky');
+const after = extractFunc(src, 'after');
+const run = eval('(' + tricky + ')')(1);
+console.log(JSON.stringify({tricky, after, run}));
+"""
+    proc = subprocess.run([NODE, "-e", script, str(source)], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    got = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert got["tricky"] == _TRICKY_JS[_TRICKY_JS.index("function tricky"):_TRICKY_JS.index("\nfunction after")]
+    assert got["after"] == "function after() { return {}; }"
+    assert got["run"] == {"done": True, "s": "}{}}"}
+
+
 # The copy defers to its own state.db row only. Run the real builder with crafted rows for the two guards.
 
 
@@ -269,7 +298,7 @@ def _copy_row(sid: str, *, profile: str, message_count: int) -> dict:
     }
 
 
-def _state_row(sid: str, *, profile: str) -> dict:
+def _state_row(sid: str, *, profile: str, user_turns: int = 2) -> dict:
     return {
         "session_id": sid,
         "profile": profile,
@@ -281,7 +310,7 @@ def _state_row(sid: str, *, profile: str) -> dict:
         "title": "Imported legacy Desktop history",
         "message_count": 2,
         "actual_message_count": 2,
-        "actual_user_message_count": 2,
+        "actual_user_message_count": user_turns,
         "pinned": False,
         "updated_at": 1,
     }
@@ -342,3 +371,10 @@ def test_empty_copy_leaves_the_state_row_in_place(monkeypatch):
     rows = _build(monkeypatch, [_copy_row("empty", profile="default", message_count=0)],
                   [_state_row("empty", profile="default")])
     assert [(row["session_id"], row["pinned"]) for row in rows] == [("empty", False)]
+
+
+def test_copy_never_revives_a_hidden_state_row(monkeypatch):
+    # A Desktop connection record with known roles and no user turn is hidden in state.db; its copy stays hidden too.
+    rows = _build(monkeypatch, [_copy_row("stub", profile="default", message_count=2)],
+                  [_state_row("stub", profile="default", user_turns=0)])
+    assert rows == []
