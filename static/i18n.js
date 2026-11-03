@@ -10267,7 +10267,7 @@ const LOCALES = {
       kanban_board_description: 'Description (optional)',
       kanban_board_icon: 'Icon (emoji, optional)',
       kanban_board_color: 'Color (optional)',
-      kanban_board_default_workdir: 'Standardpfad des Arbeitsbereichs',
+      kanban_board_default_workdir: 'Standard-Arbeitsbereichspfad',
       kanban_board_default_workdir_placeholder: 'Pfad des Arbeitsbereichs (optional)',
       kanban_board_name_required: 'Name is required',
       kanban_board_slug_required: 'Slug is required',

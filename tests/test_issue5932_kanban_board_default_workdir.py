@@ -182,7 +182,7 @@ def _locale_for_snippet(snippet):
 def test_new_board_keys_are_localized_in_non_english_sample_locales():
     samples = {
         "es": "Ruta de workspace predeterminada",
-        "de": "Standard-Workspace-Pfad",
+        "de": "Standard-Arbeitsbereichspfad",
         "pt": "Caminho padrão do workspace",
         "ko": "기본 워크스페이스 경로",
     }
