@@ -10112,10 +10112,22 @@ function _sidebarProjectResolver(rowsById){
 
 function _sidebarRowsById(rows){
   const byId=new Map();
+  // #8245: the All-profiles view can hold two profiles' rows with the same
+  // session id (a cloned profile or a copied state.db). The bare-id map keeps
+  // the first one; this side index keeps each profile's own row under
+  // profile + NUL + id so lineage lookups can stay inside the row's profile.
+  // It is a property, not map entries, so forEach/size consumers are unchanged.
+  const byProfileId=new Map();
   for(const list of rows){
     if(!Array.isArray(list)) continue;
-    for(const s of list) if(s&&s.session_id&&!byId.has(s.session_id)) byId.set(s.session_id,s);
+    for(const s of list){
+      if(!s||!s.session_id) continue;
+      if(!byId.has(s.session_id)) byId.set(s.session_id,s);
+      const scoped=String(s.profile||s.profile_name||'').trim()+'\u0000'+s.session_id;
+      if(!byProfileId.has(scoped)) byProfileId.set(scoped,s);
+    }
   }
+  byId.byProfileId=byProfileId;
   return byId;
 }
 
@@ -10152,7 +10164,24 @@ function _sidebarSameProfileForLineage(a,b){
 }
 function _sidebarDisplayBucketIsCli(s, rowsById, memo){
   if(!s) return false;
-  if(memo&&s.session_id&&memo.has(s.session_id)) return memo.get(s.session_id);
+  // #8245 release gate (r1103): the server derives the bucket from the full
+  // scoped payload of the row's own profile, before source filtering and
+  // archive pagination, and publishes it as sidebar_is_cli_session. Trust it:
+  // the browser cannot re-derive it when the parent sits on a later archive
+  // page, and the CLI and WebUI fetches then disagree about the child.
+  const serverBucket=(r)=>(r&&typeof r.sidebar_is_cli_session==='boolean')?r.sidebar_is_cli_session:null;
+  const ownBucket=(r)=>{ const b=serverBucket(r); return b===null?_isCliSession(r):b; };
+  if(serverBucket(s)!==null) return serverBucket(s);
+  // Lineage lookups and memo entries are keyed by profile + id: session ids
+  // are only unique within one profile home (#8245 release gate r1103).
+  const profileKey=(r,id)=>String((r&&(r.profile||r.profile_name))||'').trim()+'\u0000'+String(id||'');
+  const lookup=(owner,id)=>{
+    const scoped=rowsById&&rowsById.byProfileId;
+    const hit=scoped?scoped.get(profileKey(owner,id)):undefined;
+    return hit||(rowsById?rowsById.get(id):undefined);
+  };
+  const memoKey=(r)=>profileKey(r,r&&r.session_id);
+  if(memo&&s.session_id&&memo.has(memoKey(s))) return memo.get(memoKey(s));
   let result=_isCliSession(s);
   if(_isDelegatedSubagentChild(s)){
     const seen=new Set();
@@ -10164,7 +10193,7 @@ function _sidebarDisplayBucketIsCli(s, rowsById, memo){
       const parentId=String(cur.parent_session_id||'').trim();
       if(!parentId||seen.has(parentId)) break;
       seen.add(parentId);
-      const parent=rowsById.get(parentId);
+      const parent=lookup(cur,parentId);
       // #8245 re-gate (2026-10-19): the All-profiles view puts several
       // profiles' rows in one map, so a bare id lookup can resolve a parent
       // that belongs to a DIFFERENT profile and inherit its bucket. A lineage
@@ -10178,27 +10207,32 @@ function _sidebarDisplayBucketIsCli(s, rowsById, memo){
       // different answers. Resolve (and profile-check) the parent row first,
       // then take the memoized verdict for it.
       if(!parent||!_sidebarSameProfileForLineage(cur,parent)) break;
-      if(memo&&parentId&&memo.has(parentId)){
-        result=memo.get(parentId);
+      if(serverBucket(parent)!==null){
+        result=serverBucket(parent);
+        resolved=true;
+        break;
+      }
+      if(memo&&parentId&&memo.has(memoKey(parent))){
+        result=memo.get(memoKey(parent));
         resolved=true;
         break;
       }
       cur=parent;
     }
     if(!resolved&&cur!==s){
-      result=_isCliSession(cur);
+      result=ownBucket(cur);
       resolved=true;
     } else if(!resolved){
       // Rotation/compression fallback: the direct parent row may be gone, but the
       // lineage root/tip still derives the child's bucket.
       for(const key of ['_parent_lineage_root_id','_parent_lineage_tip_id']){
         const lineageId=String(s[key]||'').trim();
-        if(lineageId&&lineageId!==s.session_id&&rowsById.has(lineageId)){
-          const lineageRow=rowsById.get(lineageId);
+        const lineageRow=lineageId&&lineageId!==s.session_id?lookup(s,lineageId):undefined;
+        if(lineageRow){
           // Same profile guard as the parent walk: a lineage id from another
           // profile's home must not derive this row's bucket.
           if(!_sidebarSameProfileForLineage(s,lineageRow)) continue;
-          result=_isCliSession(lineageRow);
+          result=ownBucket(lineageRow);
           resolved=true;
           break;
         }
@@ -10206,10 +10240,10 @@ function _sidebarDisplayBucketIsCli(s, rowsById, memo){
     }
     // Every delegated row on the resolved path shares the ancestor's bucket.
     if(memo){
-      for(const r of path) if(r&&r.session_id&&!memo.has(r.session_id)) memo.set(r.session_id,result);
+      for(const r of path) if(r&&r.session_id&&!memo.has(memoKey(r))) memo.set(memoKey(r),result);
     }
   }
-  if(memo&&s.session_id&&!memo.has(s.session_id)) memo.set(s.session_id,result);
+  if(memo&&s.session_id&&!memo.has(memoKey(s))) memo.set(memoKey(s),result);
   return result;
 }
 
@@ -10935,9 +10969,9 @@ function renderSessionListFromCache(){
     // it is in the server total but not in this count, so `remaining` never
     // reaches zero and the CLI tab keeps offering "Load more archived" after
     // everything is loaded (master does not).
-    const _archivedBucketRowsById=new Map(
-      sidebarRows.filter(s=>s&&s.session_id).map(s=>[String(s.session_id),s])
-    );
+    // #8245 release gate (r1103): the same profile-aware map the partition uses;
+    // rows that carry the server's sidebar_is_cli_session use it directly.
+    const _archivedBucketRowsById=_sidebarRowsById([sidebarRows]);
     const _archivedDisplayBucketMemo=new Map();
     const _archivedInBucket=(s)=>{
       if(!s||!s.archived) return false;

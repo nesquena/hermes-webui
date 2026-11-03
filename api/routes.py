@@ -3340,14 +3340,46 @@ def _build_session_list_cache_payload(
     # counted as WebUI conversations that never render. This only decides the
     # sidebar bucket/badge; raw source, read_only, and ownership flags are
     # untouched (is_cli_session_row itself is NOT changed).
-    _sidebar_scoped_rows_by_id = {
-        str(s.get("session_id")): s
-        for s in [*archived_scoped, *visible_scoped]
-        if isinstance(s, dict) and s.get("session_id")
-    }
+    #
+    # The lookup map is built PER PROFILE, like the CLI-hidden map above: with
+    # All-profiles on, two profiles can hold the same session ids (a cloned
+    # profile or a copied state.db), and one flat map let beta's child resolve
+    # alpha's same-id parent and leave both tabs (#8245 release gate r1103).
+    _sidebar_scoped_rows_by_profile: dict[str, dict[str, dict]] = {}
+    for _row in [*archived_scoped, *visible_scoped]:
+        if not (isinstance(_row, dict) and _row.get("session_id")):
+            continue
+        _sidebar_scoped_rows_by_profile.setdefault(
+            _sidebar_profile_group_key(_row.get("profile")), {}
+        )[str(_row.get("session_id"))] = _row
+    # One verdict per row object for this request. It is also published on the
+    # response copies as ``sidebar_is_cli_session`` (below): the verdict is
+    # derived from the full scoped payload BEFORE source filtering and archive
+    # pagination, which the browser cannot reproduce when a parent sits on a
+    # later archive page (#8245 release gate r1103). Shared row dicts are not
+    # mutated; the flag only lands on the copies.
+    _sidebar_bucket_verdicts: dict[int, bool] = {}
 
     def _sidebar_bucket_is_cli(row: dict) -> bool:
-        return _sidebar_display_is_cli(row, _sidebar_scoped_rows_by_id)
+        key = id(row)
+        verdict = _sidebar_bucket_verdicts.get(key)
+        if verdict is None:
+            verdict = _sidebar_display_is_cli(
+                row,
+                _sidebar_scoped_rows_by_profile.get(
+                    _sidebar_profile_group_key(row.get("profile")), {}
+                ),
+            )
+            _sidebar_bucket_verdicts[key] = verdict
+        return verdict
+
+    def _sidebar_row_with_bucket(row) -> dict:
+        if not isinstance(row, dict):
+            return {}
+        item = dict(row)
+        if row.get("session_id"):
+            item["sidebar_is_cli_session"] = bool(_sidebar_bucket_is_cli(row))
+        return item
 
     archived_webui_count = sum(
         1 for s in archived_scoped
@@ -3419,13 +3451,9 @@ def _build_session_list_cache_payload(
     _coerce_subagent_rows(scoped)
     _coerce_subagent_rows(sidebar_reference_sessions)
     return {
-        "sessions": [
-            dict(s) if isinstance(s, dict) else {}
-            for s in scoped
-        ],
+        "sessions": [_sidebar_row_with_bucket(s) for s in scoped],
         "sidebar_reference_sessions": [
-            dict(s) if isinstance(s, dict) else {}
-            for s in sidebar_reference_sessions
+            _sidebar_row_with_bucket(s) for s in sidebar_reference_sessions
         ],
         "cli_count": len(deduped_cli),
         "archived_count": archived_count,

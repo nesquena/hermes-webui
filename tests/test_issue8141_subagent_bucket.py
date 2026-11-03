@@ -829,3 +829,140 @@ console.log(JSON.stringify({ webui: part.webuiSessionsRaw.map(s=>s.session_id),
 """)
     assert out["webui"] == ["arch_c"], out
     assert out["cli"] == [], out
+
+
+# ---------------------------------------------------------------------------
+# #8245 release gate (r1103): same session ids in two profiles, and archive
+# paging that leaves a delegated child's parent on a later page.
+# ---------------------------------------------------------------------------
+
+
+def _same_id_profile_rows(tmp_path):
+    """Two isolated Agent state.db homes holding the SAME ids: alpha's parent
+    ``shared_p`` is an older CLI session, beta's is a newer WebUI session, and
+    each has a delegated child ``shared_c``. Read through the production
+    projection and tagged with the home they came from, as the loader does."""
+    from api.agent_sessions import read_importable_agent_session_rows
+
+    alpha_db = tmp_path / "alpha" / "state.db"
+    beta_db = tmp_path / "beta" / "state.db"
+    _profile_lineage_db(
+        alpha_db,
+        ("shared_p", "Alpha Parent", "cli", None, 100.0),
+        ("shared_c", "Subagent Session", "subagent", "shared_p", 101.0),
+    )
+    _profile_lineage_db(
+        beta_db,
+        ("shared_p", "Beta Parent", "webui", None, 200.0),
+        ("shared_c", "Subagent Session", "subagent", "shared_p", 201.0),
+    )
+    rows = []
+    for profile, db in (("alpha", alpha_db), ("beta", beta_db)):
+        for r in read_importable_agent_session_rows(db, limit=200, exclude_sources=None):
+            rows.append({**r, "session_id": r["id"], "profile": profile})
+    return rows
+
+
+def test_same_ids_in_two_profiles_keep_each_child_with_its_own_parent(monkeypatch, tmp_path):
+    """All-profiles on, CLI shown: beta's child must stay in the WebUI payload
+    under beta's WebUI parent. A bare-id map resolved alpha's same-id CLI
+    parent, moved beta's child to the CLI payload, and the browser then
+    dropped it there — hidden from both tabs. Master lists it."""
+    routes = _routes()
+    rows = _same_id_profile_rows(tmp_path)
+    tabs = {}
+    for source in ("webui", "cli"):
+        payload = _payload(
+            monkeypatch, routes, rows,
+            active_profile="alpha", all_profiles=True, show_cli_sessions=True,
+            sidebar_source=source,
+        )
+        tabs[source] = {
+            (r.get("profile"), r["session_id"]): r.get("sidebar_is_cli_session")
+            for r in payload["sessions"]
+        }
+    assert tabs["webui"].get(("beta", "shared_c")) is False, tabs
+    assert ("beta", "shared_c") not in tabs["cli"], tabs
+    assert tabs["cli"].get(("alpha", "shared_c")) is True, tabs
+    assert ("alpha", "shared_c") not in tabs["webui"], tabs
+    assert tabs["webui"].get(("beta", "shared_p")) is False, tabs
+    assert tabs["cli"].get(("alpha", "shared_p")) is True, tabs
+
+
+def test_archive_page_without_the_parent_keeps_the_child_in_its_tab(monkeypatch):
+    """The server derives the bucket from the full scoped payload before
+    archive pagination and publishes it as ``sidebar_is_cli_session``. With
+    ``archived_limit=1`` the CLI page holds the archived delegated child but
+    not its archived CLI parent; the browser used to re-derive the bucket
+    without the parent, fall back to WebUI and drop the child from the CLI
+    tab while the WebUI fetch excluded it too."""
+    routes = _routes()
+    rows = [
+        _cli_parent_row("arch_parent", archived=True, last_message_at=100, updated_at=100),
+        _subagent_child_row(
+            "arch_child", "arch_parent", archived=True, last_message_at=200, updated_at=200,
+        ),
+    ]
+    payload = _payload(
+        monkeypatch, routes, rows,
+        include_archived=True, sidebar_source="cli", archived_limit=1,
+    )
+    page = {r["session_id"]: r for r in payload["sessions"]}
+    assert set(page) == {"arch_child"}, page
+    assert payload["archived_cli_count"] == 2, payload
+    item = routes._sidebar_session_response_item(page["arch_child"])
+    assert item.get("sidebar_is_cli_session") is True, item
+
+    out = _run("""
+global._showArchived = true;
+global._activeProject = NO_PROJECT_FILTER;
+global._sessionSourceFilter = 'cli';
+const rows = %s;
+const part = _partitionSidebarSessionRows(rows, null);
+console.log(JSON.stringify({ cli: part.cliSessionsRaw.map(s=>s.session_id),
+  webui: part.webuiSessionsRaw.map(s=>s.session_id) }));
+""" % json.dumps([item]))
+    assert out == {"cli": ["arch_child"], "webui": []}, out
+
+
+def test_client_memo_is_scoped_by_profile_for_same_ids():
+    """Codex's console reproduction: two rows with the same id in two
+    profiles must not share a memoised verdict."""
+    out = _run("""
+const p = {session_id:'p', profile:'alpha', session_source:'cli', is_cli_session:true};
+const w = Object.assign({}, p, {profile:'beta', session_source:'webui', is_cli_session:false});
+const memo = new Map(), rows = new Map([['p', p]]);
+console.log(JSON.stringify([p, w].map(s => _sidebarDisplayBucketIsCli(s, rows, memo))));
+""")
+    assert out == [True, False], out
+
+
+def test_client_fallback_resolves_same_id_parents_within_each_profile():
+    """Without server flags (older cached rows), the browser's own derivation
+    must keep alpha's child with alpha's CLI parent and beta's child with
+    beta's WebUI parent, in either payload order."""
+    out = _run("""
+global._activeProject = NO_PROJECT_FILTER;
+const base = { message_count:3, last_message_at:100, updated_at:100 };
+const aP = Object.assign({}, base, { session_id:'shared_p', profile:'alpha', session_source:'cli',
+  raw_source:'cli', source_tag:'cli', is_cli_session:true });
+const bP = Object.assign({}, base, { session_id:'shared_p', profile:'beta', session_source:'webui',
+  raw_source:'webui', source_tag:'webui', is_cli_session:false });
+const child = { session_id:'shared_c', parent_session_id:'shared_p', relationship_type:'child_session',
+  raw_source:'subagent', source_tag:'subagent', session_source:'other', is_cli_session:false,
+  read_only:true, message_count:3, last_message_at:101, updated_at:101 };
+const aC = Object.assign({}, child, { profile:'alpha' });
+const bC = Object.assign({}, child, { profile:'beta' });
+function buckets(rows){
+  const part = _partitionSidebarSessionRows(rows, null);
+  const tag = s => s.profile + ':' + s.session_id;
+  return { cli: part.cliSessionsRaw.map(tag).sort(), webui: part.webuiSessionsRaw.map(tag).sort() };
+}
+console.log(JSON.stringify({ a: buckets([aP, aC, bP, bC]), b: buckets([bC, bP, aC, aP]) }));
+""")
+    expected = {
+        "cli": ["alpha:shared_c", "alpha:shared_p"],
+        "webui": ["beta:shared_c", "beta:shared_p"],
+    }
+    assert out["a"] == expected, out
+    assert out["b"] == expected, out
