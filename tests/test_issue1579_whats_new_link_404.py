@@ -237,7 +237,7 @@ def test_reporter_url_shape_no_longer_produces_invalid_compare_url(tmp_path):
         base_sha = _short_sha(repo, 'HEAD~2')  # the merge-base
 
         # The compare URL the JS would build
-        cur, latest = result['current_sha'], result['latest_sha']
+        cur, latest = result['current_sha'], result['latest_sha']  # noqa: F841  pre-existing; only cur is asserted
         # In a real run repo_url is converted from origin's URL; in this test the
         # value will be a file:// path, but that's fine — what we care about is
         # the cur and latest shas.
