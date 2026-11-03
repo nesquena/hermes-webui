@@ -343,6 +343,12 @@ def test_lock_composer_for_clarify_rejects_persistence_without_unhandled_and_ret
         }}
 
         function showToast() {{}}
+        // master's lock path records the disabled reason through this helper.
+        function _composerControlSetDisabledReason(el, reason, active) {{
+          const reasons = el._composerDisabledReasons || (el._composerDisabledReasons = new Set());
+          if (active) reasons.add(reason); else reasons.delete(reason);
+          el.disabled = reasons.size > 0;
+        }}
 
         %(lock_fn)s
 

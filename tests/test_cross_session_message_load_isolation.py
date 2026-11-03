@@ -169,6 +169,14 @@ COMPOSER_DRAFT_HELPERS_SRC = "\n".join(
         "_restoreComposerDraft",
         "_switchProfileForSessionLoad",
         "_clearComposerDraft",
+        "_composerPendingFilesOwnerKey",
+        "_composerPendingFileIsLive",
+        "_clearComposerDraftSaveTimer",
+        "_queueComposerDraftWrite",
+        "_syncComposerOwnerStateFromDraft",
+        "_rememberComposerPendingFiles",
+        "_forgetComposerPendingFiles",
+        "_restoreComposerPendingFiles",
     )
 )
 
@@ -443,6 +451,10 @@ const _composerDraftRestoreSuppressedUntilBySid = new Map();
 const _composerDraftLocalFallbackBySid = new Map();
 const _composerDraftLatestIntentSequenceBySid = new Map();
 const _composerDraftPostPromisesBySid = new Map();
+const _composerDraftWriteBySid = new Map();
+const _composerPendingFilesByOwner = new Map();
+const _draftSaveTimerByOwner = new Map();
+const _draftSavePendingBySid = new Map();
 let _composerDraftIntentSequence = 0;
 __COMPOSER_DRAFT_HELPERS_SRC__
 __INFLIGHT_HAS_VISIBLE_STATE_SRC__
@@ -1269,6 +1281,11 @@ def test_new_chat_pane_takeover_midflight_does_not_write_stale_rows(tmp_path):
         )
         .replace(
             "__MERGE_PENDING_SESSION_MESSAGE_SRC__", MERGE_PENDING_SESSION_MESSAGE_SRC
+        )
+        .replace("__CLAIM_PANE_NAVIGATION_SRC__", CLAIM_PANE_NAVIGATION_SRC)
+        .replace(
+            "__PANE_NAVIGATION_CLAIM_IS_CURRENT_SRC__",
+            PANE_NAVIGATION_CLAIM_IS_CURRENT_SRC,
         )
         .replace("__COMPOSER_DRAFT_HELPERS_SRC__", COMPOSER_DRAFT_HELPERS_SRC)
         .replace("__LOAD_SESSION_SRC__", LOAD_SESSION_SRC)
