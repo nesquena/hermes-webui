@@ -544,3 +544,84 @@ def test_preflight_recognises_every_shape_the_projector_accepts():
 
     # Clean mirrors must still early-out.
     assert _has_inline_image(json.dumps([{"type": "text", "text": "no image"}])) is False
+
+
+# --- Proactive adversarial coverage: distinctions the projection erases must
+# remain visible to the digest. Each pair shares id+timestamp and differs ONLY in
+# the named property, so master keeps 2 -> 2 -> 2 and any hole collapses to
+# 2 -> 1 -> 1. Verified to FAIL on b7ee91950 before the digest fixes. ---
+
+def _adv_anth(raw, mime):
+    return {"type": "image", "source": {"type": "base64", "media_type": mime,
+                                        "data": base64.b64encode(raw).decode("ascii")}}
+
+
+_ADVERSARIAL_PAIRS = {
+    "anthropic_media_type_differs": lambda u: [
+        _adv_anth(b"same-adv-bytes", "image/png"),
+        _adv_anth(b"same-adv-bytes", "image/jpeg"),
+    ],
+    "anthropic_media_type_missing_vs_set": lambda u: [
+        _adv_anth(b"same-adv-bytes", "image/png"),
+        {"type": "image", "source": {"type": "base64", "data": base64.b64encode(b"same-adv-bytes").decode("ascii")}},
+    ],
+    "neighbouring_text_differs": lambda u: [
+        [{"type": "text", "text": "AAA"}, _openai_part(u)],
+        [{"type": "text", "text": "BBB"}, _openai_part(u)],
+    ],
+    "extra_part_key": lambda u: [
+        _openai_part(u),
+        {**_openai_part(u), "cache_control": {"type": "ephemeral"}},
+    ],
+    "subset_vs_superset_images": lambda u: [
+        [_openai_part(u)],
+        [_openai_part(u), _openai_part(_data_url(b"second-distinct-payload"))],
+    ],
+    "bare_string_url_vs_nested": lambda u: [
+        [{"type": "image_url", "image_url": u}],
+        [_openai_part(u)],
+    ],
+    "literal_marker_text_vs_real_image": lambda u: [
+        [{"type": "text", "text": "[image attachment]"}],
+        [_openai_part(u)],
+    ],
+}
+
+
+@pytest.mark.parametrize("label", sorted(_ADVERSARIAL_PAIRS))
+def test_erased_distinctions_stay_distinct_across_cold_cycles(session_dir, label):
+    url = _data_url(b"shared-adversarial-payload")
+    identity = {"role": "user", "id": f"adv-{label}", "timestamp": 90.5}
+    first, second = _ADVERSARIAL_PAIRS[label](url)
+    rows = [{**identity, "content": first}, {**identity, "content": second}]
+
+    counts = _cycle_session(session_dir, f"adv-{label}", rows)
+
+    assert counts == [2, 2, 2], f"{label} collapsed: {counts}"
+
+
+def test_mirror_whitespace_difference_survives_cold_cycles(session_dir):
+    """Mirrors differing only by surrounding whitespace are still distinct rows."""
+    url = _data_url(b"shared-adversarial-payload")
+    base = json.dumps([_openai_part(url)])
+    identity = {"role": "user", "id": "adv-ws", "timestamp": 91.5}
+    rows = [
+        {**identity, "content": "plain", "api_content": base},
+        {**identity, "content": "plain", "api_content": "  " + base + "  "},
+    ]
+
+    assert _cycle_session(session_dir, "adv-ws", rows) == [2, 2, 2]
+
+
+def test_bracket_leading_non_json_mirror_is_left_untouched(session_dir):
+    """Real agent rows carry bracket-leading PLAIN TEXT, not JSON.
+
+    All 1061 api_content values sampled on this host are JSON arrays, but the
+    detector must not mis-parse a value that merely starts with '['.
+    """
+    from api.session_image_persistence_override import _has_inline_image, _project_api_content
+    import hashlib
+
+    raw = "[Workspace::v1: /home/ubuntu/Hermes]\nplain text, not JSON"
+    assert _has_inline_image(raw) is False
+    assert _project_api_content(raw, hashlib.sha256()) is None
