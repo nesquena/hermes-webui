@@ -83,6 +83,8 @@
 
 ### Fixed
 
+- **Imported Desktop sessions keep their pin, and Desktop-tagged WebUI sessions show in the sidebar again.** Since exp-v0.52.618 an imported legacy Desktop history (one whose message roles are all empty) showed as unpinned after you pinned it, and a WebUI session carrying a Desktop source tag appeared in neither the WebUI nor the CLI group. An imported copy that still has messages now stays visible whenever its own state.db row is, and the browser gives a WebUI marker the same precedence as the server when grouping rows. Desktop sessions stay in the CLI group. (#8768, fixes findings 2 and 3 of #8762)
+
 - **The clarify card and inline message edit follow your Enter-to-send setting.** The clarify input sent on every Enter and inline edit sent on any Enter without Shift, so both ignored the Shift+Enter and Ctrl+Enter send modes, the newline default on touch-only devices, and the Enter that confirms an IME composition (Chinese, Japanese or Korean input). Both now use the composer's send-key decision, so an IME Enter never sends. In the newline modes and on touch-only devices, plain Enter in the clarify card no longer submits; use its Send button. Thanks @solarmaster961. (#8629)
 
 - **Integration runs started with `--source tool` no longer push your conversations out of the sidebar.** Hermes Agent tags third-party integration sessions `tool` and keeps them out of its own session lists; WebUI's 20-row interactive sidebar window still counted them, so a script running one integration session per batch could hide real conversations. Tool sessions are now kept out of that window like oneshot runs, and stay reachable by id, under their project, and with the `tool` source filter. (#8731, thanks @grzezlo)
