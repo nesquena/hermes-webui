@@ -83,6 +83,8 @@
 
 ### Fixed
 
+- **The custom-provider probe-budget tests no longer fail under load.** Three end-to-end tests that run the deadline arithmetic on a fake clock still waited for each endpoint probe in real seconds, so a host busy enough to start the probe thread late ended the chain early. They now run the probe inline and are decided by the clock alone; a new test reproduces the late-start case, and the tests that check in-flight probes keep real threads. Tests only. (#8795, #8789)
+
 - **The updater tests pass without a git checkout and in any order.** The stash-recovery tests ran git against the repository they sat in, so they failed in an export without `.git`; they now build their own temporary repository. Tests that unloaded and re-imported `api.updates` restored `sys.modules` but left the `api` package pointing at the re-imported copy, so a later test's patch and the route it called could reach two different module objects; a shared helper now restores both. (#8788, #8784)
 
 - **A symlink planted after startup can no longer change what a public share embeds (security).** Public shares inline images only from the session's workspace and the attachment inbox, but the inbox root was resolved by name on every share, so a symlink planted inside the workspace (the default layout puts the inbox under your home folder) could point it somewhere else. The inbox root is now fixed at server startup and read without following symlinks, so a symlink created later gives a placeholder instead of the file. A workspace or inbox that can't be resolved (a symlink loop) now shows placeholders instead of failing share creation with an error. If you deliberately re-point an inbox symlink, restart the server for shares to pick up the new location. (#8780, #8590)
