@@ -200,6 +200,158 @@ def test_refused_move_reports_the_move_error_not_the_classifier_token(tmp_path):
     assert info["placement_reason"] != "registry"
 
 
+# ── the .gitignore edit is undone only where it is attributable ─────────────
+#
+# The same rule as the lock state above, one step earlier in the call: a fact
+# that could not be established (or a change this code did not make) must never
+# authorise deleting or rewriting a file. The Agent appends ``.worktrees/`` to
+# the root the WebUI hands it; when that root is another session's checkout the
+# edit is put back — but only the edit it can attribute.
+
+
+def _session_checkout(tmp_path: Path, gitignore: str | None) -> tuple[Path, Path]:
+    """``(primary, session)``: a linked worktree whose ``.gitignore`` we control."""
+    primary = wt.init_repo(tmp_path / "primary")
+    session = wt.linked_worktree(primary, tmp_path / "session")
+    ignore = session / ".gitignore"
+    if gitignore is None:
+        ignore.unlink()
+    else:
+        wt.write(ignore, gitignore)
+    return primary, session
+
+
+def _producer_then(name: str, mutate):
+    """The stand-in Agent producer, followed by *mutate(root, info)*.
+
+    ``mutate`` stands for what else happens to the same checkout inside the
+    call window: another session's helper, the user's editor, a writer with
+    permissions this process does not have.
+    """
+    produce = wt.agent_producer(name=name)
+
+    def setup(root: str) -> dict:
+        info = produce(root)
+        mutate(Path(root), info)
+        return info
+
+    return setup
+
+
+def test_the_agents_own_gitignore_entry_is_undone(tmp_path):
+    """Control: an edit we can attribute is still undone — the moved tree must
+    not leave ``.worktrees/`` behind in the session's checkout."""
+    primary, session = _session_checkout(tmp_path, "node_modules/\n")
+
+    info = create_worktree_for_workspace(session, setup=wt.agent_producer())
+
+    assert info["placement"] == PLACEMENT_MAIN
+    assert Path(info["path"]).parent == primary.resolve() / ".worktrees"
+    assert (session / ".gitignore").read_text(encoding="utf-8") == "node_modules/\n"
+
+
+def test_the_gitignore_file_the_agent_created_is_removed(tmp_path):
+    """Control: the checkout had no ``.gitignore`` and the Agent's helper made
+    one holding only its entry — that file is ours to remove again."""
+    primary, session = _session_checkout(tmp_path, None)
+
+    info = create_worktree_for_workspace(session, setup=wt.agent_producer())
+
+    assert info["placement"] == PLACEMENT_MAIN
+    assert Path(info["path"]).parent == primary.resolve() / ".worktrees"
+    assert not (session / ".gitignore").exists()
+
+
+def test_a_gitignore_another_writer_created_is_not_deleted(tmp_path):
+    """A ``.gitignore`` that was absent before the call and carries a line we
+    did not write is not ours to delete — the old restore removed the whole
+    file because the snapshot could not tell "absent" from "not ours"."""
+    primary, session = _session_checkout(tmp_path, None)
+
+    def shared_file(root: Path, info: dict) -> None:
+        # The same window, a concurrent writer: it creates the file with its own
+        # entry and (because the Agent's entry is now present) never adds one.
+        wt.write(root / ".gitignore", "dist/\n.worktrees/\n")
+
+    info = create_worktree_for_workspace(
+        session, setup=_producer_then("hermes-shared", shared_file)
+    )
+
+    assert Path(info["path"]).parent == primary.resolve() / ".worktrees"
+    assert (session / ".gitignore").read_text(encoding="utf-8") == "dist/\n.worktrees/\n"
+
+
+def test_a_concurrent_gitignore_edit_is_not_clobbered(tmp_path):
+    """Rewriting the snapshot over the file silently discarded an entry another
+    writer added in the same window; only our own appended line is undone."""
+    primary, session = _session_checkout(tmp_path, "node_modules/\n")
+
+    def user_edit(root: Path, info: dict) -> None:
+        ignore = root / ".gitignore"
+        ignore.write_text(
+            ignore.read_text(encoding="utf-8") + "dist/\n", encoding="utf-8"
+        )
+
+    info = create_worktree_for_workspace(
+        session, setup=_producer_then("hermes-edited", user_edit)
+    )
+
+    assert Path(info["path"]).parent == primary.resolve() / ".worktrees"
+    assert (session / ".gitignore").read_text(encoding="utf-8") == (
+        "node_modules/\n.worktrees/\ndist/\n"
+    )
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0 or os.name == "nt",
+    reason="needs a non-root POSIX user: root reads straight through a 000 mode",
+)
+def test_an_unreadable_gitignore_is_not_deleted(tmp_path):
+    """An unreadable snapshot is not an absent file. Read permission is not
+    permission to unlink: the old code took ``None`` for "there was no file" and
+    deleted the ``.gitignore`` (and its unrelated ``dist/`` line) once it could
+    be read again."""
+    primary, session = _session_checkout(tmp_path, "dist/\n")
+    ignore = session / ".gitignore"
+    ignore.chmod(0o000)
+
+    def setup(root: str) -> dict:
+        # Not ``wt.agent_producer``: its own read of the 000-mode file raises.
+        # It stands for the same helper run by a writer that *can* read it.
+        root_path = Path(root)
+        target = root_path / ".worktrees" / "hermes-unreadable"
+        wt.git(
+            root_path,
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "hermes/unreadable",
+            str(target),
+            "HEAD",
+        )
+        writable = root_path / ".gitignore"
+        writable.chmod(0o644)
+        with open(writable, "a", encoding="utf-8") as handle:
+            handle.write(".worktrees/\n")
+        wt.git(root_path, "worktree", "lock", "--reason", wt.LOCK_REASON, str(target))
+        return {
+            "path": str(target),
+            "branch": "hermes/unreadable",
+            "repo_root": str(root_path),
+        }
+
+    try:
+        info = create_worktree_for_workspace(session, setup=setup)
+    finally:
+        if ignore.exists():
+            ignore.chmod(0o644)
+
+    assert Path(info["path"]).parent == primary.resolve() / ".worktrees"
+    assert ignore.exists(), "the .gitignore the WebUI could not read was deleted"
+    assert ignore.read_text(encoding="utf-8") == "dist/\n.worktrees/\n"
+
+
 # ── unknown lock state never authorises an unlock ───────────────────────────
 
 

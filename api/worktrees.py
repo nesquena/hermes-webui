@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
 from typing import Callable
@@ -389,34 +391,97 @@ def _setup_agent_worktree(repo_root: str) -> dict:
     return info
 
 
-def _gitignore_bytes(root: Path) -> bytes | None:
-    """Snapshot ``<root>/.gitignore`` exactly (``None`` when it does not exist)."""
+#: ``<root>/.gitignore`` as it was before the Agent ran: provably absent,
+#: provably present (with its bytes), or unreadable — three facts, not two.
+GITIGNORE_ABSENT = "absent"
+GITIGNORE_PRESENT = "present"
+GITIGNORE_UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class _GitignoreSnapshot:
+    """``<root>/.gitignore`` *before* the Agent's helper ran.
+
+    ``unknown`` is a first-class outcome on purpose: an unreadable snapshot is
+    not an absent file, and treating it as one authorises deleting a
+    ``.gitignore`` this code never created. Same rule as the lock state in
+    :mod:`api.worktree_placement` — a fact that could not be established never
+    authorises the action it guards.
+    """
+
+    state: str
+    content: bytes | None = None
+
+
+def _gitignore_snapshot(root: Path) -> _GitignoreSnapshot:
+    """Snapshot ``<root>/.gitignore`` without confusing "absent" with "unread"."""
+    path = root / ".gitignore"
     try:
-        return (root / ".gitignore").read_bytes()
+        os.lstat(path)
+    except FileNotFoundError:
+        return _GitignoreSnapshot(GITIGNORE_ABSENT)
     except OSError:
-        return None
+        return _GitignoreSnapshot(GITIGNORE_UNKNOWN)
+    try:
+        return _GitignoreSnapshot(GITIGNORE_PRESENT, path.read_bytes())
+    except FileNotFoundError:
+        # A dangling symlink: the path exists and has no content we could have
+        # produced, so neither "absent" nor a known prior state.
+        return _GitignoreSnapshot(GITIGNORE_UNKNOWN)
+    except OSError:
+        return _GitignoreSnapshot(GITIGNORE_UNKNOWN)
 
 
-def _restore_gitignore(root: Path, before: bytes | None) -> None:
+def _is_the_agents_entry(after: bytes, before: bytes | None) -> bool:
+    """True only when *after* is *before* plus the entry the Agent appends.
+
+    The installed helper writes ``.worktrees/\\n`` (prefixed by ``\\n`` when the
+    file did not end with one), so the only change attributable to it is a
+    suffix that strips to exactly that entry. Anything else — another writer's
+    line, a wholesale rewrite, a mangled join — is not ours to undo.
+    """
+    prior = before or b""
+    if not after.startswith(prior):
+        return False
+    return after[len(prior):].strip() in (
+        WORKTREES_DIRNAME.encode(),
+        f"{WORKTREES_DIRNAME}/".encode(),
+    )
+
+
+def _restore_gitignore(root: Path, before: _GitignoreSnapshot) -> None:
     """Undo the Agent's own ``.worktrees/`` edit where the helper ran.
 
     The Agent appends the entry to the root it was given. When the WebUI hands
     it a session's checkout instead of the repository root, that edit would land
-    in another session's tree, so the exact prior bytes are put back — and only
-    when the call actually changed them.
+    in another session's tree, so the prior state is put back — but only when
+    the file's change is exactly that entry. An unreadable snapshot, a
+    concurrent edit or a file another writer created is left alone: this
+    function can undo only what it can attribute, and deleting or rewriting
+    someone else's ``.gitignore`` is worse than a stray ignore line.
     """
+    if before.state == GITIGNORE_UNKNOWN:
+        logger.debug("leaving %s alone: its prior content could not be read", root / ".gitignore")
+        return
     path = root / ".gitignore"
     try:
-        after = path.read_bytes() if path.exists() else None
+        after = path.read_bytes()
     except OSError:
+        # Unreadable now as well, or gone (a dangling symlink reads as
+        # FileNotFoundError): either way there is nothing to put back.
         return
-    if after == before:
+    if not _is_the_agents_entry(after, before.content):
+        logger.debug(
+            "leaving %s alone: its change is not the Agent's %s entry",
+            path,
+            WORKTREES_DIRNAME,
+        )
         return
     try:
-        if before is None:
-            path.unlink(missing_ok=True)
+        if before.state == GITIGNORE_ABSENT:
+            path.unlink()
         else:
-            path.write_bytes(before)
+            path.write_bytes(before.content or b"")
     except OSError:
         logger.debug("could not restore %s", path, exc_info=True)
 
@@ -493,8 +558,9 @@ def create_worktree_for_workspace(
 
     # The Agent appends ``.worktrees/`` to the root it runs against. When that
     # root is a session's checkout, the edit is undone below so a session never
-    # dirties another session's tree.
-    gitignore_before = _gitignore_bytes(selected)
+    # dirties another session's tree. The snapshot keeps "absent" and
+    # "unreadable" apart: only the first one can authorise removing the file.
+    gitignore_before = _gitignore_snapshot(selected)
 
     info = producer(str(selected))
     path = info.get("path")

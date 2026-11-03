@@ -38,7 +38,8 @@ CREATION_PATH_FUNCTIONS = (
     "find_git_repo_root",
     "_setup_agent_worktree",
     "create_worktree_for_workspace",
-    "_gitignore_bytes",
+    "_gitignore_snapshot",
+    "_is_the_agents_entry",
     "_restore_gitignore",
     "_ensure_worktrees_ignored",
 )
