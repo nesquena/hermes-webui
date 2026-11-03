@@ -585,6 +585,33 @@ def _extract_current_base_url(cfg: dict) -> str:
     return ""
 
 
+def _canonical_equivalent_provider_key(
+    provider: str, providers_cfg: dict
+) -> str | None:
+    """The ``providers:`` key that canonically matches *provider*, if any.
+
+    Mirrors ``api.config._raw_provider_key_for_provider_id`` so onboarding's
+    stored-key detection and the catalog/endpoint lookup resolve ONE record:
+    the FIRST raw key in config order whose canonical form matches, which is
+    the same ``setdefault`` rule the catalog builders use. Config order alone
+    decides under a canonical+legacy collision, so the answer never depends on
+    which spelling was requested.
+
+    Returns ``None`` when no record matches — the caller then keeps its
+    existing exact-key result (an unconfigured provider stays unconfigured).
+    """
+    requested = str(provider or "").strip().lower()
+    if not requested:
+        return None
+    canonical = _canonicalise_provider_id(requested)
+    if not canonical:
+        return None
+    for raw_key in providers_cfg:
+        if _canonicalise_provider_id(raw_key) == canonical:
+            return raw_key
+    return None
+
+
 def _provider_api_key_present(
     provider: str, cfg: dict, env_values: dict[str, str]
 ) -> bool:
@@ -614,7 +641,26 @@ def _provider_api_key_present(
     # ``... or {}`` degrades that null to an empty mapping (salvage of #3967).
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
+        # #8664 P2-2 (review 2026-11-02): the selector is canonicalised before
+        # this runs, so a request that still spells the LEGACY slug arrives here
+        # as ``mistral`` while the stored record is ``providers.mistralai``. An
+        # exact-key lookup then reports "no key configured" and onboarding
+        # raises ``MISTRAL_API_KEY is required`` for a config that already holds
+        # a usable key. Resolve the record the same canonical-aware way the
+        # catalog and the endpoint lookup do, so stored-key detection and
+        # connection ownership agree on ONE record. A genuinely absent key must
+        # still be rejected, so this only widens WHICH records are inspected —
+        # it never treats a missing value as present.
         provider_cfg = providers_cfg.get(provider, {})
+        if not (
+            isinstance(provider_cfg, dict)
+            and str(provider_cfg.get("api_key") or "").strip()
+        ):
+            canonical_key = _canonical_equivalent_provider_key(provider, providers_cfg)
+            if canonical_key and canonical_key != provider:
+                sibling_cfg = providers_cfg.get(canonical_key)
+                if isinstance(sibling_cfg, dict):
+                    provider_cfg = sibling_cfg
         if (
             isinstance(provider_cfg, dict)
             and str(provider_cfg.get("api_key") or "").strip()
