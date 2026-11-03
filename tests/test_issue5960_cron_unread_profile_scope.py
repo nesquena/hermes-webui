@@ -48,8 +48,10 @@ def test_recent_handler_reuses_dispatcher_cron_context_without_nesting():
     handler_end = ROUTES_PY.index("\ndef ", handler_start + 1)
     handler = ROUTES_PY[handler_start:handler_end]
 
-    assert "with cron_profile_context():" in dispatch
+    # #7295: the dispatcher owns the (lock-free) per-thread cron store scope.
+    assert "with cron_store_scope():" in dispatch
     assert "cron_profile_context_for_home" not in handler
+    assert "cron_store_scope" not in handler
 
 
 def test_successful_profile_switch_resets_unread_cron_state():

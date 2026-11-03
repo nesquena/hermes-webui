@@ -1,6 +1,7 @@
 from pathlib import Path
 import re
 from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
+from tests.scripts_fallback_keys import scripts_fallback_keys
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -9,6 +10,7 @@ PROFILE_CONCEPT_FALLBACK_KEYS = {
     "composer_disabled_profile_switch",
     "profile_switch_dictation_pending",
     "workspace_artifact_source_session",
+    *scripts_fallback_keys('es'),
 }
 
 

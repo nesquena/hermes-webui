@@ -103,7 +103,6 @@ def _new_session_driver(
     return textwrap.dedent(
         f"""
         let captured=null;
-        var _newSessionInFlight=null;
         // #8356: newSession() now invalidates a superseded load at the pane
         // hand-off; mirror the module-level declarations from sessions.js so
         // the extracted source runs in this harness.

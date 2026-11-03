@@ -437,14 +437,25 @@ def _select_staged_agent_function() -> str:
     return match.group(0)
 
 
-def _run_selection(tmp_path: Path, src: str, stage: str, agent_dir_env: str | None) -> str:
-    env = {k: v for k, v in os.environ.items() if k != "HERMES_WEBUI_AGENT_DIR"}
+def _run_selection(tmp_path: Path, src: str, stage: str, agent_dir_env: str | None,
+                   extra_env: dict | None = None) -> str:
+    env = {k: v for k, v in os.environ.items() if k not in _DECISION_ENV}
+    # A HERMES_HOME of its own, so no fixture is a Hermes home's hermes-agent by accident.
+    env["HERMES_HOME"] = str(tmp_path / "unrelated-home")
     if agent_dir_env is not None:
         env["HERMES_WEBUI_AGENT_DIR"] = agent_dir_env
+    for key, value in (extra_env or {}).items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
+    lazy_in = env.get("HERMES_DISABLE_LAZY_INSTALLS", "<unset>")
     script = (
         "set -eu\n"
         + _select_staged_agent_function()
         + 'select_staged_agent_for_git_checkout "$1" "$2"\n'
+        # The selection never touches the Agent's lazy-install policy (#8594 gate).
+        + 'bash -c \'printf "LAZY=%s\\n" "${HERMES_DISABLE_LAZY_INSTALLS-<unset>}"\'\n'
         + 'bash -c \'printf "RESULT=%s\\n" "${HERMES_WEBUI_AGENT_DIR-<unset>}"\'\n'
     )
     result = subprocess.run(
@@ -452,7 +463,14 @@ def _run_selection(tmp_path: Path, src: str, stage: str, agent_dir_env: str | No
         env=env, capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, result.stderr
-    return result.stdout.rstrip("\n").splitlines()[-1].removeprefix("RESULT=")
+    lines = result.stdout.rstrip("\n").splitlines()
+    if "\n" not in lazy_in:
+        assert lines[-2] == "LAZY=" + lazy_in, lines
+    return lines[-1].removeprefix("RESULT=")
+
+
+_DECISION_ENV = ("HERMES_WEBUI_AGENT_DIR", "HERMES_DISABLE_LAZY_INSTALLS", "HERMES_INSTALL_ROOT",
+                 "HERMES_HOME", "HERMES_BASE_HOME", "HERMES_DATA_DIR_SUFFIX")
 
 
 @pytest.fixture
@@ -461,7 +479,10 @@ def staged_agent(tmp_path):
     src.mkdir(parents=True)
     (src / "run_agent.py").write_text("", encoding="utf-8")
     (src / "hermes_bootstrap.py").write_text("", encoding="utf-8")
+    (src / "pyproject.toml").write_text('[project]\nname = "hermes-agent"\n', encoding="utf-8")
     _add_pm_launch_files(src)
+    # Installed by the official installer or `hermes update`, which stamp it self-updating.
+    (src / "install-stamp.json").write_text('{"updateMechanism": "self"}', encoding="utf-8")
     stage = tmp_path / "app" / "hermes-agent-src"
     stage.mkdir(parents=True)
     (stage / "run_agent.py").write_text("", encoding="utf-8")
@@ -564,3 +585,311 @@ def test_cp_fallback_stage_drops_git_from_a_read_only_mount(tmp_path, staged_age
     assert (stage / "run_agent.py").is_file()
     assert not (stage / ".git").exists(), result.stdout + result.stderr
     assert _run_selection(tmp_path, str(src), str(stage), None) == str(stage)
+
+
+# --- #8581/#8593: the stage only when the mounted Agent's bootstrap would really relaunch ---
+# Agent v0.22.5 hermes_cli/venv_sync.py prepare_launch() returns without relaunching when
+# HERMES_DISABLE_LAZY_INSTALLS is 1/true/yes (lowercased, untrimmed), without pyproject.toml,
+# or unless read_install_stamp() returns exactly updateMechanism == "self". It reads the whole
+# stamp as utf-8-sig JSON (OSError, ValueError or a non-object reads as {}). With no stamp file,
+# step_adopt_blessed_checkout() adopts the checkout as "self" only when it resolves to
+# <home>/hermes-agent or /usr/local/lib/hermes-agent and is writable. On v0.52.544 every other
+# setup ran the mounted checkout and kept its .git (in-app Agent update); exp-v0.52.560..571
+# ran the stage for some of them (#8593).
+
+
+def test_disabled_lazy_installs_keep_the_mounted_checkout(tmp_path, staged_agent):
+    src, stage = staged_agent
+    (src / ".git").mkdir()
+    for value in ("1", "true", "TRUE", "yes", "Yes"):
+        assert _run_selection(tmp_path, str(src), str(stage), None,
+                              {"HERMES_DISABLE_LAZY_INSTALLS": value}) == "<unset>", value
+    # Anything prepare_launch() does not read as disabled still relaunches → stage.
+    for value in ("", "0", "false", "no", " 1", "1 ", "on", "1\n", "true\n"):
+        assert _run_selection(tmp_path, str(src), str(stage), None,
+                              {"HERMES_DISABLE_LAZY_INSTALLS": value}) == str(stage), repr(value)
+
+
+def test_a_checkout_without_pyproject_keeps_the_mount(tmp_path, staged_agent):
+    src, stage = staged_agent
+    (src / ".git").mkdir()
+    (src / "pyproject.toml").unlink()
+    assert _run_selection(tmp_path, str(src), str(stage), None) == "<unset>"
+
+
+def test_only_a_self_updating_stamp_selects_the_stage(tmp_path, staged_agent):
+    src, stage = staged_agent
+    (src / ".git").mkdir()
+    stamp = src / "install-stamp.json"
+    cases = {
+        '{"updateMechanism": "self"}': str(stage),
+        '\ufeff{"updateMechanism": "self", "source": "git"}': str(stage),     # BOM, as the Agent reads it
+        '{"updateMechanism": "external"}': "<unset>",
+        '{"updateMechanism": "app-installer"}': "<unset>",
+        '{"source": "git"}': "<unset>",
+        '{"updateMechanism": "self"': "<unset>",                              # malformed → {} → no relaunch
+        '["self"]': "<unset>",
+    }
+    for text, want in cases.items():
+        stamp.write_text(text, encoding="utf-8")
+        assert _run_selection(tmp_path, str(src), str(stage), None) == want, text
+    for text in ('{"updateMechanism": "self\\n"}', '{"updateMechanism": "Self"}', '{"updateMechanism": " self"}'):
+        stamp.write_text(text, encoding="utf-8")                              # compared exactly (#8593)
+        assert _run_selection(tmp_path, str(src), str(stage), None) == "<unset>", text
+    stamp.unlink()
+    stamp.mkdir()                                                             # a directory reads as {}
+    assert _run_selection(tmp_path, str(src), str(stage), None) == "<unset>"
+    stamp.rmdir()
+    # Stampless and writable: the Agent may adopt it after a later HERMES_HOME change
+    # (profile switch, then an os.execv restart without docker_init), wherever it is
+    # mounted, so the stage, as on exp-v0.52.571 (#8594 gate).
+    assert _run_selection(tmp_path, str(src), str(stage), None) == str(stage)
+
+
+def test_an_unreadable_stamp_without_python3_prefers_the_stage(tmp_path, staged_agent):
+    """Keeping a mount that does relaunch crash-loops (#8529); an unneeded stage only costs the
+    in-app Agent update. With no python3 to read the stamp, the selection keeps the #8529 fix."""
+    src, stage = staged_agent
+    (src / ".git").mkdir()
+    (src / "install-stamp.json").write_text('{"updateMechanism": "external"}', encoding="utf-8")
+    bindir = tmp_path / "bin-no-python"
+    bindir.mkdir()
+    import shutil
+    for tool in ("bash", "tr", "printf"):
+        found = shutil.which(tool)
+        if found:
+            (bindir / tool).symlink_to(found)
+    assert _run_selection(tmp_path, str(src), str(stage), None, {"PATH": str(bindir)}) == str(stage)
+
+
+def test_the_operator_override_still_wins_over_the_relaunch_checks(tmp_path, staged_agent):
+    src, stage = staged_agent
+    (src / ".git").mkdir()
+    assert _run_selection(tmp_path, str(src), str(stage), "/srv/agent",
+                          {"HERMES_DISABLE_LAZY_INSTALLS": "1"}) == "/srv/agent"
+
+
+def _tool_bin(tmp_path: Path, name: str, extra: dict | None = None) -> Path:
+    """A PATH dir with the real shell tools the selector uses plus optional stub scripts."""
+    bindir = tmp_path / name
+    bindir.mkdir()
+    for tool in ("bash", "tr", "printf", "wc", "timeout", "python3"):
+        found = shutil.which(tool)
+        if found and tool not in (extra or {}):
+            (bindir / tool).symlink_to(found)
+    for tool, body in (extra or {}).items():
+        stub = bindir / tool
+        stub.write_text("#!" + shutil.which("bash") + "\n" + body + "\n", encoding="utf-8")
+        stub.chmod(0o755)
+    return bindir
+
+
+def test_the_stamp_is_read_where_the_agent_reads_it(tmp_path, staged_agent):
+    """pm/paths.py install_root(): a non-empty HERMES_INSTALL_ROOT moves the executing tree's stamp."""
+    src, stage = staged_agent
+    (src / ".git").mkdir()
+    (src / "install-stamp.json").write_text('{"updateMechanism": "external"}', encoding="utf-8")
+    root = tmp_path / "install-root"
+    root.mkdir()
+    (root / "install-stamp.json").write_text('{"updateMechanism": "self"}', encoding="utf-8")
+    # The Agent relaunches (it reads root's "self"): the stage, never the external stamp beside the checkout.
+    assert _run_selection(tmp_path, str(src), str(stage), None, {"HERMES_INSTALL_ROOT": str(root)}) == str(stage)
+    (root / "install-stamp.json").write_text('{"updateMechanism": "external"}', encoding="utf-8")
+    (src / "install-stamp.json").write_text('{"updateMechanism": "self"}', encoding="utf-8")
+    assert _run_selection(tmp_path, str(src), str(stage), None, {"HERMES_INSTALL_ROOT": str(root)}) == "<unset>"
+    # An empty value is unset, as in the Agent (`if env`): the stamp beside the checkout decides.
+    assert _run_selection(tmp_path, str(src), str(stage), None, {"HERMES_INSTALL_ROOT": ""}) == str(stage)
+
+
+def test_a_fifo_or_oversized_stamp_prefers_the_stage_without_blocking(tmp_path, staged_agent):
+    src, stage = staged_agent
+    (src / ".git").mkdir()
+    stamp = src / "install-stamp.json"
+    stamp.unlink()
+    os.mkfifo(stamp)                                      # open() on it would block startup forever
+    assert _run_selection(tmp_path, str(src), str(stage), None) == str(stage)
+    stamp.unlink()
+    # The Agent reads the whole stamp, whatever its size (#8593): decide on what it says.
+    stamp.write_text('{"updateMechanism": "external", "pad": "' + "x" * 70000 + '"}', encoding="utf-8")
+    assert _run_selection(tmp_path, str(src), str(stage), None) == "<unset>"
+    stamp.write_text('{"updateMechanism": "self", "pad": "' + "x" * 70000 + '"}', encoding="utf-8")
+    assert _run_selection(tmp_path, str(src), str(stage), None) == str(stage)
+    # Beyond what the reader will load: undecidable, so the stage.
+    with open(stamp, "wb") as fh:
+        fh.truncate(16 * 1024 * 1024 + 1)
+    assert _run_selection(tmp_path, str(src), str(stage), None) == str(stage)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads mode-000 files")
+def test_an_unreadable_stamp_prefers_the_stage(tmp_path, staged_agent):
+    """Fail-closed: the Agent (the same user) would read an unreadable stamp as {} and not relaunch,
+    but the selector cannot prove what the Agent will see, so it prefers the stage. A kept mount that
+    does relaunch crash-loops (#8529); an unneeded stage only costs the in-app Agent update."""
+    src, stage = staged_agent
+    (src / ".git").mkdir()
+    stamp = src / "install-stamp.json"
+    stamp.write_text('{"updateMechanism": "self"}', encoding="utf-8")
+    stamp.chmod(0)
+    try:
+        assert _run_selection(tmp_path, str(src), str(stage), None) == str(stage)
+    finally:
+        stamp.chmod(0o644)
+
+
+def test_a_failing_or_hanging_stamp_reader_prefers_the_stage(tmp_path, staged_agent):
+    src, stage = staged_agent
+    (src / ".git").mkdir()
+    (src / "install-stamp.json").write_text('{"updateMechanism": "external"}', encoding="utf-8")
+    failing = _tool_bin(tmp_path, "bin-fail", {"python3": "exit 1"})
+    assert _run_selection(tmp_path, str(src), str(stage), None, {"PATH": str(failing)}) == str(stage)
+    if shutil.which("timeout"):
+        import time
+        hanging = _tool_bin(tmp_path, "bin-hang", {"python3": shutil.which("sleep") + " 30; echo external"})
+        t0 = time.monotonic()
+        assert _run_selection(tmp_path, str(src), str(stage), None, {"PATH": str(hanging)}) == str(stage)
+        assert time.monotonic() - t0 < 20
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads mode-000 files")
+def test_an_unreadable_stamp_is_quiet_and_explained(tmp_path, staged_agent):
+    """No shell redirection error in the boot log; one line says why the stage was chosen."""
+    src, stage = staged_agent
+    (src / ".git").mkdir()
+    stamp = src / "install-stamp.json"
+    stamp.write_text('{"updateMechanism": "external"}', encoding="utf-8")
+    stamp.chmod(0)
+    try:
+        env = {k: v for k, v in os.environ.items() if k not in _DECISION_ENV}
+        env["HERMES_HOME"] = str(tmp_path / "unrelated-home")
+        script = ("set -eu\n" + _select_staged_agent_function()
+                  + 'select_staged_agent_for_git_checkout "$1" "$2"\n')
+        proc = subprocess.run(["bash", "-c", script, "docker_init", str(src), str(stage)],
+                              env=env, capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 0, proc.stderr
+    finally:
+        stamp.chmod(0o644)
+    assert "Permission denied" not in proc.stderr, proc.stderr
+    assert "could not tell whether the Agent" in proc.stdout and "running the staged copy" in proc.stdout, proc.stdout
+
+
+# --- #8593 / #8594 gate: a stampless checkout's adoption depends on HERMES_HOME at relaunch time ---
+# WebUI rewrites HERMES_HOME after docker_init (init_profile_state(), profile switches) and
+# its in-app update restarts with os.execv without docker_init, so the selection decides only
+# on what no later HERMES_HOME can change: a writable stampless checkout always gets the stage.
+
+
+def test_a_writable_stampless_checkout_runs_the_stage_wherever_it_is_mounted(tmp_path, staged_agent):
+    src, stage = staged_agent
+    (src / ".git").mkdir()
+    (src / "install-stamp.json").unlink()
+    base = tmp_path / "base" / ".hermes"
+    (base / "profiles" / "coder").mkdir(parents=True)
+    places = [base / "hermes-agent", base / "profiles" / "coder" / "hermes-agent", tmp_path / "opt" / "hermes"]
+    for env in ({"HERMES_HOME": str(base)}, {"HERMES_HOME": str(base / "profiles" / "coder")},
+                {"HERMES_HOME": None, "HOME": str(tmp_path / "user")}, {"HERMES_BASE_HOME": str(base)}):
+        for place in places:
+            place.parent.mkdir(parents=True, exist_ok=True)
+            src.rename(place)
+            assert _run_selection(tmp_path, str(place), str(stage), None, env) == str(stage), (env, place)
+            src = place
+    # HERMES_INSTALL_ROOT with no stamp there: undecidable, so the stage too.
+    assert _run_selection(tmp_path, str(src), str(stage), None, {"HERMES_INSTALL_ROOT": str(tmp_path)}) == str(stage)
+    # A dangling stamp symlink is a missing stamp to the Agent (adoption replaces it).
+    (src / "install-stamp.json").symlink_to(tmp_path / "nowhere.json")
+    assert _run_selection(tmp_path, str(src), str(stage), None) == str(stage)
+
+
+def _execute_only_profiles(tmp_path, src):
+    """<base>/profiles is mode 0111: WebUI still enters the active profile, a listing cannot."""
+    base = tmp_path / "b" / ".hermes"
+    (base / "profiles" / "coder").mkdir(parents=True)
+    (base / "active_profile").write_text("coder", encoding="utf-8")
+    mount = base / "profiles" / "coder" / "hermes-agent"
+    src.rename(mount)
+    (base / "profiles").chmod(0o111)
+    return mount, {"HERMES_HOME": str(base)}, lambda: (base / "profiles").chmod(0o755)
+
+
+def _symlinked_profiles(tmp_path, src):
+    """<B>/profiles -> <C>/profiles: WebUI publishes the canonical <C>/profiles/coder, and a
+    later restart unwraps that to the base <C>, whose hermes-agent is the mount."""
+    b, c = tmp_path / "b" / ".hermes", tmp_path / "c" / ".hermes"
+    (c / "profiles" / "coder").mkdir(parents=True)
+    b.mkdir(parents=True)
+    (b / "profiles").symlink_to(c / "profiles")
+    (b / "active_profile").write_text("coder", encoding="utf-8")
+    mount = c / "hermes-agent"
+    src.rename(mount)
+    return mount, {"HERMES_HOME": str(b)}, lambda: None
+
+
+def _literal_variable_home(tmp_path, src):
+    """HERMES_HOME holds a literal $DATA: WebUI publishes it unexpanded, the restarted Agent
+    expands it, so its profile home is the expanded one, under which the mount sits."""
+    literal, expanded = tmp_path / "t" / "$DATA", tmp_path / "t" / "actual"
+    for home in (literal, expanded):
+        (home / "profiles" / "coder").mkdir(parents=True)
+        (home / "active_profile").write_text("coder", encoding="utf-8")
+    mount = expanded / "profiles" / "coder" / "hermes-agent"
+    src.rename(mount)
+    return mount, {"HERMES_HOME": str(literal), "DATA": "actual"}, lambda: None
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root traverses 0111 directories")
+@pytest.mark.parametrize("shape", [_execute_only_profiles, _symlinked_profiles, _literal_variable_home],
+                         ids=["execute-only-profiles", "symlinked-profiles", "literal-variable-home"])
+def test_homes_a_list_would_miss_still_get_the_stage(tmp_path, staged_agent, shape):
+    """#8594 gate shapes where a list of reachable homes kept the mount and the Agent later
+    adopted it after a profile switch plus an os.execv restart."""
+    src, stage = staged_agent
+    (src / ".git").mkdir()
+    (src / "install-stamp.json").unlink()
+    mount, env, cleanup = shape(tmp_path, src)
+    try:
+        assert _run_selection(tmp_path, str(mount), str(stage), None, env) == str(stage)
+    finally:
+        cleanup()
+
+
+def test_a_profile_env_cannot_move_the_install_root(tmp_path, monkeypatch):
+    """#8594 gate: the stamp the Agent reads must stay where docker_init read it, so a
+    profile .env cannot set HERMES_INSTALL_ROOT before an in-app update restart."""
+    import api.profiles as profiles
+    assert "HERMES_INSTALL_ROOT" in profiles._PROTECTED_ENV_KEYS
+    monkeypatch.delenv("HERMES_INSTALL_ROOT", raising=False)
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set(), raising=False)
+    home = tmp_path / "profiles" / "coder"
+    home.mkdir(parents=True)
+    (home / ".env").write_text(f"HERMES_INSTALL_ROOT={tmp_path / 'elsewhere'}\nSOME_PROFILE_KEY=1\n", encoding="utf-8")
+    profiles._reload_dotenv(home)
+    try:
+        assert "HERMES_INSTALL_ROOT" not in os.environ
+        assert os.environ.get("SOME_PROFILE_KEY") == "1"
+    finally:
+        profiles._reload_dotenv(tmp_path / "nowhere")
+        os.environ.pop("SOME_PROFILE_KEY", None)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root writes 0555 directories")
+def test_a_read_only_stampless_mount_at_a_hermes_home_keeps_the_mount(tmp_path, staged_agent):
+    """Adoption must write the stamp; a read-only checkout is never adopted (#8593)."""
+    src, stage = staged_agent
+    (src / ".git").mkdir()
+    (src / "install-stamp.json").unlink()
+    home = tmp_path / "hh"
+    blessed = home / "hermes-agent"
+    blessed.parent.mkdir(parents=True)
+    src.rename(blessed)
+    blessed.chmod(0o555)
+    try:
+        assert _run_selection(tmp_path, str(blessed), str(stage), None, {"HERMES_HOME": str(home)}) == "<unset>"
+    finally:
+        blessed.chmod(0o755)
+
+
+def test_the_selection_never_sets_the_lazy_install_policy():
+    """#8594 gate: HERMES_DISABLE_LAZY_INSTALLS also blocks PM-provisioned MCP launchers and
+    post-update drift repair, and the Agent's own image does not set it."""
+    function = _select_staged_agent_function()
+    assert "export HERMES_DISABLE_LAZY_INSTALLS" not in function
+    assert "export HERMES_DISABLE_LAZY_INSTALLS" not in _docker_init_source()

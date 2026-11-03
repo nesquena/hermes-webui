@@ -376,7 +376,12 @@ function _saveComposerDraft(sid, text, files) {
     ? _peekRestoredGoalContinuationDraft()
     : null;
   const timer = setTimeout(() => {
-    if(_draftSaveTimerByOwner.get(ownerKey)!==timer)return;
+    // Stale-timer guard: only a DIFFERENT registered timer (a newer save for
+    // this owner) may cancel us. An unregistered slot means this callback is
+    // firing synchronously from the harness's immediate setTimeout, before the
+    // set() below runs — that save is the current one and must go out.
+    const armedTimer=_draftSaveTimerByOwner.get(ownerKey);
+    if(armedTimer!==undefined&&armedTimer!==timer)return;
     _draftSaveTimerByOwner.delete(ownerKey);
     const pendingSave = _draftSavePendingBySid.get(sid);
     if (pendingSave && pendingSave.timer === timer) _draftSavePendingBySid.delete(sid);
@@ -581,12 +586,17 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 
 // Immediate save used before session switches.
 function _saveComposerDraftNow(sid, text, files, goalContinuationId, options) {
-  const opts = (options && typeof options === 'object') ? options : {};
+  // Callers that pass no options bag get upstream's contract: the returned
+  // promise rejects so a caller awaiting the flush can fail closed. Callers
+  // that pass an options bag opt into the softer default unless they set
+  // rejectOnError, which is what the fire-and-forget producer paths want.
+  const hasOptions = !!(options && typeof options === 'object');
+  const opts = hasOptions ? options : {};
+  const rejectOnError = hasOptions ? !!opts.rejectOnError : true;
   const ownerProfile=String(
     opts.ownerProfile||(S.session&&S.session.session_id===sid&&S.session.profile)
     ||S.activeProfile||'default'
   ).trim()||'default';
-  const rejectOnError=!!opts.rejectOnError;
   if (!sid) return Promise.resolve();
   _clearComposerDraftSaveTimer(sid,ownerProfile);
   _rememberComposerPendingFiles(sid, files, ownerProfile);
@@ -2887,7 +2897,7 @@ async function newSession(flash, options={}){
           sourceComposerText,
           sourceComposerFiles,
           '',
-          {rejectOnError:true,ownerProfile:previousProfile}
+          {ownerProfile:previousProfile}
         );
       }
     }catch(error){
@@ -3231,7 +3241,18 @@ async function _switchProfileForSessionLoad(profile){
   if(typeof _invalidateSessionListRenders==='function') _invalidateSessionListRenders();
   if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(true);
   if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);
+  let reasoningSwitchHeld=false;
+  // #7685 finding 4/5: the Scripts pane is profile-owned too. Route this
+  // alternate switch through the SAME invalidate/refresh helpers as the
+  // canonical switch so Alpha rows do not stay up under Beta and a pending
+  // Alpha reply (success or error) cannot overwrite Beta's pane.
+  if(typeof _invalidateScriptsForProfileSwitch==='function') _invalidateScriptsForProfileSwitch();
   try{
+    // Effort saves queued in the previous profile must go out under its cookie.
+    if(typeof _beginReasoningProfileSwitch==='function'){
+      reasoningSwitchHeld=true;
+      await _beginReasoningProfileSwitch();
+    }
     const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
     S.activeProfile=data.active||name;
     S.activeProfileIsDefault=!!data.is_default;
@@ -3252,6 +3273,17 @@ async function _switchProfileForSessionLoad(profile){
     if(typeof startGatewaySSE==='function') startGatewaySSE();
     if(typeof syncTopbar==='function') syncTopbar();
     if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
+    // #7685 finding 1 (MUST-FIX): invalidate AGAIN at accept, exactly like the
+    // canonical switch. The switch POST does not change S.activeProfile until
+    // it returns, so a list load started while the switch was PENDING captured
+    // the OLD owner key and passed its gate — it would repaint the previous
+    // profile's rows under the new profile. Bumping the generation here retires
+    // that in-flight reply.
+    if(typeof _invalidateScriptsForProfileSwitch==='function') _invalidateScriptsForProfileSwitch();
+    // #7685 finding 4/5: the switch is accepted for the new owner, so refresh
+    // the (cleared) Scripts pane for it. Silent-on-error, owner/generation
+    // gated like the canonical switch's refresh.
+    if(typeof _refreshScriptsAfterProfileSwitch==='function') _refreshScriptsAfterProfileSwitch();
     if(typeof renderSessionList==='function') await renderSessionList();
   }catch(switchErr){
     // The switch POST failed, so we're still on the previous profile and its
@@ -3264,7 +3296,13 @@ async function _switchProfileForSessionLoad(profile){
     if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
     _sessionListSkeletonActive=false;
     if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+    // #7685 finding 5: the switch was refused, so the old profile is still
+    // active. Restore the Scripts pane (cleared at switch start) for it
+    // instead of leaving it blank.
+    if(typeof _refreshScriptsAfterProfileSwitch==='function') _refreshScriptsAfterProfileSwitch();
     throw switchErr;
+  }finally{
+    if(reasoningSwitchHeld) _endReasoningProfileSwitch();
   }
 }
 
@@ -3853,7 +3891,8 @@ async function loadSession(sid){
     if(liveTailPrepared){
       S.messages=_dropCurrentTurnAssistantMessages(S.messages);
     }
-    S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);
+    S.messages=_mergeInflightTailMessages(S.messages,inflightMessages,
+      _inflightTurnOwnerStart(S.session,INFLIGHT[sid],activeStreamId));
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
     if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
       INFLIGHT[sid].messages=S.messages;
@@ -4275,6 +4314,10 @@ function _sourceKeyForSession(session) {
 
 function _isCliSession(session) {
   if (!session) return false;
+  // A WebUI marker wins over a CLI-family tag, as in the server's
+  // is_cli_session_row; else the row renders in neither group (#8762).
+  if ([session.session_source, session.source_tag, session.raw_source, session.source, session.source_label]
+    .some(v => String(v || '').trim().toLowerCase() === 'webui')) return false;
   // session_source is set by upstream normalization for CLI sessions as 'cli'
   if (session.session_source === 'cli') return true;
   // Legacy payloads often use raw/source tags to convey the source.
@@ -4285,7 +4328,7 @@ function _isCliSession(session) {
     || session.source_label
     || ''
   ).toLowerCase();
-  if (raw === 'cli' || raw === 'tui' || raw === 'acp') return true;
+  if (raw === 'cli' || raw === 'tui' || raw === 'acp' || raw === 'desktop') return true;
   // If messaging-like, don't classify as legacy CLI even when is_cli_session is true.
   if (_isMessagingSession(session)) return false;
   return session.is_cli_session === true;
@@ -5107,6 +5150,175 @@ function _hasCurrentTailUserDuplicate(messages,candidate){
   return !!(existing&&_sameTranscriptMessage(existing,candidate));
 }
 
+// ── Recovered current-turn prompt: turn ownership, canonical window ────────
+// A `msg_limit` first page is a TAIL window. It can start INSIDE the running
+// turn (the window then carries the turn's activity rows but not its `user`
+// row) or it can end at a PREVIOUS completed turn while the new prompt is still
+// unpersisted (deferred session saving). `_oldestIdx > 0` plus "no user row in
+// the window" cannot tell those apart, so placement follows turn/start
+// ownership instead of the shape of the window:
+//   * a `_live` row always belongs to the running turn;
+//   * a persisted row whose `_ts` is at/after the turn start
+//     (`pending_started_at`, the server's authoritative start of the turn)
+//     belongs to the running turn;
+//   * a persisted row older than that start belongs to an earlier turn.
+// The prompt goes in front of the FIRST current-turn row; when every loaded row
+// predates the turn start (the window is a previous turn's suffix) it goes
+// AFTER them, so earlier activity is never assigned to the new prompt.
+const _RECOVERED_PROMPT_TS_EPSILON=(typeof _PENDING_ACTIVE_TURN_TS_EPSILON==='number'&&_PENDING_ACTIVE_TURN_TS_EPSILON>0)
+  ?_PENDING_ACTIVE_TURN_TS_EPSILON:0.001;
+
+function _messageTimestampValue(msg){
+  if(!msg) return null;
+  const raw=msg._ts!==undefined&&msg._ts!==null?msg._ts:msg.timestamp;
+  const value=Number(raw);
+  return Number.isFinite(value)&&value>0?value:null;
+}
+
+function _messageTurnOwnership(msg,turnStart){
+  if(!msg||msg._displayOnlyRow) return 0;
+  if(msg._live) return 1;
+  const startedAt=Number(turnStart);
+  if(!Number.isFinite(startedAt)||startedAt<=0) return 0;
+  const ts=_messageTimestampValue(msg);
+  if(ts===null) return 0;
+  return ts>=startedAt-_RECOVERED_PROMPT_TS_EPSILON?1:-1;
+}
+
+function _isCompactionMarkerRow(msg){
+  return !!(msg&&typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg));
+}
+
+// Index of the first PERSISTED row owned by the running turn, judged by the
+// turn-start timestamp. Live rows are skipped (they carry no timestamp and are
+// appended after the window); compaction markers are synthetic user-role rows,
+// not submitted turns. Returns -1 when no persisted row proves ownership.
+function _currentTurnInsertIndex(messages,turnStart){
+  const list=Array.isArray(messages)?messages:[];
+  for(let i=0;i<list.length;i++){
+    const msg=list[i];
+    if(!msg||msg._displayOnlyRow||msg._live||_isCompactionMarkerRow(msg)) continue;
+    if(_messageTurnOwnership(msg,turnStart)>0) return i;
+  }
+  return -1;
+}
+
+// Target index for a recovered prompt inside a windowed transcript.
+//   * authoritative timestamp evidence: in front of the first current-turn row,
+//     or after every row when they ALL predate the turn start (the window is a
+//     previous turn's suffix — the new prompt must not claim that activity);
+//   * no timestamp evidence at all (static partial fixtures, legacy payloads):
+//     keep the historical windowed heuristic — a window with no user row is
+//     assumed to start inside the running turn, otherwise the prompt sits just
+//     before the live tail.
+function _recoveredPromptTargetIndex(messages,turnStart){
+  const list=Array.isArray(messages)?messages:[];
+  const startedAt=Number(turnStart);
+  if(Number.isFinite(startedAt)&&startedAt>0){
+    const ownedIdx=_currentTurnInsertIndex(list,startedAt);
+    if(ownedIdx>=0) return ownedIdx;
+    const sawTimestamped=list.some(m=>m&&!m._displayOnlyRow&&!m._live&&_messageTimestampValue(m)!==null);
+    if(sawTimestamped){
+      const liveIdx=list.findIndex(m=>m&&m._live);
+      return liveIdx>=0?liveIdx:list.length;
+    }
+  }
+  const liveIdx=list.findIndex(m=>m&&m._live);
+  const windowHasUser=list.some(m=>m&&String(m.role||'')==='user'&&!_isCompactionMarkerRow(m));
+  if(windowHasUser) return liveIdx>=0?liveIdx:list.length;
+  return 0;
+}
+
+// Mark a prompt recovered from OUTSIDE the loaded canonical window. The row
+// renders, but `_messageSessionIndexForRawIdx()` excludes it so it never shifts
+// the absolute index of the real window rows.
+function _markRecoveredPromptRow(row){
+  if(!row||typeof row!=='object') return row;
+  if(typeof _markDisplayOnlyRow==='function') return _markDisplayOnlyRow(row);
+  row._displayOnlyRow=true;
+  return row;
+}
+
+// A display-only prompt must disappear once the canonical row it mirrors is
+// actually loaded (older page / full transcript); otherwise it both duplicates
+// the bubble and offsets the window. Matching is by turn identity (server
+// token, `_active_turn_user`, or the turn-start timestamp) — never text alone,
+// which would hide a legitimate repeat prompt.
+function _recoveredPromptIdentityMatch(canonicalRow,recoveredRow){
+  if(!canonicalRow||!recoveredRow) return false;
+  if(canonicalRow._active_turn_user===true) return true;
+  const canonicalTs=_messageTimestampValue(canonicalRow);
+  const recoveredTs=_messageTimestampValue(recoveredRow);
+  if(canonicalTs!==null&&recoveredTs!==null&&Math.abs(canonicalTs-recoveredTs)<=_RECOVERED_PROMPT_TS_EPSILON){
+    return true;
+  }
+  const token=String(canonicalRow._active_turn_token||'');
+  if(token&&typeof _activeTurnTokenMatches==='function'&&typeof S!=='undefined'&&S&&S.session){
+    return _activeTurnTokenMatches(canonicalRow,S.session);
+  }
+  return false;
+}
+
+function _isRecoveredPromptTwin(candidate,recoveredRow){
+  if(!candidate||!recoveredRow) return false;
+  if(candidate===recoveredRow) return true;
+  return String(candidate.role||'')===String(recoveredRow.role||'')
+    && _sameTranscriptMessage(candidate,recoveredRow)
+    && _recoveredPromptIdentityMatch(candidate,recoveredRow);
+}
+
+// Is `row` the display-only copy recovered for THE turn starting at
+// `turnStart`? The owner stamp `_recoveredTurnStart` (set by the full-load
+// branch of _mergePendingSessionMessage) decides when present, so a moved
+// row whose own `_ts` trails the turn start still counts. Without a stamp,
+// only the row's timestamp at the turn start counts (a copy the producer
+// built for this turn). Text alone and the public `_active_turn_user` marker
+// never prove ownership: an earlier turn can carry either (#8696 gates).
+function _recoveredPromptCopyForTurn(row,pendingMsg,turnStart){
+  if(!row||!row._displayOnlyRow||String(row.role||'')!=='user') return false;
+  const start=Number(turnStart);
+  if(!Number.isFinite(start)||start<=0) return false;
+  if(row!==pendingMsg&&!_sameTranscriptMessage(row,pendingMsg)) return false;
+  const owner=Number(row._recoveredTurnStart);
+  if(row._recoveredTurnStart!==undefined&&row._recoveredTurnStart!==null&&Number.isFinite(owner)&&owner>0){
+    return Math.abs(owner-start)<=_RECOVERED_PROMPT_TS_EPSILON;
+  }
+  const ts=_messageTimestampValue(row);
+  return ts!==null&&Math.abs(ts-start)<=_RECOVERED_PROMPT_TS_EPSILON;
+}
+
+// Same prompt recovered twice (repeated merge on refresh/reconnect): reuse the
+// row already in the array instead of stacking a second copy above it.
+function _existingRecoveredPromptIndex(messages,pendingMsg){
+  const list=Array.isArray(messages)?messages:[];
+  const sameObject=list.indexOf(pendingMsg);
+  if(sameObject>=0) return sameObject;
+  for(let i=0;i<list.length;i++){
+    const m=list[i];
+    if(!m||!m._displayOnlyRow) continue;
+    if(_sameTranscriptMessage(m,pendingMsg)) return i;
+  }
+  return -1;
+}
+
+// Re-place carried display-only rows after a window rebuild (older page, tail
+// reload) and drop the ones whose canonical row just arrived.
+function _reconcileRecoveredPromptRows(messages,recoveredRows,turnStart){
+  if(!Array.isArray(messages)) return messages;
+  const rows=(Array.isArray(recoveredRows)?recoveredRows:[]).filter(Boolean);
+  if(!rows.length) return messages;
+  const kept=[];
+  for(const row of rows){
+    if(messages.includes(row)) continue;
+    if(messages.some(m=>m&&_isRecoveredPromptTwin(m,row))) continue;
+    kept.push(row);
+  }
+  if(!kept.length) return messages;
+  const target=_recoveredPromptTargetIndex(messages,turnStart);
+  messages.splice(target,0,...kept);
+  return messages;
+}
+
 // Keep pending-user recovery ordering identical across load, reconnect, and
 // explicit refresh paths. The pending prompt owns the live assistant tail and
 // must be projected before it, regardless of which recovery response arrived.
@@ -5117,6 +5329,103 @@ function _mergePendingSessionMessage(session,messages){
   const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(session,currentTurnMessages):null;
   if(!pendingMsg) return false;
   if(_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)) return false;
+  const windowed=typeof _oldestIdx==='number'&&_oldestIdx>0;
+  if(windowed){
+    // Tail-window transcript: the prompt's canonical position is outside the
+    // loaded window (or not persisted yet), so it is a display-only row placed
+    // by turn ownership. The window rows keep their absolute indices.
+    // `pendingMsg` here is always a FRESH row from getPendingSessionMessage
+    // (the adopt path returns null), and that helper stamps it with
+    // `session.pending_started_at || Date.now()/1000`. Trusting the fallback
+    // makes "now" the turn start, so every loaded row looks older than the
+    // turn and the recovered prompt is pushed past all of them — the reported
+    // "there is content above my first message" order. Only the server-issued
+    // pending_started_at proves turn ownership here; without it pass 0 so
+    // _recoveredPromptTargetIndex falls back to structure (a window carrying
+    // no `user` row means the prompt IS the running turn's first row).
+    const turnStart=Number(session&&session.pending_started_at)||0;
+    const existingIdx=typeof _existingRecoveredPromptIndex==='function'
+      ?_existingRecoveredPromptIndex(messages,pendingMsg)
+      :messages.indexOf(pendingMsg);
+    const withoutExisting=existingIdx>=0?messages.filter((_m,idx)=>idx!==existingIdx):messages;
+    const target=typeof _recoveredPromptTargetIndex==='function'
+      ?_recoveredPromptTargetIndex(withoutExisting,turnStart)
+      :(withoutExisting.some(m=>m&&String(m.role||'')==='user')?withoutExisting.length:0);
+    if(existingIdx>=0){
+      if(existingIdx===target) return false;
+      const [row]=messages.splice(existingIdx,1);
+      messages.splice(target,0,typeof _markRecoveredPromptRow==='function'?_markRecoveredPromptRow(row):row);
+      return true;
+    }
+    const marked=typeof _markRecoveredPromptRow==='function'?_markRecoveredPromptRow(pendingMsg):pendingMsg;
+    messages.splice(target,0,marked);
+    return true;
+  }
+  // A FULL (zero-offset) load is not "windowed", but its current-turn rows can
+  // already be persisted — a young session loaded with `_oldestIdx = 0` (small
+  // `msg_count`, no paging) reaches this merge with its assistant/tool rows in
+  // place and a `_live` tail. The fallback below then splices the prompt in
+  // front of the live row, i.e. BEHIND those persisted rows: the reported
+  // "there is content above my first message" order (live repro 2026-10-30:
+  // head = [assistant, tool, tool, tool, user(_pending), assistant]).
+  // `pending_started_at` is the server's authoritative turn start, so when it
+  // is present the same ownership rule as the windowed branch decides the
+  // position: in front of the first row at/after the turn start, and after
+  // every row when they all predate it (a new prompt never claims a previous
+  // turn's activity). Without a stamp the shape heuristics below still apply.
+  const ownershipStart=Number(session&&session.pending_started_at)||0;
+  if(ownershipStart>0&&typeof _currentTurnInsertIndex==='function'){
+    // A same-identity prompt row can already sit behind the live row (the
+    // malformed reconnect order #6419 repairs below). Judge ownership without
+    // it, then move that row (keeping its attachments and provenance) instead
+    // of inserting a second copy in front of it.
+    const misplacedIdx=liveAssistantIdx>=0?messages.findIndex((m,idx)=>
+      idx>liveAssistantIdx&&m&&m.role==='user'&&_sameTranscriptMessage(m,pendingMsg)
+    ):-1;
+    // A display-only copy an earlier pass already placed for THIS turn
+    // (repeated recovery: a failed message fetch re-merges over the same
+    // array) is reused instead of stacking another one. When the persisted
+    // turn row's text differs from pending_user_message, the tail-duplicate
+    // check above cannot see that copy, so without this every pass stacked
+    // another copy of the prompt, see #8696. Reuse is by the turn the copy was recovered FOR
+    // (`_recoveredTurnStart`, stamped below), never by text alone or a public
+    // `_active_turn_user` marker: an earlier turn's display-only row that
+    // repeats the text keeps its own turn, timestamp and attachments.
+    const existingIdx=misplacedIdx<0
+      ?messages.findIndex(m=>_recoveredPromptCopyForTurn(m,pendingMsg,ownershipStart))
+      :-1;
+    const skipIdx=misplacedIdx>=0?misplacedIdx:existingIdx;
+    const withoutSkipped=skipIdx>=0?messages.filter((_m,idx)=>idx!==skipIdx):messages;
+    const ownedIdx=_currentTurnInsertIndex(withoutSkipped,ownershipStart);
+    if(ownedIdx>=0){
+      if(misplacedIdx>=0){
+        const [misplacedUser]=messages.splice(misplacedIdx,1);
+        // Let the producer adopt the moved row (it fills in pending attachments
+        // and provenance the row lacks), then insert it display-only, as the
+        // windowed branch does: an unpersisted prompt placed in front of saved
+        // rows must not shift the saved-row indices edit/fork rely on.
+        if(typeof getPendingSessionMessage==='function') getPendingSessionMessage(session,[misplacedUser]);
+        // The moved row keeps its own `_ts` (it can trail the turn start); the
+        // owner stamp lets the next pass reuse it instead of adding a copy.
+        misplacedUser._recoveredTurnStart=ownershipStart;
+        messages.splice(ownedIdx,0,
+          typeof _markRecoveredPromptRow==='function'?_markRecoveredPromptRow(misplacedUser):misplacedUser);
+        return true;
+      }
+      if(existingIdx>=0){
+        const row=messages[existingIdx];
+        row._recoveredTurnStart=ownershipStart;
+        if(existingIdx===ownedIdx) return false;
+        messages.splice(existingIdx,1);
+        messages.splice(ownedIdx,0,typeof _markRecoveredPromptRow==='function'?_markRecoveredPromptRow(row):row);
+        return true;
+      }
+      pendingMsg._recoveredTurnStart=ownershipStart;
+      messages.splice(ownedIdx,0,
+        typeof _markRecoveredPromptRow==='function'?_markRecoveredPromptRow(pendingMsg):pendingMsg);
+      return true;
+    }
+  }
   if(liveAssistantIdx>=0){
     const misplacedIdx=messages.findIndex((m,idx)=>
       idx>liveAssistantIdx&&m&&m.role==='user'&&_sameTranscriptMessage(m,pendingMsg)
@@ -5410,9 +5719,33 @@ function _prepareRunningLiveTail(baseMessages,inflightMessages){
   return !!_messageComparableText(live);
 }
 
-function _mergeInflightTailMessages(baseMessages, inflightMessages){
+// The server's start time for the turn an INFLIGHT snapshot belongs to, or 0
+// when that is not proven. INFLIGHT can come from local storage with no server
+// live snapshot, so only an active stream that the snapshot itself names (or
+// a snapshot that names no stream) makes `pending_started_at` its turn.
+function _inflightTurnOwnerStart(session,inflight,activeStreamId){
+  const active=String(activeStreamId||'').trim();
+  if(!active||!session) return 0;
+  const own=String((inflight&&inflight.streamId)||'').trim();
+  if(own&&own!==active) return 0;
+  const start=Number(session.pending_started_at);
+  return Number.isFinite(start)&&start>0?start:0;
+}
+
+// `turnOwnerStart` (optional): the server start of the turn this INFLIGHT tail
+// belongs to (_inflightTurnOwnerStart). When known it places the recovered
+// prompt instead of the prompt's client-clock `_ts`, which can trail the
+// server start by latency or skew and so claim a previous turn's rows, and it
+// stamps the copy so the pending merge reuses it rather than adding a second
+// one (`_recoveredPromptCopyForTurn`).
+function _mergeInflightTailMessages(baseMessages, inflightMessages, turnOwnerStart){
   const base=Array.isArray(baseMessages)?baseMessages:[];
   const inflight=Array.isArray(inflightMessages)?inflightMessages:[];
+  const ownerStart=Number.isFinite(Number(turnOwnerStart))&&Number(turnOwnerStart)>0?Number(turnOwnerStart):0;
+  const placeRecoveredPrompt=(row,turnStart)=>{
+    if(ownerStart) row._recoveredTurnStart=ownerStart;
+    merged.splice(_recoveredPromptTargetIndex(merged,turnStart),0,_markRecoveredPromptRow(row));
+  };
   let firstLiveIdx=-1;
   for(let i=0;i<inflight.length;i++){
     if(inflight[i]&&inflight[i]._live){firstLiveIdx=i;break;}
@@ -5422,13 +5755,75 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages){
   if(firstLiveIdx>0&&inflight[firstLiveIdx-1]&&inflight[firstLiveIdx-1].role==='user') start=firstLiveIdx-1;
   const tail=inflight.slice(start).filter(m=>m&&m.role);
   const merged=[...base];
-  for(const msg of tail){
-    let candidate=msg;
+  const windowed=typeof _oldestIdx==='number'&&_oldestIdx>0;
+  // The live tail starts at the running turn's prompt; any earlier user row in
+  // the tail belongs to a completed turn and must never be re-placed.
+  let promptTailIdx=-1;
+  for(let i=0;i<tail.length;i++){
+    if(tail[i]&&String(tail[i].role||'')==='user') promptTailIdx=i;
+  }
+  for(let tailIdx=0;tailIdx<tail.length;tailIdx++){
+    const candidate=tail[tailIdx];
     if(!candidate) continue;
-    const duplicate=String(candidate.role||'')==='user'
+    const isUser=String(candidate.role||'')==='user';
+    if(isUser&&windowed&&tailIdx===promptTailIdx){
+      // A windowed first page (msg_limit paging) can start INSIDE the running
+      // turn: `base` then holds the turn's activity rows but not its `user`
+      // row. It can also end at a PREVIOUS turn while the new prompt is still
+      // unpersisted (deferred session saving). Turn ownership decides between
+      // the two: the prompt goes in front of the first current-turn row, or
+      // after the window when every loaded row is older than the turn start.
+      // The server's turn start wins over the prompt's client-clock `_ts`.
+      const turnStart=ownerStart||_messageTimestampValue(candidate)
+        ||Number(typeof S!=='undefined'&&S&&S.session&&S.session.pending_started_at)||0;
+      const existingIdx=_existingRecoveredPromptIndex(merged,candidate);
+      if(existingIdx>=0){
+        const [existing]=merged.splice(existingIdx,1);
+        placeRecoveredPrompt(existing,turnStart);
+        continue;
+      }
+      if(_hasCurrentTailUserDuplicate(merged,candidate)) continue;
+      placeRecoveredPrompt(candidate,turnStart);
+      continue;
+    }
+    // The prompt an earlier merge already recovered (the same row, or the copy
+    // stamped for this turn) is never appended again: a load that keeps the
+    // cached transcript re-merges this tail over it, and activity after the
+    // copy hides it from the tail-duplicate check below. Text alone is not
+    // enough; an earlier turn may have sent the same words.
+    if(isUser&&tailIdx===promptTailIdx&&(merged.includes(candidate)
+      ||(ownerStart&&merged.some(m=>_recoveredPromptCopyForTurn(m,candidate,ownerStart))))) continue;
+    const duplicate=isUser
       ? _hasCurrentTailUserDuplicate(merged,candidate)
       : merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,candidate));
-    if(!duplicate) merged.push(candidate);
+    if(!duplicate){
+      if(isUser){
+        // Session-switch recovery can hand this merge a base that already
+        // carries the running turn's ACTIVITY rows (assistant prose + tool
+        // rows) while the turn's `user` row is absent — it lives only in the
+        // INFLIGHT snapshot. `push` then parks the question BELOW its own
+        // reply, so the answer renders above the prompt until the turn
+        // settles and an idle reload restores the order. A transcript with no
+        // `user` row at all means this prompt IS the turn's first row, so
+        // place it by turn ownership. (Same structural invariant the windowed
+        // branch above enforces; only the paging condition differed.)
+        const hasAnyUser=merged.some(m=>m&&String(m.role||'')==='user');
+        if(!hasAnyUser){
+          const turnStart=ownerStart||_messageTimestampValue(candidate)
+            ||Number(typeof S!=='undefined'&&S&&S.session&&S.session.pending_started_at)||0;
+          // Marked display-only like the windowed branch: the prompt is NOT in
+          // the server's canonical transcript yet (deferred session saving),
+          // so counting it as a real array member would shift every canonical
+          // index after it — fork/edit/regenerate would send the wrong
+          // keep_count (saved row 0 would look like absolute 1). The marker
+          // keeps `_messageSessionIndexForRawIdx()` excluding the prompt, and
+          // a later canonical reload drops the display copy once it persists.
+          placeRecoveredPrompt(candidate,turnStart);
+          continue;
+        }
+      }
+      merged.push(candidate);
+    }
   }
   return merged;
 }
@@ -5530,7 +5925,12 @@ async function _loadOlderMessages() {
     if (_messagesGeneration !== startGeneration) return;
     let responseSession = data.session;
     let expandedMsgs = (responseSession.messages || []).filter(m => m && m.role);
-    const currentMsgs = (S.messages || []).filter(m => m && m.role);
+    // Recovered prompts are display-only: they are not part of the canonical
+    // window (their absolute index is outside it or not persisted yet), so the
+    // suffix-continuity check, the prepend fallback and the paging cursor all
+    // work on the canonical rows only. They are re-placed after the rebuild.
+    const carriedRecoveredRows = (S.messages || []).filter(m => m && m._displayOnlyRow);
+    const currentMsgs = (S.messages || []).filter(m => m && m.role && !m._displayOnlyRow);
     const currentLen = currentMsgs.length;
     // Suffix-continuity check: the cumulative tail is only safe to wholesale-
     // replace when our currently-displayed messages are still its suffix. If
@@ -5575,7 +5975,7 @@ async function _loadOlderMessages() {
         responseSession = fallback.session;
       }
       olderMsgs = (responseSession.messages || []).filter(m => m && m.role);
-      nextMessages = [...olderMsgs, ...S.messages];
+      nextMessages = [...olderMsgs, ...currentMsgs];
     }
     if (!olderMsgs.length) { _messagesTruncated = !!responseSession._messages_truncated; return; }
     // Replace with the larger tail window and preserve scroll as if older
@@ -5594,6 +5994,17 @@ async function _loadOlderMessages() {
     // does not briefly appear and disappear during older-message expansion.
     if (typeof window._carryForwardEphemeralTurnFields === 'function') {
       nextMessages = window._carryForwardEphemeralTurnFields(S.messages || [], nextMessages);
+    }
+    // Re-place recovered prompts that are still outside the window (or drop
+    // them when the page just loaded the canonical row they mirror). The
+    // canonical rows above keep their absolute indices either way. Guarded for
+    // partial test harnesses that extract this function alone.
+    if (carriedRecoveredRows.length && typeof _reconcileRecoveredPromptRows === 'function') {
+      _reconcileRecoveredPromptRows(
+        nextMessages,
+        carriedRecoveredRows,
+        Number(S.session && S.session.session_id === sid && S.session.pending_started_at) || 0
+      );
     }
     S.messages = nextMessages;
     _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);
@@ -6521,6 +6932,16 @@ function _showBatchProjectPicker(openerEl){
   _focusProjectPickerItem(picker);
 }
 
+// A finger's events all go to the element it first touched. A pen's go to
+// whatever is under it, unless the pointer is captured, as here, until it
+// lifts. `press` is the pen's pointerdown: done when its long press opens the
+// ⋮ menu and not from the press on, or a pen dragged off a button and lifted
+// elsewhere would click the button.
+function _keepPenOnPressedElement(press){
+  if(!press) return;
+  try{press.target.setPointerCapture(press.pointerId);}catch(_){}
+}
+
 function _focusSessionActionMenuRestoreTarget(target){
   if(!target||!target.isConnected||typeof target.focus!=='function') return false;
   try{target.focus({preventScroll:true});}catch(_){target.focus();}
@@ -6620,7 +7041,21 @@ function _sessionActionMenuShouldRepositionOnScroll(target){
 function _positionSessionActionMenu(anchorEl){
   if(!_sessionActionMenu || !anchorEl) return;
   let rect=anchorEl.getBoundingClientRect();
-  if(!rect.width||!rect.height){
+  // A menu opened from `contextmenu` (flagged at open) sits at the pointer the
+  // user invoked it at. The point is the project picker's recorded context
+  // point — the only pointer evidence in this file — and its rowOffsetX/Y keep
+  // the menu glued to the same spot in its row when a sidebar scroll or a
+  // resize repositions it here. The row lookup mirrors _projectPickerAnchorRect,
+  // which stays untouched and keeps owning the zero-sized-anchor fallback.
+  const contextPoint=anchorEl._projectPickerContextPoint;
+  const atPointer=!!(_sessionActionMenu._pointAnchoredFromPointer&&contextPoint&&Number.isFinite(contextPoint.clientX));
+  if(atPointer){
+    const row=anchorEl.closest&&anchorEl.closest('.session-child-session-fork,.session-item');
+    const rowRect=row&&row.isConnected!==false?row.getBoundingClientRect():null;
+    const pointX=rowRect&&Number.isFinite(contextPoint.rowOffsetX)?rowRect.left+contextPoint.rowOffsetX:contextPoint.clientX;
+    const pointY=rowRect&&Number.isFinite(contextPoint.rowOffsetY)?rowRect.top+contextPoint.rowOffsetY:contextPoint.clientY;
+    rect={top:pointY,bottom:pointY+1,left:pointX,right:pointX+1,width:1,height:1,pointAnchored:true};
+  } else if(!rect.width||!rect.height){
     // A zero-sized anchor — coarse-pointer CSS hides `.session-actions`, or a
     // repaint left a stale trigger — borrows the geometry the project picker
     // places from: the recorded context-menu point, else the visible row.
@@ -6749,7 +7184,13 @@ function _mountSessionActionMenu(menu, session, anchorEl){
   _positionSessionActionMenu(anchorEl);
   _playSessionActionMenuEntrance(menu);
   const menuItems=()=>Array.from(menu.querySelectorAll('.session-action-opt:not([disabled])'));
+  // True while a Tab pressed in the menu moves the focus.
+  let leavingByTab=false;
   menu.addEventListener('keydown',e=>{
+    if(e.key==='Tab'){
+      leavingByTab=true;
+      setTimeout(()=>{leavingByTab=false;},0);
+    }
     const items=menuItems();
     if(e.key==='Escape'){
       e.preventDefault();
@@ -6767,6 +7208,27 @@ function _mountSessionActionMenu(menu, session, anchorEl){
     if(nextIndex===null) return;
     e.preventDefault();
     try{items[nextIndex].focus({preventScroll:true});}catch(_){items[nextIndex].focus();}
+    // The focus does not scroll, and a menu taller than the screen scrolls
+    // inside itself: bring the row it landed on into the menu's box.
+    items[nextIndex].scrollIntoView({block:'nearest'});
+  });
+  // The finger that long-pressed the row lifts over something that takes no
+  // focus, and the browser's own mousedown for that touch drops focus on
+  // <body>: the arrow keys, Home and End then go to the page behind. While
+  // this menu is open, focus that lands nowhere comes back to the row it left.
+  // Tab from the last row lands nowhere too, on its way out of the page: that
+  // is the keyboard leaving the menu, and it is let go.
+  menu.addEventListener('focusout',e=>{
+    if(e.relatedTarget||leavingByTab) return;
+    const from=e.target;
+    setTimeout(()=>{
+      if(_sessionActionMenu!==menu||!menu.isConnected) return;
+      const active=document.activeElement;
+      if(active&&active!==document.body&&active!==document.documentElement) return;
+      const row=(from&&menu.contains(from)&&!from.disabled)?from:menuItems()[0];
+      if(!row) return;
+      try{row.focus({preventScroll:true});}catch(_){row.focus();}
+    },0);
   });
   const firstAction=menuItems()[0];
   if(firstAction){
@@ -7179,12 +7641,21 @@ function _openSessionActionMenu(session, anchorEl){
   if(!handoff) return;
   session=handoff.session;
   anchorEl=handoff.anchorEl;
+  // A context-menu point recorded moments ago is fresh evidence of where the
+  // user invoked this menu: _positionSessionActionMenu places it at the
+  // pointer and keeps it glued to that spot in the row. Consuming the flag
+  // anchors the next ⋮-open back on its button.
+  const contextPoint=anchorEl._projectPickerContextPoint;
+  const openAtContextPoint=!!(contextPoint&&contextPoint.freshMenuAnchor);
+  if(contextPoint) delete contextPoint.freshMenuAnchor;
   const isReadOnly = _isReadOnlySession(session);
-  if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl){
+  if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl && !openAtContextPoint){
     closeSessionActionMenu();
     return;
   }
   closeSessionActionMenu();
+  // A long press or a right click sends no click to close an open picker.
+  _dismissOpenProjectPicker();
   const isMessagingSession = _isMessagingSession(session);
   const isCliSession = _isCliSession(session);
   const isExternalSession = isMessagingSession || isCliSession;
@@ -7193,6 +7664,7 @@ function _openSessionActionMenu(session, anchorEl){
   menu.id='sessionActionMenu-'+(++_sessionActionMenuId);
   menu.setAttribute('role','menu');
   menu.setAttribute('aria-label', 'Conversation actions');
+  menu._pointAnchoredFromPointer=openAtContextPoint;
   _appendSessionCopyLinkAction(menu, session);
   if(isReadOnly){
     _appendSessionExportHtmlAction(menu, session);
@@ -7388,7 +7860,12 @@ document.addEventListener('keydown',e=>{
   if(e.key==='Escape' && _sessionActionMenu) closeSessionActionMenu({restoreFocus:true});
 });
 window.addEventListener('resize',()=>{
-  if(_sessionActionMenu && _sessionActionAnchor) _positionSessionActionMenu(_sessionActionAnchor);
+  if(!_sessionActionMenu || !_sessionActionAnchor) return;
+  _positionSessionActionMenu(_sessionActionAnchor);
+  // The new size may cap the menu shorter than its rows, and the cap leaves
+  // it scrolled to the top: bring the row that has focus back into its box.
+  const focused=document.activeElement;
+  if(focused && _sessionActionMenu.contains(focused)) focused.scrollIntoView({block:'nearest'});
 });
 
 // Generation counter to discard stale API responses (issue #1430).
@@ -8319,7 +8796,9 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
   // event, focus, or visibility recovery says another client/process mutated
   // the active transcript (#4205 follow-up shape). The idle-reconcile path uses
   // a non-'poll' reason, so it already sails through this gate untouched.
-  if((reason||'poll')==='poll' && !_isExternalSession(S.session)) return 'skipped';
+  // A running delegated subagent has no stream; poll it so its end is noticed.
+  const _pollRunningSubagent = S.session.active===true && _isDelegatedSubagentRow(S.session);
+  if((reason||'poll')==='poll' && !_isExternalSession(S.session) && !_pollRunningSubagent) return 'skipped';
   // Cooldown: don't force-reload immediately after streaming ends — the
   // "done" event already delivered the final messages. Reloading here would
   // clear S.toolCalls and lose Activity. The idle-reconcile path may bypass
@@ -8386,6 +8865,12 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
         if(data.session.updated_at) S.session.updated_at = data.session.updated_at;
       }
       if(typeof renderSessionList==='function') void renderSessionList();
+    }
+    // A subagent can finish without a new message; apply the lifecycle flip.
+    if(typeof data.session.active==='boolean' && S.session && S.session.session_id===sid
+       && data.session.active!==S.session.active && _isDelegatedSubagentRow(S.session)){
+      S.session.active = data.session.active;
+      if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
     }
     return 'unchanged';
   }catch(e){
@@ -9636,7 +10121,7 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
   for(const candidate of [...(rawSessions||[]),...(referenceSessions||[])]){
     if(candidate&&candidate.session_id&&!attachQueueById.has(candidate.session_id)) attachQueueById.set(candidate.session_id,candidate);
   }
-  // Raw sources is_cli_session_row never files as CLI; 'desktop' etc. are ambiguous.
+  // Raw sources is_cli_session_row never files as CLI; any other raw source is ambiguous.
   const nonCliParentSources=['webui','cron','webhook','kanban','tool','api','api_server'];
   const subagentHostHiddenByScope=(leaf)=>{
     const seen=new Set();
@@ -10215,10 +10700,22 @@ function _sidebarProjectResolver(rowsById){
 
 function _sidebarRowsById(rows){
   const byId=new Map();
+  // #8245: the All-profiles view can hold two profiles' rows with the same
+  // session id (a cloned profile or a copied state.db). The bare-id map keeps
+  // the first one; this side index keeps each profile's own row under
+  // profile + NUL + id so lineage lookups can stay inside the row's profile.
+  // It is a property, not map entries, so forEach/size consumers are unchanged.
+  const byProfileId=new Map();
   for(const list of rows){
     if(!Array.isArray(list)) continue;
-    for(const s of list) if(s&&s.session_id&&!byId.has(s.session_id)) byId.set(s.session_id,s);
+    for(const s of list){
+      if(!s||!s.session_id) continue;
+      if(!byId.has(s.session_id)) byId.set(s.session_id,s);
+      const scoped=String(s.profile||s.profile_name||'').trim()+'\u0000'+s.session_id;
+      if(!byProfileId.has(scoped)) byProfileId.set(scoped,s);
+    }
   }
+  byId.byProfileId=byProfileId;
   return byId;
 }
 
@@ -10227,10 +10724,134 @@ function _sidebarHasUnprojectedRows(rows, projectIdFor){
   return rows.some(s=>!projectIdFor(s));
 }
 
+// #8141: display-only sidebar-bucket derivation for parent-owned delegated
+// children. A delegated subagent row (raw source 'subagent' linked as a
+// child_session to a resolved parent in the same payload) travels with its
+// parent's bucket so CLI-owned children attach under their CLI parent instead
+// of landing in the WebUI bucket where they inflated the badge but never
+// rendered. Raw source / read_only / ownership flags are untouched — the
+// server derives the same bucket (routes._sidebar_display_is_cli) so the
+// source filter, source counters, and this partition always agree.
+function _isDelegatedSubagentChild(s){
+  if(!s) return false;
+  if(s.relationship_type!=='child_session') return false;
+  const src=String(s.raw_source||s.source_tag||s.session_source||s.source||'').trim().toLowerCase();
+  return src==='subagent';
+}
+// A lineage edge (parent_session_id / lineage root / lineage tip) is only
+// meaningful inside one profile: session ids are unique per profile home, and
+// the All-profiles view merges several homes into one lookup map. Treat a row
+// whose profile differs as absent rather than following the edge — inheriting
+// another profile's bucket misclassifies the row (#8245 re-gate, 2026-10-19).
+function _sidebarSameProfileForLineage(a,b){
+  if(!a||!b) return false;
+  const pa=String(a.profile||a.profile_name||'').trim();
+  const pb=String(b.profile||b.profile_name||'').trim();
+  if(!pa||!pb) return true;   // a row without profile info carries no cross-profile risk
+  return pa===pb;
+}
+function _sidebarDisplayBucketIsCli(s, rowsById, memo){
+  if(!s) return false;
+  // #8245 release gate (r1103): the server derives the bucket from the full
+  // scoped payload of the row's own profile, before source filtering and
+  // archive pagination, and publishes it as sidebar_is_cli_session. Trust it:
+  // the browser cannot re-derive it when the parent sits on a later archive
+  // page, and the CLI and WebUI fetches then disagree about the child.
+  const serverBucket=(r)=>(r&&typeof r.sidebar_is_cli_session==='boolean')?r.sidebar_is_cli_session:null;
+  const ownBucket=(r)=>{ const b=serverBucket(r); return b===null?_isCliSession(r):b; };
+  if(serverBucket(s)!==null) return serverBucket(s);
+  // Lineage lookups and memo entries are keyed by profile + id: session ids
+  // are only unique within one profile home (#8245 release gate r1103).
+  const profileKey=(r,id)=>String((r&&(r.profile||r.profile_name))||'').trim()+'\u0000'+String(id||'');
+  const lookup=(owner,id)=>{
+    const scoped=rowsById&&rowsById.byProfileId;
+    const hit=scoped?scoped.get(profileKey(owner,id)):undefined;
+    return hit||(rowsById?rowsById.get(id):undefined);
+  };
+  const memoKey=(r)=>profileKey(r,r&&r.session_id);
+  if(memo&&s.session_id&&memo.has(memoKey(s))) return memo.get(memoKey(s));
+  let result=_isCliSession(s);
+  if(_isDelegatedSubagentChild(s)){
+    const seen=new Set();
+    const path=[];
+    let cur=s;
+    let resolved=false;
+    while(_isDelegatedSubagentChild(cur)){
+      path.push(cur);
+      const parentId=String(cur.parent_session_id||'').trim();
+      if(!parentId||seen.has(parentId)) break;
+      seen.add(parentId);
+      const parent=lookup(cur,parentId);
+      // #8245 re-gate (2026-10-19): the All-profiles view puts several
+      // profiles' rows in one map, so a bare id lookup can resolve a parent
+      // that belongs to a DIFFERENT profile and inherit its bucket. A lineage
+      // edge is only meaningful within the same profile, so require the
+      // profiles to agree before following it; a cross-profile hit is treated
+      // as "parent not present" (the row keeps its own raw bucket).
+      // #8245 re-gate (2026-10-27): the check must run BEFORE the memo
+      // short-circuit. The server sorts by recency, so a newer alpha parent
+      // can be memoised first and beta's child then inherited its bucket
+      // through memo.has(parentId) — parent-first and child-first orders gave
+      // different answers. Resolve (and profile-check) the parent row first,
+      // then take the memoized verdict for it.
+      if(!parent||!_sidebarSameProfileForLineage(cur,parent)) break;
+      if(serverBucket(parent)!==null){
+        result=serverBucket(parent);
+        resolved=true;
+        break;
+      }
+      if(memo&&parentId&&memo.has(memoKey(parent))){
+        result=memo.get(memoKey(parent));
+        resolved=true;
+        break;
+      }
+      cur=parent;
+    }
+    if(!resolved&&cur!==s){
+      result=ownBucket(cur);
+      resolved=true;
+    } else if(!resolved){
+      // Rotation/compression fallback: the direct parent row may be gone, but the
+      // lineage root/tip still derives the child's bucket.
+      for(const key of ['_parent_lineage_root_id','_parent_lineage_tip_id']){
+        const lineageId=String(s[key]||'').trim();
+        const lineageRow=lineageId&&lineageId!==s.session_id?lookup(s,lineageId):undefined;
+        if(lineageRow){
+          // Same profile guard as the parent walk: a lineage id from another
+          // profile's home must not derive this row's bucket.
+          if(!_sidebarSameProfileForLineage(s,lineageRow)) continue;
+          result=ownBucket(lineageRow);
+          resolved=true;
+          break;
+        }
+      }
+    }
+    // Every delegated row on the resolved path shares the ancestor's bucket.
+    if(memo){
+      for(const r of path) if(r&&r.session_id&&!memo.has(memoKey(r))) memo.set(memoKey(r),result);
+    }
+  }
+  if(memo&&s.session_id&&!memo.has(memoKey(s))) memo.set(memoKey(s),result);
+  return result;
+}
+
 function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   // Every payload row, before bucket/project/archive scoping; the attach step classifies parents from it.
-  const rowsById=_sidebarRowsById([allMatched, typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:null]);
+  // #8245 re-gate (2026-10-27): the classifier's map must hold the COMPLETE
+  // cached rows plus the sidebar's parent references, not only the filtered
+  // match set. A search that matched the child but not its parent left the
+  // parent unresolvable, so the child fell back to its raw (WebUI) bucket
+  // even though it arrived in the CLI payload — and the WebUI fetch then
+  // excluded it, hiding it from BOTH tabs. Master shows it.
+  const rowsById=_sidebarRowsById([
+    allMatched,
+    typeof _allSessions!=='undefined'?_allSessions:null,
+    typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:null,
+  ]);
   const projectIdFor=_sidebarProjectResolver(rowsById);
+  // #8141: one memo per partition pass so the derived display bucket is
+  // resolved once per lineage instead of once per consumer.
+  const displayBucketMemo=new Map();
   let cliSessionCount=0;
   const webuiProfileFiltered=[];
   const cliProfileFiltered=[];
@@ -10242,7 +10863,11 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   let cliArchivedCount=0;
   for(const s of allMatched){
     if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
-    const isCli=_isCliSession(s);
+    // #8141: display-only bucket — a parent-owned delegated child travels with
+    // its resolved parent/lineage (CLI children attach under CLI parents)
+    // instead of landing in the WebUI bucket where it inflated the badge but
+    // never rendered. Raw source / read_only / ownership flags are untouched.
+    const isCli=_sidebarDisplayBucketIsCli(s, rowsById, displayBucketMemo);
     if(isCli) cliSessionCount++;
     if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)) continue;
     const profileFiltered=isCli ? cliProfileFiltered : webuiProfileFiltered;
@@ -10294,10 +10919,14 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
 function _scopedSidebarReferenceRows(isCli, projectIdFor){
   if(typeof _sidebarReferenceSessions==='undefined'||!Array.isArray(_sidebarReferenceSessions)||!_sidebarReferenceSessions.length) return [];
   const resolve=projectIdFor||_sidebarProjectResolver(_sidebarRowsById([_sidebarReferenceSessions, typeof _allSessions!=='undefined'?_allSessions:null]));
+  // #8141: references use the same display-only bucket derivation so an
+  // archived CLI-parent lineage (including archived subagent links) stays in
+  // the CLI render's suppression context.
+  const scopeRowsById=_sidebarRowsById([typeof _allSessions!=='undefined'?_allSessions:null, _sidebarReferenceSessions]);
   return _sidebarReferenceSessions.filter(s=>{
     if(!s) return false;
-    // Source scope: only references in the same webui/cli bucket as this render.
-    if(_isCliSession(s)!==!!isCli) return false;
+    // Source scope: only references in the same webui/cli display bucket as this render.
+    if(_sidebarDisplayBucketIsCli(s, scopeRowsById)!==!!isCli) return false;
     // Project scope: mirror _partitionSidebarSessionRows exactly.
     const projectId=resolve(s);
     if(_activeProject===NO_PROJECT_FILTER){ if(projectId) return false; }
@@ -10921,7 +11550,24 @@ function renderSessionListFromCache(){
   const archivePagingFilterActive=_sessionArchivePagingFilterActive();
   if(_showArchived&&!archivePagingFilterActive){
     const activeArchivedTotal=_sessionSourceFilter==='cli'?_archivedCliCount:_archivedWebuiCount;
-    const loadedArchivedCount=sidebarRows.filter(s=>s&&s.archived&&(_sessionSourceFilter==='cli'?_isCliSession(s):!_isCliSession(s))).length;
+    // #8245 re-gate (2026-10-19): the server total comes from the DERIVED bucket
+    // (api/routes.py computes archived_cli_count with the ownership rule), so the
+    // loaded count must use the same rule. Counting loaded rows with the raw
+    // _isCliSession() never sees an archived delegated child of a CLI parent:
+    // it is in the server total but not in this count, so `remaining` never
+    // reaches zero and the CLI tab keeps offering "Load more archived" after
+    // everything is loaded (master does not).
+    // #8245 release gate (r1103): the same profile-aware map the partition uses;
+    // rows that carry the server's sidebar_is_cli_session use it directly.
+    const _archivedBucketRowsById=_sidebarRowsById([sidebarRows]);
+    const _archivedDisplayBucketMemo=new Map();
+    const _archivedInBucket=(s)=>{
+      if(!s||!s.archived) return false;
+      return _sessionSourceFilter==='cli'
+        ? !!_sidebarDisplayBucketIsCli(s, _archivedBucketRowsById, _archivedDisplayBucketMemo)
+        : !_sidebarDisplayBucketIsCli(s, _archivedBucketRowsById, _archivedDisplayBucketMemo);
+    };
+    const loadedArchivedCount=sidebarRows.filter(_archivedInBucket).length;
     const archiveLoadCapReached=Number(_archivedRowsLoadedLimit||0)>=SESSION_ARCHIVED_MAX_LOADED_LIMIT;
     const remainingArchived=archiveLoadCapReached?0:Math.max(0, Number(activeArchivedTotal||0)-loadedArchivedCount);
     if(remainingArchived>0){
@@ -11264,6 +11910,7 @@ function renderSessionListFromCache(){
         let _gestureState='idle';
         let _swipeTracking=false;
         let _gesturePointerType='';
+        let _penPress=null;  // the pen's pointerdown, for the long press
         let _clearDragTimer=null;
         let _longPressTimer=null;
         let _longPressMenuOpened=false;
@@ -11294,6 +11941,8 @@ function renderSessionListFromCache(){
             if(_gestureState!=='pressing'||_renamingSid||_sessionSelectMode) return;
             _longPressMenuOpened=true;
             rowEl._skipNextChildOpen=true;
+            // As on a conversation's row: the pen's release and click stay here.
+            if(_gesturePointerType==='pen') _keepPenOnPressedElement(_penPress);
             _openSessionActionMenu(childSession, rowEl);
           },SESSION_LONG_PRESS_DELAY_MS);
         };
@@ -11403,10 +12052,14 @@ function renderSessionListFromCache(){
         rowEl.onpointerdown=(e)=>{
           if(e.pointerType==='mouse'||e.button!==0||_isForkActionTarget(e.target)) return;
           _beginForkGesture(e.clientX,e.clientY,e.pointerType||'');
+          if(e.pointerType==='pen') _penPress=e;
           if(e.pointerType==='touch'||e.pointerType==='pen') _scheduleForkLongPressMenu();
         };
         rowEl.onpointermove=(e)=>{
           if(e.pointerType==='mouse'||_gestureState==='idle') return;
+          // As on a conversation's row: once the long press has opened the ⋮
+          // menu, the rest of the gesture drags and swipes nothing.
+          if(_longPressMenuOpened) return;
           _pointerX=e.clientX;
           _pointerY=e.clientY;
           const signedDx=e.clientX-_pointerDownX;
@@ -11435,6 +12088,18 @@ function renderSessionListFromCache(){
           }
           _clearForkPointerState();
         };
+        // As on a conversation's row: the touch that opened the menu must not
+        // also click what is under the finger when it lifts. No click follows
+        // then, so the one-shot guard that would have swallowed it is cleared
+        // here, or it would swallow the next deliberate tap on the fork.
+        rowEl.addEventListener('touchend',(e)=>{
+          // A touch on the ⋮ button begins no gesture here, so the flag can be
+          // left over from an earlier long press: that tap keeps its click.
+          if(_isForkActionTarget(e.target)) return;
+          if(!_longPressMenuOpened||!e.cancelable) return;
+          e.preventDefault();
+          rowEl._skipNextChildOpen=false;
+        },{passive:false});
         rowEl.onpointercancel=()=>_clearForkPointerState();
         rowEl.onpointerleave=()=>{
           if(_gesturePointerType!=='mouse'&&_gestureState!=='idle') _clearForkPointerState();
@@ -11658,6 +12323,7 @@ function renderSessionListFromCache(){
     let _pointerX=0;
     let _pointerY=0;
     let _gesturePointerType='';
+    let _penPress=null;  // the pen's pointerdown, for the long press
     const _clearLongPressTimer=()=>{
       if(_longPressTimer){clearTimeout(_longPressTimer);_longPressTimer=null;}
       if(!_longPressMenuOpened) el.classList.remove('long-pressing');
@@ -11685,6 +12351,11 @@ function renderSessionListFromCache(){
         clearTimeout(_tapTimer);
         _tapTimer=null;
         _lastTapTime=0;
+        // The menu may open under the pen. Its release and its click must
+        // still come to this row, which ends the press and counts the click
+        // as its own; on the menu the click belongs to neither and closes the
+        // menu as one outside it.
+        if(_gesturePointerType==='pen') _keepPenOnPressedElement(_penPress);
         _openSessionActionMenu(s, el);
       },SESSION_LONG_PRESS_DELAY_MS);
     };
@@ -11706,6 +12377,13 @@ function renderSessionListFromCache(){
     };
     const _updateSessionGesture=(clientX,clientY)=>{
       if(_gestureState==='idle') return false;
+      // The long press has opened the ⋮ menu: the rest of this gesture drags
+      // and swipes nothing. A sideways move is still claimed as it was, so
+      // the browser does with the move what it did.
+      if(_longPressMenuOpened){
+        _trackHorizontalSwipe(Math.abs(clientX-_pointerDownX),Math.abs(clientY-_pointerDownY));
+        return _swipeTracking;
+      }
       _pointerX=clientX;
       _pointerY=clientY;
       const signedDx=clientX-_pointerDownX;
@@ -11838,10 +12516,13 @@ function renderSessionListFromCache(){
       _clearLongPressTimer();
       if(_renamingSid){_gestureState='idle';return false;}
       if(_isSessionActionTarget(target)){_gestureState='idle';return false;}
+      // Before anything below can act: lifting after the long press opened
+      // the ⋮ menu ends the gesture and does nothing else, however far the
+      // finger or the pen was dragged in between (a swipe that far archives).
+      if(_longPressMenuOpened){_gestureState='idle';return true;}
       _pointerX=clientX;
       _pointerY=clientY;
       _commitSessionSwipe();
-      if(_longPressMenuOpened){_gestureState='idle';return true;}
       if(_gestureState==='committed') return true;
       // An open action menu takes the tap first, exactly as on master: the tap only closes it (Codex round F,
       // 2026-10-23: a tag tap that skipped this left the menu open, and the open menu holds back the filtered repaint).
@@ -11948,6 +12629,7 @@ function renderSessionListFromCache(){
       if(_isSessionActionTarget(e.target)) return;
       _beginSessionGesture(e.clientX,e.clientY,e.pointerType||'');
       if(e.pointerType==='pen'){
+        _penPress=e;
         _scheduleSessionLongPressMenu();
       }
     };
@@ -11964,6 +12646,11 @@ function renderSessionListFromCache(){
     };
     el.onpointerleave=()=>{
       if(_gesturePointerType==='mouse'&&_gestureState!=='idle') _clearPointerDragState();
+      // A pen that leaves the row sends it nothing more either, not even its
+      // release: its long press would still open the ⋮ menu after it had
+      // lifted somewhere else. (Once that menu is open the pen is captured
+      // and does not leave.)
+      if(_gesturePointerType==='pen'&&_gestureState!=='idle') _clearPointerDragState();
     };
     el.onpointerup=(e)=>{
       if(e.pointerType==='touch') return;
@@ -12027,6 +12714,9 @@ function renderSessionListFromCache(){
     el.addEventListener('touchend',(e)=>{
       const touch=e.changedTouches&&e.changedTouches[0];
       if(!touch) return;
+      // A touch on the ⋮ button begins no gesture on the row, so a long-press flag
+      // left over from an earlier press must not cancel that tap's click (#8135).
+      if(_isSessionActionTarget(e.target)) return;
       // A tap (or long press) on the row itself is fully handled by the
       // gesture machine; cancel the browser's compatibility click so it cannot
       // act on the row a second time. Drags and swipes produce no click, and
@@ -12257,6 +12947,7 @@ async function deleteSession(sid, beforeDelete=null){
       const _tm=$('topbarMeta');if(_tm)_tm.textContent='Start a new conversation';
       $('msgInner').innerHTML='';
       $('emptyState').style.display='';
+      if(typeof a11yTreeReset==='function') a11yTreeReset($('fileTree'), {focusTo: $('workspaceFilesTab')});
       $('fileTree').innerHTML='';
       if(typeof S!=='undefined') S.session=null;
       if(typeof syncAppTitlebar==='function') syncAppTitlebar();
@@ -12913,6 +13604,16 @@ function _showProjectPicker(session, anchorEl){
 // picker is found out by being detached, so no close path has to clear this.
 let _openProjectPicker=null;
 
+// For the ⋮ menu that opens next. A click outside the picker closes it, but a
+// long press has its click cancelled (it would run the menu row under the
+// finger) and a right click sends none. Focus is not handed back: the menu
+// takes it.
+function _dismissOpenProjectPicker(){
+  const open=_openProjectPicker;
+  _openProjectPicker=null;
+  if(open&&open.picker.isConnected) open.dismiss({restoreFocus:false});
+}
+
 function _positionProjectPicker(picker, anchorEl){
   const margin=8;
   const gap=4;
@@ -12998,7 +13699,19 @@ function _positionProjectPicker(picker, anchorEl){
 
 function _recordProjectPickerContextPoint(anchorEl,event){
   if(!anchorEl||!Number.isFinite(event&&event.clientX)||!Number.isFinite(event&&event.clientY)) return;
+  // freshMenuAnchor marks the point as the spot a menu was just invoked from.
+  // _openSessionActionMenu consumes the flag and _positionSessionActionMenu
+  // places a context-menu-opened action menu there (and follows the row).
+  // The point itself is always recorded (the project picker reads it), but only
+  // a pointer right-click on the row is a place to open the menu at. A keyboard
+  // open (Shift+F10 or the ContextMenu key: button -1, fired at the focused
+  // trigger's centre) and a right-click on the trigger itself open on the
+  // button, exactly as a click on it does.
+  const target=event.target;
+  const onTrigger=!!(target&&target.closest&&target.closest('.session-actions-trigger'));
+  const fromKeyboard=event.button<0;
   const point={clientX:event.clientX,clientY:event.clientY};
+  if(!onTrigger&&!fromKeyboard) point.freshMenuAnchor=true;
   const row=anchorEl.closest&&anchorEl.closest('.session-child-session-fork,.session-item');
   if(row&&row.isConnected!==false){
     const rowRect=row.getBoundingClientRect();
@@ -13095,13 +13808,23 @@ function _projectPickerAnchorRect(anchorEl, bounds){
 // Fixed coordinates and getBoundingClientRect use the layout viewport. The
 // visible part can be smaller AND offset (keyboard, browser chrome, zoom).
 function _projectPickerVisibleBounds(){
+  // Validated read (#8531): garbage fold-transition geometry (observed on the
+  // iPhone Duo standalone PWA: height -33554432 = -2^25) must fall back to
+  // window dimensions, not invert the picker's visible bounds. Inlined and
+  // self-contained: this function is extracted into a Node test harness that
+  // does not load boot.js, so it must not reach across files.
   const vv=window.visualViewport;
-  const top=vv?vv.offsetTop:0;
-  const left=vv?vv.offsetLeft:0;
+  const vvOk=vv
+    &&Number.isFinite(Number(vv.height))&&Number(vv.height)>0&&Number(vv.height)<=window.innerHeight*1.5
+    &&Number.isFinite(Number(vv.width))&&Number(vv.width)>0&&Number(vv.width)<=window.innerWidth*1.5
+    ?{height:Number(vv.height),width:Number(vv.width),offsetTop:Math.max(0,Number(vv.offsetTop)||0),offsetLeft:Math.max(0,Number(vv.offsetLeft)||0)}
+    :null;
+  const top=vvOk?vvOk.offsetTop:0;
+  const left=vvOk?vvOk.offsetLeft:0;
   return {
     top,left,
-    bottom:top+(vv?vv.height:window.innerHeight),
-    right:left+(vv?vv.width:window.innerWidth),
+    bottom:top+(vvOk?vvOk.height:window.innerHeight),
+    right:left+(vvOk?vvOk.width:window.innerWidth),
   };
 }
 

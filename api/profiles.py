@@ -8,6 +8,7 @@ Profile switches update os.environ['HERMES_HOME'] and monkey-patch module-level
 cached paths in hermes-agent modules (skills_tool, skill_manager_tool,
 cron/jobs) that snapshot HERMES_HOME at import time.
 """
+import copy
 import json
 import logging
 import os
@@ -236,6 +237,11 @@ def _unwrap_profile_home_to_base(home: Path) -> Path:
 # escape isolation (#4589).
 _PROTECTED_ENV_KEYS = frozenset({
     'HERMES_WEBUI_ISOLATED_PROFILE',
+    # Where the Agent reads the executing tree's install stamp (its pm/paths.py
+    # install_root()). docker_init decides at boot whether a mounted Agent would
+    # relaunch from that stamp (#8593); a profile .env moving it would change the
+    # answer for the next in-app update restart, which skips docker_init (#8594).
+    'HERMES_INSTALL_ROOT',
     # Server-wide sidebar window; a profile .env must not widen the per-request query.
     'HERMES_WEBUI_VISIBLE_SESSION_LIMIT',
     # #7656 round-3: HERMES_WEBUI_MAX_SESSION_RESOLVE is a process-wide resource
@@ -865,6 +871,95 @@ class cron_profile_context:
         return False
 
 
+# ── Lock-free per-thread cron store scope (#7295, #6753) ─────────────────────
+# A long in-process cron job (the scheduled fire wrapped by
+# install_cron_scheduler_profile_isolation(), or the in-chat cronjob
+# action=run) holds _cron_env_lock and points os.environ['HERMES_HOME'] and the
+# cron module path globals at its own profile for the whole run. Request
+# handlers that only touch the cron store must not wait for that, and must not
+# read those globals either. Newer Agents expose context-local overrides that
+# take priority over the globals:
+#   * cron.jobs.use_cron_store(home)            -> jobs.json / output / locks
+#   * hermes_constants.set_hermes_home_override  -> get_hermes_home() readers
+#     (executions/notepad DBs, config.yaml timezone and model-pin reads)
+# cron_store_scope*() binds both for the current thread only and never takes
+# _cron_env_lock. If either helper is missing (older Agent, test stub) it falls
+# back to the lock-based contexts above, unchanged. Callers whose code path
+# reads process-global state (os.environ, cron.scheduler._hermes_home, gateway
+# status via get_process_hermes_home) must keep using the lock-based contexts.
+
+
+_RLOCK_TYPES = tuple(
+    t for t in (type(threading.RLock()), getattr(threading, '_PyRLock', None)) if isinstance(t, type)
+)
+
+
+def _agent_jobs_lock_is_reentrant(cron_jobs_mod) -> bool:
+    """True when the thread holding the Agent's ``_jobs_lock()`` may re-enter it.
+
+    The lock-free paths hold ``_jobs_lock()`` around Agent calls that take it
+    again internally (Create's two writes, Resume, List/Run reads). Agents that
+    ship ``use_cron_store`` nest it through a thread-local depth counter over an
+    ``RLock`` (``_jobs_lock_state`` / ``_jobs_file_lock``). Older Agents (e.g.
+    e5b4cf7bea2) use a plain ``threading.Lock``, where that outer hold
+    deadlocks the inner acquire. Anything else is treated as non-reentrant,
+    which keeps the locked fallback (slower, never a hang).
+    """
+    return isinstance(getattr(cron_jobs_mod, '_jobs_file_lock', None), _RLOCK_TYPES) and isinstance(
+        getattr(cron_jobs_mod, '_jobs_lock_state', None), threading.local
+    )
+
+
+def _cron_store_scope_helpers():
+    """Return ``(use_cron_store, hermes_constants)`` when the Agent supports it."""
+    try:
+        import cron.jobs as _cj
+    except Exception:
+        return None
+    use_cron_store = getattr(_cj, 'use_cron_store', None)
+    if not callable(use_cron_store) or not callable(getattr(_cj, 'get_cron_output_dir', None)):
+        return None
+    # Lock-free writers rely on the Agent's jobs.json lock to serialize against
+    # each other and against a running job's bookkeeping (Resume holds it across
+    # its read/compute/write), and hold it around Agent calls that take it
+    # again, so it must be re-entrant. Otherwise keep the locked fallback.
+    if not callable(getattr(_cj, '_jobs_lock', None)) or not _agent_jobs_lock_is_reentrant(_cj):
+        return None
+    home_mod = _resolve_hermes_home_override()
+    if home_mod is None:
+        return None
+    return use_cron_store, home_mod
+
+
+@contextmanager
+def cron_store_scope_for_home(home: Path):
+    """Route cron store access in this thread to *home* without the env lock."""
+    home = Path(home)
+    helpers = _cron_store_scope_helpers()
+    if helpers is None:
+        with cron_profile_context_for_home(home):
+            yield home
+        return
+    use_cron_store, home_mod = helpers
+    token = home_mod.set_hermes_home_override(str(home))
+    try:
+        with use_cron_store(home):
+            yield home
+    finally:
+        home_mod.reset_hermes_home_override(token)
+
+
+@contextmanager
+def cron_store_scope():
+    """TLS-active-profile variant of :func:`cron_store_scope_for_home`."""
+    if _cron_store_scope_helpers() is None:
+        with cron_profile_context():
+            yield
+        return
+    with cron_store_scope_for_home(get_active_hermes_home()):
+        yield
+
+
 def get_hermes_home_for_profile(name: str) -> Path:
     """Return the HERMES_HOME Path for *name* without mutating any process state.
 
@@ -927,25 +1022,34 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
     of that run.
     """
     home = Path(home).expanduser()
+    dotenv = _read_profile_dotenv(home)
     env: dict[str, str] = {}
 
-    try:
-        from api import yaml_compat as _yaml
+    # config.yaml keeps raw ``${VAR}`` references (#8032): resolve terminal
+    # values under the profile's own env binding before projecting them. A
+    # scalar that stays unresolved is left unset rather than handed to the
+    # Agent as a literal placeholder (host, image, cwd...).
+    from api.config import _has_env_ref
 
-        cfg_path = home / 'config.yaml'
-        cfg = _yaml.safe_load(cfg_path.read_text(encoding='utf-8')) if cfg_path.exists() else {}
-        if not isinstance(cfg, dict):
-            cfg = {}
+    try:
+        cfg = load_profile_config(home, env=_profile_env_binding(home, dotenv))
     except Exception:
         cfg = {}
-
-    terminal_cfg = cfg.get('terminal', {}) if isinstance(cfg, dict) else {}
+    terminal_cfg = cfg.get('terminal', {})
     if isinstance(terminal_cfg, dict):
         for key, env_key in _TERMINAL_ENV_MAPPINGS.items():
-            if key in terminal_cfg and terminal_cfg[key] is not None:
-                env[env_key] = _stringify_env_value(terminal_cfg[key])
+            value = terminal_cfg.get(key)
+            if value is not None and not _has_env_ref(value):
+                env[env_key] = _stringify_env_value(value)
 
-    env_path = home / '.env'
+    env.update(dotenv)
+    return env
+
+
+def _read_profile_dotenv(home: Path) -> dict[str, str]:
+    """Return a profile's ``.env`` assignments (operator-protected keys skipped)."""
+    env: dict[str, str] = {}
+    env_path = Path(home) / '.env'
     if env_path.exists():
         try:
             for line in env_path.read_text(encoding='utf-8').splitlines():
@@ -964,8 +1068,126 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
                         env[k] = v
         except Exception:
             logger.debug("Failed to read runtime env from %s", env_path)
-
     return env
+
+
+# ── Reading config VALUES from a profile's raw config.yaml (#8032) ───────────
+# Writers keep ``${VAR}`` references on disk, so any reader of a raw document
+# must expand it under the env of the profile that OWNS the document — never
+# the live process env, which streaming turns and background workers overwrite
+# with their own profile's values while they run. Route value reads through
+# load_profile_config() / expand_profile_config();
+# tests/test_issue8032_profile_env_binding.py fails on any new raw load in api/.
+
+def _is_root_profile_home(home) -> bool:
+    try:
+        return Path(home).expanduser().resolve() == Path(_DEFAULT_HERMES_HOME).expanduser().resolve()
+    except Exception:
+        return False
+
+
+def _profile_env_binding(home, dotenv: dict[str, str]) -> dict[str, str]:
+    from api import paths as _paths
+
+    env: dict[str, str] = {}
+    if _is_root_profile_home(home):
+        # Explicit ROOT binding from the launch-time snapshot, taken at import:
+        # it predates every _reload_dotenv() and every worker that mirrors a
+        # named profile into os.environ, so a key the loader mirrored later is
+        # still the LAUNCHER's value here and root keeps it. The only
+        # profile-owned values the snapshot can hold are those a shell launcher
+        # (ctl.sh) sourced from a NAMED launch home's .env before Python
+        # started. #8435's provenance record (_INITIAL_HERMES_HOME_DOTENV)
+        # identifies them by value, the same rule as
+        # api.gateway_chat._env_value_is_profile_sourced(): a non-empty value
+        # equal to the named launch home's .env value is that profile's and is
+        # dropped (fail closed, even when the launcher exported it too). Root's
+        # own .env below restores the keys it defines.
+        launch_dotenv: dict[str, str] = {}
+        if _INITIAL_HERMES_HOME and not _is_root_profile_home(_INITIAL_HERMES_HOME):
+            launch_dotenv = _INITIAL_HERMES_HOME_DOTENV
+
+        def _from_named_launch_home(key, value) -> bool:
+            value = str(value or "").strip()
+            return bool(value) and key in launch_dotenv and str(launch_dotenv[key] or "").strip() == value
+
+        env.update((k, v) for k, v in _paths.STARTUP_ENV.items() if not _from_named_launch_home(k, v))
+    env.update(filter_runtime_env_for_gateway_parity(dotenv))
+    env['HERMES_HOME'] = str(Path(home).expanduser())
+    return env
+
+
+def profile_env_binding(home) -> dict[str, str]:
+    """The env a profile's config.yaml ``${VAR}`` references resolve against.
+
+    * named profile: its own ``.env`` only, never the server process env
+      (fail-closed profile isolation, #3961);
+    * root profile: the launch-time env snapshot (``api.paths.STARTUP_ENV``,
+      taken before any worker mirrors a named profile into ``os.environ``)
+      without the values a shell launcher sourced from a NAMED launch home's
+      ``.env`` (``_INITIAL_HERMES_HOME_DOTENV``, #8435), under root's own
+      ``.env``. It is bound
+      explicitly instead of falling back to live ``os.environ``: a
+      process-wide switch loads a named profile's ``.env`` into it and every
+      streaming turn / background worker mirrors its named profile's env into
+      it while it runs.
+
+    ``HERMES_HOME`` is the profile's home in both cases.
+    """
+    return _profile_env_binding(home, _read_profile_dotenv(Path(home).expanduser()))
+
+
+def expand_profile_config(home, raw, *, env: Optional[dict] = None):
+    """Expand ``${VAR}`` in a RAW config document (or any subtree of it) that
+    belongs to the profile at *home*, under ``profile_env_binding(home)``.
+
+    Returns a fresh structure; *raw* is never mutated. A reference the binding
+    cannot resolve stays the literal ``${VAR}`` (``api.config._has_env_ref``
+    is true for it), and a caller that forwards a value treats that as absent.
+    Pass *env* to reuse a binding computed earlier (e.g. before taking a lock).
+    The binding is applied to the calling thread only, for the expansion.
+    """
+    from api.config import _expand_env_vars, _thread_ctx
+
+    if env is None:
+        env = profile_env_binding(home)
+    previous_env = getattr(_thread_ctx, 'env', None)
+    previous_block = getattr(_thread_ctx, 'block_process_env_fallback', False)
+    _thread_ctx.env = dict(env)
+    _thread_ctx.block_process_env_fallback = True
+    try:
+        try:
+            return _expand_env_vars(raw)
+        except RecursionError:
+            # A recursive YAML alias elsewhere in the document must not hide
+            # the profile's ordinary settings: keep the raw tree (its ${VAR}
+            # literals read as absent via _has_env_ref) instead of {}.
+            logger.debug("profile config at %s has a recursive alias; served unexpanded", home)
+            return copy.deepcopy(raw)
+    finally:
+        _thread_ctx.block_process_env_fallback = previous_block
+        if previous_env is None:
+            del _thread_ctx.env
+        else:
+            _thread_ctx.env = previous_env
+
+
+def load_profile_config(home, *, env: Optional[dict] = None) -> dict:
+    """Return the profile's config.yaml with every ``${VAR}`` expanded under that
+    profile's env binding (see ``expand_profile_config``); ``{}`` when the file
+    is missing or unparsable. Parsed fresh on every call, like the readers it
+    replaced, so an out-of-band edit is never served stale.
+    """
+    config_path = Path(home).expanduser() / 'config.yaml'
+    try:
+        raw = yaml.safe_load(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
+    except Exception:
+        logger.debug("Failed to load profile config from %s", config_path, exc_info=True)
+        return {}
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    expanded = expand_profile_config(home, raw, env=env)
+    return expanded if isinstance(expanded, dict) else {}
 
 
 # Match Hermes Agent gateway behavior: profile-scoped WebUI runs should
@@ -1130,14 +1352,19 @@ def _profile_secret_env_names(profile_home_path: Path) -> set[str]:
         return names
 
     custom_providers = payload.get("custom_providers") if isinstance(payload, dict) else None
-    if not isinstance(custom_providers, list):
-        return names
-    for custom_provider in custom_providers:
+    entries = list(custom_providers) if isinstance(custom_providers, list) else []
+    # Scrubbing is intentionally independent of catalog visibility/precedence:
+    # even disabled or shadowed native records declare profile-owned secrets.
+    native_providers = payload.get("providers") if isinstance(payload, dict) else None
+    if isinstance(native_providers, dict):
+        entries.extend(native_providers.values())
+    for custom_provider in entries:
         if not isinstance(custom_provider, dict):
             continue
-        key_env = str(custom_provider.get("key_env") or "").strip()
-        if key_env:
-            names.add(key_env)
+        for field in ("key_env", "api_key_env"):
+            key_env = str(custom_provider.get(field) or "").strip()
+            if key_env:
+                names.add(key_env)
         api_key = str(custom_provider.get("api_key") or "").strip()
         match = re.fullmatch(r"\$\{([^}]+)\}", api_key)
         if match:
@@ -1885,13 +2112,13 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
         from api.config import get_config
         cfg = get_config()
     else:
-        # Direct disk read — does not touch _cfg_cache
+        # Direct disk read — does not touch _cfg_cache. config.yaml keeps raw
+        # ``${VAR}`` references (#8032), so expand them under the TARGET
+        # profile's env binding (root included: a worker's mirrored env must
+        # not resolve root's references) before handing defaults to the
+        # frontend; otherwise New Chat would send the literal placeholders.
         try:
-            from api import yaml_compat as _yaml
-            cfg_path = home / 'config.yaml'
-            cfg = _yaml.safe_load(cfg_path.read_text(encoding='utf-8')) if cfg_path.exists() else {}
-            if not isinstance(cfg, dict):
-                cfg = {}
+            cfg = load_profile_config(home)
         except Exception:
             cfg = {}
     model_cfg = cfg.get('model', {})
@@ -1902,6 +2129,12 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     elif isinstance(model_cfg, dict):
         default_model = model_cfg.get('default')
         default_model_provider = model_cfg.get('provider')
+    # A reference the target profile can't resolve stays a literal ``${VAR}``
+    # after expansion; never hand that placeholder to New Chat (#8032).
+    if isinstance(default_model, str) and '${' in default_model:
+        default_model = None
+    if isinstance(default_model_provider, str) and '${' in default_model_provider:
+        default_model_provider = None
 
     # Read the target profile's workspace directly from *home* rather than via
     # get_last_workspace() which routes through the thread-local/process-global active
@@ -2099,29 +2332,6 @@ def _compute_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
     if not skills_dir.is_dir():
         return (0, 0)
 
-    disabled = set()
-    config_path = profile_dir / "config.yaml"
-    if config_path.exists():
-        try:
-            from api import yaml_compat as _yaml
-            cfg = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
-            if isinstance(cfg, dict):
-                skills_cfg = cfg.get("skills")
-                if isinstance(skills_cfg, dict):
-                    # Align with get_disabled_skill_names(platform="webui") behavior:
-                    platform_disabled = (skills_cfg.get("platform_disabled") or {}).get("webui")
-                    if platform_disabled is not None:
-                        disabled_val = platform_disabled
-                    else:
-                        disabled_val = skills_cfg.get("disabled")
-
-                    if disabled_val is not None:
-                        if isinstance(disabled_val, str):
-                            disabled_val = [disabled_val]
-                        disabled = {str(v).strip() for v in disabled_val if str(v).strip()}
-        except Exception:
-            pass
-
     try:
         from agent.skill_utils import iter_skill_index_files, parse_frontmatter, skill_matches_platform
     except ImportError as exc:
@@ -2135,6 +2345,30 @@ def _compute_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
         # count it produced would be inaccurate. The UI omits the skills line
         # when the total is 0, so the profile picker stays fully usable.
         return (0, 0)
+
+    disabled = set()
+    try:
+        # Expanded under the profile's own env (#8032: ``disabled: ${VAR}``
+        # stays a reference on disk), then decoded like the Skills reader does
+        # (a serialized ``'["a","b"]'`` string is a list, #7120).
+        skills_cfg = load_profile_config(profile_dir).get("skills")
+        if isinstance(skills_cfg, dict):
+            # Align with get_disabled_skill_names(platform="webui") behavior:
+            platform_disabled = (skills_cfg.get("platform_disabled") or {}).get("webui")
+            if platform_disabled is not None:
+                disabled_val = platform_disabled
+            else:
+                disabled_val = skills_cfg.get("disabled")
+
+            if disabled_val is not None:
+                parse_list = getattr(sys.modules.get("agent.skill_utils"), "parse_config_string_list", None)
+                if parse_list is not None:
+                    disabled_val = parse_list(disabled_val)
+                elif isinstance(disabled_val, str):
+                    disabled_val = [disabled_val]
+                disabled = {str(v).strip() for v in disabled_val if str(v).strip()}
+    except Exception:
+        pass
 
     seen_names = set()
     enabled_count = 0

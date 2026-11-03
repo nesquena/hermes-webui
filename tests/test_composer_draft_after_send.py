@@ -20,7 +20,7 @@ def _block(source: str, start_marker: str, end_marker: str) -> str:
 
 
 def _draft_save_helper_block() -> str:
-    start = SESSIONS_JS.find("let _draftSaveTimer = null;")
+    start = SESSIONS_JS.find("const _draftSaveTimerByOwner = new Map();")
     end = SESSIONS_JS.find("function _restoreComposerDraft(draft, targetSid, opts={}) {")
     assert start != -1, "draft helper block start marker not found"
     assert end != -1, "draft helper block end marker not found"
@@ -307,7 +307,7 @@ def test_clear_composer_draft_suppresses_same_session_stale_restore():
 def test_non_empty_draft_save_clears_submit_restore_suppression():
     save_body = _block(SESSIONS_JS, "function _saveComposerDraft(sid, text, files)", "function _composerDraftHasPayload")
     assert "_clearComposerDraftRestoreSuppression(sid);" in save_body
-    now_body = _block(SESSIONS_JS, "function _saveComposerDraftNow(sid, text, files, goalContinuationId)", "// Restore composer draft")
+    now_body = _block(SESSIONS_JS, "function _saveComposerDraftNow(sid, text, files, goalContinuationId, options)", "// Restore composer draft")
     assert "_clearComposerDraftRestoreSuppression(sid);" in now_body
 
 

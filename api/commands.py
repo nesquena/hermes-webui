@@ -242,10 +242,20 @@ def _run_codex_runtime_command(arg_string: str) -> str:
             active_config = webui_config.get_config()
 
             def _persist_config(config_data: dict) -> None:
-                webui_config._save_yaml_config_file(
-                    webui_config._get_config_path(),
-                    config_data,
-                )
+                # config_data is the env-EXPANDED runtime config (plus applied
+                # defaults). Persist only the key the switch owns onto the RAW
+                # document so ${VAR} references elsewhere survive (#8032).
+                model_cfg = config_data.get("model")
+                runtime = model_cfg.get("openai_runtime") if isinstance(model_cfg, dict) else None
+                config_path = webui_config._get_config_path()
+                with webui_config._cfg_lock:
+                    raw = webui_config._load_yaml_config_file_raw(config_path)
+                    raw_model = raw.get("model")
+                    if not isinstance(raw_model, dict):
+                        raw_model = {}
+                    raw_model["openai_runtime"] = runtime
+                    raw["model"] = raw_model
+                    webui_config._save_yaml_config_file(config_path, raw)
                 webui_config.reload_config()
 
             status = apply(active_config, new_value, persist_callback=_persist_config)

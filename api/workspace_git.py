@@ -211,6 +211,11 @@ def _run_git(
     attributes_file = None
     hooks_path = None
     extra_configs: list[tuple[str, str]] = []
+    if args and args[0] == "diff":
+        # `git diff` ignores GIT_OPTIONAL_LOCKS and refreshes a stale index
+        # on its own, which takes .git/index.lock. The panel only reads, so
+        # skip that refresh (#8520). Commands that write keep normal locking.
+        extra_configs.append(("diff.autoRefreshIndex", "false"))
     temporary_attributes: list[str] = []
     temporary_dirs: list[str] = []
     try:
