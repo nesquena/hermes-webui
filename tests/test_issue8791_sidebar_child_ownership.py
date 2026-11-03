@@ -135,6 +135,31 @@ elif scenario == "shared-root":
     add(db2, "beta-kid", "subagent", parent="shared-root", delegate="shared-root")
     db2.commit()
     db2.close()
+elif scenario.startswith("twin-"):
+    # With All profiles on, another profile holds an unrelated CLI session with the SAME id as an opened
+    # delegated child of a twice-compressed Desktop parent. The child names the intermediate segment, so
+    # its lineage ids must come from its own profile's state.db row, whichever profile's row is newer.
+    beta = home / "profiles" / "beta"
+    beta.mkdir(parents=True)
+    db2 = sqlite3.connect(beta / "state.db")
+    db2.executescript(SCHEMA)
+    if scenario == "twin-older":
+        add(db2, "kid", "cli")
+        add(db2, "sub-tip", "cli")
+    add(db, "root", "desktop", end_reason="compression")
+    add(db, "mid", "desktop", parent="root", end_reason="compression")
+    add(db, "tip", "desktop", parent="mid")
+    opened.append(("kid", "mid", add(db, "kid", "subagent", parent="mid", delegate="mid")))
+    # An opened, compressed delegated row whose id another profile also holds: its own lineage
+    # ids must come from its own profile's row too, or it renders top-level instead of under its host.
+    add(db, "host", "cli")
+    add(db, "sub-old", "subagent", parent="host", delegate="host", end_reason="compression")
+    opened.append(("sub-tip", "sub-old", add(db, "sub-tip", "subagent", parent="sub-old", delegate="host")))
+    if scenario == "twin-newer":
+        add(db2, "kid", "cli")
+        add(db2, "sub-tip", "cli")
+    db2.commit()
+    db2.close()
 elif scenario == "profiles":
     add(db, "shared-parent", "cli")
     add(db, "alpha-kid", "subagent", parent="shared-parent", delegate="shared-parent")
@@ -162,7 +187,8 @@ payloads = {}
 for group in ("webui", "cli"):
     payloads[group] = routes._session_list_payload_to_response(routes._build_session_list_cache_payload(
         active_profile={"renamed": "work", "root-alias": "beta"}.get(scenario, "default"),
-        all_profiles=scenario in ("profiles", "shared-root", "copy-root", "root-alias"), show_cli_sessions=True,
+        all_profiles=scenario in ("profiles", "shared-root", "copy-root", "root-alias") or scenario.startswith("twin-"),
+        show_cli_sessions=True,
         include_archived=scenario == "root-alias",
         show_previous_messaging_sessions=False, show_cron_sessions=False, show_claude_code_sessions=False,
         sidebar_source=group,
@@ -214,6 +240,7 @@ for (const group of ['webui', 'cli']) {
   global._allSessions = payloads[group];
   const rendered = {};
   const visit = (row, parent) => {
+    if (key(row) in rendered) throw new Error('rendered twice: ' + key(row) + ' under ' + rendered[key(row)] + ' and ' + parent);
     rendered[key(row)] = parent;
     // A collapsed compression lineage shows its other segments inside the row.
     for (const seg of row._lineage_segments || []) {
@@ -307,6 +334,16 @@ def test_an_opened_child_of_an_intermediate_segment_renders_under_the_tip(tmp_pa
     assert rendered["cli"].get("default:sub-tip") == "default:host", rendered
     assert rendered["cli"].get("default:sub-leaf") == "default:host", rendered
     assert rendered["webui"] == {}, rendered
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("scenario", ["twin-older", "twin-newer"])
+def test_an_opened_childs_lineage_comes_from_its_own_profiles_row(scenario, tmp_path):
+    """Another profile's same-id session must not stand in for the opened child's state.db twin: the
+    child still gets its parent's lineage ids and renders under the tip, in its own profile."""
+    rendered = _render(scenario, tmp_path)
+    assert rendered["cli"]["default:kid"] == "default:tip", rendered
+    assert rendered["cli"]["default:sub-tip"] == "default:host", rendered
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

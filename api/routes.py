@@ -3051,6 +3051,9 @@ def _build_session_list_cache_payload(
             )
         diag_stage("merge_cli_sessions")
         cli_by_id = {s["session_id"]: s for s in cli}
+        cli_by_profile_id = {
+            (_sidebar_profile_group_key(s.get("profile")), s["session_id"]): s for s in cli
+        }
         webui_sessions = _prune_orphaned_desktop_sidecar_sessions(
             webui_sessions,
             known_agent_ids=cli_by_id,
@@ -3188,7 +3191,11 @@ def _build_session_list_cache_payload(
                 # in the CLI group, and rendered in neither. The row's OWN
                 # lineage ids are copied later, after the dedupe below, so the
                 # represented-id set stays exactly what it was.
-                if _sidebar_subagent_copy_matches(s, meta):
+                twin = cli_by_profile_id.get(
+                    (_sidebar_profile_group_key(s.get("profile")), s.get("session_id"))
+                )
+                if twin is not None and _sidebar_subagent_copy_matches(s, twin):
+                    meta = twin
                     for key in (
                         "relationship_type",
                         "_parent_lineage_root_id",
@@ -3243,7 +3250,9 @@ def _build_session_list_cache_payload(
         # the sidebar bucket is derived. Copying them earlier widened the
         # profile-blind represented-id set and hid another profile's row.
         for s in webui_sessions:
-            meta = cli_by_id.get(s.get("session_id"))
+            meta = cli_by_profile_id.get(
+                (_sidebar_profile_group_key(s.get("profile")), s.get("session_id"))
+            )
             if meta and _sidebar_subagent_copy_matches(s, meta):
                 for key in ("_lineage_root_id", "_lineage_tip_id"):
                     if not s.get(key) and meta.get(key):
