@@ -3183,7 +3183,33 @@ def _build_session_list_cache_payload(
         webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
         # Apply the same CLI visibility semantics to imported local copies so
         # low-value imported artifacts do not leak into the sidebar.
-        webui_sessions = [s for s in webui_sessions if is_cli_session_row_visible(s)]
+        cli_id_counts = defaultdict(int)
+        for row in cli:
+            cli_id_counts[row.get("session_id")] += 1
+
+        def _imported_copy_is_visible(s: dict) -> bool:
+            if is_cli_session_row_visible(s):
+                return True
+            # #8762: a copy that still has messages is never judged stricter
+            # than its own state.db row. A legacy Desktop history with unknown
+            # message roles stays listed through the projection's role
+            # fallback, but its copy counts no user turns; dropping the copy
+            # let the bare state.db row stand in and lose the WebUI-owned
+            # metadata (the pin). The row must be unambiguously the copy's
+            # own: the dedupe below is by id, so a copy kept for an id that
+            # two profiles' state.db rows share would hide both of them.
+            sid = s.get("session_id")
+            meta = cli_by_id.get(sid)
+            if not meta or cli_id_counts[sid] != 1 or not is_cli_session_row_visible(meta):
+                return False
+            if not _profiles_match(meta.get("profile"), s.get("profile")):
+                return False
+            try:
+                return int(s.get("message_count") or 0) > 0
+            except (TypeError, ValueError):
+                return False
+
+        webui_sessions = [s for s in webui_sessions if _imported_copy_is_visible(s)]
         represented_webui_ids = set()
         for s in webui_sessions:
             represented_webui_ids.update(_session_lineage_ids(s))
@@ -3201,7 +3227,41 @@ def _build_session_list_cache_payload(
             diag_stage=diag_stage,
         )
         diag_stage("filter_webui_sessions")
-        webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
+        # #8141 + 2026-10-27 re-gate: display-only bucket derivation for
+        # parent-owned delegated children. CLI sessions are dropped from this
+        # payload entirely when the CLI bucket is hidden, so resolve the
+        # parent/lineage within the pre-filter rows first — a CLI-owned
+        # delegated child must follow its (hidden) CLI parent out of the
+        # WebUI bucket instead of being kept and counted as a WebUI
+        # conversation that can never render.
+        #
+        # The parent-lookup map is built PER PROFILE: these rows are still
+        # cross-profile here (profile scoping runs at profile_scope below), so
+        # one flat map let another profile's parent resolve — beta's orphan
+        # child inherited alpha's shared parent's CLI bucket and was filtered
+        # out of beta's own list, where master lists it (the default view on
+        # established installs). A parent in another profile is filtered out of
+        # this child's view anyway, so its bucket says nothing about where the
+        # child belongs — the same rule the parent_is_cli_session hint below
+        # follows. None/''/renamed-root aliases collapse onto one root group,
+        # mirroring _profiles_match.
+        _cli_off_rows_by_profile: dict[str, dict[str, dict]] = {}
+        for _row in webui_sessions:
+            if not (isinstance(_row, dict) and _row.get("session_id")):
+                continue
+            _profile_group = _sidebar_profile_group_key(_row.get("profile"))
+            _cli_off_rows_by_profile.setdefault(_profile_group, {})[
+                str(_row.get("session_id"))
+            ] = _row
+        webui_sessions = [
+            s for s in webui_sessions
+            if not _sidebar_display_is_cli(
+                s,
+                _cli_off_rows_by_profile.get(
+                    _sidebar_profile_group_key(s.get("profile")), {}
+                ),
+            )
+        ]
         # #4985 second pass — see _prune_orphaned_webui_zero_message_sessions
         # for the gate predicate and the post-#1171-survivor rationale. The
         # prune MUST run here too: established installs have
@@ -3274,30 +3334,78 @@ def _build_session_list_cache_payload(
     if exclude_hidden:
         archived_scoped = [s for s in archived_scoped if not s.get("default_hidden")]
         visible_scoped = [s for s in visible_scoped if not s.get("default_hidden")]
+    # #8141: display-only source-bucket derivation for parent-owned delegated
+    # children. Resolve the parent/lineage within this profile's FULL scoped
+    # payload (both buckets, archived included) so CLI-owned subagent children
+    # travel with — and attach under — their CLI parent instead of being
+    # counted as WebUI conversations that never render. This only decides the
+    # sidebar bucket/badge; raw source, read_only, and ownership flags are
+    # untouched (is_cli_session_row itself is NOT changed).
+    #
+    # The lookup map is built PER PROFILE, like the CLI-hidden map above: with
+    # All-profiles on, two profiles can hold the same session ids (a cloned
+    # profile or a copied state.db), and one flat map let beta's child resolve
+    # alpha's same-id parent and leave both tabs (#8245 release gate r1103).
+    _sidebar_scoped_rows_by_profile: dict[str, dict[str, dict]] = {}
+    for _row in [*archived_scoped, *visible_scoped]:
+        if not (isinstance(_row, dict) and _row.get("session_id")):
+            continue
+        _sidebar_scoped_rows_by_profile.setdefault(
+            _sidebar_profile_group_key(_row.get("profile")), {}
+        )[str(_row.get("session_id"))] = _row
+    # One verdict per row object for this request. It is also published on the
+    # response copies as ``sidebar_is_cli_session`` (below): the verdict is
+    # derived from the full scoped payload BEFORE source filtering and archive
+    # pagination, which the browser cannot reproduce when a parent sits on a
+    # later archive page (#8245 release gate r1103). Shared row dicts are not
+    # mutated; the flag only lands on the copies.
+    _sidebar_bucket_verdicts: dict[int, bool] = {}
+
+    def _sidebar_bucket_is_cli(row: dict) -> bool:
+        key = id(row)
+        verdict = _sidebar_bucket_verdicts.get(key)
+        if verdict is None:
+            verdict = _sidebar_display_is_cli(
+                row,
+                _sidebar_scoped_rows_by_profile.get(
+                    _sidebar_profile_group_key(row.get("profile")), {}
+                ),
+            )
+            _sidebar_bucket_verdicts[key] = verdict
+        return verdict
+
+    def _sidebar_row_with_bucket(row) -> dict:
+        if not isinstance(row, dict):
+            return {}
+        item = dict(row)
+        if row.get("session_id"):
+            item["sidebar_is_cli_session"] = bool(_sidebar_bucket_is_cli(row))
+        return item
+
     archived_webui_count = sum(
         1 for s in archived_scoped
-        if s.get("archived") and not _is_cli_session_for_settings(s)
+        if s.get("archived") and not _sidebar_bucket_is_cli(s)
     )
     archived_cli_count = sum(
         1 for s in archived_scoped
-        if s.get("archived") and _is_cli_session_for_settings(s)
+        if s.get("archived") and _sidebar_bucket_is_cli(s)
     )
     archived_count = archived_webui_count + archived_cli_count
     def _filter_sidebar_source(rows: list[dict]) -> list[dict]:
         if sidebar_source == "webui":
-            return [s for s in rows if not _is_cli_session_for_settings(s)]
+            return [s for s in rows if not _sidebar_bucket_is_cli(s)]
         if sidebar_source == "cli":
-            return [s for s in rows if _is_cli_session_for_settings(s)]
+            return [s for s in rows if _sidebar_bucket_is_cli(s)]
         return list(rows)
 
     full_scoped_all_sources = archived_scoped if include_archived else visible_scoped
     webui_session_count = sum(
         1 for s in full_scoped_all_sources
-        if not _is_cli_session_for_settings(s)
+        if not _sidebar_bucket_is_cli(s)
     )
     cli_session_count = sum(
         1 for s in full_scoped_all_sources
-        if _is_cli_session_for_settings(s)
+        if _sidebar_bucket_is_cli(s)
     )
     visible_scoped_filtered = _filter_sidebar_source(visible_scoped)
     archived_scoped_filtered = _filter_sidebar_source(archived_scoped)
@@ -3344,13 +3452,9 @@ def _build_session_list_cache_payload(
     _coerce_subagent_rows(scoped)
     _coerce_subagent_rows(sidebar_reference_sessions)
     return {
-        "sessions": [
-            dict(s) if isinstance(s, dict) else {}
-            for s in scoped
-        ],
+        "sessions": [_sidebar_row_with_bucket(s) for s in scoped],
         "sidebar_reference_sessions": [
-            dict(s) if isinstance(s, dict) else {}
-            for s in sidebar_reference_sessions
+            _sidebar_row_with_bucket(s) for s in sidebar_reference_sessions
         ],
         "cli_count": len(deduped_cli),
         "archived_count": archived_count,
@@ -12857,6 +12961,79 @@ def _normalize_sidebar_source_flags(session: dict) -> dict:
     normalized = dict(session)
     normalized["is_cli_session"] = is_cli_session_row(normalized)
     return normalized
+
+
+def _is_delegated_subagent_child(row: dict) -> bool:
+    """Return True for a parent-owned delegated ``delegate_task`` child row.
+
+    Delegated subagents are recorded in state.db with ``source='subagent'`` and
+    a non-continuation ``parent_session_id`` (``relationship_type``
+    ``'child_session'``). They are view-only work owned by the delegate runner
+    (#5307). This predicate is display-only: it derives a sidebar bucket and
+    never mutates the row's source/read-only flags or ``is_cli_session_row``.
+    """
+    if not isinstance(row, dict):
+        return False
+    if row.get("relationship_type") != "child_session":
+        return False
+    raw_source = str(
+        row.get("raw_source") or row.get("source_tag")
+        or row.get("session_source") or row.get("source") or ""
+    ).strip().lower()
+    return raw_source == "subagent"
+
+
+def _sidebar_profile_group_key(profile) -> str:
+    """Canonical profile group key for sidebar lineage scoping.
+
+    ``None``/empty and any renamed-root alias collapse onto one root group,
+    mirroring ``_profiles_match``'s coercion, so legacy rows tagged
+    ``'default'`` still resolve their parent after the root profile is
+    renamed. Used to keep a parent/lineage lookup inside one profile.
+    """
+    name = str(profile or "default") or "default"
+    if name == "default" or _is_root_profile(name):
+        return "default"
+    return name
+
+
+def _sidebar_display_is_cli(row: dict, rows_by_id: dict | None = None) -> bool:
+    """Display-only CLI bucket decision for a logical sidebar row (#8141).
+
+    A parent-owned delegated child travels with its resolved parent/lineage
+    within the same profile payload: CLI-owned children bucket CLI (and attach
+    under their CLI parent), WebUI-owned children stay WebUI. When the direct
+    parent cannot be resolved (missing parent, or rotated by compression), fall
+    back to the lineage root/tip and finally to the row's own
+    ``is_cli_session_row`` classification. Raw source, ``read_only``, and
+    ownership flags are never touched — this projection only decides which
+    sidebar bucket (and badge) a row is counted under.
+    """
+    if not isinstance(row, dict):
+        return False
+    if _is_delegated_subagent_child(row):
+        seen: set[str] = set()
+        current: dict = row
+        while _is_delegated_subagent_child(current):
+            parent_id = str(current.get("parent_session_id") or "").strip()
+            if not parent_id or parent_id in seen:
+                break
+            seen.add(parent_id)
+            parent = (rows_by_id or {}).get(parent_id)
+            if parent is None:
+                break
+            current = parent
+        if current is not row:
+            return _is_cli_session_for_settings(current)
+        # Rotation/compression fallback: the direct parent row may be gone, but
+        # the lineage root/tip can still derive the child's bucket.
+        for key in ("_parent_lineage_root_id", "_parent_lineage_tip_id"):
+            lineage_id = str(row.get(key) or "").strip()
+            if lineage_id and lineage_id in (rows_by_id or {}):
+                ancestor = (rows_by_id or {})[lineage_id]
+                if ancestor is not row:
+                    return _is_cli_session_for_settings(ancestor)
+    return _is_cli_session_for_settings(row)
 
 
 def _reconcile_session_detail_source_flags(session: dict, state_meta: dict) -> dict:
