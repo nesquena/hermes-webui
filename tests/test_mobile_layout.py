@@ -1141,7 +1141,8 @@ def test_composer_controls_switch_to_fit_stage_classes():
     shrink_rules = CSS[CSS.index(".composer-footer.cf-shrink"):CSS.index(".composer-footer.cf-burger .composer-left")]
     allowed_hidden = {
         ".composer-footer.cf-shrink .composer-divider{display:none;}",
-        ".composer-footer.cf-shrink #btnSavedPrompts{display:none!important;}",
+        ".composer-footer.cf-shrink #btnSavedPrompts,",
+        ".composer-footer.cf-shrink .saved-prompts-popup{display:none!important;}",
         ".composer-footer.cf-shrink .composer-profile-label,",
         ".composer-footer.cf-shrink .composer-profile-chevron,",
         ".composer-footer.cf-shrink #composerProfileLabel{display:none;}",
