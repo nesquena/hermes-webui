@@ -417,6 +417,10 @@ _ALLOWED = {
     ("profiles.py", "_profile_visible_from_meta"): "profile.yaml, not config.yaml",
     ("gateway_chat.py", "_config_url_may_belong_to_a_profile"): "reads ${VAR} reference NAMES of an operator config file (#8435)",
     ("gateway_chat.py", "_gateway_endpoint_for_profile"): "value reader: expands under its own explicit profile env (#8435)",
+    # #8690: provider identities are read UNEXPANDED; each ${VAR} is then judged by the Agent's
+    # own expander in the resolver's scope (a wildcard claim when that is unavailable).
+    ("config.py", "_provider_identity_sources"): "reads provider record NAMES unexpanded; a ${VAR} is judged by the Agent's expander (#8690)",
+    ("streaming.py", "_title_provider_name_ambiguous"): "reads the Agent profile's provider NAMES unexpanded for the title guard (#8690)",
 }
 
 
