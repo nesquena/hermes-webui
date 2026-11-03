@@ -20,11 +20,14 @@ import os
 import re
 import stat as stat_module
 from pathlib import Path
-from typing import Iterable
 
-# Python module docstring triple-quote (with optional leading whitespace).
+# Python module docstring triple-quote. Matched with ``.match`` against text
+# whose leading whitespace was stripped ONCE by the caller: a leading ``\s*``
+# here sat next to the optional prefix and a second ``\s*``, and on a
+# whitespace-only head the engine tried every split between the two runs
+# (quadratic: ~127 ms per 4 KiB head, holding the GIL; #8721).
 _PY_DOCSTRING_RE = re.compile(
-    r'^\s*(?:r|u|f|rf|fr)?\s*(?:"""|\'\'\')(.*?)(?:"""|\'\'\')',
+    r'(?:r|u|f|rf|fr)?\s*(?:"""|\'\'\')(.*?)(?:"""|\'\'\')',
     re.DOTALL,
 )
 # Leading shebang (only matches the first line; no capture).
@@ -34,6 +37,15 @@ _SH_COMMENT_BLOCK_RE = re.compile(r"^(#.*\n)+", re.MULTILINE)
 
 _SCRIPT_EXTS = {".py", ".sh"}
 _MAX_SCRIPT_BYTES = 256 * 1024  # 256 KiB cap per read
+# Listing work caps (#8721). Every described script costs an open, an fstat,
+# a 4 KiB read and a parse, so an agent that writes thousands of files into
+# scripts/ must not turn one panel refresh into unbounded work: at most
+# _MAX_LISTED_SCRIPTS are described. Walking a name is cheap with a lazy
+# scandir (a few microseconds), so the entry cap only stops a pathological
+# directory.
+# A listing cut short by either cap is reported with ``truncated: true``.
+_MAX_LIST_ENTRIES = 100000
+_MAX_LISTED_SCRIPTS = 1000
 
 
 def scripts_dir() -> Path:
@@ -120,6 +132,21 @@ def _base_open_flags() -> int:
     return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
 
 
+def _require_post_read_stat() -> None:
+    """Fail closed when the post-read containment check cannot run.
+
+    ``_still_sole_link`` looks the entry up with ``os.stat(dir_fd=...,
+    follow_symlinks=False)``. Without either capability it refuses every
+    script, so the listing must report the platform refusal through
+    ``unavailable`` rather than come back as a silent empty list (#7685's
+    rule; #8723 gate). Raises ``OSError`` like ``_base_open_flags``.
+    """
+    if os.stat not in os.supports_dir_fd:
+        raise OSError("os.stat(dir_fd=...) not supported; refusing scripts listing")
+    if os.stat not in os.supports_follow_symlinks:
+        raise OSError("os.stat(follow_symlinks=False) not supported; refusing scripts listing")
+
+
 def _leaf_open_flags() -> int:
     """Open flags for the scripts *leaf*.
 
@@ -189,9 +216,13 @@ def _open_script_for_read(base: Path, name: str) -> tuple[int, os.stat_result] |
         fst = os.fstat(file_fd)
         if not stat_module.S_ISREG(fst.st_mode):
             return None
-        # A hardlink out of the directory still has nlink > 1; nothing here
-        # can detect that, but the name is confined and the content is the
-        # user's own profile, so containment of the LOOKUP is what matters.
+        # Reject a hardlinked file (st_nlink > 1). Confining the LOOKUP is not
+        # enough: a multi-link name inside scripts/ can carry any inode the
+        # same OS user can reach (another profile's .env, say), and both the
+        # listing preview and /api/scripts/raw would serve it. Same rule as
+        # the wiki browser's allowlist and read path (#4375; #8721).
+        if fst.st_nlink > 1:
+            return None
         accepted = True
         return file_fd, fst
     except OSError:
@@ -206,6 +237,72 @@ def _open_script_for_read(base: Path, name: str) -> tuple[int, os.stat_result] |
             # The leaf was opened but then rejected: release it so it cannot
             # leak one descriptor per list request.
             _close_quietly(file_fd)
+
+
+def _still_sole_link(base: Path, name: str, fd: int) -> bool:
+    """Re-check containment AFTER the read, before anything is published.
+
+    The pre-open check in ``_open_script_for_read`` is a snapshot: a writer
+    that links an outside file in as ``scripts/name`` and unlinks that entry
+    between our ``open`` and ``fstat`` leaves the opened inode at link count 1,
+    so its outside contents passed (#8723 gate). After the read we require:
+
+    * the opened inode has exactly one link (0 means it was unlinked), and
+    * ``name`` in the scripts directory still names that same inode, with no
+      symlink followed.
+
+    Together these mean the inode's only name is the scripts entry, at the
+    moment of the check. Threat boundary: two syscalls cannot be made atomic,
+    so a concurrent writer with the SAME OS identity can still race between
+    them. Such a writer can read the file directly and could also move it
+    into scripts/, so this narrows the window rather than establishing a
+    boundary against it. Any error fails closed.
+    """
+    base_fd = -1
+    try:
+        _require_post_read_stat()
+        fst = os.fstat(fd)
+        if fst.st_nlink != 1:
+            return False
+        base_fd = os.open(base, _base_open_flags())
+        est = os.stat(name, dir_fd=base_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    finally:
+        if base_fd >= 0:
+            _close_quietly(base_fd)
+    return (
+        stat_module.S_ISREG(est.st_mode)
+        and est.st_dev == fst.st_dev
+        and est.st_ino == fst.st_ino
+    )
+
+
+def _bounded_script_names(base: Path, limit: int) -> tuple[list[str], bool]:
+    """Names of ``.py``/``.sh`` entries among at most ``limit`` directory entries.
+
+    ``Path.iterdir()`` is ``os.listdir()``, which materialises the whole
+    directory before yielding anything, so a cap applied to its output bounds
+    nothing (#8723 gate). ``os.scandir`` reads lazily; this consumes at most
+    ``limit`` entries plus one lookahead and reports whether it stopped early.
+    Permission and missing-directory errors fail closed as an empty listing,
+    as before.
+    """
+    names: list[str] = []
+    truncated = False
+    try:
+        with os.scandir(base) as it:
+            walked = 0
+            for entry in it:
+                walked += 1
+                if walked > limit:
+                    truncated = True
+                    break
+                if Path(entry.name).suffix.lower() in _SCRIPT_EXTS:
+                    names.append(entry.name)
+    except (PermissionError, FileNotFoundError, NotADirectoryError):
+        return [], False
+    return names, truncated
 
 
 def _close_quietly(fd: int) -> None:
@@ -308,7 +405,7 @@ def _read_description_bytes(raw: bytes, suffix: str) -> str:
     if suffix == ".py":
         # Skip shebang then look for the first triple-quoted string.
         head = _SHEBANG_RE.sub("", head, count=1)
-        m = _PY_DOCSTRING_RE.search(head)
+        m = _PY_DOCSTRING_RE.match(head.lstrip())
         if not m:
             return ""
         body = m.group(1).strip()
@@ -354,6 +451,8 @@ def list_scripts() -> dict:
     base = scripts_dir()
     out: list[dict] = []
     unavailable = ""
+    truncated = False
+    skipped_hardlinked = 0
     if base.is_dir():
         # Capability pre-check: without O_NOFOLLOW/O_DIRECTORY the directory
         # cannot be opened safely, so _open_script_for_read refuses EVERY
@@ -363,21 +462,42 @@ def list_scripts() -> dict:
         # known-empty answer; a refusal is an unknown one.
         try:
             _base_open_flags()
+            _require_post_read_stat()
         except OSError as exc:
             unavailable = str(exc)
         if not unavailable:
-            for entry in _safe_iterdir(base):
-                if entry.suffix.lower() not in _SCRIPT_EXTS:
-                    continue
+            # Collect candidate names first (bounded), then describe them in
+            # name order, so a listing cut short by the script cap shows the
+            # first scripts by name. If the ENTRY cap is hit, the candidates
+            # are only those among the entries walked, which depends on
+            # directory order; ``truncated`` says so either way.
+            names, truncated = _bounded_script_names(base, _MAX_LIST_ENTRIES)
+            names.sort(key=str.lower)
+            if len(names) > _MAX_LISTED_SCRIPTS:
+                truncated = True
+                names = names[:_MAX_LISTED_SCRIPTS]
+            candidates = [base / n for n in names]
+            for entry in candidates:
                 # Acquire a validated descriptor FIRST: no preview metadata
                 # is read from anything that is not a regular file pinned
                 # inside the scripts directory.
                 acquired = _open_script_for_read(base, entry.name)
                 if acquired is None:
+                    # Count refused hardlinks so a client can say why a script
+                    # is missing instead of showing a silent empty list. A
+                    # metadata-only lstat; nothing is read.
+                    try:
+                        lst = os.lstat(entry)
+                        if stat_module.S_ISREG(lst.st_mode) and lst.st_nlink > 1:
+                            skipped_hardlinked += 1
+                    except OSError:
+                        pass
                     continue
                 fd, st = acquired
                 try:
                     raw = _read_bounded(fd, 4096).content
+                    if not _still_sole_link(base, entry.name, fd):
+                        continue
                     out.append(
                         {
                             "name": entry.name,
@@ -396,6 +516,8 @@ def list_scripts() -> dict:
         "directory": str(base),
         "exists": base.is_dir(),
         "unavailable": unavailable,
+        "truncated": truncated,
+        "skipped_hardlinked": skipped_hardlinked,
     }
 
 
@@ -420,12 +542,18 @@ def read_script(name: str) -> dict | None:
     try:
         if st.st_size > _MAX_SCRIPT_BYTES:
             # Refuse to inline a multi-hundred-KiB script in the panel.
+            if not _still_sole_link(base, name, fd):
+                return None
             return {
                 "name": name,
                 "too_large": True,
                 "size": st.st_size,
             }
         res = _read_bounded(fd, _MAX_SCRIPT_BYTES)
+        # Nothing read from the descriptor is published until the entry is
+        # proven to still be this file's only name (#8723 gate).
+        if not _still_sole_link(base, name, fd):
+            return None
         if not res.ok:
             # A read that raised must surface as an error, not as an empty
             # "complete" script (#7685 finding 3).
@@ -450,11 +578,3 @@ def read_script(name: str) -> dict | None:
         }
     finally:
         _close_quietly(fd)
-
-
-def _safe_iterdir(base: Path) -> Iterable[Path]:
-    """Generator wrapper that fail-closes on permission errors."""
-    try:
-        yield from base.iterdir()
-    except (PermissionError, FileNotFoundError, NotADirectoryError):
-        return
