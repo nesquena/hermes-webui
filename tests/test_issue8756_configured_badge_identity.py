@@ -364,6 +364,39 @@ def test_typed_openrouter_alias_yields_one_configured_fallback(tmp_path, request
     ]
 
 
+@pytest.mark.parametrize("requested_provider", ["", "openrouter"], ids=["typed", "typed-with-provider"])
+def test_typed_alias_never_replaces_the_native_configured_id(tmp_path, requested_provider):
+    """Case B without the catalog row. The typed `openrouter/<vendor>/<model>`
+    alias keeps its extra `openrouter/` segment on the wire (the resolver strips
+    only `@openrouter:`), so it must not stand in for the configured
+    `anthropic/claude-sonnet-4.6`: Configured still offers the native id, once."""
+    fallback = _badge("openrouter")
+    data = _render(
+        tmp_path,
+        {
+            "groups": [
+                {
+                    "provider": "OpenRouter",
+                    "provider_id": "openrouter",
+                    "models": [{"id": "openai/gpt-other"}],
+                }
+            ],
+            "selectedValue": "openai/gpt-other",
+            "configuredBadges": {
+                "anthropic/claude-sonnet-4.6": fallback,
+                "@openrouter:anthropic/claude-sonnet-4.6": fallback,
+            },
+            "requested": "openrouter/anthropic/claude-sonnet-4.6",
+            "requestedProvider": requested_provider,
+        },
+    )
+
+    assert any(value.endswith("openrouter/anthropic/claude-sonnet-4.6") for value in data["options"])
+    assert [(row["id"], row["role"]) for row in data["configured"]] == [
+        ("anthropic/claude-sonnet-4.6", "fallback")
+    ]
+
+
 def test_providerless_legacy_badge_still_matches_vendor_spelling(tmp_path):
     """Case C: with no provider on the row or the badge, the legacy key still
     matches `openai/gpt-6.1-sol` to a `gpt-6.1-sol` badge."""

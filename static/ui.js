@@ -6066,8 +6066,21 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   return (entries||[]).some(existing=>{
     const entryProvider=_entryProvider(existing);
     if(provider&&entryProvider&&entryProvider!==provider) return false;
-    if(_showsSameEntry(existing)) return true;
     const identityProvider=provider||entryProvider;
+    // A typed or custom option (the ungrouped tail) is sent as typed, less only
+    // the `@provider:` routing prefix, so `openrouter/<vendor>/<model>` stays a
+    // different wire id from the configured `<vendor>/<model>`. Such a row never
+    // stands in for the native configured id: keep the synthesized native row,
+    // and the Configured section merges the two and prefers it.
+    if(identityProvider&&existing&&existing.groupKey==='__ungrouped__'){
+      const at=`@${identityProvider}:`;
+      const wire=(v)=>{
+        const s=String(v||'').trim().toLowerCase();
+        return (s.startsWith(at)?s.slice(at.length):s).replace(/-/g,'.');
+      };
+      if(wire(existing.value)===`${identityProvider}/${wire(modelId)}`) return false;
+    }
+    if(_showsSameEntry(existing)) return true;
     return _configuredModelIdentity(existing&&existing.value,identityProvider)
       ===_configuredModelIdentity(modelId,identityProvider);
   });
@@ -7028,7 +7041,12 @@ function renderModelDropdown(){
       }
       const candidatePriority=_configuredDisplayPriority(candidate);
       const existingPriority=_configuredDisplayPriority(existing);
-      if(candidatePriority>existingPriority){
+      // Same model, same priority: the shorter spelling carries fewer routing
+      // wrappers, so it is the native configured id rather than a typed alias.
+      const sameIdentityShorter=candidatePriority===existingPriority
+        &&_configuredModelKey(candidate)===_configuredModelKey(existing)
+        &&String(candidate.value||'').length<String(existing.value||'').length;
+      if(candidatePriority>existingPriority||sameIdentityShorter){
         configuredBySemanticKey.set(semanticKey,candidate);
       }
     }
