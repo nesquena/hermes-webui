@@ -1470,8 +1470,11 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
       const producer=typeof _newComposerProducerToken==='function'
         ? _newComposerProducerToken(`failed-send-${sid||'unknown'}`)
         : `failed-send-${sid||'unknown'}`;
+      // Write the visible textarea directly (the user must see the restored
+      // draft even if the ownership layer is not wired in this context) and let
+      // the composer ownership layer record the same state for its owner.
+      inp.value=restore;
       if(typeof _composerSetText==='function')_composerSetText(restore,restore,sid,producer,ownerProfile);
-      else inp.value=restore;
       // Mark the restored text as an identifiable continuation draft BEFORE the
       // user can act on it, so a one-key resend still carries the token.
       if(_restoreContId&&typeof _setRestoredGoalContinuationDraft==='function'){

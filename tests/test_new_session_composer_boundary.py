@@ -2786,7 +2786,7 @@ def test_immediate_draft_save_can_fail_closed_at_owner_boundary():
         (async () => {{
           let strictRejected = false;
           try {{
-            await _saveComposerDraftNow('strict-sid', 'draft', [], 'default', {{}});
+            await _saveComposerDraftNow('strict-sid', 'draft', [], 'default', {{rejectOnError:true}});
           }} catch (_) {{ strictRejected = true; }}
           let softResolved = false;
           await _saveComposerDraftNow('soft-sid', 'draft', [], 'default', {{}}).then(() => {{ softResolved = true; }});

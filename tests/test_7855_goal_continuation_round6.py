@@ -132,7 +132,7 @@ def test_the_failed_send_persist_passes_the_token() -> None:
     start = MESSAGES_JS.find("function _restoreComposerDraftAfterFailedSend(")
     assert start >= 0
     body = MESSAGES_JS[start : start + 9500]
-    assert "_saveComposerDraftNow(sid," in body, (
+    assert "_saveComposerDraftNow(" in body and "sid,persistedText" in body, (
         "the failed-send persist no longer calls the save helper"
     )
     # The 4th argument is the token, and it is conditional on the text being
