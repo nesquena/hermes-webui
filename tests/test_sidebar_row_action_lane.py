@@ -1,4 +1,4 @@
-"""A parent row whose child is running keeps the actions button off its badges.
+"""A row's actions button never sits on its badges, and never on a fork's kebab.
 
 A row's timestamp is the last flex item of ``.session-title-row`` and the
 ``margin-left:auto`` anchor that pins the badges (child count, lineage count,
@@ -14,10 +14,17 @@ Short relative stamps ("1m", "2h") are narrower than that 26px button, so the
 timestamp's box needs the button's width too, or the button pokes past it into
 whatever chip sits to its left.
 
+An EXPANDED parent adds a second collision: the button is centred on the whole
+block, so it lands on the first nested row — exactly where that row's own kebab
+is — and wins the hit test ("Pin conversation" pinned the parent). Reserving a
+gutter inside the nested lists fixes that but eats the fork's label at the
+180px sidebar minimum, so the parent's button is anchored to its own title row.
+
 The source-level tests pin the selectors and the renderer condition they mirror.
-The browser tests measure the real stylesheet on a row shaped like the
-renderer's output: nothing may move when the pointer enters the row, and the
-button may not intersect the badge or the chip left of the timestamp.
+The browser tests measure the real stylesheet on rows shaped like the
+renderer's output: nothing may move when the pointer enters a row or a children
+list expands, the button may not intersect the badge or the chip left of the
+timestamp, and a fork's kebab must belong to the fork.
 """
 import re
 from pathlib import Path
@@ -229,18 +236,61 @@ def test_short_timestamp_keeps_the_button_off_the_chip_left_of_it():
     )
 
 
-# ── An expanded parent must not steal its fork's kebab ──────────────────────
+# ── An expanded parent's trigger stays on its own title row ─────────────────
 # `.session-actions` is centred on the whole row (top:50%), so on an expanded
-# parent it lands on the first nested row, right on top of that row's own
-# button. The hit test then resolves to the parent, and "Pin conversation"
-# pins the parent instead of the fork. The lane has to be reserved on the
-# nested lists themselves: padding the parent would move its badge the moment
-# the list expands.
+# parent it lands on the first nested row, exactly where that row's own kebab
+# sits, and wins the hit test: hovering a fork's kebab and picking "Pin
+# conversation" pinned the PARENT. Padding the nested lists fixes the target
+# but eats the fork's label (at the 180px sidebar minimum the fork's own title
+# was left with zero content width), so the parent's trigger is anchored to its
+# title row instead. The scenes below are the renderer's real markup: the fork
+# rows carry `.session-child-session.session-child-session-fork`, their
+# `.session-child-session-state` slot and their own `.session-actions`.
 
-EXPANDED_SCENE = """
-<div class="sidebar" style="width:280px">
+
+def _fork_row(n, *, running=True):
+    state = " is-streaming" if running else ""
+    streaming = " streaming" if running else ""
+    return (
+        f'<div class="session-child-session session-child-session-fork{streaming}"'
+        f' id="fork{n}" data-sid="fork{n}">'
+        f'<button type="button" class="session-child-session-main" id="fork{n}-main"'
+        f' title="Open forked session">-&gt; Fork {n} that also fills the whole row - {n}m</button>'
+        f'<span class="session-state-indicator session-child-session-state{state}"'
+        f' aria-hidden="true"></span>'
+        f'<div class="session-actions"><button type="button" class="session-actions-trigger"'
+        f' id="fork{n}-k" aria-label="More">&middot;&middot;&middot;</button></div>'
+        f"</div>"
+    )
+
+
+def _expanded_scene(width, *, detailed=False, running=True, nested="children"):
+    """The renderer's real row markup, at a given sidebar width."""
+    meta = (
+        '<div class="session-meta">12 messages · 2 children · deepseek-v4</div>'
+        if detailed
+        else ""
+    )
+    if nested == "children":
+        kids = (
+            '<button type="button" class="session-child-session" id="plain-child">'
+            "-&gt; A plain child conversation row - 6m</button>"
+            + _fork_row(1, running=running)
+            + _fork_row(2, running=running)
+        )
+        kids_class = "session-child-sessions"
+    else:
+        kids = (
+            '<button type="button" class="session-lineage-segment" id="segment1">'
+            "-&gt; segment one - 4m</button>"
+            '<button type="button" class="session-lineage-segment" id="segment2">'
+            "-&gt; segment two - 3m</button>"
+        )
+        kids_class = "session-lineage-segments"
+    return f"""
+<div class="sidebar" style="width:{width}px">
   <div class="session-list">
-    <div class="session-item" id="parent">
+    <div class="session-item" id="parent" data-sid="parent">
       <div class="session-text">
         <div class="session-title-row">
           <div class="session-title-group">
@@ -250,61 +300,83 @@ EXPANDED_SCENE = """
           <span class="session-child-count">2 children</span>
           <span class="session-time">5m</span>
         </div>
-        <div class="session-child-sessions" id="kids">
-          <div class="session-child-session-fork" id="fork1">
-            <button type="button" class="session-child-session-main">-&gt; Fork one that also fills the row - 4m</button>
-            <div class="session-actions"><button type="button" class="session-actions-trigger" id="fork1-k">k</button></div>
-          </div>
-          <div class="session-child-session-fork" id="fork2">
-            <button type="button" class="session-child-session-main">-&gt; Fork two - 3m</button>
-            <div class="session-actions"><button type="button" class="session-actions-trigger" id="fork2-k">k</button></div>
-          </div>
+        {meta}
+        <div class="{kids_class}" id="kids">
+          {kids}
         </div>
       </div>
-      <div class="session-actions" id="parent-actions"><button type="button" class="session-actions-trigger" id="parent-k">k</button></div>
+      <div class="session-actions" id="parent-actions"><button type="button" class="session-actions-trigger" id="parent-k" aria-label="More">&middot;&middot;&middot;</button></div>
     </div>
   </div>
 </div>
 """
 
-# Who owns the box at each kebab's centre, and does the parent's title row stay
-# put when the children list is expanded? The click counter answers the
-# reviewer's question directly: a click at the fork kebab must reach the FORK.
+
+# Who owns the box at each kebab's centre, how wide is the first fork's label,
+# and does the parent's trigger still reach into the fork's? The click log
+# answers the reviewer's question directly: a click at the fork kebab must
+# reach the FORK. The badge/title rects are sampled with the nested list
+# visible and hidden, to prove expanding moves nothing.
 EXPANDED_MEASURE = """() => {
   window.__clicks = [];
-  for (const b of document.querySelectorAll('.session-actions-trigger')) {
+  for (const b of document.querySelectorAll(
+      '.session-actions-trigger, .session-child-session-main, .session-lineage-segment')) {
     b.addEventListener('click', () => {
       const fork = b.closest('.session-child-session-fork');
-      window.__clicks.push(fork ? fork.id : 'parent');
+      if (fork && b.classList.contains('session-actions-trigger')) { window.__clicks.push(fork.id); return; }
+      if (b.id) { window.__clicks.push(b.id); return; }
+      window.__clicks.push(b.className);
     });
   }
-  const rect = (el) => { const b = el.getBoundingClientRect();
-    return {left: b.left, right: b.right, top: b.top, bottom: b.bottom}; };
+  const rect = (el) => { const b = el ? el.getBoundingClientRect() : {left:0,right:0,top:0,bottom:0,width:0,height:0};
+    return {left: b.left, right: b.right, top: b.top, bottom: b.bottom, width: b.width, height: b.height}; };
+  const overlap = (a, b) => !(a.right <= b.left + 0.01 || a.left >= b.right - 0.01
+    || a.bottom <= b.top + 0.01 || a.top >= b.bottom - 0.01);
   const owner = (el) => {
+    if (!el) return null;
     const b = el.getBoundingClientRect();
     const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
-    if (!hit || !hit.closest('.session-actions')) return null;
+    if (!hit) return null;
     const fork = hit.closest('.session-child-session-fork');
-    return fork ? fork.id : 'parent';
+    if (fork) return fork.id;
+    const child = hit.closest('.session-child-session');
+    if (child) return child.id || 'child-row';
+    const seg = hit.closest('.session-lineage-segment');
+    if (seg) return seg.id;
+    if (hit.closest('.session-item')) return 'parent';
+    return hit.id || hit.className || hit.tagName;
   };
+  const actions = document.getElementById('parent-actions');
+  const pa = rect(actions);
   const fork1 = document.getElementById('fork1-k');
-  const fork2 = document.getElementById('fork2-k');
-  const parentBtn = document.getElementById('parent-k');
+  const f1 = rect(fork1);
+  const kids = document.getElementById('kids');
   const badge = document.querySelector('.session-child-count');
   const titleGroup = document.querySelector('.session-title-group');
-  const kids = document.getElementById('kids');
+  const titleRow = document.querySelector('#parent .session-title-row');
   const expanded = {badge: rect(badge), titleGroup: rect(titleGroup)};
   kids.style.display = 'none';
   const collapsed = {badge: rect(badge), titleGroup: rect(titleGroup)};
   kids.style.display = '';
-  const f1 = rect(fork1);
+  const main = document.getElementById('fork1-main');
+  const mainStyle = main && getComputedStyle(main);
   return {
-    fork1Owner: owner(fork1),
-    fork2Owner: owner(fork2),
-    parentOwner: owner(parentBtn),
+    parentActions: pa,
+    parentActionsDisplay: getComputedStyle(actions).display,
+    parentActionsCentre: (pa.top + pa.bottom) / 2,
+    titleRow: rect(titleRow),
+    titleRowCentre: (rect(titleRow).top + rect(titleRow).bottom) / 2,
     fork1Trigger: f1,
-    parentActions: rect(document.getElementById('parent-actions')),
-    kidsPaddingRight: parseFloat(getComputedStyle(kids).paddingRight),
+    fork1Owner: owner(fork1),
+    parentOwner: owner(document.getElementById('parent-k')),
+    plainChildOwner: owner(document.getElementById('plain-child')),
+    segmentOwner: owner(document.getElementById('segment1')),
+    parentTriggerOverFork: overlap(pa, f1),
+    fork1MainWidth: main ? rect(main).width : 0,
+    fork1MainContent: main
+      ? rect(main).width - parseFloat(mainStyle.paddingLeft) - parseFloat(mainStyle.paddingRight)
+      : 0,
+    nestedPaddingRight: parseFloat(getComputedStyle(kids).paddingRight),
     expanded: expanded,
     collapsed: collapsed,
     fork1Centre: {x: (f1.left + f1.right) / 2, y: (f1.top + f1.bottom) / 2},
@@ -312,70 +384,242 @@ EXPANDED_MEASURE = """() => {
 }"""
 
 
-def _measure_expanded_parent():
+TOUCH_MEASURE = """() => {
+  const hitCentre = (el) => {
+    if (!el) return null;
+    const b = el.getBoundingClientRect();
+    const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+    if (!hit) return null;
+    const fork = hit.closest('.session-child-session-fork');
+    if (fork) return fork.id;
+    const child = hit.closest('.session-child-session');
+    if (child) return child.id || 'child-row';
+    if (hit.closest('.session-item')) return 'parent';
+    return hit.id || hit.className || hit.tagName;
+  };
+  const parentActions = document.getElementById('parent-actions');
+  const forkActions = document.querySelector('#fork1 .session-actions');
+  const box = parentActions.getBoundingClientRect();
+  return {
+    parentActionsDisplay: getComputedStyle(parentActions).display,
+    parentActionsWidth: box.width,
+    forkActionsDisplay: forkActions ? getComputedStyle(forkActions).display : null,
+    forkMainOwner: hitCentre(document.getElementById('fork1-main')),
+    plainChildOwner: hitCentre(document.getElementById('plain-child')),
+    nestedPaddingRight: parseFloat(getComputedStyle(document.getElementById('kids')).paddingRight),
+  };
+}"""
+
+
+def _measure_expanded(width=280, *, detailed=False, running=True, nested="children",
+                      touch=False, click=False):
     pw = pytest.importorskip("playwright.sync_api")
     with pw.sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         try:
-            page = browser.new_page(viewport={"width": 1280, "height": 800})
-            page.set_content(EXPANDED_SCENE)
+            if touch:
+                context = browser.new_context(
+                    viewport={"width": 390, "height": 844}, has_touch=True, is_mobile=True
+                )
+            else:
+                context = browser.new_context(viewport={"width": 1280, "height": 800})
+            page = context.new_page()
+            page.set_content(
+                _expanded_scene(width, detailed=detailed, running=running, nested=nested)
+            )
             page.add_style_tag(path=str(REPO / "static" / "style.css"))
             page.wait_for_timeout(100)
-            page.hover("#fork1")
+            if touch:
+                measured = page.evaluate(TOUCH_MEASURE)
+                context.close()
+                return measured
+            # The pointer enters the first nested row, which also means it is
+            # inside the parent: this is the state in which both triggers used
+            # to sit on the same spot.
+            page.hover("#fork1" if nested == "children" else "#segment1")
             page.wait_for_timeout(80)
             measured = page.evaluate(EXPANDED_MEASURE)
-            # A real pointer click at the fork kebab's centre: only the fork's
-            # own trigger may receive it (this is the "pins the fork" check).
-            page.mouse.click(measured["fork1Centre"]["x"], measured["fork1Centre"]["y"])
-            page.wait_for_timeout(80)
-            measured["clicks"] = page.evaluate("() => window.__clicks")
+            if click:
+                page.mouse.click(
+                    measured["fork1Centre"]["x"], measured["fork1Centre"]["y"]
+                )
+                page.wait_for_timeout(80)
+                measured["clicks"] = page.evaluate("() => window.__clicks")
+            context.close()
             return measured
         finally:
             browser.close()
 
 
-def test_nested_lists_reserve_the_parents_action_lane():
-    block = _hover_media_block()
-    for selector in (".session-child-sessions", ".session-lineage-segments"):
-        assert re.search(
-            r"[^{}]*" + re.escape(selector) + r"[^{}]*\{[^{}]*padding-right:40px", block
-        ), (
-            f"{selector} must reserve the 40px lane: an expanded parent's button is "
-            "centred on the block and lands on the first nested row's own button"
+def _is_expanded_anchor(selector):
+    flat = " ".join(re.sub(r"/\*.*?\*/", " ", selector, flags=re.S).split())
+    return (
+        ".session-item:has(> .session-text > :is(" in flat
+        and ".session-child-sessions,.session-lineage-segments)) > .session-actions" in flat
+    )
+
+
+def test_nested_lists_take_no_lane_from_the_fork_label():
+    offenders = [
+        selector
+        for selector, body in RULES
+        if any(
+            marker in selector
+            for marker in (".session-child-sessions", ".session-lineage-segments")
         )
+        and "padding-right" in body
+    ]
+    assert not offenders, (
+        "a nested list reserves a lane for the parent's button: at the 180px "
+        "sidebar minimum that leaves the fork's own label with no content "
+        "width. Anchor the parent's button to its title row instead: "
+        + "; ".join(offenders)
+    )
+
+
+def test_an_expanded_parents_trigger_is_anchored_to_its_title_row():
+    anchor = [body for selector, body in RULES if _is_expanded_anchor(selector)]
+    assert anchor, (
+        "no rule anchors an expanded parent's button to its own title row: "
+        "centred on the block it lands on the first nested row's kebab"
+    )
+    body = anchor[0]
+    assert "top:auto" in body and "bottom:auto" in body, (
+        "the anchored button must take its static position (the row's "
+        "content-box top, where the title row starts) instead of restating a "
+        "row padding: " + body
+    )
+    assert re.search(r"transform:translateY\(calc\(\.5lh - 50%\)\)", body), (
+        "the button must be centred on the title row's own line box (`lh`), so "
+        "skins and both sidebar densities follow: " + body
+    )
+    assert not re.search(r"\d+px", body), (
+        "no hard-coded pixel offset in the anchor — it does not survive the "
+        "other densities and skins: " + body
+    )
 
 
 def test_a_forks_kebab_opens_the_forks_menu_and_not_its_parents():
-    m = _measure_expanded_parent()
+    m = _measure_expanded(280, click=True)
 
     assert m["fork1Owner"] == "fork1", (
         "a click at the first fork's kebab resolves to "
-        f"{m['fork1Owner']!r}: the parent's button is still over the fork row"
-    )
-    assert m["fork2Owner"] == "fork2", f"the second fork's kebab resolves to {m['fork2Owner']!r}"
-    assert m["parentOwner"] == "parent", (
-        f"the parent's own kebab resolves to {m['parentOwner']!r}"
+        f"{m['fork1Owner']!r}: the parent's button is over the fork row"
     )
     assert m["clicks"] == ["fork1"], (
         f"the pointer click at the fork kebab reached {m['clicks']!r}, not the fork"
     )
-    # The lane is what makes the hit test land on the fork: the nested button
-    # has to end left of the parent's button.
-    assert m["fork1Trigger"]["right"] <= m["parentActions"]["left"], (
-        "the fork's button still overlaps the parent's: fork ends at "
-        f"{m['fork1Trigger']['right']}, parent starts at {m['parentActions']['left']}"
+    assert m["parentOwner"] == "parent", (
+        f"the parent's own kebab resolves to {m['parentOwner']!r}"
     )
+    assert not m["parentTriggerOverFork"], (
+        "the parent's trigger still reaches the fork's: parent "
+        f"{m['parentActions']}, fork {m['fork1Trigger']}"
+    )
+    # The separation is vertical now: the parent's button sits on its title
+    # row, not on the first nested row.
+    assert m["parentActionsCentre"] == pytest.approx(m["titleRowCentre"], abs=0.6), (
+        "the parent's button is not centred on its title row: button centre "
+        f"{m['parentActionsCentre']}, title row centre {m['titleRowCentre']}"
+    )
+
+
+def test_the_anchored_trigger_holds_at_the_detailed_density():
+    compact = _measure_expanded(280)
+    detailed = _measure_expanded(280, detailed=True)
+
+    for label, m in (("compact", compact), ("detailed", detailed)):
+        assert m["parentActionsCentre"] == pytest.approx(m["titleRowCentre"], abs=0.6), (
+            f"{label}: the button is not centred on its title row "
+            f"({m['parentActionsCentre']} vs {m['titleRowCentre']})"
+        )
+        assert not m["parentTriggerOverFork"], (
+            f"{label}: the parent's trigger reaches the fork's kebab"
+        )
+        assert m["fork1Owner"] == "fork1", (
+            f"{label}: the fork kebab resolves to {m['fork1Owner']!r}"
+        )
+
+
+def test_minimum_sidebar_width_keeps_the_fork_label_readable():
+    # 180px is the sidebar's supported minimum (boot.js resize floor). With a
+    # running child the parent's hidden timestamp reserves 40px, and the fork
+    # row adds its own indentation, state slot and trigger: the label must
+    # still get room.
+    for detailed in (False, True):
+        m = _measure_expanded(180, detailed=detailed, running=True)
+        label = "detailed" if detailed else "compact"
+        assert m["nestedPaddingRight"] == pytest.approx(0, abs=0.05), (
+            f"{label}: the nested list still reserves {m['nestedPaddingRight']}px"
+        )
+        assert m["fork1MainContent"] > 16, (
+            f"{label}: at the 180px minimum the fork's title is left with "
+            f"{m['fork1MainContent']}px of content width (button "
+            f"{m['fork1MainWidth']}px): its label is unreadable"
+        )
+        assert not m["parentTriggerOverFork"], (
+            f"{label}: at 180px the parent's trigger reaches the fork's kebab: "
+            f"parent {m['parentActions']}, fork {m['fork1Trigger']}"
+        )
+        assert m["fork1Owner"] == "fork1", (
+            f"{label}: at 180px the first fork's kebab resolves to {m['fork1Owner']!r}"
+        )
+        assert m["plainChildOwner"] == "plain-child", (
+            f"{label}: the plain child row's centre resolves to "
+            f"{m['plainChildOwner']!r}, not the row"
+        )
 
 
 def test_expanding_the_children_does_not_move_the_parents_badge():
-    m = _measure_expanded_parent()
+    m = _measure_expanded(280)
 
-    assert m["kidsPaddingRight"] == pytest.approx(40, abs=0.05), (
-        "the nested list must hold the 40px lane on a hover-capable pointer; got "
-        f"{m['kidsPaddingRight']}px"
+    assert m["nestedPaddingRight"] == pytest.approx(0, abs=0.05), (
+        f"the nested list reserves {m['nestedPaddingRight']}px — that is the "
+        "gutter that used to be taken out of the fork's label"
     )
     for key in ("badge", "titleGroup"):
-        assert m["expanded"][key]["left"] == pytest.approx(m["collapsed"][key]["left"], abs=0.05), (
+        assert m["expanded"][key]["left"] == pytest.approx(
+            m["collapsed"][key]["left"], abs=0.05
+        ), (
             f"the parent's {key} moved when the children list expanded: "
             f"{m['collapsed'][key]['left']} -> {m['expanded'][key]['left']}"
         )
+        assert m["expanded"][key]["width"] == pytest.approx(
+            m["collapsed"][key]["width"], abs=0.05
+        ), f"the parent's {key} changed width when the children list expanded"
+
+
+def test_lineage_segments_keep_the_parents_trigger_off_the_first_segment():
+    for width in (280, 180):
+        m = _measure_expanded(width, nested="lineage", running=False)
+        assert m["segmentOwner"] == "segment1", (
+            f"{width}px: the first lineage segment's centre resolves to "
+            f"{m['segmentOwner']!r}"
+        )
+        assert m["parentActionsCentre"] == pytest.approx(m["titleRowCentre"], abs=0.6), (
+            f"{width}px: the parent's trigger is not on its title row with a "
+            "lineage segment list open"
+        )
+
+
+def test_touch_layout_hides_the_parents_trigger_so_it_cannot_intercept():
+    m = _measure_expanded(180, running=True, touch=True)
+
+    assert m["parentActionsDisplay"] == "none", (
+        "on a touch-primary layout the actions button must stay display:none "
+        f"(got {m['parentActionsDisplay']!r}): a tap on a nested row would "
+        "otherwise land on the parent's button"
+    )
+    assert m["forkActionsDisplay"] == "none", (
+        "the fork's own actions button is expected to be hidden on a "
+        f"touch-primary layout too (got {m['forkActionsDisplay']!r})"
+    )
+    assert m["forkMainOwner"] == "fork1", (
+        f"a tap on the first fork's title resolves to {m['forkMainOwner']!r}"
+    )
+    assert m["plainChildOwner"] == "plain-child", (
+        f"a tap on the plain child row resolves to {m['plainChildOwner']!r}"
+    )
+    assert m["nestedPaddingRight"] == pytest.approx(0, abs=0.05), (
+        f"the nested list reserves {m['nestedPaddingRight']}px on touch"
+    )

@@ -1758,20 +1758,24 @@
        button parked at right:6px; the timestamp's box is what keeps the
        button off the chips, so give it the button's width. */
     .session-time{min-width:26px;}
-    /* An EXPANDED parent's button is centred on the whole block
-       (.session-actions, top:50%), so on the first nested row it sits exactly
-       where that row's own button sits and wins the hit test: hovering the
-       fork's kebab and picking "Pin conversation" pinned the PARENT. Master
-       only dodged this because its hover padding narrowed the nested rows by
-       32px. Reserve the same lane inside the nested lists instead, so they
-       render already clear of the parent's button: the parent's own title row
-       and "N children" badge never move, which is what a
-       `.session-item:has(> .session-text > ...)` padding rule on the parent
-       costs (clicking the badge then shifts what sits under the pointer). */
-    .session-child-sessions,.session-lineage-segments{padding-right:40px;}
   }
   /* ── Session action trigger + dropdown ── */
   .session-actions{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .15s ease;}
+  /* An EXPANDED parent's button belongs on its own title row. Centred on the
+     whole block (top:50% above) it lands on the first nested row, exactly
+     where that row's own button sits, and wins the hit test: hovering a fork's
+     kebab and picking "Pin conversation" pinned the PARENT. A 40px gutter
+     inside the nested lists fixes the target but eats the fork's own label —
+     at the 180px sidebar minimum the fork's title had no content width left —
+     so anchor the parent's button to the title row instead.
+     `top`/`bottom` stay `auto`: the button's static position is the flex
+     content-box top, i.e. where the title row starts, so no padding value has
+     to be restated. The translate then moves it up by (half its own height -
+     half one title line), centring it on the title row; `lh` is the title's
+     inherited line box, so it follows every skin and both sidebar densities
+     instead of pinning one row height. The nested lists are never padded, so
+     nothing moves when the children expand or the pointer enters. */
+  .session-item:has(> .session-text > :is(.session-child-sessions,.session-lineage-segments)) > .session-actions{top:auto;bottom:auto;transform:translateY(calc(.5lh - 50%));}
   .session-item:hover .session-actions,.session-item:has(:focus-visible) .session-actions,.session-item.menu-open .session-actions{opacity:1;pointer-events:auto;}
   .session-item.streaming:not(:hover):not(:has(:focus-visible)):not(.menu-open) .session-actions,.session-item.unread:not(:hover):not(:has(:focus-visible)):not(.menu-open) .session-actions{opacity:0;pointer-events:none;}
   .session-actions-trigger{width:26px;height:26px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer;padding:0;line-height:1;display:inline-flex;align-items:center;justify-content:center;transition:background .12s,color .12s,border-color .12s;}
