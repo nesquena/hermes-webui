@@ -30,6 +30,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 
 _IMAGE_TYPES = {"image", "image_url", "input_image"}
 # Pinned independently of upstream WebUI releases. Bump only with a regression
@@ -100,6 +101,36 @@ def _is_inline_image_part(part) -> bool:
 
 
 _MASK = "<inline-image>"
+
+# A run long enough to be a stored image payload rather than prose that merely
+# mentions the scheme. Real snippets carry ~4,000-char previews; the minimum
+# keeps ordinary discussion of data URLs untouched.
+_MIN_INLINE_B64 = 256
+
+_INLINE_DATA_URL_RE = re.compile(
+    r"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]{%d,}" % _MIN_INLINE_B64
+)
+
+
+def _mask_inline_string(value):
+    """Replace base64 runs inside a bare string, keeping all other text verbatim.
+
+    Returns the masked string, or None when there is nothing to replace.
+
+    Only the matched data URL is substituted; the surrounding characters are
+    preserved exactly. A captured tool-call ``snippet`` can hold a Python
+    ``repr`` of the provider payload -- single-quoted, not valid JSON -- so it
+    must never be reparsed and reserialized here: doing so would rewrite the
+    captured record and its escaping. A targeted substitution is both safer and
+    sufficient, because the bytes are what must be bounded.
+    """
+    if "data:image/" not in value.lower():
+        return None
+    masked, count = _INLINE_DATA_URL_RE.subn(_MASK, value, count=1)
+    if not count:
+        # The substring is present but no run is long enough to be a payload.
+        return None
+    return masked
 
 
 def _mask_inline_payload(part):
@@ -242,6 +273,23 @@ def _project_nested(value, digest, path):
                     out = list(value)
                 out[index] = new_item
         return (value if out is None else out), out is not None
+    if isinstance(value, str):
+        # A bare string that itself carries inline image bytes. This is the
+        # captured tool-call ``snippet`` lane: a vision tool records a preview
+        # holding the data URL directly while its ``args`` point at a disk path,
+        # so the dict/list branches above never reach it. Real session
+        # 24748c2f63ab.json held 17 such snippets = 57,303 base64 chars that
+        # survived migration untouched.
+        #
+        # Only the base64 RUN is replaced; every surrounding character is kept
+        # verbatim. That matters because a snippet may hold a Python ``repr`` of
+        # the provider payload (single quotes, not JSON), which must not be
+        # reparsed or reserialized -- reformatting it would silently rewrite the
+        # captured record.
+        masked = _mask_inline_string(value)
+        if masked is not None:
+            _update_part_digest(digest, {"type": "text", "text": _MASK}, value, path)
+            return masked, True
     return value, False
 
 

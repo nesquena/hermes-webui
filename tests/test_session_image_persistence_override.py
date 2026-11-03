@@ -837,3 +837,50 @@ def test_path_encoder_is_injective_on_adversarial_keys():
 
     # Identical paths must still encode identically.
     assert enc(("k", "a"), ("i", 1)) == enc(("k", "a"), ("i", 1))
+
+
+def test_captured_tool_snippet_string_bytes_are_bounded(session_dir):
+    """A tool-call `snippet` holds the data URL inside a plain STRING.
+
+    Real session 24748c2f63ab.json carried 17 `vision_analyze` snippets, each a
+    4,000-char Python ``repr`` of the provider payload holding a base64 data URL,
+    while `args` pointed at a disk path. The dict and list branches of the
+    nested projector never reach a bare string, so 57,303 base64 chars survived
+    migration untouched.
+    """
+    url = _data_url(b"S" * 3_000)
+    snippet = (
+        "{'_multimodal': True, 'content': [{'type': 'text', 'text': 'look'}, "
+        "{'type': 'image_url', 'image_url': {'url': '" + url + "'}}]}"
+    )
+    row = {
+        "role": "assistant", "content": "p", "timestamp": 21.0, "_partial": True,
+        "_partial_tool_calls": [
+            {"name": "vision_analyze", "args": {"image_url": "/tmp/x.jpg"},
+             "snippet": snippet, "done": False},
+        ],
+    }
+    session = Session(session_id="snippet", messages=[row])
+    session.save(touch_updated_at=False)
+
+    text = (session_dir / "snippet.json").read_text()
+    assert "data:image" not in text, "snippet base64 reached disk"
+
+    kept = json.loads(text)["messages"][0]["_partial_tool_calls"][0]
+    # Non-payload text is preserved verbatim: the repr's quoting and structure
+    # must survive, because it is a captured record, not a JSON document.
+    masked = kept["snippet"]
+    assert masked.startswith("{'_multimodal': True, 'content': [{'type': 'text', 'text': 'look'},")
+    assert masked.endswith("'image_url': {'url': '<inline-image>'}}]}")
+    assert kept["name"] == "vision_analyze"
+    assert kept["args"] == {"image_url": "/tmp/x.jpg"}
+
+
+def test_short_data_url_mention_is_not_masked():
+    """A string merely mentioning `data:image/` in prose must be left alone."""
+    from api.session_image_persistence_override import _mask_inline_string
+
+    prose = "The payload looked like data:image/png;base64,AAAA and that was it."
+    assert _mask_inline_string(prose) is None
+    # A JSON *part list* string is handled by the part-lane projector, not here.
+    assert _mask_inline_string(json.dumps([_openai_part(_data_url(b"x" * 300))])) is not None
