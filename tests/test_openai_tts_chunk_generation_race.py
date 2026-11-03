@@ -118,6 +118,8 @@ let _ttsChunkIndex = 0;
 let _ttsActiveBtn = null;
 let _playingEdgeAudio = null;
 let _ttsAudioCtx = null;
+// #6541: in-flight /api/tts AbortControllers (see _sendTtsRequest).
+let _ttsPendingAborts = null;
 
 // ---- stand-ins for the boot.js voice-mode closure ----
 let _voiceModeActive = false;
@@ -249,6 +251,7 @@ const window = {
 
 eval(['_splitForTTS', '_stripForTTS', '_beginTtsPlayback', '_ownsTtsPlayback', '_noteTtsRequestSent',
   '_ttsRequestWaitMs', '_acquireTtsRequestSlot', '_sendTtsRequest', '_stopActivePlaybackAudio',
+  '_abortPendingTtsRequests', '_newTtsAbortController', '_trackTtsAbort', '_releaseTtsAbort',
   '_getTtsAudioCtx', '_playAudioBuf', '_playOpenaiTts', '_playEdgeTtsChunked', '_playElevenLabsTts',
   'speakMessage', 'autoReadLastAssistant', 'stopTTS']
   .map((n) => extractFunction(ui, n)).join('\n'));
@@ -280,7 +283,7 @@ const rateLimitedResp = () => Promise.resolve({ ok: false, status: 429, json: ()
 function resetState(){
   _ttsSpeaking = false; _ttsGeneration = 0; _ttsRequestMinGapMs = 200; _ttsLastRequestTs = 0;
   _ttsCurrentUtterance = null; _ttsChunkQueue = []; _ttsChunkIndex = 0; _ttsActiveBtn = null;
-  _playingEdgeAudio = null; _ttsAudioCtx = null;
+  _playingEdgeAudio = null; _ttsAudioCtx = null; _ttsPendingAborts = null;
   _voiceModeActive = false; _voiceModeState = 'idle'; _voiceModeThinkingSid = null;
   _voiceTtsGenStart = 0;
   if (_voiceMicRearmTimer) { clearTimeout(_voiceMicRearmTimer); _voiceMicRearmTimer = null; }

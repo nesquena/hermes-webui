@@ -357,7 +357,12 @@ def test_unknown_role_schema_emits_null_not_total():
     """#7681 finding 2: when the messages table has no ``role`` column the
     public count must be NULL ("unknown"), not the total message count."""
     src = _read_agent_sessions_py()
-    branch = src[src.index("if 'role' in message_cols:") :]
+    # Scope the guard to the NO-ROLE branch itself. Upstream master adds a
+    # Desktop-only positive-message fallback to the role-PRESENT branch (a
+    # role column exists but every value is NULL), which legitimately derives
+    # from a total row count there; the no-role branch must still emit NULL
+    # and never derive from a total.
+    branch = src[src.index("# No ``role`` column: roles are unavailable") :]
     branch = branch[: branch.index("last_activity_expr =")]
     assert 'user_message_count_expr = "NULL"' in branch, (
         "the no-role branch must emit NULL for the public user-turn count "

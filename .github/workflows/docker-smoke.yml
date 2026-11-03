@@ -54,6 +54,16 @@ on:
 permissions:
   contents: read
 
+# One run per pull request per workflow: a new push to a PR cancels this workflow's run for
+# the superseded head, queued or in progress, so a burst of PR updates does not hold every
+# later run in the shared runner queue. Only a PR run's FIRST attempt joins the PR group: a
+# re-run keeps its original (possibly superseded) head and must never cancel or replace the
+# latest head's run. Re-runs, pushes to master, tag pushes and manual dispatches get a unique
+# group (the run id), so they are never cancelled or held back.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.run_attempt == '1' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == '1' }}
+
 jobs:
   compose-config:
     name: Compose config validation
