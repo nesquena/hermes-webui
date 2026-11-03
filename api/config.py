@@ -4259,10 +4259,18 @@ def _agent_expanded_text(value: object) -> str | None:
     """String ``value`` as the installed Agent's ``load_config()`` expands it here, else None.
 
     Calls the Agent's own expander (``hermes_cli.config._expand_env_vars``: ``${VAR}`` /
-    ``${env:VAR}`` from the current profile secret scope, else the process env; an unset
-    or non-env reference stays verbatim), in the same worker or request context as the
-    Agent's resolver, so a record is judged by the value that resolver sees. None when
-    the expander is unavailable or fails: callers keep their fail-closed reading.
+    ``${env:VAR}`` from the bound profile secret scope; an unset or non-env reference
+    stays verbatim), and only while an Agent profile secret scope
+    (``agent.secret_scope.current_secret_scope()``) is bound. WebUI binds one only inside
+    ``profiles.profile_env_for_background_worker`` for a NAMED profile: the chat route's
+    connection-bundle helpers (``streaming._resolve_runtime_connection_bundle`` and the
+    model-alias variant, via ``profile_scope_for_detached_worker(<session profile>)``) and
+    the title, compression and checkpoint workers. With no scope bound (every route of the
+    default/root profile, chat and title included, and any resolution without a session
+    profile) this returns None, so a templated name claims every name and a templated
+    ``enabled`` flag keeps its record claiming: fail closed, even where the Agent's own
+    resolver would expand the value from the process env. None as well when the expander
+    is unavailable or fails: callers keep their fail-closed reading.
     """
     try:
         from agent.secret_scope import current_secret_scope
@@ -4272,6 +4280,8 @@ def _agent_expanded_text(value: object) -> str | None:
     try:
         # Without a bound profile secret scope the expander reads the shared process env,
         # which a concurrent worker for another profile can hold: keep the reading closed.
+        # This is the default/root profile's case on every route, the chat route included.
+        # Not relieved here: judging it against the profile's own environment is a follow-up.
         if current_secret_scope() is None:
             return None
         expanded = agent_expand_env_vars(value)
@@ -4288,8 +4298,10 @@ def _claiming_value(keys: tuple, values: tuple, names: set) -> str | None:
     plus underscore folding. The claiming identity is returned for the message in
     its raw spelling (never a URL, credential or expanded value). A value the Agent
     env-expands is judged by the Agent's own expansion (:func:`_agent_expanded_text`,
-    an unset reference stays verbatim); when that is unavailable it claims every
-    name, since WebUI cannot reproduce the Agent's secret scope with certainty.
+    an unset reference stays verbatim) only while a named profile's secret scope is
+    bound; otherwise (no scope: the default profile on every route, the chat route
+    included; or no expander) it claims every name, since WebUI cannot then reproduce
+    the value the Agent's resolver reads with certainty.
     """
     for value, expandable in (*((key, False) for key in keys), *((val, True) for val in values)):
         text = spelled = str(value or "").strip()
@@ -4337,8 +4349,9 @@ def _with_managed_scope(view: object) -> object:
     IT-pushed managed config over the profile's, managed winning per leaf
     (``hermes_cli.config._merge_managed_overlay``). Same reader and merge as
     ``managed_scope.apply_managed_overlay``, minus its ``${VAR}`` expansion, so
-    a managed reference is judged by the Agent's expander like any other
-    (:func:`_claiming_value`). ``view`` is never mutated; an Agent
+    a managed reference is judged like any other (:func:`_claiming_value`: by the
+    Agent's expander under a bound profile secret scope, else a wildcard). ``view``
+    is never mutated; an Agent
     without managed scope, or no managed config, leaves it unchanged.
     """
     try:
@@ -4366,9 +4379,12 @@ def provider_name_ambiguity_verdict(provider: object, config: object = None) -> 
     it returns can belong to different records depending on config order. The
     route fails closed instead. Purely name-based (no URL is read); a record
     claims in any spelling the Agent accepts. A keyed record the Agent treats as
-    disabled claims nothing (its ``enabled`` flag judged after the Agent's env
-    expansion); a legacy row counts enabled or not (the Agent's legacy view still
-    selects disabled rows).
+    disabled claims nothing; a templated ``enabled`` flag is judged after the Agent's
+    env expansion only under a bound profile secret scope, and with none bound (the
+    default profile on every route, the chat route included) the record keeps
+    claiming (fail closed). A templated ``name`` follows the same rule
+    (:func:`_agent_expanded_text`). A legacy row counts enabled or not (the Agent's
+    legacy view still selects disabled rows).
 
     * Bare built-in ``X``: ambiguous when any record other than ``providers.X``
       claims ``X``, or two keys are ``X``. Without ``providers.X`` the built-in
@@ -4410,7 +4426,9 @@ def _provider_name_ambiguity_in(source: dict, route: str, builtin: str, explicit
         # (``_match_new_style_provider`` and ``providers_dict_to_custom_providers``), so a
         # disabled one claims nothing. Legacy ``custom_providers`` rows stay counted below:
         # the Agent's legacy view still selects a row the user switched off. A templated
-        # flag is judged as the Agent expands it; unknown keeps the record (fail closed).
+        # flag is judged as the Agent expands it only under a bound profile secret scope;
+        # with none bound (the default profile, chat route included) or no expander it is
+        # unknown and keeps the record claiming (fail closed).
         flag = record.get("enabled", True)
         if _agent_expands_env_ref(flag):
             expanded = _agent_expanded_text(flag)

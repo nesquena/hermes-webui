@@ -617,6 +617,127 @@ def test_a_templated_name_without_the_agents_expander_is_still_a_wildcard(monkey
     _both_refused("openai", _agent_runtime(BUILTIN_URL, BUILTIN_KEY), "'myproxy'", configured_base_url=BUILTIN_URL)
 
 
+# ── #8775 review: the chat route's secret scope decides how templated records are judged ──
+#
+# _run_agent_streaming binds no Agent secret scope itself; its connection-bundle helper
+# (streaming._resolve_runtime_connection_bundle, called with profile_name=<session profile>)
+# enters profiles.profile_scope_for_detached_worker, which binds one for a NAMED profile
+# only. These drive that helper with the chat route's own arguments.
+
+
+def _contextvar_secret_scope(monkeypatch):
+    """The Agent's ``agent.secret_scope`` contract: a context-local mapping that
+    ``set_secret_scope`` binds and ``reset_secret_scope`` restores; None when unbound."""
+    import contextvars
+
+    var = contextvars.ContextVar("issue8690_secret_scope", default=None)
+    module = types.ModuleType("agent.secret_scope")
+    module.set_secret_scope = lambda mapping: var.set(dict(mapping))
+    module.reset_secret_scope = var.reset
+    module.current_secret_scope = var.get
+    monkeypatch.setitem(sys.modules, "agent.secret_scope", module)
+    return module
+
+
+@pytest.fixture
+def chat_profiles(monkeypatch, tmp_path):
+    """A root home and one named profile ``writer`` whose .env holds the templated values."""
+    from api import profiles
+
+    root = tmp_path / ".hermes"
+    writer = root / "profiles" / "writer"
+    writer.mkdir(parents=True)
+    (writer / ".env").write_text("PROXY_NAME=myproxy\nPROXY_ENABLED=false\n", encoding="utf-8")
+    monkeypatch.delenv("HERMES_WEBUI_ISOLATED_PROFILE", raising=False)
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root)
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(profiles, "list_profiles_api",
+                        lambda: [{"name": "default", "is_default": True}, {"name": "writer"}])
+    profiles._invalidate_root_profile_cache()
+    monkeypatch.setattr(profiles._tls, "profile", None, raising=False)
+    # The chat route mirrors the session profile's env into the process env for the turn.
+    monkeypatch.setenv("PROXY_NAME", "myproxy")
+    monkeypatch.setenv("PROXY_ENABLED", "false")
+    _install_agent_expander(monkeypatch)
+    scope = _contextvar_secret_scope(monkeypatch)
+    yield scope
+    profiles._invalidate_root_profile_cache()
+
+
+def _chat_route_bundle(provider, runtime, profile_name, configured_base_url=None):
+    """_run_agent_streaming's call: preferred URL, then the bundle with the session profile."""
+    base_url = streaming._runtime_preferred_base_url(runtime, provider, configured_base_url)
+    return streaming._resolve_runtime_connection_bundle(
+        provider, runtime.get("api_key"), base_url, runtime,
+        profile_name=profile_name, custom_provider_lookup=provider,
+    )
+
+
+_CHAT_TEMPLATED = {
+    "templated-name": (lambda: _sibling_named("${PROXY_NAME}"), "'myproxy'"),
+    "templated-flag": (_templated_flag_config, "'custom:openai'"),
+}
+
+
+def _bind_chat_config(monkeypatch, tmp_path, kind):
+    build, claimant = _CHAT_TEMPLATED[kind]
+    _write_profile_config(tmp_path / "profile" / "config.yaml", build())
+    _bind(monkeypatch, build())
+    return claimant
+
+
+def test_the_chat_route_passes_the_session_profile_to_every_bundle_resolution():
+    """The premise of the tests below: each of the chat route's bundle resolutions hands the
+    helper the session profile, which is what binds (or, for the default profile, does not
+    bind) the secret scope the templated-record judgement depends on."""
+    import inspect
+    import re
+
+    source = inspect.getsource(streaming._run_agent_streaming)
+    calls = re.findall(r"_resolve_runtime_connection_bundle\((.*?)\n\s*\)", source, re.S)
+    assert len(calls) == 3
+    assert all("profile_name=_resolved_profile_name" in call for call in calls)
+    assert "set_secret_scope" not in source
+
+
+@pytest.mark.parametrize("profile_name", ["default", None], ids=["default-profile", "no-profile"])
+@pytest.mark.parametrize("kind", sorted(_CHAT_TEMPLATED))
+def test_the_chat_route_without_a_secret_scope_judges_templated_records_fail_closed(
+        monkeypatch, tmp_path, chat_profiles, kind, profile_name):
+    """#8775 review: the default profile's chat route binds no secret scope, so a templated
+    ``name: ${PROXY_NAME}`` (PROXY_NAME=myproxy) still claims every name and a templated
+    ``enabled: ${PROXY_ENABLED}`` (false) keeps its record claiming: the bare built-in route
+    is refused although the Agent's resolver would expand both from the process env."""
+    claimant = _bind_chat_config(monkeypatch, tmp_path, kind)
+    seen = []
+    real = config._agent_expanded_text
+    monkeypatch.setattr(config, "_agent_expanded_text",
+                        lambda value: seen.append(chat_profiles.current_secret_scope()) or real(value))
+    bundle = _chat_route_bundle("openai", _agent_runtime(BUILTIN_URL, BUILTIN_KEY), profile_name,
+                                configured_base_url=BUILTIN_URL)
+    _assert_refused(bundle, claimant)
+    assert seen and all(scope is None for scope in seen)
+
+
+@pytest.mark.parametrize("kind", sorted(_CHAT_TEMPLATED))
+def test_a_named_profile_chat_route_judges_templated_records_under_its_secret_scope(
+        monkeypatch, tmp_path, chat_profiles, kind):
+    """Counterpart: a named profile's bundle resolution runs under the scope
+    profile_scope_for_detached_worker binds from that profile's .env, so the templated
+    name or flag is judged by the Agent's expansion and the built-in route goes through."""
+    _bind_chat_config(monkeypatch, tmp_path, kind)
+    seen = []
+    real = config._agent_expanded_text
+    monkeypatch.setattr(config, "_agent_expanded_text",
+                        lambda value: seen.append(chat_profiles.current_secret_scope()) or real(value))
+    bundle = _chat_route_bundle("openai", _agent_runtime(BUILTIN_URL, BUILTIN_KEY), "writer",
+                                configured_base_url=BUILTIN_URL)
+    bundle = config.raise_for_custom_provider_route(bundle)
+    assert (bundle["provider"], bundle["base_url"], bundle["api_key"]) == ("openai", BUILTIN_URL, BUILTIN_KEY)
+    assert seen and all(scope is not None and scope.get("PROXY_NAME") == "myproxy" for scope in seen)
+    assert chat_profiles.current_secret_scope() is None  # restored after the turn's resolution
+
+
 # ── Codex r1 (deferred): title generation calls the Agent with a provider name ──
 
 TITLE_REFUSED = "provider_name_ambiguous_aux"
