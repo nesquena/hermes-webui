@@ -768,7 +768,11 @@ def test_loadSession_inflight_sets_busy_before_renderMessages(cleanup_test_sessi
     # grab the wrong one. (rfind = the substantive restore branch.)
     inflight_idx = src.rfind("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+4200]
+    # The window must reach the renderMessages() call at the end of the branch.
+    # It has grown with each addition inside the branch (1200 -> 2000 -> 4200);
+    # #6649's live-tail comment plus the upstream _prepareRunningLiveTail() turn
+    # owner argument push the call past 4200 again, so keep headroom over it.
+    inflight_block = src[inflight_idx:inflight_idx+4600]
     busy_pos = inflight_block.find("S.busy=")
     # #3326 added an optional {preserveScroll} arg to the INFLIGHT-branch render
     # call, so match the call form rather than the bare `renderMessages();`.
@@ -791,7 +795,8 @@ def test_loadSession_inflight_merges_tail_with_persisted_transcript(cleanup_test
     assert "await _ensureMessagesLoaded(sid" in inflight_block, (
         "returning to an active stream should load the persisted transcript before adding the live tail"
     )
-    assert "_mergeInflightTailMessages(S.messages,inflightMessages)" in inflight_block, (
+    # Prefix match: the call may pass the optional turn-owner argument (#8698).
+    assert "_mergeInflightTailMessages(S.messages,inflightMessages" in inflight_block, (
         "INFLIGHT messages should be merged as a tail, not replace the full transcript"
     )
     assert "function _mergeInflightTailMessages" in src, (
