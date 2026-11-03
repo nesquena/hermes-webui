@@ -81,6 +81,8 @@
 
 ### Fixed
 
+- **The clarify card and inline message edit follow your Enter-to-send setting.** The clarify input sent on every Enter and inline edit sent on any Enter without Shift, so both ignored the Shift+Enter and Ctrl+Enter send modes, the newline default on touch-only devices, and the Enter that confirms an IME composition (Chinese, Japanese or Korean input). Both now use the composer's send-key decision, so an IME Enter never sends. In the newline modes and on touch-only devices, plain Enter in the clarify card no longer submits; use its Send button. Thanks @solarmaster961. (#8629)
+
 - **Integration runs started with `--source tool` no longer push your conversations out of the sidebar.** Hermes Agent tags third-party integration sessions `tool` and keeps them out of its own session lists; WebUI's 20-row interactive sidebar window still counted them, so a script running one integration session per batch could hide real conversations. Tool sessions are now kept out of that window like oneshot runs, and stay reachable by id, under their project, and with the `tool` source filter. (#8731, thanks @grzezlo)
 
 - **Hermes Desktop conversations show up in the sidebar's CLI sessions.** WebUI filed sessions with the `desktop` source as "other" and left them out of the interactive sidebar. They are now listed with CLI, TUI and ACP sessions under a Desktop label, and like those they follow the interactive-sessions toggle. Desktop sessions with no user turn are hidden, older histories whose message roles cannot be read stay visible, and only the strict owning-profile check can remove a Desktop session's sidebar entry. Sessions that current Agents store as `source='local'` are not covered yet (#8674). Thanks @nomadjames. (#7415)
