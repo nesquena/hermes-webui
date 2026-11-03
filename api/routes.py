@@ -30392,6 +30392,7 @@ def _handle_chat_sync(handler, body):
                 _find_active_turn_checkpoint_index,
                 _mark_active_turn_checkpoint,
                 _merge_display_messages_after_agent_result,
+                _reconcile_prefix_occurrence_ownership,
                 _resolve_active_turn_authority,
                 _restore_display_reasoning_metadata,
                 _restore_reasoning_metadata_before_boundary,
@@ -30667,6 +30668,20 @@ def _handle_chat_sync(handler, body):
                 msg,
                 getattr(s, "pending_user_source", None) or "webui",
             )
+        # #8574 review P2-2 (nesquena-hermes 2026-11-02): reconcile the
+        # retained ownership of the HISTORICAL PREFIX before the dedup. Now
+        # that this route actually APPLIES the identity dedup to the
+        # model-facing context (it used to compute it and overwrite it with the
+        # raw list), the conservative legacy collapse became reachable for
+        # history that carries no WebUI ids: two genuine turns repeating a
+        # prompt verbatim in DIFFERENT timestamp buckets share a content-only
+        # replay key, so the second was collapsed and a turn the display still
+        # shows was lost from the model context. A content group whose rows
+        # share ONE exact key is a replay and stays untouched, so the legacy
+        # collapse still collapses it.
+        _next_context_messages = _reconcile_prefix_occurrence_ownership(
+            _next_context_messages, _result_messages
+        )
         # #6310 residual (nesquena-hermes 2026-10-27): the identity dedup is
         # the FINAL persistence step here, exactly like the streaming settle
         # (``api/streaming.py``) applies it. This block used to compute the

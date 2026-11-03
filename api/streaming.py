@@ -9264,6 +9264,52 @@ def _retained_owner_slot_for(key, msg, retained_owner_slots):
     return None
 
 
+def _user_exact_key(msg, key=None):
+    """The exact-key tuple the identity dedup's user exact-index publishes.
+
+    The index keys on content+timestamp+source+attachments, so two rows that
+    differ in any of those fields are DISTINCT occurrences while a row that
+    differs in none of them is the same occurrence replayed. Factored out so
+    the dedup, the retire helper and the ownership reconcile all agree on one
+    tuple shape.
+    """
+    if not isinstance(msg, dict):
+        return None
+    if key is None:
+        key = _message_replay_key(msg)
+    if key is None:
+        return None
+    return (
+        key,
+        msg.get('timestamp'),
+        msg.get('_ts'),
+        msg.get('_source') or 'webui',
+        json.dumps(msg.get('attachments') or [], sort_keys=True, ensure_ascii=False),
+    )
+
+
+def _retire_slot_exact_key(user_exact_index, slot, prior_row):
+    """Drop the exact-key entry that still named ``slot``'s DISPLACED occupant.
+
+    #8574 review P2-1 (nesquena-hermes 2026-11-02): the exact-key index names
+    the slot a row occupies. When a slot's OCCUPANT is replaced, the entry for
+    the displaced row's own exact key must be dropped BEFORE the replacement's
+    key is published. Otherwise the stale entry keeps naming a slot whose
+    occupant no longer matches that key, and a later row carrying the displaced
+    key resolves against the wrong slot and overwrites the replacement that
+    legally took it over (the id-less legacy exact-replacement path).
+
+    Only an entry that still points at ``slot`` is dropped: the same exact key
+    may legitimately have been republished for another slot meanwhile, and that
+    slot's entry must survive.
+    """
+    stale = _user_exact_key(prior_row)
+    if stale is None:
+        return
+    if user_exact_index.get(stale) == slot:
+        del user_exact_index[stale]
+
+
 def _deduplicate_context_messages(messages, protected_rows=None):
     """Remove duplicate messages from context by identity, keeping first occurrence.
 
@@ -9366,11 +9412,25 @@ def _deduplicate_context_messages(messages, protected_rows=None):
                     # stable-id ownership path below, which admits the row and
                     # registers its id in the same per-key registry.
                     if not _independently_owned_user_pair(deduped[prior_exact_idx], msg):
+                        # #8574 review P2 (nesquena-hermes 2026-11-02): the slot's
+                        # OCCUPANT changes here, so the exact-key entry that still
+                        # names this slot for the DISPLACED row must be dropped
+                        # before the incoming row's own key is published. A
+                        # timestamp-shifted replay updates its owner's row in
+                        # place, which leaves the owner's ORIGINAL timestamp
+                        # entry pointing at the same slot; when a later id-less
+                        # row legally takes that slot over, the stale entry
+                        # still resolved the owner's next replay against it and
+                        # overwrote the takeover.
+                        _retire_slot_exact_key(
+                            user_exact_index, prior_exact_idx, deduped[prior_exact_idx]
+                        )
                         deduped[prior_exact_idx] = msg
                         _register_seen_stable_id(key, msg, seen_stable_by_key)
                         _register_retained_owner_slot(
                             key, msg, prior_exact_idx, retained_owner_slots
                         )
+                        user_exact_index[user_exact_key] = prior_exact_idx
                         continue
                 if key in seen:
                     # #8574 gate certification RED finding 2 (nesquena-hermes
@@ -9391,6 +9451,20 @@ def _deduplicate_context_messages(messages, protected_rows=None):
                         key, msg, retained_owner_slots
                     )
                     if own_slot is not None:
+                        # #8574 review P2 (nesquena-hermes 2026-11-02): this is
+                        # the in-place owner update — the slot's OCCUPANT
+                        # changes, so the exact-key entry naming this slot for
+                        # the DISPLACED row must be dropped before the incoming
+                        # row's own key is published. Without this the
+                        # displaced row's ORIGINAL timestamp keeps an entry
+                        # pointing at the slot; once a later id-less row
+                        # legally takes the slot over, that stale entry still
+                        # resolves the owner's next replay against the slot and
+                        # overwrites the takeover (the legacy exact-replacement
+                        # path then loses its row).
+                        _retire_slot_exact_key(
+                            user_exact_index, own_slot, deduped[own_slot]
+                        )
                         deduped[own_slot] = msg
                         _register_seen_stable_id(key, msg, seen_stable_by_key)
                         _register_retained_owner_slot(
@@ -10554,6 +10628,109 @@ def _producer_committed_compression(agent, session_id):
     )
     in_place = bool(getattr(agent, "_last_compaction_in_place", False))
     return rotated or in_place
+
+
+_NEVER_SEEN = object()
+
+
+def _reconcile_prefix_occurrence_ownership(previous_context, result_messages):
+    """Give independently owned prefix occurrences their own ownership id.
+
+    #8574 review P2-2 (nesquena-hermes 2026-11-02): this route now APPLIES the
+    identity dedup to the model-facing context (it used to compute it and then
+    overwrite it with the raw list). With that application in place, the
+    conservative legacy collapse became reachable for history that carries no
+    WebUI ids: two genuine turns that repeat a prompt verbatim in DIFFERENT
+    timestamp buckets have the same content-only replay key, so the dedup
+    collapsed the second one and the persisted model context lost a turn the
+    display transcript still shows.
+
+    Ownership is the signal the dedup already trusts: a valid non-negative
+    integer id. This reconcile hands each DISTINCT occurrence its own id so the
+    stable-id path can tell them apart.
+
+    Narrow by construction:
+      * a row that already carries a valid ownership id is never re-identified;
+      * a row the CURRENT turn owns (``_active_turn_token``) is never touched;
+      * a content group whose rows share ONE exact key is a replay, and the
+        whole group is left untouched so the legacy collapse still collapses it;
+      * only a content group with TWO OR MORE distinct exact keys is split, and
+        duplicates of one exact key share an id so they still collapse.
+
+    Synthetic ids are allocated above every real id already in play, so a
+    stamped row can never be mistaken for an existing owner.
+    """
+    if not isinstance(previous_context, list) or not previous_context:
+        return previous_context
+
+    def _exact_clock_key(row):
+        # The same content+clock+source+attachments tuple the dedup's exact
+        # index uses; two rows sharing it are one turn replayed.
+        key = _message_replay_key(row)
+        if key is None:
+            return None
+        return (
+            key,
+            row.get("timestamp"),
+            row.get("_ts"),
+            row.get("_source") or "webui",
+            json.dumps(row.get("attachments") or [], sort_keys=True, ensure_ascii=False),
+        )
+
+    # ---- pass 1: which content groups hold more than one distinct occurrence?
+    groups = {}
+    for row in previous_context:
+        if not isinstance(row, dict):
+            continue
+        if row.get("_active_turn_token"):
+            continue
+        stable_id, stable_valid = _stable_message_ownership_id(row)
+        if stable_valid and stable_id is not None:
+            continue
+        exact = _exact_clock_key(row)
+        if exact is None:
+            continue
+        groups.setdefault(exact[0], []).append(exact)
+    split_groups = {
+        replay_key for replay_key, exacts in groups.items() if len(set(exacts)) >= 2
+    }
+    if not split_groups:
+        return previous_context
+
+    # ---- allocate ids above every real id already in play
+    next_id = 1
+    for row in list(previous_context) + list(result_messages or []):
+        if not isinstance(row, dict):
+            continue
+        stable_id, stable_valid = _stable_message_ownership_id(row)
+        if stable_valid and stable_id is not None and stable_id.isdigit():
+            next_id = max(next_id, int(stable_id) + 1)
+
+    # ---- pass 2: one id per distinct exact key inside a split group
+    assigned = {}
+    out = []
+    for row in previous_context:
+        if not isinstance(row, dict):
+            out.append(row)
+            continue
+        exact = _exact_clock_key(row)
+        if exact is None or exact[0] not in split_groups:
+            out.append(row)
+            continue
+        if row.get("_active_turn_token"):
+            out.append(row)
+            continue
+        stable_id, stable_valid = _stable_message_ownership_id(row)
+        if stable_valid and stable_id is not None:
+            out.append(row)
+            continue
+        if exact not in assigned:
+            assigned[exact] = next_id
+            next_id += 1
+        stamped = dict(row)
+        stamped["id"] = assigned[exact]
+        out.append(stamped)
+    return out
 
 
 def _dedupe_replayed_context_messages(
