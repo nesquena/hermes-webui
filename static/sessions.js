@@ -10082,15 +10082,43 @@ function _isDelegatedSubagentRow(s){
 // every other row keeps its own. Memoized per render, so each lineage resolves once.
 function _sidebarProjectResolver(rowsById){
   const memo=new Map();
+  // #8791: parents, lineage roots and memo entries are keyed by profile + id, as in
+  // _sidebarDisplayBucketIsCli: with All profiles on, a bare id can name another profile's same-id
+  // parent and hand its project to this child.
+  const profileOf=(r)=>String((r&&(r.profile||r.profile_name))||'').trim();
+  const scopedKey=(owner,id)=>profileOf(owner)+'\u0000'+String(id||'');
+  // A bare-id hit counts only within one profile; a row without profile info carries no cross-profile risk.
+  const sameProfile=(a,b)=>!profileOf(a)||!profileOf(b)||profileOf(a)===profileOf(b);
+  const byProfileId=rowsById&&rowsById.byProfileId instanceof Map?rowsById.byProfileId:null;
+  const lookup=(owner,id)=>{
+    if(!rowsById||!id) return null;
+    const scoped=byProfileId?byProfileId.get(scopedKey(owner,id)):undefined;
+    if(scoped) return scoped;
+    const bare=rowsById.get(id);
+    return bare&&sameProfile(owner,bare)?bare:null;
+  };
   // Resolve the parent like the attach step does: a child of a compressed parent names its
   // pre-compression segment, which the payload carries only as the tip's _lineage_root_id.
   const byLineageRoot=new Map();
-  if(rowsById) rowsById.forEach(r=>{ if(r&&r._lineage_root_id&&!byLineageRoot.has(r._lineage_root_id)) byLineageRoot.set(r._lineage_root_id,r); });
+  const byLineageRootBare=new Map();
+  if(rowsById) (byProfileId||rowsById).forEach(r=>{
+    if(!r||!r._lineage_root_id) return;
+    const key=scopedKey(r,r._lineage_root_id);
+    if(!byLineageRoot.has(key)) byLineageRoot.set(key,r);
+    if(!byLineageRootBare.has(r._lineage_root_id)) byLineageRootBare.set(r._lineage_root_id,r);
+  });
+  const lineageRoot=(owner,id)=>{
+    if(!id) return null;
+    const scoped=byLineageRoot.get(scopedKey(owner,id));
+    if(scoped) return scoped;
+    const bare=byLineageRootBare.get(id);
+    return bare&&sameProfile(owner,bare)?bare:null;
+  };
   const parentOf=(s)=>{
     const pid=s.parent_session_id;
     if(!rowsById||!pid) return null;
-    return rowsById.get(pid)||rowsById.get(s._parent_lineage_tip_id)
-      ||byLineageRoot.get(pid)||byLineageRoot.get(s._parent_lineage_root_id)||null;
+    return lookup(s,pid)||lookup(s,s._parent_lineage_tip_id)
+      ||lineageRoot(s,pid)||lineageRoot(s,s._parent_lineage_root_id)||null;
   };
   return function projectIdFor(s){
     if(!s) return null;
@@ -10098,14 +10126,14 @@ function _sidebarProjectResolver(rowsById){
     const onPath=new Set();
     let cur=s, result=null;
     while(cur){
-      const sid=cur.session_id;
-      if(memo.has(sid)){ result=memo.get(sid); break; }
-      if(cur.project_id||!_isDelegatedSubagentRow(cur)){ result=cur.project_id||null; if(sid) path.push(sid); break; }
-      if(onPath.has(sid)) break;
-      onPath.add(sid); path.push(sid);
+      const key=scopedKey(cur,cur.session_id);
+      if(memo.has(key)){ result=memo.get(key); break; }
+      if(cur.project_id||!_isDelegatedSubagentRow(cur)){ result=cur.project_id||null; if(cur.session_id) path.push(key); break; }
+      if(onPath.has(key)) break;
+      onPath.add(key); path.push(key);
       cur=parentOf(cur);
     }
-    for(const sid of path) memo.set(sid,result);
+    for(const key of path) memo.set(key,result);
     return result;
   };
 }
@@ -10349,7 +10377,52 @@ function _scopedSidebarReferenceRows(isCli, projectIdFor){
 
 function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw, payloadRowsById){
   const referenceRows=Array.isArray(referenceSessionsRaw)?referenceSessionsRaw:sessionsRaw;
-  return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows, payloadRowsById);
+  const project=(raw, refs, payload)=>_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(raw), raw, refs, payload);
+  // #8791: lineage collapse and child attachment key rows by bare session id. With All profiles on, two
+  // profiles can hold the same id (a cloned profile or a copied state.db), and one pass attached a child
+  // under the OTHER profile's same-id parent. When an id is shared across profiles, project each profile
+  // on its own; otherwise keep the single pass unchanged. Callers sort (_sessionSidebarSortCompare) or
+  // only count/search the result, so concatenating the groups changes nothing on screen.
+  // A row's profile group: ''/missing and 'default' are the root profile, and so is the active profile's
+  // own name when it is the (renamed) root — mirroring routes._sidebar_profile_group_key and
+  // _profileMatchesActiveProfile.
+  const groupOf=(s)=>{
+    const profile=String((s&&(s.profile||s.profile_name))||'').trim();
+    if(!profile||profile==='default') return 'default';
+    if(typeof S!=='undefined'&&S&&S.activeProfileIsDefault&&profile===String(S.activeProfile||'').trim()) return 'default';
+    return profile;
+  };
+  const payloadRows=payloadRowsById instanceof Map
+    ? [...((payloadRowsById.byProfileId instanceof Map)?payloadRowsById.byProfileId:payloadRowsById).values()]
+    : null;
+  // The groups present, or null when no id appears under two groups (every single-profile view).
+  const groupById=new Map();
+  const groups=new Set();
+  let shared=false;
+  for(const list of [sessionsRaw, referenceRows, payloadRows]){
+    if(!Array.isArray(list)) continue;
+    for(const s of list){
+      if(!s||!s.session_id) continue;
+      const group=groupOf(s);
+      groups.add(group);
+      const seen=groupById.get(s.session_id);
+      if(seen===undefined) groupById.set(s.session_id,group);
+      else if(seen!==group) shared=true;
+    }
+  }
+  if(!shared) return project(sessionsRaw, referenceRows, payloadRowsById);
+  const rows=[];
+  const orphans=[];
+  for(const group of groups){
+    const inGroup=s=>!!s&&groupOf(s)===group;
+    const raw=(sessionsRaw||[]).filter(inGroup);
+    if(!raw.length) continue;
+    const payload=payloadRows?_sidebarRowsById([payloadRows.filter(inGroup)]):payloadRowsById;
+    for(const row of project(raw, referenceRows.filter(inGroup), payload)){
+      (row&&row._orphan_child_session?orphans:rows).push(row);
+    }
+  }
+  return [...rows,...orphans];
 }
 
 // Apply the renderer's complete source/reference/lineage projection to an
