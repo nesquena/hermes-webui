@@ -4841,16 +4841,101 @@ def _custom_provider_runtime_bundle_with_provenance(
         if isinstance(owner_key, str) and owner_key:
             owner_cfg = (_get_providers_cfg() or {}).get(owner_key)
             if isinstance(owner_cfg, dict):
-                # The ENDPOINT follows the OWNING record. Under a canonical+legacy
-                # collision the option can resolve through one spelling while
-                # the owner (first config record, per the documented rule) is
-                # the other, and the URL that came back then belongs to the
-                # sibling. The owner's declared base_url is authoritative once
-                # the owner is known.
+                # #8664 review P2-2 (nesquena-hermes 2026-11-03): the repair
+                # must fire ONLY on an EXACT mismatch — i.e. when the requested
+                # spelling does NOT already name the owning record. Without this
+                # guard the assignment had no condition at all, so an ordinary
+                # NON-colliding provider (``openrouter`` with an inline key, and
+                # a valid ambient key the resolver had legitimately selected)
+                # had its ambient credential replaced by the record's inline
+                # one. That is the resolver's authority, and it must survive.
+                #
+                # #8664 review P2-2 (nesquena-hermes 2026-11-03): the repair
+                # is scoped to a REAL COLLISION — two or more raw ``providers:``
+                # keys canonicalising to the same slug. That is the only
+                # situation in which the native resolver can hand back a
+                # SIBLING's endpoint/key/protocol while the requested spelling
+                # names the owner.
+                #
+                # A NON-colliding provider (``openrouter`` with one record) must
+                # keep the resolver's authority: its ambient or credential-pool
+                # key is legitimately selected, and substituting the record's
+                # inline key there was review P2-2. Comparing the requested
+                # spelling to ``owner_key`` cannot express this — under a
+                # collision the spelling names the owner while the resolved
+                # values still come from the sibling.
+                canonical_lookup = _canonicalise_provider_id(str(lookup).strip())
+                colliding = [
+                    raw_key
+                    for raw_key in (_get_providers_cfg() or {})
+                    if _canonicalise_provider_id(str(raw_key)) == canonical_lookup
+                ]
+                owner_url_declared = str(owner_cfg.get("base_url") or "").strip()
+                owner_key_declared = str(owner_cfg.get("api_key") or "").strip()
+                # #8664 review P2-1 + P2-2 (nesquena-hermes 2026-11-03): the ONE
+                # invariant that decides whether this repair runs is whether the
+                # resolver's result DISAGREES with the owning record's declared
+                # values. That covers every shape the two findings describe:
+                #
+                #   * collision, resolver returned the sibling's endpoint ->
+                #     endpoint disagrees -> repair (P2-1).
+                #   * collision, resolver returned the sibling's protocol while
+                #     key/endpoint happened to match -> the whole-record
+                #     re-selection below still runs, because a declared api_mode
+                #     that differs from the resolver's is a split too.
+                #   * single record addressed by a DIFFERENT spelling (provider
+                #     ``mistral`` while config carries ``providers.mistralai``)
+                #     -> the resolver returns nothing for that spelling ->
+                #     credential disagrees -> repair.
+                #   * single record the resolver already resolved correctly ->
+                #     nothing disagrees -> untouched.
+                #
+                # A NON-colliding provider whose credential came from an ambient
+                # env var or a credential pool must keep that authority (P2-2):
+                # such a value is NOT the owner's declared value, but it is not
+                # a sibling split either. The guard below distinguishes them by
+                # requiring an actual SIBLING to have supplied the disagreement:
+                # with fewer than two records, only a MISSING credential (the
+                # resolver produced nothing) is repairable — an ambient key the
+                # record never declared is the resolver's legitimate choice.
+                sibling_exists = len(colliding) >= 2
+                url_split = bool(
+                    owner_url_declared
+                    and str(resolved_base_url or "").strip() != owner_url_declared
+                )
+                key_split = bool(
+                    owner_key_declared
+                    and str(resolved_api_key or "").strip() != owner_key_declared
+                )
+                if sibling_exists:
+                    split = url_split or key_split
+                else:
+                    # No sibling can be the source, so the only legitimate repair
+                    # is "the resolver produced no credential for this record
+                    # while the record declares one" (the different-spelling
+                    # case). An ambient/pool key is the resolver's authority.
+                    split = bool(
+                        owner_key_declared
+                        and not str(resolved_api_key or "").strip()
+                    )
+                if not split:
+                    return bundle, None
+                # #8664 review P2-1 (nesquena-hermes 2026-11-03): resolve the
+                # selected raw record as ONE COMPLETE runtime bundle. The earlier
+                # version replaced only ``base_url`` and ``api_key``, leaving
+                # ``api_mode`` and ``credential_pool`` from the native result —
+                # which under a collision can belong to the canonical SIBLING.
+                # A caller then received the owner's key and endpoint with the
+                # sibling's protocol, and the converse when the config order or
+                # the requested spelling was reversed.
+                #
+                # Endpoint, credential, protocol and pool must all agree on one
+                # record, and the native resolver must not independently choose
+                # its sibling for any of them.
                 owner_url = str(owner_cfg.get("base_url") or "").strip()
                 if owner_url:
                     bundle["base_url"] = owner_url
-                # The CREDENTIAL follows the same record — but ONLY when that
+                # The credential follows the same record — but ONLY when that
                 # record declares one. A record that owns the endpoint while
                 # leaving the key to the env, a key_cmd or a credential pool
                 # must not borrow a sibling's key: that would invent a
@@ -4858,6 +4943,19 @@ def _custom_provider_runtime_bundle_with_provenance(
                 declared = str(owner_cfg.get("api_key") or "").strip()
                 if declared:
                     bundle["api_key"] = declared
+                # The PROTOCOL follows the same record. A record that declares
+                # no api_mode keeps the native value (it never expressed an
+                # opinion), but a declared one is authoritative — otherwise the
+                # caller runs the owner's endpoint with the sibling's wire
+                # protocol.
+                owner_mode = _custom_record_api_mode(owner_cfg)
+                if owner_mode:
+                    bundle["api_mode"] = owner_mode
+                # The POOL follows the same record for the same reason. A
+                # record with no pool of its own must not inherit the sibling's
+                # rotating credentials.
+                if "credential_pool" in owner_cfg:
+                    bundle["credential_pool"] = owner_cfg.get("credential_pool")
         return bundle, None
 
     custom = resolve_custom_provider_bundle(lookup, connection_resolver=connection_resolver)

@@ -35,6 +35,7 @@ import sys
 import types
 from urllib.parse import urlparse
 
+import pytest
 import yaml
 
 import api.config as config
@@ -1043,3 +1044,158 @@ class TestLegacyOnboardingReusesStoredKey:
             {"providers": {"openrouter": {"api_key": "other-record-canary"}}},
             {},
         ), "a different provider's key must not satisfy this selector"
+
+
+class TestWholeRuntimeBundleOwnership:
+    """P2-1 (review 2026-11-03): endpoint, key, PROTOCOL and pool must all come
+    from ONE record.
+
+    The earlier repair replaced only ``base_url`` and ``api_key``, leaving
+    ``api_mode`` and ``credential_pool`` from the native result — which under a
+    canonical+legacy collision can belong to the SIBLING. A caller then ran the
+    owner's endpoint with the sibling's wire protocol. Both config orders and
+    both requested spellings are covered.
+    """
+
+    _LEGACY = {
+        "base_url": "https://legacy-relay.example/v1",
+        "api_key": "legacy-owner-canary",
+        "api_mode": "anthropic_messages",
+    }
+    _CANONICAL = {
+        "base_url": "https://canonical-relay.example/v1",
+        "api_key": "canonical-sibling-canary",
+        "api_mode": "chat_completions",
+    }
+
+    def _bundle(self, providers, request_spelling):
+        restore = _swap_in_test_config({"model": {}, "providers": providers})
+        try:
+            sibling = providers["mistral"]
+            bundle = config.merge_custom_provider_runtime_bundle(
+                request_spelling,
+                sibling["api_key"],
+                sibling["base_url"],
+                {
+                    "provider": "mistral",
+                    "api_key": sibling["api_key"],
+                    "base_url": sibling["base_url"],
+                    "api_mode": sibling["api_mode"],
+                },
+            )
+            return bundle
+        finally:
+            restore()
+
+    @pytest.mark.parametrize("order", ["legacy-first", "canonical-first"])
+    @pytest.mark.parametrize("spelling", ["mistral", "mistralai"])
+    def test_endpoint_key_and_protocol_share_one_owner(self, order, spelling):
+        providers = (
+            {"mistralai": self._LEGACY, "mistral": self._CANONICAL}
+            if order == "legacy-first"
+            else {"mistral": self._CANONICAL, "mistralai": self._LEGACY}
+        )
+        owner = next(iter(providers.values()))  # config order decides
+        bundle = self._bundle(providers, spelling)
+        assert bundle["base_url"] == owner["base_url"], (
+            f"{order}/{spelling}: endpoint came from the sibling "
+            f"(got {bundle['base_url']!r}, owner {owner['base_url']!r})"
+        )
+        assert bundle["api_key"] == owner["api_key"], (
+            f"{order}/{spelling}: credential came from the sibling "
+            f"(got {bundle['api_key']!r}, owner {owner['api_key']!r})"
+        )
+        assert bundle["api_mode"] == owner["api_mode"], (
+            f"{order}/{spelling}: PROTOCOL came from the sibling "
+            f"(got {bundle['api_mode']!r}, owner {owner['api_mode']!r}) — "
+            "the owner's endpoint must never run on the sibling's wire format"
+        )
+
+
+class TestNonCollidingCredentialAuthority:
+    """P2-2 (review 2026-11-03): without a collision the resolver's credential
+    authority must survive — an ambient or pool key is not ours to replace."""
+
+    def test_ambient_key_is_not_replaced_by_the_inline_key(self):
+        restore = _swap_in_test_config({
+            "model": {},
+            "providers": {
+                "openrouter": {
+                    "base_url": "https://openrouter.example/v1",
+                    "api_key": "inline-record-canary",
+                },
+            },
+        })
+        try:
+            bundle = config.merge_custom_provider_runtime_bundle(
+                "openrouter",
+                "ambient-resolver-canary",
+                "https://openrouter.example/v1",
+                {
+                    "provider": "openrouter",
+                    "api_key": "ambient-resolver-canary",
+                    "base_url": "https://openrouter.example/v1",
+                },
+            )
+        finally:
+            restore()
+        assert bundle["api_key"] == "ambient-resolver-canary", (
+            "a non-colliding provider must keep the credential the resolver "
+            f"selected; got {bundle['api_key']!r}"
+        )
+
+    def test_pool_key_is_not_replaced_by_the_inline_key(self):
+        restore = _swap_in_test_config({
+            "model": {},
+            "providers": {
+                "openrouter": {
+                    "base_url": "https://openrouter.example/v1",
+                    "api_key": "inline-record-canary",
+                    "credential_pool": "openrouter-pool",
+                },
+            },
+        })
+        try:
+            bundle = config.merge_custom_provider_runtime_bundle(
+                "openrouter",
+                "pool-resolver-canary",
+                "https://openrouter.example/v1",
+                {
+                    "provider": "openrouter",
+                    "api_key": "pool-resolver-canary",
+                    "base_url": "https://openrouter.example/v1",
+                    "credential_pool": "openrouter-pool",
+                },
+            )
+        finally:
+            restore()
+        assert bundle["api_key"] == "pool-resolver-canary", (
+            "a pool-selected credential must survive on a non-colliding record; "
+            f"got {bundle['api_key']!r}"
+        )
+
+    def test_single_record_addressed_by_the_other_spelling_still_resolves(self):
+        """No sibling exists, yet the canonical spelling resolves nothing —
+        the record's own key must still be attached."""
+        restore = _swap_in_test_config({
+            "model": {},
+            "providers": {
+                "mistralai": {
+                    "base_url": "https://legacy-relay.example/v1",
+                    "api_key": "legacy-record-canary",
+                },
+            },
+        })
+        try:
+            bundle = config.merge_custom_provider_runtime_bundle(
+                "mistral",
+                None,
+                "https://legacy-relay.example/v1",
+                {"provider": "mistral", "base_url": "https://legacy-relay.example/v1"},
+            )
+        finally:
+            restore()
+        assert bundle["api_key"] == "legacy-record-canary", (
+            "the single record that owns this canonical slug declares a key, so "
+            f"the bundle must carry it; got {bundle['api_key']!r}"
+        )
