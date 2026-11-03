@@ -187,10 +187,21 @@ for thread in threads:
 print(json.dumps({"deadlocked": alive, "stacks": stacks}), flush=True)
 os._exit(0)
 '''
-    env = dict(os.environ)
-    env["HERMES_HOME"] = env.get("HERMES_HOME") or env.get("HERMES_WEBUI_TEST_STATE_DIR", "")
+    # The child gets an explicit, minimal environment rather than a copy of
+    # the parent's: an interpreter search path, HOME (the probe expands
+    # ``~/.hermes/hermes-agent`` when HERMES_AGENT_DIR is unset), SYSTEMROOT on
+    # Windows, the test's isolated HERMES_HOME and the repository on
+    # PYTHONPATH. Nothing else from the test session reaches the probe.
+    env = {
+        name: os.environ[name]
+        for name in ("PATH", "HOME", "SYSTEMROOT", "HERMES_AGENT_DIR")
+        if name in os.environ
+    }
+    env["HERMES_HOME"] = (
+        os.environ.get("HERMES_HOME") or os.environ.get("HERMES_WEBUI_TEST_STATE_DIR", "")
+    )
     env["PYTHONPATH"] = os.pathsep.join(
-        [p for p in (os.getcwd(), env.get("PYTHONPATH", "")) if p]
+        [p for p in (os.getcwd(), os.environ.get("PYTHONPATH", "")) if p]
     )
     started = time.monotonic()
     proc = subprocess.run(
