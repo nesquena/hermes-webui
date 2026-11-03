@@ -1153,7 +1153,7 @@ class _InstanceHolders:
     """Who holds one provider instance right now, whether a teardown of it is
     running, and which departed agents still have queued memory work on it."""
 
-    __slots__ = ("ref", "home_key", "holders", "teardown", "work", "claiming")
+    __slots__ = ("ref", "home_key", "holders", "teardown", "work", "claiming", "intent")
 
     def __init__(self, ref: Callable[[], Any], home_key: str = ""):
         self.ref = ref                                    # weak reference: identity, never id() alone
@@ -1182,6 +1182,13 @@ class _InstanceHolders:
         # deletes an entry in that shape, process-wide. A claiming entry is
         # kept until its claim settles.
         self.claiming = 0
+        # A last-holder release that was refused ONLY because queued memory
+        # work still writes through this instance (#8613, review 5722370551):
+        # the cleanup intent is kept here and runs once that work has drained,
+        # without another agent reaching a session boundary. A new holder
+        # takes the instance over (``register_provider_holders`` drops it), and
+        # an entry carrying one is never pruned. See ``_ReleaseIntent``.
+        self.intent: "Optional[_ReleaseIntent]" = None
 
 
 _provider_holders: dict[int, _InstanceHolders] = {}
@@ -1572,7 +1579,7 @@ def _forget_agent_holder_locked(agent_pid: int, ref: Callable[[], Any]) -> None:
         # An entry nobody holds any more, with no teardown and no queued work
         # to protect, leaves the table — unless a release is claiming it
         # right now (#8613 round 2, finding B).
-        if not entry.holders and not entry.teardown and not entry.work and not entry.claiming:
+        if not entry.holders and not entry.teardown and not entry.work and not entry.claiming and entry.intent is None:
             del _provider_holders[key]
 
 
@@ -1659,6 +1666,11 @@ def register_provider_holders(agent: Any, *, home_key: str = "") -> int:
                 entry.holders[agent_pid] = _AgentHolder(_weak_agent_ref(agent), manager_ref)
             finally:
                 entry.claiming -= 1
+            # #8613 (review 5722370551): a live holder now owns the instance, so
+            # a cleanup intent retained for an earlier departure is handed over
+            # to it — this agent's own session boundary releases the instance.
+            # Running the intent later would close the client under this agent.
+            entry.intent = None
             added += 1
     return added
 
@@ -1688,7 +1700,7 @@ def unregister_provider_holders(agent: Any) -> None:
             # An entry nobody holds any more, with no teardown and no queued work
             # to protect, leaves the table — unless a release is claiming it
             # right now (#8613 round 2, finding B).
-            if not entry.holders and not entry.teardown and not entry.work and not entry.claiming:
+            if not entry.holders and not entry.teardown and not entry.work and not entry.claiming and entry.intent is None:
                 del _provider_holders[key]
 
 
@@ -1782,7 +1794,7 @@ def _last_provider_holder_locked(agent: Any, *, self_dropped: bool = False) -> t
                 return False, (
                     f"provider {name!r} of profile home {entry.home_key!r} still has queued "
                     f"memory work from a departed agent"
-                ), ""
+                ), "work"
             del entry.work[pid]  # the work drained (or its manager is gone): the hold is spent
         # #8613: a construction in flight for this instance's profile home is a
         # holder the table cannot show yet — the Agent initialises the provider
@@ -1915,7 +1927,7 @@ def _agent_holds_instances_locked(agent: Any) -> tuple[bool, str, list]:
     return True, "", instances
 
 
-def _claim_last_held_teardown(agent: Any) -> tuple[bool, str, list]:
+def _claim_last_held_teardown(agent: Any, *, retain: "Optional[_ReleaseIntent]" = None) -> tuple[bool, str, list]:
     """``agent_is_last_provider_holder`` AND the teardown claim in ONE critical
     section, so no holder can be registered, dropped or reserved between the proof
     and the release (#8613). The claimed instances are returned by identity:
@@ -1980,6 +1992,16 @@ def _claim_last_held_teardown(agent: Any) -> tuple[bool, str, list]:
                         if entry is not None:
                             entry.teardown = True
                     return True, "", claimed
+                if retain is not None and wait_for in ("own_work", "work"):
+                    # #8613 (review 5722370551): the ONLY thing holding the
+                    # release back is queued memory work (this agent's own or a
+                    # departed agent's). The cleanup intent is kept on the
+                    # entries, in this same critical section, so it cannot be
+                    # lost between the refusal and the moment that work drains;
+                    # the caller arms it (``_arm_release_intent``).
+                    for entry in claiming_entries:
+                        entry.intent = retain
+                    return False, why, []
                 if wait_for != "fence":
                     # #8613 round 3 (finding 3): the releasing agent's own queued
                     # write is outstanding. The release path drains it BEFORE the
@@ -2061,7 +2083,7 @@ def _settle_last_held_teardown(agent: Any, claimed: list, *, released: bool = Fa
         # protect, leaves the table — unless a release is claiming it right now
         # (#8613 round 2, finding B).
         for key, entry in list(_provider_holders.items()):
-            if not entry.holders and not entry.teardown and not entry.work and not entry.claiming:
+            if not entry.holders and not entry.teardown and not entry.work and not entry.claiming and entry.intent is None:
                 del _provider_holders[key]
     return raced
 
@@ -2109,7 +2131,10 @@ def release_unowned_memory_provider(agent: Any, *, session_id: str, owner_home: 
       provider's worker is still alive).
 
     Otherwise nothing runs and it is logged once per session: that provider
-    lingers until the WebUI restarts, as before.
+    lingers until the WebUI restarts, as before — except when the ONLY reason is
+    queued memory work (this agent's own write, or a departed agent's): then the
+    release is retained (``_ReleaseIntent``) and runs on its own once that work
+    has drained, without another agent's session boundary (review 5722370551).
     """
     manager = getattr(agent, "_memory_manager", None)
     if manager is None:
@@ -2162,12 +2187,28 @@ def release_unowned_memory_provider(agent: Any, *, session_id: str, owner_home: 
             "[webui] #8613: the memory provider of evicted session %s was NOT released: "
             "its own queued memory write has not drained, and releasing now would close "
             "the client under that write. The provider keeps its worker until the write "
-            "has landed and the next session boundary releases it.",
+            "has landed; the release then runs on its own.",
             session_id,
         )
-        return False
-    ok, why, claimed = _claim_last_held_teardown(agent)
+        # Not returned here (#8613, review 5722370551): the claim below refuses on
+        # that same outstanding write and RETAINS the cleanup intent, so the
+        # release runs once the write drains instead of waiting for a session
+        # boundary of some later agent that may never come.
+    intent = _ReleaseIntent(manager, bound_home, bound_key, session_id)
+    ok, why, claimed = _claim_last_held_teardown(agent, retain=intent)
     if not ok:
+        armed = _arm_release_intent(intent)
+        if armed == "unhookable":
+            _start_intent_retry(intent, poll=True)
+        if armed != "unretained":
+            _log_once(
+                f"release-deferred:{session_id}",
+                "[webui] #8613: the memory provider of evicted session %s was NOT released "
+                "yet: %s. The release is kept and runs on its own once that memory work "
+                "has drained.",
+                session_id, why,
+            )
+            return False
         # Keyed per session: a static key logged only the FIRST refusal in the
         # process, so every later evicted session was silent about its provider.
         _log_once(
@@ -2178,6 +2219,19 @@ def release_unowned_memory_provider(agent: Any, *, session_id: str, owner_home: 
             session_id, why,
         )
         return False
+    return _run_claimed_release(
+        agent, claimed, manager=manager, bound_home=bound_home, bound_key=bound_key,
+        session_id=session_id,
+    )
+
+
+def _run_claimed_release(holder: Any, claimed: list, *, manager: Any, bound_home: str,
+                         bound_key: Optional[str], session_id: str, deferred: bool = False) -> bool:
+    """Run a release whose teardown ``claimed`` (``_claim_last_held_teardown`` or
+    ``_claim_release_intent``) already holds: ``release_soft`` in the provider's
+    bound profile home, never a session end, then settle the claim. True when the
+    release ran. ``holder`` is the departing agent, or the ``_ReleaseIntent``
+    standing in for it."""
     restore, reason = _enter_profile_home(bound_home, bound_key)
     if reason is not None:
         _log_once(
@@ -2186,7 +2240,7 @@ def release_unowned_memory_provider(agent: Any, *, session_id: str, owner_home: 
             "keeps its worker until the WebUI restarts.",
             reason,
         )
-        _settle_last_held_teardown(agent, claimed)
+        _settle_last_held_teardown(holder, claimed)
         return False
     released = False
     try:
@@ -2203,11 +2257,11 @@ def release_unowned_memory_provider(agent: Any, *, session_id: str, owner_home: 
                 session_id,
             )
             return False
-        release()
+        manager.release_soft()
         released = True
     finally:
         restore()
-        raced = _settle_last_held_teardown(agent, claimed, released=released)
+        raced = _settle_last_held_teardown(holder, claimed, released=released)
     if raced:
         logger.warning(
             "[webui] #8613: provider(s) %s gained a holder while the release of evicted "
@@ -2216,7 +2270,203 @@ def release_unowned_memory_provider(agent: Any, *, session_id: str, owner_home: 
         )
     logger.info(
         "[webui] #8613: released the memory provider of evicted session %s without "
-        "session end (its owner cannot be resolved)",
-        session_id,
+        "session end (its owner cannot be resolved)%s",
+        session_id, " once its queued memory work had drained" if deferred else "",
     )
     return True
+
+
+# ── a release refused only on queued work runs once that work drains ─────────
+#
+# Review 5722370551: "retain the outstanding-work release intent until a
+# last-holder save drains; requiring a third agent's later build/evict to
+# trigger cleanup leaves the original leak unresolved." The last holder's
+# release refused ONLY because queued memory work still writes through the
+# instance (its own, or a departed agent's work hold) keeps a ``_ReleaseIntent``
+# on the entries; a done-callback on that work starts the release once the work
+# has drained. The intent runs through the same proof, claim and settlement as
+# the eviction itself, so it inherits every fence: a live holder (which takes
+# the instance over), a construction in flight (waited for, bounded), another
+# teardown, and any other queued work.
+
+# An intent whose queued work cannot be hooked (unreadable futures) is re-checked
+# this often, and dropped after the limit: the provider then keeps its worker
+# until the WebUI restarts, as it did before.
+_INTENT_POLL_INTERVAL_S = 0.5
+_INTENT_POLL_LIMIT_S = 300.0
+
+
+class _ReleaseIntent:
+    """A last-holder release kept until the queued memory work that refused it
+    has drained (#8613, review 5722370551).
+
+    It stands in for the agent that departed: ``_memory_manager`` is that agent's
+    manager, held STRONGLY because the agent is gone and the release runs through
+    the manager. The last-holder proof (``_last_provider_holder_locked``) and the
+    settlement (``_settle_last_held_teardown``) therefore run for it unchanged;
+    ``id(intent)`` is never a holder key, so every live agent counts as another
+    holder.
+
+    Retained by ``_claim_last_held_teardown`` in the critical section that
+    refused; armed by ``_arm_release_intent``; run by ``_run_release_intent``.
+    Dropped when a new holder registers (``register_provider_holders``), when a
+    newer intent replaces it, when the proof refuses for any reason but queued
+    work, or once the release has run.
+    """
+
+    __slots__ = ("_memory_manager", "bound_home", "bound_key", "session_id")
+
+    def __init__(self, manager: Any, bound_home: str, bound_key: Optional[str], session_id: str):
+        self._memory_manager = manager
+        self.bound_home = bound_home
+        self.bound_key = bound_key
+        self.session_id = session_id
+
+
+def _outstanding_futures(manager: Any) -> list:
+    """``manager``'s queued memory work that has not finished, read without any
+    future's lock (``_future_is_done``); ``[]`` when it cannot be read."""
+    futures = getattr(manager, "_background_futures", None) if manager is not None else None
+    if not isinstance(futures, dict) or not futures:
+        return []
+    try:
+        return [future for future in list(futures) if not _future_is_done(future)]
+    except Exception:
+        return []
+
+
+def _drop_intent_locked(intent: _ReleaseIntent) -> None:
+    """Retire ``intent`` from every entry still carrying it. Holder lock held."""
+    for key, entry in list(_provider_holders.items()):
+        if entry.intent is intent:
+            entry.intent = None
+            if not entry.holders and not entry.teardown and not entry.work and not entry.claiming:
+                del _provider_holders[key]
+
+
+def _arm_release_intent(intent: _ReleaseIntent) -> str:
+    """Start ``intent`` once the queued work holding it back has drained.
+
+    ``"unretained"`` when no entry carries it (the refusal was not about queued
+    work: nothing to arm), ``"hooked"`` when a done-callback now waits on that
+    work, ``"unhookable"`` when nothing could be hooked: the caller then
+    re-checks it itself, bounded (``_run_release_intent`` with ``poll``).
+
+    Never called with the holder lock held: ``add_done_callback`` takes the
+    future's own condition lock, and holder lock -> future lock is the inversion
+    round 2 (finding C) removed. The callback only starts a thread: it runs on the
+    manager's single writer thread, where the release's own flush would wait on
+    that same thread.
+    """
+    with _provider_holders_lock:
+        _drain_pending_forgets_locked()
+        entries = [entry for entry in _provider_holders.values() if entry.intent is intent]
+        if not entries:
+            return "unretained"
+        managers = {id(intent._memory_manager): intent._memory_manager}
+        for entry in entries:
+            for manager_ref in entry.work.values():
+                held = manager_ref()
+                if held is not None:
+                    managers[id(held)] = held
+    hooks = []
+    for manager in managers.values():
+        pending = _outstanding_futures(manager)
+        if pending:
+            # One writer, first in first out: its last queued task finishes last.
+            hooks.append(pending[-1])
+    if not hooks:
+        return "unhookable"
+    for future in hooks:
+        try:
+            future.add_done_callback(lambda _done, intent=intent: _start_intent_retry(intent))
+        except Exception:
+            return "unhookable"
+    return "hooked"
+
+
+def _start_intent_retry(intent: _ReleaseIntent, *, poll: bool = False) -> None:
+    """Run ``intent`` on its own short-lived thread (see ``_arm_release_intent``)."""
+    try:
+        threading.Thread(
+            target=_run_release_intent, args=(intent, poll),
+            name="webui-8613-deferred-release", daemon=True,
+        ).start()
+    except Exception:
+        logger.warning(
+            "[webui] #8613: the deferred release of the memory provider of evicted session %s "
+            "could not start; the provider keeps its worker until the WebUI restarts.",
+            intent.session_id, exc_info=True,
+        )
+
+
+def _claim_release_intent(intent: _ReleaseIntent) -> tuple[str, str, list]:
+    """The proof and the teardown claim for a retained intent, in ONE critical
+    section, exactly like ``_claim_last_held_teardown``: ``("claimed", "",
+    instances)``, ``("work", why, [])`` while queued work still holds it, or
+    ``("dropped", why, [])`` once it is retired. A construction in flight for the
+    profile is waited for, bounded, on the same Condition."""
+    deadline = time.monotonic() + _ACQUISITION_FENCE_WAIT_S
+    with _provider_holders_lock:
+        while True:
+            _drain_pending_forgets_locked()
+            instances = _provider_instances(intent)
+            entries = [_live_holders_entry(provider) for provider in instances]
+            if not instances or any(entry is None or entry.intent is not intent for entry in entries):
+                # A new holder took the instance over, a newer intent replaced
+                # this one, or the instance is no longer tracked.
+                _drop_intent_locked(intent)
+                return "dropped", "another agent holds the provider instance now", []
+            ok, why, wait_for = _last_provider_holder_locked(intent, self_dropped=True)
+            if ok:
+                for entry in entries:
+                    entry.intent = None
+                    entry.teardown = True
+                return "claimed", "", instances
+            if wait_for in ("own_work", "work"):
+                return "work", why, []
+            if wait_for == "fence":
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    _provider_holders_cond.wait(remaining)
+                    continue
+            _drop_intent_locked(intent)
+            return "dropped", why, []
+
+
+def _run_release_intent(intent: _ReleaseIntent, poll: bool = False) -> None:
+    """Release the provider of a retained intent once its queued work drained.
+    ``poll`` marks a retry started because the work could not be hooked; every
+    retry re-checks the same way, so it only names why the thread started."""
+    give_up = time.monotonic() + _INTENT_POLL_LIMIT_S
+    while True:
+        state, why, claimed = _claim_release_intent(intent)
+        if state == "claimed":
+            _run_claimed_release(
+                intent, claimed, manager=intent._memory_manager, bound_home=intent.bound_home,
+                bound_key=intent.bound_key, session_id=intent.session_id, deferred=True,
+            )
+            return
+        if state != "work":
+            logger.info(
+                "[webui] #8613: the deferred release of the memory provider of evicted "
+                "session %s is not run: %s.",
+                intent.session_id, why,
+            )
+            return
+        # Still queued work: wait for it again. A hooked future starts a new
+        # retry when it finishes, so this one is done; work that cannot be
+        # hooked is re-checked here, bounded.
+        if _arm_release_intent(intent) != "unhookable":
+            return
+        if time.monotonic() >= give_up:
+            with _provider_holders_lock:
+                _drop_intent_locked(intent)
+            logger.warning(
+                "[webui] #8613: the memory provider of evicted session %s was NOT released: "
+                "its queued memory work did not drain within %.0fs. The provider keeps its "
+                "worker until the WebUI restarts.",
+                intent.session_id, _INTENT_POLL_LIMIT_S,
+            )
+            return
+        time.sleep(_INTENT_POLL_INTERVAL_S)

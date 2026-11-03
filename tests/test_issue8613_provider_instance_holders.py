@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 
 import httpx
 import pytest
@@ -1083,9 +1084,12 @@ def test_a_pending_save_of_an_evicted_agent_survives_the_last_holders_release(
     assert provider.save_landed.wait(30), "the pending save never completed"
     assert provider.writes == ["agent A's turn"]
 
-    # Once the work has drained the hold is spent, and the next boundary releases.
-    third = _shared_agent(homes["alpha"], provider, "8613-pending-c")
-    assert streaming._close_evicted_agent_at_session_boundary("8613-pending-c", third) is True
+    # Once the work has drained the hold is spent, and the release B's boundary
+    # retained runs on its own: no third agent's build/evict is needed for the
+    # provider to be released (review 5722370551).
+    deadline = time.monotonic() + 10
+    while provider.shutdowns < 1 and time.monotonic() < deadline:
+        time.sleep(0.02)
     assert provider.shutdowns == 1 and provider.client.is_closed is True
 
 
