@@ -76,6 +76,11 @@ const vm = require('vm');
 const apiCalls = [];
 let skillsPayload = [];
 const skillContentByName = {};
+// #7781 should-fix knob: make the /api/skills listing fetch reject.
+let skillsListingShouldFail = false;
+// #7781 [CORE] knobs: park a fetch on a promise the test settles only AFTER
+// switching the viewed session — the cross-chat race the finding describes.
+const deferredFetch = { target: null, resolve: null, reject: null };
 
 const elementStub = () => ({
   value: '',
@@ -160,11 +165,26 @@ const ctx = {
   INFLIGHT: {},
   api: async (path, opts) => {
     apiCalls.push({ path, opts: opts || null });
-    if (path === '/api/skills') return { skills: skillsPayload };
+    if (path === '/api/skills') {
+      if (skillsListingShouldFail) throw new Error('skills listing unavailable');
+      if (deferredFetch.target === 'listing') {
+        return new Promise((resolve, reject) => {
+          deferredFetch.resolve = () => resolve({ skills: skillsPayload });
+          deferredFetch.reject = reject;
+        });
+      }
+      return { skills: skillsPayload };
+    }
     if (path === '/api/commands') return { commands: [] };
     if (path === '/api/commands/bundles') return { bundles: [] };
     if (path.indexOf('/api/skills/content?name=') === 0) {
       const name = decodeURIComponent(path.slice('/api/skills/content?name='.length));
+      if (deferredFetch.target === 'content') {
+        return new Promise((resolve, reject) => {
+          deferredFetch.resolve = () => resolve({ content: skillContentByName[name] || '' });
+          deferredFetch.reject = reject;
+        });
+      }
       return { content: skillContentByName[name] || '' };
     }
     if (path === '/api/chat/start') {
@@ -182,6 +202,20 @@ const ctx = {
   __apiCalls() { return apiCalls; },
   __setComposer(text) { getEl('msg').value = text; },
   __composer() { const el = elementCache['msg']; return el ? el.value : null; },
+  __failSkillsListing(v) { skillsListingShouldFail = !!v; },
+  __deferFetch(target) { deferredFetch.target = target; deferredFetch.resolve = null; deferredFetch.reject = null; },
+  __settleFetch(mode, message) {
+    const settle = deferredFetch.resolve;
+    const fail = deferredFetch.reject;
+    deferredFetch.target = null; deferredFetch.resolve = null; deferredFetch.reject = null;
+    if (mode === 'error' && fail) fail(new Error(message || 'deferred fetch failed'));
+    else if (settle) settle();
+  },
+  // Simulate the user opening another chat (with its own composer draft)
+  // while a send is parked on an await. S lives inside the vm context, so
+  // the outer-scope knob must reach it through the context object.
+  __switchSession(sid, draft) { ctx.S.session = { session_id: sid }; ctx.S.messages = []; getEl('msg').value = draft; },
+  __messages() { return ctx.S.messages; },
 };
 vm.createContext(ctx);
 vm.runInContext(__COMMANDS_JS__, ctx);
@@ -210,6 +244,72 @@ vm.runInContext(__MESSAGES_JS__, ctx);
           composerAfter: __composer(),
         };
       };
+      // #7781 [CORE] runner: park the content (or listing) fetch, switch the
+      // viewed session mid-flight with a draft typed there, THEN settle the
+      // fetch. Whatever send() does next must belong to the chat that issued
+      // the command only.
+      const runDeferredSwitch = async (composerText, skills, contentMap, opts) => {
+        __setComposer(composerText);
+        __setSkills(skills);
+        __clearSkillContent();
+        for (const k in (contentMap || {})) __setSkillContent(k, contentMap[k]);
+        __resetApiCalls();
+        __failSkillsListing(false);
+        S.session = { session_id: opts.ownerSid };
+        S.messages = [];
+        INFLIGHT = {};
+        __deferFetch(opts.defer);
+        let thrown = null;
+        const sendPromise = send(composerText).catch((e) => { thrown = String((e && e.message) || e); });
+        // Wait until send() has actually reached the deferred fetch.
+        for (let i = 0; i < 200; i++) {
+          const reached = __apiCalls().some((c) => c && (opts.defer === 'listing'
+            ? c.path === '/api/skills'
+            : c.path.indexOf('/api/skills/content?name=') === 0));
+          if (reached) break;
+          await new Promise((r) => setTimeout(r, 5));
+        }
+        // The user opens another chat and types a draft there.
+        __switchSession(opts.switchToSid, opts.draft);
+        __settleFetch(opts.mode, opts.errorMessage);
+        await sendPromise;
+        const startCall = __apiCalls().find((c) => c && c.path === '/api/chat/start');
+        return {
+          startBody: startCall ? JSON.parse(startCall.opts.body) : null,
+          messages: S.messages,
+          composerAfter: __composer(),
+          contentFetches: __apiCalls()
+            .filter((c) => c && c.path.indexOf('/api/skills/content?name=') === 0)
+            .map((c) => c.path),
+          thrown,
+        };
+      };
+      // #7781 should-fix runner: the /api/skills listing fetch rejects with
+      // NO session switch. Master forwards the literal text; the buggy single
+      // try answered "Plugin skill error" and swallowed the command.
+      const runListingFailure = async (composerText, skills) => {
+        __setComposer(composerText);
+        __setSkills(skills);
+        __clearSkillContent();
+        __resetApiCalls();
+        __failSkillsListing(true);
+        S.session = { session_id: 'sess-1' };
+        S.messages = [];
+        INFLIGHT = {};
+        let thrown = null;
+        await send(composerText).catch((e) => { thrown = String((e && e.message) || e); });
+        __failSkillsListing(false);
+        const startCall = __apiCalls().find((c) => c && c.path === '/api/chat/start');
+        return {
+          startBody: startCall ? JSON.parse(startCall.opts.body) : null,
+          messages: S.messages,
+          composerAfter: __composer(),
+          contentFetches: __apiCalls()
+            .filter((c) => c && c.path.indexOf('/api/skills/content?name=') === 0)
+            .map((c) => c.path),
+          thrown,
+        };
+      };
       const _positive = await run('/demo:skill do X', [__PLUGIN_ROW__], { 'demo:skill': 'DEMO SKILL BODY' });
       const _negative = await run('/demo:skill', [__DIRECTORY_ROW__], {});
       // PR #7781 re-gate finding 1 controls: canonical underscore spelling
@@ -225,6 +325,15 @@ vm.runInContext(__MESSAGES_JS__, ctx);
       const _pickedEntry = _buildSkillCommandEntry(__UNDERSCORE_ROW__);
       const _entryName = _pickedEntry && _pickedEntry.name;
       const _picked = await run('/' + _entryName + ' do Y', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' });
+      // #7781 re-gate CORE: the cross-chat race. A fetch parks the send, the
+      // user switches to another chat (with a draft typed there), and only
+      // then does the fetch settle. success + error paths for the content
+      // fetch, plus the listing-fetch variant (the should-fix fall-through
+      // must honour the owner guard too).
+      const _switchSuccess = await runDeferredSwitch('/demo:skill do X', [__PLUGIN_ROW__], { 'demo:skill': 'DEMO SKILL BODY' }, { defer: 'content', ownerSid: 'sess-A', switchToSid: 'sess-B', draft: 'chat B draft', mode: 'success' });
+      const _switchError = await runDeferredSwitch('/demo:skill do X', [__PLUGIN_ROW__], { 'demo:skill': 'DEMO SKILL BODY' }, { defer: 'content', ownerSid: 'sess-A', switchToSid: 'sess-B', draft: 'chat B draft', mode: 'error', errorMessage: 'content fetch failed' });
+      const _switchListingFail = await runDeferredSwitch('/demo:skill do X', [__PLUGIN_ROW__], { 'demo:skill': 'DEMO SKILL BODY' }, { defer: 'listing', ownerSid: 'sess-A', switchToSid: 'sess-B', draft: 'chat B draft', mode: 'error', errorMessage: 'skills listing unavailable' });
+      const _listingFailure = await runListingFailure('/demo:skill do X', [__PLUGIN_ROW__]);
       return {
         positive: _positive,
         negative: _negative,
@@ -232,6 +341,10 @@ vm.runInContext(__MESSAGES_JS__, ctx);
         hyphen: _hyphen,
         unknown: _unknown,
         picked: { entryName: _entryName, run: _picked },
+        switchSuccess: _switchSuccess,
+        switchError: _switchError,
+        switchListingFail: _switchListingFail,
+        listingFailure: _listingFailure,
       };
     })()`, ctx);
     process.stdout.write(JSON.stringify(result), () => process.exit(0));
@@ -356,3 +469,77 @@ def test_picker_entry_for_underscore_name_feeds_send_verbatim():
     assert run_result["contentFetches"] == ["/api/skills/content?name=reviewdemo%3Aunder_score"], result
     # The user-message echo keeps the ORIGINAL composer text (with underscore).
     assert run_result["userMessage"] is not None and run_result["userMessage"]["content"] == "/reviewdemo:under_score do Y", result
+
+
+# ── #7781 re-gate: the cross-chat send race (CORE) ───────────────────────
+#
+# send() resolves a qualified plugin command across two awaits
+# (/api/skills, then /api/skills/content). While the second fetch is in
+# flight the user is free to open another chat and type a draft there.
+# The buggy head read S.session AFTER the awaits, so it finished the send
+# in the newly opened chat: the forced-skill directive POSTed into that
+# chat and its composer draft was wiped (success path), or the
+# "Plugin skill error" bubble was written into it (error path).
+#
+# The fix reuses the #8718 _slashOwner snapshot: after every await, if the
+# viewed session is no longer the chat that issued the command, send()
+# stops without touching the composer or the transcript.
+
+
+def test_deferred_content_session_switch_success_path_stops_send():
+    """/demo:skill do X sent in chat A; the /api/skills/content response is
+    held; the user opens chat B and types a draft; the response is released.
+    The send must stop: no /api/chat/start POST at all, chat B's transcript
+    untouched, chat B's draft intact (maintainer CORE finding)."""
+    result = _run_send_harness()["switchSuccess"]
+    # The race window was genuinely exercised: the content fetch happened.
+    assert result["contentFetches"] == ["/api/skills/content?name=demo%3Askill"], result
+    # The send stopped before dispatch — nothing POSTed anywhere.
+    assert result["startBody"] is None, result
+    # Chat B's transcript was not touched (no user bubble, no directive).
+    assert result["messages"] == [], result
+    # Chat B's composer draft survived.
+    assert result["composerAfter"] == "chat B draft", result
+    assert result["thrown"] is None, result
+
+
+def test_deferred_content_session_switch_error_path_stops_send():
+    """Same race on the error path: the /api/skills/content fetch rejects
+    after the user switched to chat B. The "Plugin skill error" bubble must
+    NOT be written into chat B and its draft must NOT be cleared."""
+    result = _run_send_harness()["switchError"]
+    assert result["contentFetches"] == ["/api/skills/content?name=demo%3Askill"], result
+    assert result["startBody"] is None, result
+    assert result["messages"] == [], result
+    assert result["composerAfter"] == "chat B draft", result
+    assert result["thrown"] is None, result
+
+
+def test_deferred_listing_session_switch_stops_send():
+    """The listing fetch itself is the deferred one and it REJECTS after the
+    switch. The should-fix fall-through (forward the literal text) must also
+    honour the owner guard — otherwise chat A's literal command text would
+    be forwarded into chat B and wipe its draft."""
+    result = _run_send_harness()["switchListingFail"]
+    assert result["startBody"] is None, result
+    assert result["messages"] == [], result
+    assert result["composerAfter"] == "chat B draft", result
+    assert result["thrown"] is None, result
+
+
+def test_listing_failure_forwards_literal_text_like_master():
+    """should-fix: with NO session switch, a failing /api/skills listing
+    fetch must fall through to master's behaviour — the literal command text
+    is forwarded as the dispatched message. The previous single try wrapped
+    the listing fetch too, so any /ns:cmd answered "Plugin skill error" and
+    sent nothing."""
+    result = _run_send_harness()["listingFailure"]
+    assert result["startBody"] is not None, result
+    assert result["startBody"]["message"] == "/demo:skill do X", result
+    # No skill content may be fetched when the listing never loaded.
+    assert result["contentFetches"] == [], result
+    # No "Plugin skill error" bubble may answer for the failed listing.
+    assert not any(
+        "Plugin skill error" in str(m.get("content") or "")
+        for m in result["messages"]
+    ), result

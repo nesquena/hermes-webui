@@ -329,3 +329,51 @@ def test_use_subargs_preserve_underscore_qualified_name():
     )
     assert "reviewdemo:under_score" in result["use_subargs"], result
     assert "reviewdemo:under-score" not in result["use_subargs"], result
+
+
+# #7781 re-gate SILENT: the verbatim qualified name belongs to PLUGIN rows
+# only. The save endpoint accepts directory skills whose name contains a
+# colon (``local:under_score``); those must keep master's colon-stripped
+# slug entry (``/localunder-score``) because that is the spelling the
+# installed agent resolves. The PR's previous ``includes(':')`` test applied
+# the verbatim rule to every row and broke the directory spelling.
+
+# A directory-installed skill saved with a colon in its name. The
+# /api/skills row for a directory skill carries NO ``source: 'plugin'``.
+COLON_DIRECTORY_SKILL = {
+    "name": "local:under_score",
+    "description": "A directory skill saved with a colon in its name",
+    "category": None,
+    "disabled": False,
+}
+
+
+def test_directory_skill_with_colon_uses_master_slug_entry_name():
+    """A colon-bearing DIRECTORY skill must be offered under master's slug
+    spelling (``/localunder-score``), never the verbatim
+    ``/local:under_score`` — the agent resolves the former (PR #7781 re-gate,
+    SILENT). The two-way assertion pins both directions: directory rows use
+    the slug, plugin rows stay verbatim."""
+    result = _run_commands_js(
+        """
+        await loadPicker();
+        const dir = skillEntries(await getSlashAutocompleteMatches('/localunder'));
+        const plugin = skillEntries(await getSlashAutocompleteMatches('/reviewdemo:under'));
+        return {
+          dir_names: dir.map((e) => e.name),
+          dir_skill_names: dir.map((e) => e.skillName),
+          dir_plugins: dir.map((e) => e.plugin || null),
+          plugin_names: plugin.map((e) => e.name),
+        };
+        """,
+        PLUGIN_SKILLS + [COLON_DIRECTORY_SKILL],
+    )
+    # Directory direction: the entry name is master's colon-stripped slug…
+    assert result["dir_names"] == ["localunder-score"], result
+    # …while skillName still round-trips the registered spelling for
+    # downstream verbatim consumers.
+    assert result["dir_skill_names"] == ["local:under_score"], result
+    # A directory skill must not be tagged with a plugin namespace.
+    assert result["dir_plugins"] == [None], result
+    # Plugin direction: the verbatim qualified identity is untouched.
+    assert result["plugin_names"] == ["reviewdemo:under_score"], result
