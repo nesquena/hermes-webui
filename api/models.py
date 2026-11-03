@@ -12908,20 +12908,26 @@ def _reconciled_visible_count_for_sidebar(
     if not sid:
         return None
     # Cross-poll hit: the answer is a function of (sidecar bytes, state.db
-    # message count), so when the caller's count for this sid is the one an
-    # earlier walk already resolved and the sidecar has not been rewritten, the
-    # walk is answered by a single stat instead of a full JSON parse plus a
-    # state.db read. Unknown expectations (rows outside the paint cap) skip the
-    # cache and pay the walk, exactly as before.
-    if expected_state_count is not None:
-        try:
-            cached_state_count = int(expected_state_count)
-        except (TypeError, ValueError):
-            cached_state_count = None
-        if cached_state_count is not None:
-            cached = _sidebar_reconcile_cache_get(str(sid), cached_state_count)
-            if cached is not None:
-                return _ReconciledSidebarVisible(int(cached[0]), bool(cached[1]))
+    # message count), so when the sidecar has not been rewritten and state.db
+    # has not advanced past the count an earlier walk resolved, the walk is
+    # answered by one stat plus one indexed COUNT instead of a full JSON parse
+    # plus a transcript read.
+    # The count used as the key must be the SAME at lookup and at store time:
+    # the caller's top-N count and the walk's own row count live in different
+    # domains (raw rows vs paginated rows: 605 vs 203 on one session here), so
+    # keying on one and storing on the other missed on every poll. One cheap
+    # COUNT is the single canonical number for both ends.
+    key_count = None
+    try:
+        summary = get_state_db_session_summary(str(sid))
+        if isinstance(summary, dict):
+            key_count = int(summary.get("message_count"))
+    except Exception:
+        key_count = None
+    if key_count is not None:
+        cached = _sidebar_reconcile_cache_get(str(sid), key_count)
+        if cached is not None:
+            return _ReconciledSidebarVisible(int(cached[0]), bool(cached[1]))
     try:
         session = Session.load_metadata_only(str(sid))
     except Exception:
@@ -13074,8 +13080,11 @@ def _reconciled_visible_count_for_sidebar(
     # Same answer, durable across polls: without this the walk above runs on
     # every poll for every row whose sidecar count trails state.db (the overlay
     # never persists the reconciled count), which is the 5-20 s sidebar stall.
-    if built_count is not None:
-        _sidebar_reconcile_cache_put(str(sid), int(built_count), visible, hidden_excluded)
+    # Stored under `key_count` — the cheap canonical count the lookup above
+    # uses — not under the walk's own row count: different domains, permanent
+    # misses otherwise.
+    if key_count is not None:
+        _sidebar_reconcile_cache_put(str(sid), int(key_count), visible, hidden_excluded)
     return _ReconciledSidebarVisible(visible, hidden_excluded)
 
 
