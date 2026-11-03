@@ -3292,6 +3292,47 @@
   .composer-footer.cf-icons .saved-prompts-popup{display:none!important;}
   .composer-footer.cf-icons .composer-divider{display:none;}
 
+  /* Hidden tooltips must not occupy the footer strip's scroll region. The
+     global .has-tooltip::after is an absolutely-positioned pseudo-element
+     parked at left:calc(100% + 8px) with opacity:0 — inside .composer-left
+     (overflow-x:auto) that idle pseudo-element extended the measured
+     scrollWidth far past the visible controls, so the fit ladder below
+     collapsed the footer while plenty of real space remained. Remove idle
+     tooltips from the strip entirely and restore them on hover/focus with
+     the same delay+fade as the global tooltip (animation fill:both keeps the
+     .15s hover-intent delay and .14s fade). */
+  .composer-left .has-tooltip::after{content:none;}
+  .composer-left .has-tooltip:hover::after,
+  .composer-left .has-tooltip:focus-visible::after{content:attr(data-tooltip);animation:composer-tooltip-in .14s ease .15s both;}
+  .composer-left .has-tooltip[aria-haspopup][aria-expanded="true"]::after{content:none;}
+  @keyframes composer-tooltip-in{from{opacity:0;}to{opacity:1;}}
+  @media(prefers-reduced-motion:reduce){
+    .composer-left .has-tooltip:hover::after,
+    .composer-left .has-tooltip:focus-visible::after{animation:none;}
+  }
+
+  /* Intermediate shrink stage (between full labels and .cf-icons): the fit
+     ladder in ui.js caps the widest labeled chips so their labels ellipsize
+     instead of disappearing. Labels stay readable where bare icons would
+     leave the footer half-empty; the divider, saved-prompts button and
+     tightened paddings/gap reclaim the rest. Label elements already ellipsize
+     via their own min-width:0/overflow rules. */
+  .composer-footer.cf-shrink .composer-left{gap:3px;}
+  .composer-footer.cf-shrink .composer-divider{display:none;}
+  .composer-footer.cf-shrink #btnSavedPrompts{display:none!important;}
+  /* Profile goes icon-only in shrink (mirrors the cf-icons profile rule): the
+     label is almost always the active profile name and carries the least
+     information of the three labeled chips — the reclaimed width goes to the
+     workspace and model labels, which are the ones worth reading. */
+  .composer-footer.cf-shrink .composer-profile-label,
+  .composer-footer.cf-shrink .composer-profile-chevron,
+  .composer-footer.cf-shrink #composerProfileLabel{display:none;}
+  .composer-footer.cf-shrink .composer-profile-chip{box-sizing:border-box;width:44px;height:44px;max-width:44px;min-width:44px;min-height:44px;padding:0;justify-content:center;gap:0;font-size:11px;}
+  .composer-footer.cf-shrink .composer-workspace-group{max-width:140px;}
+  .composer-footer.cf-shrink .composer-workspace-chip{padding-left:8px;padding-right:6px;}
+  .composer-footer.cf-shrink .composer-model-chip{max-width:120px;padding-left:8px;padding-right:6px;}
+  .composer-footer.cf-shrink .composer-reasoning-chip{padding-left:7px;padding-right:7px;}
+
   .composer-footer.cf-burger .composer-left{gap:8px;}
   .composer-footer.cf-burger .composer-workspace-group{box-sizing:border-box;flex:0 0 44px;width:44px;min-width:44px;max-width:44px;min-height:44px;overflow:hidden;border:none;background:transparent;border-radius:8px;}
   .composer-footer.cf-burger .composer-workspace-files-btn{box-sizing:border-box;width:44px;min-width:44px;max-width:44px;padding:0;border-radius:8px;}
