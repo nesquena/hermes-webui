@@ -7,8 +7,11 @@ on the same kind of non-text control, and also stays quiet when a text field
 is focused even if that field is not the event target.
 """
 import json
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 BOOT_JS = (Path(__file__).parent.parent / "static" / "boot.js").read_text(encoding="utf-8")
 
@@ -38,6 +41,9 @@ def _global_keydown_listener() -> str:
 
 def _drive_sidebar_shortcuts() -> dict:
     """Run the real listener against a Node DOM shim. No source-spelling checks."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not on PATH")
     listener = _global_keydown_listener()
     script = (
         "const listenerSrc = " + json.dumps(listener) + ";\n"
@@ -151,7 +157,7 @@ const cases = [
 """
     )
     result = subprocess.run(
-        ["node", "-e", script],
+        [node, "-e", script],
         capture_output=True,
         text=True,
         timeout=30,
