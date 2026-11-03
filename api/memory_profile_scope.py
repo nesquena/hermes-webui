@@ -1760,14 +1760,23 @@ def _last_provider_holder_locked(agent: Any, *, self_dropped: bool = False) -> t
         # as "collected" would let the release close the client under that save
         # (#8613 salvage, Codex r1): file its work hold now, exactly as the
         # queued forget will.
-        for key, h in list(entry.holders.items()):
-            if key != agent_pid and h.agent() is None:
-                held = h.manager()
-                if held is not None and _manager_has_outstanding_work(held):
-                    entry.work[id(held)] = h.manager
+        #
+        # Each holder's weak reference is read ONCE (Codex r2): with two passes,
+        # a holder alive in the first and collected (on another thread) before
+        # the second was neither counted as live nor had its work filed.
+        #
         # A collected holder does not count: its weak-reference callback removes it,
         # and a stale reference must not pin an instance nobody uses any more.
-        others = [h for key, h in entry.holders.items() if key != agent_pid and h.agent() is not None]
+        others = []
+        for key, h in list(entry.holders.items()):
+            if key == agent_pid:
+                continue
+            if h.agent() is not None:
+                others.append(h)
+                continue
+            held = h.manager()
+            if held is not None and _manager_has_outstanding_work(held):
+                entry.work[id(held)] = h.manager
         if others:
             return False, (
                 f"provider {name!r} of profile home {entry.home_key!r} is still held by "
