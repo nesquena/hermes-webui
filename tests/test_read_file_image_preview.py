@@ -32,9 +32,9 @@ function _inlineMediaHtmlForRef(ref) {
 }
 const code=extract('_readFileImageRef')+extract('_readFileImagePreviewHtml')
   +extract('_toolCardAllowsDetail');
-const funcs=Function('_redactToolTargetLabel','_inlineMediaHtmlForRef',
+const funcs=Function('_redactToolTargetLabel','_inlineMediaHtmlForRef','document',
   code+'\nreturn {_readFileImageRef,_readFileImagePreviewHtml,_toolCardAllowsDetail};'
-)(_redactToolTargetLabel,_inlineMediaHtmlForRef);
+)(_redactToolTargetLabel,_inlineMediaHtmlForRef,{addEventListener(){}});
 const {_readFileImageRef,_readFileImagePreviewHtml,_toolCardAllowsDetail}=funcs;
 let buf='';
 process.stdin.on('data', chunk=>buf+=chunk);
