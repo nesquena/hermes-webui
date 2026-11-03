@@ -125,3 +125,76 @@ def test_concurrent_write_is_refused(tmp_path, monkeypatch):
     assert script.main(["--session-dir", str(tmp_path), "--apply"]) == 1
 
     assert "data:image" in target.read_text(), "file must not be replaced on conflict"
+
+
+def test_compact_file_never_grows_when_bytes_are_removed(tmp_path):
+    """Removing image bytes must never make the file bigger.
+
+    The script rewrote every changed file with ``indent=2``, so a session stored
+    in the compact single-line layout came back pretty-printed and GREW even while
+    base64 was removed. Measured on real data: f906676da374.json 589,946 ->
+    636,306 bytes (+46,360) purely from the encoder change.
+
+    The image here is deliberately TINY (100 bytes) so the encoder change is not
+    masked by reclaimed bytes -- with a large image the file shrinks either way and
+    the test would pass against the broken script, proving nothing.
+    """
+    script = _load_script()
+    tiny = base64.b64encode(b"A" * 100).decode()
+    payload = {
+        "session_id": "compact",
+        "message_count": 2,
+        "messages": [
+            {"role": "user", "content": [
+                {"type": "text", "text": "caf\u00e9 " * 400},
+                {"type": "image_url",
+                 "image_url": {"url": "data:image/jpeg;base64," + tiny}},
+            ]},
+            {"role": "assistant", "content": "ok"},
+        ],
+    }
+    target = tmp_path / "compact.json"
+    target.write_text(json.dumps(payload, separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
+    before = target.stat().st_size
+
+    assert script.main(["--session-dir", str(tmp_path), "--apply"]) == 0
+
+    after = target.stat().st_size
+    assert after < before, f"file grew: {before} -> {after} (layout not preserved)"
+    text = target.read_text(encoding="utf-8")
+    assert "\n" not in text.rstrip("\n"), "compact layout was re-indented"
+    migrated = json.loads(text)
+    assert migrated["messages"][0]["content"][1] == {
+        "type": "text", "text": "[image attachment]",
+    }
+
+
+def test_migration_preserves_indented_layout(tmp_path):
+    """A pretty-printed file stays pretty-printed and still shrinks."""
+    script = _load_script()
+    tiny = base64.b64encode(b"B" * 100).decode()
+    payload = {
+        "session_id": "pretty",
+        "message_count": 2,
+        "messages": [
+            {"role": "user", "content": [
+                {"type": "text", "text": "caf\u00e9 " * 400},
+                {"type": "image_url",
+                 "image_url": {"url": "data:image/jpeg;base64," + tiny}},
+            ]},
+            {"role": "assistant", "content": "ok"},
+        ],
+    }
+    target = tmp_path / "pretty.json"
+    target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    before = target.stat().st_size
+
+    # --include-context so every lane is bounded; the default deliberately keeps
+    # context_messages byte-identical.
+    assert script.main(["--session-dir", str(tmp_path), "--apply", "--include-context"]) == 0
+
+    text = target.read_text(encoding="utf-8")
+    after = target.stat().st_size
+    assert "\n  " in text, "indented layout was flattened"
+    assert after < before, f"file grew: {before} -> {after}"
+    assert "data:image" not in text

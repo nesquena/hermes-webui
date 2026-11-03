@@ -76,6 +76,45 @@ def _stat_signature(path: Path):
     return (stat.st_size, stat.st_mtime_ns)
 
 
+def _detect_indent(raw: str) -> int:
+    """Return the file's existing indentation width, or 0 when it is compact.
+
+    ``json.dumps(..., indent=2)`` was applied unconditionally, so a session stored
+    in the compact single-line layout came back pretty-printed and GREW even while
+    megabytes of base64 were removed. Measured on real data: f906676da374.json
+    589,946 -> 636,306 bytes (+46,360) purely from the encoder change. Detecting the
+    existing layout keeps every rewrite <= its preimage.
+    """
+    for line in raw.split("\n")[1:]:
+        stripped = line.lstrip(" ")
+        if stripped:
+            return len(line) - len(stripped) or 2
+    return 0
+
+
+def _encode_like(raw: str, projected: dict) -> str:
+    """Serialize ``projected`` in the same layout as ``raw``.
+
+    Layout is preserved rather than normalized: the migration's contract is to
+    bound image bytes, not to reformat the file. ``ensure_ascii`` also follows the
+    original so a file that stored escaped non-ASCII does not grow from
+    re-escaping (and a file storing raw UTF-8 is not unexpectedly escaped).
+    """
+    ascii_only = not any(ord(ch) > 127 for ch in raw)
+    kwargs = {"ensure_ascii": ascii_only}
+    indent = _detect_indent(raw)
+    if indent:
+        kwargs["indent"] = indent
+    else:
+        kwargs["separators"] = (",", ":")
+    encoded = json.dumps(projected, **kwargs)
+    try:
+        encoded.encode("utf-8")
+    except UnicodeEncodeError:
+        encoded = json.dumps(projected, **{**kwargs, "ensure_ascii": True})
+    return encoded
+
+
 def migrate_file(path: Path, *, apply: bool, include_context: bool = False) -> dict:
     """Rewrite one session file. Returns a per-file report dict."""
     report = {"file": path.name, "changed": False, "error": None,
@@ -106,11 +145,7 @@ def migrate_file(path: Path, *, apply: bool, include_context: bool = False) -> d
         report["error"] = f"row_count_changed:{rows_before}->{rows_after}"
         return report
 
-    encoded = json.dumps(projected, ensure_ascii=False, indent=2)
-    try:
-        encoded.encode("utf-8")
-    except UnicodeEncodeError:
-        encoded = json.dumps(projected, ensure_ascii=True, indent=2)
+    encoded = _encode_like(raw, projected)
     report["changed"] = True
     report["bytes_after"] = len(encoded.encode("utf-8"))
     if not apply:
