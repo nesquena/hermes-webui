@@ -619,10 +619,12 @@ def test_a_templated_name_without_the_agents_expander_is_still_a_wildcard(monkey
 
 # ── #8775 review: the chat route's secret scope decides how templated records are judged ──
 #
-# _run_agent_streaming binds no Agent secret scope itself; its connection-bundle helper
+# _run_agent_streaming calls no set_secret_scope itself; its connection-bundle helper
 # (streaming._resolve_runtime_connection_bundle, called with profile_name=<session profile>)
-# enters profiles.profile_scope_for_detached_worker, which binds one for a NAMED profile
-# only. These drive that helper with the chat route's own arguments.
+# enters profiles.profile_scope_for_detached_worker, which binds a scope for a named
+# (non-root) profile and binds none for the root profile or an empty name, leaving any
+# outer scope in place. These drive that helper with the chat route's own arguments and
+# no outer scope bound, so the default profile's resolution sees current_secret_scope() None.
 
 
 def _contextvar_secret_scope(monkeypatch):
@@ -688,8 +690,9 @@ def _bind_chat_config(monkeypatch, tmp_path, kind):
 
 def test_the_chat_route_passes_the_session_profile_to_every_bundle_resolution():
     """The premise of the tests below: each of the chat route's bundle resolutions hands the
-    helper the session profile, which is what binds (or, for the default profile, does not
-    bind) the secret scope the templated-record judgement depends on."""
+    helper the session profile, which decides whether the helper binds the secret scope the
+    templated-record judgement depends on (one for a named profile, none for the root
+    profile or an empty name)."""
     import inspect
     import re
 
@@ -704,8 +707,9 @@ def test_the_chat_route_passes_the_session_profile_to_every_bundle_resolution():
 @pytest.mark.parametrize("kind", sorted(_CHAT_TEMPLATED))
 def test_the_chat_route_without_a_secret_scope_judges_templated_records_fail_closed(
         monkeypatch, tmp_path, chat_profiles, kind, profile_name):
-    """#8775 review: the default profile's chat route binds no secret scope, so a templated
-    ``name: ${PROXY_NAME}`` (PROXY_NAME=myproxy) still claims every name and a templated
+    """#8775 review: with no outer scope bound, the chat route's bundle resolution for the
+    default profile (or with no profile name) runs with ``current_secret_scope()`` None, so a
+    templated ``name: ${PROXY_NAME}`` (PROXY_NAME=myproxy) still claims every name and a templated
     ``enabled: ${PROXY_ENABLED}`` (false) keeps its record claiming: the bare built-in route
     is refused although the Agent's resolver would expand both from the process env."""
     claimant = _bind_chat_config(monkeypatch, tmp_path, kind)
@@ -763,8 +767,8 @@ def _resolver_runtime(kind, expansion):
 @pytest.mark.parametrize("kind", sorted(_RACE_TEMPLATE))
 def test_a_concurrent_profile_env_between_the_resolver_and_the_guard_cannot_unlock_a_templated_record(
         monkeypatch, tmp_path, chat_profiles, kind):
-    """The default profile binds no secret scope, so the guard must not judge a templated
-    name or flag by re-reading os.environ: here the resolver reads the writer worker's
+    """The default profile's bundle resolution here runs with no secret scope bound, so the
+    guard must not judge a templated name or flag by re-reading os.environ: here the resolver reads the writer worker's
     values (the record claims ``openai`` and its key comes back), the worker restores the
     root values (``myproxy`` / ``false``) and only then does the guard run. Re-reading
     would approve and pair the named key with the built-in URL; the route fails closed."""
