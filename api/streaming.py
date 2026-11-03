@@ -54,6 +54,7 @@ from api.config import (
     merge_custom_provider_runtime_bundle,
     CustomProviderRouteError,
     MODEL_ALIAS_ROUTE_UNRESOLVED,
+    PROVIDER_NAME_AMBIGUOUS,
     raise_for_unresolved_model_alias_route,
     CUSTOM_ROUTE_NO_CREDENTIAL,
     CUSTOM_ROUTE_NO_ENDPOINT,
@@ -2189,6 +2190,8 @@ def _custom_provider_route_classification(error) -> dict:
         label = 'Provider credential unavailable'
     elif reason == CUSTOM_ROUTE_NO_ENDPOINT:
         label = 'Provider endpoint unavailable'
+    elif reason == PROVIDER_NAME_AMBIGUOUS:
+        label = 'Provider name conflict'
     else:
         label = 'Provider not configured'
     return {

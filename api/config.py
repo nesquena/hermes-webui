@@ -3997,6 +3997,8 @@ CUSTOM_ROUTE_NO_ENDPOINT = "custom_provider_endpoint_unresolved"
 # Kept beside the custom-provider reasons because it travels the same terminal
 # verdict path: an unresolvable route must stop before any provider routing.
 MODEL_ALIAS_ROUTE_UNRESOLVED = "model_alias_route_unresolved"
+# A built-in provider name that another provider record also claims (#8690).
+PROVIDER_NAME_AMBIGUOUS = "provider_name_ambiguous"
 
 # Key the verdict travels under on a merged bundle. ``None`` == routable.
 CUSTOM_ROUTE_ERROR_FIELD = "route_error"
@@ -4229,6 +4231,131 @@ def _custom_record_names_identity(display_name: object, provider_key: object, pi
         for value in (display_name, provider_key)
         if str(value or "").strip()
     )
+
+
+def _claiming_value(values: tuple, names: set) -> str | None:
+    """The first of ``values`` whose identity spellings include one of ``names``.
+
+    Spellings are the Agent's alias vocabulary (:func:`_custom_provider_alias_set`)
+    plus their underscore-folded forms (:func:`_canonicalise_provider_id` treats
+    ``opencode_go`` and ``opencode-go`` as one id), so no spelling variant hides
+    a claim. The value is returned so a message can name the record by the very
+    field that claims the name, which is never a URL or a credential.
+    """
+    for value in values:
+        text = str(value or "").strip()
+        aliases = _custom_provider_alias_set(text, "") if text else frozenset()
+        if names & (aliases | {alias.replace("_", "-") for alias in aliases}):
+            return text
+    return None
+
+
+def provider_name_ambiguity_verdict(provider: object, config: object = None) -> dict | None:
+    """Terminal verdict when one built-in provider name has two claimants (#8690).
+
+    Hermes Agent answers a provider name with the first ``providers:`` /
+    ``custom_providers`` record whose alias set contains it, and keys the
+    credential pool by name, so when the built-in ``openai`` and a record that
+    also answers to ``openai`` (``providers['custom:openai']``, a legacy row named
+    ``openai``, a record whose ``name`` is ``openai``) coexist, the endpoint and
+    the key it returns can come from different records depending on config
+    order. Which pair is right cannot be decided from the WebUI side without
+    re-implementing that selection, so the route fails closed instead.
+
+    Purely name-based: no URL is read or compared. A record claims the name in
+    any spelling the Agent accepts (case, surrounding whitespace, spaces vs
+    dashes, the ``custom:`` prefix) whether enabled or not, because the Agent's
+    legacy view still selects rows the user switched off.
+
+    * Bare built-in route ``X``: ambiguous when ANY record other than the
+      built-in's own ``providers.X`` claims ``X`` (or two records are keyed
+      ``X``). With no ``providers.X`` the built-in identity still exists (its
+      default endpoint and ambient key), and WebUI routes bare ``X`` as that
+      built-in (#8685) while the Agent answers with the sibling, so it is still
+      two claimants.
+    * Explicit ``custom:X`` where ``X`` is a built-in id: ambiguous only when
+      ``providers.X`` exists and another record also answers to ``custom:X``;
+      the Agent's alias set for ``providers.X`` contains ``custom:X``. Without
+      ``providers.X`` the selector names exactly one record and is untouched.
+
+    Returns ``None`` for every other route, including named custom providers
+    whose name is not a built-in id.
+    """
+    route = str(provider or "").strip().lower().replace(" ", "-")
+    explicit = route.startswith("custom:")
+    builtin = _canonicalise_provider_id(route.split(":", 1)[1].strip() if explicit else route)
+    if (
+        not builtin
+        or builtin in {"custom", "auto"}
+        or builtin.startswith("custom:")
+        or _is_native_custom_provider_key(builtin)
+    ):
+        return None
+    source = get_config() if config is None else config
+    if not isinstance(source, dict):
+        return None
+    names = {route, route.replace("_", "-"), f"custom:{builtin}" if explicit else builtin}
+    own: list[str] = []
+    others: list[str] = []
+    providers = source.get("providers")
+    for key, record in (providers.items() if isinstance(providers, dict) else ()):
+        key_text = str(key or "").strip()
+        if not key_text or not isinstance(record, dict):
+            continue
+        claimed_by = _claiming_value((key_text, record.get("name"), record.get("provider_key")), names)
+        if claimed_by is None:
+            continue
+        if not key_text.lower().startswith("custom:") and _canonicalise_provider_id(key_text) == builtin:
+            own.append(key_text)
+        else:
+            others.append(f"'{key_text}'" + (f" (named '{claimed_by}')" if claimed_by != key_text else ""))
+    legacy = source.get("custom_providers")
+    rows = legacy.items() if isinstance(legacy, dict) else enumerate(legacy if isinstance(legacy, list) else ())
+    for index, row in rows:
+        if not isinstance(row, dict):
+            continue
+        fallback = index if isinstance(legacy, dict) else None
+        claimed_by = _claiming_value((row.get("name"), row.get("provider_key"), fallback), names)
+        if claimed_by is not None:
+            others.append(f"custom_providers entry '{claimed_by}'")
+    if explicit:
+        ambiguous = bool(own) and len(own) + len(others) >= 2
+    else:
+        ambiguous = bool(others) or len(own) >= 2
+    if not ambiguous:
+        return None
+    claimants = [f"the built-in '{builtin}'"] + [f"'{key}'" for key in own[1:]] + others
+    count = {2: "Two", 3: "Three"}.get(len(claimants), str(len(claimants)))
+    listed = ", ".join(claimants[:-1]) + " and " + claimants[-1]
+    return {
+        "reason": PROVIDER_NAME_AMBIGUOUS,
+        "provider": route,
+        "message": (
+            f"{count} providers claim '{builtin}': {listed}. Rename the custom one "
+            "(for example custom:my-proxy) or remove one, then retry."
+        ),
+        "hint": "Edit the provider under Settings -> Providers or in config.yaml.",
+    }
+
+
+def _refuse_ambiguous_provider_name(bundle: dict, *providers: object) -> dict | None:
+    """Make ``bundle`` terminal when any of ``providers`` is ambiguous (#8690).
+
+    The verdict is what stops the turn (:data:`CUSTOM_ROUTE_ERROR_FIELD`); the
+    connection and every side field are cleared too, so a consumer that reads
+    the fields without checking it still has nothing to send.
+    """
+    for provider in dict.fromkeys(providers):
+        verdict = provider_name_ambiguity_verdict(provider)
+        if verdict is not None:
+            bundle["base_url"] = None
+            bundle["api_key"] = None
+            for field in CUSTOM_CONNECTION_SIDE_FIELDS:
+                bundle[field] = None
+            bundle[CUSTOM_ROUTE_ERROR_FIELD] = verdict
+            logger.warning("refusing provider route: %s", verdict["message"])
+            return verdict
+    return None
 
 
 # ``enabled:`` words YAML may hand us as strings, matching
@@ -5155,14 +5282,18 @@ def _custom_provider_runtime_bundle_with_provenance(
         "acp_command": _rt.get("acp_command", _rt.get("command")),
         "acp_args": _rt.get("acp_args", _rt.get("args")),
         "credential_pool": _rt.get("credential_pool"),
-        # Routable until a named custom route proves otherwise. Non-custom
-        # routes legitimately leave the endpoint and/or credential to the
-        # runtime provider, so only the named-``custom:`` branches below can
-        # record a verdict here.
+        # Routable until a route proves otherwise. Non-custom routes
+        # legitimately leave the endpoint and/or credential to the runtime
+        # provider; they record a verdict only when two records claim their
+        # name (#8690). Named ``custom:`` routes are judged below.
         CUSTOM_ROUTE_ERROR_FIELD: None,
     }
 
     lookup = lookup_provider or resolved_provider
+    # A name two records claim (#8690) is refused before any record is chosen:
+    # the runtime dict may already pair one record's endpoint with another's key.
+    if _refuse_ambiguous_provider_name(bundle, lookup, resolved_provider) is not None:
+        return bundle, None
     if not (isinstance(lookup, str) and lookup.startswith("custom:")):
         return bundle, None
 
@@ -9765,6 +9896,9 @@ def merge_model_alias_runtime_bundle(
                 CUSTOM_ROUTE_NO_CREDENTIAL,
                 provider or f"model alias {route.get('alias') or '<unknown>'}",
             )
+    # Last, so an alias credential can neither complete nor relabel a pair the
+    # provider's runtime resolved under a name two records claim (#8690).
+    _refuse_ambiguous_provider_name(bundle, provider, route.get("provider"))
     return bundle
 
 
