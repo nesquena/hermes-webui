@@ -4230,6 +4230,34 @@ def _publish_turn_session_profile(profile_name: str | None) -> object:
     return token
 
 
+def _mirror_restore_value_under_lock() -> "str | object":
+    """Resolve the value the process env should carry, given the publisher stack.
+
+    MUST be called with ``_PROFILE_MIRROR_LOCK`` held. Shared by
+    ``_release_turn_session_profile`` (last-owner teardown) and
+    ``_reassert_turn_session_profile`` (mid-turn repair after a writer that
+    bypasses the mirror, e.g. MCP discovery's dotenv load), so the two can
+    never disagree about who owns the slot.
+
+    Returns the most recent REMAINING publisher's profile when one resolved a
+    profile, else the captured ambient — the ``_PROFILE_MIRROR_UNSET``
+    sentinel meaning "the env had no value at all, remove the key".
+    """
+    for _remaining_token, remaining_profile in reversed(_PROFILE_MIRROR_PUBLISHERS):
+        if remaining_profile is not None:
+            return str(remaining_profile)
+    return _PROFILE_MIRROR_AMBIENT
+
+
+def _apply_mirror_restore_under_lock(restore) -> None:
+    """Write (or remove) the mirror key from a ``_mirror_restore_value_under_lock``
+    result. MUST be called with ``_PROFILE_MIRROR_LOCK`` held."""
+    if restore is _PROFILE_MIRROR_UNSET:
+        os.environ.pop(_PROFILE_MIRROR_KEY, None)
+    else:
+        os.environ[_PROFILE_MIRROR_KEY] = str(restore)
+
+
 def _release_turn_session_profile(token) -> None:
     """Retire one publisher; the mirror never outlives its last owner.
 
@@ -4245,29 +4273,51 @@ def _release_turn_session_profile(token) -> None:
                 break
         else:
             return  # unknown token: not ours to restore
-        for _remaining_token, remaining_profile in reversed(
-            _PROFILE_MIRROR_PUBLISHERS
-        ):
-            if remaining_profile is not None:
-                # A concurrent turn is still running: re-publish the most
-                # recent REMAINING owner that resolved a profile — never a
-                # completed turn's. Profile-less owners in between (a
-                # background-worker scope whose profile's .env sets no
-                # HERMES_SESSION_PROFILE) register as None and must not hide
-                # the live turn's value from context-less readers.
-                os.environ[_PROFILE_MIRROR_KEY] = remaining_profile
-                break
-        else:
-            # Either the last publisher left, or no remaining publisher
-            # resolved a profile: fall back to the ambient value exactly
-            # as it was before any turn touched it — absent stays absent, and
-            # an inherited value is never masked (a profile-less turn must
-            # not delete it either).
-            ambient = _PROFILE_MIRROR_AMBIENT
-            if ambient is _PROFILE_MIRROR_UNSET:
-                os.environ.pop(_PROFILE_MIRROR_KEY, None)
-            else:
-                os.environ[_PROFILE_MIRROR_KEY] = ambient
+        # A concurrent turn is still running: re-publish the most recent
+        # REMAINING owner that resolved a profile — never a completed turn's.
+        # Profile-less owners in between (a background-worker scope whose
+        # profile's .env sets no HERMES_SESSION_PROFILE) register as None and
+        # must not hide the live turn's value from context-less readers.
+        # Otherwise fall back to the ambient value exactly as it was before any
+        # turn touched it — absent stays absent, and an inherited value is never
+        # masked (a profile-less turn must not delete it either).
+        _apply_mirror_restore_under_lock(_mirror_restore_value_under_lock())
+
+
+def _reassert_turn_session_profile(token) -> None:
+    """Re-assert a LIVE turn's published slot after a mirror-bypassing writer.
+
+    Some call paths write ``HERMES_SESSION_PROFILE`` into ``os.environ``
+    without going through ``_publish_turn_session_profile``. The known one is
+    MCP discovery: ``discover_mcp_tools()`` → ``_load_mcp_config()`` →
+    ``load_hermes_dotenv()`` resolves its home from the live ``HERMES_HOME``
+    (which the turn has already mirrored to its profile home) and publishes
+    that profile ``.env`` with ``override=True``. Left alone, an unresolved
+    turn exposes the profile's ``.env`` identity process-wide and can
+    overwrite a concurrent named turn's published value (#8452).
+
+    Unlike ``_release_turn_session_profile`` this does NOT retire anything —
+    the publisher stays live. It only repairs the env to whatever the stack
+    says the slot should carry, using the exact same resolution as the release
+    tail. No-op for an unknown token (never owned this slot) and for a
+    publisher that has already been released.
+    """
+    if token is None:
+        return
+    with _PROFILE_MIRROR_LOCK:
+        for owner_token, owner_profile in _PROFILE_MIRROR_PUBLISHERS:
+            if owner_token is token:
+                if owner_profile:
+                    os.environ[_PROFILE_MIRROR_KEY] = str(owner_profile)
+                else:
+                    # This turn published nothing (unresolved profile), so the
+                    # slot belongs to the stack: re-publish the most recent
+                    # remaining owner that resolved a profile, else the captured
+                    # ambient. A sibling named turn keeps its value; with none
+                    # live the ambient is restored exactly (absent stays absent).
+                    _apply_mirror_restore_under_lock(_mirror_restore_value_under_lock())
+                return
+        # token not in the stack: released already, or never published here.
 
 
 @contextlib.contextmanager
@@ -15059,6 +15109,24 @@ def _run_agent_streaming(
             discover_mcp_tools()
         except Exception:
             pass  # MCP not available or not configured — non-fatal
+        finally:
+            # #8452 (review 2026-11-02, release-stage finding): MCP discovery
+            # WRITES PROCESS ENV BEHIND THE MIRROR'S BACK. `discover_mcp_tools()`
+            # → `_load_mcp_config()` → `load_hermes_dotenv()` runs on every turn
+            # whenever the real `tools.mcp_tool` is importable (it is in
+            # production, always), and it resolves its home from the live
+            # `HERMES_HOME` — which the block above has already mirrored to this
+            # turn's profile home. The loader then publishes that profile .env
+            # into `os.environ` with `override=True`, so mid-turn
+            # `HERMES_SESSION_PROFILE` becomes the `.env` value, bypassing
+            # `_publish_turn_session_profile` / `_release_turn_session_profile`.
+            # An unresolved turn therefore exposed the profile's `.env` identity
+            # process-wide and could overwrite a concurrent named turn's
+            # published profile — exactly the race the mirror exists to prevent.
+            # Re-assert this turn's published slot under the mirror lock so the
+            # window closes before any agent work runs. The `finally` also
+            # covers a discovery that raised after writing the env.
+            _reassert_turn_session_profile(_turn_profile_mirror_token)
 
         # Register a gateway-style notify callback so the approval system can
         # push the `approval` SSE event the moment a dangerous command is
