@@ -2355,13 +2355,16 @@ class _ReleaseIntent:
     work, or once the release has run.
     """
 
-    __slots__ = ("_memory_manager", "bound_home", "bound_key", "session_id")
+    __slots__ = ("_memory_manager", "bound_home", "bound_key", "session_id", "armed")
 
     def __init__(self, manager: Any, bound_home: str, bound_key: Optional[str], session_id: str):
         self._memory_manager = manager
         self.bound_home = bound_home
         self.bound_key = bound_key
         self.session_id = session_id
+        # Futures already carrying this intent's done-callback, by identity (the
+        # future itself is kept so a reused id() can never match). Holder lock.
+        self.armed: dict = {}
 
 
 def _outstanding_futures(manager: Any) -> list:
@@ -2378,6 +2381,7 @@ def _outstanding_futures(manager: Any) -> list:
 
 def _drop_intent_locked(intent: _ReleaseIntent) -> None:
     """Retire ``intent`` from every entry still carrying it. Holder lock held."""
+    intent.armed.clear()
     for key, entry in list(_provider_holders.items()):
         if entry.intent is intent:
             entry.intent = None
@@ -2420,10 +2424,24 @@ def _arm_release_intent(intent: _ReleaseIntent) -> str:
             hooks.append(pending[-1])
     if not hooks:
         return "unhookable"
-    for future in hooks:
+    # Arm each future once per intent. A retry that still finds queued work
+    # re-arms, and adding the callback again to a future that already carries it
+    # doubled the retries at every completion (2**N - 1 threads for N managers
+    # draining in turn). Reserved under the holder lock, attached outside it
+    # (the lock order above); a future already armed still holds the retry.
+    with _provider_holders_lock:
+        fresh = [future for future in hooks if intent.armed.get(id(future)) is not future]
+        for future in fresh:
+            intent.armed[id(future)] = future
+    for index, future in enumerate(fresh):
         try:
             future.add_done_callback(lambda _done, intent=intent: _start_intent_retry(intent))
         except Exception:
+            # Un-reserve this future and every one not attached yet, so a later
+            # arm hooks them instead of trusting a callback that never went on.
+            with _provider_holders_lock:
+                for unattached in fresh[index:]:
+                    intent.armed.pop(id(unattached), None)
             return "unhookable"
     return "hooked"
 
@@ -2465,6 +2483,7 @@ def _claim_release_intent(intent: _ReleaseIntent) -> tuple[str, str, list]:
                 for entry in entries:
                     entry.intent = None
                     entry.teardown = True
+                intent.armed.clear()
                 return "claimed", "", instances
             if wait_for in ("own_work", "work"):
                 return "work", why, []
