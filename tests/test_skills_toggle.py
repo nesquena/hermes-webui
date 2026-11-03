@@ -1,10 +1,66 @@
 """Tests for skill toggle (enable/disable) API and frontend."""
+import contextvars
+import os
+import sys
+import types
 from pathlib import Path
+from typing import Any
 
 
 PANELS_JS = (Path(__file__).resolve().parent.parent / "static" / "panels.js").read_text("utf-8")
 I18N_JS = (Path(__file__).resolve().parent.parent / "static" / "i18n.js").read_text("utf-8")
 STYLE_CSS = (Path(__file__).resolve().parent.parent / "static" / "style.css").read_text("utf-8")
+
+
+def _install_fake_hermes_constants(monkeypatch):
+    """Install a ``hermes_constants`` twin so the plugin-home-binding tests
+    run in agent-less CI.
+
+    ``api/routes.py:_plugin_manager_home_context`` binds the request's active
+    Hermes home by calling ``hermes_constants.set_hermes_home_override`` and
+    restoring it with ``reset_hermes_home_override``; the agent package is
+    NOT installed in CI, so a hard ``import hermes_constants`` fails there and
+    the test errors instead of proving the binding. This twin mirrors the
+    real module's contract exactly (a context-local override that shadows
+    ``HERMES_HOME``, restored via the reset token) so the production code path
+    under test runs unchanged.
+
+    The real module is preferred when it is importable: this helper only
+    fills the gap, it never shadows a working installation.
+    """
+    try:
+        import hermes_constants  # noqa: F401
+        return None
+    except ImportError:
+        pass
+
+    unset = object()
+    override = contextvars.ContextVar("fake_hermes_home_override", default=unset)
+
+    def get_hermes_home_override():
+        value = override.get()
+        return str(value) if value is not unset and value else None
+
+    def get_hermes_home():
+        active = get_hermes_home_override()
+        if active:
+            return Path(os.path.expanduser(os.path.expandvars(active)))
+        raw = os.environ.get("HERMES_HOME", "").strip()
+        return Path(os.path.expanduser(os.path.expandvars(raw))) if raw else Path.home() / ".hermes"
+
+    def set_hermes_home_override(path):
+        return override.set(unset if path is None else str(path))
+
+    def reset_hermes_home_override(token):
+        override.reset(token)
+
+    fake: Any = types.ModuleType("hermes_constants")
+    fake.get_hermes_home = get_hermes_home
+    fake.get_hermes_home_override = get_hermes_home_override
+    fake.set_hermes_home_override = set_hermes_home_override
+    fake.reset_hermes_home_override = reset_hermes_home_override
+    monkeypatch.setitem(sys.modules, "hermes_constants", fake)
+    return fake
 
 
 def test_toggle_endpoint_signature_in_routes():
@@ -237,3 +293,220 @@ def test_toggle_preserves_json_array_string_entries(tmp_path, monkeypatch):
     _handle_skill_toggle(handler, {"name": "skill-a", "enabled": True})
     cfg_after2 = _load_yaml_config_file(config_path)
     assert cfg_after2["skills"]["disabled"] == ["skill-b", "skill-c"]
+
+
+class _FakePluginSkillManager:
+    """Minimal plugin-manager double for the toggle's plugin fallback.
+
+    Only the surface ``_handle_skill_toggle`` touches is implemented:
+    ``find_plugin_skill(qualified_name)`` returning the SKILL.md path or None,
+    plus ``discover_and_load(force=False)`` (the fallback must discover
+    before the lookup — PR #7781 re-gate findings 2/3).
+    """
+
+    def __init__(self, find_paths=None):
+        self._find_paths = dict(find_paths or {})
+        self.discover_calls: list = []
+
+    def discover_and_load(self, force: bool = False) -> None:
+        self.discover_calls.append(force)
+
+    def find_plugin_skill(self, qualified_name):
+        return self._find_paths.get(qualified_name)
+
+
+class _ColdRegistryPluginSkillManager(_FakePluginSkillManager):
+    """Toggle-side double whose skill registry is EMPTY until discovery runs.
+
+    Mirrors a fresh WebUI process (cold independent-API/cached-client case in
+    the re-gate review): ``find_plugin_skill`` must see the registered skill
+    only after ``discover_and_load`` has populated the in-memory registry —
+    a lookup that skips discovery 404s exactly like the pre-fix toggle.
+    """
+
+    def __init__(self, find_paths=None):
+        super().__init__(find_paths={})
+        self._cold_find_paths = dict(find_paths or {})
+        self._discovered = False
+
+    def discover_and_load(self, force: bool = False) -> None:
+        super().discover_and_load(force)
+        if not self._discovered:
+            self._find_paths.update(self._cold_find_paths)
+            self._discovered = True
+
+    @property
+    def discovered(self) -> bool:
+        return self._discovered
+
+
+def test_toggle_accepts_plugin_registered_skill(tmp_path, monkeypatch):
+    """PR #7781 review finding 3 (CORE): the Skills-panel toggle on a plugin
+    row used to 404 because the route only accepted directory skills.
+    Plugin-registered skills must be accepted for the active profile so the
+    toggle writes the qualified name into that profile's disabled set (which
+    the agent's own listing honors) instead of failing."""
+    from unittest.mock import MagicMock
+    from api.routes import _handle_skill_toggle
+    from api.config import _load_yaml_config_file
+
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr("api.routes._get_config_path", lambda: config_path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("skills:\n  disabled: []\n", encoding="utf-8")
+
+    # The directory scan misses the qualified name — plugin skills live
+    # outside the local skills tree.
+    monkeypatch.setattr("api.routes._find_skill_in_dirs", lambda name, dirs: (None, None))
+    plugin_md = tmp_path / "plugin-skills" / "demo" / "skill" / "SKILL.md"
+    plugin_md.parent.mkdir(parents=True, exist_ok=True)
+    plugin_md.write_text("---\nname: demo:skill\n---\nPlugin body", encoding="utf-8")
+    monkeypatch.setattr(
+        "api.routes._get_plugin_manager_for_visibility",
+        lambda: _FakePluginSkillManager({"demo:skill": plugin_md}),
+    )
+
+    handler = MagicMock()
+    _handle_skill_toggle(handler, {"name": "demo:skill", "enabled": False})
+    cfg_after = _load_yaml_config_file(config_path)
+    assert "demo:skill" in cfg_after["skills"]["disabled"]
+
+    # And back on: the round-trip must remove exactly the qualified name.
+    _handle_skill_toggle(handler, {"name": "demo:skill", "enabled": True})
+    cfg_after2 = _load_yaml_config_file(config_path)
+    assert "demo:skill" not in cfg_after2["skills"]["disabled"]
+
+
+def test_toggle_still_404s_for_unknown_plugin_skill(tmp_path, monkeypatch):
+    """Control: a name that is neither a directory skill nor a registered
+    plugin skill must still 404 — the plugin fallback must not turn the
+    toggle into a write-anything endpoint."""
+    from unittest.mock import MagicMock
+    from api.routes import _handle_skill_toggle
+
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr("api.routes._get_config_path", lambda: config_path)
+    monkeypatch.setattr("api.routes._find_skill_in_dirs", lambda name, dirs: (None, None))
+    monkeypatch.setattr(
+        "api.routes._get_plugin_manager_for_visibility",
+        lambda: _FakePluginSkillManager({}),
+    )
+    captured = {}
+
+    def fake_bad(handler, msg, status):
+        captured["msg"] = msg
+        captured["status"] = status
+        return True
+
+    monkeypatch.setattr("api.routes.bad", fake_bad)
+    handler = MagicMock()
+    _handle_skill_toggle(handler, {"name": "demo:nope", "enabled": False})
+    assert captured["status"] == 404, captured
+
+
+def test_toggle_cold_registry_discovers_before_lookup(tmp_path, monkeypatch):
+    """PR #7781 re-gate finding 3 (CORE): the standalone toggle on a cold
+    process used to 404 for a registered enabled native plugin because the
+    fallback called find_plugin_skill() before discovery populated the
+    registry — the same toggle after an /api/skills listing (warmed) worked.
+    The toggle must run discovery (best-effort, force=False) inside the
+    request-home scope BEFORE the lookup, then write only the active
+    profile's config (A/B isolation preserved)."""
+    from unittest.mock import MagicMock
+    from api.routes import _handle_skill_toggle
+    from api.config import _load_yaml_config_file
+
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr("api.routes._get_config_path", lambda: config_path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("skills:\n  disabled: []\n", encoding="utf-8")
+
+    # The directory scan misses the qualified name — plugin skills live
+    # outside the local skills tree.
+    monkeypatch.setattr("api.routes._find_skill_in_dirs", lambda name, dirs: (None, None))
+    plugin_md = tmp_path / "plugin-skills" / "reviewdemo" / "skill" / "SKILL.md"
+    plugin_md.parent.mkdir(parents=True, exist_ok=True)
+    plugin_md.write_text("---\nname: reviewdemo:skill\n---\nPlugin body", encoding="utf-8")
+    manager = _ColdRegistryPluginSkillManager({"reviewdemo:skill": plugin_md})
+    monkeypatch.setattr("api.routes._get_plugin_manager_for_visibility", lambda: manager)
+
+    handler = MagicMock()
+    _handle_skill_toggle(handler, {"name": "reviewdemo:skill", "enabled": False})
+    cfg_after = _load_yaml_config_file(config_path)
+    assert "reviewdemo:skill" in cfg_after["skills"]["disabled"]
+    # Discovery ran exactly once, before the lookup, with force=False.
+    assert manager.discover_calls == [False], manager.discover_calls
+    assert manager.discovered is True
+
+    # Round-trip back on: still resolves through the (now populated) registry
+    # and removes exactly the qualified name.
+    _handle_skill_toggle(handler, {"name": "reviewdemo:skill", "enabled": True})
+    cfg_after2 = _load_yaml_config_file(config_path)
+    assert "reviewdemo:skill" not in cfg_after2["skills"]["disabled"]
+
+
+def test_toggle_plugin_lookup_binds_request_active_home(tmp_path, monkeypatch):
+    """A/B isolation (PR #7781 re-gate): the toggle's discover + find calls
+    must run inside the request's active-Hermes-home scope (the manager is
+    keyed by the agent-side home), the write must land in the active
+    profile's config, and the ambient home must be restored afterwards."""
+    from unittest.mock import MagicMock
+
+    # Install the hermes_constants twin BEFORE importing the production
+    # modules: api/routes.py binds the request home through that module, and
+    # the agent package is absent in CI.
+    _install_fake_hermes_constants(monkeypatch)
+
+    from api.routes import _handle_skill_toggle
+    from api.config import _load_yaml_config_file
+    from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
+
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr("api.routes._get_config_path", lambda: config_path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("skills:\n  disabled: []\n", encoding="utf-8")
+
+    monkeypatch.setattr("api.routes._find_skill_in_dirs", lambda name, dirs: (None, None))
+    plugin_md = tmp_path / "plugin-skills" / "reviewdemo" / "skill" / "SKILL.md"
+    plugin_md.parent.mkdir(parents=True, exist_ok=True)
+    plugin_md.write_text("---\nname: reviewdemo:skill\n---\nPlugin body", encoding="utf-8")
+
+    class _RecordingManager(_FakePluginSkillManager):
+        def __init__(self, find_paths=None):
+            super().__init__(find_paths)
+            self.seen_homes = []
+
+        def _record(self):
+            self.seen_homes.append(Path(get_hermes_home()))
+
+        def discover_and_load(self, force: bool = False) -> None:
+            self._record()
+            super().discover_and_load(force)
+
+        def find_plugin_skill(self, qualified_name):
+            self._record()
+            return super().find_plugin_skill(qualified_name)
+
+    profile_a_home = (tmp_path / "profile-a").resolve()
+    profile_b_home = (tmp_path / "profile-b").resolve()
+    profile_a_home.mkdir()
+    profile_b_home.mkdir()
+    manager = _RecordingManager({"reviewdemo:skill": plugin_md})
+    monkeypatch.setattr("api.routes._get_plugin_manager_for_visibility", lambda: manager)
+    monkeypatch.setattr("api.profiles.get_active_hermes_home", lambda: str(profile_b_home))
+
+    handler = MagicMock()
+    ambient_before = Path(get_hermes_home())
+    token = set_hermes_home_override(profile_a_home)
+    try:
+        _handle_skill_toggle(handler, {"name": "reviewdemo:skill", "enabled": False})
+    finally:
+        reset_hermes_home_override(token)
+
+    # The toggle writes the ACTIVE profile's config, never the ambient one.
+    cfg_after = _load_yaml_config_file(config_path)
+    assert "reviewdemo:skill" in cfg_after["skills"]["disabled"]
+    # Both manager calls (discover + find) saw profile B's home, not the
+    # ambient profile A home, and the override was reset afterwards.
+    assert manager.seen_homes == [profile_b_home, profile_b_home], manager.seen_homes
+    assert Path(get_hermes_home()) == ambient_before
