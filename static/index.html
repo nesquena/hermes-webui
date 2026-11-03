@@ -208,14 +208,23 @@
     <!-- Tasks (cron) panel -->
     <div class="panel-view" id="panelTasks">
       <div class="panel-head">
-        <span data-i18n="scheduled_jobs">Scheduled jobs</span>
+        <span id="tasksPanelTitle" data-i18n="scheduled_jobs">Scheduled jobs</span>
         <div class="panel-head-actions">
-          <button class="panel-head-btn has-tooltip has-tooltip--bottom" id="cronRefreshBtn" onclick="loadCrons(true)" data-tooltip="Refresh job list" aria-label="Refresh job list"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
-          <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="openCronCreate()" data-tooltip="New job" data-i18n-title="new_job" aria-label="New job"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom-right" id="cronRefreshBtn" onclick="refreshTasksPanel()" data-tooltip="Refresh job list" aria-label="Refresh job list"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom-right" id="cronNewJobBtn" onclick="openCronCreate()" data-tooltip="New job" data-i18n-title="new_job" aria-label="New job"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         </div>
       </div>
+      <!-- #2316: Tasks subtab switch (Jobs | Scripts). Default tab is Jobs
+           so existing users see no behavioural change until they click. -->
+      <div class="tasks-subtab" role="tablist" aria-label="Tasks view">
+        <button type="button" class="tasks-subtab-btn active" id="tasksTabJobs" role="tab" aria-selected="true" data-i18n="cron_tab_jobs" onclick="switchTasksSubtab('jobs')">Jobs</button>
+        <button type="button" class="tasks-subtab-btn" id="tasksTabScripts" role="tab" aria-selected="false" data-i18n="cron_tab_scripts" onclick="switchTasksSubtab('scripts')">Scripts</button>
+      </div>
       <div id="cronGatewayNotice" class="detail-alert cron-gateway-notice" style="display:none"></div>
-      <div class="cron-list" id="cronList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+      <div class="cron-list" id="cronList" data-tasks-subtab="jobs"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+      <div class="scripts-list" id="scriptsList" data-tasks-subtab="scripts" hidden>
+        <div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div>
+      </div>
     </div>
     <!-- Kanban panel -->
     <div class="panel-view" id="panelKanban">
@@ -871,8 +880,8 @@
       <div class="main-view-body" id="taskDetailBody" style="display:none"></div>
       <div class="main-view-empty" id="taskDetailEmpty">
         <svg class="main-view-empty-icon" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-        <div class="main-view-empty-title" data-i18n="tasks_empty_title">Select a scheduled job</div>
-        <div class="main-view-empty-sub" data-i18n="tasks_empty_sub">Pick a job from the sidebar to view its details and runs, or create a new one.</div>
+        <div class="main-view-empty-title" id="taskDetailEmptyTitle" data-i18n="tasks_empty_title">Select a scheduled job</div>
+        <div class="main-view-empty-sub" id="taskDetailEmptySub" data-i18n="tasks_empty_sub">Pick a job from the sidebar to view its details and runs, or create a new one.</div>
       </div>
     </div>
     <div id="mainKanban" class="main-view">

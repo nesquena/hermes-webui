@@ -6018,6 +6018,18 @@ function _normalizeConfiguredModelKey(modelId){
   return s.replace(/-/g,'.');
 }
 
+function _configuredModelIdentity(modelId,providerId){
+  let s=String(modelId||'').trim().toLowerCase();
+  const provider=String(providerId||'').trim().toLowerCase();
+  if(provider){
+    const atPrefix=`@${provider}:`;
+    const slashPrefix=`${provider}/`;
+    if(s.startsWith(atPrefix)) s=s.slice(atPrefix.length)||s;
+    else if(s.startsWith(slashPrefix)) s=s.slice(slashPrefix.length)||s;
+  }
+  return s.replace(/-/g,'.');
+}
+
 function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   const normalized=_normalizeConfiguredModelKey(modelId);
   const provider=String(badge&&badge.provider||'').toLowerCase();
@@ -6079,10 +6091,15 @@ function _getConfiguredModelBadge(modelId,badgeMap,providerId){
   const provider=String(providerId||'').toLowerCase();
   const exact=map[modelId];
   if(exact && (!provider || !exact.provider || String(exact.provider).toLowerCase()===provider)) return exact;
-  const targetNorm=_normalizeConfiguredModelKey(modelId);
   const matches=[];
   for(const [candidate,badge] of Object.entries(map)){
-    if(_normalizeConfiguredModelKey(candidate)===targetNorm) matches.push(badge);
+    const badgeProvider=String(badge&&badge.provider||'').toLowerCase();
+    if(provider&&badgeProvider&&badgeProvider!==provider) continue;
+    // Strip the same provider wrapper from both sides. A typed custom id such
+    // as 'openai/gpt-4o' reaches here with no row provider, so the badge's
+    // provider decides which wrapper is routing syntax.
+    const identityProvider=provider||badgeProvider;
+    if(_configuredModelIdentity(candidate,identityProvider)===_configuredModelIdentity(modelId,identityProvider)) matches.push(badge);
   }
   if(!matches.length) return null;
   if(provider){
@@ -12256,8 +12273,42 @@ let _ttsGeneration=0;
 // replacement — and stopTTS() — invalidates all prior tokens, and every
 // asynchronous callback must verify ownership before mutating shared state.
 // `_ttsSpeaking` alone cannot distinguish playback A from playback B.
-function _beginTtsPlayback(){ _ttsSpeaking=true; return ++_ttsGeneration; }
+// A generation bump also aborts the requests the dead generation still has in
+// flight: the token only keeps stale responses out of the AudioContext, while
+// the AbortController below stops the browser downloading and decoding the
+// abandoned response. The server still finishes that provider call.
+function _beginTtsPlayback(){
+  _ttsSpeaking=true;
+  // Bump BEFORE aborting: the abort handlers are microtasks, but the token must
+  // already be dead when they run so none of them can claim the new playback.
+  const gen=++_ttsGeneration;
+  _abortPendingTtsRequests();
+  return gen;
+}
 function _ownsTtsPlayback(gen){ return gen===_ttsGeneration; }
+// In-flight /api/tts requests, one AbortController per request. Cancelling on
+// stop/replacement matters even though every callback is generation-guarded:
+// the server keeps synthesizing, the response is downloaded and thrown away,
+// and the request still occupies the per-client TTS rate window that the next
+// playback has to wait out.
+let _ttsPendingAborts=null;
+function _newTtsAbortController(){
+  if(typeof AbortController!=='function') return null;
+  try{ return new AbortController(); }catch(_){ return null; }
+}
+function _trackTtsAbort(ctl){
+  if(!ctl) return null;
+  if(!_ttsPendingAborts) _ttsPendingAborts=new Set();
+  _ttsPendingAborts.add(ctl);
+  return ctl;
+}
+function _releaseTtsAbort(ctl){ if(ctl&&_ttsPendingAborts) _ttsPendingAborts.delete(ctl); }
+function _abortPendingTtsRequests(){
+  if(!_ttsPendingAborts||!_ttsPendingAborts.size) return;
+  const pending=Array.from(_ttsPendingAborts);
+  _ttsPendingAborts.clear();
+  pending.forEach(function(ctl){ try{ ctl.abort(); }catch(_){} });
+}
 // Minimum gap between consecutive /api/tts synthesis requests, matching the
 // server-side per-client window in api/routes.py (_TtsRateLimiter, 2 s).
 // Shared by every engine and generation — the server limiter is per-client
@@ -12302,11 +12353,18 @@ function _sendTtsRequest(init, owner){
   let attempt=0;
   function _dispatch(){
     return _acquireTtsRequestSlot(owner).then(function(reserved){
-      if(!reserved) return {ok:false, err:new Error('aborted')};
-      return fetch(new URL('api/tts', document.baseURI || location.href).href, init)
+      if(!reserved) return {ok:false, err:new Error('aborted'), aborted:true};
+      // One AbortController per request: stopTTS()/a replacement aborts it, so
+      // the browser drops an abandoned response at once instead of downloading
+      // it into a generation-guarded no-op. The server-side synthesis and the
+      // request-rate window are not refunded.
+      const ctl=_trackTtsAbort(_newTtsAbortController());
+      const opts=ctl?Object.assign({}, init, {signal:ctl.signal}):init;
+      return fetch(new URL('api/tts', document.baseURI || location.href).href, opts)
       .then(function(r){
         if(r.status===429&&attempt<3){
           attempt++;
+          _releaseTtsAbort(ctl);
           return _dispatch();
         }
         if(!r.ok){
@@ -12331,8 +12389,15 @@ function _sendTtsRequest(init, owner){
           if(res&&typeof res==='object'&&('ok' in res)) return res;
           return {ok:true, buf:res};
         },
-        function(err){ return {ok:false, err:err}; }
-      );
+        function(err){
+          // A cancellation is not a failure: report it as such so no caller
+          // turns the user's own stop into an error toast.
+          return {ok:false, err:err, aborted:!!(ctl&&ctl.signal.aborted)};
+        }
+      )
+      // The request is settled (or abandoned): drop the controller so a later
+      // stop cannot abort a request that already delivered its audio.
+      .then(function(res){ _releaseTtsAbort(ctl); return res; });
     });
   }
   return _dispatch();
@@ -12445,7 +12510,7 @@ function _playEdgeTtsChunked(text, btn){
     }, _owns)
     .then(function(res){
       if(!_owns()) return;
-      if(!res.ok){ _fail((res.err&&res.err.message)||'Edge TTS failed'); return; }
+      if(!res.ok){ if(res.aborted) return; _fail((res.err&&res.err.message)||'Edge TTS failed'); return; }
       const url=URL.createObjectURL(new Blob([res.buf],{type:res.type}));
       const audio=new Audio(url);
       _playingEdgeAudio=audio;
@@ -12568,7 +12633,7 @@ function _playElevenLabsTts(text, btn){
   }, _owns)
   .then(function(res){
     if(!_owns()) return;
-    if(!res.ok){ _fail((res.err&&res.err.message)||'ElevenLabs TTS failed'); return; }
+    if(!res.ok){ if(res.aborted) return; _fail((res.err&&res.err.message)||'ElevenLabs TTS failed'); return; }
     return _playAudioBuf(res.buf, btn, 'ElevenLabs TTS', gen);
   })
   .catch(function(e){ _fail((e&&e.message)||'ElevenLabs TTS failed'); });
@@ -12593,9 +12658,11 @@ function _playOpenaiTts(text, btn){
   const _fail=function(msg){
     // Terminal failure: invalidate every scheduled/pending callback of this
     // playback (paced prefetch timers, in-flight fetch then-chains) so no
-    // follow-on request can fire after a terminal error, and stop/disconnect
-    // any partially constructed source before dropping the handle.
+    // follow-on request can fire after a terminal error, stop/disconnect
+    // any partially constructed source before dropping the handle, and cancel
+    // whatever this playback still has in flight.
     _ttsGeneration++;
+    _abortPendingTtsRequests();
     _ttsSpeaking=false;
     _stopActivePlaybackAudio();
     if(btn)btn.dataset.speaking='0';
@@ -12644,7 +12711,7 @@ function _playOpenaiTts(text, btn){
     bufPromise
     .then(function(res){
       if(!_ttsSpeaking||!_ownsTtsPlayback(gen)) return;
-      if(!res.ok){ _fail((res.err&&res.err.message)||'OpenAI TTS failed'); return; }
+      if(!res.ok){ if(res.aborted) return; _fail((res.err&&res.err.message)||'OpenAI TTS failed'); return; }
       var ctx=_getTtsAudioCtx();
       if(!ctx){ _fail('Web Audio API not available'); return; }
       var buf;
@@ -12821,8 +12888,11 @@ function _playAudioBuf(arrayBuffer, btn, label, gen){
 function stopTTS(){
   // Invalidate every in-flight generation (all engines, all chains) before
   // clearing state, so a late fetch/onended/decode callback can neither
-  // resume a stopped chain nor clobber a later playback.
+  // resume a stopped chain nor clobber a later playback. Then cancel the
+  // requests those generations still have on the wire, so stopping releases
+  // the browser's side of each request instead of only ignoring its response.
   _ttsGeneration++;
+  _abortPendingTtsRequests();
   if('speechSynthesis' in window){
     speechSynthesis.cancel();
   }
@@ -15838,6 +15908,27 @@ function _worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, visi
   const visibleTexts=Array.isArray(turnVisibleContents)?turnVisibleContents:[];
   return _stripVisibleAssistantEchoFromThinking(thinkingText, visibleContent, turnFinalVisibleContent, ...visibleTexts);
 }
+// A delegated subagent's whole task is one turn; split its worklog at each interim text.
+function _isDelegatedSubagentTranscript(){
+  return !S.busy&&!!S.session&&_isDelegatedSubagentRow(S.session);
+}
+function _worklogGroupKey(anchorRow, anchorTurn, placedAfterAnchor){
+  if(!_isDelegatedSubagentTranscript()) return anchorTurn;
+  if(placedAfterAnchor) return anchorRow;
+  for(let el=anchorRow.previousElementSibling;el;el=el.previousElementSibling){
+    if(el.classList&&el.classList.contains('assistant-segment')&&!el.classList.contains('assistant-segment-worklog-source')) return el;
+  }
+  return anchorTurn;
+}
+// Only the subagent's last turn opens: while it runs, or after it ended with no answer.
+function _subagentOpenWorklogTurn(inner){
+  if(!_isDelegatedSubagentTranscript()) return null;
+  const turns=inner.querySelectorAll('.assistant-turn'), lastTurn=turns[turns.length-1]||null;
+  if(!lastTurn||S.session.active===true) return lastTurn;
+  const last=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role!=='tool').pop();
+  const answered=!!last&&last.role==='assistant'&&!(Array.isArray(last.tool_calls)&&last.tool_calls.length)&&!!String(msgContent(last)||'').trim();
+  return answered?null:lastTurn;
+}
 function _worklogDetailsExpandedDefault(){
   return window._worklogDetailsExpandedByDefault===true;
 }
@@ -17278,6 +17369,8 @@ function _toggleActivityGroup(summary){
   // #5839: materialize deferred settled rows on first expand (lazy render).
   if(!collapsed) _materializeDeferredWorklogRows(group);
   _writeActivityDisclosureState(group.getAttribute('data-activity-disclosure-key'), !collapsed);
+  // The cached transcript HTML predates this click; drop it so a switch-back rebuilds.
+  if(typeof S!=='undefined'&&S.session&&S.session.session_id&&typeof _sessionHtmlCache!=='undefined') _sessionHtmlCache.delete(S.session.session_id);
   if(typeof _onLiveActivityToggle==='function') _onLiveActivityToggle(group);
 }
 function _toggleToolWorklogGroup(summary){
@@ -19535,6 +19628,7 @@ function ensureActivityGroup(inner, opts){
     else if(live && _liveActivityUserExpanded === false) collapsed=true;
     if(live && savedState==='open') collapsed=false;
     else if(live && savedState==='closed') collapsed=true;
+    else if(opts.honourSavedDisclosure===true && savedState) collapsed=savedState==='closed';
     group.className='agent-activity-group tool-worklog-group activity'+(collapsed?' tool-call-group-collapsed':'');
     group.setAttribute('data-tool-call-group','1');
     group.setAttribute('data-agent-activity-group','1');
@@ -20707,7 +20801,7 @@ function _messageRenderCacheSignature(){
     _addBoundedHash(add, tc.args||{});
   });
   if(S.session){
-    add(S.session.message_count);add(S.session.updated_at);add(S.session.compression_anchor_visible_idx);
+    add(S.session.message_count);add(S.session.updated_at);add(S.session.active);add(S.session.compression_anchor_visible_idx);
     _addBoundedHash(add, S.session.compression_anchor_message_key||null);
     add(S.session.compression_anchor_summary||'');
   }
@@ -23218,6 +23312,7 @@ function renderMessages(options){
     };
     const durationAssignedTurns = new Set();
     const activityByTurn = new Map();
+    let subagentOpenTurn;
     const activityOrder = [];
     const ensureActivityBucket=(key,aIdx,segmentSeq,burstId)=>{
       if(!byActivity.has(key)){
@@ -23299,13 +23394,16 @@ function renderMessages(options){
         // value) so the append path can use the ownership fact the group
         // construction already uses.
         const anchorIsWorklogSource=anchorRow.classList&&anchorRow.classList.contains('assistant-segment-worklog-source');
-        let state=activityByTurn.get(anchorTurn);
+        const groupKey=_worklogGroupKey(anchorRow,anchorTurn,!anchorIsWorklogSource&&!thinkingText);
+        let state=activityByTurn.get(groupKey);
+        if(subagentOpenTurn===undefined) subagentOpenTurn=_subagentOpenWorklogTurn(inner);
         if(!state){
           const includeTurnDuration=!durationAssignedTurns.has(anchorTurn);
           if(includeTurnDuration) durationAssignedTurns.add(anchorTurn);
           const activityKey=`assistant:${aIdx}`;
           const group=ensureActivityGroup(anchorParent,{
-            collapsed:true,
+            collapsed:!subagentOpenTurn||anchorTurn!==subagentOpenTurn,
+            honourSavedDisclosure:_isDelegatedSubagentTranscript(),
             anchor:anchorRow,
             beforeAnchor:!!thinkingText&&!anchorIsWorklogSource,
             syncAnchorReason:anchorIsWorklogSource,
@@ -23318,7 +23416,7 @@ function renderMessages(options){
           if(!list) continue;
           list.innerHTML='';
           state={group,cards:[],seenReasons:new Set(),seenTools:new Set()};
-          activityByTurn.set(anchorTurn,state);
+          activityByTurn.set(groupKey,state);
         }
         state.cards.push(...cards);
         _appendWorklogStep(state.group, anchorRow, cards, thinkingText, {
@@ -23337,7 +23435,13 @@ function renderMessages(options){
           seenTools:state.seenTools,
         });
       }
+      // The running subagent's newest worklog is live work: label it Running, not Processed.
+      let runningGroup=null;
+      if(subagentOpenTurn&&S.session.active===true)
+        activityByTurn.forEach(s=>{ if(s.group.closest('.assistant-turn')===subagentOpenTurn) runningGroup=s.group; });
       activityByTurn.forEach(state=>{
+        if(state.group===runningGroup) state.group.setAttribute('data-subagent-running','1');
+        else state.group.removeAttribute('data-subagent-running');
         _syncToolCallGroupSummary(state.group);
       });
     }else{
@@ -23763,6 +23867,9 @@ function renderMessages(options){
           _materializeDeferredWorklogRows(group);
         }
         if(!(group.textContent||'').trim()) continue; // empty group can't help
+        // A delegated transcript's collapsed chip stays collapsed (it keeps the turn non-blank).
+        if(typeof _isDelegatedSubagentTranscript==='function'&&_isDelegatedSubagentTranscript()&&
+           typeof _readActivityDisclosureState==='function'&&_readActivityDisclosureState(group.getAttribute('data-activity-disclosure-key'))==='closed'){revealed=true;continue;}
         if(group.classList.contains('tool-call-group-collapsed')){
           group.classList.remove('tool-call-group-collapsed');
           group.classList.add('open');
@@ -24005,8 +24112,20 @@ function _toolTargetLabel(tc){
   else if(kind==='memory') raw=a.target||a.name||a.action||'';
   else if(kind==='read'||kind==='write') raw=a.path||a.file_path||a.file||a.target||a.name||'';
   else if(kind==='search'||kind==='web') raw=a.query||a.pattern||a.url||a.uri||'';
+  else if(kind==='delegate') raw=_toolDelegateTargetLabel(tc,a);
   else raw=a.cmd||a.command||a.path||a.file_path||a.file||a.uri||a.url||a.query||a.pattern||a.dir||a.task||a.name||'';
   return _redactToolTargetLabel(_decodeToolLabelEntities(String(raw).split('\n')[0].trim()));
+}
+// delegate_task names its work in goal or a tasks batch; saved args may be a truncated string, so the result's count wins.
+function _toolDelegateTargetLabel(tc,a){
+  if(a.action&&a.action!=='spawn') return `subagents (${a.action})`;
+  const counted=String(tc&&tc.snippet||'').match(/"count"\s*:\s*(\d+)/);
+  let tasks=a.tasks;
+  const n=counted?+counted[1]:Array.isArray(tasks)?tasks.length:(String(tasks||'').match(/['"]goal['"]\s*:/g)||[]).length;
+  if(n>1) return `${n} subagents`;
+  if(Array.isArray(tasks)) tasks=tasks[0]&&tasks[0].goal;
+  else if(typeof tasks==='string') tasks=(tasks.match(/['"]goal['"]\s*:\s*['"]([^'"]+)/)||[])[1];
+  return tasks||a.goal||a.task||'';
 }
 function _toolReadRangeLabel(tc){
   const name=String(tc&&tc.name||'').toLowerCase().replace(/[^a-z0-9]+/g,'_');
@@ -24538,6 +24657,8 @@ function _syncToolCallGroupSummary(group){
         ? _activityProcessedElapsedLabel(group)
         : _activitySettledProcessedLabel(group);
       label.textContent=processedLabel||t('processed_elapsed','');
+      // A running subagent's open worklog is live work, not processed work.
+      if(group.getAttribute('data-subagent-running')==='1') label.textContent=t('gateway_running_label');
     }else{
       const rows=Array.from(group.querySelectorAll('.tool-card-row'));
       // Prefer the live _tcData classification; fall back to the durable data-*
@@ -24958,7 +25079,7 @@ function editMessage(btn) {
   bar.querySelector('.msg-edit-cancel').onclick = () => cancelEdit(row, originalText, body);
 
   ta.addEventListener('keydown', e => {
-    if(e.key==='Enter' && !e.shiftKey) { if(window._isImeEnter&&window._isImeEnter(e)) return; e.preventDefault(); bar.querySelector('.msg-edit-send').click(); }
+    if(window._composerShouldSendOnKey?window._composerShouldSendOnKey(e):(e.key==='Enter'&&!e.shiftKey)) { if(window._isImeEnter&&window._isImeEnter(e)) return; e.preventDefault(); bar.querySelector('.msg-edit-send').click(); }
     if(e.key==='Escape') { e.preventDefault(); cancelEdit(row, originalText, body); }
   });
 }

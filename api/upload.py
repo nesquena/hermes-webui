@@ -210,6 +210,30 @@ def _attachment_root() -> Path:
     return (STATE_DIR / 'attachments').resolve()
 
 
+_SHARE_ATTACHMENT_ROOTS: dict[str, Path | None] = {}
+
+
+def _share_attachment_root() -> Path | None:
+    """The attachment root as trusted by public shares, or None (#8590).
+
+    Resolved once per configured spelling -- at import, i.e. server startup,
+    since STATE_DIR and HERMES_WEBUI_ATTACHMENT_DIR are process-wide -- and
+    never by name again: shares walk it no-follow, so a symlink planted later
+    (e.g. inside a workspace that contains it) cannot move it.  A root that
+    cannot be resolved is None (fail closed).  Uploads keep _attachment_root().
+    """
+    key = os.getenv('HERMES_WEBUI_ATTACHMENT_DIR', '').strip() or str(STATE_DIR / 'attachments')
+    if key not in _SHARE_ATTACHMENT_ROOTS:
+        try:
+            _SHARE_ATTACHMENT_ROOTS[key] = Path(key).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            _SHARE_ATTACHMENT_ROOTS[key] = None
+    return _SHARE_ATTACHMENT_ROOTS[key]
+
+
+_share_attachment_root()
+
+
 def _upload_destination(session_id: str, safe_name: str, dest_dir: Path | None = None) -> Path:
     dest_dir = dest_dir if dest_dir is not None else _session_attachment_dir(session_id)
     dest_dir.mkdir(parents=True, exist_ok=True)
