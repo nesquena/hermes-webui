@@ -53,6 +53,7 @@ def isolated(monkeypatch, tmp_path):
     # Also when a real Agent was imported earlier in the run: its ``hermes_cli.config``
     # (env expander, managed scope) is installed only by the tests that need a stand-in.
     monkeypatch.setitem(sys.modules, "hermes_cli.config", types.ModuleType("hermes_cli.config"))
+    monkeypatch.setitem(sys.modules, "agent.secret_scope", types.ModuleType("agent.secret_scope"))
     monkeypatch.setattr(config._thread_ctx, "env", {}, raising=False)
     monkeypatch.setattr(config._thread_ctx, "block_process_env_fallback", True, raising=False)
 
@@ -248,6 +249,14 @@ def _install_agent_expander(monkeypatch):
     module = sys.modules.get("hermes_cli.config") or types.ModuleType("hermes_cli.config")
     monkeypatch.setattr(module, "_expand_env_vars", expand, raising=False)
     monkeypatch.setitem(sys.modules, "hermes_cli.config", module)
+    _install_secret_scope(monkeypatch, {})
+
+
+def _install_secret_scope(monkeypatch, mapping):
+    """``agent.secret_scope.current_secret_scope``: a bound profile scope, or None (unbound)."""
+    scope = types.ModuleType("agent.secret_scope")
+    scope.current_secret_scope = lambda: mapping
+    monkeypatch.setitem(sys.modules, "agent.secret_scope", scope)
 
 
 def _templated_flag_config():
@@ -474,6 +483,25 @@ def test_a_url_alias_without_its_own_key_routes_when_nothing_else_claims_the_nam
     bundle = config.raise_for_custom_provider_route(
         config.merge_model_alias_runtime_bundle(alias, {"base_url": NAMED_URL, "api_key": BUILTIN_KEY}))
     assert (bundle["provider"], bundle["base_url"], bundle["api_key"]) == ("openai", NAMED_URL, BUILTIN_KEY)
+
+
+@pytest.mark.parametrize("record", [
+    {"name": "openai", "enabled": "${PROXY_ENABLED}"},
+    {"name": "${PROXY_NAME}"},
+], ids=["templated-flag", "templated-name"])
+def test_templated_values_are_not_expanded_without_a_bound_profile_secret_scope(monkeypatch, tmp_path, record):
+    """Codex f1 CORE #1: with no profile secret scope bound, the Agent's expander reads the
+    shared process env, which a concurrent worker for another profile can hold. The value
+    stays unknown and the record keeps claiming (the PR-head, fail-closed reading)."""
+    monkeypatch.setenv("PROXY_ENABLED", "false")
+    monkeypatch.setenv("PROXY_NAME", "myproxy")
+    data = _config("openai", {"custom:proxy": {"base_url": NAMED_URL, "api_key": NAMED_KEY, **record},
+                              "openai": {"base_url": BUILTIN_URL, "api_key": BUILTIN_KEY}})
+    _bind(monkeypatch, data)
+    _install_agent_expander(monkeypatch)
+    assert config.provider_name_ambiguity_verdict("openai", data) is None
+    _install_secret_scope(monkeypatch, None)
+    assert config.provider_name_ambiguity_verdict("openai", data)["reason"] == REASON
 
 
 def test_an_alias_with_its_own_endpoint_and_key_is_unchanged(monkeypatch):

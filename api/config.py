@@ -4265,10 +4265,15 @@ def _agent_expanded_text(value: object) -> str | None:
     the expander is unavailable or fails: callers keep their fail-closed reading.
     """
     try:
+        from agent.secret_scope import current_secret_scope
         from hermes_cli.config import _expand_env_vars as agent_expand_env_vars
     except ImportError:
         return None
     try:
+        # Without a bound profile secret scope the expander reads the shared process env,
+        # which a concurrent worker for another profile can hold: keep the reading closed.
+        if current_secret_scope() is None:
+            return None
         expanded = agent_expand_env_vars(value)
     except Exception:
         logger.debug("provider name check: Agent env expansion failed", exc_info=True)
