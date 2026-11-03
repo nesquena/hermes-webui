@@ -410,3 +410,27 @@ def test_the_hidden_row_provenance_survives_the_cache(store, monkeypatch):
     assert loads["loads"] == 1, "the second poll must be the cache hit under test"
     assert second.hidden_excluded == first.hidden_excluded
     assert second.visible == first.visible
+
+
+def test_a_row_without_a_caller_count_is_cached_too(store, monkeypatch):
+    # Production shape: the overlay caps its count/timestamp tier at the top-N
+    # paint-priority rows, so every row past the cap arrives with
+    # ``expected_state_count=None``. Gating the lookup on that count left those
+    # rows re-walking on every poll -- the 5-20 s sidebar stall the cache exists
+    # to remove, still there with the cache "working" for the capped rows only.
+    # The revision is provable from the two sources alone, so no count is
+    # needed to key it.
+    _write_sidecar(store, [_row("user", "hello", 1.0)])
+    _install_state_db(monkeypatch, _state_rows(3))
+    loads = _count_loads(monkeypatch)
+
+    first = models._reconciled_visible_count_for_sidebar(SID)
+    assert first is not None, "an uncapped walk must still resolve a count"
+    assert loads["loads"] == 1
+
+    second = models._reconciled_visible_count_for_sidebar(SID)
+    assert second == first, "the cached answer must match the walked one"
+    assert loads["loads"] == 1, (
+        "a row outside the paint cap re-walked on the second poll: the lookup "
+        "is still gated on a caller-supplied count"
+    )

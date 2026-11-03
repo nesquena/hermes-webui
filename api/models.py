@@ -12878,7 +12878,7 @@ def _sidebar_reconcile_store_generation(*, profile=None):
     return (str(db_path), main) + companions
 
 
-def _sidebar_reconcile_cache_get(sid: str, state_count: int, *, profile=None):
+def _sidebar_reconcile_cache_get(sid: str, *, profile=None):
     """Cached ``(visible, hidden_excluded)`` for this exact revision, or None."""
     signature = _sidebar_reconcile_signature(sid)
     if signature is None:
@@ -12886,7 +12886,16 @@ def _sidebar_reconcile_cache_get(sid: str, state_count: int, *, profile=None):
     generation = _sidebar_reconcile_store_generation(profile=profile)
     if generation is None:
         return None
-    key = (str(sid), signature, int(state_count), generation)
+    # No count in the key. The store generation already covers every way the
+    # transcript can move (append, same-count rewrite, WAL commit), and a count
+    # could not be keyed consistently anyway: the caller's top-N count and the
+    # walk's own row count live in different domains (raw rows vs paginated
+    # rows: 605 vs 203 on one session here), so a key built at lookup from one
+    # and at store time from the other missed on every poll. Keying on the two
+    # proven sources is both stricter and domain-free, and it does not require
+    # the caller to supply a count -- which is what left every row outside the
+    # paint cap re-walking on each poll.
+    key = (str(sid), signature, generation)
     with _SIDEBAR_RECONCILE_CACHE_LOCK:
         entry = _SIDEBAR_RECONCILE_CACHE.get(key)
         if entry is None:
@@ -12897,7 +12906,6 @@ def _sidebar_reconcile_cache_get(sid: str, state_count: int, *, profile=None):
 
 def _sidebar_reconcile_cache_put(
     sid: str,
-    state_count: int,
     visible: int,
     hidden_excluded: bool,
     *,
@@ -12919,7 +12927,7 @@ def _sidebar_reconcile_cache_put(
         return
     if _sidebar_reconcile_store_generation(profile=profile) != store_generation:
         return
-    key = (str(sid), sidecar_signature, int(state_count), store_generation)
+    key = (str(sid), sidecar_signature, store_generation)
     with _SIDEBAR_RECONCILE_CACHE_LOCK:
         _SIDEBAR_RECONCILE_CACHE[key] = (int(visible), bool(hidden_excluded))
         _SIDEBAR_RECONCILE_CACHE.move_to_end(key)
@@ -13006,22 +13014,13 @@ def _reconciled_visible_count_for_sidebar(
     observed_generation = _sidebar_reconcile_store_generation(profile=profile)
     # Cross-poll hit: the answer is a function of the sidecar bytes and of the
     # state store's full generation (which covers same-count row rewrites, not
-    # only appends), so when the caller's count for this sid is the one an
-    # earlier walk already resolved and neither source has moved, the walk is
-    # answered by a couple of stats instead of a full JSON parse plus a
-    # state.db read. Unknown expectations (rows outside the paint cap) skip the
-    # cache and pay the walk, exactly as before.
-    if expected_state_count is not None:
-        try:
-            cached_state_count = int(expected_state_count)
-        except (TypeError, ValueError):
-            cached_state_count = None
-        if cached_state_count is not None:
-            cached = _sidebar_reconcile_cache_get(
-                str(sid), cached_state_count, profile=profile
-            )
-            if cached is not None:
-                return _ReconciledSidebarVisible(int(cached[0]), bool(cached[1]))
+    # only appends), so when neither source has moved the walk is answered by a
+    # couple of stats instead of a full JSON parse plus a state.db read. No
+    # caller-supplied count is required: rows outside the paint cap have none,
+    # and gating the lookup on it is what made them re-walk on every poll.
+    cached = _sidebar_reconcile_cache_get(str(sid), profile=profile)
+    if cached is not None:
+        return _ReconciledSidebarVisible(int(cached[0]), bool(cached[1]))
     try:
         session = Session.load_metadata_only(str(sid))
     except Exception:
@@ -13191,7 +13190,6 @@ def _reconciled_visible_count_for_sidebar(
     if built_count is not None:
         _sidebar_reconcile_cache_put(
             str(sid),
-            int(built_count),
             visible,
             hidden_excluded,
             sidecar_signature=observed_signature,
