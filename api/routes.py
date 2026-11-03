@@ -3410,7 +3410,7 @@ def _build_session_list_cache_payload(
             # #8791: the canonical profile group (renamed-root aliases folded),
             # so the browser keeps one profile's rows together without the
             # profile roster, which may not have loaded yet.
-            item["sidebar_profile_group"] = _sidebar_profile_group_key(row.get("profile"))
+            _stamp_sidebar_profile_group(item)
         return item
 
     archived_webui_count = sum(
@@ -12741,6 +12741,18 @@ def _sidebar_subagent_copy_matches(row: dict, state_row: dict) -> bool:
         return False
     source = str(row.get("raw_source") or row.get("source_tag") or "").strip().lower()
     return source == "subagent" and _profiles_match(state_row.get("profile"), row.get("profile"))
+
+
+def _stamp_sidebar_profile_group(item: dict) -> dict:
+    """Give a sidebar or search row its canonical profile group (``sidebar_profile_group``), in place (#8791).
+
+    The browser groups rows by it when ids collide across profiles. Search hits
+    merge into the sidebar list, so ``/api/sessions/search`` rows must carry the
+    same value as ``/api/sessions`` rows or a renamed root's rows split apart.
+    """
+    if isinstance(item, dict) and item.get("session_id"):
+        item["sidebar_profile_group"] = _sidebar_profile_group_key(item.get("profile"))
+    return item
 
 
 def _sidebar_profile_group_key(profile) -> str:
@@ -23158,6 +23170,7 @@ def _handle_sessions_search(handler, parsed):
             if isinstance(item.get("title"), str):
                 item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
             _redact_sidebar_title_fields(item, _search_redact_enabled)
+            _stamp_sidebar_profile_group(item)
             safe_sessions.append(item)
         return j(handler, {
             "sessions": safe_sessions,
@@ -23172,6 +23185,7 @@ def _handle_sessions_search(handler, parsed):
             if isinstance(item.get("title"), str):
                 item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
             _redact_sidebar_title_fields(item, _search_redact_enabled)
+            _stamp_sidebar_profile_group(item)
             results.append(item)
             continue
         if content_search:
@@ -23199,6 +23213,7 @@ def _handle_sessions_search(handler, parsed):
                         if isinstance(item.get("title"), str):
                             item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
                         _redact_sidebar_title_fields(item, _search_redact_enabled)
+                        _stamp_sidebar_profile_group(item)
                         results.append(item)
                         break
             except (KeyError, Exception):

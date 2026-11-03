@@ -167,6 +167,12 @@ for group in ("webui", "cli"):
         show_previous_messaging_sessions=False, show_cron_sessions=False, show_claude_code_sessions=False,
         sidebar_source=group,
     ))["sessions"]
+if scenario == "root-alias":
+    # A content search for "x" (every message is "x"), as the sidebar issues it, to merge into the list.
+    from urllib.parse import urlparse
+    routes.j = lambda handler, response: response
+    payloads["search"] = routes._handle_sessions_search(
+        None, urlparse("/api/sessions/search?q=x&content=1&all_profiles=1"))["sessions"]
 print(json.dumps(payloads, default=str))
 '''
 
@@ -177,7 +183,7 @@ const payloads = JSON.parse(require('fs').readFileSync(0, 'utf8'));
 const topLevel = new Set([...src.matchAll(/^function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map(m => m[1]));
 const stubbed = new Set(['_hasUnreadForSession']);
 const loaded = new Set();
-const queue = ['_partitionSidebarSessionRows', '_renderSidebarRowsFromPartition', '_isCliSession'];
+const queue = ['_partitionSidebarSessionRows', '_renderSidebarRowsFromPartition', '_isCliSession', '_sessionSearchMergeMatches'];
 while (queue.length) {
   const name = queue.pop();
   if (loaded.has(name) || stubbed.has(name)) continue;
@@ -199,6 +205,8 @@ const extra = JSON.parse(process.argv[2] || '{}');
 Object.assign(global.S, extra.S || {});
 if ('_activeProject' in extra) global._activeProject = extra._activeProject;
 if ('_showArchived' in extra) global._showArchived = extra._showArchived;
+// A search query: merge the server's search rows into the list as the sidebar does.
+global.$ = () => ({value: extra.search || ''});
 const key = r => (r.profile || 'default') + ':' + r.session_id;
 const out = {};
 for (const group of ['webui', 'cli']) {
@@ -213,7 +221,8 @@ for (const group of ['webui', 'cli']) {
     }
     for (const child of row._child_sessions || []) visit(child, key(row));
   };
-  for (const row of _renderSidebarRowsFromPartition(_partitionSidebarSessionRows(payloads[group], null))) visit(row, null);
+  const listed = extra.search ? _sessionSearchMergeMatches(payloads[group], extra.search, payloads.search) : payloads[group];
+  for (const row of _renderSidebarRowsFromPartition(_partitionSidebarSessionRows(listed, null))) visit(row, null);
   out[group] = rendered;
 }
 console.log(JSON.stringify(out));
@@ -255,6 +264,8 @@ def _render(scenario: str, tmp_path: Path, ui: dict | None = None) -> dict:
     rendered = json.loads(proc.stdout.strip().splitlines()[-1])
     # Every row the server sends for a group renders in that group, and in no other.
     for group, other in (("webui", "cli"), ("cli", "webui")):
+        if (ui or {}).get("search"):
+            break  # a search shows matches only
         sent = {(r.get("profile") or "default") + ":" + r["session_id"] for r in payloads[group]}
         assert set(rendered[group]) == sent, (group, sorted(sent), rendered[group])
         assert not set(rendered[group]) & set(rendered[other]), (group, rendered)
@@ -321,6 +332,17 @@ def test_a_renamed_roots_legacy_snapshot_stays_in_its_conversation_before_the_ro
     # Active profile "beta", roster not loaded: the server's profile group keeps "default" and "work" together.
     ui = {"S": {"activeProfile": "beta", "activeProfileIsDefault": False}, "_showArchived": True}
     rendered = _render("root-alias", tmp_path, ui)
+    assert rendered["webui"] == {"work:tip": None, "default:old": "segment:work:tip"}, rendered
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_a_renamed_roots_rows_stay_together_when_search_hits_merge_in(tmp_path):
+    # The same conversation, found through the content search: search rows carry the server's profile group too.
+    ui = {"S": {"activeProfile": "beta", "activeProfileIsDefault": False}, "_showArchived": True, "search": "x"}
+    payloads = _payloads("root-alias", tmp_path)
+    assert {r["session_id"]: r.get("sidebar_profile_group") for r in payloads["search"]} == {
+        "tip": "default", "old": "default"}, payloads["search"]
+    rendered = _render("root-alias", tmp_path / "render", ui)
     assert rendered["webui"] == {"work:tip": None, "default:old": "segment:work:tip"}, rendered
 
 
