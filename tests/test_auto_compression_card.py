@@ -917,7 +917,13 @@ def test_auto_compression_done_sse_refreshes_context_indicator_usage():
 
 def test_auto_compression_done_payload_includes_live_usage_snapshot():
     src = _read("api/streaming.py")
-    start = src.find("put('compressed'")
+    # Two legitimate emitters exist: the success path and the cancel
+    # settlement, which publishes the same handoff when a Stop lands after a
+    # rotation. Pin the SUCCESS path's payload by its anchor rather than by
+    # the file's first occurrence.
+    anchor = src.find("_compression_continuation_session_id = s.session_id")
+    assert anchor != -1, "success-path compression handoff anchor not found"
+    start = src.find("put('compressed'", anchor)
     assert start != -1, "compressed SSE payload not found"
     end = src.find("})", start)
     assert end != -1, "compressed SSE payload end not found"

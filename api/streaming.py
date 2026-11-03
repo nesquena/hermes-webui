@@ -44,6 +44,7 @@ from api.config import (
     peek_stream,
     stream_owner_session_id,
     session_writeback_owner,
+    register_session_writeback_owner,
     clear_session_writeback_owner_if_owned,
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
     resolve_model_provider,
@@ -7815,6 +7816,16 @@ def _migrate_compression_session_ownership(
     from api.paths import _atomic_write_text
 
     missing = object()
+    # The session id is the key of more than the transcript: the turn's
+    # writeback authority is registered by the chat start under the id the
+    # stream was admitted with, and every settlement guard compares that record
+    # to its stream. A rotation that moves the id but leaves the record behind
+    # makes those guards fail closed on the CONTINUATION — a Stop during a
+    # retry settled against the continuation silently dropped the turn and the
+    # client was never told the id moved (#8011 review, "sealed parent with no
+    # continuation"). Carry the claim with the id, and put it back if the
+    # publication is rolled back.
+    previous_writeback_owner = session_writeback_owner(old_sid)
     previous_state = (
         s.session_id,
         bool(getattr(s, 'pre_compression_snapshot', False)),
@@ -7981,6 +7992,8 @@ def _migrate_compression_session_ownership(
                 s.pre_compression_snapshot = False
                 s.pre_compression_continuation_session_id = None
                 s.parent_session_id = old_sid
+                if previous_writeback_owner:
+                    register_session_writeback_owner(new_sid, previous_writeback_owner)
                 SESSIONS[new_sid] = s
                 SESSIONS.move_to_end(new_sid)
                 _evict_sessions_over_cap()
@@ -8003,6 +8016,14 @@ def _migrate_compression_session_ownership(
                 SESSIONS[new_sid] = existing_new_session
             if SESSIONS.get(old_sid) is None:
                 SESSIONS[old_sid] = s
+            # Undo the writeback transfer with the id it belongs to, so a
+            # rolled-back publication cannot leave the stream owning a
+            # continuation that was never published. Never take the claim back
+            # from a successor that was admitted on the parent meanwhile.
+            if previous_writeback_owner:
+                clear_session_writeback_owner_if_owned(new_sid, previous_writeback_owner)
+                if session_writeback_owner(old_sid) in (None, previous_writeback_owner):
+                    register_session_writeback_owner(old_sid, previous_writeback_owner)
             s.session_id, s.pre_compression_snapshot, s.pre_compression_continuation_session_id, s.parent_session_id = previous_state
             with SESSION_AGENT_LOCKS_LOCK:
                 if SESSION_AGENT_LOCKS.get(old_sid) is agent_lock:
@@ -14821,6 +14842,10 @@ def _run_agent_streaming(
     # retired handles for the turn and drain each distinct one once.
     _replaced_steer_agents = []
 
+    # Compression handoffs this turn has already published: a cancel settled
+    # after the success path announced a rotation must not announce it twice.
+    _compression_handoffs = []
+
     def _remember_pending_steer_result(value):
         text = value.get('pending_steer') if isinstance(value, dict) else None
         if isinstance(text, str) and text:
@@ -14864,7 +14889,11 @@ def _run_agent_streaming(
         if event in ('done', 'apperror', 'stream_end'):
             _settle_pending_steer()
         # If cancelled, drop all further events except the cancel event itself
-        if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'apperror'):
+        # and the compression handoff. A Stop during a retry can land after the
+        # first attempt rotated the session; ``compressed`` is a control frame
+        # (the browser must re-point at the id the turn is written under), not
+        # transcript data, so it survives the same gate the cancel frame does.
+        if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'apperror', 'compressed'):
             return
         event_id = None
         if run_journal is not None:
@@ -14885,6 +14914,11 @@ def _run_agent_streaming(
                 q.note_last_event_id(event_id)
             except Exception:
                 logger.debug("Failed to note event_id %s for stream %s", event_id, stream_id, exc_info=True)
+        if event == 'compressed' and isinstance(data, dict):
+            _compression_handoffs.append((
+                str(data.get('old_session_id') or data.get('session_id') or ''),
+                str(data.get('new_session_id') or ''),
+            ))
         try:
             queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)
             q.put_nowait(queue_item)
@@ -14911,6 +14945,27 @@ def _run_agent_streaming(
                 session, ephemeral=ephemeral, stream_id=stream_id,
                 preserve_partials=True,
             )
+            # The retry may run on a continuation the first attempt rotated
+            # into. The turn's stream was opened on the origin id, which
+            # compression sealed (and whose sidebar row is now hidden), so a
+            # cancel-only terminal frame leaves the browser bound to a session
+            # it cannot show. Publish the same handoff the success path emits,
+            # before the cancel frame, so the client re-points at the id the
+            # cancelled turn was actually written under.
+            _settle_session_id = str(getattr(session, 'session_id', '') or '')
+            if (
+                _settle_session_id
+                and _settle_session_id != str(session_id)
+                and (str(session_id), _settle_session_id) not in _compression_handoffs
+            ):
+                put('compressed', {
+                    'session_id': session_id,
+                    'old_session_id': session_id,
+                    'new_session_id': _settle_session_id,
+                    'continuation_session_id': _settle_session_id,
+                    'message': 'Compression finished',
+                    'usage': _live_usage_snapshot(),
+                })
             if not ephemeral:
                 try:
                     append_turn_journal_event_for_stream(
@@ -19746,6 +19801,12 @@ def _run_agent_streaming(
             # cancel must keep its registry claim.
             try:
                 clear_session_writeback_owner_if_owned(session_id, stream_id)
+                # A compression rotation carries this stream's claim onto the
+                # continuation id (see _migrate_compression_session_ownership),
+                # so the turn's own teardown has to release it there too.
+                _rotated_sid = str(getattr(s, 'session_id', '') or '') if s is not None else ''
+                if _rotated_sid and _rotated_sid != str(session_id):
+                    clear_session_writeback_owner_if_owned(_rotated_sid, stream_id)
             except Exception:
                 logger.debug(
                     "Failed to clear session writeback owner for stream %s", stream_id,
