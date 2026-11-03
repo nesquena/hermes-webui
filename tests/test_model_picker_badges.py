@@ -180,7 +180,7 @@ def test_ui_renders_model_badges_from_api_payload():
         "A UI deve calcular uma prioridade estável (primary -> fallback 1 -> fallback N) "
         "para renderizar os modelos configurados no topo do dropdown."
     )
-    assert "Object.entries(_badgeMap)" in js and "_normalizeConfiguredModelKey(existing.value)" in js, (
+    assert "Object.entries(_badgeMap)" in js and "_configuredModelIdentity(existing&&existing.value" in js, (
         "renderModelDropdown() deve sintetizar entradas para modelos configurados ausentes "
         "do catálogo atual, senão fallbacks locais/Ollama desaparecem da seção Configured."
     )
