@@ -2380,7 +2380,9 @@ def _arm_release_intent(intent: _ReleaseIntent) -> str:
     """
     with _provider_holders_lock:
         _drain_pending_forgets_locked()
-        entries = [entry for entry in _provider_holders.values() if entry.intent is intent]
+        # Snapshot first (Codex r2): a GC callback run by an allocation here
+        # re-enters the holder RLock on this thread and may prune the table.
+        entries = [entry for entry in list(_provider_holders.values()) if entry.intent is intent]
         if not entries:
             return "unretained"
         managers = {id(intent._memory_manager): intent._memory_manager}
