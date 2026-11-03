@@ -9651,7 +9651,9 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       // (the chain renders as an orphan) or an unresolvable link keeps the child an orphan.
       const subagentParentKnown=childIsDelegatedSubagent&&subagentHostHiddenByScope(child);
       const crossSurfaceChild=!!(child&&child._cross_surface_child_session&&_isChildSession(child));
-      if(!searchActive&&(subagentParentKnown||crossSurfaceChild)) continue;
+      // #8791: a row whose parent exists only in another profile is never hidden; it was a visible row before
+      // the per-profile projection (_renderSidebarRowsFromRawSessions) and stays one, top-level in its profile.
+      if(!searchActive&&!child._sidebar_parent_outside_profile&&(subagentParentKnown||crossSurfaceChild)) continue;
       orphans.push({...child,_orphan_child_session:true});
     }
   }
@@ -10413,11 +10415,37 @@ function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw, pa
     }
   }
   if(!shared) return project(sessionsRaw, referenceRows, payloadRowsById);
+  // Never hide a row master showed: a child whose parent exists in no row of its own profile (sessions,
+  // reference or payload rows), but is a visible row of another profile, attached there in one pass. The
+  // per-profile pass can't attach it, and the scope suppression in _attachChildSessionsToSidebarRows would
+  // drop it; flag it so it renders as a top-level row in its own profile instead.
+  const idsByGroup=new Map();
+  const visibleIdsByGroup=new Map();
+  const addIds=(map, group, s)=>{
+    if(!map.has(group)) map.set(group,new Set());
+    for(const id of [s.session_id,s._lineage_root_id,s._lineage_tip_id]) if(id) map.get(group).add(id);
+  };
+  for(const list of [sessionsRaw, referenceRows, payloadRows]){
+    if(!Array.isArray(list)) continue;
+    for(const s of list) if(s&&s.session_id) addIds(idsByGroup, groupOf(s), s);
+  }
+  for(const s of sessionsRaw||[]) if(s&&s.session_id) addIds(visibleIdsByGroup, groupOf(s), s);
+  const parentOutsideProfile=(s, group)=>{
+    const refs=[s.parent_session_id,s._parent_lineage_root_id,s._parent_lineage_tip_id].filter(Boolean);
+    if(!refs.length) return false;
+    const own=idsByGroup.get(group)||new Set();
+    if(refs.some(id=>own.has(id))) return false;
+    for(const [other, ids] of visibleIdsByGroup){
+      if(other!==group&&refs.some(id=>ids.has(id))) return true;
+    }
+    return false;
+  };
   const rows=[];
   const orphans=[];
   for(const group of groups){
     const inGroup=s=>!!s&&groupOf(s)===group;
-    const raw=(sessionsRaw||[]).filter(inGroup);
+    const raw=(sessionsRaw||[]).filter(inGroup)
+      .map(s=>parentOutsideProfile(s, group)?{...s,_sidebar_parent_outside_profile:true}:s);
     if(!raw.length) continue;
     const payload=payloadRows?_sidebarRowsById([payloadRows.filter(inGroup)]):payloadRowsById;
     for(const row of project(raw, referenceRows.filter(inGroup), payload)){

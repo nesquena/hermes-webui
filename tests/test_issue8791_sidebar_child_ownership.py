@@ -331,6 +331,18 @@ def test_an_opened_sidecars_lineage_ids_do_not_hide_another_profiles_session(tmp
     assert {"beta:old", "default:tip", "default:host"} <= sent, sent
 
 
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_a_row_whose_parent_is_only_in_another_profile_is_never_hidden(tmp_path):
+    # beta's plain "old" carries the default profile's parent link (the active-profile-only lineage enrichment
+    # applies default's metadata to every row with that id). It must not attach under default's host, and it
+    # must not vanish either: it renders as a top-level row in its own profile.
+    rendered = _render("copy-root", tmp_path)
+    assert rendered["cli"].get("beta:old", "missing") is None, rendered
+    assert rendered["cli"].get("default:tip") == "default:host", rendered
+    assert rendered["cli"].get("default:host", "missing") is None, rendered
+    assert rendered["webui"] == {}, rendered
+
+
 # Server half on crafted rows: the bucket derivation itself, independent of the browser.
 def _child(sid, parent, **extra):
     return {"session_id": sid, "profile": "default", "parent_session_id": parent, "raw_source": "subagent",
