@@ -4045,7 +4045,7 @@ def test_behavior_harness_uses_fixed_literal_source_only():
 def test_programmatic_send_waits_for_new_session_owner_before_capturing_payload():
     start = MESSAGES_JS.index("async function send(){")
     duplicate_guard = MESSAGES_JS.index(
-        "if(typeof _sendInProgress!=='undefined'&&_sendInProgress) return", start
+        "if(typeof _sendInProgress!=='undefined'&&_sendInProgress", start
     )
     transition_wait = MESSAGES_JS.index("await _newSessionInFlight", start)
     capture = MESSAGES_JS.index("_sendInProgress = true", start)

@@ -134,7 +134,7 @@ def test_the_switch_save_still_threads_the_peeked_token() -> None:
         "the session-switch save no longer peeks the restored binding "
         "(#7855 round 7 MUST-FIX 3)"
     )
-    assert "_saveComposerDraftNow(currentSid, draftText, draftFiles, _switchContId, {})" in body, (
+    assert "_saveComposerDraftNow(currentSid, draftText, draftFiles, _switchContId)" in body, (
         "the session-switch save omits the continuation token (#7855 round 7 "
         "MUST-FIX 3)"
     )

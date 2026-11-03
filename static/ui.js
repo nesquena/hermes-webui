@@ -11916,8 +11916,8 @@ function lockComposerForClarify(placeholderText){
       && String(restoredCont.text || '').trim() === saveText.trim()) ? restoredCont.id : '';
     try {
       const saveResult = saveContId
-        ? _saveComposerDraftNow(sid, saveText, saveFiles, saveContId, {})
-        : _saveComposerDraftNow(sid, saveText, saveFiles, '', {});
+        ? _saveComposerDraftNow(sid, saveText, saveFiles, saveContId)
+        : _saveComposerDraftNow(sid, saveText, saveFiles);
       if (saveResult && typeof saveResult.catch === 'function') {
         saveResult.catch((error)=>_handleComposerDraftPostFailure(error,sid,saveText,saveFiles));
       }

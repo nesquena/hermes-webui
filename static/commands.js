@@ -1911,7 +1911,7 @@ async function _steerPersistDraftForOwner(ownerSid, originalMsg, explicitSteer, 
   const persistedText = _steerRestoreText(originalMsg,explicitSteer);
   const persistedFiles = Array.isArray(filesSnapshot) ? [...filesSnapshot] : [];
   try{
-    const result = _saveComposerDraftNow(ownerSid,persistedText,persistedFiles,'',{});
+    const result = _saveComposerDraftNow(ownerSid,persistedText,persistedFiles);
     if(result&&typeof result.catch==='function'){
       return result.catch((error)=>_handleComposerDraftPostFailure(error,ownerSid,persistedText,persistedFiles));
     }

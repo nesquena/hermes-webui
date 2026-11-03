@@ -1644,8 +1644,13 @@ async function send(){
   // success sends to the fresh session, failure safely remains on the source.
   if(typeof _newSessionInFlight!=='undefined'&&_newSessionInFlight){
     // If another send already owns this transition, a Voice Mode callback is a
-    // duplicate producer for the same still-visible composer. Do not queue it.
-    if(typeof _sendInProgress!=='undefined'&&_sendInProgress) return;
+    // duplicate producer for the same still-visible composer. Do not queue it —
+    // but a genuine re-entrant turn (the composer still holds text the user
+    // typed) must fall through to the _sendInProgress queue branch below
+    // instead of being dropped.
+    if(typeof _sendInProgress!=='undefined'&&_sendInProgress
+       &&!String((typeof _composerTextWithPendingSelections==='function'
+         ? _composerTextWithPendingSelections() : '' )||'').trim()) return;
     let newSessionResult=null;
     try{newSessionResult=await _newSessionInFlight;}catch(_){return;}
     if(_newSessionActionWasSuperseded(newSessionResult))return;

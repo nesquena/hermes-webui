@@ -144,7 +144,7 @@ def test_the_session_switch_save_persists_the_token() -> None:
     assert "_saveComposerDraftNow(currentSid" in switch_body, (
         "the session-switch save call site was not found"
     )
-    assert "_saveComposerDraftNow(currentSid, draftText, draftFiles, _switchContId, {})" in switch_body, (
+    assert "_saveComposerDraftNow(currentSid, draftText, draftFiles, _switchContId)" in switch_body, (
         "the session-switch save omits the continuation token, so a restored "
         "queued continuation degrades to an ordinary draft on return "
         "(#7855 round-7 CORE)"
