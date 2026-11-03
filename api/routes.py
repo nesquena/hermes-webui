@@ -3090,6 +3090,10 @@ def _build_session_list_cache_payload(
                     or _is_api_server_sidecar_row(s)
                 )
                 and not _session_source_is_webui(s)
+                # Desktop rows already use the strict owning-profile pass
+                # above. A second, generic probe can consult the active DB
+                # and incorrectly prune a foreign profile's shared index row.
+                and not _is_desktop_sidecar_row(s)
                 and _sid not in cli_by_id
             ):
                 _orphan_probe_rows.append(s)
@@ -10344,12 +10348,39 @@ def _lookup_gateway_session_identity(session_id: str) -> dict:
 # Sources kept out of the default projection with no bounded pass of their own.
 # A session the user explicitly opens from one of them is resolved by id, so it
 # stays reachable however many newer runs exist (#8265 review on #8349).
-_CLI_LOOKUP_FALLBACK_SOURCES = ("oneshot",)
+# Derived from the models constants so a newly excluded source is never left
+# unreachable by id.
+from api.models import (  # noqa: E402
+    BACKGROUND_CLI_SOURCES as _BACKGROUND_CLI_SOURCES,
+    INTERACTIVE_WINDOW_EXCLUDED_CLI_SOURCES as _INTERACTIVE_WINDOW_EXCLUDED_CLI_SOURCES,
+)
+
+_CLI_LOOKUP_FALLBACK_SOURCES = tuple(
+    source for source in _INTERACTIVE_WINDOW_EXCLUDED_CLI_SOURCES
+    if source not in _BACKGROUND_CLI_SOURCES
+)
 
 
 def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False) -> dict:
     if not session_id:
         return {}
+    # perf: this runs on hot request paths (/api/session/import_cli,
+    # /api/git-info) and used to enumerate EVERY CLI session through
+    # get_cli_sessions() — a whole-state.db projection that costs seconds when
+    # cold and re-runs whenever the agent writes to state.db. Answer from an
+    # existing snapshot first, so the common case skips the projection entirely.
+    try:
+        row = lookup_cli_session_row(session_id, all_profiles=all_profiles)
+        if row:
+            return row
+    except Exception:
+        logger.debug("cli session metadata lookup failed", exc_info=True)
+
+    # Nothing cached yet: keep the original enumeration as the source of truth,
+    # resolved through the module-level name so callers that replace
+    # get_cli_sessions() (tests, plugins) still control what this returns. The
+    # fast path is an optimisation, not a second source of truth (#8412 review:
+    # git-info answered 404 for a session the enumeration did return).
     try:
         for row in get_cli_sessions(all_profiles=all_profiles):
             if row.get("session_id") == session_id:
@@ -12607,12 +12638,11 @@ def _is_desktop_sidecar_row(session: dict) -> bool:
     Desktop app, the ``state.db`` row disappears but the sidecar stays, so the
     row lingers in the sidebar forever.
 
-    Such a row matches neither ``is_cli_session_row()`` (Desktop is not CLI and
-    its source marker is not ``cli``/``tui``) nor ``_is_api_server_sidecar_row()``
-    (Desktop is not API-server), so the #3238 existence probe never inspected it
-    and no prune path could reach it. Existence is still decided by
-    ``agent_session_rows_existing()``, which fails closed to "all present", so a
-    transient ``state.db`` read error never prunes a live Desktop session.
+    Desktop belongs to the interactive family, but its sidecars are reconciled
+    only by ``_prune_orphaned_desktop_sidecar_sessions()``. That pass uses
+    ``agent_session_rows_existing_strict()`` so an unavailable owning-profile
+    database retains the row instead of borrowing the active profile's DB.
+    Desktop rows must not also enter the generic CLI/API orphan pass.
     """
     if not isinstance(session, dict) or _session_source_is_webui(session):
         return False
@@ -13014,6 +13044,7 @@ from api.models import (
     import_cli_session,
     CLAUDE_CODE_SOURCE,
     get_cli_sessions,
+    lookup_cli_session_row,
     get_cli_session_messages,
     get_state_db_session_messages,
     get_state_db_session_message_prefix_summary,

@@ -52,12 +52,20 @@ def test_ui_enter_submit_paths_respect_ime_composition():
         re.DOTALL,
     ), \
         "App dialog Enter handler must ignore IME composition Enter in static/ui.js"
+    # Inline edit no longer starts with `if(e.key==='Enter' && !e.shiftKey)`.
+    # Send/newline is the shared helper; the windowed IME guard still returns
+    # before preventDefault and Send. Behavior is pinned in
+    # test_issue1443_ime_helper_promotion.py.
+    edit_at = UI_JS.index("ta.addEventListener('keydown'")
+    edit = UI_JS[edit_at:UI_JS.index("});", edit_at) + 3]
+    assert "window._composerShouldSendOnKey" in edit, (
+        "Message edit Enter-to-save must decide through window._composerShouldSendOnKey"
+    )
     assert re.search(
-        _ime_guarded_enter_pattern("e", require_no_shift=True),
-        UI_JS,
-        re.DOTALL,
-    ), \
-        "Message edit Enter-to-save handler must ignore IME composition Enter in static/ui.js"
+        r"if\s*\(\s*window\._isImeEnter\s*&&\s*window\._isImeEnter\s*\(\s*e\s*\)\s*\)\s*return\s*;",
+        edit,
+    ), "Message edit Enter-to-save handler must ignore IME composition Enter in static/ui.js"
+    assert edit.index("window._isImeEnter") < edit.index("preventDefault") < edit.index(".msg-edit-send")
     assert re.search(
         rf"inp\.onkeydown=\(e2\)=>\{{\s*{_ime_guarded_enter_pattern('e2')}",
         UI_JS,
