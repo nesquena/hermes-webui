@@ -1754,6 +1754,17 @@ def _last_provider_holder_locked(agent: Any, *, self_dropped: bool = False) -> t
                 if entry.teardown:
                     return False, f"a teardown of provider {name!r} is already running", ""
                 return False, f"provider {name!r} is not tracked as held by this agent", ""
+        # A holder collected WHILE a critical section holds this lock has its
+        # forget QUEUED (the GC callback never waits for the lock), so its
+        # manager's queued work is not in ``entry.work`` yet. Skipping it below
+        # as "collected" would let the release close the client under that save
+        # (#8613 salvage, Codex r1): file its work hold now, exactly as the
+        # queued forget will.
+        for key, h in list(entry.holders.items()):
+            if key != agent_pid and h.agent() is None:
+                held = h.manager()
+                if held is not None and _manager_has_outstanding_work(held):
+                    entry.work[id(held)] = h.manager
         # A collected holder does not count: its weak-reference callback removes it,
         # and a stale reference must not pin an instance nobody uses any more.
         others = [h for key, h in entry.holders.items() if key != agent_pid and h.agent() is not None]

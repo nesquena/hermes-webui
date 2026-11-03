@@ -245,7 +245,7 @@ def test_stress_concurrent_evictions_and_draining_saves_release_exactly_once(
     futures = []
     token = hc.set_hermes_home_override(str(homes["alpha"]))
     try:
-        for agent, marker in zip(agents, markers):
+        for agent, marker in zip(agents, markers, strict=True):
             agent._memory_manager.sync_all(marker, "reply", session_id=agent.session_id)
             futures.extend(list(agent._memory_manager._background_futures))
     finally:
@@ -280,3 +280,58 @@ def test_stress_concurrent_evictions_and_draining_saves_release_exactly_once(
         future.result(timeout=30)
     assert sorted(provider.writes) == sorted(markers), "a queued save was lost"
     _released_exactly_once(provider)
+
+
+def test_a_holder_collected_while_the_claim_holds_the_lock_keeps_its_queued_save(
+    hc, homes, holder_registry, monkeypatch
+):
+    """Codex r1 on the salvage (CORE). A is collected on another thread while B's
+    claim holds the holder lock: A's GC callback only QUEUES its forget, so A's
+    manager's queued save was not a work hold yet, and the proof skipped A as
+    "collected" — B's release closed the client under A's save. The save must
+    land, and the provider must still be released once it has drained."""
+    was_enabled = gc.isenabled()
+    gc.disable()
+    provider = _pause_saves(RecordingProvider())
+    first = _shared_agent(homes["alpha"], provider, "8613-pd-gcq-a")
+    second = _shared_agent(homes["alpha"], provider, "8613-pd-gcq-b")
+    _queue_paused_save(first, provider, "departed save", hc)
+    futures = list(first._memory_manager._background_futures)
+    type(first).built.clear()
+    first.cycle = first  # only a collection frees it
+    del first
+    begin_gc, collected = threading.Event(), threading.Event()
+
+    def collect():
+        assert begin_gc.wait(10)
+        gc.collect()
+        collected.set()
+
+    collector = threading.Thread(target=collect, name="8613-pd-gcq-collector", daemon=True)
+    collector.start()
+    original = scope._agent_holds_instances_locked
+
+    def collect_while_the_claim_holds_the_lock(agent):
+        result = original(agent)
+        begin_gc.set()
+        assert collected.wait(10), "the weak-reference callback blocked on the holder lock"
+        return result
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(scope, "_agent_holds_instances_locked", collect_while_the_claim_holds_the_lock)
+            assert streaming._close_evicted_agent_at_session_boundary("8613-pd-gcq-b", second) is True
+        closed_before_save = provider.client.is_closed
+        provider.save_resume.set()
+        for future in futures:
+            future.result(timeout=30)
+        assert provider.writes == ["departed save"], {
+            "closed_before_save": closed_before_save, "shutdowns": provider.shutdowns,
+        }
+        assert closed_before_save is False
+        _released_exactly_once(provider)
+    finally:
+        provider.save_resume.set()
+        collector.join(10)
+        if was_enabled:
+            gc.enable()
