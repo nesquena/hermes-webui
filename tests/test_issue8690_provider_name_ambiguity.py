@@ -17,6 +17,7 @@ outbound I/O blocked). No Agent, live endpoint or real profile is used.
 
 from __future__ import annotations
 
+import json
 import sys
 import types
 
@@ -36,7 +37,10 @@ REASON = getattr(config, "PROVIDER_NAME_AMBIGUOUS", "provider_name_ambiguous")
 
 
 @pytest.fixture(autouse=True)
-def isolated(monkeypatch):
+def isolated(monkeypatch, tmp_path):
+    # The raw-identity source (Codex r3) reads the active profile's config.yaml;
+    # point it at a per-test file that only the raw-config tests create.
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(tmp_path / "profile" / "config.yaml"))
     # No Agent: record pool / host-gated lookups report nothing, exactly as in CI.
     pkg = types.ModuleType("hermes_cli")
     pkg.__path__ = []
@@ -345,3 +349,51 @@ def test_an_alias_with_its_own_endpoint_and_key_is_unchanged(monkeypatch):
              "base_url_explicit": True, "credential_explicit": True, "api_key": NAMED_KEY}
     bundle = config.raise_for_custom_provider_route(config.merge_model_alias_runtime_bundle(alias, {}))
     assert (bundle["base_url"], bundle["api_key"]) == (NAMED_URL, NAMED_KEY)
+
+
+# ── Codex r3: identities are read unexpanded from the profile's config.yaml ────
+
+
+def _write_profile_config(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), encoding="utf-8")  # JSON is YAML
+    return path
+
+
+def _sibling_named(name):
+    return _config("openai", {
+        "myproxy": {"name": name, "base_url": NAMED_URL, "api_key": NAMED_KEY},
+        "openai": {"base_url": BUILTIN_URL, "api_key": BUILTIN_KEY},
+    }, base_url=BUILTIN_URL)
+
+
+def test_a_reference_the_cache_expanded_to_another_name_is_still_refused(monkeypatch, tmp_path):
+    """Codex r3 repro: the cache expanded ``${SIBLING_NAME}`` to 'unrelated', then the
+    profile .env changed it to 'openai' without touching config.yaml. The Agent reads
+    'openai'; the stale cache must not let WebUI accept the built-in URL with myproxy's key."""
+    _write_profile_config(tmp_path / "profile" / "config.yaml", _sibling_named("${SIBLING_NAME}"))
+    _bind(monkeypatch, _sibling_named("unrelated"))  # the stale expanded cache
+    runtime = _agent_runtime(BUILTIN_URL, NAMED_KEY)
+    _both_refused("openai", runtime, "'myproxy'", configured_base_url=BUILTIN_URL)
+    verdict = config.provider_name_ambiguity_verdict("openai")
+    assert verdict and verdict["reason"] == REASON
+
+
+def test_literal_names_in_the_profile_config_keep_their_verdicts(monkeypatch, tmp_path):
+    _write_profile_config(tmp_path / "profile" / "config.yaml", _sibling_named("unrelated"))
+    _bind(monkeypatch, _sibling_named("unrelated"))
+    assert config.provider_name_ambiguity_verdict("openai") is None
+    _write_profile_config(tmp_path / "profile" / "config.yaml", _sibling_named("openai"))
+    _bind(monkeypatch, _sibling_named("openai"))
+    assert config.provider_name_ambiguity_verdict("openai")["reason"] == REASON
+
+
+def test_the_raw_identities_follow_the_active_profile_config(monkeypatch, tmp_path):
+    """The raw file is the one get_config() serves: switching profiles switches it."""
+    templated = _write_profile_config(tmp_path / "b" / "config.yaml", _sibling_named("${SIBLING_NAME}"))
+    literal = _write_profile_config(tmp_path / "a" / "config.yaml", _sibling_named("unrelated"))
+    _bind(monkeypatch, _sibling_named("unrelated"))
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(literal))
+    assert config.provider_name_ambiguity_verdict("openai") is None
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(templated))
+    assert config.provider_name_ambiguity_verdict("openai")["reason"] == REASON

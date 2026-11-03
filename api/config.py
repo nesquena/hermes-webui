@@ -4273,8 +4273,33 @@ def _claiming_value(keys: tuple, values: tuple, names: set) -> str | None:
     return None
 
 
+def _provider_identity_sources(config: object) -> tuple:
+    """The config views :func:`provider_name_ambiguity_verdict` reads identities from.
+
+    An explicit ``config`` is the only view. Otherwise the active profile's
+    config.yaml as parsed but NOT env-expanded (the file :func:`get_config`
+    serves, via :func:`_get_config_path`) comes first, then the cached view.
+    The Agent re-expands ``${VAR}`` references from the profile's current
+    secret scope on every load, while the cache keeps the expansion it saw when
+    it last reloaded (an edited .env does not change config.yaml's mtime), so
+    only the raw spelling tells reliably that a name is a reference (Codex r3).
+    The cached view still counts, so an in-memory config is never ignored.
+    """
+    if config is not None:
+        return (config,)
+    try:
+        raw = _load_yaml_config_file_raw(_get_config_path(), _copy=False)
+    except Exception:
+        logger.debug("provider name check: raw config unreadable", exc_info=True)
+        raw = None
+    return (raw, get_config())
+
+
 def provider_name_ambiguity_verdict(provider: object, config: object = None) -> dict | None:
     """Terminal verdict when one built-in provider name has two claimants (#8690).
+
+    Identities are read from every view :func:`_provider_identity_sources`
+    returns; the first view with an ambiguity decides (fail closed).
 
     The Agent answers a name with the first record whose alias set contains it
     and shares one credential pool between such records, so the endpoint and key
@@ -4301,10 +4326,17 @@ def provider_name_ambiguity_verdict(provider: object, config: object = None) -> 
         or _is_native_custom_provider_key(builtin)
     ):
         return None
-    source = get_config() if config is None else config
-    if not isinstance(source, dict):
-        return None
     names = {route, route.replace("_", "-"), f"custom:{builtin}" if explicit else builtin}
+    for source in _provider_identity_sources(config):
+        if isinstance(source, dict):
+            verdict = _provider_name_ambiguity_in(source, route, builtin, explicit, names)
+            if verdict is not None:
+                return verdict
+    return None
+
+
+def _provider_name_ambiguity_in(source: dict, route: str, builtin: str, explicit: bool, names: set) -> dict | None:
+    """:func:`provider_name_ambiguity_verdict` for one config view."""
     own: list[str] = []
     others: list[str] = []
     providers = source.get("providers")
