@@ -200,6 +200,10 @@ def main():
         if k.endswith("_API_KEY"):
             env.pop(k, None)
     env.update({
+        # Isolate the server from this machine's own Hermes install: a temporary HOME, and no lazy dependency
+        # installs, so it can't discover an installed Agent and stall while preparing its dependencies.
+        "HOME": state_dir,
+        "HERMES_DISABLE_LAZY_INSTALLS": "1",
         "HERMES_WEBUI_PORT": str(port),
         "HERMES_WEBUI_HOST": "127.0.0.1",
         "HERMES_WEBUI_STATE_DIR": state_dir,
