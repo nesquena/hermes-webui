@@ -3179,6 +3179,29 @@ def _build_session_list_cache_payload(
                 for key in ("source_tag", "raw_source", "session_source", "source_label"):
                     if not s.get(key) and meta.get(key):
                         s[key] = meta[key]
+                # #8791: an opened delegated child's sidecar carries neither its
+                # relationship nor its own or its parent's compression lineage
+                # until the lineage enrichment, which runs after the sidebar
+                # bucket is derived. Its own state.db row has all of them.
+                # Without them a child naming an intermediate compression
+                # segment of its parent resolved no parent, and a child naming
+                # an opened compressed delegated row lost that row; either kept
+                # its WebUI bucket while its host sat in the CLI group and
+                # rendered in neither. Only for delegated (subagent) rows, and
+                # only from the same profile's row.
+                if (
+                    str(s.get("raw_source") or s.get("source_tag") or "").strip().lower() == "subagent"
+                    and _profiles_match(meta.get("profile"), s.get("profile"))
+                ):
+                    for key in (
+                        "relationship_type",
+                        "_parent_lineage_root_id",
+                        "_parent_lineage_tip_id",
+                        "_lineage_root_id",
+                        "_lineage_tip_id",
+                    ):
+                        if not s.get(key) and meta.get(key):
+                            s[key] = meta[key]
         webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
         # Apply the same CLI visibility semantics to imported local copies so
         # low-value imported artifacts do not leak into the sidebar.

@@ -74,6 +74,41 @@ elif scenario == "compressed":
     add(db, "nest-old", "subagent", parent="nest-host", delegate="nest-host", end_reason="compression")
     add(db, "nest-tip", "subagent", parent="nest-old", delegate="nest-host")
     add(db, "nest-leaf", "subagent", parent="nest-old", delegate="nest-old")
+elif scenario == "intermediate":
+    # An opened child naming an intermediate segment of a twice-compressed Desktop parent.
+    add(db, "root", "desktop", end_reason="compression")
+    add(db, "mid", "desktop", parent="root", end_reason="compression")
+    add(db, "tip", "desktop", parent="mid")
+    opened.append(("kid", "mid", add(db, "kid", "subagent", parent="mid", delegate="mid")))
+    # An opened, compressed delegated row, and a child that names its pre-compression id.
+    add(db, "host", "cli")
+    add(db, "sub-old", "subagent", parent="host", delegate="host", end_reason="compression")
+    opened.append(("sub-tip", "sub-old", add(db, "sub-tip", "subagent", parent="sub-old", delegate="host")))
+    add(db, "sub-leaf", "subagent", parent="sub-old", delegate="sub-old")
+elif scenario == "renamed":
+    # The root profile renamed to "work": its rows carry "work", an opened child's copy the legacy "default".
+    from api import profiles
+    profiles._root_profile_name_cache = {"default", "work"}
+    profiles._root_profile_name_cache_loaded = True
+    ts = add(db, "proj-host", "webui")
+    models.Session("proj-host", title="Project host", workspace=workspace, profile="work", project_id="proj",
+                   messages=[{"role": "user", "content": "x", "timestamp": ts}], created_at=ts, updated_at=ts,
+                   session_source="webui").save(touch_updated_at=False)
+    opened.append(("proj-kid", "proj-host", add(db, "proj-kid", "subagent", parent="proj-host", delegate="proj-host")))
+elif scenario == "shared-root":
+    # Two profiles whose compressed conversations share a pre-compression id but not a current one.
+    add(db, "shared-root", "cli", end_reason="compression")
+    add(db, "alpha-tip", "cli", parent="shared-root")
+    add(db, "alpha-kid", "subagent", parent="shared-root", delegate="shared-root")
+    beta = home / "profiles" / "beta"
+    beta.mkdir(parents=True)
+    db2 = sqlite3.connect(beta / "state.db")
+    db2.executescript(SCHEMA)
+    add(db2, "shared-root", "cli", end_reason="compression")
+    add(db2, "beta-tip", "cli", parent="shared-root")
+    add(db2, "beta-kid", "subagent", parent="shared-root", delegate="shared-root")
+    db2.commit()
+    db2.close()
 elif scenario == "profiles":
     add(db, "shared-parent", "cli")
     add(db, "alpha-kid", "subagent", parent="shared-parent", delegate="shared-parent")
@@ -100,7 +135,8 @@ models.clear_cli_sessions_cache()
 payloads = {}
 for group in ("webui", "cli"):
     payloads[group] = routes._session_list_payload_to_response(routes._build_session_list_cache_payload(
-        active_profile="default", all_profiles=scenario == "profiles", show_cli_sessions=True,
+        active_profile="work" if scenario == "renamed" else "default",
+        all_profiles=scenario in ("profiles", "shared-root"), show_cli_sessions=True,
         show_previous_messaging_sessions=False, show_cron_sessions=False, show_claude_code_sessions=False,
         sidebar_source=group,
     ))["sessions"]
@@ -131,6 +167,10 @@ Object.assign(global, {
   _sidebarReferenceSessions: [], S: {session: null, busy: false, activeStreamId: null, activeProfile: 'default'},
   _activeProject: null, _showArchived: false,
 });
+// Per-scenario UI state: the active profile, and an active project filter.
+const extra = JSON.parse(process.argv[2] || '{}');
+Object.assign(global.S, extra.S || {});
+if ('_activeProject' in extra) global._activeProject = extra._activeProject;
 const key = r => (r.profile || 'default') + ':' + r.session_id;
 const out = {};
 for (const group of ['webui', 'cli']) {
@@ -148,7 +188,7 @@ console.log(JSON.stringify(out));
 """
 
 
-def _render(scenario: str, tmp_path: Path) -> dict:
+def _render(scenario: str, tmp_path: Path, ui: dict | None = None) -> dict:
     home = tmp_path / "home"
     state = tmp_path / "webui"
     (state / "sessions").mkdir(parents=True)
@@ -172,7 +212,7 @@ def _render(scenario: str, tmp_path: Path) -> dict:
     assert proc.returncode == 0, proc.stderr[-4000:]
     payloads = json.loads(proc.stdout.strip().splitlines()[-1])
     proc = subprocess.run(
-        [NODE, "-e", _SIDEBAR, str(SESSIONS_JS)],
+        [NODE, "-e", _SIDEBAR, str(SESSIONS_JS), json.dumps(ui or {})],
         input=json.dumps(payloads), cwd=REPO, capture_output=True, text=True, timeout=60,
     )
     assert proc.returncode == 0, proc.stderr[-4000:]
@@ -209,6 +249,35 @@ def test_a_child_never_attaches_under_another_profiles_parent(tmp_path):
     assert rendered["cli"].get("default:alpha-kid") == "default:shared-parent", rendered
     assert rendered["cli"].get("beta:beta-kid") == "beta:shared-parent", rendered
     assert rendered["webui"] == {}, rendered
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_an_opened_child_of_an_intermediate_segment_renders_under_the_tip(tmp_path):
+    rendered = _render("intermediate", tmp_path)
+    # The opened child names "mid", which only the state.db row's parent lineage links to the tip.
+    assert rendered["cli"].get("default:kid") == "default:tip", rendered
+    # An opened compressed delegated row, and the child naming its pre-compression id, stay with their host.
+    assert rendered["cli"].get("default:sub-tip") == "default:host", rendered
+    assert rendered["cli"].get("default:sub-leaf") == "default:host", rendered
+    assert rendered["webui"] == {}, rendered
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_two_profiles_sharing_a_pre_compression_id_keep_their_own_rows(tmp_path):
+    rendered = _render("shared-root", tmp_path)
+    assert rendered["cli"].get("default:alpha-tip", "missing") is None, rendered
+    assert rendered["cli"].get("beta:beta-tip", "missing") is None, rendered
+    assert rendered["cli"].get("default:alpha-kid") == "default:alpha-tip", rendered
+    assert rendered["cli"].get("beta:beta-kid") == "beta:beta-tip", rendered
+    assert rendered["webui"] == {}, rendered
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_a_renamed_roots_legacy_child_stays_in_its_parents_project(tmp_path):
+    # Active profile "work" is the renamed root; the opened child's copy is tagged the legacy "default".
+    ui = {"S": {"activeProfile": "work", "activeProfileIsDefault": True}, "_activeProject": "proj"}
+    rendered = _render("renamed", tmp_path, ui)
+    assert rendered["webui"].get("default:proj-kid") == "work:proj-host", rendered
 
 
 # Server half on crafted rows: the bucket derivation itself, independent of the browser.

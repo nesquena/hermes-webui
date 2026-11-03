@@ -10082,21 +10082,12 @@ function _isDelegatedSubagentRow(s){
 // every other row keeps its own. Memoized per render, so each lineage resolves once.
 function _sidebarProjectResolver(rowsById){
   const memo=new Map();
-  // #8791: parents, lineage roots and memo entries are keyed by profile + id, as in
+  // #8791: parents, lineage roots and memo entries are keyed by profile + id first, as in
   // _sidebarDisplayBucketIsCli: with All profiles on, a bare id can name another profile's same-id
-  // parent and hand its project to this child.
-  const profileOf=(r)=>String((r&&(r.profile||r.profile_name))||'').trim();
-  const scopedKey=(owner,id)=>profileOf(owner)+'\u0000'+String(id||'');
-  // A bare-id hit counts only within one profile; a row without profile info carries no cross-profile risk.
-  const sameProfile=(a,b)=>!profileOf(a)||!profileOf(b)||profileOf(a)===profileOf(b);
+  // parent and hand its project to this child. When the row's own profile has no such id, fall back to
+  // the bare id as before, so a legacy row tagged 'default' under a renamed root still finds its parent.
+  const scopedKey=(owner,id)=>String((owner&&(owner.profile||owner.profile_name))||'').trim()+'\u0000'+String(id||'');
   const byProfileId=rowsById&&rowsById.byProfileId instanceof Map?rowsById.byProfileId:null;
-  const lookup=(owner,id)=>{
-    if(!rowsById||!id) return null;
-    const scoped=byProfileId?byProfileId.get(scopedKey(owner,id)):undefined;
-    if(scoped) return scoped;
-    const bare=rowsById.get(id);
-    return bare&&sameProfile(owner,bare)?bare:null;
-  };
   // Resolve the parent like the attach step does: a child of a compressed parent names its
   // pre-compression segment, which the payload carries only as the tip's _lineage_root_id.
   const byLineageRoot=new Map();
@@ -10107,18 +10098,18 @@ function _sidebarProjectResolver(rowsById){
     if(!byLineageRoot.has(key)) byLineageRoot.set(key,r);
     if(!byLineageRootBare.has(r._lineage_root_id)) byLineageRootBare.set(r._lineage_root_id,r);
   });
-  const lineageRoot=(owner,id)=>{
-    if(!id) return null;
-    const scoped=byLineageRoot.get(scopedKey(owner,id));
-    if(scoped) return scoped;
-    const bare=byLineageRootBare.get(id);
-    return bare&&sameProfile(owner,bare)?bare:null;
-  };
   const parentOf=(s)=>{
     const pid=s.parent_session_id;
     if(!rowsById||!pid) return null;
-    return lookup(s,pid)||lookup(s,s._parent_lineage_tip_id)
-      ||lineageRoot(s,pid)||lineageRoot(s,s._parent_lineage_root_id)||null;
+    const refs=[pid,s._parent_lineage_tip_id];
+    const roots=[pid,s._parent_lineage_root_id];
+    if(byProfileId){
+      for(const id of refs){ const hit=id&&byProfileId.get(scopedKey(s,id)); if(hit) return hit; }
+      for(const id of roots){ const hit=id&&byLineageRoot.get(scopedKey(s,id)); if(hit) return hit; }
+    }
+    for(const id of refs){ const hit=id&&rowsById.get(id); if(hit) return hit; }
+    for(const id of roots){ const hit=id&&byLineageRootBare.get(id); if(hit) return hit; }
+    return null;
   };
   return function projectIdFor(s){
     if(!s) return null;
@@ -10378,24 +10369,29 @@ function _scopedSidebarReferenceRows(isCli, projectIdFor){
 function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw, payloadRowsById){
   const referenceRows=Array.isArray(referenceSessionsRaw)?referenceSessionsRaw:sessionsRaw;
   const project=(raw, refs, payload)=>_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(raw), raw, refs, payload);
-  // #8791: lineage collapse and child attachment key rows by bare session id. With All profiles on, two
-  // profiles can hold the same id (a cloned profile or a copied state.db), and one pass attached a child
-  // under the OTHER profile's same-id parent. When an id is shared across profiles, project each profile
-  // on its own; otherwise keep the single pass unchanged. Callers sort (_sessionSidebarSortCompare) or
-  // only count/search the result, so concatenating the groups changes nothing on screen.
-  // A row's profile group: ''/missing and 'default' are the root profile, and so is the active profile's
-  // own name when it is the (renamed) root — mirroring routes._sidebar_profile_group_key and
-  // _profileMatchesActiveProfile.
+  // #8791: lineage collapse and child attachment key rows by bare session id and compression-lineage id.
+  // With All profiles on, two profiles can hold the same ids (a cloned profile or a copied state.db), and
+  // one pass attached a child under the OTHER profile's same-id parent, or collapsed two profiles'
+  // compressed conversations into one row. When any of those ids is shared across profiles, project each
+  // profile on its own; otherwise keep the single pass unchanged. Callers sort (_sessionSidebarSortCompare)
+  // or only count/search the result, so concatenating the groups changes nothing on screen.
+  // A row's profile group: ''/missing and 'default' are the root profile, and so is the root under its
+  // renamed name (the active profile when it is the root, or a roster entry flagged is_default) —
+  // mirroring routes._sidebar_profile_group_key, _profileMatchesActiveProfile and
+  // _cronProfileNameIsRootAlias.
+  const roster=(typeof _profilesCache!=='undefined'&&_profilesCache&&Array.isArray(_profilesCache.profiles))?_profilesCache.profiles:[];
   const groupOf=(s)=>{
     const profile=String((s&&(s.profile||s.profile_name))||'').trim();
     if(!profile||profile==='default') return 'default';
     if(typeof S!=='undefined'&&S&&S.activeProfileIsDefault&&profile===String(S.activeProfile||'').trim()) return 'default';
+    if(roster.some(p=>p&&p.is_default&&p.name===profile)) return 'default';
     return profile;
   };
   const payloadRows=payloadRowsById instanceof Map
     ? [...((payloadRowsById.byProfileId instanceof Map)?payloadRowsById.byProfileId:payloadRowsById).values()]
     : null;
-  // The groups present, or null when no id appears under two groups (every single-profile view).
+  // The groups present, and whether any session or lineage id appears under two groups (never in a
+  // single-profile view).
   const groupById=new Map();
   const groups=new Set();
   let shared=false;
@@ -10405,9 +10401,12 @@ function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw, pa
       if(!s||!s.session_id) continue;
       const group=groupOf(s);
       groups.add(group);
-      const seen=groupById.get(s.session_id);
-      if(seen===undefined) groupById.set(s.session_id,group);
-      else if(seen!==group) shared=true;
+      for(const id of [s.session_id,s._lineage_root_id,s._lineage_tip_id]){
+        if(!id) continue;
+        const seen=groupById.get(id);
+        if(seen===undefined) groupById.set(id,group);
+        else if(seen!==group) shared=true;
+      }
     }
   }
   if(!shared) return project(sessionsRaw, referenceRows, payloadRowsById);
