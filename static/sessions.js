@@ -36,10 +36,28 @@ let _pendingCarryForwardSnapshot = null;
 
 // Debounced save — prevents hammering the server on every keystroke.
 let _draftSaveTimer = null;
+let _draftSaveTimerSid = null;
+let _draftSaveTimerPayload = null;
+let _draftSaveTimerRev = 0;
 const _DRAFT_SAVE_DELAY_MS = 400;
 const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';
 const _composerDraftKnownPayloadSessions = new Set();
 const _composerDraftRestoreSuppressedUntilBySid = new Map();
+// Bumped when a non-empty draft differing from the composer's last known
+// payload is saved, so callers can tell whether a newer draft exists. Re-saving
+// the same payload (e.g. an autosave of a restored draft) is not newer.
+const _composerDraftRevBySid = new Map();
+const _composerDraftLastPayloadBySid = new Map();
+function _composerDraftRevision(sid) { return _composerDraftRevBySid.get(sid) || 0; }
+function _noteComposerDraftPayload(sid, text, files) {
+  _composerDraftLastPayloadBySid.set(sid, _composerDraftPayloadSignature(String(text || ''), _composerDraftFilesForPersist(files)));
+}
+function _bumpComposerDraftRevision(sid, text, files) {
+  const sig = _composerDraftPayloadSignature(text, files);
+  if (_composerDraftLastPayloadBySid.get(sid) === sig) return;
+  _composerDraftLastPayloadBySid.set(sid, sig);
+  _composerDraftRevBySid.set(sid, _composerDraftRevision(sid) + 1);
+}
 const _composerDraftLocalFallbackBySid = new Map();
 const _composerDraftLatestIntentSequenceBySid = new Map();
 const _composerDraftPostPromisesBySid = new Map();
@@ -248,9 +266,31 @@ function _saveComposerDraft(sid, text, files) {
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
     _clearComposerDraftRestoreSuppression(sid);
     _composerDraftKnownPayloadSessions.add(sid);
+    _bumpComposerDraftRevision(sid, normalizedText, normalizedFiles);
+  } else {
+    _noteComposerDraftPayload(sid, '', []);
   }
+  _draftSaveTimerSid = sid;
+  _draftSaveTimerPayload = _composerDraftPayloadSignature(normalizedText, normalizedFiles);
+  _draftSaveTimerRev = _composerDraftRevision(sid);
+  // #7855 (round 9, MUST-FIX 1): snapshot the restored goal-continuation
+  // binding WHEN THE AUTOSAVE IS SCHEDULED. Two clients sharing a session can
+  // otherwise drop an unchanged continuation's token: another client's write
+  // changes the stored draft, and this tab's keystroke autosave then re-saves
+  // the text without the token it still owns locally. The id is sent only
+  // when its bound text equals the text being saved; any other autosave sends
+  // an explicit empty token so a stale binding can never be stored next to an
+  // edited draft (round-7 rule) nor left orphaned server-side.
+  const _restoredCont = (typeof _peekRestoredGoalContinuationDraft === 'function')
+    ? _peekRestoredGoalContinuationDraft()
+    : null;
   _draftSaveTimer = setTimeout(() => {
-    _postComposerDraftPayload(sid, normalizedDraft, intent).catch((error) => {
+    let _autosaveContId = '';
+    if (_restoredCont && _restoredCont.id
+        && String(_restoredCont.text || '').trim() === String(normalizedText || '').trim()) {
+      _autosaveContId = _restoredCont.id;
+    }
+    _postComposerDraftPayload(sid, normalizedDraft, intent, _autosaveContId).catch((error) => {
       _handleComposerDraftPostFailure(error, sid, normalizedText, liveFiles, intent);
     });
   }, _DRAFT_SAVE_DELAY_MS);
@@ -317,12 +357,27 @@ function _handleComposerDraftPostFailure(error, sid, text, files, intent=null) {
   }
 }
 
-function _postComposerDraftPayload(sid, draft, intent=null) {
+function _postComposerDraftPayload(sid, draft, intent=null, goalContinuationId='') {
   const requestSid = _safeDraftSessionId(sid);
   if (!requestSid) return Promise.resolve();
   const normalizedText = String((draft && draft.text) || '');
   const normalizedFiles = Array.isArray(draft && draft.files) ? draft.files.filter(Boolean) : [];
-  const bodyPayload = JSON.parse(JSON.stringify({ text: normalizedText, files: normalizedFiles }));
+  // #7855: the continuation token is part of the draft, so the wire body ALWAYS
+  // carries the field — the continuation's own id, or an explicit empty string
+  // that clears any stored token (round-7 rule). Omitting the key entirely made
+  // a keystroke autosave drop the token an unchanged continuation still owns
+  // (round 9 MUST-FIX 1) and left a stale stored token behind on clear.
+  // The normalizer itself lives in static/messages.js (sibling top-level
+  // scope), so fall back to a local trim when it is not loaded — this file's
+  // own test harness and the boot path both run without it.
+  const normalizedGoalContId = (typeof _normalizeGoalContinuationId === 'function')
+    ? _normalizeGoalContinuationId(goalContinuationId)
+    : String(goalContinuationId || '').trim();
+  const bodyPayload = JSON.parse(JSON.stringify({
+    text: normalizedText,
+    files: normalizedFiles,
+    goal_continuation_id: normalizedGoalContId,
+  }));
   const post = (targetSid, beforeDispatch) => {
     const previous = _composerDraftPostPromisesBySid.get(targetSid);
     let resolveWrite;
@@ -422,20 +477,33 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 }
 
 // Immediate save used before session switches.
-function _saveComposerDraftNow(sid, text, files) {
+function _saveComposerDraftNow(sid, text, files, goalContinuationId) {
   if (!sid) return Promise.resolve();
   clearTimeout(_draftSaveTimer);
   const normalizedText = String(text || '');
   const liveFiles = Array.isArray(files) ? files.filter(Boolean).slice() : [];
   const normalizedFiles = _composerDraftFilesForPersist(files);
+  // #7855 CORE (round 6): the continuation token is part of the draft. Persisting
+  // the text without it meant a reload between a failed start and its retry
+  // restored the words and dropped the token, and the retry then posted
+  // goal_continuation_id: None — which start admission scores goal_related=false.
+  // The token is only ever persisted together with the exact text it belongs to,
+  // and the restore path re-binds them the same way the in-page restore does.
+  const normalizedGoalContId = (typeof _normalizeGoalContinuationId === 'function')
+    ? _normalizeGoalContinuationId(goalContinuationId)
+    : String(goalContinuationId || '').trim();
   const normalizedDraft = { text: normalizedText, files: normalizedFiles };
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
     _clearComposerDraftRestoreSuppression(sid);
+    _bumpComposerDraftRevision(sid, normalizedText, normalizedFiles);
+  } else {
+    _noteComposerDraftPayload(sid, '', []);
   }
   // Most chat switches leave an empty composer. Avoid putting the switch path
   // behind a network POST unless there is new local draft content or an existing
   // server draft that must be cleared.
   if (!_composerDraftHasPayload(normalizedText, normalizedFiles)
+      && !normalizedGoalContId
       && S.session && S.session.session_id === sid
       && !_sessionComposerDraftHasPayload(S.session)
       && !_composerDraftKnownPayloadSessions.has(sid)
@@ -443,7 +511,7 @@ function _saveComposerDraftNow(sid, text, files) {
     return Promise.resolve();
   }
   const intent = _setComposerDraftLocalIntent(sid, normalizedText, liveFiles);
-  return _postComposerDraftPayload(sid, normalizedDraft, intent);
+  return _postComposerDraftPayload(sid, normalizedDraft, intent, normalizedGoalContId);
 }
 
 // Restore composer draft from server onto #msg textarea.
@@ -460,12 +528,18 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   const current = ta.value || '';
   const preserveActiveInput = !!(opts && opts.preserveActiveInput);
   const restoreSid = targetSid || (S.session && S.session.session_id);
-  const localFallback = restoreSid && _composerDraftLocalFallbackBySid.get(restoreSid);
-  const useLocalFallback = !!localFallback;
-  if (useLocalFallback) {
+  let localFallback = restoreSid && _composerDraftLocalFallbackBySid.get(restoreSid);
+  if (localFallback) {
     text = localFallback.text;
     files = localFallback.files;
   }
+  // A delivered steer's exact draft (server or local fallback) is being
+  // compare-and-cleared: show the empty projection in place, without re-reading it.
+  if (restoreSid && _composerDraftHasPayload(text, files) && !_isComposerDraftRestoreSuppressed(restoreSid, text, files)
+      && typeof _steerDraftIsRetiring === 'function' && _steerDraftIsRetiring(restoreSid, text, files)) {
+    draft = null; localFallback = null; text = ''; files = [];
+  }
+  const useLocalFallback = !!localFallback;
   const hasServerDraftPayload = _composerDraftHasPayload(text, files);
   const serverDraftText = (draft && typeof draft.text === 'string') ? draft.text : '';
   const serverDraftFiles = (draft && Array.isArray(draft.files)) ? draft.files : [];
@@ -506,21 +580,78 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
     if (typeof autoResize === 'function') autoResize();
     if (typeof updateSendBtn === 'function') updateSendBtn();
   }
+  // #7855 CORE (round 6): re-bind the persisted continuation token to the text
+  // it was stored with, exactly like the in-page restore does. Without this the
+  // reload restored the words and left the token on the server, and the retry
+  // posted goal_continuation_id: None.
+  if (typeof _setRestoredGoalContinuationDraft === 'function') {
+    const _restoredContId = draft && typeof draft.goal_continuation_id === 'string'
+      ? draft.goal_continuation_id.trim()
+      : '';
+    if (_restoredContId) {
+      _setRestoredGoalContinuationDraft(_restoredContId, text);
+    } else if (typeof _clearRestoredGoalContinuationDraft === 'function') {
+      _clearRestoredGoalContinuationDraft();
+    }
+  }
+  // Files restoration is skipped for now (requires S.pendingFiles plumbing).
 }
 
 // Clear the saved draft for a session (called when message is sent).
 function _clearComposerDraft(sid, text, files) {
   if (!sid) return;
-  clearTimeout(_draftSaveTimer);
+  // The pending debounced save may belong to another session (e.g. after New Chat).
+  if (_draftSaveTimerSid === sid) clearTimeout(_draftSaveTimer);
   _clearRememberedNewChatDraftSession(sid);
   if (arguments.length >= 2) _suppressComposerDraftRestoreAfterSubmit(sid, text, files);
   else _suppressComposerDraftRestoreAfterSubmit(sid);
+  // #7855 CORE (round 6): the clear must reach the server as an explicit empty
+  // token — `_postComposerDraftPayload`'s default 4th argument is '' — so the
+  // stored token is dropped together with the draft it belonged to. Omitting
+  // the field entirely would leave a stored continuation token behind after
+  // the draft was submitted, and the next session to restore that draft would
+  // inherit it.
   const intent = _setComposerDraftLocalIntent(sid, '', []);
   return _postComposerDraftPayload(sid, { text: '', files: [] }, intent).catch(() => {
     if (_composerDraftLocalFallbackBySid.get(sid) === intent) {
       _composerDraftLocalFallbackBySid.delete(sid);
     }
   });
+}
+
+// Clear sid's saved draft only if it still equals text/files (server-side
+// compare-and-clear), so a newer draft saved meanwhile is kept.
+// maxRev: a pending debounced save of this same payload scheduled at or before
+// that draft revision would land after the clear and write it back, so cancel
+// it; a later save (re-typed by the user) or a different payload is newer.
+function _clearComposerDraftIfUnchanged(sid, text, files, maxRev) {
+  if (!sid) return Promise.resolve(false);
+  if (_draftSaveTimerSid === sid && _draftSaveTimerRev <= Number(maxRev)
+      && _draftSaveTimerPayload === _composerDraftPayloadSignature(text, files)) clearTimeout(_draftSaveTimer);
+  const ifFiles = _composerDraftFilesForPersist(files);
+  const ifSig = _composerDraftPayloadSignature(String(text || ''), ifFiles);
+  // Join the per-session draft write chain so an earlier queued save cannot
+  // land after this compare-and-clear and resurrect the retired draft.
+  const previous = _composerDraftPostPromisesBySid.get(sid);
+  const dispatch = () => api('/api/session/draft', {
+    method: 'POST',
+    body: JSON.stringify({ session_id: sid, text: '', files: [], if_text: String(text || ''), if_files: ifFiles }),
+  });
+  const write = previous ? Promise.resolve(previous).then(dispatch, dispatch) : dispatch();
+  const pending = write.finally(() => {
+    if (_composerDraftPostPromisesBySid.get(sid) === pending) _composerDraftPostPromisesBySid.delete(sid);
+  });
+  _composerDraftPostPromisesBySid.set(sid, pending);
+  return pending.then((r) => {
+    if (r && r.mismatch) return false;
+    // A failed-save local fallback holding exactly the retired payload is now stale.
+    const fallback = _composerDraftLocalFallbackBySid.get(sid);
+    if (fallback && _composerDraftPayloadSignature(fallback.text, _composerDraftFilesForPersist(fallback.files)) === ifSig) {
+      _forgetComposerDraftLocalFallback(sid);
+    }
+    _rememberComposerDraftPayloadState(sid, '', []);
+    return true;
+  }).catch(() => false);
 }
 
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
@@ -556,6 +687,7 @@ const _sessionStreamingById = new Map();
 const _sessionListSnapshotById = new Map();
 const _sessionListSourceById = new Map();
 let _sessionListPointerActive = false;
+let _sessionRowPointerReleasePending = false;
 let _sessionListLastScrollAt = 0;
 let _pendingSessionListPayload = null;
 let _pendingSessionListApplyTimer = 0;
@@ -568,6 +700,9 @@ const SESSION_SWIPE_REFLOW_LEAD_MS = 220;
 const SESSION_REFLOW_TIMEOUT_MS = 420;
 const SESSION_LIST_FLIP_TIMEOUT_MS = 460;
 const SESSION_LONG_PRESS_DELAY_MS = 400;
+// Controls inside a session row that own their clicks; activating one never
+// opens the row's conversation.
+const SESSION_ROW_NESTED_CONTROL_SELECTOR = '.session-select-cb-wrapper,.session-tag,.session-title-input,.session-child-count,.session-child-sessions,.session-child-session,.session-lineage-count,.session-lineage-segments,.session-lineage-segment';
 const SESSION_ARCHIVE_SWIPE_THRESHOLD_PX = 128;
 const SESSION_DELETE_SWIPE_THRESHOLD_PX = 128;
 const SESSION_SWIPE_CANCEL_RATIO = 0.75;
@@ -1064,11 +1199,11 @@ function _markSessionCompletionUnreadIfBackground(sid, messageCount = null, meta
   }
   if (_isSessionActivelyViewedForList(sid)) {
     _setSessionViewedCount(sid, count);
-    if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
+    if (typeof _repaintSidebarForBackgroundChurn === 'function') _repaintSidebarForBackgroundChurn();
     return false;
   }
   _markSessionCompletionUnread(sid, count, meta);
-  if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
+  if (typeof _repaintSidebarForBackgroundChurn === 'function') _repaintSidebarForBackgroundChurn();
   return true;
 }
 
@@ -1426,11 +1561,15 @@ function _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt) {
 // aggregated unread state (own + children) authoritatively, so a lineage
 // PARENT keeps its own / other children's unread dot instead of being stripped
 // by ad-hoc DOM surgery (Greptile concern (b) on #4946).
-function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0) {
+function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0, backgroundRepaint = false) {
   if (!sid) return;
   _setSessionViewedCount(sid, messageCount);
   _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt);
-  if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
+  if(backgroundRepaint&&typeof _repaintSidebarForBackgroundChurn==='function'){
+    _repaintSidebarForBackgroundChurn();
+  }else if(typeof renderSessionListFromCache==='function'){
+    renderSessionListFromCache();
+  }
 }
 
 // Does the session currently carry any unread state that a visit should clear?
@@ -1955,7 +2094,7 @@ function _markSessionCompletedInList(session, previousSid = null) {
     message_count: messageCount,
     last_message_at: lastMessageAt,
   });
-  renderSessionListFromCache();
+  _repaintSidebarForBackgroundChurn();
 }
 
 function _markPollingCompletionUnreadTransitions(sessions) {
@@ -2210,6 +2349,8 @@ async function newSession(flash, options={}){
   }
   _setNewSessionPending(true);
   _newSessionInFlight=(async()=>{
+    // Intent-time picker epoch; see the refresh below.
+    let newSessionClaim=(typeof _projectPickerOpenEpoch==='number')?_projectPickerOpenEpoch:0;
     // Starting a brand-new chat must not carry named context blocks selected in
     // the previous conversation (#2543). loadSession() clears these on a sidebar
     // switch, but the New Chat path replaces S.session here without going through
@@ -2368,11 +2509,23 @@ async function newSession(flash, options={}){
     // window). The marker must never authorize a provider override for a
     // different (new) session.
     if(S.session&&S.session.session_id&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(S.session.session_id);
+    if(options&&typeof options.pickerClaimEpoch==='number') newSessionClaim=options.pickerClaimEpoch;
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
     }
     S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
+    // #8356: New Chat takes the pane without going through loadSession(), so
+    // an in-flight loadSession() for the previous session still owns the load
+    // (its _loadingSessionId/_loadGeneration match) and its response can write
+    // the old transcript over the new pane. Invalidate the superseded load
+    // here: clearing the id and advancing the generation makes every stale
+    // _isCurrentLoad() continuation bail — the idle error catch, the inflight
+    // restore and the busy-flag cleanup can no longer mutate the new pane.
+    _loadingSessionId = null;
+    _loadSessionGeneration++;
+    // #7855: a brand-new session starts with no restored-continuation draft.
+    if(typeof _clearRestoredGoalContinuationDraft==='function') _clearRestoredGoalContinuationDraft();
     S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
@@ -2427,15 +2580,19 @@ async function newSession(flash, options={}){
       if(S.session.model!==modelSel.value || sessionProvider !== currentProvider){
         let sessionModelApplied=_applyModelToDropdown(S.session.model,modelSel,sessionProvider);
         if(!sessionModelApplied){
-          const opt=document.createElement('option');
-          opt.value=S.session.model;
-          opt.textContent=typeof getModelLabel==='function'?getModelLabel(S.session.model):S.session.model;
-          opt.dataset.custom='1';
-          opt.dataset.provider=sessionProvider||'';
-          modelSel.appendChild(opt);
-          sessionModelApplied=_applyModelToDropdown(S.session.model,modelSel,sessionProvider);
+          if(typeof _ensureModelOptionInDropdown==='function'){
+            sessionModelApplied=_ensureModelOptionInDropdown(S.session.model,modelSel,sessionProvider);
+          }
+          if(!sessionModelApplied){
+            const opt=document.createElement('option');
+            opt.value=S.session.model;
+            opt.textContent=typeof getModelLabel==='function'?getModelLabel(S.session.model):S.session.model;
+            opt.dataset.custom='1';
+            opt.dataset.provider=sessionProvider||'';
+            modelSel.appendChild(opt);
+            sessionModelApplied=_applyModelToDropdown(S.session.model,modelSel,sessionProvider);
+          }
         }
-        if(sessionModelApplied&&typeof syncModelChip==='function') syncModelChip();
       }
     }
     // Reset per-session visual state: a fresh chat is idle even if another
@@ -2480,7 +2637,13 @@ async function newSession(flash, options={}){
     // handlers used to guarantee this with their own awaited render (#7936);
     // now that newSession() owns the sole refresh it must force the paint,
     // matching the project "+" path (#5002: "newSession doesn't render; callers must").
-    if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session',{force:true})).catch(()=>{})}
+    // User intent (Ctrl/Cmd+K, New-chat controls): retire an open project
+    // picker that is older than this intent first, or this refresh is swallowed
+    // by the picker's background-repaint deferral and the new chat stays
+    // unpainted. A picker opened while this create was in flight is the newer
+    // choice — the delayed completion keeps it and the render re-anchors it.
+    if(typeof _retireProjectPickerForExplicitRepaint==='function') _retireProjectPickerForExplicitRepaint(newSessionClaim);
+    if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session',{force:true,keepProjectPicker:true})).catch(()=>{})}
   })();
   try{
     return await _newSessionInFlight;
@@ -2527,7 +2690,18 @@ async function _switchProfileForSessionLoad(profile){
   if(typeof _invalidateSessionListRenders==='function') _invalidateSessionListRenders();
   if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(true);
   if(typeof showSessionListSkeleton==='function') showSessionListSkeleton(name);
+  let reasoningSwitchHeld=false;
+  // #7685 finding 4/5: the Scripts pane is profile-owned too. Route this
+  // alternate switch through the SAME invalidate/refresh helpers as the
+  // canonical switch so Alpha rows do not stay up under Beta and a pending
+  // Alpha reply (success or error) cannot overwrite Beta's pane.
+  if(typeof _invalidateScriptsForProfileSwitch==='function') _invalidateScriptsForProfileSwitch();
   try{
+    // Effort saves queued in the previous profile must go out under its cookie.
+    if(typeof _beginReasoningProfileSwitch==='function'){
+      reasoningSwitchHeld=true;
+      await _beginReasoningProfileSwitch();
+    }
     const data=await api('/api/profile/switch',{method:'POST',body:JSON.stringify({name}),timeoutToast:false});
     S.activeProfile=data.active||name;
     S.activeProfileIsDefault=!!data.is_default;
@@ -2548,6 +2722,17 @@ async function _switchProfileForSessionLoad(profile){
     if(typeof startGatewaySSE==='function') startGatewaySSE();
     if(typeof syncTopbar==='function') syncTopbar();
     if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
+    // #7685 finding 1 (MUST-FIX): invalidate AGAIN at accept, exactly like the
+    // canonical switch. The switch POST does not change S.activeProfile until
+    // it returns, so a list load started while the switch was PENDING captured
+    // the OLD owner key and passed its gate — it would repaint the previous
+    // profile's rows under the new profile. Bumping the generation here retires
+    // that in-flight reply.
+    if(typeof _invalidateScriptsForProfileSwitch==='function') _invalidateScriptsForProfileSwitch();
+    // #7685 finding 4/5: the switch is accepted for the new owner, so refresh
+    // the (cleared) Scripts pane for it. Silent-on-error, owner/generation
+    // gated like the canonical switch's refresh.
+    if(typeof _refreshScriptsAfterProfileSwitch==='function') _refreshScriptsAfterProfileSwitch();
     if(typeof renderSessionList==='function') await renderSessionList();
   }catch(switchErr){
     // The switch POST failed, so we're still on the previous profile and its
@@ -2560,7 +2745,13 @@ async function _switchProfileForSessionLoad(profile){
     if(typeof _setProfileSwitchListEmbargo==='function') _setProfileSwitchListEmbargo(false);
     _sessionListSkeletonActive=false;
     if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+    // #7685 finding 5: the switch was refused, so the old profile is still
+    // active. Restore the Scripts pane (cleared at switch start) for it
+    // instead of leaving it blank.
+    if(typeof _refreshScriptsAfterProfileSwitch==='function') _refreshScriptsAfterProfileSwitch();
     throw switchErr;
+  }finally{
+    if(reasoningSwitchHeld) _endReasoningProfileSwitch();
   }
 }
 
@@ -2664,13 +2855,34 @@ async function loadSession(sid){
   // Persist the current composer draft before switching away so it can be
   // restored when the user switches back (#1060). Save to server now so the
   // draft survives page refresh and syncs across clients.
+  // #7855 CORE (round 7): the departing session's composer may hold a
+  // restored goal-continuation binding. Saving only the text/files dropped
+  // the token, so switching away from a restored queued continuation and
+  // coming back restored an ordinary draft — the retry then posted no id
+  // and admission scored goal_related=false (Chromium + real HTTP: master
+  // scores true).
+  //
+  // Read the binding WITHOUT consuming it (the one-shot marker stays armed
+  // for a same-session resend) and only persist it when it still describes
+  // the text being saved — an edited draft must not carry the old token.
+  let _switchContId = '';
+  if (typeof _peekRestoredGoalContinuationDraft === 'function') {
+    const _peeked = _peekRestoredGoalContinuationDraft();
+    if (_peeked && _peeked.id
+        && String(_peeked.text || '').trim() === String(($('msg') || {}).value || '').trim()) {
+      _switchContId = _peeked.id;
+    }
+  }
   if (currentSid && currentSid !== sid) {
     if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
     if(typeof _clearQueueCardDisplay==='function') _clearQueueCardDisplay(currentSid);
     const draftText = ($('msg') || {}).value || '';
     const draftFiles = S.pendingFiles ? [...S.pendingFiles] : [];
     try {
-      await _saveComposerDraftNow(currentSid, draftText, draftFiles);
+      // #7855 (round 7): the departing session's restored continuation token
+      // must travel with the exact text it belongs to, or a return to this
+      // session restores an ordinary draft and the retry loses the goal.
+      await _saveComposerDraftNow(currentSid, draftText, draftFiles, _switchContId);
     } catch (error) {
       _handleComposerDraftPostFailure(error, currentSid, draftText, draftFiles);
     }
@@ -2930,6 +3142,16 @@ async function loadSession(sid){
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.
   S._pendingSessionToolsets=null;
+  // #7855: a session switch is a hard context boundary — drop any restored
+  // goal-continuation draft left over from the previous session (restored but
+  // never sent, or abandoned mid-settle) so it cannot attach to the next send.
+  // A SAME-SESSION force refresh is NOT such a boundary (round 9, MUST-FIX 3):
+  // it may finish seconds after another client changed the stored draft, and
+  // clearing the binding here would drop an unchanged continuation's token
+  // while the visible local text survives — the next send then posts no id and
+  // becomes an ordinary turn where the marker admission would have kept it
+  // goal-related. Only clear when the session actually changed.
+  if (currentSid !== sid && typeof _clearRestoredGoalContinuationDraft==='function') _clearRestoredGoalContinuationDraft();
   if(typeof populateModelDropdown==='function'){
     const modelRefreshSid=sid;
     const isActiveModelRefreshSession=()=>!!(S.session&&S.session.session_id===modelRefreshSid);
@@ -2997,7 +3219,8 @@ async function loadSession(sid){
   _acknowledgeSessionVisit(
     S.session.session_id,
     Number(data.session.message_count || 0),
-    Number(data.session.last_message_at || data.session.updated_at || 0)
+    Number(data.session.last_message_at || data.session.updated_at || 0),
+    Boolean(opts.externalRefreshReason)
   );
   try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
   _setActiveSessionUrl(S.session.session_id);
@@ -3092,7 +3315,8 @@ async function loadSession(sid){
     if(liveTailPrepared){
       S.messages=_dropCurrentTurnAssistantMessages(S.messages);
     }
-    S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);
+    S.messages=_mergeInflightTailMessages(S.messages,inflightMessages,
+      _inflightTurnOwnerStart(S.session,INFLIGHT[sid],activeStreamId));
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
     if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
       INFLIGHT[sid].messages=S.messages;
@@ -3230,6 +3454,15 @@ async function loadSession(sid){
             const _msg=$&&$('msg');
             if(_msg&&_first.text&&!_msg.value){
               _msg.value=_first.text||'';
+              // #7855 (round 5): mark the restored text as an identifiable
+              // CONTINUATION DRAFT — the ID rides on the composer element
+              // together with the exact text it was restored for, and send()
+              // consumes it only while that text is still what is sent. If the
+              // user replaces or abandons the draft, the ID dies with it
+              // instead of attaching to their own message.
+              if(typeof _setRestoredGoalContinuationDraft==='function'){
+                _setRestoredGoalContinuationDraft(_first.goal_continuation_id||'',_first.text||'');
+              }
               if(typeof autoResize==='function') autoResize();
               if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
             }
@@ -3352,7 +3585,8 @@ async function loadSession(sid){
     _acknowledgeSessionVisit(
       sid,
       Number(S.session.message_count || 0),
-      Number(S.session.last_message_at || S.session.updated_at || 0)
+      Number(S.session.last_message_at || S.session.updated_at || 0),
+      Boolean(opts.externalRefreshReason)
     );
   }
 
@@ -3504,7 +3738,7 @@ function _isCliSession(session) {
     || session.source_label
     || ''
   ).toLowerCase();
-  if (raw === 'cli' || raw === 'tui' || raw === 'acp') return true;
+  if (raw === 'cli' || raw === 'tui' || raw === 'acp' || raw === 'desktop') return true;
   // If messaging-like, don't classify as legacy CLI even when is_cli_session is true.
   if (_isMessagingSession(session)) return false;
   return session.is_cli_session === true;
@@ -4105,7 +4339,7 @@ async function _ensureMessagesLoaded(sid, opts) {
   // S.messages in a single frame.
   opts = opts || {};
   const _loadGeneration = Number.isFinite(opts.loadGeneration) ? Number(opts.loadGeneration) : null;
-  const _ownsLoad = () => _loadingSessionId === sid && (_loadGeneration === null || _loadSessionGeneration === _loadGeneration);
+  const _ownsLoad = () => _loadingSessionId === sid && (_loadGeneration === null || _loadSessionGeneration === _loadGeneration) && !!S.session && S.session.session_id === sid;
   if (!_ownsLoad()) return;
   // Metadata-only reads omit regeneration authority. Cached rows alone do
   // not prove that the current session payload can authorize regeneration.
@@ -4326,6 +4560,175 @@ function _hasCurrentTailUserDuplicate(messages,candidate){
   return !!(existing&&_sameTranscriptMessage(existing,candidate));
 }
 
+// ── Recovered current-turn prompt: turn ownership, canonical window ────────
+// A `msg_limit` first page is a TAIL window. It can start INSIDE the running
+// turn (the window then carries the turn's activity rows but not its `user`
+// row) or it can end at a PREVIOUS completed turn while the new prompt is still
+// unpersisted (deferred session saving). `_oldestIdx > 0` plus "no user row in
+// the window" cannot tell those apart, so placement follows turn/start
+// ownership instead of the shape of the window:
+//   * a `_live` row always belongs to the running turn;
+//   * a persisted row whose `_ts` is at/after the turn start
+//     (`pending_started_at`, the server's authoritative start of the turn)
+//     belongs to the running turn;
+//   * a persisted row older than that start belongs to an earlier turn.
+// The prompt goes in front of the FIRST current-turn row; when every loaded row
+// predates the turn start (the window is a previous turn's suffix) it goes
+// AFTER them, so earlier activity is never assigned to the new prompt.
+const _RECOVERED_PROMPT_TS_EPSILON=(typeof _PENDING_ACTIVE_TURN_TS_EPSILON==='number'&&_PENDING_ACTIVE_TURN_TS_EPSILON>0)
+  ?_PENDING_ACTIVE_TURN_TS_EPSILON:0.001;
+
+function _messageTimestampValue(msg){
+  if(!msg) return null;
+  const raw=msg._ts!==undefined&&msg._ts!==null?msg._ts:msg.timestamp;
+  const value=Number(raw);
+  return Number.isFinite(value)&&value>0?value:null;
+}
+
+function _messageTurnOwnership(msg,turnStart){
+  if(!msg||msg._displayOnlyRow) return 0;
+  if(msg._live) return 1;
+  const startedAt=Number(turnStart);
+  if(!Number.isFinite(startedAt)||startedAt<=0) return 0;
+  const ts=_messageTimestampValue(msg);
+  if(ts===null) return 0;
+  return ts>=startedAt-_RECOVERED_PROMPT_TS_EPSILON?1:-1;
+}
+
+function _isCompactionMarkerRow(msg){
+  return !!(msg&&typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg));
+}
+
+// Index of the first PERSISTED row owned by the running turn, judged by the
+// turn-start timestamp. Live rows are skipped (they carry no timestamp and are
+// appended after the window); compaction markers are synthetic user-role rows,
+// not submitted turns. Returns -1 when no persisted row proves ownership.
+function _currentTurnInsertIndex(messages,turnStart){
+  const list=Array.isArray(messages)?messages:[];
+  for(let i=0;i<list.length;i++){
+    const msg=list[i];
+    if(!msg||msg._displayOnlyRow||msg._live||_isCompactionMarkerRow(msg)) continue;
+    if(_messageTurnOwnership(msg,turnStart)>0) return i;
+  }
+  return -1;
+}
+
+// Target index for a recovered prompt inside a windowed transcript.
+//   * authoritative timestamp evidence: in front of the first current-turn row,
+//     or after every row when they ALL predate the turn start (the window is a
+//     previous turn's suffix — the new prompt must not claim that activity);
+//   * no timestamp evidence at all (static partial fixtures, legacy payloads):
+//     keep the historical windowed heuristic — a window with no user row is
+//     assumed to start inside the running turn, otherwise the prompt sits just
+//     before the live tail.
+function _recoveredPromptTargetIndex(messages,turnStart){
+  const list=Array.isArray(messages)?messages:[];
+  const startedAt=Number(turnStart);
+  if(Number.isFinite(startedAt)&&startedAt>0){
+    const ownedIdx=_currentTurnInsertIndex(list,startedAt);
+    if(ownedIdx>=0) return ownedIdx;
+    const sawTimestamped=list.some(m=>m&&!m._displayOnlyRow&&!m._live&&_messageTimestampValue(m)!==null);
+    if(sawTimestamped){
+      const liveIdx=list.findIndex(m=>m&&m._live);
+      return liveIdx>=0?liveIdx:list.length;
+    }
+  }
+  const liveIdx=list.findIndex(m=>m&&m._live);
+  const windowHasUser=list.some(m=>m&&String(m.role||'')==='user'&&!_isCompactionMarkerRow(m));
+  if(windowHasUser) return liveIdx>=0?liveIdx:list.length;
+  return 0;
+}
+
+// Mark a prompt recovered from OUTSIDE the loaded canonical window. The row
+// renders, but `_messageSessionIndexForRawIdx()` excludes it so it never shifts
+// the absolute index of the real window rows.
+function _markRecoveredPromptRow(row){
+  if(!row||typeof row!=='object') return row;
+  if(typeof _markDisplayOnlyRow==='function') return _markDisplayOnlyRow(row);
+  row._displayOnlyRow=true;
+  return row;
+}
+
+// A display-only prompt must disappear once the canonical row it mirrors is
+// actually loaded (older page / full transcript); otherwise it both duplicates
+// the bubble and offsets the window. Matching is by turn identity (server
+// token, `_active_turn_user`, or the turn-start timestamp) — never text alone,
+// which would hide a legitimate repeat prompt.
+function _recoveredPromptIdentityMatch(canonicalRow,recoveredRow){
+  if(!canonicalRow||!recoveredRow) return false;
+  if(canonicalRow._active_turn_user===true) return true;
+  const canonicalTs=_messageTimestampValue(canonicalRow);
+  const recoveredTs=_messageTimestampValue(recoveredRow);
+  if(canonicalTs!==null&&recoveredTs!==null&&Math.abs(canonicalTs-recoveredTs)<=_RECOVERED_PROMPT_TS_EPSILON){
+    return true;
+  }
+  const token=String(canonicalRow._active_turn_token||'');
+  if(token&&typeof _activeTurnTokenMatches==='function'&&typeof S!=='undefined'&&S&&S.session){
+    return _activeTurnTokenMatches(canonicalRow,S.session);
+  }
+  return false;
+}
+
+function _isRecoveredPromptTwin(candidate,recoveredRow){
+  if(!candidate||!recoveredRow) return false;
+  if(candidate===recoveredRow) return true;
+  return String(candidate.role||'')===String(recoveredRow.role||'')
+    && _sameTranscriptMessage(candidate,recoveredRow)
+    && _recoveredPromptIdentityMatch(candidate,recoveredRow);
+}
+
+// Is `row` the display-only copy recovered for THE turn starting at
+// `turnStart`? The owner stamp `_recoveredTurnStart` (set by the full-load
+// branch of _mergePendingSessionMessage) decides when present, so a moved
+// row whose own `_ts` trails the turn start still counts. Without a stamp,
+// only the row's timestamp at the turn start counts (a copy the producer
+// built for this turn). Text alone and the public `_active_turn_user` marker
+// never prove ownership: an earlier turn can carry either (#8696 gates).
+function _recoveredPromptCopyForTurn(row,pendingMsg,turnStart){
+  if(!row||!row._displayOnlyRow||String(row.role||'')!=='user') return false;
+  const start=Number(turnStart);
+  if(!Number.isFinite(start)||start<=0) return false;
+  if(row!==pendingMsg&&!_sameTranscriptMessage(row,pendingMsg)) return false;
+  const owner=Number(row._recoveredTurnStart);
+  if(row._recoveredTurnStart!==undefined&&row._recoveredTurnStart!==null&&Number.isFinite(owner)&&owner>0){
+    return Math.abs(owner-start)<=_RECOVERED_PROMPT_TS_EPSILON;
+  }
+  const ts=_messageTimestampValue(row);
+  return ts!==null&&Math.abs(ts-start)<=_RECOVERED_PROMPT_TS_EPSILON;
+}
+
+// Same prompt recovered twice (repeated merge on refresh/reconnect): reuse the
+// row already in the array instead of stacking a second copy above it.
+function _existingRecoveredPromptIndex(messages,pendingMsg){
+  const list=Array.isArray(messages)?messages:[];
+  const sameObject=list.indexOf(pendingMsg);
+  if(sameObject>=0) return sameObject;
+  for(let i=0;i<list.length;i++){
+    const m=list[i];
+    if(!m||!m._displayOnlyRow) continue;
+    if(_sameTranscriptMessage(m,pendingMsg)) return i;
+  }
+  return -1;
+}
+
+// Re-place carried display-only rows after a window rebuild (older page, tail
+// reload) and drop the ones whose canonical row just arrived.
+function _reconcileRecoveredPromptRows(messages,recoveredRows,turnStart){
+  if(!Array.isArray(messages)) return messages;
+  const rows=(Array.isArray(recoveredRows)?recoveredRows:[]).filter(Boolean);
+  if(!rows.length) return messages;
+  const kept=[];
+  for(const row of rows){
+    if(messages.includes(row)) continue;
+    if(messages.some(m=>m&&_isRecoveredPromptTwin(m,row))) continue;
+    kept.push(row);
+  }
+  if(!kept.length) return messages;
+  const target=_recoveredPromptTargetIndex(messages,turnStart);
+  messages.splice(target,0,...kept);
+  return messages;
+}
+
 // Keep pending-user recovery ordering identical across load, reconnect, and
 // explicit refresh paths. The pending prompt owns the live assistant tail and
 // must be projected before it, regardless of which recovery response arrived.
@@ -4336,6 +4739,103 @@ function _mergePendingSessionMessage(session,messages){
   const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(session,currentTurnMessages):null;
   if(!pendingMsg) return false;
   if(_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)) return false;
+  const windowed=typeof _oldestIdx==='number'&&_oldestIdx>0;
+  if(windowed){
+    // Tail-window transcript: the prompt's canonical position is outside the
+    // loaded window (or not persisted yet), so it is a display-only row placed
+    // by turn ownership. The window rows keep their absolute indices.
+    // `pendingMsg` here is always a FRESH row from getPendingSessionMessage
+    // (the adopt path returns null), and that helper stamps it with
+    // `session.pending_started_at || Date.now()/1000`. Trusting the fallback
+    // makes "now" the turn start, so every loaded row looks older than the
+    // turn and the recovered prompt is pushed past all of them — the reported
+    // "there is content above my first message" order. Only the server-issued
+    // pending_started_at proves turn ownership here; without it pass 0 so
+    // _recoveredPromptTargetIndex falls back to structure (a window carrying
+    // no `user` row means the prompt IS the running turn's first row).
+    const turnStart=Number(session&&session.pending_started_at)||0;
+    const existingIdx=typeof _existingRecoveredPromptIndex==='function'
+      ?_existingRecoveredPromptIndex(messages,pendingMsg)
+      :messages.indexOf(pendingMsg);
+    const withoutExisting=existingIdx>=0?messages.filter((_m,idx)=>idx!==existingIdx):messages;
+    const target=typeof _recoveredPromptTargetIndex==='function'
+      ?_recoveredPromptTargetIndex(withoutExisting,turnStart)
+      :(withoutExisting.some(m=>m&&String(m.role||'')==='user')?withoutExisting.length:0);
+    if(existingIdx>=0){
+      if(existingIdx===target) return false;
+      const [row]=messages.splice(existingIdx,1);
+      messages.splice(target,0,typeof _markRecoveredPromptRow==='function'?_markRecoveredPromptRow(row):row);
+      return true;
+    }
+    const marked=typeof _markRecoveredPromptRow==='function'?_markRecoveredPromptRow(pendingMsg):pendingMsg;
+    messages.splice(target,0,marked);
+    return true;
+  }
+  // A FULL (zero-offset) load is not "windowed", but its current-turn rows can
+  // already be persisted — a young session loaded with `_oldestIdx = 0` (small
+  // `msg_count`, no paging) reaches this merge with its assistant/tool rows in
+  // place and a `_live` tail. The fallback below then splices the prompt in
+  // front of the live row, i.e. BEHIND those persisted rows: the reported
+  // "there is content above my first message" order (live repro 2026-10-30:
+  // head = [assistant, tool, tool, tool, user(_pending), assistant]).
+  // `pending_started_at` is the server's authoritative turn start, so when it
+  // is present the same ownership rule as the windowed branch decides the
+  // position: in front of the first row at/after the turn start, and after
+  // every row when they all predate it (a new prompt never claims a previous
+  // turn's activity). Without a stamp the shape heuristics below still apply.
+  const ownershipStart=Number(session&&session.pending_started_at)||0;
+  if(ownershipStart>0&&typeof _currentTurnInsertIndex==='function'){
+    // A same-identity prompt row can already sit behind the live row (the
+    // malformed reconnect order #6419 repairs below). Judge ownership without
+    // it, then move that row (keeping its attachments and provenance) instead
+    // of inserting a second copy in front of it.
+    const misplacedIdx=liveAssistantIdx>=0?messages.findIndex((m,idx)=>
+      idx>liveAssistantIdx&&m&&m.role==='user'&&_sameTranscriptMessage(m,pendingMsg)
+    ):-1;
+    // A display-only copy an earlier pass already placed for THIS turn
+    // (repeated recovery: a failed message fetch re-merges over the same
+    // array) is reused instead of stacking another one. When the persisted
+    // turn row's text differs from pending_user_message, the tail-duplicate
+    // check above cannot see that copy, so without this every pass stacked
+    // another copy of the prompt, see #8696. Reuse is by the turn the copy was recovered FOR
+    // (`_recoveredTurnStart`, stamped below), never by text alone or a public
+    // `_active_turn_user` marker: an earlier turn's display-only row that
+    // repeats the text keeps its own turn, timestamp and attachments.
+    const existingIdx=misplacedIdx<0
+      ?messages.findIndex(m=>_recoveredPromptCopyForTurn(m,pendingMsg,ownershipStart))
+      :-1;
+    const skipIdx=misplacedIdx>=0?misplacedIdx:existingIdx;
+    const withoutSkipped=skipIdx>=0?messages.filter((_m,idx)=>idx!==skipIdx):messages;
+    const ownedIdx=_currentTurnInsertIndex(withoutSkipped,ownershipStart);
+    if(ownedIdx>=0){
+      if(misplacedIdx>=0){
+        const [misplacedUser]=messages.splice(misplacedIdx,1);
+        // Let the producer adopt the moved row (it fills in pending attachments
+        // and provenance the row lacks), then insert it display-only, as the
+        // windowed branch does: an unpersisted prompt placed in front of saved
+        // rows must not shift the saved-row indices edit/fork rely on.
+        if(typeof getPendingSessionMessage==='function') getPendingSessionMessage(session,[misplacedUser]);
+        // The moved row keeps its own `_ts` (it can trail the turn start); the
+        // owner stamp lets the next pass reuse it instead of adding a copy.
+        misplacedUser._recoveredTurnStart=ownershipStart;
+        messages.splice(ownedIdx,0,
+          typeof _markRecoveredPromptRow==='function'?_markRecoveredPromptRow(misplacedUser):misplacedUser);
+        return true;
+      }
+      if(existingIdx>=0){
+        const row=messages[existingIdx];
+        row._recoveredTurnStart=ownershipStart;
+        if(existingIdx===ownedIdx) return false;
+        messages.splice(existingIdx,1);
+        messages.splice(ownedIdx,0,typeof _markRecoveredPromptRow==='function'?_markRecoveredPromptRow(row):row);
+        return true;
+      }
+      pendingMsg._recoveredTurnStart=ownershipStart;
+      messages.splice(ownedIdx,0,
+        typeof _markRecoveredPromptRow==='function'?_markRecoveredPromptRow(pendingMsg):pendingMsg);
+      return true;
+    }
+  }
   if(liveAssistantIdx>=0){
     const misplacedIdx=messages.findIndex((m,idx)=>
       idx>liveAssistantIdx&&m&&m.role==='user'&&_sameTranscriptMessage(m,pendingMsg)
@@ -4629,9 +5129,33 @@ function _prepareRunningLiveTail(baseMessages,inflightMessages){
   return !!_messageComparableText(live);
 }
 
-function _mergeInflightTailMessages(baseMessages, inflightMessages){
+// The server's start time for the turn an INFLIGHT snapshot belongs to, or 0
+// when that is not proven. INFLIGHT can come from local storage with no server
+// live snapshot, so only an active stream that the snapshot itself names (or
+// a snapshot that names no stream) makes `pending_started_at` its turn.
+function _inflightTurnOwnerStart(session,inflight,activeStreamId){
+  const active=String(activeStreamId||'').trim();
+  if(!active||!session) return 0;
+  const own=String((inflight&&inflight.streamId)||'').trim();
+  if(own&&own!==active) return 0;
+  const start=Number(session.pending_started_at);
+  return Number.isFinite(start)&&start>0?start:0;
+}
+
+// `turnOwnerStart` (optional): the server start of the turn this INFLIGHT tail
+// belongs to (_inflightTurnOwnerStart). When known it places the recovered
+// prompt instead of the prompt's client-clock `_ts`, which can trail the
+// server start by latency or skew and so claim a previous turn's rows, and it
+// stamps the copy so the pending merge reuses it rather than adding a second
+// one (`_recoveredPromptCopyForTurn`).
+function _mergeInflightTailMessages(baseMessages, inflightMessages, turnOwnerStart){
   const base=Array.isArray(baseMessages)?baseMessages:[];
   const inflight=Array.isArray(inflightMessages)?inflightMessages:[];
+  const ownerStart=Number.isFinite(Number(turnOwnerStart))&&Number(turnOwnerStart)>0?Number(turnOwnerStart):0;
+  const placeRecoveredPrompt=(row,turnStart)=>{
+    if(ownerStart) row._recoveredTurnStart=ownerStart;
+    merged.splice(_recoveredPromptTargetIndex(merged,turnStart),0,_markRecoveredPromptRow(row));
+  };
   let firstLiveIdx=-1;
   for(let i=0;i<inflight.length;i++){
     if(inflight[i]&&inflight[i]._live){firstLiveIdx=i;break;}
@@ -4641,13 +5165,75 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages){
   if(firstLiveIdx>0&&inflight[firstLiveIdx-1]&&inflight[firstLiveIdx-1].role==='user') start=firstLiveIdx-1;
   const tail=inflight.slice(start).filter(m=>m&&m.role);
   const merged=[...base];
-  for(const msg of tail){
-    let candidate=msg;
+  const windowed=typeof _oldestIdx==='number'&&_oldestIdx>0;
+  // The live tail starts at the running turn's prompt; any earlier user row in
+  // the tail belongs to a completed turn and must never be re-placed.
+  let promptTailIdx=-1;
+  for(let i=0;i<tail.length;i++){
+    if(tail[i]&&String(tail[i].role||'')==='user') promptTailIdx=i;
+  }
+  for(let tailIdx=0;tailIdx<tail.length;tailIdx++){
+    const candidate=tail[tailIdx];
     if(!candidate) continue;
-    const duplicate=String(candidate.role||'')==='user'
+    const isUser=String(candidate.role||'')==='user';
+    if(isUser&&windowed&&tailIdx===promptTailIdx){
+      // A windowed first page (msg_limit paging) can start INSIDE the running
+      // turn: `base` then holds the turn's activity rows but not its `user`
+      // row. It can also end at a PREVIOUS turn while the new prompt is still
+      // unpersisted (deferred session saving). Turn ownership decides between
+      // the two: the prompt goes in front of the first current-turn row, or
+      // after the window when every loaded row is older than the turn start.
+      // The server's turn start wins over the prompt's client-clock `_ts`.
+      const turnStart=ownerStart||_messageTimestampValue(candidate)
+        ||Number(typeof S!=='undefined'&&S&&S.session&&S.session.pending_started_at)||0;
+      const existingIdx=_existingRecoveredPromptIndex(merged,candidate);
+      if(existingIdx>=0){
+        const [existing]=merged.splice(existingIdx,1);
+        placeRecoveredPrompt(existing,turnStart);
+        continue;
+      }
+      if(_hasCurrentTailUserDuplicate(merged,candidate)) continue;
+      placeRecoveredPrompt(candidate,turnStart);
+      continue;
+    }
+    // The prompt an earlier merge already recovered (the same row, or the copy
+    // stamped for this turn) is never appended again: a load that keeps the
+    // cached transcript re-merges this tail over it, and activity after the
+    // copy hides it from the tail-duplicate check below. Text alone is not
+    // enough; an earlier turn may have sent the same words.
+    if(isUser&&tailIdx===promptTailIdx&&(merged.includes(candidate)
+      ||(ownerStart&&merged.some(m=>_recoveredPromptCopyForTurn(m,candidate,ownerStart))))) continue;
+    const duplicate=isUser
       ? _hasCurrentTailUserDuplicate(merged,candidate)
       : merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,candidate));
-    if(!duplicate) merged.push(candidate);
+    if(!duplicate){
+      if(isUser){
+        // Session-switch recovery can hand this merge a base that already
+        // carries the running turn's ACTIVITY rows (assistant prose + tool
+        // rows) while the turn's `user` row is absent — it lives only in the
+        // INFLIGHT snapshot. `push` then parks the question BELOW its own
+        // reply, so the answer renders above the prompt until the turn
+        // settles and an idle reload restores the order. A transcript with no
+        // `user` row at all means this prompt IS the turn's first row, so
+        // place it by turn ownership. (Same structural invariant the windowed
+        // branch above enforces; only the paging condition differed.)
+        const hasAnyUser=merged.some(m=>m&&String(m.role||'')==='user');
+        if(!hasAnyUser){
+          const turnStart=ownerStart||_messageTimestampValue(candidate)
+            ||Number(typeof S!=='undefined'&&S&&S.session&&S.session.pending_started_at)||0;
+          // Marked display-only like the windowed branch: the prompt is NOT in
+          // the server's canonical transcript yet (deferred session saving),
+          // so counting it as a real array member would shift every canonical
+          // index after it — fork/edit/regenerate would send the wrong
+          // keep_count (saved row 0 would look like absolute 1). The marker
+          // keeps `_messageSessionIndexForRawIdx()` excluding the prompt, and
+          // a later canonical reload drops the display copy once it persists.
+          placeRecoveredPrompt(candidate,turnStart);
+          continue;
+        }
+      }
+      merged.push(candidate);
+    }
   }
   return merged;
 }
@@ -4749,7 +5335,12 @@ async function _loadOlderMessages() {
     if (_messagesGeneration !== startGeneration) return;
     let responseSession = data.session;
     let expandedMsgs = (responseSession.messages || []).filter(m => m && m.role);
-    const currentMsgs = (S.messages || []).filter(m => m && m.role);
+    // Recovered prompts are display-only: they are not part of the canonical
+    // window (their absolute index is outside it or not persisted yet), so the
+    // suffix-continuity check, the prepend fallback and the paging cursor all
+    // work on the canonical rows only. They are re-placed after the rebuild.
+    const carriedRecoveredRows = (S.messages || []).filter(m => m && m._displayOnlyRow);
+    const currentMsgs = (S.messages || []).filter(m => m && m.role && !m._displayOnlyRow);
     const currentLen = currentMsgs.length;
     // Suffix-continuity check: the cumulative tail is only safe to wholesale-
     // replace when our currently-displayed messages are still its suffix. If
@@ -4794,7 +5385,7 @@ async function _loadOlderMessages() {
         responseSession = fallback.session;
       }
       olderMsgs = (responseSession.messages || []).filter(m => m && m.role);
-      nextMessages = [...olderMsgs, ...S.messages];
+      nextMessages = [...olderMsgs, ...currentMsgs];
     }
     if (!olderMsgs.length) { _messagesTruncated = !!responseSession._messages_truncated; return; }
     // Replace with the larger tail window and preserve scroll as if older
@@ -4813,6 +5404,17 @@ async function _loadOlderMessages() {
     // does not briefly appear and disappear during older-message expansion.
     if (typeof window._carryForwardEphemeralTurnFields === 'function') {
       nextMessages = window._carryForwardEphemeralTurnFields(S.messages || [], nextMessages);
+    }
+    // Re-place recovered prompts that are still outside the window (or drop
+    // them when the page just loaded the canonical row they mirror). The
+    // canonical rows above keep their absolute indices either way. Guarded for
+    // partial test harnesses that extract this function alone.
+    if (carriedRecoveredRows.length && typeof _reconcileRecoveredPromptRows === 'function') {
+      _reconcileRecoveredPromptRows(
+        nextMessages,
+        carriedRecoveredRows,
+        Number(S.session && S.session.session_id === sid && S.session.pending_started_at) || 0
+      );
     }
     S.messages = nextMessages;
     _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);
@@ -5188,7 +5790,11 @@ function _optimisticallyArchiveSessionInList(sid, archived){
     changed=true;
     return {...s,archived:!!archived};
   });
-  if(changed) renderSessionListFromCache();
+  // Only the external-hide completion calls this helper, and it lands after an
+  // awaited response: route the repaint through the shared completion helper so
+  // a picker owned by another session survives and only this session's own
+  // picker is retired.
+  if(changed) _repaintSidebarAfterSessionCompletion(sid);
 }
 function _optimisticallyRemoveSessionFromList(sid){
   if(!sid||!Array.isArray(_allSessions)) return;
@@ -5557,6 +6163,9 @@ function _wireSessionNewTabListeners(node, getSid, getSession, opts){
 function toggleSessionSelectMode(){
   _sessionSelectMode=!_sessionSelectMode;
   _selectedSessions.clear();
+  // Explicit user intent: the select-mode repaint must paint now, not be
+  // swallowed by the picker's background-repaint deferral.
+  _retireProjectPickerForExplicitRepaint();
   renderSessionListFromCache();
 }
 function exitSessionSelectMode(){
@@ -5625,11 +6234,14 @@ function _renderBatchActionBar(){
     if(!ok)return;
     try{
       const results=await Promise.all(ids.map(async sid=>{
-        const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:sid,archived:true})});
-        return {response,session:sessionsById.get(sid)||null};
+        const _batchPayload={session_id:sid,archived:true};
+        const _snap=sessionsById.get(sid);
+        if(typeof _showAllProfiles!=='undefined'&&_showAllProfiles&&_snap&&_snap.profile){_batchPayload.all_profiles=true;_batchPayload.profile=_snap.profile;}
+        const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify(_batchPayload)});
+        return {response,session:_snap||null};
       }));
       const retainedCount=_worktreeResponseCount(results);
-      showToast(retainedCount?t('session_archived_worktree'):t('session_archived'));exitSessionSelectMode();await renderSessionList();
+      showToast(retainedCount?t('session_archived_worktree'):t('session_archived'));exitSessionSelectMode();await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
     }catch(e){showToast('Archive failed: '+(e.message||e));}
   };bar.appendChild(archiveBtn);
   // Move
@@ -5639,44 +6251,60 @@ function _renderBatchActionBar(){
   // Delete
   const deleteBtn=document.createElement('button');deleteBtn.className='batch-action-btn batch-action-btn-danger';
   deleteBtn.textContent=t('session_batch_delete');
-  deleteBtn.onclick=async()=>{
-    const ids=[..._selectedSessions];
-    const wtCount=_worktreeSessionCount(ids);
-    const sessionsById=new Map(ids.map(sid=>[sid,_sessionSnapshotById(sid)]));
-    const ok=await showConfirmDialog({
-      message:wtCount?t('session_batch_delete_worktree_confirm',ids.length,wtCount):t('session_batch_delete_confirm',ids.length),
-      confirmLabel:t('delete_title'),
-      danger:true
-    });
-    if(!ok)return;
-    const modelPickAtDelete=typeof _readComposerModelPick==='function'
-      ? _readComposerModelPick()
-      : null;
-    const modelPickRevisionAtDelete=Number(modelPickAtDelete&&modelPickAtDelete.revision||0)||0;
-    try{
-      const results=await Promise.all(ids.map(async sid=>{
-        const response=await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
-        return {response,session:sessionsById.get(sid)||null};
-      }));
-      ids.forEach(_forgetComposerDraftLocalFallback);
-      const retainedCount=_worktreeResponseCount(results);
-      const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
-      ids.forEach(_clearHandoffStorageForSession);
-      if(S.session&&ids.includes(S.session.session_id)){
-        S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
-        if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
-        const remaining=await api('/api/sessions'+_sessionListQueryString());
-        if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
-        else{
-          _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete);
-          $('msgInner').innerHTML='';$('emptyState').style.display='';
-        }
-      }
-      if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');
-      else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');
-      exitSessionSelectMode();await renderSessionList();
-    }catch(e){showToast('Delete failed: '+(e.message||e));}
-  };bar.appendChild(deleteBtn);
+  deleteBtn.onclick=()=>_deleteSelectedSessionsBatch();bar.appendChild(deleteBtn);
+}
+async function _deleteSelectedSessionsBatch(){
+  const ids=[..._selectedSessions];
+  if(!ids.length)return;
+  const wtCount=_worktreeSessionCount(ids);
+  const sessionsById=new Map(ids.map(sid=>[sid,_sessionSnapshotById(sid)]));
+  const ok=await showConfirmDialog({
+    message:wtCount?t('session_batch_delete_worktree_confirm',ids.length,wtCount):t('session_batch_delete_confirm',ids.length),
+    confirmLabel:t('delete_title'),
+    danger:true
+  });
+  if(!ok)return;
+  const modelPickAtDelete=typeof _readComposerModelPick==='function'
+    ? _readComposerModelPick()
+    : null;
+  const modelPickRevisionAtDelete=Number(modelPickAtDelete&&modelPickAtDelete.revision||0)||0;
+  // Settle each request on its own: a refused delete (409, live gateway work)
+  // must not discard the ones that already committed (#8323 review item 1).
+  const settled=await Promise.allSettled(ids.map(async sid=>{
+    const response=await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
+    return {response,session:sessionsById.get(sid)||null};
+  }));
+  const results=settled.filter(r=>r.status==='fulfilled').map(r=>r.value);
+  const deletedIds=ids.filter((sid,i)=>settled[i].status==='fulfilled');
+  const failures=ids.map((sid,i)=>({sid,error:settled[i].reason})).filter(f=>f.error);
+  deletedIds.forEach(_forgetComposerDraftLocalFallback);
+  const retainedCount=_worktreeResponseCount(results);
+  const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
+  deletedIds.forEach(_clearHandoffStorageForSession);
+  if(S.session&&deletedIds.includes(S.session.session_id)){
+    S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
+    if(typeof _syncProviderQuotaForActiveContext==='function') _syncProviderQuotaForActiveContext();
+    if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
+    const remaining=await api('/api/sessions'+_sessionListQueryString());
+    if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
+    else{
+      _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete);
+      $('msgInner').innerHTML='';$('emptyState').style.display='';
+    }
+  }
+  if(failures.length){
+    // Keep the refused sessions selected with their drafts so the user can
+    // retry after stopping the work that blocked them.
+    showToast(_sessionDeleteErrorMessage(failures[0].error)+' ('+deletedIds.length+'/'+ids.length+')',0,'error');
+    _selectedSessions.clear();
+    failures.forEach(f=>_selectedSessions.add(f.sid));
+    await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
+    _updateBatchActionBar();
+    return;
+  }
+  if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');
+  else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');
+  exitSessionSelectMode();await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
 }
 function _showBatchProjectPicker(openerEl){
   const ids=[..._selectedSessions];if(!ids.length)return;
@@ -5686,7 +6314,7 @@ function _showBatchProjectPicker(openerEl){
   const none=_projectPickerItem();none.textContent=t('project_picker_none');
   none.onclick=async()=>{picker.remove();
     try{await Promise.all(ids.map(sid=>api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:sid,project_id:null})})));
-      showToast('Removed from project');exitSessionSelectMode();await renderSessionList();
+      showToast('Removed from project');exitSessionSelectMode();await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
     }catch(e){showToast('Move failed: '+(e.message||e));}
   };picker.appendChild(none);
   for(const p of(_allProjects||[])){
@@ -5696,7 +6324,7 @@ function _showBatchProjectPicker(openerEl){
     const name=document.createElement('span');name.textContent=p.name;item.appendChild(name);
     item.onclick=async()=>{picker.remove();
       try{await Promise.all(ids.map(sid=>api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:sid,project_id:p.project_id})})));
-        showToast('Moved to '+p.name);exitSessionSelectMode();await renderSessionList();
+        showToast('Moved to '+p.name);exitSessionSelectMode();await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
       }catch(e){showToast('Move failed: '+(e.message||e));}
     };picker.appendChild(item);
   }
@@ -5712,6 +6340,16 @@ function _showBatchProjectPicker(openerEl){
   _focusProjectPickerItem(picker);
 }
 
+// A finger's events all go to the element it first touched. A pen's go to
+// whatever is under it, unless the pointer is captured, as here, until it
+// lifts. `press` is the pen's pointerdown: done when its long press opens the
+// ⋮ menu and not from the press on, or a pen dragged off a button and lifted
+// elsewhere would click the button.
+function _keepPenOnPressedElement(press){
+  if(!press) return;
+  try{press.target.setPointerCapture(press.pointerId);}catch(_){}
+}
+
 function _focusSessionActionMenuRestoreTarget(target){
   if(!target||!target.isConnected||typeof target.focus!=='function') return false;
   try{target.focus({preventScroll:true});}catch(_){target.focus();}
@@ -5721,6 +6359,7 @@ function _focusSessionActionMenuRestoreTarget(target){
 function closeSessionActionMenu({restoreFocus=false}={}){
   const focusTarget=restoreFocus?_sessionActionAnchor:null;
   const fallbackFocusTarget=restoreFocus?_sessionActionPreviousFocus:null;
+  const restoreSessionId=_sessionActionSessionId;
   if(_sessionActionMenu){
     _sessionActionMenu.remove();
     _sessionActionMenu = null;
@@ -5738,6 +6377,62 @@ function closeSessionActionMenu({restoreFocus=false}={}){
   _sessionActionSessionId = null;
   _sessionActionPreviousFocus = null;
   if(!_focusSessionActionMenuRestoreTarget(focusTarget)) _focusSessionActionMenuRestoreTarget(fallbackFocusTarget);
+  // A repaint replaces the rows this menu was anchored on, so focus restored
+  // above may disappear with the old trigger. Re-home it to the replacement
+  // owner control without ever selecting an expanded fork descendant.
+  const restoreFocusAfterRepaint=()=>{
+    if(!restoreFocus) return;
+    const active=document.activeElement;
+    if(active&&active!==document.body&&active.isConnected) return;
+    const row=typeof _findSessionRenameRow==='function'?_findSessionRenameRow(restoreSessionId):null;
+    if(!row) return;
+    const ownAction=row.querySelector(':scope > .session-actions-trigger, :scope > .session-actions > .session-actions-trigger');
+    const ownMain=row.querySelector(':scope > .session-child-session-main');
+    // A top-level row can contain expanded fork buttons. Try direct controls
+    // first. A touch layout can keep its direct action trigger hidden, so only
+    // make the owner row focusable after neither direct control accepted focus.
+    let restored=false;
+    const candidates=[ownAction,ownMain];
+    for(const candidate of candidates){
+      if(candidate&&_focusSessionActionMenuRestoreTarget(candidate)){
+        restored=true;
+        break;
+      }
+    }
+    if(!restored){
+      row.tabIndex=-1;
+      _focusSessionActionMenuRestoreTarget(row);
+    }
+  };
+  // A mutation completion is durable user-visible state, not background churn.
+  // Replay it even when this menu action opened a newer project picker; the
+  // keep-picker path re-anchors that overlay after rebuilding the sidebar.
+  if(typeof _sessionListRepaintDeferredByActionMenu!=='undefined'&&_sessionListRepaintDeferredByActionMenu){
+    setTimeout(()=>{
+      if(!_sessionListRepaintDeferredByActionMenu||_sessionActionMenu) return;
+      _sessionListRepaintDeferredByActionMenu=false;
+      try{
+        if(typeof _repaintSidebarKeepingProjectPicker==='function') _repaintSidebarKeepingProjectPicker();
+        else if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+      }catch(_){
+        _sessionListRepaintDeferredByActionMenu=true;
+        return;
+      }
+      restoreFocusAfterRepaint();
+    },0);
+  }
+  // Drain a sidebar repaint the project picker deferred while this menu was
+  // blocking renders (picker dismissed by opening another row's ⋮ menu). Next
+  // tick, so a menu action that opens the picker re-arms the guard first.
+  if(typeof _sessionListRepaintDeferredByPicker!=='undefined'&&_sessionListRepaintDeferredByPicker){
+    setTimeout(()=>{
+      if(!_sessionListRepaintDeferredByPicker||_sessionActionMenu) return;
+      if(typeof _projectPickerTeardown!=='undefined'&&_projectPickerTeardown!==null) return;
+      _sessionListRepaintDeferredByPicker=false;
+      if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+      restoreFocusAfterRepaint();
+    },0);
+  }
 }
 
 function _sessionActionMenuShouldIgnoreScrollTarget(target){
@@ -5753,9 +6448,32 @@ function _sessionActionMenuShouldRepositionOnScroll(target){
 
 function _positionSessionActionMenu(anchorEl){
   if(!_sessionActionMenu || !anchorEl) return;
-  const rect=anchorEl.getBoundingClientRect();
+  let rect=anchorEl.getBoundingClientRect();
+  // A menu opened from `contextmenu` (flagged at open) sits at the pointer the
+  // user invoked it at. The point is the project picker's recorded context
+  // point — the only pointer evidence in this file — and its rowOffsetX/Y keep
+  // the menu glued to the same spot in its row when a sidebar scroll or a
+  // resize repositions it here. The row lookup mirrors _projectPickerAnchorRect,
+  // which stays untouched and keeps owning the zero-sized-anchor fallback.
+  const contextPoint=anchorEl._projectPickerContextPoint;
+  const atPointer=!!(_sessionActionMenu._pointAnchoredFromPointer&&contextPoint&&Number.isFinite(contextPoint.clientX));
+  if(atPointer){
+    const row=anchorEl.closest&&anchorEl.closest('.session-child-session-fork,.session-item');
+    const rowRect=row&&row.isConnected!==false?row.getBoundingClientRect():null;
+    const pointX=rowRect&&Number.isFinite(contextPoint.rowOffsetX)?rowRect.left+contextPoint.rowOffsetX:contextPoint.clientX;
+    const pointY=rowRect&&Number.isFinite(contextPoint.rowOffsetY)?rowRect.top+contextPoint.rowOffsetY:contextPoint.clientY;
+    rect={top:pointY,bottom:pointY+1,left:pointX,right:pointX+1,width:1,height:1,pointAnchored:true};
+  } else if(!rect.width||!rect.height){
+    // A zero-sized anchor — coarse-pointer CSS hides `.session-actions`, or a
+    // repaint left a stale trigger — borrows the geometry the project picker
+    // places from: the recorded context-menu point, else the visible row.
+    // typeof-guarded so extracted-function Node harnesses stay self-contained.
+    if(typeof _projectPickerAnchorRect==='function'&&typeof _projectPickerVisibleBounds==='function'){
+      rect=_projectPickerAnchorRect(anchorEl,_projectPickerVisibleBounds());
+    }
+  }
   const menuW=Math.min(280, Math.max(220, _sessionActionMenu.scrollWidth || 220));
-  let left=rect.right-menuW;
+  let left=rect.pointAnchored?rect.left:rect.right-menuW;
   if(left<8) left=8;
   if(left+menuW>window.innerWidth-8) left=window.innerWidth-menuW-8;
   _sessionActionMenu.style.left=left+'px';
@@ -5874,7 +6592,13 @@ function _mountSessionActionMenu(menu, session, anchorEl){
   _positionSessionActionMenu(anchorEl);
   _playSessionActionMenuEntrance(menu);
   const menuItems=()=>Array.from(menu.querySelectorAll('.session-action-opt:not([disabled])'));
+  // True while a Tab pressed in the menu moves the focus.
+  let leavingByTab=false;
   menu.addEventListener('keydown',e=>{
+    if(e.key==='Tab'){
+      leavingByTab=true;
+      setTimeout(()=>{leavingByTab=false;},0);
+    }
     const items=menuItems();
     if(e.key==='Escape'){
       e.preventDefault();
@@ -5892,6 +6616,27 @@ function _mountSessionActionMenu(menu, session, anchorEl){
     if(nextIndex===null) return;
     e.preventDefault();
     try{items[nextIndex].focus({preventScroll:true});}catch(_){items[nextIndex].focus();}
+    // The focus does not scroll, and a menu taller than the screen scrolls
+    // inside itself: bring the row it landed on into the menu's box.
+    items[nextIndex].scrollIntoView({block:'nearest'});
+  });
+  // The finger that long-pressed the row lifts over something that takes no
+  // focus, and the browser's own mousedown for that touch drops focus on
+  // <body>: the arrow keys, Home and End then go to the page behind. While
+  // this menu is open, focus that lands nowhere comes back to the row it left.
+  // Tab from the last row lands nowhere too, on its way out of the page: that
+  // is the keyboard leaving the menu, and it is let go.
+  menu.addEventListener('focusout',e=>{
+    if(e.relatedTarget||leavingByTab) return;
+    const from=e.target;
+    setTimeout(()=>{
+      if(_sessionActionMenu!==menu||!menu.isConnected) return;
+      const active=document.activeElement;
+      if(active&&active!==document.body&&active!==document.documentElement) return;
+      const row=(from&&menu.contains(from)&&!from.disabled)?from:menuItems()[0];
+      if(!row) return;
+      try{row.focus({preventScroll:true});}catch(_){row.focus();}
+    },0);
   });
   const firstAction=menuItems()[0];
   if(firstAction){
@@ -5903,6 +6648,18 @@ function _findSessionRenameRow(sessionId){
   const sid=String(sessionId||'');
   if(!sid) return null;
   return document.querySelector('.session-item[data-sid="'+sid+'"], .session-child-session[data-sid="'+sid+'"]');
+}
+
+// A press on a non-focusable part of a row moves focus out of whatever had
+// it, so editors that save on blur (a session or project rename, a queued
+// message) commit and the on-screen keyboard closes. Row handlers that cancel
+// that press (the title's mousedown, the row's touchend) do it with this.
+// A press on the focusable title keeps focus there when it already has it
+// (a screen reader's activate command starts with mousedown).
+function _releaseFocusLikeRowPress(pressedTitle){
+  const active=document.activeElement;
+  if(!active||active===document.body||active===pressedTitle) return;
+  if(typeof active.blur==='function') active.blur();
 }
 
 function _buildSessionRenameStarter(session, displayEl, renderDisplay){
@@ -5941,7 +6698,11 @@ function _buildSessionRenameStarter(session, displayEl, renderDisplay){
       const releaseRename=()=>{
         _renamingSid=null;
         if(inp.isConnected) inp.replaceWith(displayEl);
-        setTimeout(()=>{ if(_renamingSid===null) renderSessionListFromCache(); },50);
+        setTimeout(()=>{
+          if(_renamingSid!==null) return;
+          if(typeof _repaintSidebarKeepingProjectPicker==='function') _repaintSidebarKeepingProjectPicker();
+          else if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+        },50);
       };
       if(!save){
         applyTitle(oldTitle,false);
@@ -6010,8 +6771,8 @@ function _syncSessionShareState(session, nextSession){
     S.session.share_created_at=session.share_created_at;
     if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
   }
-  renderSessionListFromCache();
-  void renderSessionList();
+  _repaintSidebarKeepingProjectPicker();
+  void renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
 }
 
 async function _createOrRefreshSessionShare(session){
@@ -6175,7 +6936,9 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
   const reflowPositions=_captureSessionReflowPositions();
   const renderHold=beforeListRender?Promise.resolve().then(beforeListRender):null;
   try{
-    const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:session.session_id,archived})});
+    const _archivePayload={session_id:session.session_id,archived};
+    if(typeof _showAllProfiles!=='undefined'&&_showAllProfiles&&session.profile){_archivePayload.all_profiles=true;_archivePayload.profile=session.profile;}
+    const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify(_archivePayload)});
     session.archived=archived;
     const cached=(_allSessions||[]).find(s=>s&&s.session_id===session.session_id);
     if(cached) cached.archived=archived;
@@ -6185,19 +6948,122 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
     if(renderHold) await renderHold;
     if(_showArchived&&!_sessionPrefersReducedMotion()) _sessionSwipeReturnOffsets.set(session.session_id,'0px');
     _pendingSessionReflowPositions=reflowPositions;
-    renderSessionListFromCache();
+    _repaintSidebarAfterSessionCompletion(session.session_id);
     void renderSessionList();
     return true;
   }catch(err){if(renderHold) await renderHold.catch(()=>{});_pendingSessionReflowPositions=null;showToast(t('session_archive_failed')+err.message);return false;}
 }
 
+function _projectPickerSessionActionHandoff(session, anchorEl){
+  const sid=session&&session.session_id;
+  // A refresh accepted while the picker held the old layout updates the list
+  // cache but skips its repaint, so the row closures can carry stale canonical
+  // fields. Resolve the action owner from the current caches.
+  const currentFromCaches=()=>{
+    let found=(_allSessions||[]).find(item=>item&&item.session_id===sid)||null;
+    if(!found){
+      for(const parent of (_allSessions||[])){
+        found=parent&&Array.isArray(parent._child_sessions)
+          ? parent._child_sessions.find(child=>child&&child.session_id===sid)||null
+          : null;
+        if(found) break;
+      }
+    }
+    // A visible New Chat with no messages is rendered from S.session but is
+    // not in that cache yet; resolve it there after the cache lookups. The
+    // typeof guard keeps the extracted-function Node harness self-contained.
+    if(!found&&typeof S!=='undefined'&&S.session&&S.session.session_id===sid) found=S.session;
+    // Content-search-only results render in the sidebar from _contentSearchResults
+    // (see _sessionSearchMergeMatches) even though they are absent from the list
+    // cache, so the action owner resolves there too, after every cache-level
+    // lookup and with the same exact-id test.
+    if(!found&&typeof _contentSearchResults!=='undefined'&&Array.isArray(_contentSearchResults)){
+      found=_contentSearchResults.find(item=>item&&item.session_id===sid)||null;
+    }
+    return found;
+  };
+
+  if(!_projectPickerTeardown){
+    // No picker to retire. While a repaint is still deferred (a held-gesture
+    // menu kept it pending), the rows on screen trail the caches — a second
+    // menu must not bind a stale row closure; the menu-close drain still owns
+    // the replay.
+    if(typeof _sessionListRepaintDeferredByPicker!=='undefined'&&_sessionListRepaintDeferredByPicker){
+      return {session:currentFromCaches()||session,anchorEl};
+    }
+    return {session,anchorEl};
+  }
+  const contextPoint=anchorEl&&anchorEl._projectPickerContextPoint;
+  const retireProjectPicker=_projectPickerTeardown;
+  _projectPickerTeardown=null;
+  retireProjectPicker();
+  if(!_sessionListRepaintDeferredByPicker) return {session,anchorEl};
+
+  // A fork long-press opens its menu while the finger is still down and arms
+  // its one-click open-suppression on the pressed row; an ordinary long-press
+  // is held the same way, identified by the row's `.long-pressing` state.
+  // Chromium dispatches the release click at the physical release point, so
+  // replacing the rows now can move that point off the pressed row (a peer
+  // message plus the refresh it triggered were accepted while the picker held
+  // the old layout), strand the suppression and let the stray click close the
+  // menu. Postpone the destructive replacement until the gesture, its
+  // compatibility click and this menu are finished: closing the menu drains
+  // the deferral like any other blocked render, and the menu stays anchored on
+  // the live row the suppression is armed on.
+  if(anchorEl&&(anchorEl._skipNextChildOpen||(anchorEl.classList&&anchorEl.classList.contains('session-item')&&anchorEl.classList.contains('long-pressing')))){
+    // The replacement stays postponed, but the menu must not bind the stale
+    // row closure: resolve the owner from the caches without repainting.
+    return {session:currentFromCaches()||session,anchorEl};
+  }
+
+  // A list refresh may have already replaced this session's canonical fields
+  // while the picker kept the old row DOM alive. Paint that state before the
+  // action menu captures either the row closure or its focus-return anchor.
+  _sessionListRepaintDeferredByPicker=false;
+  try{
+    renderSessionListFromCache();
+  }catch(_){
+    _sessionListRepaintDeferredByPicker=true;
+    return null;
+  }
+  let currentSession=currentFromCaches();
+  const currentRow=_findSessionRenameRow(sid);
+  // Keep the opener's kind: expanded rows contain child triggers before their
+  // own, and touch long-press must stay on the visible row, not hidden dots.
+  const anchorClasses=anchorEl&&anchorEl.classList;
+  let currentAnchor=anchorEl&&anchorEl.isConnected?anchorEl:null;
+  if(anchorClasses&&anchorClasses.contains('session-actions-trigger')){
+    currentAnchor=currentRow&&currentRow.querySelector(':scope > .session-actions > .session-actions-trigger');
+  }else if(anchorClasses&&anchorClasses.contains('session-actions')){
+    currentAnchor=currentRow&&currentRow.querySelector(':scope > .session-actions');
+  }else if(anchorClasses&&(anchorClasses.contains('session-item')||anchorClasses.contains('session-child-session'))){
+    currentAnchor=currentRow;
+  }
+  if(!currentSession||!currentAnchor||!currentAnchor.isConnected) return null;
+  if(contextPoint) currentAnchor._projectPickerContextPoint=contextPoint;
+  return {session:currentSession,anchorEl:currentAnchor};
+}
+
 function _openSessionActionMenu(session, anchorEl){
+  const handoff=_projectPickerSessionActionHandoff(session,anchorEl);
+  if(!handoff) return;
+  session=handoff.session;
+  anchorEl=handoff.anchorEl;
+  // A context-menu point recorded moments ago is fresh evidence of where the
+  // user invoked this menu: _positionSessionActionMenu places it at the
+  // pointer and keeps it glued to that spot in the row. Consuming the flag
+  // anchors the next ⋮-open back on its button.
+  const contextPoint=anchorEl._projectPickerContextPoint;
+  const openAtContextPoint=!!(contextPoint&&contextPoint.freshMenuAnchor);
+  if(contextPoint) delete contextPoint.freshMenuAnchor;
   const isReadOnly = _isReadOnlySession(session);
-  if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl){
+  if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl && !openAtContextPoint){
     closeSessionActionMenu();
     return;
   }
   closeSessionActionMenu();
+  // A long press or a right click sends no click to close an open picker.
+  _dismissOpenProjectPicker();
   const isMessagingSession = _isMessagingSession(session);
   const isCliSession = _isCliSession(session);
   const isExternalSession = isMessagingSession || isCliSession;
@@ -6206,6 +7072,7 @@ function _openSessionActionMenu(session, anchorEl){
   menu.id='sessionActionMenu-'+(++_sessionActionMenuId);
   menu.setAttribute('role','menu');
   menu.setAttribute('aria-label', 'Conversation actions');
+  menu._pointAnchoredFromPointer=openAtContextPoint;
   _appendSessionCopyLinkAction(menu, session);
   if(isReadOnly){
     _appendSessionExportHtmlAction(menu, session);
@@ -6253,8 +7120,8 @@ function _openSessionActionMenu(session, anchorEl){
         const cached=(_allSessions||[]).find(s=>s&&s.session_id===session.session_id);
         if(cached) cached.pinned=newPinned;
         if(S.session&&S.session.session_id===session.session_id) S.session.pinned=newPinned;
-        renderSessionListFromCache();
-        void renderSessionList();
+        _repaintSidebarKeepingProjectPicker();
+        void renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
       }catch(err){
         showToast(t('session_pin_failed')+err.message);
         await renderSessionList();
@@ -6288,7 +7155,9 @@ function _openSessionActionMenu(session, anchorEl){
       async()=>{
         closeSessionActionMenu();
         try{
-          await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:session.session_id,archived:true})});
+          const _hidePayload={session_id:session.session_id,archived:true};
+          if(typeof _showAllProfiles!=='undefined'&&_showAllProfiles&&session.profile){_hidePayload.all_profiles=true;_hidePayload.profile=session.profile;}
+          await api('/api/session/archive',{method:'POST',body:JSON.stringify(_hidePayload)});
           _optimisticallyArchiveSessionInList(session.session_id,true);
           session.archived=true;
           if(S.session&&S.session.session_id===session.session_id) S.session.archived=true;
@@ -6334,7 +7203,7 @@ function _openSessionActionMenu(session, anchorEl){
           const cached=(_allSessions||[]).find(item=>item&&item.session_id===session.session_id);
           if(cached) cached.title=nextTitle;
           if(S.session&&S.session.session_id===session.session_id){S.session.title=nextTitle;syncTopbar();}
-          renderSessionListFromCache();
+          _repaintSidebarKeepingProjectPicker();
         }
         if(typeof showToast==='function') showToast(t('session_title_regenerated', nextTitle||t('untitled')), 2400);
       }catch(err){
@@ -6399,7 +7268,12 @@ document.addEventListener('keydown',e=>{
   if(e.key==='Escape' && _sessionActionMenu) closeSessionActionMenu({restoreFocus:true});
 });
 window.addEventListener('resize',()=>{
-  if(_sessionActionMenu && _sessionActionAnchor) _positionSessionActionMenu(_sessionActionAnchor);
+  if(!_sessionActionMenu || !_sessionActionAnchor) return;
+  _positionSessionActionMenu(_sessionActionAnchor);
+  // The new size may cap the menu shorter than its rows, and the cap leaves
+  // it scrolled to the top: bring the row that has focus back into its box.
+  const focused=document.activeElement;
+  if(focused && _sessionActionMenu.contains(focused)) focused.scrollIntoView({block:'nearest'});
 });
 
 // Generation counter to discard stale API responses (issue #1430).
@@ -6409,6 +7283,11 @@ window.addEventListener('resize',()=>{
 let _renderSessionListGen = 0;
 let _renderSessionListInFlight = null;
 let _renderSessionListQueuedRequest = null;
+// The request currently being drained. A call that queues behind it inherits
+// this request's recovery/repaint upgrades into the successor — keep-picker,
+// nondeferred recovery — so the supersession cannot silently downgrade them;
+// the active response is discarded as stale and the successor is what paints.
+let _renderSessionListActiveRequest = null;
 let _sessionListRefreshAnimationPending = false;
 let _sessionListFirstRenderAnimated = false;
 let _sessionListEnterAllAnimationPending = false;
@@ -6424,6 +7303,9 @@ function _invalidateSessionListRenders(){
   _renderSessionListGen++;
   _pendingSessionListPayload = null;
   _renderSessionListQueuedRequest = null;
+  // A successor queued after this invalidation must not inherit the cancelled
+  // render's recovery intent (profile/scope switch cancels obsolete work).
+  _renderSessionListActiveRequest = null;
   // A retry whose fetch is invalidated here (e.g. a profile switch mid-retry)
   // would otherwise leave the error note stuck as an inert "Retrying…" button
   // with no request in flight — the stale fetch returns before
@@ -6635,7 +7517,7 @@ function _mergeOptimisticFirstTurnSessions(fetchedSessions){
 function _isSessionListUserInteracting(){
   const now=Date.now();
   const list=$('sessionList');
-  const pointerOverList=Boolean(list&&(list.matches(':hover')||list.matches(':focus-within')));
+  const pointerOverList=Boolean(list&&(list.matches(':hover')||list.matches(':has(:focus-visible)')));
   return Boolean(
     _sessionListPointerActive ||
     pointerOverList ||
@@ -6657,9 +7539,9 @@ function _schedulePendingSessionListApply(){
     if(payload.gen!==_renderSessionListGen) return;
     // Profile switch may have bumped unread gen after the list gen check
     // window; still drop completion-marking for the stale pre-switch payload.
-    _applySessionListPayload(payload.sessData,payload.projData,{
-      unreadGen:payload.unreadGen,
-    });
+    const applyOpts={unreadGen:payload.unreadGen};
+    if(payload.keepProjectPicker===true) applyOpts.keepProjectPicker=true;
+    _applySessionListPayload(payload.sessData,payload.projData,applyOpts);
   }, Math.max(120, SESSION_LIST_INTERACTION_IDLE_MS));
 }
 
@@ -6837,7 +7719,7 @@ function _applySessionListPayload(sessData, projData, opts){
   // NEVER skip when recovering from a skeleton or error-banner DOM state: those
   // are rendered outside the signature path, so an identical-signature match
   // would leave the skeleton/error on screen instead of the real list. (Codex #5467)
-  const _canRenderNow = !_renamingSid && !_sessionActionMenu;
+  const _canRenderNow = !_renamingSid && !_sessionActionMenu && !(typeof _projectPickerTeardown!=='undefined'&&_projectPickerTeardown!==null);
   const _mustForceRender = _hadSessionListSkeleton || _hadSessionListLoadError;
   const _renderSig = _sessionListRenderSignature();
   if(_canRenderNow && !_mustForceRender && !_sessionListRefreshAnimationPending && _renderSig && _renderSig===_lastSessionListRenderSig){
@@ -6847,7 +7729,8 @@ function _applySessionListPayload(sessData, projData, opts){
     return;
   }
   if(_canRenderNow) _lastSessionListRenderSig = _renderSig;
-  renderSessionListFromCache();  // no-ops if rename is in progress
+  if(applyOpts.keepProjectPicker) _repaintSidebarKeepingProjectPicker();
+  else _repaintSidebarForBackgroundChurn();
 }
 
 function _mergeRenderSessionListOptions(prev, next){
@@ -6856,7 +7739,22 @@ function _mergeRenderSessionListOptions(prev, next){
   if((prev&&prev.deferWhileInteracting===false)||(next&&next.deferWhileInteracting===false)){
     merged.deferWhileInteracting=false;
   }
+  if((prev&&prev.keepProjectPicker===true)||(next&&next.keepProjectPicker===true)){
+    merged.keepProjectPicker=true;
+  }
   return merged;
+}
+
+function _normalizeRenderSessionListOptions(opts){
+  // A session-list refresh is user-owned unless its caller explicitly enters
+  // the background-churn lane below. User-owned updates paint immediately and
+  // preserve/re-anchor an open project picker. This inverted default keeps the
+  // long tail of durable actions safe as new call sites are added.
+  return {
+    deferWhileInteracting:false,
+    keepProjectPicker:true,
+    ...((opts&&typeof opts==='object')?opts:{}),
+  };
 }
 
 function _showSessionListLoadError(error){
@@ -6915,7 +7813,7 @@ function _renderSessionListLoadErrorNote(){
       setPending();
       _sessionListLoadError={..._sessionListLoadError,retrying:true};
       renderSessionListFromCache();
-      void renderSessionList({deferWhileInteracting:false}).finally(()=>{
+      void renderSessionList({deferWhileInteracting:false,keepProjectPicker:true}).finally(()=>{
         if(!retry.parentNode||(_sessionListLoadError&&_sessionListLoadError.retrying)) return;
         retry.textContent='Retry';
         retry.removeAttribute('aria-disabled');
@@ -6978,10 +7876,14 @@ async function _runRenderSessionListRefresh(opts, _gen){
     if (_profileSwitchListEmbargo) return;
     if(deferWhileInteracting&&_isSessionListUserInteracting()){
       _pendingSessionListPayload={gen:_gen,sessData,projData,unreadGen};
+      if(opts&&opts.keepProjectPicker===true) _pendingSessionListPayload.keepProjectPicker=true;
       _schedulePendingSessionListApply();
       return;
     }
-    _applySessionListPayload(sessData,projData,{unreadGen});
+    // Carry the keep-picker intent to the payload when set; non-keep refreshes
+    // keep the plain apply shape.
+    if(opts&&opts.keepProjectPicker===true) _applySessionListPayload(sessData,projData,{unreadGen,keepProjectPicker:true});
+    else _applySessionListPayload(sessData,projData,{unreadGen});
   }catch(e){
     if (_gen !== _renderSessionListGen) return;
     // #4671: same embargo guard as the success path — a mid-switch /api/sessions that
@@ -7011,13 +7913,15 @@ async function _runRenderSessionListRefresh(opts, _gen){
     // up-front profile-switch skeleton instead of stranding it.
     _sessionListSkeletonActive = false;
     if (_scopeMatches) {
-      renderSessionListFromCache();
+      if(opts&&opts.keepProjectPicker===true) _repaintSidebarKeepingProjectPicker();
+      else _repaintSidebarForBackgroundChurn();
     } else {
       _allSessions = [];
       _sidebarReferenceSessions = [];
       _allSessionsScope = _curScope;
       _clearSessionSourceTabCounts();
-      renderSessionListFromCache();
+      if(opts&&opts.keepProjectPicker===true) _repaintSidebarKeepingProjectPicker();
+      else _repaintSidebarForBackgroundChurn();
     }
   }
 }
@@ -7043,6 +7947,7 @@ async function _drainRenderSessionListQueue(initialRequest){
   let request=initialRequest;
   try{
     while(request){
+      _renderSessionListActiveRequest=request;
       await _runRenderSessionListRefresh(request.opts, request.gen);
       request=_renderSessionListQueuedRequest;
       _renderSessionListQueuedRequest=null;
@@ -7053,21 +7958,46 @@ async function _drainRenderSessionListQueue(initialRequest){
       const next=_renderSessionListQueuedRequest;
       _renderSessionListQueuedRequest=null;
       _renderSessionListInFlight=_drainRenderSessionListQueue(next);
+    }else{
+      _renderSessionListActiveRequest=null;
     }
   }
 }
 
 async function renderSessionList(opts={}){
-  const request={opts:opts||{},gen:++_renderSessionListGen};
+  const request={opts:_normalizeRenderSessionListOptions(opts),gen:++_renderSessionListGen};
   if(_renderSessionListInFlight){
+    // The active request's response is discarded as stale when this call
+    // supersedes its generation; the queued request is what actually settles
+    // and paints. Carry only the active request's recovery/repaint upgrades
+    // into the successor — an explicit nondeferred intent and the keep-picker
+    // keep — so the supersession cannot silently downgrade them. Never inherit
+    // an active background request's deferWhileInteracting:true: a new caller
+    // (e.g. the project-create refresh) may rely on immediate rendering by
+    // default, and the inherited deferral would park its payload until the
+    // interaction ends. Invalidation clears the queue instead of inheriting it.
+    const activeOpts=_renderSessionListActiveRequest&&_renderSessionListActiveRequest.opts;
+    const inherited={};
+    if(activeOpts&&activeOpts.deferWhileInteracting===false) inherited.deferWhileInteracting=false;
+    if(activeOpts&&activeOpts.keepProjectPicker===true) inherited.keepProjectPicker=true;
+    const queuedOpts=_mergeRenderSessionListOptions(
+      inherited,
+      _renderSessionListQueuedRequest&&_renderSessionListQueuedRequest.opts);
     _renderSessionListQueuedRequest={
-      opts:_mergeRenderSessionListOptions(_renderSessionListQueuedRequest&&_renderSessionListQueuedRequest.opts, request.opts),
+      opts:_mergeRenderSessionListOptions(queuedOpts, request.opts),
       gen:request.gen,
     };
     return _renderSessionListInFlight;
   }
   _renderSessionListInFlight=_drainRenderSessionListQueue(request);
   return _renderSessionListInFlight;
+}
+
+function _refreshSidebarForBackgroundChurn(){
+  // Polling/SSE is the only refresh class allowed to defer behind active
+  // sidebar interaction or an open project picker. Keep this option pair at a
+  // single auditable call site; producers invoke this helper instead.
+  return renderSessionList({deferWhileInteracting:true,keepProjectPicker:false});
 }
 
 // ── Gateway session SSE (real-time sync for agent sessions) ──
@@ -7120,6 +8050,7 @@ function _mergeSessionListRefreshOptions(prev, next){
   const merged = {...(prev||{}), ...(next||{})};
   if((prev&&prev.force===true)||(next&&next.force===true)) merged.force = true;
   if((prev&&prev.refreshActive===true)||(next&&next.refreshActive===true)) merged.refreshActive = true;
+  if((prev&&prev.keepProjectPicker===true)||(next&&next.keepProjectPicker===true)) merged.keepProjectPicker = true;
   return merged;
 }
 
@@ -7137,11 +8068,11 @@ function startStreamingPoll(){
     // brings the list current the moment the tab is shown again, so no update is
     // lost — the background tab just stops burning network + DOM churn.
     if(typeof document !== 'undefined' && document.hidden) return;
-    void renderSessionList({deferWhileInteracting:true});
+    void _refreshSidebarForBackgroundChurn();
   }, _streamingPollMs);
   if(typeof document !== 'undefined' && !_streamingPollVisibilityHandler){
     _streamingPollVisibilityHandler = () => {
-      if(!document.hidden) void renderSessionList({deferWhileInteracting:true});
+      if(!document.hidden) void _refreshSidebarForBackgroundChurn();
     };
     document.addEventListener('visibilitychange', _streamingPollVisibilityHandler);
   }
@@ -7163,11 +8094,11 @@ function ensureSessionTimeRefreshPoll(){
     // Relative-time labels only matter when visible; the visibilitychange
     // handler below refreshes timestamps immediately when the tab is shown.
     if(typeof document !== 'undefined' && document.hidden) return;
-    renderSessionListFromCache();
+    _repaintSidebarForBackgroundChurn();
   }, _sessionTimeRefreshMs);
   if(typeof document !== 'undefined' && !_sessionTimeRefreshVisibilityHandler){
     _sessionTimeRefreshVisibilityHandler = () => {
-      if(!document.hidden) renderSessionListFromCache();
+      if(!document.hidden) _repaintSidebarForBackgroundChurn();
     };
     document.addEventListener('visibilitychange', _sessionTimeRefreshVisibilityHandler);
   }
@@ -7273,7 +8204,9 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
   // event, focus, or visibility recovery says another client/process mutated
   // the active transcript (#4205 follow-up shape). The idle-reconcile path uses
   // a non-'poll' reason, so it already sails through this gate untouched.
-  if((reason||'poll')==='poll' && !_isExternalSession(S.session)) return 'skipped';
+  // A running delegated subagent has no stream; poll it so its end is noticed.
+  const _pollRunningSubagent = S.session.active===true && _isDelegatedSubagentRow(S.session);
+  if((reason||'poll')==='poll' && !_isExternalSession(S.session) && !_pollRunningSubagent) return 'skipped';
   // Cooldown: don't force-reload immediately after streaming ends — the
   // "done" event already delivered the final messages. Reloading here would
   // clear S.toolCalls and lose Activity. The idle-reconcile path may bypass
@@ -7341,6 +8274,12 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
       }
       if(typeof renderSessionList==='function') void renderSessionList();
     }
+    // A subagent can finish without a new message; apply the lifecycle flip.
+    if(typeof data.session.active==='boolean' && S.session && S.session.session_id===sid
+       && data.session.active!==S.session.active && _isDelegatedSubagentRow(S.session)){
+      S.session.active = data.session.active;
+      if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+    }
     return 'unchanged';
   }catch(e){
     // Ignore transient refresh failures; the next poll/focus event will retry.
@@ -7384,7 +8323,19 @@ async function refreshSessionList(reason='manual', opts={}){
   }
   _sessionListRefreshInFlight = true;
   try{
-    await renderSessionList({deferWhileInteracting:!force});
+    const userOwnedRefresh = (opts&&opts.keepProjectPicker===true) || reason==='pull';
+    if(userOwnedRefresh){
+      await renderSessionList();
+    }else if(force){
+      // A forced sessions_changed refresh must paint immediately even while
+      // the list is hovered or focused (a remote rename painted at once on
+      // master; the churn deferral parked it until the pointer or focus left
+      // the list). It enters as background-class — no keep-picker claim — so
+      // an open picker is still protected by its own repaint deferral.
+      await renderSessionList({deferWhileInteracting:false,keepProjectPicker:false});
+    }else{
+      await _refreshSidebarForBackgroundChurn();
+    }
     if(refreshActive) await refreshActiveSessionIfExternallyUpdated(reason||'session-list');
   }finally{
     _sessionListRefreshInFlight = false;
@@ -7554,7 +8505,7 @@ function startGatewayPollFallback(ms){
     // and avoids redundant DOM renders during active streaming (#4704).
     if(typeof document !== 'undefined' && document.hidden) return;
     if(typeof S !== 'undefined' && (S.busy || S.activeStreamId)) return;
-    renderSessionList({deferWhileInteracting:true});
+    void _refreshSidebarForBackgroundChurn();
   }, intervalMs);
   // Visibility catch-up: refresh immediately when tab re-gains focus,
   // so no gateway updates are dropped during hidden-skip periods.
@@ -7679,7 +8630,7 @@ async function probeGatewaySSEStatus(){
     }
     if(resp.status === 503 || data.watcher_running === false){
       startGatewayPollFallback(data.fallback_poll_ms || _gatewayFallbackPollMs);
-      renderSessionList({deferWhileInteracting:true});
+      void _refreshSidebarForBackgroundChurn();
       if(!_gatewaySSEWarningShown && typeof showToast === 'function'){
         showToast('Gateway sync unavailable — falling back to periodic refresh.', 5000);
         _gatewaySSEWarningShown = true;
@@ -7690,7 +8641,7 @@ async function probeGatewaySSEStatus(){
     // Start fallback polling as a safe default; it will self-cancel
     // when the SSE connection recovers and sessions_changed fires.
     startGatewayPollFallback(_gatewayFallbackPollMs);
-    renderSessionList({deferWhileInteracting:true});
+    void _refreshSidebarForBackgroundChurn();
   }finally{
     _gatewayProbeInFlight = false;
   }
@@ -7723,7 +8674,7 @@ function startGatewaySSE(){
           stopGatewayPollFallback();
           _gatewaySSEWarningShown = false;
           if(!_isDuplicateGatewaySessionSnapshot(data.sessions)){
-            renderSessionList({deferWhileInteracting:true}); // re-fetch and re-render
+            void _refreshSidebarForBackgroundChurn(); // re-fetch and re-render
           }
           // If the active session received new gateway messages, refresh the conversation view.
           // S.busy check prevents stomping on an in-progress WebUI response.
@@ -7968,7 +8919,7 @@ function filterSessions(){
       const directAndTitleMatches=_sessionSearchDirectAndTitleMatches(_allSessions,currentQ);
       const directOrTitleIds=new Set(directAndTitleMatches.map(s=>s.session_id));
       _contentSearchResults = (data.sessions||[]).filter(s => s.match_type === 'content' && !directOrTitleIds.has(s.session_id));
-      renderSessionListFromCache();
+      _repaintSidebarForBackgroundChurn();
     } catch(e) { /* ignore */ }
   }, 350);
 }
@@ -8456,8 +9407,13 @@ function _sessionStateTooltip({isStreaming=false,hasUnread=false}={}){
   return '';
 }
 
-function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawReferenceSessions){
+function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawReferenceSessions, payloadRowsById){
   const referenceSessions=Array.isArray(rawReferenceSessions)?rawReferenceSessions:(rawSessions||[]);
+  let searchActive=false;
+  try{
+    const searchEl=typeof $==='function' ? $('sessionSearch') : null;
+    searchActive=Boolean(searchEl&&String(searchEl.value||'').trim());
+  }catch(_e){ searchActive=false; }
   const sessionIdsInList=new Set(referenceSessions.map(s=>s&&s.session_id).filter(Boolean));
   const rawSessionsById=new Map(referenceSessions.filter(s=>s&&s.session_id).map(s=>[s.session_id,s]));
   const cleanSidebarRow=(s)=>{
@@ -8505,6 +9461,23 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       parentRow._child_session_attention={...childAttention};
     }
   };
+  // Every payload row by id and by compression-lineage root, so a child naming its parent's
+  // pre-compression segment resolves to the row that represents that lineage in this payload.
+  const payloadById=new Map();
+  const payloadByLineageRoot=new Map();
+  const indexPayloadRow=(s)=>{
+    if(!s||!s.session_id) return;
+    if(!payloadById.has(s.session_id)) payloadById.set(s.session_id,s);
+    if(s._lineage_root_id&&!payloadByLineageRoot.has(s._lineage_root_id)) payloadByLineageRoot.set(s._lineage_root_id,s);
+  };
+  if(payloadRowsById instanceof Map) payloadRowsById.forEach(indexPayloadRow);
+  [...(rawSessions||[]),...referenceSessions].forEach(indexPayloadRow);
+  const payloadParentFor=(s)=>{
+    const pid=s&&s.parent_session_id;
+    if(!pid) return null;
+    return payloadById.get(pid)||payloadById.get(s._parent_lineage_tip_id)
+      ||payloadByLineageRoot.get(pid)||payloadByLineageRoot.get(s._parent_lineage_root_id)||null;
+  };
   const visibleBySid=new Map();
   const visibleBySegmentSid=new Map();
   const visibleByLineageKey=new Map();
@@ -8514,7 +9487,8 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     if(attachDepthCache.has(session.session_id)) return attachDepthCache.get(session.session_id);
     if(seen.has(session.session_id)) return 0;
     seen.add(session.session_id);
-    const parent=session.parent_session_id&&rawSessionsById.get(session.parent_session_id);
+    // A child of a compressed parent may name its pre-compression segment; order it by the tip.
+    const parent=session.parent_session_id&&payloadParentFor(session);
     let depth=0;
     if(parent&&(_isChildSession(session)||(_isForkWithResolvableParent(session, sessionIdsInList)&&!(session&&session.pinned)))){
       depth=1+attachDepthFor(parent, seen);
@@ -8555,6 +9529,32 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
   for(const candidate of [...(rawSessions||[]),...(referenceSessions||[])]){
     if(candidate&&candidate.session_id&&!attachQueueById.has(candidate.session_id)) attachQueueById.set(candidate.session_id,candidate);
   }
+  // Raw sources is_cli_session_row never files as CLI; any other raw source is ambiguous.
+  const nonCliParentSources=['webui','cron','webhook','kanban','tool','api','api_server'];
+  const subagentHostHiddenByScope=(leaf)=>{
+    const seen=new Set();
+    let cur=leaf;
+    while(cur&&!seen.has(cur.session_id)){
+      seen.add(cur.session_id);
+      const parent=payloadParentFor(cur);
+      if(!parent){
+        // A missing subagent parent is a child row, never a scope-hidden top-level host.
+        const ps=String(cur.parent_source||'').trim().toLowerCase();
+        if(ps==='subagent') return false;
+        if(typeof cur.parent_is_cli_session==='boolean') return !cur.parent_is_cli_session;
+        return nonCliParentSources.includes(ps)||(typeof _isMessagingSession==='function'&&_isMessagingSession({raw_source: ps}));
+      }
+      if(_isCliSession(parent)) return false;
+      if(cur!==leaf&&(visibleBySid.has(parent.session_id)||visibleBySegmentSid.has(parent.session_id))) return false;
+      if(!_isDelegatedSubagentRow(parent)){
+        // Only a top-level row can be a host hidden by scope; a non-subagent child (branch) never is.
+        if(_isChildSession(parent)) return false;
+        return !visibleBySid.has(parent.session_id);
+      }
+      cur=parent;
+    }
+    return false;
+  };
   const attachQueue=[...attachQueueById.values()].sort((a,b)=>attachDepthFor(a)-attachDepthFor(b));
   for(const child of attachQueue){
     const childRenderable=!!(child&&child.session_id&&renderableChildIds.has(child.session_id));
@@ -8569,7 +9569,9 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     const childLineageKey=child&&(child._lineage_root_id||child.lineage_root_id||child.parent_session_id);
     const isHiddenLineageReferenceChild=!!(child&&child.archived&&child.parent_session_id&&childLineageKey&&!child.pinned&&!childRenderable);
     if(!_isChildSession(child)&&!isForkChild&&!isHiddenLineageReferenceChild) continue;
-    const parentSid=child.parent_session_id;
+    const resolvedParent=payloadParentFor(child);
+    const parentSid=resolvedParent&&!visibleBySid.has(child.parent_session_id)&&!visibleBySegmentSid.has(child.parent_session_id)
+      ? resolvedParent.session_id : child.parent_session_id;
     let parentRow=visibleBySid.get(parentSid);
     let parentSegment=null;
     if(!parentRow&&visibleBySegmentSid.has(parentSid)){
@@ -8578,7 +9580,10 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       parentSegment=resolved.seg;
     }
     if(!parentRow&&child._parent_lineage_tip_id){
-      parentRow=visibleBySid.get(child._parent_lineage_tip_id)||null;
+      const tipSid=child._parent_lineage_tip_id;
+      const tipSeg=!visibleBySid.has(tipSid)&&visibleBySegmentSid.get(tipSid);
+      parentRow=visibleBySid.get(tipSid)||(tipSeg&&tipSeg.row)||null;
+      if(tipSeg) parentSegment=tipSeg.seg;
     }
     if(!parentRow&&child._parent_lineage_root_id){
       parentRow=visibleByLineageKey.get(child._parent_lineage_root_id)||null;
@@ -8637,7 +9642,12 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       // trigger from archived to filtered-out. A cross-surface WebUI child of a
       // genuinely external (messaging/CLI) parent is handled by the parentIsExternal
       // branch above and still orphans as before.
-      if(child&&child._cross_surface_child_session&&_isChildSession(child)) continue;
+      // A flag-less subagent is suppressed only when its ancestor chain ends at a hidden, non-CLI
+      // top-level host (the partition's _isCliSession bucket). A CLI ancestor, a visible ancestor
+      // (the chain renders as an orphan) or an unresolvable link keeps the child an orphan.
+      const subagentParentKnown=childIsDelegatedSubagent&&subagentHostHiddenByScope(child);
+      const crossSurfaceChild=!!(child&&child._cross_surface_child_session&&_isChildSession(child));
+      if(!searchActive&&(subagentParentKnown||crossSurfaceChild)) continue;
       orphans.push({...child,_orphan_child_session:true});
     }
   }
@@ -8874,7 +9884,7 @@ function clearOptimisticSessionStreaming(sid){
     _sessionStreamingById.set(sid,false);
   }
   if(typeof _forgetObservedStreamingSession==='function') _forgetObservedStreamingSession(sid);
-  renderSessionListFromCache();
+  _repaintSidebarForBackgroundChurn();
 }
 
 
@@ -8951,7 +9961,15 @@ function _scheduleSessionVirtualizedRender(){
       const currentEnd=Number(liveList.dataset.sessionVirtualEnd||0);
       if(nextWindow.virtualized&&nextWindow.start===currentStart&&nextWindow.end===currentEnd) return;
     }
-    renderSessionListFromCache();
+    if(typeof _projectPickerTeardown!=='undefined'&&_projectPickerTeardown!==null
+       &&typeof _projectPickerAnchorWithinSessionList==='function'&&!_projectPickerAnchorWithinSessionList()){
+      // The picker's anchor is outside the rows this rebuild replaces: paint
+      // now (deferring would show blank space while scrolling) and leave the
+      // picker to its own anchor observer.
+      _repaintSidebarKeepingProjectPicker();
+    }else{
+      _repaintSidebarForBackgroundChurn();
+    }
   });
 }
 
@@ -8996,7 +10014,7 @@ function _resyncSessionVirtualWindowAfterRender(list, expectedScrollTop, virtual
     const actualScrollTop=Number(list.scrollTop)||0;
     const tolerance=Math.max(2, Number(virtualWindow.itemHeight||SESSION_VIRTUAL_ROW_HEIGHT)/2);
     if(Math.abs(actualScrollTop-expectedScrollTop)<=tolerance) return;
-    renderSessionListFromCache();
+    _repaintSidebarForBackgroundChurn();
   });
 }
 
@@ -9060,6 +10078,16 @@ function _isDelegatedSubagentRow(s){
 // every other row keeps its own. Memoized per render, so each lineage resolves once.
 function _sidebarProjectResolver(rowsById){
   const memo=new Map();
+  // Resolve the parent like the attach step does: a child of a compressed parent names its
+  // pre-compression segment, which the payload carries only as the tip's _lineage_root_id.
+  const byLineageRoot=new Map();
+  if(rowsById) rowsById.forEach(r=>{ if(r&&r._lineage_root_id&&!byLineageRoot.has(r._lineage_root_id)) byLineageRoot.set(r._lineage_root_id,r); });
+  const parentOf=(s)=>{
+    const pid=s.parent_session_id;
+    if(!rowsById||!pid) return null;
+    return rowsById.get(pid)||rowsById.get(s._parent_lineage_tip_id)
+      ||byLineageRoot.get(pid)||byLineageRoot.get(s._parent_lineage_root_id)||null;
+  };
   return function projectIdFor(s){
     if(!s) return null;
     const path=[];
@@ -9071,7 +10099,7 @@ function _sidebarProjectResolver(rowsById){
       if(cur.project_id||!_isDelegatedSubagentRow(cur)){ result=cur.project_id||null; if(sid) path.push(sid); break; }
       if(onPath.has(sid)) break;
       onPath.add(sid); path.push(sid);
-      cur=rowsById?rowsById.get(cur.parent_session_id):null;
+      cur=parentOf(cur);
     }
     for(const sid of path) memo.set(sid,result);
     return result;
@@ -9093,7 +10121,9 @@ function _sidebarHasUnprojectedRows(rows, projectIdFor){
 }
 
 function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
-  const projectIdFor=_sidebarProjectResolver(_sidebarRowsById([allMatched, typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:null]));
+  // Every payload row, before bucket/project/archive scoping; the attach step classifies parents from it.
+  const rowsById=_sidebarRowsById([allMatched, typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:null]);
+  const projectIdFor=_sidebarProjectResolver(rowsById);
   let cliSessionCount=0;
   const webuiProfileFiltered=[];
   const cliProfileFiltered=[];
@@ -9141,6 +10171,7 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     webuiSessionsRaw,
     cliSessionsRaw,
     projectIdFor,
+    rowsById,
   };
 }
 
@@ -9168,9 +10199,22 @@ function _scopedSidebarReferenceRows(isCli, projectIdFor){
   });
 }
 
-function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw){
+function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw, payloadRowsById){
   const referenceRows=Array.isArray(referenceSessionsRaw)?referenceSessionsRaw:sessionsRaw;
-  return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows);
+  return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows, payloadRowsById);
+}
+
+// Apply the renderer's complete source/reference/lineage projection to an
+// already partitioned view. Keeping this final projection shared prevents
+// overlay-owner qualification from drifting from the rows the sidebar paints.
+function _renderSidebarRowsFromPartition(partition){
+  const isCliView=_sessionSourceFilter==='cli';
+  const referenceRaw=isCliView?partition.cliReferenceRaw:partition.webuiReferenceRaw;
+  return _renderSidebarRowsFromRawSessions(
+    partition.sessionsRaw,
+    [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView, partition.projectIdFor)],
+    partition.rowsById,
+  );
 }
 
 function _projectBindingsForNewSession(project){
@@ -9267,6 +10311,55 @@ function _attachProjectQuickCreateButton(chip, project){
   chip.appendChild(btn);
 }
 
+function _installSessionOpenControl(control, session, activate){
+  if(!control||!session||!session.session_id) return;
+  control.onkeydown=(e)=>{
+    if((e.key==='Enter'||e.key===' ')&&(e.repeat||e.ctrlKey||e.metaKey||e.altKey||e.shiftKey)) e.preventDefault();
+  };
+  control.onclick=async(e)=>{
+    // Pointer and touch activation stay owned by the row gesture state machine.
+    // Native keyboard activation and assistive-technology synthesized clicks use
+    // detail=0, so handling only that path avoids opening a conversation twice.
+    if(!e||e.detail!==0||_sessionSelectMode||_renamingSid) return;
+    await activate();
+  };
+}
+
+function _isSessionSidebarVisible(list){
+  if(!list) return false;
+  const panel=list.closest&&list.closest('#panelChat');
+  if(panel&&!panel.classList.contains('active')) return false;
+  const sidebar=list.closest&&list.closest('.sidebar');
+  if(typeof _isDesktopWidth==='function'){
+    if(_isDesktopWidth()){
+      if(typeof _isSidebarCollapsed==='function'&&_isSidebarCollapsed()) return false;
+    }else if(sidebar&&!sidebar.classList.contains('mobile-open')){
+      return false;
+    }
+  }
+  return true;
+}
+
+function _captureSessionOpenControlFocus(list){
+  if(!list||typeof document==='undefined') return null;
+  if(!_isSessionSidebarVisible(list)) return null;
+  const active=document.activeElement;
+  if(!active||!list.contains(active)||!active.closest) return null;
+  const control=active.closest('.session-open-control');
+  if(!control||!list.contains(control)) return null;
+  return control.dataset&&control.dataset.sid?control.dataset.sid:null;
+}
+
+function _restoreSessionOpenControlFocus(list, sid){
+  if(!list||!sid||typeof document==='undefined') return false;
+  if(!_isSessionSidebarVisible(list)) return false;
+  const controls=list.querySelectorAll('.session-open-control[data-sid]');
+  const control=Array.from(controls).find(candidate=>candidate.dataset.sid===sid);
+  if(!control||control.disabled||control.getAttribute('aria-hidden')==='true') return false;
+  try{control.focus({preventScroll:true});}catch(_){control.focus();}
+  return document.activeElement===control;
+}
+
 
 function renderSessionListFromCache(){
   // #4671: while a profile-switch skeleton is up, bail — _allSessions still holds the
@@ -9283,7 +10376,18 @@ function renderSessionListFromCache(){
   // click it. Sidebar syncs, stream/unread updates, and panel-resync repairs can
   // all call this while the fixed-position menu is open; rebuilding the row DOM
   // here removes the anchor and makes the menu feel unclickable.
+  if(_sessionActionMenu
+    &&!_sidebarRepaintBackgroundChurn
+    &&typeof _sessionListRepaintDeferredByActionMenu!=='undefined'){
+    _sessionListRepaintDeferredByActionMenu=true;
+  }
   if(_sessionActionMenu) return;
+  // Same for the "Move to project" picker opened from that menu: rebuilding the
+  // rows removes its anchor, and the picker closes itself when its row goes away.
+  // Background churn defers — remembering the skipped repaint so closing the
+  // picker replays it; a user-intent repaint retires the picker first and paints
+  // now (see _projectPickerBlocksRepaint).
+  if(_projectPickerBlocksRepaint()){ if(typeof _sessionListRepaintDeferredByPicker!=='undefined') _sessionListRepaintDeferredByPicker=true; return; }
   closeSessionActionMenu();
   // Purge stale INFLIGHT entries for sessions the server confirms are NOT
   // streaming. This runs on every list refresh to prevent memory leaks from
@@ -9298,6 +10402,7 @@ function renderSessionListFromCache(){
   // session id into another conversation, that content hit should still appear.
   const searchMatches=_sessionSearchMergeMatches(sidebarRows,searchQueryRaw,_contentSearchResults);
   const allMatched=_ensureActiveSessionRowPresent(searchMatches,sidebarRows);
+  const sidebarPartition=_partitionSidebarSessionRows(allMatched, activeSidForSidebar);
   const {
     cliSessionCount,
     profileFiltered,
@@ -9308,19 +10413,18 @@ function renderSessionListFromCache(){
     webuiSessionsRaw,
     cliSessionsRaw,
     projectIdFor,
-  }=_partitionSidebarSessionRows(allMatched, activeSidForSidebar);
-  const referenceRaw=_sessionSourceFilter==='cli'?cliReferenceRaw:webuiReferenceRaw;
-  const isCliView=_sessionSourceFilter==='cli';
-  const sessions=_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView, projectIdFor)]);
+    rowsById,
+  }=sidebarPartition;
+  const sessions=_renderSidebarRowsFromPartition(sidebarPartition);
   // Server-provided source bucket counts are authoritative for the current
   // payload. When present, skip the expensive cross-bucket render/count pass;
   // null is a deliberate "not computed" sentinel consumed only by
   // _sessionSourceTabCount's fallback path below.
   const renderedWebuiSessionCount=_serverWebuiSessionCount===null
-    ? _renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false, projectIdFor)]).length
+    ? _renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false, projectIdFor)], rowsById).length
     : null;
   const renderedCliSessionCount=_serverCliSessionCount===null
-    ? _renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true, projectIdFor)]).length
+    ? _renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true, projectIdFor)], rowsById).length
     : null;
   const webuiSessionTabCount=_sessionSourceTabCount('webui', renderedWebuiSessionCount, renderedCliSessionCount);
   const cliSessionTabCount=_sessionSourceTabCount('cli', renderedWebuiSessionCount, renderedCliSessionCount);
@@ -9334,6 +10438,7 @@ function renderSessionListFromCache(){
   const committedSwipeDuration=_sessionPrefersReducedMotion()?0:SESSION_SWIPE_DURATION_MS;
   const committedSwipeReflowDelay=Math.max(0,committedSwipeDuration-SESSION_SWIPE_REFLOW_LEAD_MS);
   const listScrollTopBeforeRender=list.scrollTop||0;
+  const focusedSessionOpenControlId=_captureSessionOpenControlFocus(list);
   list.innerHTML='';
   // #4671: belt-and-suspenders. The authoritative skeleton-clear happens in
   // _applySessionListPayload (once fresh data is in hand) BEFORE this function is
@@ -9734,12 +10839,19 @@ function renderSessionListFromCache(){
     toggleBtn.onclick=(e)=>{e.stopPropagation();toggleSessionSelectMode();};
     list.appendChild(toggleBtn);
   }
+  _restoreSessionOpenControlFocus(list,focusedSessionOpenControlId);
   // Refresh FLIP and queued archive/delete reflow both drive
   // --session-reflow-offset. Refresh wins so one render has one transform writer.
   const reflowBefore=animateRefresh?flipBefore:_pendingSessionReflowPositions;
   const reflowTimeout=animateRefresh?SESSION_LIST_FLIP_TIMEOUT_MS:SESSION_REFLOW_TIMEOUT_MS;
   _pendingSessionReflowPositions=null;
   _playSessionRowsReflowFromPositions(reflowBefore,reflowTimeout,_sessionPrefersReducedMotion);
+  // The rebuild above may have replaced the row an open project picker is
+  // anchored to. Qualify the overlay independently of this repaint: keep it by
+  // re-anchoring to its owner's rebuilt row, or retire it only when that owner
+  // is actually gone. (Repaints that were deferred for the picker returned at
+  // the top of this function and never reach here.)
+  if(typeof _reanchorProjectPickerAfterRepaint==='function') _reanchorProjectPickerAfterRepaint();
 
   function _renderOneSession(s, isPinnedGroup=false){
     const el=document.createElement('div');
@@ -9821,19 +10933,62 @@ function renderSessionListFromCache(){
       branchInd.title=_sessionForkTooltip(parentLabel);
       titleRow.appendChild(branchInd);
     }
-    const title=document.createElement('span');
-    title.className='session-title';
+    const title=document.createElement(_sessionSelectMode?'span':'button');
+    title.className=_sessionSelectMode?'session-title':'session-title session-open-control';
+    if(!_sessionSelectMode){
+      title.type='button';
+      title.dataset.sid=s.session_id;
+      if(isActive) title.setAttribute('aria-current','page');
+      _installSessionOpenControl(title,s,()=>_activateRowWithoutPointer(title));
+    }
     const displayTitle=cleanTitle||'Untitled';
     const titleMatched=Boolean(searchQueryRaw&&displayTitle.toLowerCase().includes(searchQueryRaw.toLowerCase()));
     if(titleMatched) _appendHighlightedText(title,displayTitle,searchQueryRaw,'session-search-hit');
     else title.textContent=displayTitle;
     title.title=_sessionFullTitleTooltip(rawTitle,cleanTitle,s);
+    // Keep native button activation for Enter/Space. Pointer-only presses must
+    // still release editors without parking focus on the title.
+    if(!_sessionSelectMode){
+      // Keyboard focus only: a mouse press must not move focus onto the title,
+      // or the list stays :focus-within and deferred refreshes never apply.
+      // A title that already has focus keeps it. Click, double-click rename
+      // and assistive activation are unaffected.
+      title.onmousedown=(e)=>{
+        // Left and right presses: a right press opens the context menu, and
+        // closing it would otherwise hand focus back to the title.
+        if(e.button!==0&&e.button!==2) return;
+        e.preventDefault();
+        // The prevented default also leaves focus where it was.
+        _releaseFocusLikeRowPress(title);
+      };
+    }
     const tsMs=_sessionTimestampMs(s);
     const ts=document.createElement('span');
     const hasAttentionState=isStreaming||hasUnread||Boolean(attention);
     ts.className='session-time'+(hasAttentionState?' is-hidden':'');
     ts.textContent=hasAttentionState?'':_formatRelativeSessionTime(tsMs);
-    titleRow.appendChild(title);
+    const titleGroup=document.createElement('div');
+    titleGroup.className='session-title-group';
+    titleGroup.appendChild(title);
+    // Keep tag/filter controls outside the conversation-open button while one
+    // constrained flex group preserves a visible title on narrow sidebars.
+    for(const tag of tags){
+      const chip=document.createElement('span');
+      chip.className='session-tag';
+      chip.textContent=tag;
+      chip.title='Click to filter by '+tag;
+      // Presses reach the row so a long press on a tag still opens the conversation actions, as on
+      // master; the row gesture treats an ordinary tag release as "filter, do not open".
+      chip.onclick=(e)=>{
+        e.stopPropagation();
+        // Tag filtering is an explicit transition, not a background repaint.
+        _retireProjectPickerForExplicitRepaint();
+        const searchBox=$('sessionSearch');
+        if(searchBox){searchBox.value=tag;filterSessions();}
+      };
+      titleGroup.appendChild(chip);
+    }
+    titleRow.appendChild(titleGroup);
     // Project color dot: placed BETWEEN title and timestamp, not inside the
     // title span. Inside the title span it would be clipped by the ellipsis
     // truncation, becoming invisible exactly when the title is long enough
@@ -9859,7 +11014,7 @@ function renderSessionListFromCache(){
     const canExpandLineageSegments=showLineageMetadata&&Boolean(lineageKey&&segmentCount>1&&(lineageSegments.length>0||needsLineageReport||_lineageReportInflight.has(lineageReportKey)));
     const lineageSegmentsExpanded=canExpandLineageSegments&&_expandedLineageKeys.has(lineageKey);
     if(lineageSegmentsExpanded&&needsLineageReport){
-      _fetchLineageReportForRow(s,lineageKey).then(()=>renderSessionListFromCache());
+      _fetchLineageReportForRow(s,lineageKey).then(()=>_repaintSidebarForBackgroundChurn());
     }
     if(segmentCount>0){
       const segmentCountEl=document.createElement('span');
@@ -9875,10 +11030,13 @@ function renderSessionListFromCache(){
         const toggleLineageSegments=(e)=>{
           e.preventDefault();
           e.stopPropagation();
+          // Explicit user intent: the toggle must paint now, not be swallowed by
+          // the picker's background-repaint deferral.
+          _retireProjectPickerForExplicitRepaint();
           if(_expandedLineageKeys.has(lineageKey)) _expandedLineageKeys.delete(lineageKey);
           else {
             _expandedLineageKeys.add(lineageKey);
-            if(needsLineageReport) _fetchLineageReportForRow(s,lineageKey).then(()=>renderSessionListFromCache());
+            if(needsLineageReport) _fetchLineageReportForRow(s,lineageKey).then(()=>_repaintSidebarForBackgroundChurn());
           }
           renderSessionListFromCache();
         };
@@ -9899,6 +11057,9 @@ function renderSessionListFromCache(){
       ['pointerdown','pointerup','click'].forEach(ev=>childCountEl.addEventListener(ev,e=>e.stopPropagation()));
       childCountEl.onclick=(e)=>{
         e.stopPropagation();
+        // Explicit user intent: the toggle must paint now, not be swallowed by
+        // the picker's background-repaint deferral.
+        _retireProjectPickerForExplicitRepaint();
         const key=_sidebarLineageKeyForRow(s);
         if(_expandedChildSessionKeys.has(key)) _expandedChildSessionKeys.delete(key);
         else _expandedChildSessionKeys.add(key);
@@ -9996,6 +11157,7 @@ function renderSessionListFromCache(){
         let _gestureState='idle';
         let _swipeTracking=false;
         let _gesturePointerType='';
+        let _penPress=null;  // the pen's pointerdown, for the long press
         let _clearDragTimer=null;
         let _longPressTimer=null;
         let _longPressMenuOpened=false;
@@ -10026,6 +11188,8 @@ function renderSessionListFromCache(){
             if(_gestureState!=='pressing'||_renamingSid||_sessionSelectMode) return;
             _longPressMenuOpened=true;
             rowEl._skipNextChildOpen=true;
+            // As on a conversation's row: the pen's release and click stay here.
+            if(_gesturePointerType==='pen') _keepPenOnPressedElement(_penPress);
             _openSessionActionMenu(childSession, rowEl);
           },SESSION_LONG_PRESS_DELAY_MS);
         };
@@ -10135,10 +11299,14 @@ function renderSessionListFromCache(){
         rowEl.onpointerdown=(e)=>{
           if(e.pointerType==='mouse'||e.button!==0||_isForkActionTarget(e.target)) return;
           _beginForkGesture(e.clientX,e.clientY,e.pointerType||'');
+          if(e.pointerType==='pen') _penPress=e;
           if(e.pointerType==='touch'||e.pointerType==='pen') _scheduleForkLongPressMenu();
         };
         rowEl.onpointermove=(e)=>{
           if(e.pointerType==='mouse'||_gestureState==='idle') return;
+          // As on a conversation's row: once the long press has opened the ⋮
+          // menu, the rest of the gesture drags and swipes nothing.
+          if(_longPressMenuOpened) return;
           _pointerX=e.clientX;
           _pointerY=e.clientY;
           const signedDx=e.clientX-_pointerDownX;
@@ -10167,6 +11335,18 @@ function renderSessionListFromCache(){
           }
           _clearForkPointerState();
         };
+        // As on a conversation's row: the touch that opened the menu must not
+        // also click what is under the finger when it lifts. No click follows
+        // then, so the one-shot guard that would have swallowed it is cleared
+        // here, or it would swallow the next deliberate tap on the fork.
+        rowEl.addEventListener('touchend',(e)=>{
+          // A touch on the ⋮ button begins no gesture here, so the flag can be
+          // left over from an earlier long press: that tap keeps its click.
+          if(_isForkActionTarget(e.target)) return;
+          if(!_longPressMenuOpened||!e.cancelable) return;
+          e.preventDefault();
+          rowEl._skipNextChildOpen=false;
+        },{passive:false});
         rowEl.onpointercancel=()=>_clearForkPointerState();
         rowEl.onpointerleave=()=>{
           if(_gesturePointerType!=='mouse'&&_gestureState!=='idle') _clearForkPointerState();
@@ -10265,6 +11445,10 @@ function renderSessionListFromCache(){
             e.preventDefault();
             if(e.pointerType==='touch'||e.pointerType==='pen') return;
             e.stopPropagation();
+            // Coarse-pointer CSS hides the semantic actions anchor. Preserve
+            // the trusted mouse point so an expanded parent's oversized rect
+            // cannot swallow the fork child's project picker placement.
+            _recordProjectPickerContextPoint(actions,e);
             _openSessionActionMenu(child, actions||row);
           };
           _wireSessionNewTabListeners(row, ()=>child.session_id, ()=>child, {exact:true});
@@ -10286,20 +11470,6 @@ function renderSessionListFromCache(){
       }
       sessionText.appendChild(childList);
     }
-    // Append tag chips after the title text
-    for(const tag of tags){
-      const chip=document.createElement('span');
-      chip.className='session-tag';
-      chip.textContent=tag;
-      chip.title='Click to filter by '+tag;
-      chip.onclick=(e)=>{
-        e.stopPropagation();
-        const searchBox=$('sessionSearch');
-        if(searchBox){searchBox.value=tag;filterSessions();}
-      };
-      title.appendChild(chip);
-    }
-
     // Rename: called directly when we confirm it's a double-click
     const startRename=_buildSessionRenameStarter(
       s,
@@ -10366,6 +11536,11 @@ function renderSessionListFromCache(){
       _tapTimer=null;
       _lastTapTime=0;
       _clearPointerDragState();
+      // Coarse-pointer CSS hides the actions element used as the semantic menu
+      // anchor. Remember the real mouse point so a project picker opened from
+      // this menu is not positioned from the expanded parent row's full rect.
+      // That rect can be taller than the session list when children are open.
+      _recordProjectPickerContextPoint(actions,e);
       _openSessionActionMenu(s, actions||el);
     };
 
@@ -10395,6 +11570,7 @@ function renderSessionListFromCache(){
     let _pointerX=0;
     let _pointerY=0;
     let _gesturePointerType='';
+    let _penPress=null;  // the pen's pointerdown, for the long press
     const _clearLongPressTimer=()=>{
       if(_longPressTimer){clearTimeout(_longPressTimer);_longPressTimer=null;}
       if(!_longPressMenuOpened) el.classList.remove('long-pressing');
@@ -10422,6 +11598,11 @@ function renderSessionListFromCache(){
         clearTimeout(_tapTimer);
         _tapTimer=null;
         _lastTapTime=0;
+        // The menu may open under the pen. Its release and its click must
+        // still come to this row, which ends the press and counts the click
+        // as its own; on the menu the click belongs to neither and closes the
+        // menu as one outside it.
+        if(_gesturePointerType==='pen') _keepPenOnPressedElement(_penPress);
         _openSessionActionMenu(s, el);
       },SESSION_LONG_PRESS_DELAY_MS);
     };
@@ -10443,6 +11624,13 @@ function renderSessionListFromCache(){
     };
     const _updateSessionGesture=(clientX,clientY)=>{
       if(_gestureState==='idle') return false;
+      // The long press has opened the ⋮ menu: the rest of this gesture drags
+      // and swipes nothing. A sideways move is still claimed as it was, so
+      // the browser does with the move what it did.
+      if(_longPressMenuOpened){
+        _trackHorizontalSwipe(Math.abs(clientX-_pointerDownX),Math.abs(clientY-_pointerDownY));
+        return _swipeTracking;
+      }
       _pointerX=clientX;
       _pointerY=clientY;
       const signedDx=clientX-_pointerDownX;
@@ -10575,15 +11763,22 @@ function renderSessionListFromCache(){
       _clearLongPressTimer();
       if(_renamingSid){_gestureState='idle';return false;}
       if(_isSessionActionTarget(target)){_gestureState='idle';return false;}
+      // Before anything below can act: lifting after the long press opened
+      // the ⋮ menu ends the gesture and does nothing else, however far the
+      // finger or the pen was dragged in between (a swipe that far archives).
+      if(_longPressMenuOpened){_gestureState='idle';return true;}
       _pointerX=clientX;
       _pointerY=clientY;
       _commitSessionSwipe();
-      if(_longPressMenuOpened){_gestureState='idle';return true;}
       if(_gestureState==='committed') return true;
+      // An open action menu takes the tap first, exactly as on master: the tap only closes it (Codex round F,
+      // 2026-10-23: a tag tap that skipped this left the menu open, and the open menu holds back the filtered repaint).
       if(_sessionActionMenu&&!_sessionActionMenu.contains(target)){
         closeSessionActionMenu();
         return true;
       }
+      // A tag tap filters (the chip's own click handler) and never opens the conversation.
+      if(_gestureState==='pressing'&&target&&target.closest&&target.closest('.session-tag')){_gestureState='idle';return false;}
       if(target&&target.closest&&target.closest('.session-child-count,.session-child-sessions,.session-child-session,.session-lineage-count,.session-lineage-segments,.session-lineage-segment')) return false;
       if(_sessionSelectMode){if(!readOnly)toggleSessionSelect(s.session_id);return true;}
       if(wasDragging){
@@ -10609,22 +11804,79 @@ function renderSessionListFromCache(){
       _tapTimer=setTimeout(async()=>{
         _tapTimer=null;
         _lastTapTime=0;
-        if(_renamingSid) return;
-        try{
-          if(($('sessionSearch').value||'').trim()) _hideSearchPreviewsAfterSelect=true;
-          await _openSidebarSession(s);
-        }finally{
-          el.classList.remove('loading');
-        }
+        await _openRowSession();
       }, delay);
       return false;
     };
+    const _openRowSession=async()=>{
+      if(_renamingSid) return;
+      try{
+        if(($('sessionSearch').value||'').trim()) _hideSearchPreviewsAfterSelect=true;
+        await _openSidebarSession(s);
+      }finally{
+        el.classList.remove('loading');
+      }
+    };
+    // Activation that does not come from this row's pointer/touch gesture:
+    // Enter on the title link, or a screen reader's activate command (NVDA
+    // browse mode in Firefox dispatches mousedown/mouseup/click with no pointer
+    // events, so the gesture machine never arms). Same guards as the gesture
+    // path: row controls, nested controls, an open menu, selection mode.
+    const _activateRowWithoutPointer=(target)=>{
+      if(_isSessionActionTarget(target)) return;
+      if(target&&target.closest&&target.closest(SESSION_ROW_NESTED_CONTROL_SELECTOR)) return;
+      if(_sessionActionMenu){closeSessionActionMenu();return;}
+      if(_sessionSelectMode){if(!readOnly)toggleSessionSelect(s.session_id);return;}
+      clearTimeout(_tapTimer);_tapTimer=null;_lastTapTime=0;
+      void _openRowSession().then(_refocusOpenSessionTitle);
+    };
+    // Opening rebuilds the list and detaches the focused title, dropping focus
+    // to <body>. Hand it to the open conversation's rebuilt title so the next
+    // Tab continues from there. Focus that went somewhere real is left alone,
+    // and focus() is a no-op inside the closed (inert) phone drawer. A newer
+    // open still loading refocuses when it lands; an open superseded by one
+    // that already landed hands focus to the conversation that is current,
+    // never to its own stale row.
+    const _refocusOpenSessionTitle=()=>{
+      const current=document.activeElement;
+      if(current&&current!==document.body&&current.isConnected) return;
+      if(_loadingSessionId) return;
+      const sid=S.session&&S.session.session_id;
+      if(!sid) return;
+      const list=$('sessionList');
+      const row=list&&list.querySelector('.session-item[data-sid="'+CSS.escape(sid)+'"]');
+      const rowTitle=row&&row.querySelector('.session-open-control');
+      if(rowTitle) _focusSessionActionMenuRestoreTarget(rowTitle);
+    };
+    // A bare click is assistive-technology activation. The gesture's own
+    // clicks never get here as one: a mouse/pen release flags the click the
+    // browser dispatches in the same task (cleared once that task ends, so it
+    // cannot outlive the gesture, and is list-wide so a row rebuilt in between
+    // still matches), and a handled touch tap cancels its compatibility click
+    // at touchend. Both listeners use the capture phase so inner controls that
+    // stop propagation (the actions button) still publish and consume the flag.
+    el.addEventListener('pointerup',(e)=>{
+      if(e.pointerType==='touch'||e.button!==0) return;
+      _sessionRowPointerReleasePending=true;
+      setTimeout(()=>{_sessionRowPointerReleasePending=false;},0);
+    },true);
+    el.addEventListener('click',(e)=>{
+      if(_sessionRowPointerReleasePending){
+        _sessionRowPointerReleasePending=false;
+        return;
+      }
+      // Native keyboard/AT clicks belong to the button's detail=0 handler.
+      // Firefox AT mouse events (detail=1, no pointerup) still use this path.
+      if(e.detail===0&&e.target&&e.target.closest&&e.target.closest('.session-open-control')) return;
+      _activateRowWithoutPointer(e.target);
+    },true);
     el.onpointerdown=(e)=>{
       if(e.pointerType==='touch') return;
       if(e.pointerType==='mouse' && e.button!==0) return;
       if(_isSessionActionTarget(e.target)) return;
       _beginSessionGesture(e.clientX,e.clientY,e.pointerType||'');
       if(e.pointerType==='pen'){
+        _penPress=e;
         _scheduleSessionLongPressMenu();
       }
     };
@@ -10641,6 +11893,11 @@ function renderSessionListFromCache(){
     };
     el.onpointerleave=()=>{
       if(_gesturePointerType==='mouse'&&_gestureState!=='idle') _clearPointerDragState();
+      // A pen that leaves the row sends it nothing more either, not even its
+      // release: its long press would still open the ⋮ menu after it had
+      // lifted somewhere else. (Once that menu is open the pen is captured
+      // and does not leave.)
+      if(_gesturePointerType==='pen'&&_gestureState!=='idle') _clearPointerDragState();
     };
     el.onpointerup=(e)=>{
       if(e.pointerType==='touch') return;
@@ -10704,8 +11961,29 @@ function renderSessionListFromCache(){
     el.addEventListener('touchend',(e)=>{
       const touch=e.changedTouches&&e.changedTouches[0];
       if(!touch) return;
+      // A touch on the ⋮ button begins no gesture on the row, so a long-press flag
+      // left over from an earlier press must not cancel that tap's click (#8135).
+      if(_isSessionActionTarget(e.target)) return;
+      // A tap (or long press) on the row itself is fully handled by the
+      // gesture machine; cancel the browser's compatibility click so it cannot
+      // act on the row a second time. Drags and swipes produce no click, and
+      // nested controls keep theirs.
+      const tapHandledHere=_gestureState==='pressing'&&!_swipeTracking
+        &&!_isSessionActionTarget(e.target)
+        &&!(e.target&&e.target.closest&&e.target.closest(SESSION_ROW_NESTED_CONTROL_SELECTOR));
       if(_finishSessionGesture(touch.clientX,touch.clientY,e.target,'touch')) e.stopPropagation();
-    },{passive:true});
+      // A long press that opened the actions menu must not also synthesize a click on release (on a tag
+      // that click would filter and close the menu it just opened).
+      if((tapHandledHere||_longPressMenuOpened)&&e.cancelable){
+        e.preventDefault();
+        // Cancelling also drops the compatibility mousedown that would move
+        // focus. Release it here instead (a long press that opened the menu
+        // gets no mousedown either). During a rename this commits it, and it
+        // must come after _finishSessionGesture: an unchanged rename ends at
+        // once, and the gesture must still see it active and open nothing.
+        if(!_longPressMenuOpened) _releaseFocusLikeRowPress(e.target&&e.target.closest&&e.target.closest('.session-title'));
+      }
+    },{passive:false});
     return el;
   }
 }
@@ -10715,7 +11993,7 @@ async function _handleActiveSessionStorageEvent(e){
   // Do not treat localStorage as a global active-session bus. Each tab owns its
   // active conversation via its URL (/session/<id>), so another tab switching
   // sessions must not force this tab to navigate away from an in-flight turn.
-  if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+  if(typeof _repaintSidebarForBackgroundChurn==='function') _repaintSidebarForBackgroundChurn();
 }
 
 async function _handleShowAllProfilesStorageEvent(e){
@@ -10841,6 +12119,17 @@ async function removeWorktree(session){
   }
 }
 
+// Wire codes from /api/session/delete are for clients, not for people: map the
+// bounded refusals to a sentence the user can act on (#8323 review item 3).
+function _sessionDeleteErrorMessage(err){
+  const code=err&&err.message?String(err.message):String(err||'');
+  if(code==='session_busy') return t('session_delete_busy');
+  if(code==='unknown_execution') return t('session_delete_unknown_execution');
+  if(code==='runtime_ledger_unavailable') return t('session_delete_ledger_unavailable');
+  if(code==='state_db_cleanup_failed') return t('session_delete_cleanup_failed');
+  return t('delete_failed')+code;
+}
+
 async function deleteSession(sid, beforeDelete=null){
   const session=_sessionSnapshotById(sid);
   const ok=await showConfirmDialog({
@@ -10874,10 +12163,10 @@ async function deleteSession(sid, beforeDelete=null){
     if(optimisticRendered){
       _optimisticallyRemovedSessionIds.delete(sid);
       _allSessions=previousSessions;
-      renderSessionListFromCache();
+      _repaintSidebarAfterSessionCompletion(sid);
     }
     const err=deleteResult.error;
-    setStatus(`Delete failed: ${err&&err.message?err.message:String(err)}`);
+    setStatus(_sessionDeleteErrorMessage(err));
     return false;
   }
   const response=deleteResult&&deleteResult.response;
@@ -10890,6 +12179,7 @@ async function deleteSession(sid, beforeDelete=null){
   }
   if(S.session&&S.session.session_id===sid){
     S.session=null;S.messages=[];S.entries=[];
+    if(typeof _syncProviderQuotaForActiveContext==='function') _syncProviderQuotaForActiveContext();
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
     localStorage.removeItem('hermes-webui-session');
     // load the most recent remaining session, or show blank if none left
@@ -10902,6 +12192,7 @@ async function deleteSession(sid, beforeDelete=null){
       const _tm=$('topbarMeta');if(_tm)_tm.textContent='Start a new conversation';
       $('msgInner').innerHTML='';
       $('emptyState').style.display='';
+      if(typeof a11yTreeReset==='function') a11yTreeReset($('fileTree'), {focusTo: $('workspaceFilesTab')});
       $('fileTree').innerHTML='';
       if(typeof S!=='undefined') S.session=null;
       if(typeof syncAppTitlebar==='function') syncAppTitlebar();
@@ -10918,17 +12209,264 @@ async function deleteSession(sid, beforeDelete=null){
 
 const PROJECT_COLORS=['#7cb9ff','#f5c542','#e94560','#50c878','#c084fc','#fb923c','#67e8f9','#f472b6'];
 
+// Teardown hook for the currently mounted project picker (see
+// _showProjectPicker). Kept at module scope so opening a second picker — and
+// any later viewport change — can retire the previous one's listeners instead
+// of leaking a handler that repositions a detached element.
+let _projectPickerTeardown=null;
+// Set when an explicit mutation completion could not repaint because the session
+// action menu was still open. Menu teardown replays this through the keep-picker
+// contract so a newer picker cannot swallow the completed state change.
+let _sessionListRepaintDeferredByActionMenu=false;
+// Set when a sidebar repaint was skipped because the project picker was open, so the
+// picker's teardown can replay it (same contract as the ⋮ menu guard, minus the lost repaint).
+let _sessionListRepaintDeferredByPicker=false;
+// Overlay generation for dismissal authority. Bumped every time a picker opens;
+// flows that may need to dismiss a picker capture the current value when their
+// interaction fires, so work that began before a picker opened can never retire
+// that newer overlay (its claim is older than the picker's opening).
+let _projectPickerOpenEpoch=0;
+
+// Sidebar repaints that are background churn — list refreshes, stream/unread
+// syncs, poll timers, panel-resync repairs — defer while the project picker is
+// open instead of tearing the rows out from under it, and the picker's close
+// replays them. Producers run through the wrapper below. Every other repaint
+// proceeds — a durable/view update is never deferred — and the render then
+// qualifies the overlay independently: keep it by re-anchoring to its owner's
+// rebuilt row, or retire it when its owner is actually gone. A dismissal is
+// never inherited: only an explicit claim at least as new as the picker's
+// opening may retire it (see the claim parameter of the explicit repaint
+// action), so legacy async callers can no longer dismiss a newer picker.
+let _sidebarRepaintBackgroundChurn=false;
+function _repaintSidebarForBackgroundChurn(){
+  const previous=_sidebarRepaintBackgroundChurn;
+  _sidebarRepaintBackgroundChurn=true;
+  try{ renderSessionListFromCache(); }
+  finally{ _sidebarRepaintBackgroundChurn=previous; }
+}
+
+// A completion whose durable result retires or relocates a row (archive, move,
+// delete rollback) must not paint as fresh user intent just because the user
+// started the action earlier: the open picker is the newer choice. Retire only
+// a picker anchored to the session this response mutated — its row is going
+// away — then paint the durable result now, keeping and re-anchoring a picker
+// owned by another session instead of deferring the result behind it. Callers
+// run after the awaited response, never across it.
+function _repaintSidebarAfterSessionCompletion(sessionId,claimEpoch){
+  const open=typeof _openProjectPicker!=='undefined'?_openProjectPicker:null;
+  if(open&&sessionId&&open.sessionId===sessionId&&typeof _retireProjectPickerForExplicitRepaint==='function'){
+    const retired=_retireProjectPickerForExplicitRepaint(claimEpoch);
+    // A newer picker for the same still-existing row outranks this held
+    // completion. Publish the durable move now, but preserve and re-anchor the
+    // newer overlay instead of deferring it or granting the old response
+    // dismissal authority.
+    if(!retired&&typeof claimEpoch==='number'){
+      _repaintSidebarKeepingProjectPicker();
+      return;
+    }
+  }
+  _repaintSidebarKeepingProjectPicker();
+}
+
+// Resolve picker ownership through the same cache/filter/lineage pipeline the
+// next sidebar render will use. A connected DOM row is not authoritative: a
+// successful delete/archive/filter change can leave that old node connected
+// until the repaint. In that case background churn must proceed immediately so
+// the render removes the stale row and its overlay.
+function _projectPickerOwnerEligibleForSidebar(sessionId){
+  if(!sessionId) return false;
+  const rows=Array.isArray(_allSessions)?_allSessions:[];
+  const searchEl=(typeof $==='function')?$('sessionSearch'):null;
+  const query=searchEl?String(searchEl.value||'').trim():'';
+  const sidebarRows=typeof _sessionRowsWithActiveEphemeralSession==='function'
+    ? _sessionRowsWithActiveEphemeralSession(rows)
+    : rows;
+  const searchMatches=(typeof _sessionSearchMergeMatches==='function')
+    ? _sessionSearchMergeMatches(sidebarRows,query,typeof _contentSearchResults!=='undefined'?_contentSearchResults:[])
+    : sidebarRows;
+  const matched=typeof _ensureActiveSessionRowPresent==='function'
+    ? _ensureActiveSessionRowPresent(searchMatches,sidebarRows)
+    : searchMatches;
+  if(typeof _partitionSidebarSessionRows!=='function'||typeof _renderSidebarRowsFromPartition!=='function'){
+    return matched.some(row=>row&&row.session_id===sessionId);
+  }
+  const activeSid=typeof _activeSessionIdForSidebar==='function'
+    ? _activeSessionIdForSidebar()
+    : ((typeof S!=='undefined'&&S.session)?S.session.session_id:null);
+  const partition=_partitionSidebarSessionRows(matched,activeSid);
+  const rendered=_renderSidebarRowsFromPartition(partition);
+  return rendered.some(row=>{
+    if(typeof _sessionLineageContainsSession==='function') return _sessionLineageContainsSession(row,sessionId);
+    return Boolean(row&&row.session_id===sessionId);
+  });
+}
+
+// Decide what a sidebar repaint does while the project picker is open. Returns
+// true when the caller must skip this repaint (background churn: defer, and the
+// picker's close replays it). Every other repaint proceeds now — completion,
+// navigation and explicit intent alike — and the render qualifies the overlay
+// afterwards: an explicit caller may have claimed a dismissal first (see the
+// claim parameter of the explicit repaint action), otherwise the picker is
+// kept and re-anchored to its owner's rebuilt row. No caller inherits a blanket
+// dismissal, so a legacy async completion can no longer tear down a newer
+// picker it never claimed authority over.
+function _projectPickerBlocksRepaint(){
+  if(typeof _projectPickerTeardown==='undefined'||_projectPickerTeardown===null) return false;
+  const background=Boolean(typeof _sidebarRepaintBackgroundChurn!=='undefined'&&_sidebarRepaintBackgroundChurn);
+  if(!background) return false;
+  const open=typeof _openProjectPicker!=='undefined'?_openProjectPicker:null;
+  if(open&&typeof _projectPickerOwnerEligibleForSidebar==='function'
+     &&!_projectPickerOwnerEligibleForSidebar(open.sessionId)) return false;
+  return true;
+}
+
+// True when the open picker is anchored to a row inside the session list — the
+// domain a sidebar rebuild replaces. A picker anchored outside it is untouched
+// by a row rebuild, so scroll-driven rebuilds must proceed instead of deferring
+// on it.
+function _projectPickerAnchorWithinSessionList(){
+  const open=typeof _openProjectPicker!=='undefined'?_openProjectPicker:null;
+  const anchor=open&&open.anchorEl;
+  if(!anchor||typeof anchor.closest!=='function') return false;
+  return Boolean(anchor.closest('#sessionList, .session-list'));
+}
+
+// A repaint that must not wait for the picker and must not retire it either:
+// the scroll-driven rebuild while the picker's anchor lives outside the rows
+// being replaced. A picker anchored elsewhere (a topbar title, a project chip)
+// survives a list rebuild, and deferring would leave blank space while the
+// user scrolls.
+let _sidebarRepaintKeepProjectPicker=false;
+function _repaintSidebarKeepingProjectPicker(){
+  const previous=_sidebarRepaintKeepProjectPicker;
+  _sidebarRepaintKeepProjectPicker=true;
+  try{ renderSessionListFromCache(); }
+  finally{ _sidebarRepaintKeepProjectPicker=previous; }
+}
+
+// Retire the picker ahead of a repaint the user just asked for (child-count
+// toggle, tag filter, inline project create, Select, a new chat). The deferral
+// guard in renderSessionListFromCache exists for background churn; an explicit
+// transition must complete instead. Callers repaint immediately after, so a
+// pending deferral folds into that repaint instead of replaying later.
+//
+// Overlay generation: a caller whose interaction may land after newer work
+// started (a held response, a delayed completion) passes the claim it captured
+// when the interaction fired. A picker that opened after that claim is the
+// user's newer choice; this repaint has no dismissal authority over it and the
+// call is refused — the overlay is kept and re-anchored by the render instead.
+function _retireProjectPickerForExplicitRepaint(claimEpoch){
+  if(typeof _projectPickerTeardown==='undefined'||!_projectPickerTeardown) return false;
+  const open=(typeof _openProjectPicker!=='undefined')?_openProjectPicker:null;
+  if(open&&typeof claimEpoch==='number'
+     &&typeof open.openEpoch==='number'
+     &&open.openEpoch>claimEpoch) return false;
+  const retire=_projectPickerTeardown;
+  _projectPickerTeardown=null;
+  if(typeof _sessionListRepaintDeferredByPicker!=='undefined') _sessionListRepaintDeferredByPicker=false;
+  try{ retire(); }catch(_){}
+  return true;
+}
+
+// A kept picker is older DOM than the durable cache update that triggered the
+// repaint. Refresh its radio state in place so the visual and screen-reader
+// selection agree with the sidebar, without rebuilding the menu or moving
+// keyboard focus.
+function _syncProjectPickerSelection(open){
+  if(!open||!open.picker||!open.sessionId||!Array.isArray(_allSessions)) return false;
+  const session=_allSessions.find(s=>s&&s.session_id===open.sessionId);
+  if(!session||typeof open.picker.querySelectorAll!=='function') return false;
+  const selected=session.project_id==null?'':String(session.project_id);
+  const items=Array.from(open.picker.querySelectorAll('.project-picker-item[data-project-id]'));
+  for(const item of items){
+    const active=String(item.getAttribute('data-project-id')||'')===selected;
+    if(item.classList&&typeof item.classList.toggle==='function') item.classList.toggle('active',active);
+    if(typeof item.setAttribute==='function') item.setAttribute('aria-checked',active?'true':'false');
+  }
+  return items.length>0;
+}
+
+// Qualify the open picker after a repaint rebuilt the sidebar rows. The repaint
+// itself always proceeds (view adoption and durable updates stay immediate);
+// this decides the overlay's fate independently. When the picker's anchor row
+// was replaced, move the picker to the row its owner has now — a still-eligible
+// owner keeps its overlay — and retire it only when that owner is actually gone
+// (archived, deleted, filtered out). Never leave the picker mounted on a
+// detached anchor.
+
+function _reanchorProjectPickerAfterRepaint(){
+  const open=(typeof _openProjectPicker!=='undefined')?_openProjectPicker:null;
+  if(!open||!open.picker||open.picker.isConnected===false) return false;
+  // The picker can outlive a durable project mutation because completion
+  // repaints intentionally keep a newer interaction open. Refresh its choices
+  // before the radio state: delete/create/rename must not leave stale project
+  // IDs, missing rows or old labels clickable until the picker is reopened.
+  const choicesRefresh=typeof open.refreshChoices==='function'?open.refreshChoices():false;
+  const gestureDeferred=choicesRefresh==='deferred';
+  // A pressed choice must remain the same DOM node, at the same screen
+  // position, through pointerup/click. Repaint may still retarget a detached
+  // anchor, but choice replacement and placement wait until the gesture ends.
+  if(gestureDeferred){
+    const current=open.anchorEl;
+    if(current&&current.isConnected!==false) return false;
+  }
+  if(typeof _syncProjectPickerSelection==='function') _syncProjectPickerSelection(open);
+  const current=open.anchorEl;
+  if(current&&current.isConnected!==false){
+    // Refreshed choices can make the picker taller than when it was placed (a
+    // pending create, rename or delete completing). Re-run placement for a
+    // still-connected anchor too, so a below-anchor picker that no longer fits
+    // flips or caps instead of growing past the viewport. Focus is untouched.
+    if(typeof _positionProjectPicker==='function') _positionProjectPicker(open.picker,current);
+    return false;
+  }
+  let next=(typeof _findSessionRenameRow==='function')?_findSessionRenameRow(open.sessionId):null;
+  const contextPoint=current&&current._projectPickerContextPoint;
+  const currentClasses=current&&current.classList;
+  if(next&&currentClasses&&typeof currentClasses.contains==='function'
+     &&typeof next.querySelector==='function'){
+    if(currentClasses.contains('session-actions-trigger')){
+      next=next.querySelector(':scope > .session-actions > .session-actions-trigger')||next;
+    }else if(currentClasses.contains('session-actions')){
+      next=next.querySelector(':scope > .session-actions')||next;
+    }
+  }
+  if(!next||next.isConnected===false){
+    if(typeof open.dismiss==='function') open.dismiss({restoreFocus:false});
+    return false;
+  }
+  if(contextPoint) next._projectPickerContextPoint=contextPoint;
+  if(typeof open.retarget==='function') open.retarget(next);
+  else open.anchorEl=next;
+  if(!gestureDeferred&&typeof _positionProjectPicker==='function') _positionProjectPicker(open.picker,next);
+  if(!gestureDeferred&&typeof requestAnimationFrame==='function'){
+    requestAnimationFrame(()=>{
+      if(open.picker&&open.picker.isConnected!==false&&open.anchorEl&&open.anchorEl.isConnected!==false
+         &&typeof _positionProjectPicker==='function'){
+        try{ _positionProjectPicker(open.picker,open.anchorEl); }catch(_){}
+      }
+    });
+  }
+  return true;
+}
+
 function _showProjectPicker(session, anchorEl){
-  // Close any existing picker
+  // Overlay generation: opening a picker is the event a later dismissal claim
+  // is measured against (see _retireProjectPickerForExplicitRepaint).
+  if(typeof _projectPickerOpenEpoch==='number') _projectPickerOpenEpoch+=1;
+  const pickerEpoch=(typeof _projectPickerOpenEpoch==='number')?_projectPickerOpenEpoch:0;
+  // Close any existing picker. Its teardown, not just element removal, has to
+  // run so no resize/click listener outlives the element it was bound for.
+  if(_projectPickerTeardown){const stale=_projectPickerTeardown;_projectPickerTeardown=null;stale();}
   document.querySelectorAll('.project-picker').forEach(p=>p.remove());
   const picker=document.createElement('div');
   picker.className='project-picker';
   // "No project" option
   const none=_projectPickerItem('',!session.project_id);
+  none.setAttribute('data-project-id','');
   none.textContent=t('project_picker_none');
   none.onclick=async()=>{
-    picker.remove();
-    document.removeEventListener('click',close);
+    teardown();
     try {
       await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:null})});
       // Sidebar rows are shallow copies of _allSessions entries (see
@@ -10937,7 +12475,7 @@ function _showProjectPicker(session, anchorEl){
       // renderSessionListFromCache() reflects the move. (#2551)
       const idx=_allSessions.findIndex(s=>s&&s.session_id===session.session_id);
       if(idx>=0) _allSessions[idx].project_id=null;
-      renderSessionListFromCache();
+      _repaintSidebarAfterSessionCompletion(session.session_id,pickerEpoch);
       showToast('Removed from project');
     } catch(e) {
       showToast('Unassign failed: '+(e.message||e));
@@ -10959,38 +12497,50 @@ function _showProjectPicker(session, anchorEl){
     if(projProfile === 'default' || sessionProfile === 'default') return false;
     return true;
   };
-  for(const p of _allProjects){
-    if (_profileHidesProject(p.profile)) continue;
-    const item=_projectPickerItem('',session.project_id===p.project_id);
-    if(p.color){
-      const dot=document.createElement('span');
-      dot.className='color-dot';
-      dot.style.cssText='width:6px;height:6px;border-radius:50%;background:'+p.color+';flex-shrink:0;';
-      item.appendChild(dot);
+  const _projectPickerChoiceSignature=(p)=>JSON.stringify([
+    String(p.project_id),String(p.name||''),String(p.color||''),String(p.profile||'')
+  ]);
+  const _projectPickerChoice=(p,item)=>{
+    if (_profileHidesProject(p.profile)) return null;
+    item=item||_projectPickerItem('',session.project_id===p.project_id);
+    item.setAttribute('data-project-id',String(p.project_id));
+    const signature=_projectPickerChoiceSignature(p);
+    if(item._projectPickerChoiceSignature!==signature){
+      for(const child of Array.from(item.children||[])) child.remove();
+      item.textContent='';
+      if(p.color){
+        const dot=document.createElement('span');
+        dot.className='color-dot';
+        dot.style.cssText='width:6px;height:6px;border-radius:50%;background:'+p.color+';flex-shrink:0;';
+        item.appendChild(dot);
+      }
+      const name=document.createElement('span');
+      name.textContent=p.name;
+      item.appendChild(name);
+      item._projectPickerChoiceSignature=signature;
     }
-    const name=document.createElement('span');
-    name.textContent=p.name;
-    item.appendChild(name);
     item.onclick=async()=>{
-      picker.remove();
-      document.removeEventListener('click',close);
+      teardown();
       try{
         await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:p.project_id})});
         // See #2551 — write to _allSessions, not the shallow sidebar copy.
         const idx=_allSessions.findIndex(s=>s&&s.session_id===session.session_id);
         if(idx>=0) _allSessions[idx].project_id=p.project_id;
-        renderSessionListFromCache();
+        _repaintSidebarAfterSessionCompletion(session.session_id,pickerEpoch);
         showToast('Moved to '+p.name);
       }catch(e){showToast('Move failed: '+(e.message||e));}
     };
-    picker.appendChild(item);
+    return item;
+  };
+  for(const p of _allProjects){
+    const item=_projectPickerChoice(p);
+    if(item) picker.appendChild(item);
   }
   // "+ New project" shortcut at the bottom
   const createItem=_projectPickerItem('project-picker-create');
   createItem.textContent=t('project_picker_new');
   createItem.onclick=async()=>{
-    picker.remove();
-    document.removeEventListener('click',close);
+    teardown();
     const name=await showPromptDialog({
       message:t('project_name_prompt'),
       confirmLabel:t('create'),
@@ -11007,36 +12557,291 @@ function _showProjectPicker(session, anchorEl){
       try{
         await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:res.project.project_id})});
         session.project_id=res.project.project_id;
-        await renderSessionList();
+        await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
         showToast('Created "'+res.project.name+'" and moved session');
       }catch(e){
-        await renderSessionList();
+        await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
         showToast('Created "'+res.project.name+'" but move failed: '+(e&&e.message||'try again'));
       }
     }
   };
   picker.appendChild(createItem);
+  let pointerGestureId=null;
+  let pendingChoiceRefresh=false;
+  let choiceRefreshTimer=null;
+  const refreshChoices=(opts)=>{
+    if(!picker||picker.isConnected===false||typeof picker.querySelectorAll!=='function') return false;
+    if(pointerGestureId!==null&&!(opts&&opts.force===true)){
+      pendingChoiceRefresh=true;
+      return 'deferred';
+    }
+    const oldItems=Array.from(picker.querySelectorAll('.project-picker-item'));
+    const oldProjectItems=Array.from(picker.querySelectorAll('.project-picker-item[data-project-id]'))
+      .filter(item=>String(item.getAttribute('data-project-id')||'')!=='');
+    const visibleProjects=_allProjects.filter(p=>!_profileHidesProject(p.profile));
+    const unchanged=oldProjectItems.length===visibleProjects.length
+      &&oldProjectItems.every((item,index)=>
+        String(item.getAttribute('data-project-id')||'')===String(visibleProjects[index].project_id)
+        &&item._projectPickerChoiceSignature===_projectPickerChoiceSignature(visibleProjects[index]));
+    if(unchanged) return false;
+    const active=(typeof document!=='undefined')?document.activeElement:null;
+    const ownedFocus=!!(active&&typeof picker.contains==='function'&&picker.contains(active));
+    const focusedId=ownedFocus&&typeof active.getAttribute==='function'
+      ? active.getAttribute('data-project-id')
+      : null;
+    const focusedIndex=ownedFocus?oldItems.indexOf(active):-1;
+    const byId=new Map(oldProjectItems.map(item=>[String(item.getAttribute('data-project-id')),item]));
+    const retained=new Set();
+    // Keep every surviving choice exactly where it is: in real browsers a DOM
+    // move drops the focus of the row the user is on (Chromium blurs a focused
+    // node the moment it is re-inserted), so only genuinely new choices are
+    // inserted — each one before the next expected row, or in the tail.
+    let anchor=createItem;
+    for(let index=visibleProjects.length-1;index>=0;index--){
+      const p=visibleProjects[index];
+      const id=String(p.project_id);
+      let item=byId.get(id);
+      if(item){
+        retained.add(item);
+        _projectPickerChoice(p,item);
+      }else{
+        item=_projectPickerChoice(p);
+        if(item) picker.insertBefore(item,anchor);
+      }
+      if(item) anchor=item;
+    }
+    for(const item of oldProjectItems){
+      if(!retained.has(item)) item.remove();
+    }
+    if(ownedFocus&&active!==none&&active!==createItem){
+      const fresh=Array.from(picker.querySelectorAll('.project-picker-item'));
+      const surviving=fresh.find(item=>typeof item.getAttribute==='function'
+        &&item.getAttribute('data-project-id')===focusedId);
+      let target=surviving;
+      if(!target&&fresh.length){
+        target=fresh[Math.min(Math.max(focusedIndex,0),fresh.length-1)];
+      }
+      // Identity reconciliation leaves a surviving focused choice in place.
+      // Only a deleted choice needs a replacement focus target, and that handoff
+      // must not scroll the sidebar or viewport.
+      if(!surviving&&target&&typeof _focusSessionActionMenuRestoreTarget==='function'){
+        _focusSessionActionMenuRestoreTarget(target);
+      }
+    }
+    return true;
+  };
+  let gestureClickListener=null;
+  const applyPendingChoiceRefresh=()=>{
+    choiceRefreshTimer=null;
+    // The gesture settles here: release the picker for normal repaints again.
+    // Until this runs the gesture id stays bound, so a repaint that completes
+    // between the release and the gesture's click (or its grace timeout) is
+    // still deferred instead of re-placing the picker under the finger.
+    pointerGestureId=null;
+    if(gestureClickListener){document.removeEventListener('click',gestureClickListener,true);gestureClickListener=null;}
+    if(!pendingChoiceRefresh||picker.isConnected===false) return;
+    pendingChoiceRefresh=false;
+    refreshChoices({force:true});
+    const open=(typeof _openProjectPicker!=='undefined')?_openProjectPicker:null;
+    if(open&&open.picker===picker){
+      if(typeof _syncProjectPickerSelection==='function') _syncProjectPickerSelection(open);
+      if(open.anchorEl&&open.anchorEl.isConnected!==false
+         &&typeof _positionProjectPicker==='function') _positionProjectPicker(picker,open.anchorEl);
+    }
+  };
+  const finishPointerGesture=(event)=>{
+    if(pointerGestureId===null) return;
+    if(event&&event.pointerId!=null&&event.pointerId!==pointerGestureId) return;
+    // The gesture id stays bound until applyPendingChoiceRefresh settles the
+    // gesture. A repaint that lands in between (e.g. a mutation's follow-up GET
+    // completing on touch) must still be deferred, or it can re-place the picker
+    // under the finger and the tap lands on the wrong row.
+    // Pointerup is followed by click: in the same task for a mouse, in a later
+    // one for a touch tap (Chromium synthesizes the click after touchend). The
+    // pressed node and the picker's place must survive until that click has
+    // been dispatched, so apply the queued refresh right after it, with a
+    // grace period for gestures that end without a click (pointercancel, a
+    // release outside the picker). Settle every release, with or without a
+    // queued refresh, so the id never outlives the gesture.
+    if(gestureClickListener) document.removeEventListener('click',gestureClickListener,true);
+    gestureClickListener=()=>{
+      document.removeEventListener('click',gestureClickListener,true);gestureClickListener=null;
+      if(choiceRefreshTimer!==null) clearTimeout(choiceRefreshTimer);
+      choiceRefreshTimer=setTimeout(applyPendingChoiceRefresh,0);
+    };
+    document.addEventListener('click',gestureClickListener,true);
+    if(choiceRefreshTimer!==null) clearTimeout(choiceRefreshTimer);
+    choiceRefreshTimer=setTimeout(applyPendingChoiceRefresh,400);
+  };
+  const beginPointerGesture=(event)=>{
+    if(event&&event.button!=null&&event.button!==0) return;
+    // A prior release/cancel may still be waiting for its synthetic click or
+    // grace timeout. A new press owns the pending refresh now: retire the old
+    // completion so it cannot rebuild or reposition choices under this press.
+    if(choiceRefreshTimer!==null){clearTimeout(choiceRefreshTimer);choiceRefreshTimer=null;}
+    if(gestureClickListener){
+      document.removeEventListener('click',gestureClickListener,true);
+      gestureClickListener=null;
+    }
+    pointerGestureId=event&&event.pointerId!=null?event.pointerId:0;
+  };
   // Append to body and position using getBoundingClientRect so it isn't clipped
   // by overflow:hidden on .session-item ancestors
   document.body.appendChild(picker);
   picker.style.position='fixed';
   picker.style.zIndex='999';
+  picker.style.right='auto';
+  const visualViewport=window.visualViewport;
+  let repositionFrame=null;
+  let pendingCloseWhenAway=false;
+  let closeTimer=null;
+  let anchorObserver=null;
+
+  // Re-place from the current anchor. The placement itself lives in
+  // _positionProjectPicker so the module-level resize hook can share it; this
+  // wrapper folds in the ownership rules that close the picker: a retired
+  // element, a repainted-away anchor, or — on scroll — a row that left the
+  // list. Viewport changes re-place instead, even when the row is briefly out
+  // of sight behind the keyboard or a resized window.
+  const reposition=(closeWhenAway)=>{
+    if(picker.isConnected===false){teardown();return;}
+    if(anchorEl.isConnected===false){teardown();return;}
+    if(closeWhenAway){
+      const bounds=_projectPickerVisibleBounds();
+      if(_projectPickerAnchorAway(anchorEl,_projectPickerAnchorRect(anchorEl,bounds),bounds)){teardown();return;}
+    }
+    _positionProjectPicker(picker,anchorEl);
+  };
+  // visualViewport resize/scroll fire on mobile when the on-screen keyboard or
+  // the URL bar changes the usable height; window resize covers desktop and
+  // orientation changes. Coalesce with rAF so a burst of events costs one
+  // reposition per frame.
+  const scheduleReposition=(closeWhenAway)=>{
+    pendingCloseWhenAway=pendingCloseWhenAway||closeWhenAway;
+    if(repositionFrame!==null) return;
+    repositionFrame=requestAnimationFrame(()=>{
+      repositionFrame=null;
+      const shouldClose=pendingCloseWhenAway;
+      pendingCloseWhenAway=false;
+      reposition(shouldClose);
+    });
+  };
+  const onViewportChange=()=>scheduleReposition(false);
+  // Element scroll does not bubble. Capture it from the session list and any
+  // other ancestor that moves the anchor, but ignore the picker's own scroll.
+  const onScroll=(e)=>{
+    if(e.target===document||e.target?.contains?.(anchorEl)) scheduleReposition(true);
+  };
+  const close=(e)=>{
+    if(!picker.contains(e.target)&&e.target!==anchorEl) teardown();
+  };
+  // Single exit path: item selection, outside click, replacement by a newer
+  // picker and an unmounted anchor all run this, so no listener outlives the
+  // element it was bound for.
+  const teardown=()=>{
+    if(_projectPickerTeardown===teardown) _projectPickerTeardown=null;
+    if(_openProjectPicker&&_openProjectPicker.picker===picker) _openProjectPicker=null;
+    if(repositionFrame!==null){cancelAnimationFrame(repositionFrame);repositionFrame=null;}
+    pendingCloseWhenAway=false;
+    if(closeTimer!==null){clearTimeout(closeTimer);closeTimer=null;}
+    if(choiceRefreshTimer!==null){clearTimeout(choiceRefreshTimer);choiceRefreshTimer=null;}
+    if(gestureClickListener){document.removeEventListener('click',gestureClickListener,true);gestureClickListener=null;}
+    pointerGestureId=null;
+    pendingChoiceRefresh=false;
+    if(anchorObserver){anchorObserver.disconnect();anchorObserver=null;}
+    window.removeEventListener('resize',onViewportChange);
+    if(visualViewport){
+      visualViewport.removeEventListener('resize',onViewportChange);
+      visualViewport.removeEventListener('scroll',onViewportChange);
+    }
+    document.removeEventListener('scroll',onScroll,true);
+    document.removeEventListener('click',close);
+    picker.removeEventListener('pointerdown',beginPointerGesture,true);
+    document.removeEventListener('pointerup',finishPointerGesture,true);
+    document.removeEventListener('pointercancel',finishPointerGesture,true);
+    picker.remove();
+    // Replay a sidebar repaint that was skipped while this picker was open, once
+    // no other picker has taken over (next tick, after any selection handler has
+    // written its cache update). typeof-guarded so the function stays
+    // self-contained for the extracted-function Node harness.
+    if(typeof _sessionListRepaintDeferredByPicker!=='undefined'&&_sessionListRepaintDeferredByPicker){
+      setTimeout(()=>{
+        // A replacement picker opened in the meantime inherits the deferral and
+        // replays it when it closes; keep the flag set until someone replays it.
+        // The ⋮ action menu blocks renders too, so if one is open now (e.g. the
+        // picker was dismissed by opening another row's menu), leave the flag
+        // for closeSessionActionMenu() to drain.
+        if(_projectPickerTeardown!==null||!_sessionListRepaintDeferredByPicker) return;
+        if(typeof _sessionActionMenu!=='undefined'&&_sessionActionMenu) return;
+        _sessionListRepaintDeferredByPicker=false;
+        if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+      },0);
+    }
+  };
+  window.addEventListener('resize',onViewportChange);
+  if(visualViewport){
+    visualViewport.addEventListener('resize',onViewportChange);
+    visualViewport.addEventListener('scroll',onViewportChange);
+  }
+  document.addEventListener('scroll',onScroll,true);
+  picker.addEventListener('pointerdown',beginPointerGesture,true);
+  document.addEventListener('pointerup',finishPointerGesture,true);
+  document.addEventListener('pointercancel',finishPointerGesture,true);
+  // A sidebar render can remove the row without any viewport event. Observe
+  // only child-list mutations while this picker is open, and avoid layout
+  // reads for unrelated transcript updates.
+  anchorObserver=new MutationObserver(()=>{
+    if(!anchorEl?.isConnected||!picker.isConnected) teardown();
+  });
+  anchorObserver.observe(document.body,{childList:true,subtree:true});
+  _projectPickerTeardown=teardown;
+  // Open even when the anchor is already stale, clipped or replaced by an
+  // earlier sidebar render: callers may open first and repaint their rows
+  // afterwards, and a picker anchored on a disconnected row is still fine to
+  // show. Its lifecycle stays owned by the observer and the scroll/resize
+  // listeners above, which retire it on the next repaint or sighting change.
   _positionProjectPicker(picker,anchorEl);
-  // Close on outside click
-  const close=(e)=>{if(!picker.contains(e.target)&&e.target!==anchorEl){picker.remove();document.removeEventListener('click',close);}};
-  setTimeout(()=>document.addEventListener('click',close),0);
+  // Registered on the next tick so the click that opened the picker cannot close
+  // it; skip if the picker was already retired by then.
+  if(_projectPickerTeardown===teardown){
+    closeTimer=setTimeout(()=>{
+      closeTimer=null;
+      if(_projectPickerTeardown===teardown) document.addEventListener('click',close);
+    },0);
+  }
   // Keyboard (#8044): arrows move between the rows, Escape closes the picker
   // and hands focus back to the conversation's ⋮ trigger.
   picker.setAttribute('aria-label',t('session_move_project'));
   const dismiss=(opts)=>{
-    picker.remove();
     document.removeEventListener('click',close);
+    teardown();
+    // Paint a sidebar repaint that was skipped while this picker was open now,
+    // before focus returns: the repaint replaces the row and its trigger, so
+    // restoring first would hand focus to the element the repaint is about to
+    // remove. Same guards as the deferred replay: no other picker may own the
+    // deferral, and an open ⋮ menu blocks renders (closeSessionActionMenu
+    // drains it instead).
+    if(typeof _sessionListRepaintDeferredByPicker!=='undefined'&&_sessionListRepaintDeferredByPicker
+       &&_projectPickerTeardown===null
+       &&!(typeof _sessionActionMenu!=='undefined'&&_sessionActionMenu)
+       &&typeof renderSessionListFromCache==='function'){
+      _sessionListRepaintDeferredByPicker=false;
+      try{ renderSessionListFromCache(); }catch(_){ _sessionListRepaintDeferredByPicker=true; }
+    }
     // Not to a row that is going out of sight with its sidebar.
     if(opts&&opts.restoreFocus===false) return;
     _focusSessionActionMenuRestoreTarget(_projectPickerFocusReturnTarget(session,anchorEl));
   };
   _wireProjectPickerKeys(picker,dismiss);
-  _openProjectPicker={picker,anchorEl,sessionId:session.session_id,dismiss};
+  _openProjectPicker={picker,anchorEl,sessionId:session.session_id,dismiss,openEpoch:pickerEpoch,refreshChoices,retarget:(nextAnchor)=>{
+    // Follow a sidebar rebuild to the row that conversation has now (see
+    // _reanchorProjectPickerAfterRepaint). Rebind the closure's anchor and the
+    // module-level copy so every listener, observer and placement reads the
+    // live element.
+    if(!nextAnchor) return;
+    anchorEl=nextAnchor;
+    if(_openProjectPicker&&_openProjectPicker.picker===picker) _openProjectPicker.anchorEl=nextAnchor;
+  }};
   _focusProjectPickerItem(picker);
 }
 
@@ -11044,33 +12849,123 @@ function _showProjectPicker(session, anchorEl){
 // picker is found out by being detached, so no close path has to clear this.
 let _openProjectPicker=null;
 
+// For the ⋮ menu that opens next. A click outside the picker closes it, but a
+// long press has its click cancelled (it would run the menu row under the
+// finger) and a right click sends none. Focus is not handed back: the menu
+// takes it.
+function _dismissOpenProjectPicker(){
+  const open=_openProjectPicker;
+  _openProjectPicker=null;
+  if(open&&open.picker.isConnected) open.dismiss({restoreFocus:false});
+}
+
 function _positionProjectPicker(picker, anchorEl){
-  const rect=anchorEl.getBoundingClientRect();
-  // Placed as _positionSessionActionMenu places the ⋮ menu: below the anchor,
-  // above it when that fits whole, else slid up over the anchor until it fits.
-  // Natural height first (the CSS already caps it at 100dvh - 16px).
-  picker.style.maxHeight='';
-  const pickerH=picker.offsetHeight||0;
   const margin=8;
-  const maxAvail=window.innerHeight-margin*2;
-  let top=rect.bottom+4;
-  if(top+pickerH>window.innerHeight-margin && rect.top>pickerH+12){
-    top=rect.top-pickerH-4;            // flip above when there is room
-  }
-  if(pickerH>maxAvail){
-    picker.style.maxHeight=maxAvail+'px'; // taller than the screen: pin and scroll
-    top=margin;
+  const gap=4;
+  const bounds=_projectPickerVisibleBounds();
+  const rect=_projectPickerAnchorRect(anchorEl, bounds);
+  picker.style.maxHeight='';
+  picker.style.overflowY='';
+  // Width affects wrapping and therefore height, so both the visual-viewport
+  // path and the older window-dimensions fallback size it before measuring.
+  const availableWidth=Math.max(0,bounds.right-bounds.left-margin*2);
+  picker.style.minWidth=Math.min(160,availableWidth)+'px';
+  picker.style.maxWidth=Math.min(220,availableWidth)+'px';
+  if(!window.visualViewport){
+    // No visual viewport (older browsers): place from the layout window.
+    const pickerH=picker.offsetHeight||0;
+    const maxAvail=window.innerHeight-margin*2;
+    let top=rect.bottom+4;
+    if(top+pickerH>window.innerHeight-margin && rect.top>pickerH+12){
+      top=rect.top-pickerH-4;            // flip above when there is room
+    }
+    if(pickerH>maxAvail){
+      picker.style.maxHeight=maxAvail+'px'; // taller than the screen: pin and scroll
+      picker.style.overflowY='auto';
+      top=margin;
+    }else{
+      if(top+pickerH>window.innerHeight-margin) top=window.innerHeight-margin-pickerH;
+      if(top<margin) top=margin;         // slide to fit, overlapping the anchor
+    }
+    picker.style.top=top+'px';
+    picker.style.bottom='auto';
   }else{
-    if(top+pickerH>window.innerHeight-margin) top=window.innerHeight-margin-pickerH;
-    if(top<margin) top=margin;         // slide to fit, overlapping the anchor
+    // The visible viewport can be smaller AND offset from the layout window
+    // (the on-screen keyboard, browser chrome, zoom). Place from its bounds.
+    const belowTop=Math.max(bounds.top+margin,rect.bottom+gap);
+    const aboveBottom=Math.min(bounds.bottom-margin,rect.top-gap);
+    const spaceBelow=Math.max(0,bounds.bottom-margin-belowTop);
+    const spaceAbove=Math.max(0,aboveBottom-(bounds.top+margin));
+    // Measure the rendered picker instead of guessing its height. A fixed
+    // threshold fails as soon as the user has enough projects to make the menu
+    // taller, and a cap left over from the previous viewport would keep a
+    // desktop clamp on a phone-sized screen.
+    const pickerHeight=picker.offsetHeight||0;
+    picker.style.top='auto';
+    picker.style.bottom='auto';
+    if(pickerHeight<=spaceBelow){
+      // Preferred placement: directly below the session action button.
+      picker.style.top=belowTop+'px';
+    }else if(pickerHeight<=spaceAbove){
+      // Keep above-positioned pickers bottom-anchored so they stay attached to
+      // the row they belong to across resizes.
+      picker.style.bottom=(window.innerHeight-aboveBottom)+'px';
+    }else if(pickerHeight<=bounds.bottom-bounds.top-margin*2){
+      // The full list fits the visible viewport: slide it up from the bottom as
+      // far as it must, overlapping the anchor rather than clipping it.
+      picker.style.top=Math.max(bounds.top+margin,bounds.bottom-margin-pickerHeight)+'px';
+      picker.style.maxHeight=pickerHeight+'px';
+      picker.style.overflowY='auto';
+    }else{
+      // Taller than the visible viewport: cap to the roomier side and keep
+      // every row reachable by scrolling inside; keep at least a few rows
+      // visible when both sides are cramped.
+      let cap=Math.max(spaceAbove,spaceBelow);
+      let capTop=spaceAbove>spaceBelow?bounds.top+margin:belowTop;
+      if(cap<132){
+        cap=Math.max(0,bounds.bottom-bounds.top-margin*2);
+        capTop=bounds.top+margin;
+      }
+      picker.style.maxHeight=cap+'px';
+      picker.style.overflowY='auto';
+      picker.style.top=capTop+'px';
+    }
   }
-  picker.style.top=top+'px';
-  picker.style.bottom='auto';
-  // Align right edge of picker with right edge of button; keep within viewport
-  const pickerW=Math.min(220,Math.max(160,picker.scrollWidth||160));
-  let left=rect.right-pickerW;
-  if(left<8) left=8;
+  // Align right edge of picker with right edge of button; keep within viewport.
+  // A picker anchored on the recorded context point opens like an OS context
+  // menu instead: its left edge at the pointer, shifted left only when it
+  // would leave the viewport — right-aligning to a 1px point clamps to the
+  // left margin, over the icon rail, at tablet widths.
+  const pickerW=picker.offsetWidth;
+  const preferredLeft=rect.pointAnchored?rect.left:rect.right-pickerW;
+  const left=Math.max(bounds.left+margin,Math.min(preferredLeft,bounds.right-margin-pickerW));
   picker.style.left=left+'px';
+}
+
+function _recordProjectPickerContextPoint(anchorEl,event){
+  if(!anchorEl||!Number.isFinite(event&&event.clientX)||!Number.isFinite(event&&event.clientY)) return;
+  // freshMenuAnchor marks the point as the spot a menu was just invoked from.
+  // _openSessionActionMenu consumes the flag and _positionSessionActionMenu
+  // places a context-menu-opened action menu there (and follows the row).
+  // The point itself is always recorded (the project picker reads it), but only
+  // a pointer right-click on the row is a place to open the menu at. A keyboard
+  // open (Shift+F10 or the ContextMenu key: button -1, fired at the focused
+  // trigger's centre) and a right-click on the trigger itself open on the
+  // button, exactly as a click on it does.
+  const target=event.target;
+  const onTrigger=!!(target&&target.closest&&target.closest('.session-actions-trigger'));
+  const fromKeyboard=event.button<0;
+  const point={clientX:event.clientX,clientY:event.clientY};
+  if(!onTrigger&&!fromKeyboard) point.freshMenuAnchor=true;
+  const row=anchorEl.closest&&anchorEl.closest('.session-child-session-fork,.session-item');
+  if(row&&row.isConnected!==false){
+    const rowRect=row.getBoundingClientRect();
+    if(Number.isFinite(rowRect&&rowRect.left)&&Number.isFinite(rowRect&&rowRect.top)){
+      point.rowOffsetX=event.clientX-rowRect.left;
+      point.rowOffsetY=event.clientY-rowRect.top;
+    }
+  }
+  anchorEl._projectPickerContextPoint=point;
 }
 
 // An open picker follows a resize or a rotation, as the ⋮ menu does. A sidebar
@@ -11119,6 +13014,77 @@ function _projectPickerSidebarHidden(el){
   if(!sidebar||sidebar.classList.contains('mobile-open')) return false;
   if(sidebar.closest('.layout.sidebar-collapsed')) return true;
   return typeof _isDesktopWidth==='function'&&!_isDesktopWidth();
+}
+
+// The anchor geometry the picker owns: a zero-sized anchor (a hidden
+// .session-actions on a touch-primary layout, or a repainted trigger) borrows
+// the visible row it belongs to, or the context-menu point recorded on it.
+function _projectPickerAnchorRect(anchorEl, bounds){
+  let rect=anchorEl?.getBoundingClientRect();
+  if(rect&&(!rect.width||!rect.height)){
+    // Fork children are independently actionable rows nested inside a
+    // potentially viewport-spanning parent. Prefer the nearest visible child
+    // owner before falling back to the ancestor session item.
+    const row=anchorEl?.closest?.('.session-child-session-fork,.session-item');
+    if(row&&row.isConnected!==false){
+      const rowRect=row.getBoundingClientRect();
+      const point=anchorEl._projectPickerContextPoint;
+      // A context-menu click inside an expanded child list belongs to the
+      // parent row, whose aggregate rect may span both viewport edges. Use
+      // the actual click point while the owning row still intersects the
+      // list; once the row leaves, fall back to its rect so teardown wins.
+      if(point&&Number.isFinite(point.clientX)&&Number.isFinite(point.clientY)&&!_projectPickerAnchorAway(anchorEl,rowRect,bounds)){
+        const pointX=Number.isFinite(point.rowOffsetX)?rowRect.left+point.rowOffsetX:point.clientX;
+        const pointY=Number.isFinite(point.rowOffsetY)?rowRect.top+point.rowOffsetY:point.clientY;
+        rect={
+          top:pointY,bottom:pointY+1,
+          left:pointX,right:pointX+1,
+          width:1,height:1,
+          pointAnchored:true,
+        };
+      }else{
+        rect=rowRect;
+      }
+    }
+  }
+  return rect;
+}
+
+// Fixed coordinates and getBoundingClientRect use the layout viewport. The
+// visible part can be smaller AND offset (keyboard, browser chrome, zoom).
+function _projectPickerVisibleBounds(){
+  // Validated read (#8531): garbage fold-transition geometry (observed on the
+  // iPhone Duo standalone PWA: height -33554432 = -2^25) must fall back to
+  // window dimensions, not invert the picker's visible bounds. Inlined and
+  // self-contained: this function is extracted into a Node test harness that
+  // does not load boot.js, so it must not reach across files.
+  const vv=window.visualViewport;
+  const vvOk=vv
+    &&Number.isFinite(Number(vv.height))&&Number(vv.height)>0&&Number(vv.height)<=window.innerHeight*1.5
+    &&Number.isFinite(Number(vv.width))&&Number(vv.width)>0&&Number(vv.width)<=window.innerWidth*1.5
+    ?{height:Number(vv.height),width:Number(vv.width),offsetTop:Math.max(0,Number(vv.offsetTop)||0),offsetLeft:Math.max(0,Number(vv.offsetLeft)||0)}
+    :null;
+  const top=vvOk?vvOk.offsetTop:0;
+  const left=vvOk?vvOk.offsetLeft:0;
+  return {
+    top,left,
+    bottom:top+(vvOk?vvOk.height:window.innerHeight),
+    right:left+(vvOk?vvOk.width:window.innerWidth),
+  };
+}
+
+// Whether the anchor has left the visible picture: detached, zero-sized, or
+// fully clipped by the session list / the visual viewport.
+function _projectPickerAnchorAway(anchorEl, rect, bounds){
+  if(!anchorEl||anchorEl.isConnected===false) return true;
+  if(!rect||!rect.width||!rect.height) return true;
+  const scrollContainer=anchorEl.closest?anchorEl.closest('.session-list'):null;
+  const clip=scrollContainer?scrollContainer.getBoundingClientRect():bounds;
+  const top=Math.max(bounds.top,clip.top);
+  const bottom=Math.min(bounds.bottom,clip.bottom);
+  const left=Math.max(bounds.left,clip.left);
+  const right=Math.min(bounds.right,clip.right);
+  return bottom<=top||right<=left||rect.bottom<=top||rect.top>=bottom||rect.right<=left||rect.left>=right;
 }
 
 // ── Project picker rows and keyboard (#8044) ────────────────────────────
@@ -11245,6 +13211,8 @@ function _startProjectCreate(bar, addBtn){
     _finishDone=true;
     if(save&&inp.value.trim()){
       const color=PROJECT_COLORS[_allProjects.length%PROJECT_COLORS.length];
+      // Overlay-generation claim: the picker set open when this create fired.
+      const createClaim=(typeof _projectPickerOpenEpoch==='number')?_projectPickerOpenEpoch:0;
       try{
         await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:inp.value.trim(),color})});
       }catch(e){
@@ -11252,7 +13220,12 @@ function _startProjectCreate(bar, addBtn){
         showToast('Project create failed: '+(e.message||e));
         return;
       }
-      await renderSessionList();
+      // The API-success transition (editor -> chip) must paint now. A picker
+      // that predates this create is retired first (folding its deferral); one
+      // the user opened while the create was in flight is newer than this
+      // completion, so it is kept and the repaint re-anchors it.
+      _retireProjectPickerForExplicitRepaint(createClaim);
+      await renderSessionList({keepProjectPicker:true});
       showToast('Project created');
     }else{
       inp.replaceWith(addBtn);
@@ -12180,7 +14153,12 @@ function _startProjectRename(proj, chip){
     if(save&&inp.value.trim()&&inp.value.trim()!==proj.name){
       try {
         await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,name:inp.value.trim()})});
-        await renderSessionList();
+        // The API-success transition (editor -> chip) must paint now. Use the
+        // explicit nondeferred keep-picker contract: a picker opened while the
+        // rename was in flight is newer than this completion, so repaint
+        // immediately and keep/re-anchor that picker instead of deferring
+        // behind the open interaction.
+        await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
         showToast('Project renamed');
       } catch(e) {
         _finishDone=false;
@@ -12238,7 +14216,7 @@ function _showProjectContextMenu(e, proj, chip){
       menu.remove();
       try {
         await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,name:proj.name,color:hex})});
-        await renderSessionList();
+        await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
         showToast('Color updated');
       } catch(e) {
         showToast('Color update failed: '+(e.message||e));
@@ -12314,7 +14292,7 @@ async function _confirmDeleteProject(proj){
   try {
     await api('/api/projects/delete',{method:'POST',body:JSON.stringify({project_id:proj.project_id})});
     if(_activeProject===proj.project_id) _activeProject=null;
-    await renderSessionList();
+    await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
     showToast('Project deleted');
   } catch(e) {
     showToast('Delete failed: '+(e.message||e));
@@ -12340,7 +14318,9 @@ function navigateSession(dir){
 document.addEventListener('keydown',(e)=>{
   if(e.key!=='j'&&e.key!=='k') return;
   if(e.ctrlKey||e.metaKey||e.altKey) return;
-  if(typeof _isInteractiveSwipeTarget==='function'&&_isInteractiveSwipeTarget(e.target)) return;
+  // Title buttons retain focus after opening; J/K must remain available there.
+  const onSessionTitle=e.target instanceof Element&&e.target.matches('.session-open-control');
+  if(!onSessionTitle&&typeof _isInteractiveSwipeTarget==='function'&&_isInteractiveSwipeTarget(e.target)) return;
   e.preventDefault();
   navigateSession(e.key==='j'?1:-1);
 });

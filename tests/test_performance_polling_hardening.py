@@ -19,7 +19,7 @@ def test_session_list_refreshes_are_coalesced_while_in_flight():
     assert "let _renderSessionListQueuedRequest = null" in src
     assert "async function _runRenderSessionListRefresh" in src
     assert "async function _drainRenderSessionListQueue" in src
-    assert "const request={opts:opts||{},gen:++_renderSessionListGen}" in src
+    assert "const request={opts:_normalizeRenderSessionListOptions(opts),gen:++_renderSessionListGen}" in src
     assert "if(_renderSessionListInFlight)" in src
     assert "_renderSessionListQueuedRequest={" in src
     assert "opts:_mergeRenderSessionListOptions" in src

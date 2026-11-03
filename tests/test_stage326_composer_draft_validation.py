@@ -286,3 +286,38 @@ def test_draft_save_skips_unchanged_payload_before_persist(monkeypatch, tmp_path
     assert second["payload"].get("unchanged") is True
     assert len(draft_calls) == 1
     assert first["payload"]["draft"] == {"text": "persistent draft", "files": []}
+
+
+def test_slow_draft_save_with_minimal_handler_still_returns_payload(monkeypatch, tmp_path):
+    """A draft save that takes over 200 ms logs a [SLOW] line. That diagnostic must not
+    raise for a handler without ``_safe_webui_print`` (every other diagnostics site uses
+    ``getattr``). CI's Python 3.13 shards hit this in
+    ``test_draft_save_skips_unchanged_payload_before_persist`` on slow runners: the
+    response was already written, then AttributeError escaped handle_post."""
+    import time
+
+    models, routes = _build_draft_env(tmp_path, monkeypatch)
+
+    sid = "draft-save-slow"
+    models.Session(
+        session_id=sid,
+        title="Draft validation slow",
+        messages=[{"role": "user", "content": "hello"}],
+    ).save(touch_updated_at=False, skip_index=True)
+
+    original_save_draft = routes._save_session_draft
+
+    def slow_save_draft(sid_value, draft_payload):
+        time.sleep(0.25)
+        return original_save_draft(sid_value, draft_payload)
+
+    monkeypatch.setattr(routes, "_save_session_draft", slow_save_draft)
+
+    result = _draft_post(
+        monkeypatch,
+        routes,
+        {"session_id": sid, "text": "slow draft", "files": []},
+    )
+
+    assert result["status"] == 200
+    assert result["payload"]["draft"] == {"text": "slow draft", "files": []}

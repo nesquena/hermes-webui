@@ -219,6 +219,25 @@ function _isTouchKeyboardViewport(){
   try{return matchMedia('(hover:none) and (pointer:coarse)').matches&&!_hasFinePointerCoexisting();}catch(_){return false;}
 }
 
+// Validated visualViewport read (#8531): iOS 27 standalone PWAs on foldables
+// (iPhone Duo) can report garbage geometry after fold/unfold — observed
+// height -33554432 (= -2^25) — with no corrective resize event until the
+// device rotates. Returns null when the reading is implausible so callers
+// fall back to window dimensions instead of poisoning layout math.
+function _plausibleVisualViewport(){
+  const vv=window.visualViewport;
+  if(!vv) return null;
+  const h=Number(vv.height), w=Number(vv.width);
+  const ih=window.innerHeight, iw=window.innerWidth;
+  if(!Number.isFinite(h)||h<=0||h>ih*1.5) return null;
+  if(!Number.isFinite(w)||w<=0||w>iw*1.5) return null;
+  return {
+    width:w, height:h,
+    offsetTop:Math.max(0,Number(vv.offsetTop)||0),
+    offsetLeft:Math.max(0,Number(vv.offsetLeft)||0)
+  };
+}
+
 function _syncKeyboardBottomInset(){
   const root=document.documentElement;
   if(!root) return;
@@ -235,7 +254,16 @@ function _syncKeyboardBottomInset(){
     root.style.removeProperty('--keyboard-bottom-inset');
     return;
   }
-  const inset=Math.max(0,Math.ceil(window.innerHeight-(vv.height+vv.offsetTop)));
+  // Compute from one validated snapshot (#8531): a garbage reading clears the
+  // inset entirely — a cleared inset at worst lets the keyboard overlap the
+  // composer for one frame until the next sane viewport event, while any
+  // bogus-but-capped inset buries the transcript.
+  const vvOk=_plausibleVisualViewport();
+  if(!vvOk){
+    root.style.removeProperty('--keyboard-bottom-inset');
+    return;
+  }
+  const inset=Math.max(0,Math.ceil(window.innerHeight-(vvOk.height+vvOk.offsetTop)));
   if(inset>0){
     root.style.setProperty('--keyboard-bottom-inset',`${inset}px`);
   }else{
@@ -415,6 +443,10 @@ function _setWorkspacePanelMode(mode, returnFocusTo){
   }else{
     panel.classList.remove('mobile-open');
   }
+  // Closing the panel leaves the preview (and its editor) mounted, so the
+  // derived dirty state must be recomputed: a hidden editor is not unsaved work
+  // the user can be asked about (#8514).
+  if(typeof _syncPreviewDirty==='function') _syncPreviewDirty();
   syncWorkspacePanelUI();
 }
 
@@ -652,7 +684,11 @@ function _isPwaStandalone(){
 }
 
 function _isInteractiveSwipeTarget(target){
-  try{return !!(target&&target.closest&&target.closest('input,textarea,select,button,a,[contenteditable="true"],.topbar-chips,.composer-left,.sidebar,.rightpanel'));}
+  // .model-dropdown: the model menu is a floating panel, not part of the page
+  // behind it. Without it a PWA sidebar swipe starting inside the open menu
+  // drags the whole layout, and the printable-key/shortcut guards below treat
+  // keys typed in the menu as page-level shortcuts.
+  try{return !!(target&&target.closest&&target.closest('input,textarea,select,button,a,[contenteditable="true"],.topbar-chips,.composer-left,.sidebar,.rightpanel,.img-lightbox,.model-dropdown'));}
   catch(_){return false;}
 }
 
@@ -936,7 +972,131 @@ $('btnSend').onclick=()=>{
   send();
 };
 $('mainChat')?.addEventListener('pointerdown', closeMobileWorkspacePanelFromChat);
-$('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInput').value='';$('fileInput').click();};
+let _attachChoiceOpen=false;
+let _attachChoicePointerDown=false;
+const _attachChoiceCapabilityQueries={
+  coarse:matchMedia('(pointer:coarse)'),
+  fine:matchMedia('(any-pointer:fine)'),
+};
+function _shouldOfferCameraChoice(){
+  try{
+    return _isTouchOnlyDevice();
+  }catch(_){return false;}
+}
+function _syncAttachChoiceSemantics(){
+  const attach=$('btnAttach');
+  if(!attach)return;
+  if(_shouldOfferCameraChoice()){
+    attach.setAttribute('aria-haspopup','menu');
+    attach.setAttribute('aria-controls','attachChoicePopup');
+    attach.setAttribute('aria-expanded',String(_attachChoiceOpen));
+  }else{
+    ['aria-haspopup','aria-controls','aria-expanded'].forEach(name=>attach.removeAttribute(name));
+  }
+}
+function _handleAttachChoiceCapabilityChange(){
+  if(!_shouldOfferCameraChoice()){
+    const popup=$('attachChoicePopup');
+    _dismissAttachChoice(!!(popup&&popup.contains(document.activeElement)));
+  }
+  _syncAttachChoiceSemantics();
+}
+function _setAttachChoiceOpen(open,restoreFocus){
+  const popup=$('attachChoicePopup');
+  const attach=$('btnAttach');
+  if(!popup||!attach)return;
+  _attachChoiceOpen=!!open;
+  popup.hidden=!_attachChoiceOpen;
+  popup.setAttribute('aria-hidden',String(!_attachChoiceOpen));
+  if(_attachChoiceOpen) popup.querySelector('[data-attach-choice]')?.focus();
+  else if(restoreFocus) attach.focus();
+  _syncAttachChoiceSemantics();
+}
+function _dismissAttachChoice(restoreFocus){
+  if(_attachChoiceOpen)_setAttachChoiceOpen(false,restoreFocus);
+}
+window._dismissAttachChoice=_dismissAttachChoice;
+function _openAttachInput(input){
+  _dismissAttachChoice();
+  if(!input)return;
+  const restoreFocus=()=>{
+    input.removeEventListener('change',restoreFocus);
+    input.removeEventListener('cancel',restoreFocus);
+    setTimeout(()=>$('btnAttach')?.focus(),0);
+  };
+  input.addEventListener('change',restoreFocus);
+  input.addEventListener('cancel',restoreFocus);
+  input.value='';
+  input.click();
+}
+function _cameraFileWithUniqueName(file,usedNames){
+  if(!file||!usedNames.has(file.name))return file;
+  const match=/^(.*?)(\.[^.]*)?$/.exec(file.name);
+  const stem=match?.[1]||file.name;
+  const ext=match?.[2]||'';
+  let index=1;
+  let name;
+  do{name=`${stem} (${index++})${ext}`;}while(usedNames.has(name));
+  return new File([file],name,{type:file.type,lastModified:file.lastModified});
+}
+function _handleCameraFiles(files){
+  const usedNames=new Set((S.pendingFiles||[]).map(file=>file.name));
+  const normalized=[];
+  for(const file of files||[]){
+    const normalizedFile=_cameraFileWithUniqueName(file,usedNames);
+    if(normalizedFile){normalized.push(normalizedFile);usedNames.add(normalizedFile.name);}
+  }
+  addFiles(normalized);
+}
+$('btnAttach').onclick=e=>{
+  _attachChoicePointerDown=false;
+  if(e&&e.preventDefault)e.preventDefault();
+  if(_shouldOfferCameraChoice())_setAttachChoiceOpen(!_attachChoiceOpen);
+  else {$('fileInput').value='';$('fileInput').click();}
+};
+$('btnAttach').addEventListener('pointerdown',()=>{_attachChoicePointerDown=_attachChoiceOpen;});
+$('btnAttach').addEventListener('pointercancel',()=>{_attachChoicePointerDown=false;});
+$('attachChoicePopup')?.addEventListener('click',e=>{
+  const choice=e.target.closest('[data-attach-choice]')?.dataset.attachChoice;
+  if(choice==='camera')_openAttachInput($('cameraFileInput'));
+  if(choice==='files')_openAttachInput($('fileInput'));
+});
+$('attachChoicePopup')?.addEventListener('focusout',e=>{
+  if(!e.currentTarget.contains(e.relatedTarget)){
+    if(_attachChoicePointerDown&&(!e.relatedTarget||e.relatedTarget===$('btnAttach')))return;
+    _dismissAttachChoice();
+  }
+});
+document.addEventListener('pointerdown',e=>{
+  if(_attachChoiceOpen&&!e.target.closest('#attachChoicePopup,#btnAttach'))_dismissAttachChoice();
+});
+function _handleAttachChoiceKeydown(e){
+  if(!_attachChoiceOpen)return false;
+  if(e.key==='Escape'){
+    e.preventDefault();
+    _dismissAttachChoice(true);
+    return true;
+  }
+  const popup=$('attachChoicePopup');
+  if(!popup||!popup.contains(document.activeElement))return false;
+  const choices=[...popup.querySelectorAll('[data-attach-choice]:not([disabled])')];
+  if(!choices.length)return false;
+  const current=choices.indexOf(document.activeElement);
+  let next=current;
+  if(e.key==='ArrowDown')next=current<0?0:(current+1)%choices.length;
+  else if(e.key==='ArrowUp')next=current<0?choices.length-1:(current-1+choices.length)%choices.length;
+  else if(e.key==='Home')next=0;
+  else if(e.key==='End')next=choices.length-1;
+  else return false;
+  e.preventDefault();
+  choices[next].focus();
+  return true;
+}
+_syncAttachChoiceSemantics();
+Object.values(_attachChoiceCapabilityQueries).forEach(query=>{
+  if(typeof query.addEventListener==='function')query.addEventListener('change',_handleAttachChoiceCapabilityChange);
+  else if(typeof query.addListener==='function')query.addListener(_handleAttachChoiceCapabilityChange);
+});
 
 // ── Voice input (Web Speech API + MediaRecorder fallback) ───────────────────
 function _micIsLocalhostOrLoopback(hostname){
@@ -976,7 +1136,44 @@ function _micToastKeyForRecognitionError(error){
 
   // Persist SR failure across reloads (e.g. Tailscale/network error)
   const _micForceMediaRecorderKey='mic_force_mediarecorder';
-  const _micForceMediaRecorderStored=localStorage.getItem(_micForceMediaRecorderKey);
+  const _micForceMediaRecorderExpiryKey='mic_force_mediarecorder_expires';
+  const _MIC_FORCE_MR_TTL_MS=24*60*60*1000;
+  // A persisted SR failure auto-expires after 24h: a transient outage (or a
+  // browser update that fixes SR) should not pin this device to MediaRecorder
+  // forever.
+  function _getMicForceMediaRecorderStored(){
+    try{
+      const exp=localStorage.getItem(_micForceMediaRecorderExpiryKey);
+      const stored=localStorage.getItem(_micForceMediaRecorderKey);
+      if(exp){
+        const expMs=parseInt(exp,10);
+        // A garbled expiry counts as expired too: a value that never parses
+        // would otherwise pin this device forever.
+        if(!Number.isFinite(expMs)||Date.now()>expMs){
+          localStorage.removeItem(_micForceMediaRecorderKey);
+          localStorage.removeItem(_micForceMediaRecorderExpiryKey);
+          return null;
+        }
+      }else if(stored==='0'||stored==='1'){
+        // Values saved before the expiry key existed would otherwise pin this
+        // device forever. Start the 24h window on the first read after upgrade.
+        // A full or read-only store must not discard the readable preference.
+        try{
+          localStorage.setItem(_micForceMediaRecorderExpiryKey,String(Date.now()+_MIC_FORCE_MR_TTL_MS));
+        }catch(_){}
+      }
+      return stored;
+    }catch(_){
+      return null;
+    }
+  }
+  function _setMicForceMediaRecorder(value){
+    try{
+      localStorage.setItem(_micForceMediaRecorderKey,String(value));
+      localStorage.setItem(_micForceMediaRecorderExpiryKey,String(Date.now()+_MIC_FORCE_MR_TTL_MS));
+    }catch(_){}
+  }
+  const _micForceMediaRecorderStored=_getMicForceMediaRecorderStored();
   // Prefer Hermes server-side STT (MediaRecorder -> /api/transcribe) only
   // after the server confirms an STT provider is available. No stored key must
   // keep browser SpeechRecognition as the first-click default until then; that
@@ -1140,7 +1337,7 @@ function _micToastKeyForRecognitionError(error){
   }
 
   function _allowBrowserSttFallback(){
-    return !!(SpeechRecognition&&localStorage.getItem(_micForceMediaRecorderKey)!=='1');
+    return !!(SpeechRecognition&&_getMicForceMediaRecorderStored()!=='1');
   }
 
   async function _transcribeBlob(blob, prefixSnapshot){
@@ -1158,11 +1355,31 @@ function _micToastKeyForRecognitionError(error){
         err.status=res.status;
         throw err;
       }
-      _commitTranscript(data.transcript||'', prefixSnapshot);
+      const transcript=(data.transcript||'').trim();
+      if(!transcript){
+        // Silence, not failure: the server answers 200 with an empty transcript
+        // (and no_speech) when the audio carried no speech. Committing an empty
+        // string left the user watching an unchanged composer, unable to tell a
+        // dead mic from a quiet room.
+        //
+        // A Send click while recording is an unambiguous send intent (same rule
+        // as the raw-audio path): honour it whenever the composer has anything
+        // send() would accept (text, staged files or selected context), instead
+        // of dropping the queued send and leaving the draft behind. The
+        // "no speech" toast is only for the case where there is nothing to send.
+        if(window._micPendingSend&&_composerHasContent()){
+          _commitTranscript('', prefixSnapshot);
+          return;
+        }
+        window._micPendingSend=false;
+        showToast(t('mic_no_speech'));
+        return;
+      }
+      _commitTranscript(transcript, prefixSnapshot);
     }catch(err){
       if(_isServerSttUnavailable(err)&&_allowBrowserSttFallback()){
         window._micPendingSend=false;
-        localStorage.setItem(_micForceMediaRecorderKey,'0');
+        _setMicForceMediaRecorder('0');
         _forceMediaRecorder=false;
         recognition=_ensureSpeechRecognition();
         showToast(err.message||t('mic_network'));
@@ -1366,7 +1583,7 @@ function _micToastKeyForRecognitionError(error){
       if(event.error==='network'||event.error==='not-allowed'
           ||event.error==='service-not-allowed'||event.error==='audio-capture'){
         // Persist SR failure: next reload will skip SpeechRecognition
-        localStorage.setItem(_micForceMediaRecorderKey,'1');
+        _setMicForceMediaRecorder('1');
         _forceMediaRecorder=true;
         recognition=null;
       }
@@ -1406,7 +1623,7 @@ function _micToastKeyForRecognitionError(error){
   // persisted '0' is respected and not re-flipped.
   function _applyDeferredServerSttFlip(){
     if(_serverSttAvailable&&!_forceMediaRecorder&&!window._micActive
-        &&localStorage.getItem(_micForceMediaRecorderKey)===null){
+        &&_getMicForceMediaRecorderStored()===null){
       _forceMediaRecorder=true;
       recognition=null;
     }
@@ -2489,6 +2706,7 @@ function _currentSessionIsReusableEmptyChat(){
 }
 
 $('fileInput').onchange=e=>{addFiles(Array.from(e.target.files));e.target.value='';};
+$('cameraFileInput').onchange=e=>{_handleCameraFiles(Array.from(e.target.files));e.target.value='';};
 $('btnNewChat').onclick=async()=>{
   // If the current session has no messages AND nothing is in flight, just focus
   // the composer rather than creating another empty session that will clutter the
@@ -2646,7 +2864,10 @@ function clearPreview(opts={}){
   const pc=$('previewCode');if(pc)pc.textContent='';
   const pp=$('previewPathText');if(pp)pp.textContent='';
   const ft=$('fileTree');if(ft)ft.style.display='';
-  _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
+  _previewCurrentPath='';_previewCurrentMode='';
+  // Reset the editor baseline as well, so a later preview cannot inherit a
+  // stale "unsaved" comparison from the file that was just closed (#8514).
+  if(typeof _resetPreviewDirty==='function') _resetPreviewDirty(); else _previewDirty=false;
   if(typeof _previewOpenGen==='number') _previewOpenGen++;
   // #6710: retire any in-flight preview open (guarded so harnesses that extract
   // this function alone keep working).
@@ -2711,6 +2932,7 @@ $('modelSelect').onchange=async()=>{
   }
   if(!S.session){
     if(typeof _rememberEmptyComposerModelOverride==='function') _rememberEmptyComposerModelOverride(modelState.model,modelState.model_provider);
+    if(typeof _syncProviderQuotaForActiveContext==='function') _syncProviderQuotaForActiveContext();
     if(typeof syncModelChip==='function') syncModelChip();
     if(typeof syncReasoningChip==='function') syncReasoningChip();
     return;
@@ -2869,6 +3091,19 @@ function _isNumpadEnter(e){
 // falls through to the `else { send() }` branch — sending the message instead
 // of inserting a newline (issue: mobile Enter sends on fresh page load).
 try{ window._sendKey=localStorage.getItem('hermes-pref-send_key')||'enter'; }catch(_){ window._sendKey='enter'; }
+// hwc: send-key — clarify and inline edit share this Enter decision.
+// The composer listener below keeps its own branches, including _mobileDefault.
+function _composerShouldSendOnKey(e){
+  if(!e||e.key!=='Enter') return false;
+  if(typeof _isImeEnter==='function'?_isImeEnter(e):(e.isComposing||e.keyCode===229)) return false;
+  const isNumpadEnter=typeof _isNumpadEnter==='function'&&_isNumpadEnter(e);
+  const _mobileDefault=_isTouchOnlyDevice()
+    &&(window._sendKey==='enter'||typeof window._sendKey==='undefined');
+  if(window._sendKey==='shift+enter') return !!e.shiftKey;
+  if(window._sendKey==='ctrl+enter'||_mobileDefault) return !!(isNumpadEnter||e.ctrlKey||e.metaKey);
+  return !e.shiftKey;
+}
+window._composerShouldSendOnKey=_composerShouldSendOnKey;
 $('msg').addEventListener('keydown',e=>{
   // Autocomplete navigation when dropdown is open
   const dd=$('cmdDropdown');
@@ -2930,6 +3165,7 @@ function _enterBelongsToFocusedControl(el){
 }
 
 document.addEventListener('keydown',async e=>{
+  if(_handleAttachChoiceKeydown(e))return;
   // Cmd/Ctrl+B toggles desktop sidebar collapse (VS Code convention).
   // Skip when typing in an input/textarea/contenteditable so text-edit
   // shortcuts (e.g. bold in some embedded editors) are never stolen.
@@ -3109,6 +3345,10 @@ function applyEmptyStatePanelPref(){
 }
 
 window.addEventListener('resize',()=>{
+  // Resync the keyboard inset on every window resize even when visualViewport
+  // exists (#8531): fold transitions can change window geometry without a
+  // trustworthy visualViewport event, so the inset must be re-validated here.
+  _syncKeyboardBottomInset();
   _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
   // Re-apply the sidebar state on viewport change (e.g. foldable unfold:
@@ -3708,6 +3948,7 @@ function _setComposerControlHidden(el, hidden){
 
 function _applyComposerFooterVisibilitySettings(){
   const hidden=window._composerControlVisibility||{};
+  if(hidden.hide_composer_attach&&typeof _dismissAttachChoice==='function')_dismissAttachChoice();
   for(const def of _allComposerControlToggleDefs()){
     const isHidden=!!hidden[def.key];
     for(const selector of def.selectors){
@@ -3871,6 +4112,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       : 'compact_worklog';
     window._transparentStream=window._chatActivityDisplayMode==='transparent_stream';
     window._transparentEventTimestamps=s.transparent_stream_event_timestamps!==false;
+    if(typeof setScreenReaderMode==='function') setScreenReaderMode(s.screen_reader_mode);
     window._terminalAutoExpandOnOutput=!!s.terminal_auto_expand_on_output;
     window._worklogDetailsExpandedByDefault=!!(
       Object.prototype.hasOwnProperty.call(s,'worklog_details_expanded_default')
@@ -4303,7 +4545,11 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   // re-run when the browser restores the page from bfcache.
   const _srch = document.getElementById('sessionSearch'); if (_srch) _srch.value = '';
   if (typeof syncSessionSearchClear === 'function') syncSessionSearchClear();
-  if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
+  const _syncQuotaForBootContext=()=>{
+    if(typeof _syncProviderQuotaForActiveContext==='function'){
+      _syncProviderQuotaForActiveContext();
+    }
+  };
   const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
   const pwaLaunchAction=(window.HermesPWA&&typeof window.HermesPWA.launchAction==='function')
     ? window.HermesPWA.launchAction()
@@ -4374,6 +4620,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
           try{localStorage.removeItem('hermes-webui-session');}catch(_){}
         }
         S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
+        _syncQuotaForBootContext();
         S._bootReady=true;
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
@@ -4388,6 +4635,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
           || localStorage.getItem('hermes-webui-workspace-panel')==='open';
         if(_ephPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
         await _maybeBindFreshDefaultWorkspaceSession(prefillIntent);
+        _syncQuotaForBootContext();
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
@@ -4427,6 +4675,9 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         : [];
       const _restoredHasDraft = !!(_restoredDraftText || _restoredDraftFiles.length);
       if(S.session && (S.session.message_count||0) === 0 && !_restoredInFlight && !_restoredHasDraft){
+        if(typeof _rememberEmptyComposerModelOverride==='function'){
+          _rememberEmptyComposerModelOverride(S.session.model, S.session.model_provider);
+        }
         S.session=null; S.messages=[];
         S._bootReady=true;
         // Restore panel pref before syncing so the workspace panel stays visible
@@ -4435,6 +4686,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
           || localStorage.getItem('hermes-webui-workspace-panel')==='open';
         if(_ephPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
         await _maybeBindFreshDefaultWorkspaceSession(prefillIntent);
+        _syncQuotaForBootContext();
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
@@ -4466,6 +4718,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   if(_freshPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
   // A route-only 404 can leave another saved session available for the next boot.
   if(!localStorage.getItem('hermes-webui-session')) await _maybeBindFreshDefaultWorkspaceSession(prefillIntent);
+  _syncQuotaForBootContext();
   syncWorkspacePanelState();
   $('emptyState').style.display='';
   await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);

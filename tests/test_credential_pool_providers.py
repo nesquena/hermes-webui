@@ -1,8 +1,13 @@
 """Regression tests for credential_pool provider detection in /api/models."""
 
 import json
+import logging
+import socket
 import sys
+import time
 import types
+
+import pytest
 
 import api.config as config
 import api.profiles as profiles
@@ -813,10 +818,11 @@ def test_custom_provider_detected_by_get_available_models(monkeypatch, tmp_path)
         config.cfg.update(old_cfg)
         config._cfg_mtime = old_mtime
 
-    groups = _group_by_provider(result)
-    assert "bothub" in groups, (
+    groups = {g["provider_id"]: g for g in result.get("groups", [])}
+    assert "custom:bothub" in groups, (
         f"Bothub must appear as a group in get_available_models; got {list(groups)}"
     )
+    assert groups["custom:bothub"]["provider"] == "Bothub"
     # Models may be empty since there's no real endpoint in test — the key is
     # that the group appears at all (credential pool detection works).
 
@@ -973,3 +979,219 @@ def test_seeded_config_survives_a_stale_loaded_config_path(monkeypatch, tmp_path
     the seed and only the auth.json provider survived ("got ['OpenAI Codex']")."""
     monkeypatch.setattr(config, "_cfg_path", config.Path("/nonexistent/elsewhere/config.yaml"))
     test_custom_provider_detected_by_get_available_models(monkeypatch, tmp_path)
+
+
+# --- Hermetic network: a slow runner network must not decide these tests ---
+
+
+def test_seeded_custom_provider_never_waits_on_dns(monkeypatch, tmp_path, caplog):
+    """Shard-4 CI flake: the bothub seed above made get_available_models() resolve bothub.chat for real.
+
+    The SSRF pre-check in _read_custom_endpoint_models (api/config.py) calls socket.getaddrinfo() with no
+    timeout, on the catalog rebuild worker, and conftest's network isolation used to block connects but not
+    DNS. A runner resolver slower than _LIVE_REBUILD_BUDGET_SECONDS (4 s) kept the worker from finishing, so
+    the budget fallback was served ("live provider-catalog rebuild exceeded 4.0s budget") and the seed failed
+    with "got ['OpenAI Codex']" in about 4.1 s.
+
+    Here the C resolver below conftest's socket.getaddrinfo guard hangs past the budget. The seed must still
+    be answered in-band, and no lookup of a public name may reach the resolver."""
+    import _socket
+
+    hang = max(float(config._LIVE_REBUILD_BUDGET_SECONDS), 0.0) + 1.0
+    reached = []
+    real_c_getaddrinfo = _socket.getaddrinfo
+
+    def slow_resolver(host, *args, **kwargs):
+        h = host.decode("ascii", "ignore") if isinstance(host, (bytes, bytearray)) else str(host or "")
+        if h in ("", "localhost") or h.replace(".", "").isdigit() or ":" in h:
+            return real_c_getaddrinfo(host, *args, **kwargs)
+        reached.append(h)
+        time.sleep(hang)
+        raise socket.gaierror(socket.EAI_AGAIN, "simulated resolver timeout")
+
+    monkeypatch.setattr(_socket, "getaddrinfo", slow_resolver)
+    caplog.set_level(logging.INFO, logger="api.config")
+
+    seed_failure = None
+    try:
+        test_seeded_config_survives_a_stale_loaded_config_path(monkeypatch, tmp_path)
+    except AssertionError as exc:
+        seed_failure = exc
+    budget_fallbacks = [
+        r.getMessage() for r in caplog.records
+        if r.name == "api.config" and "budget" in r.getMessage() and "fallback" in r.getMessage()
+    ]
+    assert not reached and not budget_fallbacks and seed_failure is None, (
+        "the seeded catalog must be built in-band without a DNS lookup; "
+        f"resolver reached={reached}, budget fallbacks={budget_fallbacks}, seed assertion={seed_failure}"
+    )
+
+
+@pytest.fixture
+def owned_pool_lookup(monkeypatch, tmp_path):
+    """Persist pools per profile; stub only external auth/pool loading, not selectors."""
+    from api import providers
+
+    _install_fake_hermes_cli(monkeypatch)
+    state = {"cfg": {}, "home": tmp_path / "a", "reads": [], "loads": []}
+
+    def write_pool(home, pools):
+        home.mkdir(exist_ok=True)
+        (home / "auth.json").write_text(json.dumps({"credential_pool": pools}), encoding="utf-8")
+
+    def read_pool(pid):
+        state["reads"].append((str(state["home"]), pid))
+        payload = json.loads((state["home"] / "auth.json").read_text(encoding="utf-8"))
+        return payload["credential_pool"].get(pid, [])
+
+    def load_pool(pid):
+        state["loads"].append((str(state["home"]), pid))
+        entries = [types.SimpleNamespace(**entry) for entry in read_pool(pid)]
+        return types.SimpleNamespace(entries=lambda: entries)
+
+    def no_network(*_args, **_kwargs):
+        raise AssertionError("credential lookup must not access the network")
+
+    write_pool(state["home"], {})
+    state["write_pool"] = write_pool
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: state["home"])
+    monkeypatch.setattr(config, "get_config", lambda: state["cfg"])
+    monkeypatch.setattr(providers, "get_config", lambda: state["cfg"])
+    monkeypatch.setattr(config._thread_ctx, "env", {}, raising=False)
+    monkeypatch.setattr(config._thread_ctx, "block_process_env_fallback", True, raising=False)
+    monkeypatch.setattr(sys.modules["hermes_cli.auth"], "read_credential_pool", read_pool, raising=False)
+    pool_module = types.ModuleType("agent.credential_pool")
+    pool_module.load_pool = load_pool
+    monkeypatch.setitem(sys.modules, "agent.credential_pool", pool_module)
+    monkeypatch.setattr(socket, "getaddrinfo", no_network)
+    monkeypatch.setattr("urllib.request.urlopen", no_network)
+    old_cache = dict(config._CREDENTIAL_POOL_CACHE)
+    config._CREDENTIAL_POOL_CACHE.clear()
+    try:
+        yield state
+    finally:
+        config._CREDENTIAL_POOL_CACHE.clear()
+        config._CREDENTIAL_POOL_CACHE.update(old_cache)
+
+
+@pytest.mark.parametrize("fields, expected", [
+    ({"runtime_api_key": "synthetic-runtime", "agent_key": "synthetic-agent", "access_token": "synthetic-access"}, "synthetic-runtime"),
+    ({"agent_key": "synthetic-agent", "access_token": "synthetic-access"}, "synthetic-agent"),
+    ({"access_token": "synthetic-access"}, "synthetic-access"),
+])
+def test_owned_pool_only_key_priority_and_capability(owned_pool_lookup, fields, expected):
+    from api import providers
+
+    state = owned_pool_lookup
+    state["write_pool"](state["home"], {"custom:bothub": [{"source": "manual", **fields}]})
+    assert config._custom_provider_entries(state["cfg"]) == []
+    assert providers._get_provider_api_key("custom:bothub") == expected
+    assert providers._provider_has_key("custom:bothub") is True
+    assert providers.provider_has_usable_credential("custom:bothub") is True
+    assert {pid for _, pid in state["reads"]} == {"custom:bothub"}
+    assert state["loads"] == []  # read-only profiles must never seed from process env
+
+
+@pytest.mark.parametrize("store", ["native", "legacy"])
+def test_owned_pool_configured_key_still_wins(owned_pool_lookup, store):
+    from api import providers
+
+    state = owned_pool_lookup
+    record = {"api_key": "synthetic-configured", "base_url": "https://owned.invalid/v1"}
+    state["cfg"] = ({"providers": {"custom:bothub": record}} if store == "native" else
+                    {"custom_providers": [{"name": "bothub", **record}]})
+    state["write_pool"](state["home"], {
+        "custom:bothub": [{"source": "manual", "runtime_api_key": "synthetic-owned-pool"}],
+        "custom:other": [{"source": "manual", "runtime_api_key": "synthetic-foreign"}],
+    })
+    assert providers._get_provider_api_key("custom:bothub") == "synthetic-configured"
+    assert state["reads"] == state["loads"] == []
+
+
+@pytest.mark.parametrize("ambient", [None, {"source": "gh_cli"}, {"source": "env:github_token"}, {"key_source": "gh auth token"}])
+def test_owned_pool_absence_cannot_borrow_other_or_ambient_keys(owned_pool_lookup, monkeypatch, tmp_path, ambient):
+    from api import providers
+
+    state = owned_pool_lookup
+    state["cfg"] = {
+        "model": {"provider": "custom", "api_key": "synthetic-default"},
+        "providers": {"custom": {"api_key": "synthetic-generic"},
+                      "custom:other": {"api_key": "synthetic-other"}},
+    }
+    for name in ("OPENAI_API_KEY", "CUSTOM_API_KEY", "CUSTOM_BOTHUB_API_KEY", "GITHUB_TOKEN"):
+        monkeypatch.setenv(name, "synthetic-process")
+    default_home = tmp_path / "default"
+    state["write_pool"](default_home, {"custom:bothub": [{"runtime_api_key": "synthetic-other-profile"}]})
+    monkeypatch.setattr(config, "_DEFAULT_HERMES_HOME", default_home)
+    state["write_pool"](state["home"], {
+        "custom:bothub": [] if ambient is None else [{"runtime_api_key": "synthetic-ambient", **ambient}],
+        "custom:other": [{"source": "manual", "runtime_api_key": "synthetic-foreign"}],
+    })
+    assert providers._get_provider_api_key("custom:bothub") is None
+    assert providers._provider_has_key("custom:bothub") is False
+    assert providers.provider_has_usable_credential("custom:bothub") is False
+    assert {pid for _, pid in state["reads"]} == {"custom:bothub"}
+    assert state["loads"] == []
+
+
+@pytest.mark.parametrize("kind", ["disabled-exact", "disabled-bare", "ambiguous-forward", "ambiguous-reverse"])
+def test_owned_pool_native_refusal_precedes_nonempty_pool(owned_pool_lookup, kind):
+    from api import providers
+
+    state = owned_pool_lookup
+    if kind.startswith("disabled"):
+        key = "custom:demo-key" if kind == "disabled-exact" else "demo-key"
+        records = [(key, {"api": "https://disabled.invalid/v1", "enabled": False})]
+    else:
+        records = [("Demo Key", {"api": "https://first.invalid/v1"}),
+                   ("demo-key", {"api": "https://second.invalid/v1"})]
+        if kind.endswith("reverse"):
+            records.reverse()
+    state["cfg"] = {"providers": dict(records)}
+    state["write_pool"](state["home"], {
+        "custom:demo-key": [{"source": "manual", "runtime_api_key": "synthetic-forbidden"}],
+        "custom:safe": [{"source": "manual", "runtime_api_key": "synthetic-safe"}],
+    })
+    for reader in (providers._get_provider_api_key, providers._provider_has_key, providers.provider_has_usable_credential):
+        if kind.startswith("ambiguous"):
+            with pytest.raises(config.AmbiguousCustomProviderError):
+                reader("custom:demo-key")
+        else:
+            assert not reader("custom:demo-key")
+    assert state["reads"] == state["loads"] == []
+    assert providers._get_provider_api_key("custom:safe") == "synthetic-safe"
+    assert {pid for _, pid in state["reads"]} == {"custom:safe"}
+
+
+@pytest.mark.parametrize("usable", [False, True])
+def test_owned_pool_unusable_entries_remain_filtered(owned_pool_lookup, usable):
+    from api import providers
+
+    state = owned_pool_lookup
+    entries = [
+        {"runtime_api_key": "synthetic-dead", "last_status": "dead"},
+        {"runtime_api_key": "synthetic-exhausted", "last_status": "exhausted", "last_error_reset_at": "2999-01-01T00:00:00Z"},
+    ]
+    if usable:
+        entries.append({"runtime_api_key": "synthetic-usable"})
+    state["write_pool"](state["home"], {"custom:bothub": entries})
+    assert providers._get_provider_api_key("custom:bothub") == ("synthetic-usable" if usable else None)
+    assert providers._provider_has_key("custom:bothub") is usable
+    assert providers.provider_has_usable_credential("custom:bothub") is usable
+
+
+@pytest.mark.parametrize("readonly", [False, True])
+def test_owned_pool_profile_a_b_a_keeps_credentials_and_cache_owned(owned_pool_lookup, monkeypatch, tmp_path, readonly):
+    from api import providers
+
+    state = owned_pool_lookup
+    monkeypatch.setattr(config._thread_ctx, "block_process_env_fallback", readonly)
+    a, b = state["home"], tmp_path / "b"
+    state["write_pool"](a, {"custom:bothub": [{"source": "manual", "runtime_api_key": "synthetic-a"}]})
+    state["write_pool"](b, {"custom:other": [{"source": "manual", "runtime_api_key": "synthetic-b-other"}]})
+    for home, expected in ((a, "synthetic-a"), (b, None), (a, "synthetic-a")):
+        state["home"] = home
+        assert providers._get_provider_api_key("custom:bothub") == expected
+        assert providers._provider_has_key("custom:bothub") is (expected is not None)
+        assert providers.provider_has_usable_credential("custom:bothub") is (expected is not None)
+    assert len(state["loads"]) == (0 if readonly else 2)

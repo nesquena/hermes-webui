@@ -61,7 +61,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       config.py            Discovery, globals, model detection, reloadable config
       helpers.py           HTTP helpers: j(), bad(), require(), safe_resolve(), security headers
       goals.py             Persistent-goal commands and profile-scoped native GoalManager bridge
-      models.py            Session model + CRUD, per-session profile tracking, CLI/state.db bridge
+      models.py            Session model + CRUD, per-session profile/model/reasoning tracking, CLI/state.db bridge
       profiles.py          Profile state management, hermes_cli wrapper
       onboarding.py        First-run onboarding status, real provider config writes, OAuth linking, readiness detection
       routes.py            All GET + POST route handlers (if/elif dispatch, no decorators)
@@ -290,6 +290,13 @@ passes so a high-volume worker source cannot consume that interactive window:
 - Cron: up to `CRON_PROJECT_CHIP_LIMIT` rows.
 - Webhook: up to `WEBHOOK_PROJECT_CHIP_LIMIT` rows.
 - Kanban: up to `KANBAN_PROJECT_CHIP_LIMIT` rows.
+- One-shot (`hermes -z`): kept out of the interactive window and its
+  unassigned refill, with no default pass of its own. They keep normal project
+  chips, so the assigned recovery pass still reaches one filed under a project.
+  An explicit `source_filter="oneshot"` lists the newest ones, and a session
+  the user opens by id resolves through `get_cli_session_by_id()`.
+- Tool (`--source tool`): handled like one-shot runs. Hermes Agent uses this
+  tag for integration sessions that should stay out of user session lists.
 
 Source-specific views still use their dedicated bounds, and the later sidebar
 visibility stage decides whether recovered background rows are shown. In
@@ -722,6 +729,55 @@ file populated before `get_available_models` returns, and the single-flight rele
 with the queued commit, so ownership still spans the durable write. The out-of-band worker
 commits directly, which is correct because it holds no catalog lock by then.
 
+### 4.12 Insights Period Endpoint (`/api/insights`)
+
+`GET /api/insights` reports usage analytics for one time window. The window is
+selected by query parameters, and the response echoes the window it actually
+served through `mode` (`"trailing"` or `"custom"`). Totals and the daily series
+are always computed over the same resolved interval. Data comes from the WebUI
+session index plus non-WebUI rows in the active profile's `state.db`, when that
+database exists. The optional `sync_to_insights` setting mirrors WebUI usage
+into `state.db`; it does not control whether this endpoint includes CLI rows.
+
+Window selection:
+
+- `days=N` — trailing window of the last `N` days. This is what the panel's
+  7/30/90/365 presets send, and the fallback when no absolute bound is usable.
+- `start=…` / `end=…` — an absolute window. Each bound is either an exact Unix
+  epoch timestamp in seconds or a `YYYY-MM-DD` calendar date. A supplied
+  `start` with no `end` runs to the server clock. A supplied `end` with no
+  `start` back-steps the start by 30 days using the bound's own arithmetic: a
+  `YYYY-MM-DD` end subtracts 30 calendar days (local midnight to local
+  midnight, DST-safe), while a numeric end subtracts exactly `30 * 86400`
+  seconds — so across a daylight-saving change a numeric end's default start can
+  land on a different local date than the calendar one would.
+- The **Custom range…** selection sends the two `<input type=date>` values as
+  raw `YYYY-MM-DD` strings, not epoch seconds, so the server reads them in its
+  own timezone and a browser in another timezone cannot shift the selected
+  calendar day. The panel defaults the inputs to the last 30 calendar days only
+  when no range has been picked yet, so preset → Custom never erases a chosen
+  range.
+
+Bounds and fallbacks:
+
+- A `YYYY-MM-DD` bound selects a whole local calendar day (start = that day's
+  local midnight; an end date's exclusive stop is the next local midnight,
+  except a date equal to today, which clamps to the server clock because that
+  day is not over). An epoch bound keeps its exact `[start, end)` precision.
+  Bounds are swapped if supplied reversed.
+- The window never extends into the future: an `end` beyond the server clock
+  is clamped to `now`.
+- Windows are clamped to five calendar years so the daily series cannot grow
+  unbounded.
+- The request fails closed to the trailing `days` window (`mode: "trailing"`)
+  when an absolute bound cannot be served faithfully: a supplied bound that is
+  unparseable (e.g. `2026-02-31`) or out of the supported epoch range, a
+  pre-epoch date (Chromium's date input accepts `0001-…`, and no session
+  predates 1970), or a strictly-future start. A supplied-but-invalid bound is
+  never treated as an omitted one, so a rejected request cannot fabricate an
+  interval the caller did not ask for. An explicit zero-length window pinned to
+  the clock itself (`start == now`) stays an empty custom interval rather than
+  silently serving the trailing window.
 
 ### 4.12 Project Bindings (`/api/projects/bind`)
 
@@ -1091,6 +1147,30 @@ Default toolset list (hardcoded fallback):
 
 The web UI always runs with the full CLI toolset. There is no per-session toolset
 restriction from the UI yet (see ROADMAP.md Wave 4 for the plan).
+
+### 8.1 `${VAR}` references: raw writes, bound reads (#8032, #8129)
+
+`config.yaml` may hold `${VAR}` / `${env:VAR}` references to secrets (API keys,
+base URLs, MCP headers). Two rules keep them references:
+
+- **Writes go through the raw document.** A config writer loads the raw YAML
+  (`_load_yaml_config_file_raw`), changes the keys it owns and saves that. It
+  never saves a dict that came from the env-expanding reader, or a resolved
+  secret ends up on disk in place of its reference. Re-submitting a displayed
+  (resolved) value unchanged keeps the reference; a changed value is written as
+  given.
+- **Reads of a profile's raw document expand under that profile's binding.**
+  Use `api.profiles.load_profile_config()` / `expand_profile_config()`. A named
+  profile resolves against its own `.env` only. Root resolves against the
+  launch-time snapshot `api.paths.STARTUP_ENV` under root's own `.env`, without
+  the values a shell launcher sourced from a named launch home's `.env`
+  (`_INITIAL_HERMES_HOME_DOTENV`). It never reads the live `os.environ`, which
+  streaming turns and background workers overwrite with their own profile's
+  values. A reference the binding cannot resolve stays literal and reads as
+  absent.
+
+`tests/test_issue8032_profile_env_binding.py` fails on any new raw config load
+in `api/` that is not an allowlisted writer or loader internal.
 
 ---
 
@@ -1787,6 +1867,11 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
     /api/session/new           {"model"?, "workspace"?} -> new session
     /api/session/update        {"session_id", "workspace"?, "model"?} -> updated session
     /api/session/delete        {"session_id"} -> {"ok": true}
+                               -> 409 {"ok": false, "error": <code>} when the gateway
+                                  ledger refuses (session_busy / unknown_execution /
+                                  runtime_ledger_unavailable); files and rows are kept.
+                               -> 500 {"ok": false, "error": "state_db_cleanup_failed"}
+                                  when the state.db delete fails; files are kept.
     /api/chat/start            {"session_id", "message", "model"?, "workspace"?}
                                -> {"stream_id", "session_id"}. Starts agent daemon thread.
     /api/chat                  (fallback, sync) {"session_id", "message", "model"?, "workspace"?}

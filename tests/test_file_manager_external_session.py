@@ -444,11 +444,11 @@ def test_delete_serializes_with_workspace_recovery_and_sidecar_stays_deleted(
     monkeypatch.setattr(models_module, "_write_session_index", lambda **_kwargs: None)
     monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes_module, "get_session", lambda *_args, **_kwargs: session)
-    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid, **_kw: {})
     monkeypatch.setattr(routes_module, "_session_is_subagent_view_only", lambda _sid: False)
     monkeypatch.setattr(routes_module, "_is_messaging_session_id", lambda _sid: False)
     monkeypatch.setattr(
-        routes_module, "_worktree_retained_payload_for_session_id", lambda _sid: {}
+        routes_module, "_worktree_retained_payload_for_session_id", lambda _sid, **_kw: {}
     )
     monkeypatch.setattr(routes_module, "prune_session_from_index", lambda _sid: None)
     monkeypatch.setattr(
@@ -547,13 +547,13 @@ def test_delete_returns_503_without_mutation_when_session_lock_is_busy(
         "get_session",
         lambda *_args, **_kwargs: cached_session,
     )
-    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid, **_kw: {})
     monkeypatch.setattr(
         routes_module, "_session_is_subagent_view_only", lambda _sid: False
     )
     monkeypatch.setattr(routes_module, "_is_messaging_session_id", lambda _sid: False)
     monkeypatch.setattr(
-        routes_module, "_worktree_retained_payload_for_session_id", lambda _sid: {}
+        routes_module, "_worktree_retained_payload_for_session_id", lambda _sid, **_kw: {}
     )
     monkeypatch.setattr(
         routes_module, "_get_session_agent_lock", lambda _sid: ContendedLock()
@@ -820,6 +820,7 @@ def test_get_session_for_file_ops_state_db_fallback(
 
     monkeypatch.setattr(models_module, "get_session", raise_key)
     monkeypatch.setattr(models_module, "_active_state_db_path", lambda: db)
+    monkeypatch.setattr(models_module, "_strict_active_state_db_path", lambda: db)
     monkeypatch.setattr(
         models_module, "get_last_workspace", lambda: str(workspace)
     )
@@ -844,6 +845,7 @@ def test_get_session_for_file_ops_unknown_session_raises(
 
     monkeypatch.setattr(models_module, "get_session", raise_key)
     monkeypatch.setattr(models_module, "_active_state_db_path", lambda: db)
+    monkeypatch.setattr(models_module, "_strict_active_state_db_path", lambda: db)
     monkeypatch.setattr(models_module, "get_last_workspace", lambda: str(tmp_path))
 
     with pytest.raises(KeyError):
@@ -852,7 +854,7 @@ def test_get_session_for_file_ops_unknown_session_raises(
 
 def test_state_db_has_session_missing_db(models_module, monkeypatch, tmp_path):
     monkeypatch.setattr(
-        models_module, "_active_state_db_path", lambda: tmp_path / "missing.db"
+        models_module, "_strict_active_state_db_path", lambda: tmp_path / "missing.db"
     )
     assert models_module.state_db_has_session("any") is False
 
@@ -860,6 +862,6 @@ def test_state_db_has_session_missing_db(models_module, monkeypatch, tmp_path):
 def test_state_db_has_session_present(models_module, monkeypatch, tmp_path):
     db = tmp_path / "state.db"
     _make_state_db(db, "cli-9")
-    monkeypatch.setattr(models_module, "_active_state_db_path", lambda: db)
+    monkeypatch.setattr(models_module, "_strict_active_state_db_path", lambda: db)
     assert models_module.state_db_has_session("cli-9") is True
     assert models_module.state_db_has_session("nope") is False

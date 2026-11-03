@@ -216,11 +216,14 @@ class TestBuildProviderCardJs:
     def test_configured_badge_shown_for_config_yaml(self):
         """The Configured badge must appear when has_key is True regardless of key_source."""
         fn = self._get_fn()
+        classifier_idx = fn.find("const isConfigured=")
+        assert classifier_idx != -1, "_buildProviderCard has no shared configured classifier"
+        classifier = fn[classifier_idx : classifier_idx + 180]
+        assert "p.has_key" in classifier, "Non-self-hosted configured status no longer follows p.has_key"
         badge_idx = fn.find("provider-card-badge")
         assert badge_idx != -1, "provider-card-badge not found in _buildProviderCard"
-        badge_ctx = fn[max(0, badge_idx - 50) : badge_idx + 80]
-        assert "p.has_key" in badge_ctx or "has_key" in badge_ctx, (
-            "Configured badge is not conditional on p.has_key"
+        assert "isConfigured?" in fn[badge_idx - 80 : badge_idx + 120], (
+            "Configured badge does not use the shared configured classifier"
         )
 
 

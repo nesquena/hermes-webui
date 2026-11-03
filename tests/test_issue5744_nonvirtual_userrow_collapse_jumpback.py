@@ -336,6 +336,9 @@ def test_rendermessages_calls_prewipe_capture_before_wipe():
     """
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + r"""
+// The render path captures viewport ownership before its own scroll restore
+// (#7591); harnesses that run the real renderMessages must provide it.
+function _captureMessageRecoveryOwnership(){ return { programmatic:false, jumpOwner:false }; }
 eval(extractFunc('renderMessages'));
 const body = renderMessages.toString();
 const capIdx = body.indexOf('_rememberRenderedUserRowIntrinsicHeights(');
