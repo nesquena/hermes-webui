@@ -429,6 +429,69 @@ def test_named_profile_derives_the_profile_scoped_container_key(monkeypatch):
 # Streaming worker — bind during the turn, restore on EVERY exit path
 # ---------------------------------------------------------------------------
 
+def _install_mcp_discovery_stub(monkeypatch, mode="dotenv"):
+    """Make `discover_mcp_tools()` deterministic inside a scene.
+
+    Release-stage finding (review 2026-11-02). The scene fakes ``hermes_cli``
+    with a plain module that is NOT a package, so the real
+    ``tools.mcp_tool`` import inside ``_run_agent_streaming``'s
+    ``try: ... discover_mcp_tools()`` fails — but only while nothing earlier
+    in the pytest session has cached the real ``tools.mcp_tool``. That made the
+    scene's behavior depend on test order, and in the full release suite the
+    real chain ran and wrote the profile ``.env`` into ``os.environ`` behind
+    the profile mirror's back.
+
+    Rather than depending on whichever modules happen to be cached, install an
+    explicit stand-in. Modes:
+
+    * ``"dotenv"`` (default): faithfully emulate the real chain
+      ``discover_mcp_tools() → _load_mcp_config() → load_hermes_dotenv()``.
+      It resolves the home from the LIVE ``HERMES_HOME`` (the turn mirrors it
+      to the profile home before discovery runs) and publishes that profile's
+      ``.env`` with ``override=True`` — the exact production write the fix has
+      to survive.
+    * ``"none"``: a no-op discovery, for tests that only care about identity
+      lifecycle and should not have env churn.
+
+    Returns the recorder list of home paths the stub resolved (for assertions).
+    """
+    from api import agent_compat as _agent_compat
+
+    _real_agent_attr = _agent_compat.agent_attr
+    calls: list[str] = []
+
+    def _stub_discover_mcp_tools():
+        calls.append(str(os.environ.get("HERMES_HOME") or ""))
+        if mode == "none":
+            return []
+        home = os.environ.get("HERMES_HOME") or ""
+        if not home:
+            return []
+        env_path = Path(home) / ".env"
+        if not env_path.exists():
+            return []
+        # Mirror `_load_dotenv_with_fallback(..., override=True)` for the
+        # simple `KEY=VALUE` lines this test suite writes.
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, _, value = line.partition("=")
+            os.environ[name.strip()] = value.strip()
+        return []
+
+    def _patched_agent_attr(owner, name, home, default=_agent_compat._MISSING):
+        # Intercept ONLY the MCP-discovery lookup. Every other `agent_attr`
+        # caller (approval session key, UI session id, …) must keep resolving
+        # against the real modules, exactly as production does.
+        if name == "discover_mcp_tools":
+            return _stub_discover_mcp_tools
+        return _real_agent_attr(owner, name, home, default)
+
+    monkeypatch.setattr(_agent_compat, "agent_attr", _patched_agent_attr)
+    return calls
+
+
 class _StreamingScene:
     """Drive the REAL _run_agent_streaming worker with a sentinel Agent.
 
@@ -437,7 +500,7 @@ class _StreamingScene:
     resolution, identity lifecycle, env mutation and teardown all run for real.
     """
 
-    def __init__(self, monkeypatch, tmp_path, *, profile, active_profile_name=None, on_run=None, tag="", real_profile_env=False):
+    def __init__(self, monkeypatch, tmp_path, *, profile, active_profile_name=None, on_run=None, tag="", real_profile_env=False, mcp_discovery="dotenv"):
         from typing import Callable, Optional
 
         from api import config as cfg
@@ -607,6 +670,16 @@ class _StreamingScene:
         monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
         monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
         monkeypatch.setitem(sys.modules, "hermes_state", fake_hermes_state)
+        # Release-stage finding (review 2026-11-02): MCP discovery must be
+        # DETERMINISTIC here. The fake `hermes_cli` above is not a package, so
+        # `discover_mcp_tools()` fails its import only while no earlier test has
+        # cached the real `tools.mcp_tool` — the scene's behavior then depended
+        # on test ORDER, which hid a production path. Install an explicit
+        # stand-in instead: by default it faithfully emulates the real
+        # `discover_mcp_tools() → _load_mcp_config() → load_hermes_dotenv()`
+        # chain (see `_install_mcp_discovery_stub`), so every scene exercises
+        # the same code shape the release suite hits.
+        _install_mcp_discovery_stub(monkeypatch, mcp_discovery)
 
         for registry in (
             "STREAMS", "CANCEL_FLAGS", "AGENT_INSTANCES", "STREAM_PARTIAL_TEXT",
@@ -1889,3 +1962,114 @@ def test_unresolved_profile_fallback_reads_the_dotenv_identity(
     # WebUI consumers.
     assert scene.observed["thread_env_profile"] == "dotenv-profile"
     assert sc._SESSION_PROFILE.get() is sc._UNSET
+
+
+# ---------------------------------------------------------------------------
+# Release-stage finding (review 2026-11-02): MCP discovery writes the profile
+# `.env` into the process env BEHIND the mirror's back
+#
+# `discover_mcp_tools()` → `_load_mcp_config()` → `load_hermes_dotenv()` runs on
+# every turn in production (the real `tools.mcp_tool` is always importable) and
+# resolves its home from the live `HERMES_HOME`, which the turn has already
+# mirrored to its profile home. The loader publishes that profile's `.env` with
+# `override=True`, so mid-turn `HERMES_SESSION_PROFILE` became the `.env`
+# value — bypassing the per-turn mirror. An unresolved turn therefore exposed
+# the profile identity process-wide and could overwrite a concurrent named
+# turn's published profile: the exact race #8452 exists to prevent.
+#
+# These two tests drive that write DETERMINISTICALLY through the same stub the
+# scene uses (no dependence on which modules an earlier test cached) and assert
+# the invariant holds mid-turn. They fail on the pre-fix head.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("ambient", [None, "inherited-ambient"])
+def test_mcp_discovery_dotenv_write_does_not_displace_the_turn_slot(
+    monkeypatch, tmp_path, ambient,
+):
+    """Discovery's dotenv write must not become the mid-turn process value.
+
+    Unresolved-profile turn beside an ambient value, with the profile home's
+    `.env` declaring a DIFFERENT `HERMES_SESSION_PROFILE`. The real chain
+    publishes the dotenv value into `os.environ`; the mirror must re-assert its
+    own slot afterwards, so the Agent still observes the ambient — never the
+    `.env` identity the generic path used to apply.
+    """
+    sc = _session_context(monkeypatch)
+    if ambient is None:
+        monkeypatch.delenv("HERMES_SESSION_PROFILE", raising=False)
+    else:
+        monkeypatch.setenv("HERMES_SESSION_PROFILE", ambient)
+
+    scene = _StreamingScene(
+        monkeypatch, tmp_path,
+        profile=None,
+        active_profile_name=None,
+        tag=f"discovery-{'absent' if ambient is None else 'inherited'}",
+        real_profile_env=True,
+        mcp_discovery="dotenv",  # the faithful stub = real production shape
+    )
+    (scene.profile_home / ".env").write_text(
+        "HERMES_SESSION_PROFILE=dotenv-profile\n", encoding="utf-8"
+    )
+
+    scene.run()
+
+    # Mid-turn, the Agent saw the mirror's slot, not discovery's dotenv write.
+    assert scene.observed["env_profile"] == ambient, (
+        "MCP discovery's dotenv write leaked into the mid-turn process env: "
+        f"observed {scene.observed['env_profile']!r}, expected ambient {ambient!r}"
+    )
+    # The ContextVar path (what the installed Agent reads) still resolves the
+    # dotenv identity for an unresolved turn — unchanged by this fix.
+    assert scene.observed["ctx_profile"] == "dotenv-profile"
+    assert scene.observed["resolved_profile"] == "dotenv-profile"
+    # And the turn still leaks nothing after it ends.
+    assert os.environ.get("HERMES_SESSION_PROFILE") == ambient
+    assert sc._SESSION_PROFILE.get() is sc._UNSET
+
+
+def test_mcp_discovery_dotenv_write_does_not_clobber_a_live_named_turn(
+    monkeypatch, tmp_path,
+):
+    """A concurrent named turn's published profile survives discovery.
+
+    Turn A (named `work`) publishes and stays live. Turn B is unresolved and
+    runs discovery, whose dotenv write would set `HERMES_SESSION_PROFILE` to
+    the `.env` value. The mirror must restore A's published profile — B must
+    never overwrite a live named turn's slot.
+    """
+    sc = _session_context(monkeypatch)
+    monkeypatch.delenv("HERMES_SESSION_PROFILE", raising=False)
+
+    unresolved = _StreamingScene(
+        monkeypatch, tmp_path, profile=None,
+        active_profile_name=None, tag="clobber-unresolved", mcp_discovery="dotenv",
+    )
+    (unresolved.profile_home / ".env").write_text(
+        "HERMES_SESSION_PROFILE=dotenv-profile\n", encoding="utf-8"
+    )
+
+    # Publish the named turn's slot the way the worker does, then hold it live
+    # across the unresolved turn's whole run (discovery included).
+    from api import streaming as _streaming_mod
+
+    token = _streaming_mod._publish_turn_session_profile("work")
+    try:
+        assert os.environ.get("HERMES_SESSION_PROFILE") == "work"
+        unresolved.run()
+        # MID-TURN assertion: this is the window the finding is about. The
+        # unresolved turn's own Agent must have observed the LIVE named turn's
+        # profile, not the `.env` value its MCP discovery wrote.
+        assert unresolved.observed["env_profile"] == "work", (
+            "an unresolved turn's MCP discovery overwrote a LIVE named turn's "
+            f"published profile mid-turn: observed "
+            f"{unresolved.observed['env_profile']!r}"
+        )
+        # And it must not leak after the turn either.
+        assert os.environ.get("HERMES_SESSION_PROFILE") == "work", (
+            "an unresolved turn's MCP discovery overwrote a LIVE named turn's "
+            f"published profile: {os.environ.get('HERMES_SESSION_PROFILE')!r}"
+        )
+    finally:
+        _streaming_mod._release_turn_session_profile(token)
