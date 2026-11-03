@@ -20,6 +20,13 @@ step 1 (the admission gate the tests assert on) and drops only step 2 (the
 worker thread), so the fence semantics under test stay intact and nothing
 escapes the test.
 
+Module identity: every helper here resolves ``api.updates`` at **call time**
+through ``sys.modules`` (``import api.updates as updates``). Some tests delete
+``sys.modules["api.updates"]`` and re-import it, after which a module object
+bound at import time and the live module are different objects with different
+``_apply_lock`` instances. Patching or locking the stale object would leave
+the code under test running for real.
+
 Usage::
 
     from tests._updater_restart_isolation import isolated_restart_scheduler
@@ -53,7 +60,12 @@ def isolated_restart_scheduler(monkeypatch):
     revert the caller's own unrelated monkeypatches.
     """
     from api import run_drain
-    from api import updates
+
+    # ``import api.updates`` (not ``from api import updates``): some tests delete
+    # ``sys.modules["api.updates"]`` and re-import it, after which the package
+    # attribute and the live module can be different objects. The stub must land
+    # on the object callers resolve at call time, i.e. the one in ``sys.modules``.
+    import api.updates as updates
 
     recorder = _RestartRecorder()
 
@@ -74,18 +86,26 @@ class _RestartRecorder:
         self.calls: list[float] = []
 
 
-def live_restart_workers() -> list[str]:
+def live_restart_workers(ignore=()) -> list[str]:
     """Return the names of the restart workers that are still alive.
 
     ``_schedule_restart`` names its worker ``_do``, so a live worker shows up
-    as ``Thread-N (_do)``.
+    as ``Thread-N (_do)``. Pass ``ignore`` (a snapshot of
+    ``threading.enumerate()`` taken before the code under test ran) so a
+    worker some other test leaked earlier in the session is not blamed on this
+    one.
     """
-    return [t.name for t in threading.enumerate() if t.name.endswith("(_do)")]
+    skip = {id(t) for t in ignore}
+    return [
+        t.name
+        for t in threading.enumerate()
+        if t.name.endswith("(_do)") and id(t) not in skip
+    ]
 
 
 def apply_lock_is_free() -> bool:
     """Return True when ``api.updates._apply_lock`` can be acquired right now."""
-    from api import updates
+    import api.updates as updates
 
     acquired = updates._apply_lock.acquire(blocking=False)
     if acquired:
@@ -93,7 +113,24 @@ def apply_lock_is_free() -> bool:
     return acquired
 
 
-def assert_no_restart_worker_escaped(timeout: float = 5.0) -> None:
+def wait_for_restart_workers(ignore=(), timeout: float = 5.0) -> list[str]:
+    """Give workers spawned during a test a chance to exit; return survivors.
+
+    A leaked worker sleeps for its ``delay`` before it touches anything, so a
+    teardown that looks once, immediately, can pass for the wrong reason. Poll
+    until ``timeout`` elapses and return whatever is still alive.
+    """
+    step = 0.05
+    waited = 0.0
+    survivors = live_restart_workers(ignore)
+    while survivors and waited < timeout:
+        time.sleep(step)
+        waited += step
+        survivors = live_restart_workers(ignore)
+    return survivors
+
+
+def assert_no_restart_worker_escaped(timeout: float = 5.0, ignore=()) -> None:
     """Fail if a restart worker still holds ``_apply_lock``.
 
     A leaked worker is a daemon thread that sleeps for its ``delay`` and only
@@ -110,12 +147,12 @@ def assert_no_restart_worker_escaped(timeout: float = 5.0) -> None:
                 "a restart worker still holds api.updates._apply_lock "
                 f"after {waited:.2f}s — it will refuse later apply_update() calls"
             )
-        if not live_restart_workers():
+        if not live_restart_workers(ignore):
             return
         waited += step
         time.sleep(step)
 
     raise AssertionError(
         f"a restart worker thread is still alive after {deadline:.2f}s: "
-        f"{live_restart_workers()}"
+        f"{live_restart_workers(ignore)}"
     )
