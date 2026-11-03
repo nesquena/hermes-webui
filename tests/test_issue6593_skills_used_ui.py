@@ -500,6 +500,12 @@ def test_active_stream_conflict_keeps_resolved_use_payload():
         async function loadSession(sid){assert.strictEqual(sid,'A');}
         async function newSession(){throw new Error('unexpected new session');}
         async function uploadPendingFiles(){return [];}
+        // send() claims, forgets, and releases the departing upload op with no
+        // typeof guard. This harness extracts send() without those helpers, the
+        // same way footer harnesses stub _captureMessageRecoveryOwnership.
+        function _claimDepartingUploadOp(){ return 1; }
+        function _forgetDepartingUploadDraft(){}
+        function _releaseDepartingUploadOp(){}
         async function api(){throw new Error('Session already has an active stream');}
         %(send)s
         (async()=>{
