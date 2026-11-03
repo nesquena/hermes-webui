@@ -313,3 +313,30 @@ process.stdout.write(JSON.stringify(out));
         if "\\n" in value or "\\t" in value or "\\u" in value
     )
     assert leaked == [], f"Czech values render escape sequences: {leaked}"
+
+
+PROFILE_NAME_GRAMMAR = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_czech_profile_example_uses_a_valid_profile_identifier():
+    """The onboarding example must not tell users to create a profile the form rejects.
+
+    `saveProfileForm` in static/panels.js validates the name against an
+    ASCII-only grammar, so a Czech example naming a profile with diacritics
+    („výzkumník“) describes an identifier the user cannot type.
+    """
+    panels = read(REPO / "static" / "panels.js")
+    assert "/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)" in panels, (
+        "saveProfileForm no longer validates the profile name with the grammar "
+        "this test asserts against"
+    )
+    values = _i18n_runtime(
+        "setLocale('cs');process.stdout.write(JSON.stringify(t('profile_concept_example')));"
+    )
+    match = re.search(r"profil\s+[„\"»]([^„“\"»«]+)[“\"«]", values)
+    assert match, f"no quoted profile identifier in the example: {values!r}"
+    identifier = match.group(1)
+    assert PROFILE_NAME_GRAMMAR.match(identifier), (
+        f"the example asks for profile {identifier!r}, which saveProfileForm rejects"
+    )

@@ -21325,7 +21325,7 @@ const LOCALES = {
     profile_base_url_rule: 'Základní URL musí začínat http:// nebo https://',
     profile_concept_label_example: 'Příklad',
     profile_concept_label_together: 'Dohromady',
-    profile_concept_example: 'Příklad: vytvořte profil „výzkumník“ se zapnutými dovednostmi webového vyhledávání a pracovní prostor „moje-aplikace“ ukazující na složku projektu. Profil výzkumníka si pamatuje vaše výzkumné preference; pracovní prostor drží chat, terminál a prohlížení souborů u tohoto projektu.',
+    profile_concept_example: 'Příklad: vytvořte profil „researcher“ se zapnutými dovednostmi webového vyhledávání a pracovní prostor „moje-aplikace“ ukazující na složku projektu. Profil researcher si pamatuje vaše výzkumné preference; pracovní prostor drží chat, terminál a prohlížení souborů u tohoto projektu.',
     profile_concept_desc_together: 'Profil může mít výchozí pracovní prostor, ale prostor můžete kdykoli přepnout. Profily odpovídají na otázku „kdo pracuje?“, pracovní prostory na otázku „kde pracuje?“',
     profile_concept_desc_workspaces: 'Složky projektů nebo produktů na disku. Používejte jeden pracovní prostor na repozitář nebo produkt, aby chat, terminál a prohlížení souborů mířily na správné soubory.',
     profile_concept_desc_profiles: 'Identita agenta, paměť, dovednosti, nastavení modelu/poskytovatele a připojené nástroje. Vytvářejte profily pro role jako výzkumník, spisovatel, marketér nebo vývojář, když mají tyto role mít jiný kontext nebo jiné schopnosti.',
