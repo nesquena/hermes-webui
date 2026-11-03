@@ -1239,3 +1239,76 @@ def test_sync_chat_cold_follow_up_collapses_replayed_owner(tmp_path, monkeypatch
         "the display must retain exactly the two independently owned turns; got "
         f"{_contents(display)}"
     )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# #8574 review P2-2 (nesquena-hermes 2026-11-02): a repeated id-less user
+# turn on LEGACY history must survive the sync route's dedup.
+# ────────────────────────────────────────────────────────────────────────
+#
+# Reviewer's repro: history `higher / guess 50 / higher / guess 75` with no
+# WebUI ids, then a new prompt. `POST /api/chat` used to persist a context
+# WITHOUT the second `higher` (5 rows) while the transcript kept it (6 rows);
+# master's sync route keeps both. Ids are minted on the Agent's result copies,
+# but the dedup ran on the raw, unowned prefix, so the two genuine turns
+# looked like one replay.
+
+_P2_2_LEGACY_HISTORY = [
+    {"role": "user", "content": "higher", "timestamp": 100.0},
+    {"role": "assistant", "content": "guess 50", "timestamp": 101.0},
+    {"role": "user", "content": "higher", "timestamp": 102.0},
+    {"role": "assistant", "content": "guess 75", "timestamp": 103.0},
+]
+
+
+def test_sync_chat_keeps_a_repeated_idless_legacy_turn(tmp_path, monkeypatch):
+    """Both genuine `higher` turns must reach the persisted context."""
+    reloaded = _sync_http_send(
+        tmp_path,
+        monkeypatch,
+        "i8574-p2-2-legacy-repeat",
+        _P2_2_LEGACY_HISTORY,
+        "lower",
+        "guess 90",
+    )
+    assert reloaded is not None
+    context = reloaded.context_messages
+    display = reloaded.messages
+
+    context_higher = _contents(context).count("higher")
+    display_higher = _contents(display).count("higher")
+    assert context_higher == 2, (
+        "the model context must keep BOTH genuine legacy `higher` turns; "
+        f"got {context_higher} in {_contents(context)}"
+    )
+    assert display_higher == 2, (
+        f"the display transcript must also keep both; got {_contents(display)}"
+    )
+    # The row counts must agree: this is the divergence the finding is about.
+    assert len(context) == len(display), (
+        "the persisted context and the display transcript must not diverge on "
+        f"row count; got context={len(context)} display={len(display)}"
+    )
+
+
+def test_sync_chat_still_collapses_a_real_replay(tmp_path, monkeypatch):
+    """Control: an ID-BEARING replay must still collapse (no over-splitting)."""
+    history = [
+        {"role": "user", "content": "status?", "timestamp": 100.0, "id": 11},
+        {"role": "assistant", "content": "all green", "timestamp": 101.0, "id": 12},
+        {"role": "user", "content": "status?", "timestamp": 100.0, "id": 11},
+        {"role": "assistant", "content": "all green", "timestamp": 101.0, "id": 12},
+    ]
+    reloaded = _sync_http_send(
+        tmp_path,
+        monkeypatch,
+        "i8574-p2-2-replay-control",
+        history,
+        "next",
+        "ok",
+    )
+    assert reloaded is not None
+    assert _contents(reloaded.context_messages).count("status?") == 1, (
+        "the same-id replay must still collapse to one row; got "
+        f"{_contents(reloaded.context_messages)}"
+    )
