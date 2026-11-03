@@ -4391,12 +4391,13 @@ def _reassert_turn_session_profile(token) -> None:
 
     Some call paths write ``HERMES_SESSION_PROFILE`` into ``os.environ``
     without going through ``_publish_turn_session_profile``. The known one is
-    MCP discovery: ``discover_mcp_tools()`` → ``_load_mcp_config()`` →
-    ``load_hermes_dotenv()`` resolves its home from the live ``HERMES_HOME``
-    (which the turn has already mirrored to its profile home) and publishes
-    that profile ``.env`` with ``override=True``. Left alone, an unresolved
-    turn exposes the profile's ``.env`` identity process-wide and can
-    overwrite a concurrent named turn's published value (#8452).
+    MCP discovery: its ``discover_mcp_tools`` entry point →
+    ``_load_mcp_config`` → ``load_hermes_dotenv`` chain resolves its home from
+    the live ``HERMES_HOME`` (which the turn has already mirrored to its
+    profile home) and publishes that profile ``.env`` with ``override=True``.
+    Left alone, an unresolved turn exposes the profile's ``.env`` identity
+    process-wide and can overwrite a concurrent named turn's published value
+    (#8452).
 
     Unlike ``_release_turn_session_profile`` this does NOT retire anything —
     the publisher stays live. It only repairs the env to whatever the stack
