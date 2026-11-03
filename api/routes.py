@@ -72,7 +72,12 @@ from api.session_events import (
     unsubscribe_session_events,
 )
 from api.gateway_restart import restart_active_profile_gateway
-from api.shares import create_or_refresh_share, load_share, revoke_share
+from api.shares import (
+    build_share_snapshot,
+    load_share,
+    revoke_share,
+    write_share_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -589,6 +594,7 @@ def _project_default_workspace(proj) -> str | None:
 # alias, so every existing call site (and the tests that patch it) reads the
 # same object. Reentrant so a mutation may call helpers that take it again.
 from api.models import PROJECTS_CATALOG_LOCK as _PROJECTS_CATALOG_LOCK
+from api.models import update_session_share_fields as _update_session_share_fields
 
 
 # Bounded wait for a session lock while /api/projects/delete clears cached
@@ -3084,6 +3090,10 @@ def _build_session_list_cache_payload(
                     or _is_api_server_sidecar_row(s)
                 )
                 and not _session_source_is_webui(s)
+                # Desktop rows already use the strict owning-profile pass
+                # above. A second, generic probe can consult the active DB
+                # and incorrectly prune a foreign profile's shared index row.
+                and not _is_desktop_sidecar_row(s)
                 and _sid not in cli_by_id
             ):
                 _orphan_probe_rows.append(s)
@@ -3172,7 +3182,33 @@ def _build_session_list_cache_payload(
         webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
         # Apply the same CLI visibility semantics to imported local copies so
         # low-value imported artifacts do not leak into the sidebar.
-        webui_sessions = [s for s in webui_sessions if is_cli_session_row_visible(s)]
+        cli_id_counts = defaultdict(int)
+        for row in cli:
+            cli_id_counts[row.get("session_id")] += 1
+
+        def _imported_copy_is_visible(s: dict) -> bool:
+            if is_cli_session_row_visible(s):
+                return True
+            # #8762: a copy that still has messages is never judged stricter
+            # than its own state.db row. A legacy Desktop history with unknown
+            # message roles stays listed through the projection's role
+            # fallback, but its copy counts no user turns; dropping the copy
+            # let the bare state.db row stand in and lose the WebUI-owned
+            # metadata (the pin). The row must be unambiguously the copy's
+            # own: the dedupe below is by id, so a copy kept for an id that
+            # two profiles' state.db rows share would hide both of them.
+            sid = s.get("session_id")
+            meta = cli_by_id.get(sid)
+            if not meta or cli_id_counts[sid] != 1 or not is_cli_session_row_visible(meta):
+                return False
+            if not _profiles_match(meta.get("profile"), s.get("profile")):
+                return False
+            try:
+                return int(s.get("message_count") or 0) > 0
+            except (TypeError, ValueError):
+                return False
+
+        webui_sessions = [s for s in webui_sessions if _imported_copy_is_visible(s)]
         represented_webui_ids = set()
         for s in webui_sessions:
             represented_webui_ids.update(_session_lineage_ids(s))
@@ -3190,7 +3226,41 @@ def _build_session_list_cache_payload(
             diag_stage=diag_stage,
         )
         diag_stage("filter_webui_sessions")
-        webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
+        # #8141 + 2026-10-27 re-gate: display-only bucket derivation for
+        # parent-owned delegated children. CLI sessions are dropped from this
+        # payload entirely when the CLI bucket is hidden, so resolve the
+        # parent/lineage within the pre-filter rows first — a CLI-owned
+        # delegated child must follow its (hidden) CLI parent out of the
+        # WebUI bucket instead of being kept and counted as a WebUI
+        # conversation that can never render.
+        #
+        # The parent-lookup map is built PER PROFILE: these rows are still
+        # cross-profile here (profile scoping runs at profile_scope below), so
+        # one flat map let another profile's parent resolve — beta's orphan
+        # child inherited alpha's shared parent's CLI bucket and was filtered
+        # out of beta's own list, where master lists it (the default view on
+        # established installs). A parent in another profile is filtered out of
+        # this child's view anyway, so its bucket says nothing about where the
+        # child belongs — the same rule the parent_is_cli_session hint below
+        # follows. None/''/renamed-root aliases collapse onto one root group,
+        # mirroring _profiles_match.
+        _cli_off_rows_by_profile: dict[str, dict[str, dict]] = {}
+        for _row in webui_sessions:
+            if not (isinstance(_row, dict) and _row.get("session_id")):
+                continue
+            _profile_group = _sidebar_profile_group_key(_row.get("profile"))
+            _cli_off_rows_by_profile.setdefault(_profile_group, {})[
+                str(_row.get("session_id"))
+            ] = _row
+        webui_sessions = [
+            s for s in webui_sessions
+            if not _sidebar_display_is_cli(
+                s,
+                _cli_off_rows_by_profile.get(
+                    _sidebar_profile_group_key(s.get("profile")), {}
+                ),
+            )
+        ]
         # #4985 second pass — see _prune_orphaned_webui_zero_message_sessions
         # for the gate predicate and the post-#1171-survivor rationale. The
         # prune MUST run here too: established installs have
@@ -3263,30 +3333,78 @@ def _build_session_list_cache_payload(
     if exclude_hidden:
         archived_scoped = [s for s in archived_scoped if not s.get("default_hidden")]
         visible_scoped = [s for s in visible_scoped if not s.get("default_hidden")]
+    # #8141: display-only source-bucket derivation for parent-owned delegated
+    # children. Resolve the parent/lineage within this profile's FULL scoped
+    # payload (both buckets, archived included) so CLI-owned subagent children
+    # travel with — and attach under — their CLI parent instead of being
+    # counted as WebUI conversations that never render. This only decides the
+    # sidebar bucket/badge; raw source, read_only, and ownership flags are
+    # untouched (is_cli_session_row itself is NOT changed).
+    #
+    # The lookup map is built PER PROFILE, like the CLI-hidden map above: with
+    # All-profiles on, two profiles can hold the same session ids (a cloned
+    # profile or a copied state.db), and one flat map let beta's child resolve
+    # alpha's same-id parent and leave both tabs (#8245 release gate r1103).
+    _sidebar_scoped_rows_by_profile: dict[str, dict[str, dict]] = {}
+    for _row in [*archived_scoped, *visible_scoped]:
+        if not (isinstance(_row, dict) and _row.get("session_id")):
+            continue
+        _sidebar_scoped_rows_by_profile.setdefault(
+            _sidebar_profile_group_key(_row.get("profile")), {}
+        )[str(_row.get("session_id"))] = _row
+    # One verdict per row object for this request. It is also published on the
+    # response copies as ``sidebar_is_cli_session`` (below): the verdict is
+    # derived from the full scoped payload BEFORE source filtering and archive
+    # pagination, which the browser cannot reproduce when a parent sits on a
+    # later archive page (#8245 release gate r1103). Shared row dicts are not
+    # mutated; the flag only lands on the copies.
+    _sidebar_bucket_verdicts: dict[int, bool] = {}
+
+    def _sidebar_bucket_is_cli(row: dict) -> bool:
+        key = id(row)
+        verdict = _sidebar_bucket_verdicts.get(key)
+        if verdict is None:
+            verdict = _sidebar_display_is_cli(
+                row,
+                _sidebar_scoped_rows_by_profile.get(
+                    _sidebar_profile_group_key(row.get("profile")), {}
+                ),
+            )
+            _sidebar_bucket_verdicts[key] = verdict
+        return verdict
+
+    def _sidebar_row_with_bucket(row) -> dict:
+        if not isinstance(row, dict):
+            return {}
+        item = dict(row)
+        if row.get("session_id"):
+            item["sidebar_is_cli_session"] = bool(_sidebar_bucket_is_cli(row))
+        return item
+
     archived_webui_count = sum(
         1 for s in archived_scoped
-        if s.get("archived") and not _is_cli_session_for_settings(s)
+        if s.get("archived") and not _sidebar_bucket_is_cli(s)
     )
     archived_cli_count = sum(
         1 for s in archived_scoped
-        if s.get("archived") and _is_cli_session_for_settings(s)
+        if s.get("archived") and _sidebar_bucket_is_cli(s)
     )
     archived_count = archived_webui_count + archived_cli_count
     def _filter_sidebar_source(rows: list[dict]) -> list[dict]:
         if sidebar_source == "webui":
-            return [s for s in rows if not _is_cli_session_for_settings(s)]
+            return [s for s in rows if not _sidebar_bucket_is_cli(s)]
         if sidebar_source == "cli":
-            return [s for s in rows if _is_cli_session_for_settings(s)]
+            return [s for s in rows if _sidebar_bucket_is_cli(s)]
         return list(rows)
 
     full_scoped_all_sources = archived_scoped if include_archived else visible_scoped
     webui_session_count = sum(
         1 for s in full_scoped_all_sources
-        if not _is_cli_session_for_settings(s)
+        if not _sidebar_bucket_is_cli(s)
     )
     cli_session_count = sum(
         1 for s in full_scoped_all_sources
-        if _is_cli_session_for_settings(s)
+        if _sidebar_bucket_is_cli(s)
     )
     visible_scoped_filtered = _filter_sidebar_source(visible_scoped)
     archived_scoped_filtered = _filter_sidebar_source(archived_scoped)
@@ -3333,13 +3451,9 @@ def _build_session_list_cache_payload(
     _coerce_subagent_rows(scoped)
     _coerce_subagent_rows(sidebar_reference_sessions)
     return {
-        "sessions": [
-            dict(s) if isinstance(s, dict) else {}
-            for s in scoped
-        ],
+        "sessions": [_sidebar_row_with_bucket(s) for s in scoped],
         "sidebar_reference_sessions": [
-            dict(s) if isinstance(s, dict) else {}
-            for s in sidebar_reference_sessions
+            _sidebar_row_with_bucket(s) for s in sidebar_reference_sessions
         ],
         "cli_count": len(deduped_cli),
         "archived_count": archived_count,
@@ -3651,6 +3765,8 @@ from api.config import (
     unregister_stream_owner,
     CHAT_LOCK,
     _get_session_agent_lock,
+    _get_session_share_lock,
+    SHARE_SESSION_LOCK_TIMEOUT_SECONDS,
     CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS,
     load_settings,
     persisted_speech_settings_keys,
@@ -6943,6 +7059,131 @@ def _resolve_share_session_pair(sid: str, handler):
         return synth, None, cli_meta
 
 
+def _reload_session_for_share(sid: str):
+    """Durable sidecar for a share mutation, or ``None`` when it cannot be read.
+
+    A share handler must not save the session object it resolved before taking the
+    share lock: a title rename or an appended message that finished while it waited
+    would be reverted by the save. Reload inside the lock and change only the share
+    fields. An unreadable sidecar falls back to the caller's copy instead of turning
+    the request into a 500 (#8255 review).
+    """
+    try:
+        return Session.load(sid)
+    except Exception:
+        logger.debug("Failed to reload session %s for a share mutation", sid, exc_info=True)
+        return None
+
+
+def _mirror_share_fields_to_cached_session(sid: str, source) -> None:
+    """Copy share fields onto the resident cached session before it is persisted.
+
+    The cache's freshness check compares message/scene state and not share fields,
+    so a cached copy left untouched after the share lock was released keeps serving
+    the previous token to the next reader (#8255 review).
+
+    This runs BEFORE the durable save, not after it (#8255 review, second round).
+    A streaming checkpoint serializes the live session; if the token only reached
+    the live copy after the save, a checkpoint landing in that window would write
+    ``share_token: None`` back over the sidecar and the published link would stay
+    live with nothing left for revoke to find.
+    """
+    try:
+        with LOCK:
+            cached = SESSIONS.get(sid)
+            if cached is None or cached is source:
+                return
+            cached.share_token = getattr(source, "share_token", None)
+            cached.share_created_at = getattr(source, "share_created_at", None)
+    except Exception:
+        logger.debug("Failed to mirror share fields for session %s", sid, exc_info=True)
+
+
+def _resident_share_token(sid: str) -> str:
+    """Token held by the resident session, when that entry is this session.
+
+    A streaming checkpoint can serialize the live object before a share request
+    set the token and commit after it, so the sidecar can come back without a
+    token while the published snapshot is still live. Reusing the resident token
+    keeps that link revocable instead of minting a second token that orphans it
+    (#8255 review, third round).
+
+    The check is identity, not freshness: the entry must be the session the
+    request is about, and a metadata-only stub cannot speak for share fields.
+    """
+    try:
+        with LOCK:
+            cached = SESSIONS.get(sid)
+    except Exception:
+        logger.debug("Failed to read resident session %s for its share token", sid, exc_info=True)
+        return ""
+    if cached is None:
+        return ""
+    if str(getattr(cached, "session_id", "") or "") != str(sid):
+        return ""
+    if getattr(cached, "_loaded_metadata_only", False):
+        return ""
+    return str(getattr(cached, "share_token", "") or "").strip()
+
+
+def _persist_share_fields(sid: str, session, *, share_token, share_created_at) -> None:
+    """Persist only the two share fields of ``sid``.
+
+    Saving the copy the handler resolved writes its conversation fields back over
+    any writer that finished since it was read, so the sidecar is patched in
+    place instead. ``session`` is saved only when no sidecar exists yet (a pure
+    external session), where there is no persisted conversation to revert
+    (#8255 review, third round).
+
+    The whole check-and-write runs under the session's persistence lock, so the
+    "no sidecar yet" decision cannot go stale: a save that lands between the
+    check and the fallback would otherwise be reverted by the whole-object save
+    that follows it (#8399 review). The lock is reentrant, so the patch helper
+    and ``save()`` re-entering it is expected.
+    """
+    with _session_persist_lock(sid):
+        if not _update_session_share_fields(
+            sid,
+            share_token=share_token,
+            share_created_at=share_created_at,
+        ):
+            session.share_token = share_token
+            session.share_created_at = share_created_at
+            session.save(touch_updated_at=False)
+        # Still under the persistence lock, so no save can land between the
+        # patch and this step (#8399 review, release fold).
+        _commit_share_fields_to_cached_session(
+            sid, share_token=share_token, share_created_at=share_created_at,
+        )
+
+
+def _commit_share_fields_to_cached_session(sid: str, *, share_token, share_created_at) -> None:
+    """Set the resident session's share pair AND its stale-save baseline to the
+    pair that was just persisted. The caller holds ``_session_persist_lock(sid)``.
+
+    The pre-save mirror moves only the fields. A resident save in the
+    mirror/patch window is then back at its baseline and adopts the pre-patch
+    pair from disk, so the cached copy kept serving a revoked token. Moving the
+    fields again without the baseline is worse: a copy that a writer reloaded
+    in that window (a rename, say) would carry the new pair as its own change,
+    and after an eviction and a newer share its delayed save would write the old
+    token over the new one, leaving a link that revoke cannot reach. Fields and
+    baseline therefore move together, and only once the pair is on disk
+    (#8399 review, release fold).
+    """
+    try:
+        with LOCK:
+            cached = SESSIONS.get(sid)
+            if cached is None:
+                return
+            cached.share_token = share_token
+            cached.share_created_at = share_created_at
+            cached._share_token_saved = share_token
+            cached._share_created_at_saved = share_created_at
+    except Exception:
+        logger.debug("Failed to commit share fields to cached session %s", sid, exc_info=True)
+
+
 def _reconcile_stale_stream_state_for_session_rows(session_rows) -> bool:
     """Clear stale persisted stream fields before /api/sessions serializes rows."""
     changed = False
@@ -10211,12 +10452,39 @@ def _lookup_gateway_session_identity(session_id: str) -> dict:
 # Sources kept out of the default projection with no bounded pass of their own.
 # A session the user explicitly opens from one of them is resolved by id, so it
 # stays reachable however many newer runs exist (#8265 review on #8349).
-_CLI_LOOKUP_FALLBACK_SOURCES = ("oneshot",)
+# Derived from the models constants so a newly excluded source is never left
+# unreachable by id.
+from api.models import (  # noqa: E402
+    BACKGROUND_CLI_SOURCES as _BACKGROUND_CLI_SOURCES,
+    INTERACTIVE_WINDOW_EXCLUDED_CLI_SOURCES as _INTERACTIVE_WINDOW_EXCLUDED_CLI_SOURCES,
+)
+
+_CLI_LOOKUP_FALLBACK_SOURCES = tuple(
+    source for source in _INTERACTIVE_WINDOW_EXCLUDED_CLI_SOURCES
+    if source not in _BACKGROUND_CLI_SOURCES
+)
 
 
 def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False) -> dict:
     if not session_id:
         return {}
+    # perf: this runs on hot request paths (/api/session/import_cli,
+    # /api/git-info) and used to enumerate EVERY CLI session through
+    # get_cli_sessions() — a whole-state.db projection that costs seconds when
+    # cold and re-runs whenever the agent writes to state.db. Answer from an
+    # existing snapshot first, so the common case skips the projection entirely.
+    try:
+        row = lookup_cli_session_row(session_id, all_profiles=all_profiles)
+        if row:
+            return row
+    except Exception:
+        logger.debug("cli session metadata lookup failed", exc_info=True)
+
+    # Nothing cached yet: keep the original enumeration as the source of truth,
+    # resolved through the module-level name so callers that replace
+    # get_cli_sessions() (tests, plugins) still control what this returns. The
+    # fast path is an optimisation, not a second source of truth (#8412 review:
+    # git-info answered 404 for a session the enumeration did return).
     try:
         for row in get_cli_sessions(all_profiles=all_profiles):
             if row.get("session_id") == session_id:
@@ -12398,6 +12666,79 @@ def _normalize_sidebar_source_flags(session: dict) -> dict:
     return normalized
 
 
+def _is_delegated_subagent_child(row: dict) -> bool:
+    """Return True for a parent-owned delegated ``delegate_task`` child row.
+
+    Delegated subagents are recorded in state.db with ``source='subagent'`` and
+    a non-continuation ``parent_session_id`` (``relationship_type``
+    ``'child_session'``). They are view-only work owned by the delegate runner
+    (#5307). This predicate is display-only: it derives a sidebar bucket and
+    never mutates the row's source/read-only flags or ``is_cli_session_row``.
+    """
+    if not isinstance(row, dict):
+        return False
+    if row.get("relationship_type") != "child_session":
+        return False
+    raw_source = str(
+        row.get("raw_source") or row.get("source_tag")
+        or row.get("session_source") or row.get("source") or ""
+    ).strip().lower()
+    return raw_source == "subagent"
+
+
+def _sidebar_profile_group_key(profile) -> str:
+    """Canonical profile group key for sidebar lineage scoping.
+
+    ``None``/empty and any renamed-root alias collapse onto one root group,
+    mirroring ``_profiles_match``'s coercion, so legacy rows tagged
+    ``'default'`` still resolve their parent after the root profile is
+    renamed. Used to keep a parent/lineage lookup inside one profile.
+    """
+    name = str(profile or "default") or "default"
+    if name == "default" or _is_root_profile(name):
+        return "default"
+    return name
+
+
+def _sidebar_display_is_cli(row: dict, rows_by_id: dict | None = None) -> bool:
+    """Display-only CLI bucket decision for a logical sidebar row (#8141).
+
+    A parent-owned delegated child travels with its resolved parent/lineage
+    within the same profile payload: CLI-owned children bucket CLI (and attach
+    under their CLI parent), WebUI-owned children stay WebUI. When the direct
+    parent cannot be resolved (missing parent, or rotated by compression), fall
+    back to the lineage root/tip and finally to the row's own
+    ``is_cli_session_row`` classification. Raw source, ``read_only``, and
+    ownership flags are never touched — this projection only decides which
+    sidebar bucket (and badge) a row is counted under.
+    """
+    if not isinstance(row, dict):
+        return False
+    if _is_delegated_subagent_child(row):
+        seen: set[str] = set()
+        current: dict = row
+        while _is_delegated_subagent_child(current):
+            parent_id = str(current.get("parent_session_id") or "").strip()
+            if not parent_id or parent_id in seen:
+                break
+            seen.add(parent_id)
+            parent = (rows_by_id or {}).get(parent_id)
+            if parent is None:
+                break
+            current = parent
+        if current is not row:
+            return _is_cli_session_for_settings(current)
+        # Rotation/compression fallback: the direct parent row may be gone, but
+        # the lineage root/tip can still derive the child's bucket.
+        for key in ("_parent_lineage_root_id", "_parent_lineage_tip_id"):
+            lineage_id = str(row.get(key) or "").strip()
+            if lineage_id and lineage_id in (rows_by_id or {}):
+                ancestor = (rows_by_id or {})[lineage_id]
+                if ancestor is not row:
+                    return _is_cli_session_for_settings(ancestor)
+    return _is_cli_session_for_settings(row)
+
+
 def _reconcile_session_detail_source_flags(session: dict, state_meta: dict) -> dict:
     """Return a /api/session payload whose source flags match state.db truth.
 
@@ -12474,12 +12815,11 @@ def _is_desktop_sidecar_row(session: dict) -> bool:
     Desktop app, the ``state.db`` row disappears but the sidecar stays, so the
     row lingers in the sidebar forever.
 
-    Such a row matches neither ``is_cli_session_row()`` (Desktop is not CLI and
-    its source marker is not ``cli``/``tui``) nor ``_is_api_server_sidecar_row()``
-    (Desktop is not API-server), so the #3238 existence probe never inspected it
-    and no prune path could reach it. Existence is still decided by
-    ``agent_session_rows_existing()``, which fails closed to "all present", so a
-    transient ``state.db`` read error never prunes a live Desktop session.
+    Desktop belongs to the interactive family, but its sidecars are reconciled
+    only by ``_prune_orphaned_desktop_sidecar_sessions()``. That pass uses
+    ``agent_session_rows_existing_strict()`` so an unavailable owning-profile
+    database retains the row instead of borrowing the active profile's DB.
+    Desktop rows must not also enter the generic CLI/API orphan pass.
     """
     if not isinstance(session, dict) or _session_source_is_webui(session):
         return False
@@ -12881,6 +13221,7 @@ from api.models import (
     import_cli_session,
     CLAUDE_CODE_SOURCE,
     get_cli_sessions,
+    lookup_cli_session_row,
     get_cli_session_messages,
     get_state_db_session_messages,
     get_state_db_session_message_prefix_summary,
@@ -18626,20 +18967,97 @@ def handle_post(handler, parsed) -> bool:
             snapshot_session, stored_session, cli_meta = _resolve_share_session_pair(sid, handler)
         except KeyError:
             return bad(handler, "Session not found", 404)
+        # #8255 review (second round): build the snapshot from the session as it
+        # is INSIDE the lock. A writer that saves while the snapshot is being
+        # built used to be reverted, because the snapshot was taken before the
+        # lock and the persist saved that older state back. The lock now covers
+        # the build as well, so the published snapshot and the persisted state
+        # are the same state.
+        share_lock = _get_session_share_lock(sid)
+        if not share_lock.acquire(timeout=SHARE_SESSION_LOCK_TIMEOUT_SECONDS):
+            return bad(handler, "Session busy, try again", 503)
         try:
-            share_meta = create_or_refresh_share(snapshot_session)
-        except ValueError as exc:
-            return bad(handler, str(exc), 400)
-        persisted_session = stored_session
-        if persisted_session is None:
-            persisted_session = _build_share_metadata_sidecar(
-                sid,
-                snapshot_session,
-                cli_meta=cli_meta,
+            # Re-read inside the lock: saving the object resolved before the wait
+            # would revert a title rename or an appended message that landed while
+            # this request was blocked.
+            persisted_session = _reload_session_for_share(sid) or stored_session
+            if persisted_session is None:
+                persisted_session = _build_share_metadata_sidecar(
+                    sid,
+                    snapshot_session,
+                    cli_meta=cli_meta,
+                )
+            try:
+                # The transcript still comes from the resolved snapshot session: a
+                # raw messaging session has no WebUI sidecar to read messages
+                # from, and building the snapshot from the sidecar instead would
+                # lose that transcript (#8255 review, second round). What changed
+                # is WHERE the snapshot is built: inside the lock, and from the
+                # newest state, so a writer that saves during the snapshot I/O is
+                # not reverted by the persist.
+                current = _reload_session_for_share(sid)
+                if current is not None:
+                    snapshot_source = copy.copy(current)
+                    snapshot_source.messages = _share_snapshot_messages_for_session(
+                        current,
+                        cli_meta=cli_meta,
+                    )
+                else:
+                    snapshot_source = snapshot_session
+                snapshot = build_share_snapshot(snapshot_source)
+            except ValueError as exc:
+                return bad(handler, str(exc), 400)
+            # A writer may have saved while the snapshot was being built. Re-read
+            # once more so the state we persist is the newest one, not the copy
+            # that was current when the snapshot started (#8255 review, second
+            # round: a writer that saves during the snapshot I/O was reverted).
+            refreshed = _reload_session_for_share(sid)
+            if refreshed is not None:
+                persisted_session = refreshed
+            # Create side of #8255: reuse the token the durable sidecar already
+            # records instead of minting a new one, otherwise the previous snapshot
+            # stays live and unreachable by revoke.
+            durable_token = str(getattr(persisted_session, "share_token", "") or "").strip()
+            if not durable_token:
+                # A checkpoint can commit the live session without a token after
+                # this request read the sidecar, while the published snapshot is
+                # still live. Reuse the resident token instead of minting a
+                # second one that would orphan that link (#8255 review, third
+                # round).
+                durable_token = _resident_share_token(sid)
+            # A token whose link was revoked must never be reused: republishing
+            # it makes the old URL readable again for anyone who kept it, and no
+            # new link is ever issued (#8399 review). The sidecar can still name
+            # one after a revoke whose write was lost, or when this request
+            # resolved a copy that predates the revoke, so the token has to prove
+            # it is live before the snapshot writer may keep it.
+            if durable_token and load_share(durable_token) is None:
+                durable_token = ""
+            share_meta = write_share_snapshot(
+                snapshot,
+                token=durable_token,
+                source_session_id=sid,
             )
-        persisted_session.share_token = share_meta["share_token"]
-        persisted_session.share_created_at = share_meta["share_created_at"]
-        persisted_session.save(touch_updated_at=False)
+            persisted_session.share_token = share_meta["share_token"]
+            persisted_session.share_created_at = share_meta["share_created_at"]
+            # Update the live cached copy BEFORE the durable save (#8255 review,
+            # second round): a streaming checkpoint that serializes the live
+            # session between the save and the mirror would write
+            # ``share_token: None`` back over the sidecar, leaving a published
+            # link that revoke can no longer reach.
+            _mirror_share_fields_to_cached_session(sid, persisted_session)
+            # Persist only the two share fields: saving this detached copy would
+            # restore the title and transcript it was built from, reverting a
+            # writer that finished while the snapshot was built (#8255 review,
+            # third round).
+            _persist_share_fields(
+                sid,
+                persisted_session,
+                share_token=share_meta["share_token"],
+                share_created_at=share_meta["share_created_at"],
+            )
+        finally:
+            share_lock.release()
         _publish_session_list_changed(
             "session_share_create",
             profile=getattr(persisted_session, "profile", None),
@@ -18673,22 +19091,70 @@ def handle_post(handler, parsed) -> bool:
             snapshot_session, stored_session, cli_meta = _resolve_share_session_pair(sid, handler)
         except KeyError:
             return bad(handler, "Session not found", 404)
-        target_session = stored_session
-        if target_session is None:
-            token = str(getattr(snapshot_session, "share_token", "") or "").strip()
+        # #8255: the LRU-cached session is not the share-token authority. The
+        # cache-freshness check compares message/scene state and not share
+        # fields, so a cached copy loaded during a create's save window (or any
+        # other writer's save) still looks current while it carries no
+        # ``share_token``. Revoking from that copy found no token, cleared the
+        # cached metadata and reported ``ok: true`` even though the published
+        # snapshot stayed live. Resolve the token from the durable sidecar under
+        # the per-session *share* lock (the agent lock is held across whole agent
+        # turns, so it must not gate a revoke), re-read the session inside the
+        # lock so a concurrent writer's save is not reverted, and only report
+        # success once the snapshot no longer resolves.
+        share_lock = _get_session_share_lock(sid)
+        if not share_lock.acquire(timeout=SHARE_SESSION_LOCK_TIMEOUT_SECONDS):
+            return bad(handler, "Session busy, try again", 503)
+        try:
+            target_session = _reload_session_for_share(sid) or stored_session
+            if target_session is None:
+                token = str(getattr(snapshot_session, "share_token", "") or "").strip()
+                if not token:
+                    return bad(handler, "Session not found", 404)
+                target_session = _build_share_metadata_sidecar(
+                    sid,
+                    snapshot_session,
+                    cli_meta=cli_meta,
+                )
+                target_session.share_created_at = getattr(snapshot_session, "share_created_at", None)
+            token = str(getattr(target_session, "share_token", "") or "").strip()
             if not token:
-                return bad(handler, "Session not found", 404)
-            target_session = _build_share_metadata_sidecar(
+                # External sessions whose snapshot was published without a sidecar
+                # write keep the token only on the snapshot/in-memory copy.
+                token = str(getattr(snapshot_session, "share_token", "") or "").strip()
+            if not token:
+                token = str(getattr(stored_session, "share_token", "") or "").strip()
+            if token:
+                # revoke_share() locates the published snapshot through the
+                # session's token field, so hand it the resolved authority.
+                target_session.share_token = token
+                revoke_share(target_session)
+                if load_share(token) is not None:
+                    return bad(handler, "Share link could not be revoked", 500)
+            # A writer may have saved while the revoke was reading the snapshot
+            # store. Re-read so the state we persist is the newest one, not the
+            # copy that was current when the token was resolved (#8255 review,
+            # second round).
+            refreshed = _reload_session_for_share(sid)
+            if refreshed is not None:
+                target_session = refreshed
+            target_session.share_token = None
+            target_session.share_created_at = None
+            # Mirror before the durable save (#8255 review, second round): a
+            # streaming checkpoint in the save/mirror window would otherwise write
+            # the live session's stale share fields back over the sidecar.
+            _mirror_share_fields_to_cached_session(sid, target_session)
+            # Clear only the share fields, so a conversation write that landed
+            # after the final re-read above is not reverted (#8255 review, third
+            # round).
+            _persist_share_fields(
                 sid,
-                snapshot_session,
-                cli_meta=cli_meta,
+                target_session,
+                share_token=None,
+                share_created_at=None,
             )
-            target_session.share_token = token
-            target_session.share_created_at = getattr(snapshot_session, "share_created_at", None)
-        revoke_share(target_session)
-        target_session.share_token = None
-        target_session.share_created_at = None
-        target_session.save(touch_updated_at=False)
+        finally:
+            share_lock.release()
         _publish_session_list_changed(
             "session_share_revoke",
             profile=getattr(target_session, "profile", None),
