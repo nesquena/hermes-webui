@@ -165,6 +165,45 @@ def _project_parts(content, digest):
     return projected, removed
 
 
+def _project_nested(value, digest, path):
+    """Recursively replace inline image parts inside an arbitrary JSON value.
+
+    ``_partial_tool_calls`` stores captured tool arguments for interrupted turns;
+    a screenshot-style tool holds image parts inside ``args``, which the content
+    and api_content lanes never visit. Those bytes reached disk unbounded.
+
+    ``path`` (not a bare index) is fed to the digest so a part's position inside
+    the nested structure participates in the erased-provenance fingerprint, for
+    the same reason ``_project_parts`` tracks the array index.
+
+    Returns (new_value, changed) and is copy-on-write: a value with no inline
+    image bytes is returned as the SAME object.
+    """
+    if isinstance(value, dict):
+        payload = _inline_image_payload(value)
+        if payload is not None:
+            _update_part_digest(digest, value, payload, path)
+            return dict(_MARKER), True
+        out = None
+        for key, child in value.items():
+            new_child, changed = _project_nested(child, digest, f"{path}.{key}")
+            if changed:
+                if out is None:
+                    out = dict(value)
+                out[key] = new_child
+        return (value if out is None else out), out is not None
+    if isinstance(value, list):
+        out = None
+        for index, item in enumerate(value):
+            new_item, changed = _project_nested(item, digest, f"{path}[{index}]")
+            if changed:
+                if out is None:
+                    out = list(value)
+                out[index] = new_item
+        return (value if out is None else out), out is not None
+    return value, False
+
+
 def _project_api_content(raw, digest):
     """Project the per-message ``api_content`` sidecar, which can duplicate the bytes.
 
@@ -237,6 +276,18 @@ def compact_persisted_image_parts(messages, *, stamp_digest: bool = True) -> int
             message["api_content"] = projected_api_content
             changed += 1
             message_changed = True
+        # `_partial_tool_calls` is the interrupted-turn capture lane. It is
+        # stripped before provider replay, but it IS persisted, and a captured
+        # tool call can carry image parts inside its `args`.
+        partials = message.get("_partial_tool_calls")
+        if isinstance(partials, list):
+            projected_partials, partials_changed = _project_nested(
+                partials, digest, "_partial_tool_calls"
+            )
+            if partials_changed:
+                message["_partial_tool_calls"] = projected_partials
+                changed += 1
+                message_changed = True
         if message_changed and stamp_digest:
             # Content-equality discriminator that survives the projection. The
             # marker alone is identical for every image, so without this the

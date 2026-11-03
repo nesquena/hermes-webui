@@ -625,3 +625,106 @@ def test_bracket_leading_non_json_mirror_is_left_untouched(session_dir):
     raw = "[Workspace::v1: /home/ubuntu/Hermes]\nplain text, not JSON"
     assert _has_inline_image(raw) is False
     assert _project_api_content(raw, hashlib.sha256()) is None
+
+
+def test_partial_tool_call_image_bytes_are_bounded_across_cold_cycles(session_dir):
+    """`_partial_tool_calls` is a persisted lane the content/mirror paths never visit.
+
+    A captured screenshot-style tool call holds image parts inside `args`. Real
+    session files on this host carry such bytes; unbounded they wrote 1,337,068
+    bytes for five 200 KB images versus 3,147 for the same images in `content`.
+
+    The projection must bound them while preserving every non-image field the
+    interrupted-turn recovery and the UI read (name/done/duration/others).
+    """
+    big = _data_url(b"S" * 200_000)
+    row = {
+        "role": "assistant",
+        "content": "partial text",
+        "timestamp": 95.5,
+        "_partial": True,
+        "_partial_tool_calls": [
+            {"name": "screenshot", "args": {"command": "capture", "parts": [
+                {"type": "text", "text": "describe"},
+                _openai_part(big),
+            ]}, "done": True, "duration": 1.0},
+            {"name": "read_file", "args": {"path": "/tmp/x.txt"}, "done": False},
+        ],
+    }
+    session = Session(session_id="ptc", messages=[row])
+
+    counts = []
+    for _ in range(3):
+        session.save(touch_updated_at=False)
+        persisted = json.loads((session_dir / "ptc.json").read_text())
+        counts.append(persisted["message_count"])
+        session = Session.load("ptc")
+
+    assert counts == [1, 1, 1]
+    text = (session_dir / "ptc.json").read_text()
+    assert "data:image" not in text, "partial tool-call image bytes reached disk"
+
+    calls = json.loads(text)["messages"][0]["_partial_tool_calls"]
+    assert calls[0]["args"]["parts"][1] == {"type": "text", "text": "[image attachment]"}
+    # Every non-image field the recovery/UI path reads is preserved.
+    assert calls[0]["name"] == "screenshot" and calls[0]["done"] is True
+    assert calls[0]["args"]["command"] == "capture"
+    assert calls[1] == {"name": "read_file", "args": {"path": "/tmp/x.txt"}, "done": False}
+
+
+def test_partial_tool_call_nested_and_anthropic_images_are_bounded(session_dir):
+    """Nesting depth and the Anthropic base64 shape must both be reached."""
+    row = {
+        "role": "assistant",
+        "content": "partial",
+        "timestamp": 96.5,
+        "_partial_tool_calls": [{
+            "name": "deep",
+            "args": {"outer": {"inner": [
+                _anthropic_part(b"A" * 50_000),
+                {"type": "text", "text": "keep me"},
+            ]}},
+            "done": False,
+        }],
+    }
+    session = Session(session_id="ptc-deep", messages=[row])
+
+    session.save(touch_updated_at=False)
+
+    text = (session_dir / "ptc-deep.json").read_text()
+    assert "base64" not in text
+    inner = json.loads(text)["messages"][0]["_partial_tool_calls"][0]["args"]["outer"]["inner"]
+    assert inner[0] == {"type": "text", "text": "[image attachment]"}
+    assert inner[1] == {"type": "text", "text": "keep me"}
+
+
+def test_projector_leaves_clean_partial_tool_calls_untouched():
+    """Copy-on-write: a partial tool-call list with no image bytes is not copied."""
+    from api.session_image_persistence_override import project_message_payloads
+
+    payload = {"messages": [{"role": "assistant", "content": "x",
+                             "_partial_tool_calls": [{"name": "t", "args": {"a": 1}}]}]}
+    assert project_message_payloads(payload) is payload
+
+
+def test_distinct_partial_tool_call_images_do_not_collapse(session_dir):
+    """Bounding the bytes must not make two distinct partial rows look identical.
+
+    Projecting `args` replaces the image with a shared marker, so the tool
+    signature becomes equal; only `_image_payload_digest` keeps them apart. Without
+    it the collapse guard would delete one row on the next save.
+    """
+    identity = {"role": "assistant", "content": "partial", "timestamp": 97.5, "_partial": True}
+    rows = []
+    for payload in (b"first-partial-image", b"second-partial-image"):
+        rows.append({**identity, "_partial_tool_calls": [{
+            "name": "screenshot", "done": True,
+            "args": {"parts": [_openai_part(_data_url(payload))]},
+        }]})
+
+    counts = _cycle_session(session_dir, "ptc-distinct", rows)
+
+    assert counts == [2, 2, 2], counts
+    persisted = json.loads((session_dir / "ptc-distinct.json").read_text())
+    digests = {m.get("_image_payload_digest") for m in persisted["messages"]}
+    assert None not in digests and len(digests) == 2
