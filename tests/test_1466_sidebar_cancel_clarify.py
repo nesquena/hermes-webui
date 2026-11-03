@@ -68,7 +68,7 @@ class TestSidebarCancelAction:
 
     def test_cli_session_helper_identifies_cli_origin(self):
         """CLI sessions should be treated as external-only for destructive action gating."""
-        body = _function_body(SESSIONS_JS, "_isCliSession", 900)
+        body = _function_body(SESSIONS_JS, "_isCliSession", 1300)
         assert "function _isCliSession(session) {" in body
         assert "session.session_source === 'cli'" in body
         assert "session.raw_source" in body

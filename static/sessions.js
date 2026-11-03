@@ -3728,6 +3728,10 @@ function _sourceKeyForSession(session) {
 
 function _isCliSession(session) {
   if (!session) return false;
+  // A WebUI marker wins over a CLI-family tag, as in the server's
+  // is_cli_session_row; else the row renders in neither group (#8762).
+  if ([session.session_source, session.source_tag, session.raw_source, session.source, session.source_label]
+    .some(v => String(v || '').trim().toLowerCase() === 'webui')) return false;
   // session_source is set by upstream normalization for CLI sessions as 'cli'
   if (session.session_source === 'cli') return true;
   // Legacy payloads often use raw/source tags to convey the source.
