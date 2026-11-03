@@ -6078,7 +6078,7 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
         const s=String(v||'').trim().toLowerCase();
         return (s.startsWith(at)?s.slice(at.length):s).replace(/-/g,'.');
       };
-      if(wire(existing.value)===`${identityProvider}/${wire(modelId)}`) return false;
+      if(wire(existing.value)===`${identityProvider.replace(/-/g,'.')}/${wire(modelId)}`) return false;
     }
     if(_showsSameEntry(existing)) return true;
     return _configuredModelIdentity(existing&&existing.value,identityProvider)

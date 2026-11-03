@@ -397,6 +397,32 @@ def test_typed_alias_never_replaces_the_native_configured_id(tmp_path, requested
     ]
 
 
+def test_typed_alias_on_a_hyphenated_provider_keeps_the_native_id(tmp_path):
+    """The typed-alias rule compares normalized ids, so a provider whose name
+    has a dash (`custom:foo-bar`) must be normalized the same way."""
+    primary = _badge("custom:foo-bar", "primary", "Primary")
+    data = _render(
+        tmp_path,
+        {
+            "groups": [
+                {
+                    "provider": "Foo Bar",
+                    "provider_id": "custom:foo-bar",
+                    "models": [{"id": "acme/other-model"}],
+                }
+            ],
+            "selectedValue": "acme/other-model",
+            "configuredBadges": {"acme/example-model": primary},
+            "requested": "@custom:foo-bar:custom:foo-bar/acme/example-model",
+            "requestedProvider": "custom:foo-bar",
+        },
+    )
+
+    assert [(row["id"], row["role"]) for row in data["configured"]] == [
+        ("acme/example-model", "primary")
+    ]
+
+
 def test_providerless_legacy_badge_still_matches_vendor_spelling(tmp_path):
     """Case C: with no provider on the row or the badge, the legacy key still
     matches `openai/gpt-6.1-sol` to a `gpt-6.1-sol` badge."""
