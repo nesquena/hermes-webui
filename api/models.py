@@ -12861,12 +12861,21 @@ def _sidebar_reconcile_store_generation(*, profile=None):
     main = _state_file_signature(db_path)
     if main is None or main == _UNREADABLE_STATE_FILE:
         return None
-    return (
-        str(db_path),
-        main,
+    companions = (
         _state_file_signature(db_path.with_name(db_path.name + '-wal')),
         _state_file_signature(db_path.with_name(db_path.name + '-journal')),
     )
+    # A companion that exists but cannot be stat'd leaves the generation
+    # unprovable -- it may have been committed to, so the cached answer could be
+    # older than the store. Absent is a legitimate state and stays ``None`` in
+    # the tuple (a rollback-journal store has no ``-wal``); unreadable is not a
+    # state at all, so the WHOLE generation is rejected rather than accepted
+    # with a hole in it. Guarding only the main file would cache an
+    # unprovable store and serve a stale count forever, which is the same
+    # durable-stale defect the generation exists to prevent.
+    if any(sig == _UNREADABLE_STATE_FILE for sig in companions):
+        return None
+    return (str(db_path), main) + companions
 
 
 def _sidebar_reconcile_cache_get(sid: str, state_count: int, *, profile=None):

@@ -139,6 +139,24 @@ def _walk(sid=SID, *, count):
     )
 
 
+def _make_unreadable(monkeypatch, target):
+    """Make exactly *target* refuse to stat, the way a defended file does.
+
+    chmod is not enough (the test owns the file) and a whole-module stub would
+    hide which file the code actually consults, so the failure is injected on
+    the one path that must be probed.
+    """
+    real_stat = os.stat
+    wanted = os.fspath(target)
+
+    def _stat(path, *args, **kwargs):
+        if os.fspath(path) == wanted:
+            raise PermissionError(13, "Permission denied", wanted)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(models.os, "stat", _stat)
+
+
 def test_second_poll_over_an_unchanged_board_does_not_rewalk(store, monkeypatch):
     _write_sidecar(store, [_row("user", "hello", 1.0)])
     state = _install_state_db(monkeypatch, _state_rows(3))
@@ -244,28 +262,30 @@ def test_a_write_during_the_walk_is_not_published(store, monkeypatch):
     # store has at write time: attaching an old answer to a newer signature is
     # a durable stale entry, unlike an in-flight request choosing an older
     # snapshot.
+    #
+    # The file is deliberately NOT restored afterwards. Putting the old bytes
+    # back does not restore st_ctime, so the pre-write signature can never be
+    # reproduced: the entry then misses for a reason unrelated to the defect and
+    # the assertion holds even against code that publishes the stale answer.
+    # Reading the newer durable result back is the discriminator.
     _write_sidecar(store, [_row("user", "hello", 1.0)])
     _install_state_db(monkeypatch, _state_rows(3))
     loads = _count_loads(monkeypatch)
 
-    original = (store / f"{SID}.json").read_bytes()
-    original_st = (store / f"{SID}.json").stat()
     raced = {"done": False}
     real_load = models.Session.load.__func__
+    saved_rows = [
+        _row("user", "hello", 1.0),
+        _row("assistant", "hi", 2.0),
+        _row("user", "again", 3.0),
+    ]
 
     def _load_and_save_mid_walk(cls, sid):
         session = real_load(cls, sid)
         if not raced["done"]:
             raced["done"] = True
             # A real save lands while this walk is still reconciling.
-            _write_sidecar(
-                store,
-                [
-                    _row("user", "hello", 1.0),
-                    _row("assistant", "hi", 2.0),
-                    _row("user", "again", 3.0),
-                ],
-            )
+            _write_sidecar(store, saved_rows)
         return session
 
     monkeypatch.setattr(models.Session, "load", classmethod(_load_and_save_mid_walk))
@@ -275,20 +295,20 @@ def test_a_write_during_the_walk_is_not_published(store, monkeypatch):
     assert raced["done"] is True
     assert loads["loads"] == 1
 
-    # Put the sidecar back exactly as this poll saw it: the revision is then
-    # byte- and nanosecond-identical, so a second poll can only miss if nothing
-    # was published.
-    path = store / f"{SID}.json"
-    path.write_bytes(original)
-    os.utime(path, ns=(original_st.st_atime_ns, original_st.st_mtime_ns))
+    # Control: the save really landed, so the newer durable result is reachable
+    # and the assertion below cannot pass on a save that never happened.
+    on_disk = json.loads((store / f"{SID}.json").read_text(encoding="utf-8"))
+    assert len(on_disk["messages"]) == 3
 
-    second = _walk(count=3)
+    fresh = _walk(count=3)
     assert loads["loads"] == 2, (
         "the walk published an answer derived from a snapshot that changed under "
-        "it, so the next poll served a stale count"
+        "it under the newer signature, so the next poll served a stale count"
     )
-    assert second is not None and second.visible == stale.visible, (
-        "the re-derived answer must describe the same revision this poll reads"
+    assert fresh is not None and fresh.visible == 6, (
+        "a fresh poll must read the saved rows back: 3 sidecar rows plus the 3 "
+        f"state rows (got {fresh.visible if fresh else None}, in-flight snapshot "
+        f"was {stale.visible})"
     )
 
 
@@ -305,6 +325,59 @@ def test_an_unprovable_store_generation_caches_nothing(store, monkeypatch):
     assert loads["loads"] == 2, (
         "a walk with no provable store generation was cached anyway"
     )
+
+
+@pytest.mark.parametrize("companion", ["", "-wal", "-journal"])
+def test_an_unreadable_state_file_makes_the_generation_unprovable(
+    store, monkeypatch, companion
+):
+    # A generation is only provable if EVERY file that can carry a commit is
+    # either provably absent or provably stat'd. An unreadable companion may
+    # have been written to, so the whole generation is rejected: accepting it
+    # would cache an answer that can silently be older than the store, which is
+    # exactly the durable-stale defect the generation exists to prevent.
+    _write_sidecar(store, [_row("user", "hello", 1.0)])
+    _install_state_db(monkeypatch, _state_rows(3))
+    loads = _count_loads(monkeypatch)
+
+    db = _state_db(store)
+    target = db if companion == "" else db.with_name(db.name + companion)
+    if companion:
+        target.write_bytes(b"companion-segment")
+    _make_unreadable(monkeypatch, target)
+
+    assert models._sidebar_reconcile_store_generation() is None, (
+        f"an unreadable state file ({target.name}) still produced a provable "
+        "generation"
+    )
+
+    first = _walk(count=3)
+    second = _walk(count=3)
+    assert first is not None and second is not None
+    assert loads["loads"] == 2, (
+        "an unprovable generation was cached anyway: the next poll cannot prove "
+        "the store did not move under it"
+    )
+
+
+def test_absent_companions_are_still_a_legitimate_generation(store, monkeypatch):
+    # The mirror of the test above, so the fix cannot be satisfied by rejecting
+    # everything: a store with no journal/WAL companion is normal and must cache.
+    _write_sidecar(store, [_row("user", "hello", 1.0)])
+    _install_state_db(monkeypatch, _state_rows(3))
+    loads = _count_loads(monkeypatch)
+
+    db = _state_db(store)
+    assert not db.with_name(db.name + "-wal").exists()
+    assert not db.with_name(db.name + "-journal").exists()
+
+    generation = models._sidebar_reconcile_store_generation()
+    assert generation is not None, "an absent companion is not an unprovable one"
+    assert generation[2] is None and generation[3] is None
+
+    assert _walk(count=3) is not None
+    assert _walk(count=3) is not None
+    assert loads["loads"] == 1, "a provable store must still be answered from cache"
 
 
 def test_the_hidden_row_provenance_survives_the_cache(store, monkeypatch):
