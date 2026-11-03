@@ -4408,19 +4408,20 @@ def _reassert_turn_session_profile(token) -> None:
     if token is None:
         return
     with _PROFILE_MIRROR_LOCK:
-        for owner_token, owner_profile in _PROFILE_MIRROR_PUBLISHERS:
-            if owner_token is token:
-                if owner_profile:
-                    os.environ[_PROFILE_MIRROR_KEY] = str(owner_profile)
-                else:
-                    # This turn published nothing (unresolved profile), so the
-                    # slot belongs to the stack: re-publish the most recent
-                    # remaining owner that resolved a profile, else the captured
-                    # ambient. A sibling named turn keeps its value; with none
-                    # live the ambient is restored exactly (absent stays absent).
-                    _apply_mirror_restore_under_lock(_mirror_restore_value_under_lock())
-                return
-        # token not in the stack: released already, or never published here.
+        # Liveness check first: only a token that still names a LIVE publisher
+        # may repair the env. A released or unknown token is a no-op — its
+        # owner has already vacated the slot, possibly in favour of a newer
+        # sibling, so touching the env here would resurrect a completed turn's
+        # value. Never retire or reorder publishers.
+        if not any(owner_token is token for owner_token, _ in _PROFILE_MIRROR_PUBLISHERS):
+            return
+        # BOTH the named and the unresolved owner use the SHARED stack policy —
+        # the same newest-live-non-None/ambient resolver as the release tail —
+        # so the mid-turn repair and the teardown can never disagree about who
+        # owns the slot. A named owner's own value counts only while it IS the
+        # newest live named publisher: a delayed re-assert must not resurrect
+        # an older owner's profile over a newer sibling's (review 2026-11-03).
+        _apply_mirror_restore_under_lock(_mirror_restore_value_under_lock())
 
 
 @contextlib.contextmanager
