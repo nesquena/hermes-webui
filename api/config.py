@@ -4284,15 +4284,40 @@ def _provider_identity_sources(config: object) -> tuple:
     it last reloaded (an edited .env does not change config.yaml's mtime), so
     only the raw spelling tells reliably that a name is a reference (Codex r3).
     The cached view still counts, so an in-memory config is never ignored.
+    Every view carries the Agent's managed scope (:func:`_with_managed_scope`).
     """
     if config is not None:
-        return (config,)
+        return (_with_managed_scope(config),)
     try:
         raw = _load_yaml_config_file_raw(_get_config_path(), _copy=False)
     except Exception:
         logger.debug("provider name check: raw config unreadable", exc_info=True)
         raw = None
-    return (raw, get_config())
+    return (_with_managed_scope(raw), _with_managed_scope(get_config()))
+
+
+def _with_managed_scope(view: object) -> object:
+    """``view`` with the Agent's managed-scope config.yaml merged on top (Codex r5).
+
+    The Agent resolves providers from ``load_config()``, which deep-merges the
+    IT-pushed managed config over the profile's, managed winning per leaf
+    (``hermes_cli.config._merge_managed_overlay``). Same reader and merge as
+    ``managed_scope.apply_managed_overlay``, minus its ``${VAR}`` expansion, so
+    a managed reference stays a wildcard. ``view`` is never mutated; an Agent
+    without managed scope, or no managed config, leaves it unchanged.
+    """
+    try:
+        from hermes_cli.config import _deep_merge
+        from hermes_cli.managed_scope import load_managed_config
+    except ImportError:
+        return view
+    try:
+        managed = load_managed_config() if isinstance(view, dict) else None
+        return _deep_merge(copy.deepcopy(view), managed) if isinstance(managed, dict) and managed else view
+    except Exception:
+        # The Agent fails open the same way (``apply_managed_overlay``).
+        logger.debug("provider name check: managed scope unreadable", exc_info=True)
+        return view
 
 
 def provider_name_ambiguity_verdict(provider: object, config: object = None) -> dict | None:

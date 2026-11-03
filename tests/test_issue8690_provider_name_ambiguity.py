@@ -518,3 +518,114 @@ def test_auto_title_routes_use_the_agents_current_main_provider(monkeypatch, aux
     raw, status = streaming.generate_title_raw_via_aux("hello there", "hi")
     assert (status == TITLE_REFUSED) is refused
     assert bool(aux_calls) is not refused
+
+
+# ── Codex r5: the Agent merges its managed scope over the profile's providers ──
+
+
+def _agent_deep_merge(base, override):
+    """Stand-in for ``hermes_cli.config._deep_merge`` (verbatim): the merge the
+    Agent's ``load_config()`` and ``apply_managed_overlay`` put managed values on with."""
+    result = base.copy()
+    for key, value in override.items():
+        over_dict = isinstance(result.get(key), dict)
+        if over_dict and isinstance(value, dict):
+            result[key] = _agent_deep_merge(result[key], value)
+        elif not (over_dict and value is None):
+            result[key] = value
+    return result
+
+
+@pytest.fixture
+def managed(monkeypatch, tmp_path):
+    """Install an Agent managed scope: its config.yaml in ``$HERMES_MANAGED_DIR``
+    (how the Agent's own tests point it away from /etc/hermes), read unexpanded
+    by ``load_managed_config`` like ``hermes_cli.managed_scope``'s reader."""
+    def install(data):
+        managed_dir = tmp_path / "managed"
+        managed_dir.mkdir(exist_ok=True)
+        (managed_dir / "config.yaml").write_text(json.dumps(data), encoding="utf-8")
+        monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed_dir))
+        scope = types.ModuleType("hermes_cli.managed_scope")
+        scope.load_managed_config = lambda: json.loads(
+            (pathlib.Path(os.environ["HERMES_MANAGED_DIR"]) / "config.yaml").read_text(encoding="utf-8"))
+        monkeypatch.setitem(sys.modules, "hermes_cli.managed_scope", scope)
+        agent_cfg = sys.modules.get("hermes_cli.config")
+        if agent_cfg is None:
+            agent_cfg = types.ModuleType("hermes_cli.config")
+            monkeypatch.setitem(sys.modules, "hermes_cli.config", agent_cfg)
+        monkeypatch.setattr(agent_cfg, "_deep_merge", _agent_deep_merge, raising=False)
+    return install
+
+
+def _local(monkeypatch, tmp_path, data):
+    """The profile's config.yaml (raw view) and WebUI's cache hold ``data``."""
+    _write_profile_config(tmp_path / "profile" / "config.yaml", data)
+    _bind(monkeypatch, data)
+
+
+LEGACY_SIBLING = dict(_config("openai", PLAIN, base_url=BUILTIN_URL),
+                      custom_providers=[{"name": "openai", "base_url": NAMED_URL, "api_key": NAMED_KEY}])
+
+
+@pytest.mark.parametrize("local, overlay", [
+    (_sibling_named("openai"), {"providers": {"myproxy": {"name": "private-proxy"}}}),
+    (LEGACY_SIBLING, {"custom_providers": []}),  # a managed list replaces the profile's
+], ids=["managed-rename", "managed-list-replaces"])
+def test_a_managed_overlay_that_removes_the_sibling_claim_is_not_refused(monkeypatch, tmp_path, managed, local, overlay):
+    """Codex r5: the Agent sees one 'openai' claimant, so WebUI must not refuse."""
+    _local(monkeypatch, tmp_path, local)
+    assert config.provider_name_ambiguity_verdict("openai")["reason"] == REASON
+    managed(overlay)
+    assert config.provider_name_ambiguity_verdict("openai") is None
+    _both_route("openai", _agent_runtime(BUILTIN_URL, BUILTIN_KEY), ("openai", BUILTIN_URL, BUILTIN_KEY),
+                configured_base_url=BUILTIN_URL)
+
+
+@pytest.mark.parametrize("name", ["openai", "${PROXY_NAME}"])
+def test_a_managed_overlay_that_adds_a_sibling_claim_is_refused(monkeypatch, tmp_path, managed, name):
+    """Converse: the profile's names are distinct, the managed one is 'openai' (or a
+    ``${VAR}`` the Agent expands, whatever WebUI's environment says it is)."""
+    monkeypatch.setenv("PROXY_NAME", "unrelated")
+    _local(monkeypatch, tmp_path, _sibling_named("private-proxy"))
+    managed({"providers": {"myproxy": {"name": name}}})
+    assert config.provider_name_ambiguity_verdict("openai")["reason"] == REASON
+    _both_refused("openai", _agent_runtime(BUILTIN_URL, NAMED_KEY), "'myproxy'", configured_base_url=BUILTIN_URL)
+
+
+@pytest.mark.parametrize("local, overlay, refused", [
+    (_sibling_named("openai"), {"providers": {"myproxy": {"name": "private-proxy"}}}, False),
+    (_sibling_named("private-proxy"), {"providers": {"myproxy": {"name": "openai"}}}, True),
+], ids=["managed-rename", "managed-sibling"])
+def test_the_title_guard_reads_the_agents_profile_with_its_managed_scope(
+        monkeypatch, aux_calls, tmp_path, managed, local, overlay, refused):
+    _title_route(monkeypatch, {"provider": "openai"}, PLAIN)
+    _agent_scope(monkeypatch, aux_calls, tmp_path, local["providers"])
+    managed(overlay)
+    raw, status = streaming.generate_title_raw_via_aux("hello there", "hi")
+    assert (status == TITLE_REFUSED) is refused
+    assert bool(aux_calls) is not refused
+
+
+@pytest.mark.parametrize("local, refused", [(_sibling_named("openai"), True), (_sibling_named("private-proxy"), False)])
+def test_an_agent_without_managed_scope_keeps_the_profile_verdict(monkeypatch, tmp_path, managed, local, refused):
+    """Older Agents have no ``hermes_cli.managed_scope``: no overlay, verdicts as before."""
+    _local(monkeypatch, tmp_path, local)
+    managed({"providers": {"myproxy": {"name": "openai" if not refused else "private-proxy"}}})
+    monkeypatch.setitem(sys.modules, "hermes_cli.managed_scope", None)  # import -> ImportError
+    assert (config.provider_name_ambiguity_verdict("openai") is not None) is refused
+
+
+def test_the_managed_overlay_mutates_neither_the_cache_nor_the_raw_config(monkeypatch, tmp_path, managed):
+    import copy
+
+    local = _sibling_named("openai")
+    _local(monkeypatch, tmp_path, local)
+    before = copy.deepcopy(local)
+    raw_before = copy.deepcopy(config._load_yaml_config_file_raw(tmp_path / "profile" / "config.yaml"))
+    managed({"providers": {"myproxy": {"name": "private-proxy"}, "extra": {"name": "x"}}})
+    assert config.provider_name_ambiguity_verdict("openai") is None
+    assert config.provider_name_ambiguity_verdict("openai", config=local) is None
+    assert local == before
+    raw_cached = config._load_yaml_config_file_raw(tmp_path / "profile" / "config.yaml", _copy=False)
+    assert raw_cached == raw_before
