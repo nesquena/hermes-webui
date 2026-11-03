@@ -13,6 +13,16 @@ on:
 # running and reporting green, but SHORT-CIRCUIT their expensive work when every changed
 # path is documentation. Detection FAILS SAFE: if anything is uncertain (no base to diff,
 # any non-doc path touched), docs_only=false and the full suite runs.
+# One run per pull request per workflow: a new push to a PR cancels this workflow's run for
+# the superseded head, queued or in progress, so a burst of PR updates does not hold every
+# later run in the shared runner queue. Only a PR run's FIRST attempt joins the PR group: a
+# re-run keeps its original (possibly superseded) head and must never cancel or replace the
+# latest head's run. Re-runs, pushes to master, tag pushes and manual dispatches get a unique
+# group (the run id), so they are never cancelled or held back.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.run_attempt == '1' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == '1' }}
+
 jobs:
   changes:
     runs-on: ubuntu-latest
@@ -120,7 +130,15 @@ jobs:
 
       - name: Ensure origin/master ref is available for the diff gate
         if: needs.changes.outputs.docs_only != 'true'
-        run: git fetch --no-tags --depth=1 origin master || true
+        # NOTE: no --depth here. The checkout above already fetched the full
+        # history (`fetch-depth: 0`) so the gate can diff against the
+        # merge-base with master. A shallow fetch would rewrite that history
+        # into a shallow boundary, and `git merge-base origin/master HEAD`
+        # would then fail — at which point scripts/ruff_lint.py falls back to
+        # diffing against `origin/master` itself, turning the gate into a
+        # two-point diff of the whole history gap. Every upstream finding in
+        # that gap is then reported as "introduced by this PR".
+        run: git fetch --no-tags origin master || true
 
       # Whole-tree Python syntax gate. The Python analog of the JS `node --check`
       # pass. The ruff E9 gate below is diff-scoped (new/changed lines only), so a
@@ -165,7 +183,10 @@ jobs:
 
       - name: Scope / undefined-reference gate (#3696)
         if: needs.changes.outputs.docs_only != 'true'
-        run: python3 scripts/scope_undef_gate.py
+        # --require-eslint: fail rather than skip if eslint is missing. The step
+        # above installs eslint into node_modules/.bin, not onto PATH, and before
+        # the gate looked there it skipped on every run.
+        run: python3 scripts/scope_undef_gate.py --require-eslint
 
   test:
     needs: changes

@@ -1082,12 +1082,34 @@ def test_msg_limit_compression_child_fast_path_filters_tool_calls_in_child_coord
     child.save(touch_updated_at=False)
     _make_state_db(tmp_path / "state.db", child_sid, child_messages)
 
+    real_lineage_loader = routes._webui_sidecar_lineage_messages_for_display
+    real_session_load = models.Session.load.__func__
+    captured = {"lineage_loads": 0, "parent_full_loads": 0}
+
+    def wrapped_lineage_loader(*args, **kwargs):
+        captured["lineage_loads"] += 1
+        return real_lineage_loader(*args, **kwargs)
+
+    def wrapped_session_load(cls, sid):
+        if sid == parent_sid:
+            captured["parent_full_loads"] += 1
+        return real_session_load(cls, sid)
+
+    monkeypatch.setattr(
+        routes,
+        "_webui_sidecar_lineage_messages_for_display",
+        wrapped_lineage_loader,
+    )
+    monkeypatch.setattr(models.Session, "load", classmethod(wrapped_session_load))
+
     handler = _GetHandler(
         f"/api/session?session_id={child_sid}&messages=1&resolve_model=0&msg_limit=30"
     )
     routes.handle_get(handler, urlparse(handler.path))
 
     assert handler.status == 200
+    assert captured["lineage_loads"] == 0
+    assert captured["parent_full_loads"] == 0
     payload = handler.response_json["session"]
     assert payload["_messages_offset"] == len(parent_messages) + 470
     assert payload["tool_calls"] == [
@@ -1109,6 +1131,313 @@ def test_msg_limit_compression_child_fast_path_filters_tool_calls_in_child_coord
     ]
 
 
+def test_msg_limit_compression_child_prefix_miss_falls_back_before_parent_full_load(
+    monkeypatch,
+    tmp_path,
+):
+    """A metadata-prefix miss must not full-parse inside the omission proof."""
+    import api.models as models
+    import api.routes as routes
+
+    parent_sid = "parent_compression_snapshot_prefix_miss"
+    child_sid = "continuation_child_prefix_miss"
+    parent_messages = [
+        {"role": "assistant", "content": f"parent {idx}", "timestamp": float(idx)}
+        for idx in range(120)
+    ]
+    child_messages = [
+        {"role": "assistant", "content": f"child {idx}", "timestamp": 300.0 + idx}
+        for idx in range(500)
+    ]
+    parent = _install_test_session(monkeypatch, tmp_path, parent_sid, parent_messages)
+    parent.pre_compression_snapshot = True
+    parent.save(touch_updated_at=False)
+    boundary = _disjoint_parent_boundary(parent, child_messages)
+
+    # Put a valid but oversized ordinary metadata field before todo_state and
+    # messages. The bounded prefix reader must miss it without granting itself
+    # the todo-specific 8 MiB ceiling; a full JSON parse would still succeed.
+    parent_payload = json.loads(parent.path.read_text(encoding="utf-8"))
+    assert "todo_state" in parent_payload
+    reordered_parent = {
+        key: parent_payload[key]
+        for key in ("session_id", "title", "created_at", "updated_at")
+    }
+    reordered_parent["compression_anchor_summary"] = "x" * (
+        models._METADATA_PREFIX_MAX_BYTES + 4096
+    )
+    for key, value in parent_payload.items():
+        if key in reordered_parent or key in {"todo_state", "messages"}:
+            continue
+        reordered_parent[key] = value
+    reordered_parent["todo_state"] = parent_payload["todo_state"]
+    reordered_parent["messages"] = parent_payload["messages"]
+    parent.path.write_text(
+        json.dumps(reordered_parent, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    assert models._read_metadata_json_prefix(parent.path) is None
+
+    child = models.Session(
+        session_id=child_sid,
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=child_messages,
+        parent_session_id=parent_sid,
+        compression_disjoint_parent_boundary=boundary,
+        created_at=300.0,
+        updated_at=900.0,
+    )
+    child.save(touch_updated_at=False)
+    _make_state_db(tmp_path / "state.db", child_sid, child_messages)
+
+    real_lineage_loader = routes._webui_sidecar_lineage_messages_for_display
+    real_session_load = models.Session.load.__func__
+    events = []
+
+    def wrapped_lineage_loader(*args, **kwargs):
+        events.append("lineage")
+        return real_lineage_loader(*args, **kwargs)
+
+    def wrapped_session_load(cls, sid):
+        if sid == parent_sid:
+            events.append("parent-full-load")
+        return real_session_load(cls, sid)
+
+    monkeypatch.setattr(
+        routes,
+        "_webui_sidecar_lineage_messages_for_display",
+        wrapped_lineage_loader,
+    )
+    monkeypatch.setattr(models.Session, "load", classmethod(wrapped_session_load))
+
+    handler = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0&msg_limit=30"
+    )
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    assert events[0] == "lineage"
+    assert "parent-full-load" in events
+    payload = handler.response_json["session"]
+    assert payload["message_count"] == len(parent_messages) + len(child_messages)
+    assert payload["_messages_offset"] == len(parent_messages) + 470
+
+
+def test_display_rebased_tool_calls_require_an_exact_integer_owner():
+    import api.routes as routes
+
+    assert routes._display_rebased_tool_calls(
+        [
+            {"name": "valid", "assistant_msg_idx": 2},
+            {"name": "unmapped", "assistant_msg_idx": 3},
+            {"name": "missing"},
+            {"name": "string", "assistant_msg_idx": "2"},
+            {"name": "boolean", "assistant_msg_idx": True},
+            "not-a-card",
+        ],
+        {2: 9},
+    ) == [{"name": "valid", "assistant_msg_idx": 9}]
+
+
+def test_msg_limit_preloaded_lineage_cache_preserves_child_owner_projection(
+    monkeypatch,
+    tmp_path,
+):
+    """Owner maps must survive the ordinary bounded lineage-cache preload."""
+    import api.models as models
+    import api.routes as routes
+
+    parent_sid = "parent_preloaded_lineage_owner_map"
+    child_sid = "child_preloaded_lineage_owner_map"
+    parent_messages = [
+        {"role": "assistant", "content": f"parent {idx}", "timestamp": float(idx)}
+        for idx in range(4)
+    ]
+    child_messages = [
+        {"role": "assistant", "content": f"child {idx}", "timestamp": 10.0 + idx}
+        for idx in range(40)
+    ]
+    parent = _install_test_session(monkeypatch, tmp_path, parent_sid, parent_messages)
+    monkeypatch.setattr(routes, "SESSION_DIR", tmp_path / "sessions", raising=False)
+    parent.pre_compression_snapshot = True
+    parent.save(touch_updated_at=False)
+    child = models.Session(
+        session_id=child_sid,
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=child_messages,
+        tool_calls=[{"name": "visible-child-tool", "assistant_msg_idx": 35}],
+        anchor_activity_scenes={
+            "child-local-scene": {
+                "version": "anchor_activity_scene_record_v1",
+                "message_index": 35,
+                "message_ref": "child-local-scene",
+                "stream_id": "stream-child-local-scene",
+                "scene": {
+                    "version": "activity_scene_v1",
+                    "mode": "compact_worklog",
+                    "activity_rows": [{"row_id": "tool-visible", "role": "tool"}],
+                    "final_answer": "child 35",
+                },
+                "updated_at": 50.0,
+            }
+        },
+        parent_session_id=parent_sid,
+        created_at=10.0,
+        updated_at=50.0,
+    )
+    child.save(touch_updated_at=False)
+    _make_state_db(tmp_path / "state.db", child_sid, child_messages)
+
+    path = f"/api/session?session_id={child_sid}&messages=1&resolve_model=0&msg_limit=10"
+    first = _GetHandler(path)
+    routes.handle_get(first, urlparse(first.path))
+
+    assert first.status == 200
+    first_payload = first.response_json["session"]
+    assert first_payload["_messages_offset"] == len(parent_messages) + 30
+    assert first_payload["tool_calls"] == [
+        {"name": "visible-child-tool", "assistant_msg_idx": 5}
+    ]
+    assert first_payload["messages"][5]["_anchor_activity_scene"]["final_answer"] == "child 35"
+
+    cached = _GetHandler(path)
+    routes.handle_get(cached, urlparse(cached.path))
+
+    assert cached.status == 200
+    assert cached.response_json["session"]["messages"] == first_payload["messages"]
+    assert cached.response_json["session"]["tool_calls"] == first_payload["tool_calls"]
+
+
+def test_msg_limit_projection_fallback_rebases_child_metadata_across_interleaved_state_row(
+    monkeypatch,
+    tmp_path,
+):
+    """A state-only row between child rows must not detach child-local cards/scenes."""
+    import api.models as models
+    import api.routes as routes
+
+    parent_sid = "parent_compression_snapshot_interleaved_metadata"
+    child_sid = "continuation_child_interleaved_metadata"
+    parent_messages = [
+        {"role": "assistant", "content": f"parent {idx}", "timestamp": float(idx)}
+        for idx in range(120)
+    ]
+    child_messages = [
+        {"role": "assistant", "content": f"child {idx}", "timestamp": 300.0 + idx}
+        for idx in range(500)
+    ]
+    interleaved = {
+        "role": "user",
+        "content": "state.db interleaved child row",
+        "timestamp": 774.5,
+    }
+    parent = _install_test_session(monkeypatch, tmp_path, parent_sid, parent_messages)
+    parent.pre_compression_snapshot = True
+    parent.updated_at = 200.0
+    parent.save(touch_updated_at=False)
+    child = models.Session(
+        session_id=child_sid,
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=child_messages,
+        tool_calls=[
+            {"name": "visible-child-tool", "assistant_msg_idx": 475},
+            {"name": "missing-owner"},
+            {"name": "string-owner", "assistant_msg_idx": "475"},
+        ],
+        anchor_activity_scenes={
+            "child-local-scene": {
+                "version": "anchor_activity_scene_record_v1",
+                "message_index": 475,
+                "message_ref": "child-local-scene",
+                "stream_id": "stream-child-local-scene",
+                "scene": {
+                    "version": "activity_scene_v1",
+                    "mode": "compact_worklog",
+                    "activity_rows": [{"row_id": "tool-visible", "role": "tool"}],
+                    "final_answer": "child 475",
+                },
+                "updated_at": 900.0,
+            }
+        },
+        parent_session_id=parent_sid,
+        compression_disjoint_parent_boundary=_disjoint_parent_boundary(parent, child_messages),
+        created_at=300.0,
+        updated_at=900.0,
+    )
+    child.save(touch_updated_at=False)
+    state_rows = [*child_messages[:475], interleaved, *child_messages[475:]]
+    _make_state_db(tmp_path / "state.db", child_sid, state_rows)
+
+    real_lineage_loader = routes._webui_sidecar_lineage_messages_for_display
+    captured = {"lineage_loads": 0}
+
+    def wrapped_lineage_loader(*args, **kwargs):
+        captured["lineage_loads"] += 1
+        return real_lineage_loader(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", wrapped_lineage_loader)
+
+    handler = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0&msg_limit=30"
+    )
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    assert captured["lineage_loads"] >= 1
+    payload = handler.response_json["session"]
+    assert payload["message_count"] == len(parent_messages) + len(state_rows)
+    assert payload["_messages_offset"] == len(parent_messages) + len(state_rows) - 30
+    assert [msg["content"] for msg in payload["messages"][:6]] == [
+        "child 471",
+        "child 472",
+        "child 473",
+        "child 474",
+        "state.db interleaved child row",
+        "child 475",
+    ]
+    assert payload["tool_calls"] == [
+        {"name": "visible-child-tool", "assistant_msg_idx": 5}
+    ]
+    assert payload["messages"][5]["_anchor_activity_scene"]["final_answer"] == "child 475"
+
+    cached = _GetHandler(handler.path)
+    routes.handle_get(cached, urlparse(cached.path))
+
+    assert cached.status == 200
+    cached_payload = cached.response_json["session"]
+    assert cached_payload["_messages_offset"] == payload["_messages_offset"]
+    assert cached_payload["messages"] == payload["messages"]
+    assert cached_payload["tool_calls"] == payload["tool_calls"]
+
+    full = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0&msg_limit=all"
+    )
+    routes.handle_get(full, urlparse(full.path))
+
+    assert full.status == 200
+    full_payload = full.response_json["session"]
+    assert full_payload["_messages_offset"] == 0
+    assert full_payload["message_count"] == len(parent_messages) + len(state_rows)
+    child_475_display_index = len(parent_messages) + 475 + 1
+    assert full_payload["messages"][child_475_display_index]["content"] == "child 475"
+    assert full_payload["tool_calls"] == [
+        {
+            "name": "visible-child-tool",
+            "assistant_msg_idx": child_475_display_index,
+        }
+    ]
+    assert (
+        full_payload["messages"][child_475_display_index]["_anchor_activity_scene"]["final_answer"]
+        == "child 475"
+    )
+
+
 def test_parent_and_straddling_pages_do_not_leak_child_local_hydration_coordinates(
     monkeypatch,
     tmp_path,
@@ -1126,6 +1455,8 @@ def test_parent_and_straddling_pages_do_not_leak_child_local_hydration_coordinat
         {"role": "assistant", "content": f"child {idx}", "timestamp": 10.0 + idx}
         for idx in range(4)
     ]
+    colliding_parent_ref = routes._assistant_anchor_scene_message_ref(parent_messages[2])
+    assert colliding_parent_ref
     parent = _install_test_session(monkeypatch, tmp_path, parent_sid, parent_messages)
     parent.pre_compression_snapshot = True
     parent.updated_at = 5.0
@@ -1140,13 +1471,14 @@ def test_parent_and_straddling_pages_do_not_leak_child_local_hydration_coordinat
             {"name": "child-zero", "assistant_msg_idx": 0},
             {"name": "child-two", "assistant_msg_idx": 2},
         ],
-        # This stale record is still child-local. Even though its scene text can
-        # match a parent row, a parent-only page must never consult child index 0.
+        # This stale child-owned record deliberately forges the exact ref and
+        # scene text of a parent row. A parent-only or straddling page must still
+        # enforce the projected child owner index before hydrating by ref.
         anchor_activity_scenes={
             "stale-child-zero": {
                 "version": "anchor_activity_scene_record_v1",
                 "message_index": 0,
-                "message_ref": "stale-child-zero",
+                "message_ref": colliding_parent_ref,
                 "stream_id": "stale-child-stream",
                 "scene": {
                     "version": "activity_scene_v1",
@@ -1198,6 +1530,10 @@ def test_parent_and_straddling_pages_do_not_leak_child_local_hydration_coordinat
     assert straddling_payload["tool_calls"] == [
         {"name": "child-zero", "assistant_msg_idx": 2}
     ]
+    assert all(
+        "_anchor_activity_scene" not in msg
+        for msg in straddling_payload["messages"]
+    )
 
 
 def test_msg_limit_partial_parent_suffix_replay_falls_back_with_contiguous_pagination(
@@ -1625,6 +1961,7 @@ def test_msg_limit_truncated_parent_metadata_falls_back_to_full_lineage(
             [f"parent-todo-{idx}" for idx in range(256)],
             id="largest-valid-parent-todo-prefix",
         ),
+        pytest.param("null-parent", None, id="explicit-null-parent-todo"),
         ("task", ["child-todo"]),
         ("empty", []),
     ],
@@ -1663,16 +2000,17 @@ def test_msg_limit_compression_child_fast_path_preserves_parent_todo_state_witho
             }
             for idx in range(256)
         ]
-    parent_messages[100] = {
-        "role": "tool",
-        "content": json.dumps({"todos": parent_todos}),
-        "timestamp": 100.0,
-    }
+    if child_todo_state != "null-parent":
+        parent_messages[100] = {
+            "role": "tool",
+            "content": json.dumps({"todos": parent_todos}),
+            "timestamp": 100.0,
+        }
     child_messages = [
         {"role": "assistant", "content": f"child {idx}", "timestamp": 300.0 + idx}
         for idx in range(500)
     ]
-    if child_todo_state not in (None, "large-parent", "max-parent"):
+    if child_todo_state not in (None, "large-parent", "max-parent", "null-parent"):
         child_todos = []
         if child_todo_state == "task":
             child_todos = [
@@ -1733,7 +2071,10 @@ def test_msg_limit_compression_child_fast_path_preserves_parent_todo_state_witho
     payload = handler.response_json["session"]
     assert payload["message_count"] == len(parent_messages) + len(child_messages)
     assert payload["_messages_offset"] == len(parent_messages) + 470
-    assert [todo["id"] for todo in payload["todo_state"]["todos"]] == expected_todo_ids
+    if expected_todo_ids is None:
+        assert payload.get("todo_state") is None
+    else:
+        assert [todo["id"] for todo in payload["todo_state"]["todos"]] == expected_todo_ids
 
 
 def test_msg_limit_compression_child_legacy_parent_todo_falls_back_to_lineage(
@@ -1804,6 +2145,85 @@ def test_msg_limit_compression_child_legacy_parent_todo_falls_back_to_lineage(
     payload = handler.response_json["session"]
     assert payload["message_count"] == len(parent_messages) + len(child_messages)
     assert payload["todo_state"]["todos"][0]["id"] == "legacy-parent-todo"
+
+
+@pytest.mark.parametrize(
+    "malformed_todo_state",
+    [
+        pytest.param({"summary": {"total": 1}}, id="missing-todos"),
+        pytest.param({"todos": "not-a-list"}, id="non-list-todos"),
+        pytest.param(["not-a-snapshot"], id="non-dict-snapshot"),
+    ],
+)
+def test_msg_limit_compression_child_malformed_parent_todo_metadata_falls_back_to_lineage(
+    monkeypatch,
+    tmp_path,
+    malformed_todo_state,
+):
+    import api.models as models
+    import api.routes as routes
+
+    parent_sid = "malformed_parent_compression_snapshot_todo"
+    child_sid = "malformed_continuation_child_todo"
+    parent_messages = [
+        {"role": "user", "content": f"parent {idx}", "timestamp": float(idx)}
+        for idx in range(120)
+    ]
+    parent_messages[100] = {
+        "role": "tool",
+        "content": json.dumps({
+            "todos": [
+                {"id": "parent-todo", "content": "recover from transcript", "status": "pending"}
+            ]
+        }),
+        "timestamp": 100.0,
+    }
+    child_messages = [
+        {"role": "assistant", "content": f"child {idx}", "timestamp": 300.0 + idx}
+        for idx in range(500)
+    ]
+
+    parent = _install_test_session(monkeypatch, tmp_path, parent_sid, parent_messages)
+    parent.pre_compression_snapshot = True
+    parent.updated_at = 200.0
+    parent.save(touch_updated_at=False)
+    parent_payload = json.loads(parent.path.read_text(encoding="utf-8"))
+    parent_payload["todo_state"] = malformed_todo_state
+    parent.path.write_text(json.dumps(parent_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    child = models.Session(
+        session_id=child_sid,
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=child_messages,
+        parent_session_id=parent_sid,
+        compression_disjoint_parent_boundary=_disjoint_parent_boundary(parent, child_messages),
+        created_at=300.0,
+        updated_at=900.0,
+    )
+    child.save(touch_updated_at=False)
+    _make_state_db(tmp_path / "state.db", child_sid, child_messages)
+
+    real_lineage_loader = routes._webui_sidecar_lineage_messages_for_display
+    captured = {"lineage_loads": 0}
+
+    def wrapped_lineage_loader(*args, **kwargs):
+        captured["lineage_loads"] += 1
+        return real_lineage_loader(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", wrapped_lineage_loader)
+
+    handler = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0&msg_limit=30"
+    )
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    assert captured["lineage_loads"] >= 1
+    payload = handler.response_json["session"]
+    assert payload["message_count"] == len(parent_messages) + len(child_messages)
+    assert payload["todo_state"]["todos"][0]["id"] == "parent-todo"
 
 
 def test_msg_limit_single_hop_fast_path_falls_back_for_state_db_only_prefix_row(
@@ -2369,7 +2789,7 @@ def test_msg_limit_unavailable_parent_metadata_count_falls_back_to_lineage(monke
     monkeypatch.setattr(
         routes.Session,
         "load_metadata_only",
-        staticmethod(lambda _sid: MetadataOnlyParent()),
+        staticmethod(lambda _sid, **_kwargs: MetadataOnlyParent()),
     )
 
     def lineage_loader(_session):

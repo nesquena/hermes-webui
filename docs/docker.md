@@ -84,6 +84,10 @@ use `docker-compose.two-container.yml`,
 `docker-compose.three-container.yml`, or run `hermes gateway` separately before
 relying on offline scheduled runs. See [Scheduled jobs and the gateway daemon](#scheduled-jobs-and-the-gateway-daemon) below for the full background and verification steps.
 
+If your mounted `~/.hermes/hermes-agent` is a git checkout that the Agent may re-launch from (Agent v0.21.6 or newer: a self-updating checkout installed by the official installer or `hermes update`, or a writable checkout the Agent can adopt as one), the WebUI runs the container's staged copy of that Agent instead, so the Agent never re-launches the WebUI into your host's Python. As a result, Settings' Agent update reports that the Agent is not a git repository: update the Agent on the host with `hermes update`, then recreate the container (`docker compose up -d --force-recreate`) so it stages the updated Agent. The mounted checkout still runs directly, `.git` and in-app update included, whenever that Agent would not re-launch anyway (#8581, #8593): with `HERMES_DISABLE_LAZY_INSTALLS=1` (or `true`/`yes`); when its `install-stamp.json` names an update mechanism other than exactly `self`; or, with no stamp, when the checkout is mounted read-only. If the WebUI cannot tell, it runs the staged copy. A writable checkout without `install-stamp.json` (a plain `git clone`) runs the staged copy wherever it is mounted, because the Agent may adopt it as self-updating after a profile switch; update it on the host and recreate the container, as above.
+
+When opt-in auto-install is enabled (`HERMES_WEBUI_AUTO_INSTALL=1`), an already-selected staged Agent is used directly without a stage-copy warning. A different staged directory still has to pass the ownership, ancestry, source-identity, and freshness checks.
+
 For troubleshooting, reinstall, or onboarding reproduction trials, do not mount
 your real `~/.hermes` unless you intentionally want to test real state. Use an
 isolated Hermes home and follow
@@ -254,6 +258,8 @@ curl -sS "${GATEWAY_BASE_URL%/}/health/detailed" | jq '.gateway_state, .state'
 
 If the service name differs in your compose file, `docker compose -f docker-compose.two-container.yml ps` lists the running services.
 For container-to-container diagnostics, set one of `HERMES_API_URL` or `HERMES_WEBUI_GATEWAY_BASE_URL` in the WebUI environment, then restart WebUI.
+
+In these multi-container setups the Gateway runs in the `hermes-agent` service, not in the WebUI container, so WebUI reports it as managed outside WebUI (#8391): the Gateway card in System Settings shows a note instead of Start/Stop/Restart, the agent-health banner has no Restart button, and `POST /api/gateway/start|stop|restart` answers `409` with `code: gateway_externally_managed`. Restart the Gateway where it runs, for example `docker compose -f docker-compose.two-container.yml restart hermes-agent`. A WebUI that monitors this machine's own Gateway through a loopback URL (such as `HERMES_WEBUI_GATEWAY_BASE_URL=http://127.0.0.1:8642`) keeps these controls once it has seen that Gateway running for the active profile; if the Gateway is stopped and WebUI has not seen it running yet, the card says WebUI hasn't confirmed it runs on this machine, and starting it once with `hermes gateway start` (or `hermes --profile <name> gateway start` for a named profile; the card shows the exact command) lets WebUI manage it from then on.
 
 Refs #2785, #4483.
 
@@ -570,7 +576,7 @@ The two- and three-container setups use **named Docker volumes** (not bind mount
       └─────────────────────────┘
 ```
 
-The WebUI container doesn't ship with the agent's Python deps — at startup it runs `uv pip install /home/hermeswebui/.hermes/hermes-agent` to install them from the shared volume. The WebUI mount is read-only; the agent container is the only writer.
+The WebUI container doesn't ship with the agent's Python deps. At startup it copies the agent source from the shared volume into a writable stage (`/app/hermes-agent-src`) and installs it with `uv pip install -e "/app/hermes-agent-src[all]"`, passing the agent's own `[tool.uv] override-dependencies` as `--overrides` (since agent v0.22.5 its requirements only resolve with them, #8524). The WebUI mount is read-only; the agent container is the only writer.
 
 ## Upgrading the agent container
 

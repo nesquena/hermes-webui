@@ -8,13 +8,12 @@ A conversation containing an inline-image MEDIA token — ``MEDIA:data:image/
 Root cause: the whole base64 blob became the ``raw`` "path" and
 ``_resolve_against_roots`` stat()ed it outside its try/except.
 
-The fix routes ``data:`` tokens to an in-memory validator that applies the
-same public-share policy as a local file (raster MIME allow-list, strict
-base64, byte cap, magic bytes) and never touches the filesystem. A valid
-raster image survives as an ``<img>``; every other data URI (text, octet-stream,
-SVG, malformed, oversized, mismatched magic) is replaced by the placeholder, so
-none of its bytes can reach the public snapshot JSON. ``_resolve_against_roots``
-also keeps a defensive length/newline/NUL guard.
+The fix handles ``data:`` tokens in memory and never touches the filesystem.
+Public shares now replace EVERY content-supplied inline ``data:`` URI with
+``_INLINE_DATA_PLACEHOLDER`` (a valid image header can hide trailing secret
+bytes that credential redaction cannot see), so none of its bytes can reach the
+public snapshot JSON; see tests/test_share_inline_data_image_placeholder.py.
+``_resolve_against_roots`` also keeps a defensive length/newline/NUL guard.
 """
 
 from __future__ import annotations
@@ -69,21 +68,20 @@ def _snapshot_json(tmp_path: Path, content: str) -> str:
     return json.dumps(shares.build_share_snapshot(session))
 
 
-def test_valid_png_data_uri_survives_as_image(tmp_path: Path):
+def test_valid_png_data_uri_is_placeholdered(tmp_path: Path):
     ws = tmp_path / "workspace"
     ws.mkdir()
     out = _embed(f"Chart: MEDIA:data:image/png;base64,{_b64(PNG)} done", [ws])
-    assert f'<img src="data:image/png;base64,{_b64(PNG)}"' in out
-    assert shares._PLACEHOLDER not in out
-    assert out.endswith(" done")
+    assert out == f"Chart: {shares._INLINE_DATA_PLACEHOLDER} done"
 
 
 @pytest.mark.parametrize("blob_len", [5_000, 60_000, 400_000])
-def test_large_valid_png_does_not_crash_and_survives(tmp_path: Path, blob_len):
+def test_large_valid_png_does_not_crash_and_is_placeholdered(tmp_path: Path, blob_len):
     """The exact #7949 crash shape: a >4 KB inline image must not raise."""
     big = PNG + b"\x00" * blob_len
     snap = _snapshot_json(tmp_path, f"Here: MEDIA:data:image/png;base64,{_b64(big)}")
-    assert "data:image/png;base64," in snap
+    assert "data:image/png;base64," not in snap
+    assert shares._INLINE_DATA_PLACEHOLDER in snap
 
 
 def test_mixed_case_scheme_and_jpg_alias(tmp_path: Path):
@@ -91,7 +89,7 @@ def test_mixed_case_scheme_and_jpg_alias(tmp_path: Path):
     ws.mkdir()
     jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 32
     out = _embed(f"MEDIA:DATA:Image/JPG;base64,{_b64(jpeg)}", [ws])
-    assert '<img src="data:image/jpeg;base64,' in out
+    assert out == shares._INLINE_DATA_PLACEHOLDER
 
 
 @pytest.mark.parametrize(
@@ -113,14 +111,14 @@ def test_unsafe_data_uris_never_reach_snapshot(tmp_path: Path, uri):
     snap = _snapshot_json(tmp_path, f"leak: MEDIA:{uri} end")
     assert SECRET not in snap
     assert _b64(SECRET.encode()) not in snap
-    assert shares._PLACEHOLDER in snap
+    assert shares._INLINE_DATA_PLACEHOLDER in snap
 
 
 def test_oversized_png_is_placeholdered_without_decoding(tmp_path: Path):
     huge = PNG + b"\x00" * (shares._SHARE_EMBED_MAX_BYTES + 1)
     snap = _snapshot_json(tmp_path, f"MEDIA:data:image/png;base64,{_b64(huge)}")
     assert "data:image/png;base64," not in snap
-    assert shares._PLACEHOLDER in snap
+    assert shares._INLINE_DATA_PLACEHOLDER in snap
 
 
 def test_data_uri_never_reaches_filesystem(tmp_path: Path, monkeypatch):

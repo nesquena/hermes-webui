@@ -154,6 +154,88 @@ def test_wake_uses_fixed_prompt_and_result_reaches_parent_once(env):
     assert FakeDB().claim_caller_history_deliveries("sid1") == []
 
 
+# --- one neutral wake prompt: owner death is never inferred from the delivered text -------------------------
+# These drive the Agent's own ``_format_async_delegation`` (the producer whose text lands in the row) through
+# the real poller, so the delivered content is exactly what a Gateway delivery carries.
+
+def _producer_text(evt):
+    return pytest.importorskip("tools.process_registry_notifications")._format_async_delegation(evt)
+
+
+def _batch(*results, **extra):
+    return {"delegation_id": "deleg_r", "is_batch": True, "goals": [f"task {i + 1}" for i in range(len(results))],
+            "results": [dict(r, task_index=i) for i, r in enumerate(results)], **extra}
+
+
+def _wake_with(calls, text):
+    """Deliver *text* as one pending row through ``poll_once()``; return the wake prompt the parent gets."""
+    calls.clear()
+    FakeDB.rows[FakeDB.add("sid1", "deleg_r")]["content"] = text
+    assert gdw.poll_once(0) == 1
+    return calls[0]["prompt"]
+
+
+@pytest.mark.parametrize("marker", ["outcome unknown", "Unrecorded outcomes remain unknown", "status=interrupted"])
+def test_completed_summary_quoting_a_marker_keeps_the_neutral_prompt(env, marker):
+    """A successful child may write any of these words; that says nothing about its owner."""
+    calls, _ = env
+    text = _producer_text(_batch({"status": "completed", "duration_seconds": 4,
+                                  "summary": f"The provider documents the response as {marker}; review is complete."}))
+    assert marker in text  # the literal really is in the delivered text, as a completed summary wrote it
+    assert _wake_with(calls, text) == gdw.WAKE_PROMPT
+
+
+def test_ordinary_interrupted_batch_keeps_the_neutral_prompt(env):
+    """The normal batch formatter emits ``status=interrupted`` for an interrupted child, with no owner recovery."""
+    calls, _ = env
+    text = _producer_text(_batch({"status": "completed", "summary": "done"},
+                                 {"status": "interrupted", "error": "owner restart", "summary": "partial work"}))
+    assert "status=interrupted" in text and "last_known_status" not in text and "Last persisted unit status" not in text
+    assert _wake_with(calls, text) == gdw.WAKE_PROMPT
+
+
+def test_claim_and_wake_never_derives_an_owner_exit_from_result_prose(env, tmp_path):
+    """Same invariant through ``_claim_and_wake()`` itself: the row's wording selects nothing."""
+    calls, _ = env
+    FakeDB.rows[FakeDB.add("sid1", "deleg_r")]["content"] = _producer_text(
+        _batch({"status": "completed", "summary": "The provider documents the response as outcome unknown."}))
+    assert gdw._claim_and_wake(tmp_path / "state.db", "sid1", "sid1") == 1
+    assert calls[0]["prompt"] == gdw.WAKE_PROMPT
+
+
+def test_recovered_mixed_batch_wakes_with_conditional_recovery_guidance(env):
+    """A real owner-recovery delivery: the producer's evidence reaches the model unchanged and the prompt points at it.
+
+    The event is the shape ``recover_abandoned_delegations`` records (one recorded child, one unknown child,
+    ``last_known_status`` and transcript diagnostics); the text is whatever the installed Agent's formatter makes of it.
+    """
+    calls, _ = env
+    text = _producer_text(_batch(
+        {"status": "completed", "summary": "the review landed"},
+        {"status": "unknown", "summary": None,
+         "error": "Delegation owner exited before recording a terminal result; outcome unknown."},
+        status="unknown",
+        error="Delegation owner exited before the unit finished; 1/2 child results were recorded and are "
+              "included below, the rest are unknown.",
+        last_known_status="running",
+        task_transcripts={1: "/tmp/deleg_r/task_1.jsonl"}, transcript_tails={1: "tail-marker: wrote half of the file"}))
+    # What the real formatter emits for this shape (not asserted against any marker it does not produce).
+    assert "Last persisted unit status: running" in text and "the review landed" in text
+    assert "inspect evidence before retrying side effects" in text
+    assert "/tmp/deleg_r/task_1.jsonl" in text and "tail-marker: wrote half of the file" in text
+
+    prompt = _wake_with(calls, text)
+    # The producer's content is delivered to the parent's context verbatim, once.
+    delivered = [str(m.get("content")) for m in _context()]
+    assert delivered.count(text) == 1
+    # The wake instruction is conditional and scopes the resume to what the evidence shows unfinished.
+    assert prompt == gdw.WAKE_PROMPT
+    assert "If that result carries recovery evidence" in prompt
+    assert "resume only the work it lists as unfinished" in prompt
+    assert "do not retry a side effect whose outcome is unrecorded" in prompt
+    assert "was cut off" not in prompt and "owner process exited" not in prompt
+
+
 def test_commit_only_after_wake_turn_persisted(env):
     calls, _ = env
     FakeDB.add("sid1", "deleg_b")
