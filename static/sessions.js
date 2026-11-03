@@ -3738,7 +3738,7 @@ function _isCliSession(session) {
     || session.source_label
     || ''
   ).toLowerCase();
-  if (raw === 'cli' || raw === 'tui' || raw === 'acp') return true;
+  if (raw === 'cli' || raw === 'tui' || raw === 'acp' || raw === 'desktop') return true;
   // If messaging-like, don't classify as legacy CLI even when is_cli_session is true.
   if (_isMessagingSession(session)) return false;
   return session.is_cli_session === true;
@@ -9529,7 +9529,7 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
   for(const candidate of [...(rawSessions||[]),...(referenceSessions||[])]){
     if(candidate&&candidate.session_id&&!attachQueueById.has(candidate.session_id)) attachQueueById.set(candidate.session_id,candidate);
   }
-  // Raw sources is_cli_session_row never files as CLI; 'desktop' etc. are ambiguous.
+  // Raw sources is_cli_session_row never files as CLI; any other raw source is ambiguous.
   const nonCliParentSources=['webui','cron','webhook','kanban','tool','api','api_server'];
   const subagentHostHiddenByScope=(leaf)=>{
     const seen=new Set();
