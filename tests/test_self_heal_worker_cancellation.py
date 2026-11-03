@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from api import config, streaming
+from api import config, models, streaming
 from tests.test_steer_worker_boundaries import worker_scene as worker_scene
 
 
@@ -93,3 +93,130 @@ def test_self_heal_registration_obeys_retained_stop(worker_scene, monkeypatch, f
         assert finalized
     assert "run" not in config.AGENT_INSTANCES
     assert "run" not in config.ACTIVE_RUNS
+
+
+def test_a_stop_during_the_heal_retry_keeps_the_rotated_continuation(
+    worker_scene, monkeypatch,
+):
+    """A Stop inside a retry that started on a rotated session must persist.
+
+    The reviewer's scene: the first attempt rotates ``original`` ->
+    ``continuation-one`` through compression and returns a 401, the credential
+    refresh succeeds, and a Stop lands while the rebuilt Agent runs. The turn's
+    writeback authority is registered by the chat start under the id the stream
+    was admitted with, so settling the cancel against the continuation failed
+    closed: only the sealed parent reached disk, the continuation the sidebar
+    now points at was never written, and the client was never told the id moved.
+    """
+    scene = worker_scene
+    monkeypatch.setattr(config, "SESSION_WRITEBACK_OWNERS", {})
+    # routes.py claims the writeback for the stream under the chat-start id
+    # before the worker starts; that record is what authorises settlement.
+    config.register_session_writeback_owner("original", "run")
+    stop = threading.Event()
+    config.CANCEL_FLAGS["run"] = stop
+    built = []
+
+    def on_init():
+        built.append(scene.agent)
+
+    def on_run():
+        if len(built) == 1:
+            # The first attempt compressed and rotated, then the provider
+            # returned a 401 as a result (not as a raised exception).
+            scene.agent.session_id = "continuation-one"
+            scene.result = {"error": "401 unauthorized", "messages": []}
+            return
+        # Stop lands while the rebuilt Agent runs.
+        stop.set()
+        scene.result = {"messages": [
+            {"role": "user", "content": "Do the task."},
+            {"role": "assistant", "content": "Healed answer."},
+        ]}
+
+    scene.on_init, scene.on_run = on_init, on_run
+    monkeypatch.setattr(streaming, "_attempt_credential_self_heal", lambda *args, **kwargs: {
+        "provider": "openai", "api_key": "synthetic-self-heal-fixture",
+        "base_url": "http://127.0.0.1:1/v1",
+    })
+
+    scene.run()
+
+    assert scene.calls.count("run") == 2, "the heal retry must have run"
+    emitted = list(scene.events.queue)
+    names = [event for event, _payload in emitted]
+    assert "cancel" in names, "a stopped heal retry must settle as a cancel"
+    assert "compressed" in names, (
+        "the client must be told the session id rotated, or it stays on a "
+        "parent row the compression sealed"
+    )
+    assert names.index("compressed") < names.index("cancel"), (
+        "the handoff must precede the cancel frame"
+    )
+    handoff = next(payload for event, payload in emitted if event == "compressed")
+    assert handoff.get("new_session_id") == "continuation-one"
+
+    continuation = models.Session.load("continuation-one")
+    assert continuation is not None, (
+        "the cancelled turn must be written on the continuation the session "
+        "now points at, not dropped behind the sealed parent"
+    )
+    saved = [str(row.get("content") or "") for row in continuation.messages]
+    assert "Do the task." in saved, "the cancelled turn's user row must survive"
+    assert "Healed answer." not in saved, "the cancelled turn persisted the retry's answer"
+
+    parent = models.Session.load("original")
+    assert parent is not None and getattr(
+        parent, "pre_compression_continuation_session_id", None
+    ) == "continuation-one", "the parent must stay sealed against the continuation"
+    # The claim followed the id; the turn's teardown must release it there, or
+    # the next turn on the continuation inherits a stale owner.
+    assert "continuation-one" not in config.SESSION_WRITEBACK_OWNERS
+    assert "original" not in config.SESSION_WRITEBACK_OWNERS
+
+
+def test_a_stop_during_the_heal_retry_is_a_cancel_not_a_saved_answer(
+    worker_scene, monkeypatch,
+):
+    """A Stop that lands while the retry runs must not be saved as its answer.
+
+    The constructor fence above covers a Stop before the replacement Agent runs.
+    Nothing looked at the flag after ``run_conversation`` returned, so the
+    healed answer was persisted as a completed turn while ``put`` dropped the
+    ``done`` frame — the client got no terminal event and the user's Stop was
+    lost.
+    """
+    scene = worker_scene
+    stop = threading.Event()
+    config.CANCEL_FLAGS["run"] = stop
+    built = []
+
+    def on_init():
+        built.append(scene.agent)
+
+    def on_run():
+        if len(built) == 1:
+            raise RuntimeError("401 unauthorized")
+        stop.set()
+        scene.result = {
+            "messages": [
+                {"role": "user", "content": "Do the task."},
+                {"role": "assistant", "content": "Healed answer."},
+            ],
+        }
+
+    scene.on_init, scene.on_run = on_init, on_run
+    monkeypatch.setattr(streaming, "_attempt_credential_self_heal", lambda *args, **kwargs: {
+        "provider": "openai", "api_key": "synthetic-self-heal-fixture",
+        "base_url": "http://127.0.0.1:1/v1",
+    })
+
+    scene.run()
+
+    assert scene.calls.count("run") == 2, "the heal retry must have run"
+    emitted = [event for event, _payload in list(scene.events.queue)]
+    assert "cancel" in emitted, "a stopped heal retry must settle as a cancel"
+    assert "done" not in emitted
+    assert "Healed answer." not in "\n".join(
+        str(row.get("content") or "") for row in scene.session.messages
+    ), "the cancelled turn must not persist the retry's answer"

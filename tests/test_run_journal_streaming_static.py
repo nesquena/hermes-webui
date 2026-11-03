@@ -38,9 +38,12 @@ def test_streaming_compacts_all_successful_agent_result_writebacks():
 
     # Normal completion plus both credential self-heal retry-success paths now
     # route through one shared settlement helper, which owns the compaction.
+    # A fourth call settles a *failed* retry's partial rows (the work that turn
+    # really performed) — it is a writeback like the others, not an exception
+    # to the invariant.
     assert "def _settle_result_messages(" in src
     assert "_compact_session_image_parts_for_persistence(session)" in settle_src
-    assert run_src.count("_settle_result_messages(") == 3
+    assert run_src.count("_settle_result_messages(") == 4
 
 
 def test_visible_process_echo_compare_ignores_all_whitespace():
