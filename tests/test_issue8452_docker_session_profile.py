@@ -2039,7 +2039,9 @@ def test_mcp_discovery_dotenv_write_does_not_clobber_a_live_named_turn(
     the `.env` value. The mirror must restore A's published profile — B must
     never overwrite a live named turn's slot.
     """
-    sc = _session_context(monkeypatch)
+    # Install the fake session_context (side effect only: this test asserts on
+    # the process env, not the ContextVars).
+    _session_context(monkeypatch)
     monkeypatch.delenv("HERMES_SESSION_PROFILE", raising=False)
 
     unresolved = _StreamingScene(
