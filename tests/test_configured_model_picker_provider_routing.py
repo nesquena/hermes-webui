@@ -44,6 +44,7 @@ eval([
   '_findModelInDropdown',
   '_applyModelToDropdown',
   '_ensureModelOptionInDropdown',
+  '_readModelOverflowData',
 ].map(name => extractFunction(uiSrc, name)).join('\n'));
 
 globalThis._refreshOpenModelDropdown = () => {};
@@ -93,11 +94,79 @@ const select = {
 const requested = '@custom:backup:model-a';
 const applied = _ensureModelOptionInDropdown(requested, select, 'custom:backup');
 const state = _modelStateForSelect(select, select.value);
-process.stdout.write(JSON.stringify({
+const result = {
   applied,
   state,
   options: options.map(option => ({value: option.value, provider: _getOptionProviderId(option)})),
-}));
+};
+
+const payload = JSON.parse(process.argv[2] || '{}');
+if (payload.colonOverflow) {
+  const {model, provider, groups} = payload.colonOverflow;
+  let selectedOption = null;
+  const bindSelection = option => Object.defineProperty(option, 'selected', {
+    get() { return selectedOption === option; },
+    set(value) { if (value) selectedOption = option; },
+  });
+  const optgroups = groups.map(data => {
+    const group = {tagName: 'OPTGROUP', dataset: {provider: data.provider_id, extraModels: JSON.stringify(data.extra_models || [])}};
+    group.children = (data.models || []).map(item => Object.assign(document.createElement('option'), {value: item.id, parentElement: group}));
+    group.appendChild = option => {
+      option.parentElement = group;
+      group.children.push(option);
+      if (!options.includes(option)) options.push(option);
+      bindSelection(option);
+    };
+    return group;
+  });
+  const options = optgroups.flatMap(group => group.children);
+  options.forEach(bindSelection);
+  let selectedValue = model;
+  selectedOption = options.find(option => option.value === selectedValue) || null;
+  const overflowSelect = {
+    id: 'modelSelect',
+    options,
+    get value() { return selectedOption ? selectedOption.value : selectedValue; },
+    set value(value) {
+      selectedValue = String(value || '');
+      selectedOption = options.find(option => option.value === selectedValue) || null;
+    },
+    get selectedOptions() {
+      return selectedOption ? [selectedOption] : [];
+    },
+    querySelectorAll(selector) { return selector === 'optgroup' ? optgroups : []; },
+    appendChild(option) {
+      option.parentElement = this;
+      options.push(option);
+    },
+  };
+  const firstRestore = _ensureModelOptionInDropdown(model, overflowSelect, provider);
+  const firstState = _modelStateForSelect(overflowSelect, overflowSelect.value);
+  const secondRestore = _ensureModelOptionInDropdown(model, overflowSelect, provider);
+  const routedValue = `@${provider}:${model}`;
+  const modelIdentity = _modelPickerOptionIdentity(model, provider);
+  const rows = options.map(option => ({
+    value: option.value, provider: _getOptionProviderId(option),
+    identity: _modelPickerOptionIdentity(option.value, _getOptionProviderId(option)),
+    ungrouped: option.parentElement === overflowSelect,
+  }));
+  result.colonOverflow = {
+    firstRestore,
+    firstState,
+    secondRestore,
+    selectedState: _modelStateForSelect(overflowSelect, overflowSelect.value),
+    selectedProvider: _getOptionProviderId(overflowSelect.selectedOptions[0]),
+    openrouterIdentities: rows.filter(row => row.provider === provider).map(row => row.identity),
+    catalogIdentities: [...(groups[0].models || []), ...(groups[0].extra_models || [])]
+      .map(item => _modelPickerOptionIdentity(item.id, provider)),
+    backupValues: rows.filter(row => row.provider === 'custom:backup').map(row => row.value),
+    routedRows: rows.filter(row => row.provider === provider && row.identity === modelIdentity),
+    ungroupedRoutedRows: rows.filter(row => row.value === routedValue && row.ungrouped),
+    selectedOptionCount: overflowSelect.selectedOptions.length,
+  };
+}
+
+process.stdout.write(JSON.stringify(result));
 """
 
 
@@ -564,6 +633,49 @@ def test_colon_bearing_custom_provider_round_trip_restores_selected_row(tmp_path
     assert "model-opt-badge--selected" in actual["activeRow"]["html"]
     assert "model-a:free" in actual["activeRow"]["html"]
     assert ">free<" not in actual["activeRow"]["html"].replace("model-a:free", "")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_repeated_openrouter_colon_overflow_restoration_reuses_one_routed_row():
+    model = "nex-agi/nex-n2.5-pro:free"
+    thinking = "nex-agi/nex-n2.5-pro:thinking"
+    fixture = {
+        "colonOverflow": {
+            "model": model,
+            "provider": "openrouter",
+            "groups": [
+                {
+                    "provider_id": "openrouter",
+                    "models": [{"id": thinking}],
+                    "extra_models": [{"id": model}],
+                },
+                {
+                    "provider_id": "custom:backup",
+                    "models": [{"id": model}],
+                },
+            ],
+        }
+    }
+    result = subprocess.run(
+        [NODE, "-e", _DRIVER, str(UI_JS), json.dumps(fixture)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    actual = json.loads(result.stdout)["colonOverflow"]
+
+    assert actual["firstRestore"]
+    assert actual["secondRestore"]
+    assert actual["firstState"] == {"model": model, "model_provider": "openrouter"}
+    assert actual["selectedState"] == {"model": model, "model_provider": "openrouter"}
+    assert actual["selectedOptionCount"] == 1
+    assert actual["selectedProvider"] == "openrouter"
+    assert len(actual["routedRows"]) == 1, f"expected one OpenRouter row for {model}, got {actual['routedRows']!r}"
+    assert actual["ungroupedRoutedRows"] == []
+    assert set(actual["openrouterIdentities"]) == set(actual["catalogIdentities"])
+    assert len(actual["openrouterIdentities"]) == len(set(actual["openrouterIdentities"]))
+    assert actual["backupValues"] == [model]
 
 
 _RENDERED_CLICK_DRIVER = r"""

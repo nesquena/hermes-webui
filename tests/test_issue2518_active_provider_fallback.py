@@ -51,6 +51,10 @@ def _new_session_body() -> str:
 # ---------------------------------------------------------------------------
 # Client-side: source-shape check that the fallback is wired in newSession().
 # ---------------------------------------------------------------------------
+# NOTE: the slice length below is only a SEARCH BOUND inside newSession()'s
+# body (which is ~16.9k chars); the assertions are unchanged. It was raised
+# from 8000/9000 to 12000 because the profile-boundary guard added to the
+# project-binding merge lengthened the prefix before the fallback chain.
 
 
 class TestClientFallbackSourceShape:

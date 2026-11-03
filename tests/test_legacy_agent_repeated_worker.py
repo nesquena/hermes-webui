@@ -31,7 +31,11 @@ def test_old_persistence_shapes_keep_each_turn_in_actual_worker(tmp_path, monkey
             super().__init__(sid, SQLiteStore(path))
             self.context_compressor = self.ephemeral_system_prompt = None
             self.platform, self.model = 'webui', 'test-model'
-            self._flushed_objects = set()
+            # Object-tracked flushes key on id(row). Keep each flushed row alive in the
+            # tracker: an id() is only unique among live objects, and a row freed after an
+            # earlier turn let CPython hand its address to a new row, which was then skipped
+            # as already flushed (the CI flake on the 'objects' shape).
+            self._flushed_objects = {}
 
         def local_provider(self, prompt, history, clean, timestamp):
             histories.append(copy.deepcopy(history))
@@ -76,7 +80,7 @@ def test_old_persistence_shapes_keep_each_turn_in_actual_worker(tmp_path, monkey
                 if shape == 'timestamp-markers':
                     row['_db_persisted'] = True
                 else:
-                    self._flushed_objects.add(id(row))
+                    self._flushed_objects[id(row)] = row
             self._last_flushed_db_idx = len(messages)
 
     if shape.startswith('timestamp-'):

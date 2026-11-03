@@ -100,6 +100,7 @@ def test_session_duplicate_foreign_profile_session_blocked_by_visibility_guard(m
     handler = _FakeHandler()
     foreign = _SimpleSession("foreign_duplicate", profile="other")
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: foreign)
+    monkeypatch.setattr(routes, "get_session_profile_readonly", lambda sid: routes.get_session(sid, metadata_only=True).profile)
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": "foreign_duplicate"})
@@ -132,6 +133,7 @@ def test_session_duplicate_same_profile_still_duplicates(monkeypatch):
 
     monkeypatch.setattr(routes.Session, "load", staticmethod(_load))
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: source)
+    monkeypatch.setattr(routes, "get_session_profile_readonly", lambda sid: routes.get_session(sid, metadata_only=True).profile)
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": "session_visible"})
@@ -155,6 +157,7 @@ def test_file_read_foreign_profile_session_returns_404_before_file_ops(monkeypat
     handler = _FakeHandler()
     foreign = _SimpleSession("foreign_file", profile="other", workspace="/workspace")
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: foreign)
+    monkeypatch.setattr(routes, "get_session_profile_readonly", lambda sid: routes.get_session(sid, metadata_only=True).profile)
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     monkeypatch.setattr(routes, "get_session_for_file_ops", lambda sid: (_ for _ in ()).throw(AssertionError("file ops should not run")))
     cap = _capture(monkeypatch)
@@ -291,6 +294,7 @@ def test_chat_stream_status_blocks_foreign_active_stream(monkeypatch):
     foreign = _SimpleSession("foreign_session", profile="other")
 
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: foreign if sid == "foreign_session" else (_ for _ in ()).throw(KeyError("Session not found")))
+    monkeypatch.setattr(routes, "get_session_profile_readonly", lambda sid: routes.get_session(sid, metadata_only=True).profile)
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     with config.ACTIVE_RUNS_LOCK:
         previous = dict(config.ACTIVE_RUNS)
@@ -331,6 +335,7 @@ def test_chat_stream_status_blocks_foreign_registered_stream_before_worker_start
         if sid == "foreign_session"
         else (_ for _ in ()).throw(KeyError("Session not found")),
     )
+    monkeypatch.setattr(routes, "get_session_profile_readonly", lambda sid: routes.get_session(sid, metadata_only=True).profile)
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     monkeypatch.setattr(
         routes,
@@ -374,6 +379,7 @@ def test_chat_stream_status_keeps_same_profile_stream_visible(monkeypatch):
     visible = _SimpleSession("visible_session", profile="default")
 
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: visible if sid == "visible_session" else (_ for _ in ()).throw(KeyError("Session not found")))
+    monkeypatch.setattr(routes, "get_session_profile_readonly", lambda sid: routes.get_session(sid, metadata_only=True).profile)
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     with config.ACTIVE_RUNS_LOCK:
         previous = dict(config.ACTIVE_RUNS)
@@ -404,6 +410,7 @@ def test_chat_cancel_blocks_foreign_owned_stream_before_cancel_call(monkeypatch)
     calls = {"cancel": 0}
 
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: foreign if sid == "foreign_session" else (_ for _ in ()).throw(KeyError("Session not found")))
+    monkeypatch.setattr(routes, "get_session_profile_readonly", lambda sid: routes.get_session(sid, metadata_only=True).profile)
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     with config.ACTIVE_RUNS_LOCK:
         previous = dict(config.ACTIVE_RUNS)
@@ -448,6 +455,7 @@ def test_chat_cancel_same_profile_stream_still_passes_through(monkeypatch):
     calls = {"cancel": 0}
 
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: visible if sid == "visible_session" else (_ for _ in ()).throw(KeyError("Session not found")))
+    monkeypatch.setattr(routes, "get_session_profile_readonly", lambda sid: routes.get_session(sid, metadata_only=True).profile)
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     monkeypatch.setattr(runtime_adapter, "runtime_adapter_enabled", lambda: False)
     monkeypatch.setattr(routes, "cancel_stream", lambda _stream_id: calls.__setitem__("cancel", calls["cancel"] + 1) or True)
@@ -480,6 +488,7 @@ def test_chat_stream_blocks_foreign_owned_dead_stream_before_replay(monkeypatch)
     foreign = _SimpleSession("foreign_session", profile="other")
 
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: foreign if sid == "foreign_session" else (_ for _ in ()).throw(KeyError("Session not found")))
+    monkeypatch.setattr(routes, "get_session_profile_readonly", lambda sid: routes.get_session(sid, metadata_only=True).profile)
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     monkeypatch.setattr(runtime_adapter, "runtime_adapter_enabled", lambda: False)
     monkeypatch.setattr(routes, "_stream_runner_run_events", lambda *_args, **_kwargs: False)
@@ -507,6 +516,7 @@ def test_chat_stream_allows_unknown_dead_stream_fallback_replay_path(monkeypatch
     calls = {"replay": 0}
 
     monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("session lookup should be avoided")))
+    monkeypatch.setattr(routes, "get_session_profile_readonly", lambda sid: routes.get_session(sid, metadata_only=True).profile)
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     monkeypatch.setattr(routes, "_stream_runner_run_events", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(routes, "find_run_summary", lambda _stream_id: None)
@@ -538,6 +548,7 @@ def test_session_new_skips_prev_session_commit_from_other_profile(monkeypatch):
     monkeypatch.setattr(routes, "read_body", lambda _handler: {"prev_session_id": "foreign_session"})
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: foreign if sid == "foreign_session" else (_ for _ in ()).throw(KeyError("Session not found")))
+    monkeypatch.setattr(routes, "get_session_profile_readonly", lambda sid: routes.get_session(sid, metadata_only=True).profile)
     monkeypatch.setattr(session_lifecycle, "commit_session_memory", lambda sid, agent=None: calls.__setitem__("commit", calls["commit"] + 1))
     monkeypatch.setattr(
         routes,
@@ -572,6 +583,7 @@ def test_session_new_keeps_prev_session_commit_for_same_profile(monkeypatch):
     monkeypatch.setattr(routes, "read_body", lambda _handler: {"prev_session_id": "visible_session"})
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: visible if sid == "visible_session" else (_ for _ in ()).throw(KeyError("Session not found")))
+    monkeypatch.setattr(routes, "get_session_profile_readonly", lambda sid: routes.get_session(sid, metadata_only=True).profile)
     monkeypatch.setattr(session_lifecycle, "commit_session_memory", lambda sid, agent=None: calls.__setitem__("commit", calls["commit"] + 1))
     monkeypatch.setattr(routes, "new_session", lambda **_kwargs: calls.__setitem__("new", calls["new"] + 1) or _NewSession())
 

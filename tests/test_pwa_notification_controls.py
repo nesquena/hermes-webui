@@ -53,6 +53,11 @@ def _extract_fn(src: str, name: str) -> str:
     marker = f"function {name}"
     start = src.find(marker)
     assert start >= 0, f"{name} not found"
+    # Keep the `async` modifier when the declaration has one. The marker matches
+    # inside "async function name", so slicing at `start` would hand the harness
+    # a plain function whose body awaits, which Node rejects at compile time.
+    if src[max(0, start - 6):start] == "async ":
+        start -= 6
     brace = src.find("{", src.find(")", start))
     depth = 0
     for i in range(brace, len(src)):
@@ -454,7 +459,7 @@ def test_completion_notification_fires_when_tab_was_hidden_during_stream():
 def test_desktop_background_notification_signal_stays_out_of_stream_visibility():
     stream_tracker = _source_between(
         "const LIVE_STREAMS={};",
-        "function closeLiveStream(sessionId, streamId, source){",
+        "function closeLiveStream(sessionId, streamId, source",
     )
     deferred_recovery = _source_between(
         "function _reattachOrRestoreAfterDeferredStreamError(source){",

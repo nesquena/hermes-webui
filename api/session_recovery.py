@@ -31,6 +31,7 @@ import logging
 import os
 import re
 import sqlite3
+import sys
 import threading
 from contextlib import closing
 from pathlib import Path
@@ -481,6 +482,17 @@ def inspect_session_recovery_status(session_path: Path) -> dict:
     return status
 
 
+def _note_recovered_sidecar_write(session_path: Path) -> None:
+    """Count a restore like ``Session.save`` does (#8267).
+
+    Only a process that has loaded ``api.models`` has a session cache that a
+    cold load could publish into, so the standalone CLI skips this.
+    """
+    models = sys.modules.get('api.models')
+    if models is not None:
+        models._note_sidecar_write(session_path.stem)
+
+
 def recover_session(session_path: Path) -> dict:
     """Restore session_path from its .bak when the bak has more messages.
 
@@ -511,7 +523,11 @@ def recover_session(session_path: Path) -> dict:
             fh.write(payload)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp_path, session_path)
+        _note_recovered_sidecar_write(session_path)
+        try:
+            os.replace(tmp_path, session_path)
+        finally:
+            _note_recovered_sidecar_write(session_path)
     except (OSError, TypeError, ValueError) as exc:
         logger.warning("recover_session: guarded restore failed for %s: %s", session_path, exc)
         try:

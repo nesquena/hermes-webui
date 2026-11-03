@@ -2705,6 +2705,9 @@ def test_rotated_session_stream_end_uses_original_stream_owner_id(tmp_path, monk
     continuation_id = "streaming_rotated_title_owner_cont"
     stream_queue = queue.Queue()
     config.STREAMS[stream_id] = stream_queue
+    monkeypatch.setattr(streaming, "SESSION_DIR", models.SESSION_DIR)
+    session_agent_lock = streaming._get_session_agent_lock(session_id)
+    assert config.SESSION_AGENT_LOCKS.get(session_id) is session_agent_lock
 
     previous_messages = [{"role": "user", "content": "before", "timestamp": 1.0}]
     session = Session(
@@ -2720,6 +2723,7 @@ def test_rotated_session_stream_end_uses_original_stream_owner_id(tmp_path, monk
     )
     session.save()
     models.SESSIONS[session_id] = session
+    assert models.SESSIONS[session_id] is session
 
     class _RotatingAgent(_MockAgent):
         """Simulates compression rotating the agent session id."""

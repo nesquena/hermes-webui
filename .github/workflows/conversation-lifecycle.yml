@@ -15,6 +15,8 @@ on:
       - 'tests/sidebar_terminal_barrier_server.py'
       - 'tests/browser_historical_transcript_hydration.py'
       - 'tests/browser_reconnect_scene_redraw.py'
+      - 'tests/browser_settle_visibility_7676.py'
+      - 'tests/browser_approval_first_click.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - '.github/workflows/conversation-lifecycle.yml'
@@ -28,6 +30,8 @@ on:
       - 'tests/sidebar_terminal_barrier_server.py'
       - 'tests/browser_historical_transcript_hydration.py'
       - 'tests/browser_reconnect_scene_redraw.py'
+      - 'tests/browser_settle_visibility_7676.py'
+      - 'tests/browser_approval_first_click.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - '.github/workflows/conversation-lifecycle.yml'
@@ -35,9 +39,15 @@ on:
 jobs:
   live-to-final:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    # Keep existing proof rows informational; reconnect regressions fail CI.
-    continue-on-error: ${{ matrix.name != 'reconnect-scene-redraw' }}
+    # Same slow-mirror budget as browser-smoke.yml: `playwright install --with-deps`
+    # runs apt-get on every job, and on a slow Ubuntu mirror (~25-65 kB/s) the install
+    # step alone can run past 10 minutes. On 2026-10-22 the old 10-minute limit cut
+    # about 4% of this workflow's jobs, most inside the install step; the two blocking
+    # matrix rows below were each cut 14-16 times (census in PR #8494).
+    timeout-minutes: 30
+    # Keep existing proof rows informational; reconnect + #7676 settle and the
+    # #7091 approval first-click regressions fail CI.
+    continue-on-error: ${{ matrix.name != 'reconnect-scene-redraw' && matrix.name != 'settle-visibility-7676' && matrix.name != 'approval-first-click' }}
     strategy:
       fail-fast: false
       matrix:
@@ -53,6 +63,20 @@ jobs:
           - name: reconnect-scene-redraw
             script: tests/browser_reconnect_scene_redraw.py
             browsers: chromium
+          # #7676: the settled reply must stay visible in Transparent Stream —
+          # real browser, no network interruption, virtualization on/off and
+          # both idle-reconcile outcomes. Strict: this is the regression guard
+          # for the blank-settled-reply report.
+          - name: settle-visibility-7676
+            script: tests/browser_settle_visibility_7676.py
+            browsers: chromium
+          # #7091: the approval card must answer on the FIRST click; a stale
+          # transport id is reconciled against the /api/approval/pending head and
+          # a click captured on A is never transferred to a queued successor B.
+          # Strict: a swallowed failure here would let a cross-approval
+          # regression land green.
+          - name: approval-first-click
+            script: tests/browser_approval_first_click.py
     steps:
       - uses: actions/checkout@v4
 

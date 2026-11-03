@@ -267,6 +267,9 @@ class TestBug2TypeCheckRecycling:
         Feed it an .assistant-turn node; it must return null."""
         source = _extract_func_script(JS) + r"""
 // Extract the renderMessages function body
+// The render path captures viewport ownership before its own scroll restore
+// (#7591); harnesses that run the real renderMessages must provide it.
+function _captureMessageRecoveryOwnership(){ return { programmatic:false, jumpOwner:false }; }
 const rmSrc = extractFunc('renderMessages');
 
 // Verify the full fixed guard exists in the actual source
@@ -312,6 +315,9 @@ console.log(JSON.stringify({
         """Extract the assistant-turn recycling guard from renderMessages.
         Feed it a .msg-row node; it must return null."""
         source = _extract_func_script(JS) + r"""
+// The render path captures viewport ownership before its own scroll restore
+// (#7591); harnesses that run the real renderMessages must provide it.
+function _captureMessageRecoveryOwnership(){ return { programmatic:false, jumpOwner:false }; }
 const rmSrc = extractFunc('renderMessages');
 
 const guardPresent = rmSrc.includes("recycled.classList.contains('assistant-turn')");

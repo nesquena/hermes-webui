@@ -133,10 +133,26 @@ def _run_continuation_restore(responses, *, attempts=1, current_sid=None,
     mismatch_end = js.index("\n}", mismatch_start) + 2
     draft_start = js.index("function _restoreComposerDraft(draft, targetSid, opts={}) {")
     draft_end = js.index("\n}\n\n// Clear the saved draft", draft_start) + 2
+
+    def source_function(name):
+        start = js.index(f"function {name}(")
+        return js[start:js.index("\n}", start) + 2]
+
+    draft_dependencies = "\n".join([
+        js[js.index("const _composerDraftLocalFallbackBySid = new Map();"):].splitlines()[0],
+        js[js.index("const _composerDraftRestoreSuppressedUntilBySid = new Map();"):].splitlines()[0],
+        source_function("_composerDraftFileSignature"),
+        source_function("_composerDraftFilesForPersist"),
+        source_function("_composerDraftPayloadSignature"),
+        source_function("_composerDraftHasPayload"),
+        source_function("_clearComposerDraftRestoreSuppression"),
+        source_function("_isComposerDraftRestoreSuppressed"),
+    ])
     spec = json.dumps({
         "load": js[js.index("let _contextTransitionGeneration=0;"):js.index("const _newSessionPendingText")] + "\n" + js[load_start:load_end],
         "routeParser": js[route_start:route_end],
         "profileMismatchParser": js[mismatch_start:mismatch_end],
+        "draftDependencies": draft_dependencies,
         "draftRestore": js[draft_start:draft_end],
         "responses": responses,
         "attempts": attempts,
@@ -216,7 +232,7 @@ const context=vm.createContext({{
     return {{session:response.session}};
   }}
 }});
-vm.runInContext(spec.draftRestore,context);
+vm.runInContext(spec.draftDependencies+'\\n'+spec.draftRestore,context);
 vm.runInContext(spec.profileMismatchParser+'\\n'+spec.routeParser+'\\n'+spec.load,context);
 (async()=>{{
   const errors=[];

@@ -85,7 +85,17 @@ def normalize_dashboard_browser_url(raw_url: str | None) -> str:
         raise ValueError("invalid dashboard URL path")
     path = parsed.path or ""
     path_lower = path.lower()
-    if "\\" in path or "%5c" in path_lower or "%2f" in path_lower or "%2e" in path_lower:
+    # Reject "\\\\", encoded separators/dot segments, and double slashes. A leading "//"
+    # is authority-like: proxies collapse it or resolve it as an open redirect, and
+    # posixpath.normpath() preserves exactly two leading slashes, so the canonical-path
+    # guard below would not catch it on its own.
+    if (
+        "\\" in path
+        or "%5c" in path_lower
+        or "%2f" in path_lower
+        or "%2e" in path_lower
+        or "//" in path
+    ):
         raise ValueError("invalid dashboard URL path")
     import posixpath as _posixpath
 

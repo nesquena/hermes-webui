@@ -3238,7 +3238,7 @@ def test_gateway_approval_response_relay():
 
     captured = {}
 
-    def fake_request_json(self, req):
+    def fake_request_json(self, req, **_kwargs):
         captured["url"] = req.full_url
         captured["body"] = json.loads(req.data)
         return {"ok": True}

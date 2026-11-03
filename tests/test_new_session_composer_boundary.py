@@ -31,16 +31,42 @@ def _set_new_session_pending_function() -> str:
 
 
 def _add_files_function() -> str:
-    return _function(
-        UI_JS, "addFiles", "\nconst _uploadPendingFilesProgressBySession"
-    )
+    # addFiles() routes through the collision-safe pending-file helpers, so the
+    # harness needs them too (the merged addFiles keeps master's rename logic).
+    return "\n".join([
+        _function(UI_JS, "_pendingFileUniqueName", "\n// A pending file's identity"),
+        _function(UI_JS, "_pendingFileOrigName", "\nfunction addFiles"),
+        _function(UI_JS, "addFiles", "\nconst _uploadPendingFilesProgressBySession"),
+    ])
+
+
+# Module-scope state the extracted newSession()/draft helpers touch. Declared
+# with `var` here (and normalised to `var` everywhere else in this file) so a
+# harness that also declares one of them stays legal, and the merged layer's
+# bindings exist even when a test's own prelude predates them.
+_NEW_SESSION_STATE = (
+    "var _newSessionInFlight=null;\n"
+    "var _newSessionRequest=null;\n"
+    "var _loadingSessionId=null;\n"
+    "var _loadSessionGeneration=0;\n"
+)
+
+_DRAFT_STATE = (
+    "var _composerDraftLocalFallbackBySid=new Map();\n"
+    "var _composerDraftLatestIntentSequenceBySid=new Map();\n"
+    "var _composerDraftIntentSequence=0;\n"
+    "var _composerDraftRevBySid=new Map();\n"
+    "var _composerDraftLastPayloadBySid=new Map();\n"
+)
 
 
 def _new_session_function() -> str:
     start = SESSIONS_JS.find("async function newSession(")
     end = SESSIONS_JS.find("\n\n/**", start)
     assert start != -1 and end != -1, "newSession function not found"
-    return SESSIONS_JS[start:end]
+    # The merged newSession() invalidates a superseded load at the pane hand-off
+    # (#8356); a harness must declare that module state to run the source.
+    return "var _loadingSessionId=null;\nvar _loadSessionGeneration=0;\n" + SESSIONS_JS[start:end]
 
 
 def _wait_for_new_session_navigation_function() -> str:
@@ -212,8 +238,9 @@ def _run_review_race_harness(schedule: str) -> dict:
         function updateSendBtn(){{}}
         function renderTray(){{}}
         function _rememberComposerPendingFiles(){{}}
-        function _saveComposerDraftNow(sid,text,files,profile){{
-          saves.push({{sid,text,files:[...(files||[])].map(f=>f.name),profile:profile||null}});
+        function _saveComposerDraftNow(sid,text,files,_contId,opts){{
+          const profile=(opts&&opts.ownerProfile)||null;
+          saves.push({{sid,text,files:[...(files||[])].map(f=>f.name),profile}});
           return Promise.resolve();
         }}
         function _restoreComposerDraft(draft){{
@@ -310,7 +337,7 @@ def _run_pending_file_ownership_harness() -> dict:
     script = textwrap.dedent(
         f"""
         {_composer_authority_helpers()}
-        let _loadingSessionId = null;
+        var _loadingSessionId = null;
         let trayRenders = 0;
         const apiCalls = [];
         const oldFile = {{
@@ -1598,7 +1625,7 @@ def test_voice_mode_send_preserves_buffered_transcript_across_new_session_handof
         const assert = require('assert');
         {_composer_authority_helpers()}
 
-        let _newSessionInFlight = null;
+        var _newSessionInFlight = null;
         let resolveInflight;
         const sendCalls = [];
         const S = {{
@@ -2026,8 +2053,9 @@ def _run_new_session_load_interleave_harness(
         {_load_session_function()}
         {_open_sidebar_session_function()}
 
-        let _loadingSessionId = null;
-        let _loadSessionGeneration = 0;
+        var _loadingSessionId = null;
+        var _loadSessionGeneration = 0;
+        var _composerDraftLocalFallbackBySid = new Map();
         let _sessionSourceFilter = 'webui';
         let _activeProject = null;
         const NO_PROJECT_FILTER = '__none__';
@@ -2113,8 +2141,9 @@ def _run_new_session_load_interleave_harness(
           if(path===`/controlled/messages/${{targetSid}}`) return messages.promise;
           throw new Error(`unexpected API call: ${{path}}`);
         }}
-        function _saveComposerDraftNow(sid,text,files,profile){{
-          saves.push({{sid,text,files:[...(files||[])].map(file=>file.name),profile:profile||null}});
+        function _saveComposerDraftNow(sid,text,files,_contId,opts){{
+          const profile=(opts&&opts.ownerProfile)||null;
+          saves.push({{sid,text,files:[...(files||[])].map(file=>file.name),profile}});
           return Promise.resolve();
         }}
         async function _ensureMessagesLoaded(sid){{
@@ -2558,6 +2587,7 @@ def test_draft_debounce_is_scoped_by_profile_and_session_id():
     draft_helpers = _composer_draft_helpers()
     script = textwrap.dedent(
         f"""
+        var _loadingSessionId=null;
         const S = {{
           session:{{session_id:'shared',profile:'beta',composer_draft:{{text:'',files:[]}}}},
           activeProfile:'beta',activeProfileIsDefault:false,pendingFiles:[]
@@ -2733,6 +2763,8 @@ def test_immediate_draft_save_can_fail_closed_at_owner_boundary():
     )
     script = textwrap.dedent(
         f"""
+        function _setComposerDraftLocalIntent(t,f){{return {{text:String(t||''),files:Array.isArray(f)?f:[],sequence:1}};}}
+        var _composerDraftLocalFallbackBySid=new Map();
         {source}
         const S = {{session:null}};
         function _clearComposerDraftSaveTimer() {{}}
@@ -2744,8 +2776,13 @@ def test_immediate_draft_save_can_fail_closed_at_owner_boundary():
         function _sessionComposerDraftHasPayload() {{ return false; }}
         function _rememberComposerDraftPayloadState() {{}}
         function _syncComposerOwnerStateFromDraft() {{}}
+        function _bumpComposerDraftRevision() {{}}
+        function _noteComposerDraftPayload() {{}}
+        function _bumpComposerDraftRevision() {{}}
+        function _noteComposerDraftPayload() {{}}
         function _queueComposerDraftWrite(_sid, write) {{ return Promise.resolve().then(write); }}
         function api() {{ return Promise.reject(new Error('draft endpoint unavailable')); }}
+        function _postComposerDraftPayload() {{ return Promise.reject(new Error('draft endpoint unavailable')); }}
         (async () => {{
           let strictRejected = false;
           try {{
@@ -2765,7 +2802,18 @@ def test_immediate_draft_save_can_fail_closed_at_owner_boundary():
 
 
 def test_all_draft_post_paths_use_the_per_session_write_queue():
-    assert SESSIONS_JS.count("enqueue(sid,()=>api('/api/session/draft'") == 3
+    """Every draft POST joins one per-session chain.
+
+    The merged draft layer funnels the autosave, the immediate save, the
+    submit-clear and the compare-and-clear through the single
+    ``_queueComposerDraftWrite`` primitive, so the invariant is stronger than
+    counting individual call sites.
+    """
+    assert SESSIONS_JS.count("function _queueComposerDraftWrite(") == 1
+    assert "_queueComposerDraftWrite(targetSid, () =>" in SESSIONS_JS
+    assert "_queueComposerDraftWrite(sid, () => api('/api/session/draft'" in SESSIONS_JS
+    assert "_composerDraftWriteBySid" in SESSIONS_JS
+    assert "enqueue(sid,()=>api('/api/session/draft'" not in SESSIONS_JS
 
 
 def test_owner_swap_restore_and_mutation_drain_have_no_await_gap():
@@ -2903,7 +2951,8 @@ def test_clarify_409_after_owner_swap_keeps_captured_old_session_owner():
         let _clarifyOwnerProfile='default';
         let _clarifySignature='sig';
         let _clarifyId='clarify-1';
-        function _saveComposerDraftNow(sid,text,files,profile){{
+        function _saveComposerDraftNow(sid,text,files,_contId,opts){{
+          const profile=(opts&&opts.ownerProfile)||null;
           saves.push({{sid,text,files:[...(files||[])],profile}});return Promise.resolve();
         }}
         function _clarifySetControlsDisabled(){{}}
@@ -3015,7 +3064,8 @@ def test_abort_after_owner_change_persists_source_without_mutating_visible_compo
         }};
         const $=id=>id==='msg'?msg:null;
         const saves=[];
-        function _saveComposerDraftNow(sid,text,files,profile){{
+        function _saveComposerDraftNow(sid,text,files,_contId,opts){{
+          const profile=(opts&&opts.ownerProfile)||null;
           saves.push({{sid,text,files:files.map(file=>file.name),profile}});
           return Promise.resolve();
         }}
@@ -3551,8 +3601,12 @@ def test_immediate_draft_save_refreshes_owner_authority_with_profile_and_revisio
     )
     script = textwrap.dedent(
         f"""
+        function _setComposerDraftLocalIntent(t,f){{return {{text:String(t||''),files:Array.isArray(f)?f:[],sequence:1}};}}
+        var _composerDraftLocalFallbackBySid=new Map();
         const S={{session:{{session_id:'sid-a',profile:'work'}},activeProfile:'work'}};
         function _clearComposerDraftSaveTimer(){{}}
+        function _bumpComposerDraftRevision(){{}}
+        function _noteComposerDraftPayload(){{}}
         const remembered=[];
         function _rememberComposerPendingFiles(){{}}
         function _composerDraftFilesForPersist(files){{return files.map(file=>file.name);}}
@@ -3561,6 +3615,7 @@ def test_immediate_draft_save_refreshes_owner_authority_with_profile_and_revisio
         function _sessionComposerDraftHasPayload(){{return false;}}
         const _composerDraftKnownPayloadSessions=new Set();
         function _queueComposerDraftWrite(_sid,write){{return Promise.resolve().then(write);}}
+        function _postComposerDraftPayload(){{return Promise.resolve();}}
         function api(){{return Promise.resolve({{ok:true}});}}
         function _rememberComposerDraftPayloadState(){{}}
         function _composerRememberedOwnerSnapshot(){{
@@ -3605,6 +3660,8 @@ def test_ordinary_switch_save_r2_invalidates_deferred_failed_send_r1_snapshot():
     )
     script = textwrap.dedent(
         f"""
+        function _setComposerDraftLocalIntent(t,f){{return {{text:String(t||''),files:Array.isArray(f)?f:[],sequence:1}};}}
+        var _composerDraftLocalFallbackBySid=new Map();
         const msg={{value:''}};
         const S={{
           session:{{session_id:'old-session',profile:'default',composer_draft:{{}}}},
@@ -3612,6 +3669,8 @@ def test_ordinary_switch_save_r2_invalidates_deferred_failed_send_r1_snapshot():
         }};
         const $=id=>id==='msg'?msg:null;
         function _clearComposerDraftSaveTimer(){{}}
+        function _bumpComposerDraftRevision(){{}}
+        function _noteComposerDraftPayload(){{}}
         const _composerDraftKnownPayloadSessions=new Set();
         const writes=[];
         function _rememberComposerPendingFiles(){{}}
@@ -3621,6 +3680,15 @@ def test_ordinary_switch_save_r2_invalidates_deferred_failed_send_r1_snapshot():
         function _sessionComposerDraftHasPayload(){{return false;}}
         function _rememberComposerDraftPayloadState(){{}}
         function _queueComposerDraftWrite(_sid,write){{return Promise.resolve().then(write);}}
+        function _postComposerDraftPayload(sid,draft,intent,contId){{
+          return _queueComposerDraftWrite(sid,()=>api('/api/session/draft',{{
+            method:'POST',
+            body:JSON.stringify({{
+              session_id:sid,text:(draft&&draft.text)||'',files:(draft&&draft.files)||[],
+              goal_continuation_id:contId||''
+            }})
+          }}));
+        }}
         function api(_path,options){{
           writes.push(JSON.parse(options.body));return Promise.resolve({{ok:true}});
         }}
@@ -3639,12 +3707,12 @@ def test_ordinary_switch_save_r2_invalidates_deferred_failed_send_r1_snapshot():
 
         S.session={{session_id:'old-session',profile:'default',composer_draft:{{}}}};
         msg.value='r2';
-        _saveComposerDraftNow('old-session','r2',[],'default').then(()=>{{
+        _saveComposerDraftNow('old-session','r2',[],'',{{ownerProfile:'default'}}).then(()=>{{
           S.session={{session_id:'new-session',profile:'default',composer_draft:{{}}}};
           msg.value='';
           if(_composerOwnerSnapshotIsCurrent(r1Snapshot)){{
             return _saveComposerDraftNow(
-              'old-session',r1Snapshot.text,r1Snapshot.files,r1Snapshot.profile
+              'old-session',r1Snapshot.text,r1Snapshot.files,'',{{ownerProfile:r1Snapshot.profile}}
             );
           }}
         }}).then(()=>{{
@@ -3702,7 +3770,8 @@ def test_foreign_owner_cannot_join_null_source_transition():
         const S={{session:null,activeProfile:'beta',pendingFiles:[]}};
         const $=id=>id==='msg'?msg:null;
         const saves=[];
-        function _saveComposerDraftNow(sid,text,files,profile){{
+        function _saveComposerDraftNow(sid,text,files,_contId,opts){{
+          const profile=(opts&&opts.ownerProfile)||null;
           saves.push({{sid,text,files:[...(files||[])].map(f=>f.name),profile}});
           return Promise.resolve();
         }}
@@ -3746,7 +3815,8 @@ def test_non_visible_owner_uses_full_remembered_baseline_for_late_file():
         const S={{session:{{session_id:'owner-b',profile:'beta'}},activeProfile:'beta',pendingFiles:[]}};
         const $=id=>id==='msg'?msg:null;
         const saves=[];
-        function _saveComposerDraftNow(sid,text,files,profile){{
+        function _saveComposerDraftNow(sid,text,files,_contId,opts){{
+          const profile=(opts&&opts.ownerProfile)||null;
           saves.push({{sid,text,files:[...(files||[])].map(f=>f.name),profile}});
           return Promise.resolve();
         }}
@@ -3785,7 +3855,8 @@ def test_non_visible_owner_without_authoritative_baseline_fails_closed():
         }};
         const $=id=>id==='msg'?msg:null;
         const saves=[];
-        function _saveComposerDraftNow(sid,text,files,profile){{
+        function _saveComposerDraftNow(sid,text,files,_contId,opts){{
+          const profile=(opts&&opts.ownerProfile)||null;
           saves.push({{sid,text,files:files.map(file=>file.name),profile}});
           return Promise.resolve();
         }}
@@ -3824,7 +3895,8 @@ def test_same_session_id_different_profile_is_non_visible_owner():
         }};
         const $=id=>id==='msg'?msg:null;
         const saves=[];
-        function _saveComposerDraftNow(sid,text,files,profile){{
+        function _saveComposerDraftNow(sid,text,files,_contId,opts){{
+          const profile=(opts&&opts.ownerProfile)||null;
           saves.push({{sid,text,profile}});return Promise.resolve();
         }}
         {authority}
@@ -3903,7 +3975,7 @@ def test_owner_file_references_release_on_clear_and_forget_on_delete():
     assert "_forgetComposerOwnerState(sid)" in _function(
         SESSIONS_JS, "deleteSession", "\n\n// ── Project helpers"
     )
-    assert "ids.forEach(_forgetComposerOwnerState)" in SESSIONS_JS
+    assert "deletedIds.forEach(_forgetComposerOwnerState)" in SESSIONS_JS
 
 
 def test_all_ordinary_draft_saves_refresh_owner_revision_authority():
@@ -3929,7 +4001,8 @@ def test_late_lifecycle_a_callback_cannot_join_transition_b():
         }};
         const $=id=>id==='msg'?msg:null;
         const saves=[];
-        function _saveComposerDraftNow(sid,text,files,profile){{
+        function _saveComposerDraftNow(sid,text,files,_contId,opts){{
+          const profile=(opts&&opts.ownerProfile)||null;
           saves.push({{sid,text,files:[...(files||[])],profile}});
           return Promise.resolve();
         }}
@@ -4101,7 +4174,8 @@ def test_late_server_transcription_updates_source_owner_not_visible_destination(
         }};
         const $=id=>id==='msg'?msg:null;
         const saves=[];
-        function _saveComposerDraftNow(sid,text,files,profile){{
+        function _saveComposerDraftNow(sid,text,files,_contId,opts){{
+          const profile=(opts&&opts.ownerProfile)||null;
           saves.push({{sid,text,files:[...(files||[])],profile}});
           return Promise.resolve();
         }}
@@ -4204,7 +4278,7 @@ def test_late_voice_mode_completion_retires_before_reading_destination_draft():
         let _voiceModeState='listening';
         let _voiceModeThinkingSid=null;
         let _recognition={{abort(){{}}}};
-        let _newSessionInFlight=null;
+        var _newSessionInFlight=null;
         const S={{session:{{session_id:'destination'}}}};
         let sends=0,restarts=0;
         function send(){{sends++;}}
@@ -4246,7 +4320,7 @@ def test_voice_mode_retires_pending_send_when_new_session_rejects():
         let _voiceModeThinkingSid=null;
         let _recognition={{abort(){{}}}};
         let rejectCreation;
-        let _newSessionInFlight=new Promise((_resolve,reject)=>{{rejectCreation=reject;}});
+        var _newSessionInFlight=new Promise((_resolve,reject)=>{{rejectCreation=reject;}});
         const S={{session:{{session_id:'source'}}}};
         let sends=0,restarts=0;
         function send(){{sends++;}}

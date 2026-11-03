@@ -74,6 +74,7 @@ def _record_connects(monkeypatch):
 
 def _point_models_at(monkeypatch, db):
     monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
+    monkeypatch.setattr(models, "_strict_active_state_db_path", lambda: db)
     monkeypatch.setattr(models, "_agent_state_db_path", lambda *, profile=None: db)
 
 

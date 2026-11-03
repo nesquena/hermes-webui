@@ -726,6 +726,7 @@ const _sessionListSnapshotById=new Map([['old-cron', {{message_count:1, last_mes
 const _sessionListSourceById=new Map();
 global.S={{activeProfile:'profile-a',activeProfileIsDefault:false}};
 global.renderSessionListFromCache=()=>{{}};
+global._repaintSidebarForBackgroundChurn=()=>{{ renderSessionListFromCache(); }};
 global.updateCronBadge=()=>{{ _cronUnreadCount=_cronNewJobIds.size; }};
 function _getSessionViewedCounts(){{ return _sessionViewedCounts; }}
 function _setSessionViewedCount(){{}}
@@ -853,6 +854,7 @@ const _sessionListSnapshotById=new Map([['new-cron', {{message_count:1, last_mes
 const _sessionListSourceById=new Map();
 global.S={{activeProfile:'profile-b',activeProfileIsDefault:false}};
 global.renderSessionListFromCache=()=>{{}};
+global._repaintSidebarForBackgroundChurn=()=>{{ renderSessionListFromCache(); }};
 function _getSessionViewedCounts(){{ return _sessionViewedCounts; }}
 function _setSessionViewedCount(){{}}
 function _getSessionObservedStreaming(){{ return {{}}; }}

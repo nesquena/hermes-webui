@@ -959,3 +959,35 @@ console.log(JSON.stringify({ initial, hiddenStates, afterCustom, afterSelect, su
     }
     assert out["whitespaceSubmitValue"] == "openrouter/beta"
     assert out["whitespaceCustomValue"] == ""
+
+
+@pytest.mark.parametrize("form", [False, True])
+def test_codex_protocol_requests_send_explicit_user_agent(monkeypatch, form):
+    # auth.openai.com answers HTTP 530 to urllib's default "Python-urllib/x.y"
+    # User-Agent, so every Codex protocol call (user code, device-token poll,
+    # token exchange) goes through _json_request and must carry an explicit one.
+    import api.oauth as oauth
+
+    captured = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def fake_urlopen(req, timeout=None):
+        captured.append(req)
+        return _Resp()
+
+    monkeypatch.setattr(oauth.urllib.request, "urlopen", fake_urlopen)
+    oauth._json_request(oauth.CODEX_USER_CODE_URL, {"client_id": "x"}, form=form)
+
+    assert len(captured) == 1
+    # urllib only adds its default User-Agent at open time, so an unset header
+    # reads back as None here.
+    assert captured[0].get_header("User-agent") == "codex_cli_rs/0.0.0 (Hermes WebUI)"

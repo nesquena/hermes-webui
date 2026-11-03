@@ -1711,7 +1711,7 @@ def _next_send_history(session):
         session, prefer_context=True, state_messages=[],
     )
     history = _new_turn_context_from_messages(reconciled, prompt)
-    history = _dedupe_replayed_context_messages(history, history, prompt)
+    history, _protected = _dedupe_replayed_context_messages(history, history, prompt)
     history = _dedupe_replayed_active_context(history, history, prompt)
     return _sanitize_messages_for_agent(history)
 
