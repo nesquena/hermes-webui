@@ -1121,7 +1121,15 @@ def _attempt_model_alias_credential_self_heal(
         with SESSION_AGENT_CACHE_LOCK:
             evicted = SESSION_AGENT_CACHE.pop(session_id, None)
         if evicted is not None:
-            _close_cached_agent_entry_at_session_boundary(session_id, evicted)
+            # #8613 round 3 (the maintainer's note): this close runs inside the
+            # per-session agent lock, so it must NOT wait — neither on the
+            # construction fence nor on the evicted agent's own queued memory
+            # write (the release drains it, bounded). The wait would stall the
+            # user's next turn while the lock is held. The release is refused
+            # right away instead, and the provider keeps its worker until the
+            # next session boundary.
+            with release_without_fence_wait():
+                _close_cached_agent_entry_at_session_boundary(session_id, evicted)
     except Exception:
         logger.debug("[webui] self-heal: alias agent-cache eviction failed", exc_info=True)
     return fresh_route, _resolve_model_alias_endpoint_runtime(
@@ -13698,7 +13706,15 @@ def _attempt_credential_self_heal(
         with SESSION_AGENT_CACHE_LOCK:
             _evicted_entry = SESSION_AGENT_CACHE.pop(session_id, None)
         if _evicted_entry is not None:
-            _close_cached_agent_entry_at_session_boundary(session_id, _evicted_entry)
+            # #8613 round 3 (the maintainer's note): this close runs inside the
+            # per-session agent lock, so it must NOT wait — neither on the
+            # construction fence nor on the evicted agent's own queued memory
+            # write (the release drains it, bounded). The wait would stall the
+            # user's next turn while the lock is held. The release is refused
+            # right away instead, and the provider keeps its worker until the
+            # next session boundary.
+            with release_without_fence_wait():
+                _close_cached_agent_entry_at_session_boundary(session_id, _evicted_entry)
 
         # 3. Invalidate the credential pool for this provider
         invalidate_credential_pool_cache(provider_id)

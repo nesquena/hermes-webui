@@ -1192,6 +1192,51 @@ _provider_holders_lock = threading.RLock()
 # should-fix 5). ``wait()`` releases the lock, so no thread is blocked by it.
 _provider_holders_cond = threading.Condition(_provider_holders_lock)
 
+# ── the GC weak-reference callbacks never WAIT for the holder lock ─────────
+#
+# A weak-reference callback fires on whatever thread collected the object —
+# including from inside a logging handler's ``write()``, while that thread
+# holds the handler's own lock. The holder lock can be held at the same time
+# by a thread that is LOGGING (the release logs under it), so a callback that
+# WAITS for the holder lock deadlocks the two threads against each other: the
+# holder lock is then never released, and every later construction that needs
+# the holder table blocks until the WebUI restarts (#8613 round 3, finding 1).
+#
+# So a callback that finds the lock busy QUEUES its work and returns; the next
+# locked table operation applies the queue under the lock. A callback that
+# fires on the thread that already holds the lock — a GC inside a locked
+# section — still runs immediately, because the lock is reentrant.
+_pending_forgets: list[tuple[str, int, Callable[[], Any]]] = []
+# Re-entrancy guard: applying a queued forget can itself allocate, and that
+# allocation can run a GC whose callback fires on THIS thread — which holds the
+# lock, so the callback runs its forget inline and would drain the queue
+# again. The guard keeps the drain single-level; anything queued meanwhile is
+# applied by the next locked table operation.
+_draining_pending_forgets = False
+
+
+def _drain_pending_forgets_locked() -> None:
+    """Apply the forget operations queued while the holder lock was busy.
+
+    Called with ``_provider_holders_lock`` held, before the operation that
+    reads or writes the table: a forgotten agent must not be counted as a
+    holder, and a departed agent's queued work must be registered as a hold
+    before a release may prove that nothing else writes through the instance.
+    """
+    global _draining_pending_forgets
+    if _draining_pending_forgets:
+        return
+    _draining_pending_forgets = True
+    try:
+        while _pending_forgets:
+            kind, key, ref = _pending_forgets.pop()
+            if kind == "agent":
+                _forget_agent_holder_locked(key, ref)
+            else:
+                _forget_provider_instance_locked(key, ref)
+    finally:
+        _draining_pending_forgets = False
+
 
 # ── one instance-lifetime protocol: acquisition reservations (#8613) ─────────
 #
@@ -1460,40 +1505,75 @@ def _weak_agent_ref(agent: Any) -> Callable[[], Any]:
 
 
 def _forget_provider_instance(inst_pid: int, ref: Callable[[], Any]) -> None:
-    """Weak-reference callback: the instance itself is gone, so its holder set is."""
-    with _provider_holders_lock:
-        entry = _provider_holders.get(inst_pid)
-        if entry is not None and entry.ref is ref:
-            del _provider_holders[inst_pid]
+    """Weak-reference callback: the instance itself is gone, so its holder set is.
+
+    NEVER waits for the holder lock (#8613 round 3, finding 1): this callback
+    fires from inside a GC, possibly on a thread that holds a logging
+    handler's lock, while the holder lock is held by a thread that is
+    logging. The two waits would deadlock the pair, and the holder lock would
+    then never be released. A busy lock means the work is queued and applied
+    by the next locked table operation.
+    """
+    if not _provider_holders_lock.acquire(blocking=False):
+        _pending_forgets.append(("instance", inst_pid, ref))
+        return
+    try:
+        _drain_pending_forgets_locked()
+        _forget_provider_instance_locked(inst_pid, ref)
+    finally:
+        _provider_holders_lock.release()
+
+
+def _forget_provider_instance_locked(inst_pid: int, ref: Callable[[], Any]) -> None:
+    """The instance is gone, so its holder set is. The holder lock is held."""
+    entry = _provider_holders.get(inst_pid)
+    if entry is not None and entry.ref is ref:
+        del _provider_holders[inst_pid]
 
 
 def _forget_agent_holder(agent_pid: int, ref: Callable[[], Any]) -> None:
-    """Weak-reference callback: a collected agent stops holding every instance."""
-    with _provider_holders_lock:
-        for key, entry in list(_provider_holders.items()):
-            holder = entry.holders.get(agent_pid)
-            if holder is not None and holder.agent is ref:
-                del entry.holders[agent_pid]
-                # #8613 must-fix 1: the agent is gone, but a save its manager
-                # already queued is not. That manager is still alive — the queued
-                # work holds it — so the hold survives as queued work, weakly, and
-                # evaporates once the work has drained.
-                #
-                # #8613 round 2 (finding A): the hold is filed under the
-                # MANAGER's identity, not the agent's id(). CPython reuses the
-                # id() of a collected object, so a hold filed under the agent's
-                # id was inherited by a later agent that landed on the same id —
-                # and the release then closed the client under this departed
-                # agent's queued save. The manager is a different object with a
-                # different identity, so the two never collide.
-                manager = holder.manager()
-                if manager is not None and _manager_has_outstanding_work(manager):
-                    entry.work[id(manager)] = holder.manager
-            # An entry nobody holds any more, with no teardown and no queued work
-            # to protect, leaves the table — unless a release is claiming it
-            # right now (#8613 round 2, finding B).
-            if not entry.holders and not entry.teardown and not entry.work and not entry.claiming:
-                del _provider_holders[key]
+    """Weak-reference callback: a collected agent stops holding every instance.
+
+    NEVER waits for the holder lock (#8613 round 3, finding 1) — see
+    ``_forget_provider_instance``. A busy lock means the work is queued and
+    applied by the next locked table operation.
+    """
+    if not _provider_holders_lock.acquire(blocking=False):
+        _pending_forgets.append(("agent", agent_pid, ref))
+        return
+    try:
+        _drain_pending_forgets_locked()
+        _forget_agent_holder_locked(agent_pid, ref)
+    finally:
+        _provider_holders_lock.release()
+
+
+def _forget_agent_holder_locked(agent_pid: int, ref: Callable[[], Any]) -> None:
+    """A collected agent stops holding every instance. The holder lock is held."""
+    for key, entry in list(_provider_holders.items()):
+        holder = entry.holders.get(agent_pid)
+        if holder is not None and holder.agent is ref:
+            del entry.holders[agent_pid]
+            # #8613 must-fix 1: the agent is gone, but a save its manager
+            # already queued is not. That manager is still alive — the queued
+            # work holds it — so the hold survives as queued work, weakly, and
+            # evaporates once the work has drained.
+            #
+            # #8613 round 2 (finding A): the hold is filed under the
+            # MANAGER's identity, not the agent's id(). CPython reuses the
+            # id() of a collected object, so a hold filed under the agent's
+            # id was inherited by a later agent that landed on the same id —
+            # and the release then closed the client under this departed
+            # agent's queued save. The manager is a different object with a
+            # different identity, so the two never collide.
+            manager = holder.manager()
+            if manager is not None and _manager_has_outstanding_work(manager):
+                entry.work[id(manager)] = holder.manager
+        # An entry nobody holds any more, with no teardown and no queued work
+        # to protect, leaves the table — unless a release is claiming it
+        # right now (#8613 round 2, finding B).
+        if not entry.holders and not entry.teardown and not entry.work and not entry.claiming:
+            del _provider_holders[key]
 
 
 def _live_holders_entry(provider: Any) -> Optional[_InstanceHolders]:
@@ -1533,6 +1613,7 @@ def register_provider_holders(agent: Any, *, home_key: str = "") -> int:
     manager_ref = _weak_manager_ref(_agent_manager(agent))
     added = 0
     with _provider_holders_lock:
+        _drain_pending_forgets_locked()
         for provider in instances:
             inst_pid = id(provider)
             entry = _provider_holders.get(inst_pid)
@@ -1545,7 +1626,18 @@ def register_provider_holders(agent: Any, *, home_key: str = "") -> int:
                 except TypeError:  # no weak reference: hold it strongly, never by id() alone
                     ref = lambda provider=provider: provider
                 entry = _InstanceHolders(ref, home_key)
+                # #8613 round 3 (finding 2): the entry is published only with
+                # its first holder ALREADY inside it. The weak reference below
+                # allocates, and that allocation can run a GC — whose callbacks
+                # prune this table PROCESS-WIDE, deleting every entry nobody
+                # holds. An entry published while still EMPTY is exactly what
+                # such a prune removes, and the registration would then fill a
+                # DETACHED object: the live agent is in no table, so the next
+                # boundary sees no holder and closes the provider under it.
+                entry.holders[agent_pid] = _AgentHolder(_weak_agent_ref(agent), manager_ref)
                 _provider_holders[inst_pid] = entry
+                added += 1
+                continue
             if agent_pid in entry.holders:
                 continue
             if entry.teardown:
@@ -1557,7 +1649,16 @@ def register_provider_holders(agent: Any, *, home_key: str = "") -> int:
                     getattr(provider, "name", "?"),
                 )
                 continue
-            entry.holders[agent_pid] = _AgentHolder(_weak_agent_ref(agent), manager_ref)
+            # #8613 round 3 (finding 2): the entry is MUTATED here, and the
+            # allocation inside ``_weak_agent_ref`` can run a GC whose
+            # callbacks prune this table process-wide. The entry is therefore
+            # claimed for the mutation, so a prune cannot detach it while it
+            # is being filled.
+            entry.claiming += 1
+            try:
+                entry.holders[agent_pid] = _AgentHolder(_weak_agent_ref(agent), manager_ref)
+            finally:
+                entry.claiming -= 1
             added += 1
     return added
 
@@ -1581,6 +1682,7 @@ def unregister_provider_holders(agent: Any) -> None:
     agent_pid = id(agent)
     manager = _agent_manager(agent)
     with _provider_holders_lock:
+        _drain_pending_forgets_locked()
         for key, entry in list(_provider_holders.items()):
             _forget_holder_locked(entry, agent_pid, manager)
             # An entry nobody holds any more, with no teardown and no queued work
@@ -1607,36 +1709,39 @@ def _forget_holder_locked(entry: _InstanceHolders, agent_pid: int, manager: Any)
         entry.work[id(manager)] = holder.manager
 
 
-def _last_provider_holder_locked(agent: Any, *, self_dropped: bool = False) -> tuple[bool, str, bool]:
+def _last_provider_holder_locked(agent: Any, *, self_dropped: bool = False) -> tuple[bool, str, str]:
     """``agent_is_last_provider_holder`` with ``_provider_holders_lock`` already
-    held. Returns ``(ok, why, fenced)``; ``fenced`` is True when the ONLY reason
-    for the refusal is a construction in flight for the instance's profile home,
-    the one reason a bounded wait can clear (see ``_claim_last_held_teardown``).
+    held. Returns ``(ok, why, wait_for)``; ``wait_for`` is empty when no bounded
+    wait can clear the refusal, ``"fence"`` when the ONLY reason for it is a
+    construction in flight for the instance's profile home, and ``"own_work"``
+    when it is the RELEASING agent's own queued memory write (see
+    ``_claim_last_held_teardown``).
 
     ``self_dropped`` is for the claim path, which has already removed ``agent``
     from the holder sets inside the same critical section: the agent is then no
-    longer expected to be recorded, and its own queued work does not count
-    against it — the release drains that itself.
+    longer expected to be recorded, and its OWN queued write is counted against
+    it (#8613 round 3, finding 3) — the release closes the providers after
+    bounded waits, so a write still running past them would lose its client.
     """
     if agent is None:
-        return True, "", False
+        return True, "", ""
     instances = _provider_instances(agent)
     if not instances:
-        return True, "", False  # nothing held: no other agent can be broken by a release
+        return True, "", ""  # nothing held: no other agent can be broken by a release
     agent_pid = id(agent)
     for provider in instances:
         name = getattr(provider, "name", "?")
         entry = _live_holders_entry(provider)
         if entry is None:
-            return False, f"provider {name!r} is not tracked as held by any agent", False
+            return False, f"provider {name!r} is not tracked as held by any agent", ""
         if not self_dropped:
             mine = entry.holders.get(agent_pid)
             if mine is None or mine.agent() is not agent:
                 # A claim that already dropped this agent (a release in flight for
                 # it) must answer as the teardown it is, not as an untracked hold.
                 if entry.teardown:
-                    return False, f"a teardown of provider {name!r} is already running", False
-                return False, f"provider {name!r} is not tracked as held by this agent", False
+                    return False, f"a teardown of provider {name!r} is already running", ""
+                return False, f"provider {name!r} is not tracked as held by this agent", ""
         # A collected holder does not count: its weak-reference callback removes it,
         # and a stale reference must not pin an instance nobody uses any more.
         others = [h for key, h in entry.holders.items() if key != agent_pid and h.agent() is not None]
@@ -1644,29 +1749,40 @@ def _last_provider_holder_locked(agent: Any, *, self_dropped: bool = False) -> t
             return False, (
                 f"provider {name!r} of profile home {entry.home_key!r} is still held by "
                 f"{len(others)} other agent(s)"
-            ), False
+            ), ""
         if entry.teardown:
-            return False, f"a teardown of provider {name!r} is already running", False
+            return False, f"a teardown of provider {name!r} is already running", ""
         # #8613 must-fix 1: an agent that already left the holder set — evicted or
         # collected — while its manager still had queued memory work holds this
         # instance exactly like a live holder: that work still writes through it.
-        # Its own work is excluded: the release drains the agent it releases.
         #
         # #8613 round 2 (finding A): the hold is compared by the MANAGER's
         # identity, not by the agent's id(). The agent being released is
         # identified by its own manager, so a hold filed under a RECYCLED agent
         # id is still counted as another manager's work — which is what keeps
         # the shared client open for the departed agent's queued save.
+        #
+        # #8613 round 3 (finding 3): the RELEASING agent's own work counts too.
+        # It used to be exempt ("the release drains that itself"), but the
+        # Agent's ``release_soft`` closes the providers after BOUNDED waits
+        # (a 10 s flush and a 5 s drain): a write still running past them
+        # loses its client — "Cannot send a request, as the client has been
+        # closed" — and the write is lost with it. The claim waits for that
+        # write to drain ("own_work") and refuses the teardown when it does
+        # not: the provider keeps its worker, and the write lands.
         own_manager = _agent_manager(agent)
         for pid, manager_ref in list(entry.work.items()):
             held_manager = manager_ref()
-            if held_manager is not None and own_manager is not None and held_manager is own_manager:
-                continue  # its own queued work: the release drains that itself
             if _manager_has_outstanding_work(held_manager):
+                if held_manager is not None and own_manager is not None and held_manager is own_manager:
+                    return False, (
+                        f"provider {name!r} of profile home {entry.home_key!r} still has queued "
+                        f"memory work from the agent being released"
+                    ), "own_work"
                 return False, (
                     f"provider {name!r} of profile home {entry.home_key!r} still has queued "
                     f"memory work from a departed agent"
-                ), False
+                ), ""
             del entry.work[pid]  # the work drained (or its manager is gone): the hold is spent
         # #8613: a construction in flight for this instance's profile home is a
         # holder the table cannot show yet — the Agent initialises the provider
@@ -1677,8 +1793,8 @@ def _last_provider_holder_locked(agent: Any, *, self_dropped: bool = False) -> t
             return False, (
                 f"provider {name!r} of profile home {entry.home_key!r} is being acquired "
                 f"by {pending} construction(s) in flight"
-            ), True
-    return True, "", False
+            ), "fence"
+    return True, "", ""
 
 
 def agent_is_last_provider_holder(agent: Any) -> tuple[bool, str]:
@@ -1691,7 +1807,12 @@ def agent_is_last_provider_holder(agent: Any) -> tuple[bool, str]:
     status quo, a provider shut down under a live agent is not.
     """
     with _provider_holders_lock:
-        ok, why, _fenced = _last_provider_holder_locked(agent)
+        # #8613 round 3 (finding 1): the queued forgets are applied FIRST, so a
+        # collected agent is not counted as a live holder and its queued work is
+        # registered as a hold — the proof below decides whether a release may
+        # close the client that work goes through.
+        _drain_pending_forgets_locked()
+        ok, why, _wait_for = _last_provider_holder_locked(agent)
     return ok, why
 
 
@@ -1703,6 +1824,68 @@ def agent_is_last_provider_holder(agent: Any) -> tuple[bool, str]:
 # alive, which is the leak #8613 exists to close. ``Condition.wait`` releases the
 # lock while it waits, so no other thread is blocked by it.
 _ACQUISITION_FENCE_WAIT_S = 15.0
+
+
+# How long a release waits for the RELEASING agent's own queued memory work to
+# drain before it gives up and keeps the provider alive (#8613 round 3, finding
+# 3). The Agent's ``release_soft`` closes the providers after BOUNDED waits (a
+# 10 s flush and a 5 s drain), so a save still running past them is closed
+# under — "Cannot send a request, as the client has been closed" — and the save
+# is lost with it. The release drains that work FIRST, here, and refuses the
+# teardown when it does not drain: the provider keeps its worker and the save
+# lands.
+#
+# The bound matches the Agent's own flush budget on purpose: a save that drains
+# within it is flushed by the release either way, so the release keeps the
+# coverage it had; a save that does NOT drain is the case that loses the write,
+# and there the provider stays alive instead.
+_RELEASE_WORK_DRAIN_WAIT_S = 10.0
+
+
+def _drain_releasing_work(manager: Any) -> bool:
+    """Whether the releasing manager's own queued memory work has drained.
+
+    ``release_soft`` closes the providers after bounded waits, so a save still
+    running when it returns loses its client (#8613 round 3, finding 3). The
+    release therefore drains that work BEFORE the teardown — with the manager's
+    own ``flush_pending`` when it has one, so the save really RAN (a sentinel
+    task completing proves every earlier task ran) — and refuses the teardown
+    when the work does not drain.
+
+    The manager's own bookkeeping is re-read after the flush: the future's done
+    callback drops it from ``_background_futures`` on the writer thread, so a
+    drain that just happened can still be visible for an instant. That window
+    must not turn into a refusal, so it is given a moment to clear.
+
+    A caller that must not block (the compression-migration close holds the
+    per-session agent lock) does not wait at all: it refuses, and the provider
+    keeps its worker until the next session boundary.
+    """
+    if not _manager_has_outstanding_work(manager):
+        return True
+    if _skip_fence_wait.get():
+        return False
+    flush = getattr(manager, "flush_pending", None)
+    if callable(flush):
+        try:
+            flush(timeout=_RELEASE_WORK_DRAIN_WAIT_S)
+        except Exception:
+            return False
+    else:
+        # No ``flush_pending`` (an older Agent): wait for the manager's own
+        # bookkeeping to clear.
+        deadline = time.monotonic() + _RELEASE_WORK_DRAIN_WAIT_S
+        while _manager_has_outstanding_work(manager):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+    # The flush proves the work RAN; the bookkeeping catches up a moment later.
+    deadline = time.monotonic() + 1.0
+    while _manager_has_outstanding_work(manager):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+    return True
 
 
 def _agent_holds_instances_locked(agent: Any) -> tuple[bool, str, list]:
@@ -1755,6 +1938,11 @@ def _claim_last_held_teardown(agent: Any) -> tuple[bool, str, list]:
     """
     deadline = time.monotonic() + _ACQUISITION_FENCE_WAIT_S
     with _provider_holders_lock:
+        # #8613 round 3 (finding 1): the queued forgets are applied FIRST, so a
+        # collected agent is not counted as a live holder and its queued work is
+        # registered as a hold before the proof decides whether a release may
+        # close the client that work goes through.
+        _drain_pending_forgets_locked()
         ok, why, claimed = _agent_holds_instances_locked(agent)
         if not ok:
             return False, why, []
@@ -1785,14 +1973,21 @@ def _claim_last_held_teardown(agent: Any) -> tuple[bool, str, list]:
                 claiming_entries.append(entry)
         try:
             while True:
-                ok, why, fenced = _last_provider_holder_locked(agent, self_dropped=True)
+                ok, why, wait_for = _last_provider_holder_locked(agent, self_dropped=True)
                 if ok:
                     for provider in claimed:
                         entry = _live_holders_entry(provider)
                         if entry is not None:
                             entry.teardown = True
                     return True, "", claimed
-                if not fenced:
+                if wait_for != "fence":
+                    # #8613 round 3 (finding 3): the releasing agent's own queued
+                    # write is outstanding. The release path drains it BEFORE the
+                    # claim (see ``_drain_releasing_work``); work that is still
+                    # running here was queued after that drain, and the teardown
+                    # is refused: the provider keeps its worker and the write
+                    # lands. Waiting here would hold the holder lock — the hot
+                    # path every construction needs — so it does not.
                     return False, why, []
                 if _skip_fence_wait.get():
                     # #8613 round 2 (the maintainer's note): this caller must
@@ -1841,6 +2036,9 @@ def _settle_last_held_teardown(agent: Any, claimed: list, *, released: bool = Fa
     agent_pid = id(agent)
     manager = _agent_manager(agent)
     with _provider_holders_lock:
+        # #8613 round 3 (finding 1): apply the queued forgets before the table is
+        # read, so a collected agent is not counted as a live holder here.
+        _drain_pending_forgets_locked()
         for provider in claimed:
             entry = _live_holders_entry(provider)
             if entry is None:
@@ -1944,6 +2142,30 @@ def release_unowned_memory_provider(agent: Any, *, session_id: str, owner_home: 
     # construction is acquiring, or one a departed agent still has queued memory
     # work on. The claim waits for a construction in flight, bounded, so the
     # instance is not dropped out of the table with its writer alive.
+    #
+    # #8613 round 3 (finding 3): the RELEASING agent's own queued work is
+    # drained FIRST. The Agent's ``release_soft`` closes the providers after
+    # bounded waits (a 10 s flush and a 5 s drain), so a save still running
+    # past them is closed under — "Cannot send a request, as the client has
+    # been closed" — and the save is lost. When the work does not drain in
+    # time the teardown is refused: the provider keeps its worker, the save
+    # lands, and the next session boundary releases it.
+    #
+    # The proof runs BEFORE the drain, so the wait only happens when this
+    # release would really tear the provider down. A shared instance — another
+    # agent of the profile still holds it — is refused by the proof anyway, and
+    # waiting for a drain nobody needs would stall the eviction for nothing.
+    ok, why = agent_is_last_provider_holder(agent)
+    if ok and not _drain_releasing_work(manager):
+        _log_once(
+            f"release-own-work:{session_id}",
+            "[webui] #8613: the memory provider of evicted session %s was NOT released: "
+            "its own queued memory write has not drained, and releasing now would close "
+            "the client under that write. The provider keeps its worker until the write "
+            "has landed and the next session boundary releases it.",
+            session_id,
+        )
+        return False
     ok, why, claimed = _claim_last_held_teardown(agent)
     if not ok:
         # Keyed per session: a static key logged only the FIRST refusal in the
