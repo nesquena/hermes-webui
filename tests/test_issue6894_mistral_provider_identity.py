@@ -832,3 +832,214 @@ class _FakeHandler:
 
     def json_body(self):
         return json.loads(bytes(self.body).decode("utf-8"))
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Section 7 — the two round-2 findings (#8664 review 2026-11-02)
+# ────────────────────────────────────────────────────────────────────────
+#
+# P2-1: the final connection bundle must come from ONE record. With both
+# ``providers.mistralai`` and ``providers.mistral`` present, the catalog emits
+# a canonical ``@mistral:`` option while the native resolver picks its
+# credential by EXACT spelling, so the endpoint and the key could come from
+# different records. The bundle now re-attaches the credential (and the
+# endpoint) to the record the endpoint resolution already chose.
+#
+# P2-2: onboarding must reuse an EXISTING configured key. ``_provider_api_key_present``
+# did an exact ``providers.<provider>`` lookup, so a legacy ``providers.mistralai``
+# record read as "no key configured" once the selector was canonicalised to
+# ``mistral``. The detection now resolves the record canonically, the same way
+# the catalog and the endpoint lookup do.
+
+_COLLISION_LEGACY_FIRST_PAIR = {
+    "model": {"provider": "anthropic", "default": "unrelated-model"},
+    "providers": {
+        "mistralai": {
+            "api_key": "legacy-record-canary",
+            "base_url": "https://legacy-relay.example/v1",
+        },
+        "mistral": {
+            "api_key": "canonical-record-canary",
+            "base_url": "https://canonical-relay.example/v1",
+        },
+    },
+}
+_COLLISION_CANONICAL_FIRST_PAIR = {
+    "model": {"provider": "anthropic", "default": "unrelated-model"},
+    "providers": {
+        "mistral": {
+            "api_key": "canonical-record-canary",
+            "base_url": "https://canonical-relay.example/v1",
+        },
+        "mistralai": {
+            "api_key": "legacy-record-canary",
+            "base_url": "https://legacy-relay.example/v1",
+        },
+    },
+}
+
+
+def _final_bundle_inputs(option: str) -> tuple:
+    """The ``(provider, api_key, base_url, runtime)`` a caller passes to
+    ``merge_custom_provider_runtime_bundle`` for *option*, with the native
+    resolver picking its credential by EXACT spelling.
+
+    Call inside an active ``_swap_in_test_config`` so the resolution reads the
+    same config the assertion will.
+    """
+    _model, provider, webui_base_url = config.resolve_model_provider(option)
+    providers_cfg = config.cfg.get("providers") or {}
+    entry = providers_cfg.get(provider) if isinstance(providers_cfg, dict) else None
+    native_key = (
+        str(entry.get("api_key") or "").strip() if isinstance(entry, dict) else ""
+    ) or None
+    runtime = {
+        "provider": provider,
+        "api_key": native_key,
+        "base_url": webui_base_url,
+    }
+    return provider, native_key, webui_base_url, runtime
+
+
+def _final_bundle_for(cfg_extra: dict, option: str):
+    """Emitted option -> endpoint selection -> native credential -> bundle.
+
+    The native resolver is asked for the same provider id the WebUI resolved
+    and picks its credential by EXACT spelling, which is the split this
+    finding is about.
+    """
+    restore = _swap_in_test_config(cfg_extra)
+    try:
+        _model, provider, webui_base_url = config.resolve_model_provider(option)
+        providers_cfg = config.cfg.get("providers") or {}
+        entry = providers_cfg.get(provider) if isinstance(providers_cfg, dict) else None
+        native_key = (
+            str(entry.get("api_key") or "").strip()
+            if isinstance(entry, dict)
+            else ""
+        ) or None
+        bundle = config.merge_custom_provider_runtime_bundle(
+            provider,
+            native_key,
+            webui_base_url,
+            {"provider": provider, "api_key": native_key, "base_url": webui_base_url},
+        )
+        return bundle
+    finally:
+        restore()
+
+
+class TestFinalBundleRecordOwnership:
+    """P2-1: endpoint and credential must come from the SAME record."""
+
+    def test_bundle_never_mixes_two_records(self):
+        for label, cfg_extra in (
+            ("legacy-first", _COLLISION_LEGACY_FIRST_PAIR),
+            ("canonical-first", _COLLISION_CANONICAL_FIRST_PAIR),
+        ):
+            for option in (
+                "@mistral:mistral-small-latest",
+                "@mistralai:mistral-small-latest",
+            ):
+                restore = _swap_in_test_config(cfg_extra)
+                try:
+                    bundle = config.merge_custom_provider_runtime_bundle(
+                        *_final_bundle_inputs(option)
+                    )
+                    # The owner is resolved from the SAME config the bundle
+                    # read, so the two cannot disagree about ordering.
+                    owner = config._raw_provider_key_for_provider_id(
+                        bundle["provider"]
+                    )
+                    owner_record = cfg_extra["providers"].get(owner) or {}
+                finally:
+                    restore()
+                assert bundle["api_key"] == owner_record.get("api_key"), (
+                    f"{label} {option}: the bundle's credential came from a "
+                    f"different record than the endpoint owner {owner!r} "
+                    f"(bundle key {bundle['api_key']!r}, owner key "
+                    f"{owner_record.get('api_key')!r})"
+                )
+                assert bundle["base_url"] == owner_record.get("base_url"), (
+                    f"{label} {option}: the bundle's endpoint came from a "
+                    f"different record than its owner {owner!r} "
+                    f"(bundle url {bundle['base_url']!r}, owner url "
+                    f"{owner_record.get('base_url')!r})"
+                )
+
+    def test_single_record_config_is_untouched(self):
+        """A config with no collision must keep exactly what it declared."""
+        cfg_extra = {
+            "model": {"provider": "anthropic", "default": "unrelated-model"},
+            "providers": {
+                "mistralai": {
+                    "api_key": "legacy-record-canary",
+                    "base_url": "https://legacy-relay.example/v1",
+                },
+            },
+        }
+        bundle = _final_bundle_for(cfg_extra, "@mistral:mistral-small-latest")
+        assert bundle["api_key"] == "legacy-record-canary"
+        assert bundle["base_url"] == "https://legacy-relay.example/v1"
+
+    def test_owner_record_without_a_key_is_left_alone(self):
+        """A record that owns the endpoint but declares no key keeps the
+        credential another authority supplied — it must not borrow a sibling's."""
+        cfg_extra = {
+            "model": {"provider": "anthropic", "default": "unrelated-model"},
+            "providers": {
+                "mistralai": {
+                    "api_key": "legacy-record-canary",
+                    "base_url": "https://legacy-relay.example/v1",
+                },
+                "mistral": {
+                    "base_url": "https://canonical-relay.example/v1",
+                },
+            },
+        }
+        bundle = _final_bundle_for(cfg_extra, "@mistral:mistral-small-latest")
+        assert bundle["base_url"] == "https://legacy-relay.example/v1", (
+            "the endpoint owner is the FIRST config record (the documented "
+            "collision rule), which declares this URL"
+        )
+        assert bundle["api_key"] == "legacy-record-canary", (
+            "the owning (first config) record declares this key, so the "
+            f"bundle must carry it; got {bundle['api_key']!r}"
+        )
+
+
+class TestLegacyOnboardingReusesStoredKey:
+    """P2-2: an existing configured key must satisfy onboarding."""
+
+    def test_existing_legacy_key_is_reused(self, tmp_path):
+        """Real ``_provider_api_key_present`` — NOT the hardcoded True stub."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump({
+                "model": {},
+                "providers": {"mistralai": {"api_key": "legacy-record-canary"}},
+            }),
+            encoding="utf-8",
+        )
+        providers_cfg = {"mistralai": {"api_key": "legacy-record-canary"}}
+        assert onboarding._provider_api_key_present(
+            "mistral", {"providers": providers_cfg}, {}
+        ), (
+            "a stored providers.mistralai key must satisfy the canonical "
+            "mistral selector"
+        )
+
+    def test_genuinely_missing_key_is_still_rejected(self):
+        assert not onboarding._provider_api_key_present(
+            "mistral", {"providers": {}}, {}
+        ), "an absent key must never be treated as present"
+        assert not onboarding._provider_api_key_present(
+            "mistral", {"providers": {"mistral": {"api_key": "   "}}}, {}
+        ), "a blank key must never be treated as present"
+
+    def test_unrelated_record_key_does_not_satisfy(self):
+        assert not onboarding._provider_api_key_present(
+            "mistral",
+            {"providers": {"openrouter": {"api_key": "other-record-canary"}}},
+            {},
+        ), "a different provider's key must not satisfy this selector"

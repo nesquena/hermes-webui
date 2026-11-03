@@ -4815,6 +4815,49 @@ def _custom_provider_runtime_bundle_with_provenance(
 
     lookup = lookup_provider or resolved_provider
     if not (isinstance(lookup, str) and lookup.startswith("custom:")):
+        # #8664 P2-1 (review 2026-11-02): the endpoint and the credential must
+        # come from the SAME ``providers:`` record, and this is where they
+        # currently split. The catalog emits a CANONICAL option (``@mistral:``)
+        # while the stored record may still be the legacy ``providers.mistralai``
+        # — and when BOTH spellings exist, the endpoint is resolved through
+        # ``_raw_provider_key_for_provider_id`` (first matching raw key, config
+        # order) while the native resolver picks its credential by EXACT
+        # spelling. A collision therefore produced
+        # ``api_key`` from one record and ``base_url`` from the other.
+        #
+        # Re-attach the credential to the record the ENDPOINT already chose,
+        # so endpoint/key/protocol/pool all agree on one owner. Only an
+        # EXACT-mismatch is repaired: when the requested spelling already names
+        # the owning record (the common case, and the only case for a
+        # non-colliding config) the value is untouched, so an ambient/registry
+        # credential that legitimately belongs to the requested provider is
+        # never replaced by a sibling record's key.
+        #
+        # A record that owns the endpoint but declares NO key is left alone too:
+        # its credential may legitimately come from the env, a key_cmd, or a
+        # credential pool, and substituting a sibling's key would invent a
+        # credential the selected record never had.
+        owner_key = _raw_provider_key_for_provider_id(lookup)
+        if isinstance(owner_key, str) and owner_key:
+            owner_cfg = (_get_providers_cfg() or {}).get(owner_key)
+            if isinstance(owner_cfg, dict):
+                # The ENDPOINT follows the OWNING record. Under a canonical+legacy
+                # collision the option can resolve through one spelling while
+                # the owner (first config record, per the documented rule) is
+                # the other, and the URL that came back then belongs to the
+                # sibling. The owner's declared base_url is authoritative once
+                # the owner is known.
+                owner_url = str(owner_cfg.get("base_url") or "").strip()
+                if owner_url:
+                    bundle["base_url"] = owner_url
+                # The CREDENTIAL follows the same record — but ONLY when that
+                # record declares one. A record that owns the endpoint while
+                # leaving the key to the env, a key_cmd or a credential pool
+                # must not borrow a sibling's key: that would invent a
+                # credential the selected record never had.
+                declared = str(owner_cfg.get("api_key") or "").strip()
+                if declared:
+                    bundle["api_key"] = declared
         return bundle, None
 
     custom = resolve_custom_provider_bundle(lookup, connection_resolver=connection_resolver)
