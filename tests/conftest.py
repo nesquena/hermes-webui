@@ -833,6 +833,20 @@ def allow_outbound_network(monkeypatch):
     yield
 
 
+# ── Real-checkout git guard ─────────────────────────────────────────────────
+# Installed once here, like the network guard above: see tests/_real_repo_git_guard.py.
+from tests import _real_repo_git_guard as _repo_git_guard  # noqa: E402
+
+_repo_git_guard.install(REPO_ROOT, HERMES_AGENT)
+pytest_runtest_logstart = _repo_git_guard.pytest_runtest_logstart
+pytest_runtest_makereport = _repo_git_guard.pytest_runtest_makereport
+
+
+@pytest.fixture
+def allow_real_repo_git(monkeypatch):
+    """Opt in to real mutating git against the checkout for one test."""
+    monkeypatch.setattr(subprocess, 'Popen', _repo_git_guard.REAL_POPEN)
+    yield
 
 
 # ── Environment isolation for tests ────────────────────────────────────────
