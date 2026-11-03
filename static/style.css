@@ -1758,6 +1758,17 @@
        button parked at right:6px; the timestamp's box is what keeps the
        button off the chips, so give it the button's width. */
     .session-time{min-width:26px;}
+    /* An EXPANDED parent's button is centred on the whole block
+       (.session-actions, top:50%), so on the first nested row it sits exactly
+       where that row's own button sits and wins the hit test: hovering the
+       fork's kebab and picking "Pin conversation" pinned the PARENT. Master
+       only dodged this because its hover padding narrowed the nested rows by
+       32px. Reserve the same lane inside the nested lists instead, so they
+       render already clear of the parent's button: the parent's own title row
+       and "N children" badge never move, which is what a
+       `.session-item:has(> .session-text > ...)` padding rule on the parent
+       costs (clicking the badge then shifts what sits under the pointer). */
+    .session-child-sessions,.session-lineage-segments{padding-right:40px;}
   }
   /* ── Session action trigger + dropdown ── */
   .session-actions{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .15s ease;}
