@@ -401,6 +401,9 @@ const sandbox = {
   localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
   navigator: { language: 'en', languages: ['en'] },
   setTimeout, clearTimeout, setInterval, clearInterval,
+  // The first label lands on the next frame; flush it inside the paint so this
+  // probe observes the settled text it is about (re-stamping, not timing).
+  requestAnimationFrame: (cb) => { cb(); return 0; },
 };
 sandbox.globalThis = sandbox;
 sandbox.window = sandbox;
@@ -446,6 +449,8 @@ def _run_label_clobber_probe():
     funcs = "\n".join([
         "let _micElapsedTimer = null;",
         "let _micStateTimer = null;",
+        "let _micShown = false;",
+        "let _micPaintGen = 0;",
         "const _MIC_THINK_MAX_MS = 180000;",
         _extract_function(BOOT_JS, "_micStateClear"),
         _extract_function(BOOT_JS, "_micPaint"),
@@ -530,6 +535,7 @@ globalThis.localStorage = {
 };
 globalThis.window = {};
 globalThis.document = {};
+const status = {};
 let _forceMediaRecorder = true;
 let recognition = null;
 const SpeechRecognition = function () {};
@@ -656,6 +662,7 @@ def _run_transcribe_harness():
         _extract_function(BOOT_JS, "_setMicForceMediaRecorder"),
         _extract_function(BOOT_JS, "_isServerSttUnavailable"),
         _extract_function(BOOT_JS, "_allowBrowserSttFallback"),
+        _extract_function(BOOT_JS, "_micSignalNoSpeech"),
         _extract_function(BOOT_JS, "_transcribeBlob"),
     ])
     js = _HARNESS.replace("__FUNCSIF__", funcs)
@@ -764,6 +771,8 @@ let mediaRecorder = null;
 let audioChunks = [];
 let _micElapsedTimer = null;
 let _micStateTimer = null;
+let _micShown = false;
+let _micPaintGen = 0;
 let _micMeterCtx = null;
 let _micMeterRaf = 0;
 let _micSpokeAt = 0;
@@ -810,7 +819,11 @@ globalThis.localStorage = {
 globalThis.window = { _micPendingSend: false };
 globalThis.document = {};
 globalThis.cancelAnimationFrame = () => {};
-globalThis.requestAnimationFrame = () => 0;
+// Synchronous: the shipped _micPaint writes the first label on the next frame
+// (a live region shown with its text already in place is read as initial
+// content). The announcement timing has its own probe below; here the frame is
+// flushed inside the paint so every snapshot sees the label it settles on.
+globalThis.requestAnimationFrame = (cb) => { cb(); return 0; };
 
 class MediaRecorder {
   static isTypeSupported() { return true; }
@@ -1007,6 +1020,7 @@ def _run_capture_harness():
         _extract_function(BOOT_JS, "_micStateClear"),
         paint,
         _extract_function(BOOT_JS, "_micStateLabel"),
+        _extract_function(BOOT_JS, "_micSignalNoSpeech"),
         _extract_function(BOOT_JS, "_micStartElapsed"),
         _extract_function(BOOT_JS, "_micStopElapsed"),
         _extract_function(BOOT_JS, "_micStopMeter"),
@@ -1135,4 +1149,304 @@ def test_a_superseded_recorder_never_takes_the_strip(capture_runs):
 def test_a_superseded_recorder_still_commits_its_transcript(capture_runs):
     assert capture_runs["afterSupersededComposer"] == "late words", (
         "the user's words are committed even though the strip belongs elsewhere"
+    )
+
+# --- the first label is announced, and both backends speak it once ----------
+#
+# The strip is hidden at rest and the label is the aria-live region. A region
+# that becomes visible with its text already in place is taken as initial
+# content by some screen readers, so the first "Listening…" of a session was
+# never announced. The shipped `_micPaint` now shows the strip in one task and
+# writes the label on the next frame; this probe holds the frame queue, so it
+# can see the text before and after the frame.
+
+_ANNOUNCE_PROBE = r"""
+const frames = [];
+globalThis.requestAnimationFrame = (cb) => { frames.push(cb); return frames.length; };
+const flush = () => { const q = frames.splice(0); q.forEach((cb) => cb()); };
+function stub() {
+  const set = new Set(); const attrs = {};
+  return {
+    textContent: '', style: { display: '', setProperty() {} },
+    classList: { toggle(c, on) { on ? set.add(c) : set.delete(c); } },
+    setAttribute(k, v) { attrs[k] = String(v); },
+    removeAttribute(k) { delete attrs[k]; },
+    getAttribute(k) { return k in attrs ? attrs[k] : null; },
+  };
+}
+const status = stub(), micTextEl = stub(), micTimerEl = stub(), micLevelEl = stub();
+function t(k, ...a) { return a.length ? k + '(' + a.join(',') + ')' : k; }
+let _micElapsedTimer = null, _micStateTimer = null;
+let _micShown = false, _micPaintGen = 0;
+const _MIC_THINK_MAX_MS = 180000, _MIC_EMPTY_MS = 2500;
+__FUNCS__
+const out = {};
+
+// 1. A capture opens from a hidden strip: shown in this task, spoken next frame.
+_micPaint('rec');
+out.shownBeforeFrame = status.style.display === ''
+  && status.getAttribute('data-state') === 'rec';
+out.labelBeforeFrame = micTextEl.textContent;
+out.framesPending = frames.length;
+flush();
+out.labelAfterFrame = micTextEl.textContent;
+
+// 2. A paint that lands before that frame keeps its own label: a waiting
+// "Listening…" must never overwrite a newer state.
+_micPaint(null);
+_micPaint('rec');
+out.recLabelBeforeFrame = micTextEl.textContent;
+_micPaint('done', 2);
+out.doneLabelNow = micTextEl.textContent;
+flush();
+out.afterStaleFrame = micTextEl.textContent;
+
+// 3. A state change while the strip is already shown is written in the same
+// task: only the first appearance needs the frame.
+_micPaint('think');
+out.thinkLabelNow = micTextEl.textContent;
+out.framesPendingAtThink = frames.length;
+
+_micStateClear();
+console.log(JSON.stringify(out));
+"""
+
+
+def _run_announce_probe():
+    funcs = "\n".join([
+        _extract_function(BOOT_JS, "_micStateClear"),
+        _extract_function(BOOT_JS, "_micPaint"),
+        _extract_function(BOOT_JS, "_micStateLabel"),
+        _extract_function(BOOT_JS, "_micStopElapsed"),
+    ])
+    js = _ANNOUNCE_PROBE.replace("__FUNCS__", funcs)
+    proc = subprocess.run(
+        [NODE, "-e", js], capture_output=True, text=True, cwd=ROOT, timeout=60
+    )
+    assert proc.returncode == 0, "node harness failed:\n%s" % proc.stderr
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_the_first_label_is_written_after_the_strip_is_shown():
+    if NODE is None:
+        pytest.skip("node not on PATH")
+    out = _run_announce_probe()
+    assert out["shownBeforeFrame"] is True, (
+        "the strip must be on screen in the task the capture starts: the "
+        "readout cannot wait for a frame, only its announcement can"
+    )
+    assert out["labelBeforeFrame"] == "", (
+        "the label was written in the same task that showed the strip (%r): a "
+        "live region that appears with its text in place is read as initial "
+        "content, so the first 'Listening…' is never announced"
+        % out["labelBeforeFrame"]
+    )
+    assert out["framesPending"] == 1, out
+    assert out["labelAfterFrame"] == "voice_listening", (
+        "the label must be announced on the next frame, translated"
+    )
+    # The waiting label is stale the moment another state owns the strip.
+    assert out["doneLabelNow"] == "voice_words_added(2)"
+    assert out["afterStaleFrame"] == "voice_words_added(2)", (
+        "a queued 'Listening…' overwrote the state that superseded it"
+    )
+    # Already shown: no extra frame, the state change is in the same task.
+    assert out["thinkLabelNow"] == "voice_transcribing"
+    assert out["framesPendingAtThink"] == 0, (
+        "only the first appearance defers; a state change while the strip is "
+        "shown must land immediately"
+    )
+
+
+# --- one silence signal for both speech-to-text backends --------------------
+#
+# The upload path and the browser's SpeechRecognition answer the same event —
+# the take heard nothing — and must answer it the same way: the strip when it
+# is free, the toast only as a fallback. The browser path is the awkward one:
+# its `onerror` is followed by `onend`, which clears the strip, so a paint from
+# `onerror` is wiped before anyone sees it. This runs the shipped
+# `_ensureSpeechRecognition` with the shipped `_setRecording`/`_micPaint` so the
+# whole settle is exercised as code.
+
+_SR_NO_SPEECH_PROBE = r"""
+const paints = [], toasts = [];
+let continuous = false;
+function stub() {
+  const set = new Set(); const attrs = {};
+  return {
+    textContent: '', style: { display: '', setProperty() {} },
+    classList: { toggle(c, on) { on ? set.add(c) : set.delete(c); } },
+    setAttribute(k, v) { attrs[k] = String(v); },
+    removeAttribute(k) { delete attrs[k]; },
+    getAttribute(k) { return k in attrs ? attrs[k] : null; },
+    hasAttribute(k) { return k in attrs; },
+  };
+}
+const btn = stub(), status = stub(), micTextEl = stub();
+const micTimerEl = stub(), micLevelEl = stub();
+const ta = { value: '' };
+let recognition = null;
+let _rawAudioMode = false;
+let _micTranscribeSeq = 0, _micSpokeAt = 0;
+let _micElapsedTimer = null, _micStateTimer = null;
+let _micShown = false, _micPaintGen = 0;
+let _finalText = '', _prefix = '';
+let _speechStopRequested = false, _micHeardNothing = false;
+let _micRestartCount = 0;
+const _micMaxRestarts = 20;
+let _activeCaptureMode = 'speech';
+let _forceMediaRecorder = false;
+const _locale = { _speech: 'en-US' };
+const _MIC_THINK_MAX_MS = 180000, _MIC_EMPTY_MS = 2500;
+globalThis.window = { _micActive: false, _micPendingSend: false };
+globalThis.requestAnimationFrame = (cb) => { cb(); return 0; };
+function SpeechRecognition() {}
+SpeechRecognition.prototype.start = function () { this.started = true; };
+SpeechRecognition.prototype.stop = function () {};
+function _micDictationContinuous() { return continuous; }
+function _micShouldRestartDictation() { return false; }
+function _micStartElapsed() {}
+function _micStopMeter() {}
+function _setButtonTooltipAndKey() {}
+function _releaseMicWakeLock() {}
+function _setMicForceMediaRecorder() {}
+function _applyDeferredServerSttFlip() {}
+function autoResize() {}
+function send() {}
+function showToast(m) { toasts.push(m); }
+function t(k, ...a) { return a.length ? k + '(' + a.join(',') + ')' : k; }
+function _micToastKeyForRecognitionError(e) {
+  return { 'not-allowed': 'mic_denied', 'network': 'mic_network' }[e] || null;
+}
+__FUNCS__
+// The shipped paint, recorded on the way through: the probe is about which
+// channel settled the outcome, so it needs the sequence, not only the DOM.
+function _micPaint(state, count, holdMs) {
+  paints.push(state === undefined ? null : state);
+  return _micPaintReal(state, count, holdMs);
+}
+const out = {};
+const snap = () => ({
+  state: status.getAttribute('data-state') || null,
+  label: micTextEl.textContent,
+  visible: status.style.display !== 'none',
+  toasts: toasts.slice(),
+});
+const reset = () => { paints.length = 0; toasts.length = 0; };
+
+const sr = _ensureSpeechRecognition();
+
+// 1. Desktop one-shot: silence settles to the strip, and it has to survive the
+// onend that follows the error.
+window._micActive = true;
+sr.onstart();
+_setRecording(true);
+reset();
+sr.onerror({ error: 'no-speech' });
+out.afterError = snap();
+out.afterErrorPaints = paints.slice();
+sr.onend();
+out.afterEnd = snap();
+out.afterEndPaints = paints.slice();
+
+// 2. A different error keeps its toast and paints no silence.
+sr.onstart();
+_setRecording(true);
+reset();
+sr.onerror({ error: 'not-allowed' });
+sr.onend();
+out.denied = snap();
+
+// 3. Continuous dictation: a no-speech pause is a normal pause, swallowed so
+// onend can restart. It must not leave a silence outcome waiting for a later
+// settle to paint.
+continuous = true;
+window._micActive = true;
+_speechStopRequested = false;
+_micRestartCount = 0;
+sr.onstart();
+_setRecording(true);
+reset();
+sr.onerror({ error: 'no-speech' });
+out.continuous = { paints: paints.slice(), toasts: toasts.slice(), pending: _micHeardNothing };
+
+_micStateClear();
+console.log(JSON.stringify(out));
+"""
+
+
+def _run_sr_no_speech_probe():
+    paint = _extract_function(BOOT_JS, "_micPaint").replace(
+        "function _micPaint(", "function _micPaintReal(", 1
+    )
+    funcs = "\n".join([
+        _extract_function(BOOT_JS, "_micStateClear"),
+        paint,
+        _extract_function(BOOT_JS, "_micStateLabel"),
+        _extract_function(BOOT_JS, "_micStopElapsed"),
+        _extract_function(BOOT_JS, "_micSignalNoSpeech"),
+        _extract_function(BOOT_JS, "_setRecording"),
+        _extract_function(BOOT_JS, "_ensureSpeechRecognition"),
+    ])
+    js = _SR_NO_SPEECH_PROBE.replace("__FUNCS__", funcs)
+    proc = subprocess.run(
+        [NODE, "-e", js], capture_output=True, text=True, cwd=ROOT, timeout=60
+    )
+    assert proc.returncode == 0, "node harness failed:\n%s" % proc.stderr
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_browser_no_speech_settles_to_the_strip_like_the_upload_path():
+    if NODE is None:
+        pytest.skip("node not on PATH")
+    out = _run_sr_no_speech_probe()
+    after_error = out["afterError"]
+    assert after_error["state"] is None and after_error["toasts"] == [], (
+        "sr.onerror must not paint or toast on its own: onend clears the "
+        "strip right after it, so anything painted here is invisible"
+    )
+    after_end = out["afterEnd"]
+    assert after_end["state"] == "empty", (
+        "the browser backend heard nothing and the strip must say so, exactly "
+        "like the upload path's empty result; got %r" % (after_end,)
+    )
+    assert after_end["label"] == "mic_no_speech", (
+        "the silence outcome is the translated sentence, not a toast"
+    )
+    assert after_end["toasts"] == [], (
+        "a toast on top of the strip repeated the sentence and covered the "
+        "header on a phone"
+    )
+    assert out["afterEndPaints"][-1] == "empty", out["afterEndPaints"]
+
+    denied = out["denied"]
+    assert denied["toasts"] == ["mic_denied"], (
+        "every other recognition failure still carries its own toast"
+    )
+    assert denied["state"] is None, "a denied mic must not claim it heard nothing"
+
+    cont = out["continuous"]
+    assert cont["paints"] == [] and cont["toasts"] == [], (
+        "a no-speech pause during continuous dictation is restarted, not "
+        "reported as an outcome"
+    )
+    assert cont["pending"] is False, (
+        "a swallowed pause must not leave a silence outcome armed for the "
+        "next settle to paint"
+    )
+
+
+def test_the_no_speech_outcome_has_exactly_one_routing():
+    # Two backends, one outcome. Every empty result goes through
+    # _micSignalNoSpeech, which chooses the strip or the toast by ownership;
+    # a second paint/toast site is how the two paths drifted apart.
+    assert BOOT_JS.count("_micPaint('empty'") == 1, (
+        "the silence paint must live in _micSignalNoSpeech only"
+    )
+    assert BOOT_JS.count("showToast(t('mic_no_speech'))") == 1, (
+        "the silence toast must live in _micSignalNoSpeech only"
+    )
+    assert BOOT_JS.count("_micSignalNoSpeech(") == 4, (
+        "expected the definition plus three callers (upload empty result, "
+        "commit's empty case, browser onend)"
     )

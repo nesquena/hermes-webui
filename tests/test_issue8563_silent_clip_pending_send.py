@@ -69,6 +69,9 @@ const _MIC_EMPTY_MS = 2500;
 const _MIC_FAILED_MS = 4000;
 const paints = [];
 function _micPaint(state) { paints.push(state === undefined ? null : state); }
+// The strip element exists for this driver: the silence outcome is painted on
+// it, and the toast is only the fallback when there is no strip to paint.
+const status = {};
 const _micForceMediaRecorderKey = 'mic_force_mediarecorder';
 let ta = { value: input.composerText || '' };
 const toasts = [];
@@ -99,6 +102,7 @@ global.fetch = async () => ({
 eval(extractFunc('_commitTranscript'));
 eval(extractFunc('_isServerSttUnavailable'));
 eval(extractFunc('_allowBrowserSttFallback'));
+eval(extractFunc('_micSignalNoSpeech'));
 eval(extractFunc('_transcribeBlob'));
 
 const blob = { type: 'audio/webm', size: 1024 };

@@ -1211,6 +1211,10 @@ function _micToastKeyForRecognitionError(error){
   // so rapid start/stop/visibility churn can't leak a lock. _micRestartCount is
   // bounded by _micMaxRestarts to stop a tight loop if the audio session is stolen.
   let _speechStopRequested=false;
+  // A recognition run that reported `no-speech`. The failure is known in
+  // sr.onerror but the readout belongs after the capture is released, so it is
+  // carried to onend, which is the only place a strip paint survives.
+  let _micHeardNothing=false;
   let _micWakeLock=null;
   let _micWakeLockOp=null;
   let _micRestartCount=0;
@@ -1293,6 +1297,10 @@ function _micToastKeyForRecognitionError(error){
 
   let _micElapsedTimer=null;
   let _micStateTimer=null;
+  // Whether the strip is on screen (the markup ships it hidden), and a paint
+  // counter that lets a label waiting for its frame notice it was superseded.
+  let _micShown=false;
+  let _micPaintGen=0;
   let _micMeterCtx=null;
   let _micMeterRaf=0;
   let _micSpokeAt=0;
@@ -1311,11 +1319,14 @@ function _micToastKeyForRecognitionError(error){
   function _micPaint(state,count,holdMs){
     _micStateClear();
     if(!status) return;
+    const gen=++_micPaintGen;
     if(state!=='rec') _micStopElapsed();
+    const wasHidden=!_micShown;
     for(const cls of ['is-rec','is-think','is-done','is-empty','is-failed']){
       status.classList.toggle(cls,cls==='is-'+state);
     }
     if(!state){
+      _micShown=false;
       status.style.display='none';
       status.removeAttribute('data-state');
       if(micTextEl) micTextEl.textContent='';
@@ -1323,9 +1334,27 @@ function _micToastKeyForRecognitionError(error){
       if(micLevelEl) micLevelEl.style.setProperty('--mic-level','0');
       return;
     }
+    _micShown=true;
     status.style.display='';
     status.setAttribute('data-state',state);
-    if(micTextEl) micTextEl.textContent=_micStateLabel(state,count);
+    if(micTextEl){
+      const label=_micStateLabel(state,count);
+      // The label is the aria-live region. A region that goes from
+      // display:none to shown with its text already in place is read as
+      // initial content by some screen readers, so the first "Listening…"
+      // would never be announced. When the strip was hidden, show it in this
+      // task and write the label on the next frame; a paint that lands in
+      // between takes the stamp (gen) and keeps its own label.
+      if(label&&wasHidden){
+        micTextEl.textContent='';
+        requestAnimationFrame(()=>{
+          if(gen!==_micPaintGen) return; // a newer state owns the label now
+          micTextEl.textContent=label;
+        });
+      }else{
+        micTextEl.textContent=label;
+      }
+    }
     if(state!=='rec'){
       if(micTimerEl) micTimerEl.textContent='';
       if(micLevelEl) micLevelEl.style.setProperty('--mic-level','0');
@@ -1335,6 +1364,17 @@ function _micToastKeyForRecognitionError(error){
     }else if(state==='think'){
       _micStateTimer=setTimeout(()=>{_micStateTimer=null;_micPaint(null);},_MIC_THINK_MAX_MS);
     }
+  }
+
+  // "The take heard nothing" is one outcome with one voice, whichever
+  // speech-to-text backend produced it. The strip says it while it is still
+  // ours to write; the toast is only the fallback for a take that lost the
+  // strip to a newer capture (a toast on top of the strip repeated the
+  // sentence and covered the header on a phone, and a superseded take with no
+  // strip of its own would otherwise be silent about it).
+  function _micSignalNoSpeech(ownsStrip){
+    if(status&&ownsStrip){ _micPaint('empty',0,_MIC_EMPTY_MS); return; }
+    showToast(t('mic_no_speech'));
   }
 
   // Every label is a translation key: the old word-count tick ("12p") told the
@@ -1512,9 +1552,14 @@ function _micToastKeyForRecognitionError(error){
     // the capture heard nothing. Held briefly — the composer is the lasting
     // evidence, this is only the "it worked" tick. Gated on ownership: a capture
     // that started while this request was pending owns the readout and the clock.
-    if(!ownsButton||ownsButton()){
-      if(clean){ _micPaint('done',_micWordCount(clean),_MIC_READY_MS); }
-      else{ _micPaint('empty',0,_MIC_EMPTY_MS); }
+    if(!clean){
+      // An empty take is the one outcome a superseded request still has to
+      // report: it must not touch the strip, and with no strip of its own
+      // nothing else would say it came back empty — _micSignalNoSpeech picks
+      // the strip or the toast by ownership.
+      _micSignalNoSpeech(!ownsButton||ownsButton());
+    }else if(!ownsButton||ownsButton()){
+      _micPaint('done',_micWordCount(clean),_MIC_READY_MS);
     }
     if(window._micPendingSend){
       window._micPendingSend=false;
@@ -1581,15 +1626,10 @@ function _micToastKeyForRecognitionError(error){
         window._micPendingSend=false;
         // A 200 with nothing heard is a settlement, not a request still in
         // flight: this exit has to retire 'think' exactly like
-        // _commitTranscript's empty case does — the same timed outcome, gated on
-        // ownership so a newer capture keeps its readout. The strip's own
-        // "No speech detected. Try again." is the announcement; a toast on top
-        // of it repeated the sentence and covered the header on a phone. A
-        // superseded request is the exception: it must not paint over the newer
-        // capture's strip, and with no strip of its own nothing would tell the
-        // user its take came back empty, so the toast is all that case has.
-        if(ownsButton()) _micPaint('empty',0,_MIC_EMPTY_MS);
-        else showToast(t('mic_no_speech'));
+        // _commitTranscript's empty case does — the same timed outcome, routed
+        // the same way, so a newer capture keeps its readout and a superseded
+        // request still says its take was empty.
+        _micSignalNoSpeech(ownsButton());
         return;
       }
       _commitTranscript(transcript, prefixSnapshot, ownsButton);
@@ -1721,7 +1761,7 @@ function _micToastKeyForRecognitionError(error){
     sr.interimResults=true;
     sr.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
 
-    sr.onstart=()=>{ _finalText=''; };
+    sr.onstart=()=>{ _finalText=''; _micHeardNothing=false; };
 
     sr.onresult=(event)=>{
       // #5294: a real result means the continuity restarts are PRODUCTIVE, not a
@@ -1774,6 +1814,11 @@ function _micToastKeyForRecognitionError(error){
       _micRestartCount=0;
       void _releaseMicWakeLock();
       _setRecording(false);
+      // The run is over and the strip has just been released: this is the one
+      // point where a silence readout survives (a paint from sr.onerror is
+      // wiped by the _setRecording(false) here). Same outcome and same routing
+      // as the upload path's empty result.
+      if(_micHeardNothing){ _micHeardNothing=false; _micSignalNoSpeech(true); }
       if(window._micPendingSend){
         window._micPendingSend=false;
         send();
@@ -1784,7 +1829,8 @@ function _micToastKeyForRecognitionError(error){
     sr.onerror=(event)=>{
       // While dictating with continuity on, a no-speech/aborted error is a normal
       // pause or transient audio-session hiccup — swallow it and let onend restart
-      // (bounded by _micMaxRestarts). Desktop one-shot still surfaces the toast.
+      // (bounded by _micMaxRestarts). Desktop one-shot settles to the strip's
+      // silence outcome instead of a toast.
       if((event.error==='no-speech'||event.error==='aborted')
           && _micDictationContinuous()
           && window._micActive
@@ -1805,6 +1851,14 @@ function _micToastKeyForRecognitionError(error){
         _setMicForceMediaRecorder('1');
         _forceMediaRecorder=true;
         recognition=null;
+      }
+      if(event.error==='no-speech'){
+        // The browser backend's "heard nothing" is the same outcome the upload
+        // path paints, and it takes the same route — but it is recorded here
+        // and painted in onend, which fires right after this and clears the
+        // strip: a paint from this handler would be wiped by it.
+        _micHeardNothing=true;
+        return;
       }
       const messageKey=_micToastKeyForRecognitionError(event.error);
       showToast(messageKey?t(messageKey):t('mic_error')+event.error);
