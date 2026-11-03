@@ -36,14 +36,19 @@ def test_viewport_cap_requires_files_in_the_tray():
 
 
 def test_short_window_shrinks_the_draft_before_the_footer():
+    """The draft yields first. The tray yields only after that floor is hit."""
     marker = "@media (max-height: 599px){"
     idx = CSS.find(marker)
     assert idx >= 0, "short windows have no populated-draft budget"
-    block = CSS[idx:idx + 500]
+    block = CSS[idx:CSS.find("\n  .attach-tray.has-files{", idx)]
     assert ".composer-box:has(.attach-tray.has-files) > textarea#msg{" in block
-    assert "flex-shrink:1" in block
+    assert "flex-shrink:1000" in block
+    assert block.find("flex-shrink:1000") < block.find("flex-shrink:1;")
+    assert "min-height:44px" in block
     assert ".composer-box:has(.attach-tray.has-files) > .attach-tray.has-files{" in block
-    assert "flex-shrink:0" in block
+    assert "flex-shrink:1;" in block
+    assert "flex-shrink:0" not in block
+    assert ".composer-box > .composer-footer{flex-shrink:0;}" in CSS
 
 
 def test_attach_tray_scrolls_when_it_has_files():
