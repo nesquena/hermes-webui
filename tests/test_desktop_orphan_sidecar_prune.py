@@ -6,10 +6,9 @@ opened in the WebUI sidebar. If the user later deletes that conversation from
 the Desktop app, the backing ``state.db`` row disappears but the sidecar stays,
 so the stale row lingers in the sidebar forever.
 
-#3238 / #4591 removed that shape for CLI and API-server imports by probing
-``state.db`` directly through ``agent_session_rows_existing()``. A Desktop row
-matched neither predicate — Desktop is not CLI, and it is not API-server — so
-the existence probe never inspected it and no prune path could reach it.
+#3238 / #4591 removed that shape for CLI and API-server imports. Desktop now
+joins the interactive family, but its sidecars must use only the dedicated
+strict owning-profile prune, not the generic probe's active-profile fallback.
 
 These tests pin three things:
 
@@ -30,6 +29,8 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
@@ -254,11 +255,12 @@ def _desktop_row(sid: str, *, profile: str = "default") -> dict:
         "profile": profile,
         "source_tag": "desktop",
         "raw_source": "desktop",
-        "session_source": "other",
+        "session_source": "cli",
         "source_label": "Desktop",
-        "is_cli_session": False,
+        "is_cli_session": True,
         "title": "Desktop conversation",
         "message_count": 1,
+        "actual_user_message_count": 1,
         "updated_at": 1,
     }
 
@@ -342,7 +344,8 @@ def test_actual_builder_prunes_desktop_orphan_with_cli_sessions_shown(monkeypatc
     assert pruned == ["desktop-gone"]
 
 
-def test_actual_builder_keeps_live_desktop_row(monkeypatch):
+@pytest.mark.parametrize("show_cli_sessions", [False, True])
+def test_actual_builder_keeps_live_desktop_row(monkeypatch, show_cli_sessions):
     import api.routes as routes
 
     monkeypatch.setattr(
@@ -354,10 +357,12 @@ def test_actual_builder_keeps_live_desktop_row(monkeypatch):
     payload, pruned = _run_actual_builder(
         monkeypatch,
         [_desktop_row("desktop-live")],
-        show_cli_sessions=False,
+        show_cli_sessions=show_cli_sessions,
     )
 
-    assert [row["session_id"] for row in payload["sessions"]] == ["desktop-live"]
+    # Hiding interactive rows is not permission to prune their index entries.
+    expected = ["desktop-live"] if show_cli_sessions else []
+    assert [row["session_id"] for row in payload["sessions"]] == expected
     assert pruned == []
 
 
@@ -403,7 +408,7 @@ def test_all_profiles_uses_row_owning_db_for_destructive_absence(
     payload, pruned = _run_actual_builder(
         monkeypatch,
         [_desktop_row("same-id", profile="work")],
-        show_cli_sessions=False,
+        show_cli_sessions=True,
         all_profiles=True,
     )
 
@@ -533,7 +538,8 @@ def test_isolated_fresh_start_retains_foreign_index_row_with_cli_shown(tmp_path)
     assert sid in {row.get("session_id") for row in index}
 
 
-def test_all_profiles_prune_matrix_for_named_profile_db(tmp_path, monkeypatch):
+@pytest.mark.parametrize("show_cli_sessions", [False, True])
+def test_all_profiles_prune_matrix_for_named_profile_db(tmp_path, monkeypatch, show_cli_sessions):
     """Live/missing/corrupt rows retain; only a confirmed deletion prunes."""
     from api import models
 
@@ -563,15 +569,16 @@ def test_all_profiles_prune_matrix_for_named_profile_db(tmp_path, monkeypatch):
     payload, pruned = _run_actual_builder(
         monkeypatch,
         rows,
-        show_cli_sessions=False,
+        show_cli_sessions=show_cli_sessions,
         all_profiles=True,
     )
 
-    assert {row["session_id"] for row in payload["sessions"]} == {
+    expected = {
         "missing-db",
         "live-row",
         "corrupt-db",
-    }
+    } if show_cli_sessions else set()
+    assert {row["session_id"] for row in payload["sessions"]} == expected
     assert pruned == ["deleted-row"]
 
 
@@ -579,9 +586,8 @@ def test_inaccessible_owner_profile_retains_row_and_never_fails_the_sidebar(tmp_
     """Release-gate fold: an owning profile directory that cannot be traversed
     (chmod 000) made ``db_path.exists()`` raise ``PermissionError`` outside the
     lookup's exception handler, so the whole sidebar builder failed (HTTP 500).
-    It must fail closed instead: keep the row, prune nothing, with either
-    visibility toggle and either profile scope."""
-    import pytest
+    It must fail closed instead: prune nothing, with either visibility toggle
+    and either profile scope. The toggle may still hide the retained row."""
 
     from api import models
 
@@ -611,7 +617,8 @@ def test_inaccessible_owner_profile_retains_row_and_never_fails_the_sidebar(tmp_
                         show_cli_sessions=show_cli_sessions,
                         all_profiles=all_profiles,
                     )
-                    assert [row["session_id"] for row in payload["sessions"]] == ["locked-row"], (
+                    expected = ["locked-row"] if show_cli_sessions else []
+                    assert [row["session_id"] for row in payload["sessions"]] == expected, (
                         all_profiles, show_cli_sessions)
                     assert pruned == [], (all_profiles, show_cli_sessions)
             finally:

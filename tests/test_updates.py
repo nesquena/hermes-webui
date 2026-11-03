@@ -62,9 +62,9 @@ def _fake_git_for_release_fetch_failure(args, cwd, timeout=10):
         return '', True  # clean tree
     if args == ['fetch', 'origin', '--tags', '--force']:
         return 'would clobber existing tag v0.50.294', False
-    if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+    if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
         return 'v0.51.106\nv0.51.103', True
-    if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+    if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
         return 'v0.51.103', True
     if args == ['merge-base', '--is-ancestor', 'v0.51.106', 'HEAD']:
         return '', False
@@ -145,7 +145,7 @@ def test_check_repo_redacts_credentialed_fetch_failure(tmp_path):
             return '', True
         if args == ['fetch', 'origin', '--tags', '--force']:
             return raw_error, False
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return '', True
         raise AssertionError(f'unexpected git args: {args!r}')
 
@@ -278,7 +278,7 @@ def test_check_repo_fetch_failure_without_tags_is_not_up_to_date(tmp_path):
             return '', True
         if args == ['fetch', 'origin', '--tags', '--force']:
             return 'network unavailable', False
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return '', True
         raise AssertionError(f'unexpected git args: {args!r}')
 
@@ -1232,7 +1232,7 @@ def test_check_repo_fetches_tags_with_force(tmp_path):
             # Force a fetch failure path so we don't have to mock the rest of
             # the release/branch logic; the assertion is about the args shape.
             return '', False
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return '', True
         raise AssertionError(f'unexpected git args: {args!r}')
 
@@ -1319,11 +1319,11 @@ def test_check_repo_recovers_from_remote_retag(tmp_path):
             ), False
         if args == ['fetch', 'origin', '--tags', '--force']:
             return '', True
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v0.51.110\nv0.51.109', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v0.51.110', True
-        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v0.51.110', True
         if args == ['remote', 'get-url', 'origin']:
             return 'https://github.com/nesquena/hermes-webui.git', True
@@ -1364,12 +1364,12 @@ def test_check_repo_release_falls_through_when_head_is_past_tag(tmp_path):
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v2026.5.16', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.16', True
         # HEAD is 608 commits past the tag — describe includes a suffix.
-        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.16-608-g1d22b9c2d', True
         raise AssertionError(f'unexpected git args: {args!r}')
 
@@ -1387,12 +1387,12 @@ def test_check_repo_release_not_affected_when_head_exactly_on_tag(tmp_path):
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v2026.5.16\nv2026.5.10', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.16', True
         # No -N-gSHA suffix: HEAD is exactly on the tag.
-        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.16', True
         if args == ['remote', 'get-url', 'origin']:
             return 'https://github.com/nesquena/hermes-agent.git', True
@@ -1418,9 +1418,9 @@ def test_check_repo_stable_up_to_date_payload_carries_real_latest_tag(tmp_path):
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v0.52.1\nv0.52.0', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v0.52.0', True
         # HEAD contains the latest tag → suppress_stable_fallthrough wins.
         if args == ['merge-base', '--is-ancestor', 'v0.52.1', 'HEAD']:
@@ -1452,12 +1452,12 @@ def test_check_repo_branch_check_runs_for_post_tag_commits(tmp_path):
     def fake_git(args, cwd, timeout=10):
         if args == ['fetch', 'origin', '--tags', '--force']:
             return '', True
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v2026.5.16', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.16', True
         # HEAD is 608 commits past the tag.
-        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.16-608-g1d22b9c2d', True
         # Branch-check path follows: rev-parse upstream, default branch, rev-list.
         if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
@@ -1503,11 +1503,11 @@ def test_check_repo_branch_path_without_tags_omits_tag_fields(tmp_path):
     def fake_git(args, cwd, timeout=10):
         if args == ['fetch', 'origin', '--tags', '--force']:
             return '', True
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return '', True  # no release tags at all
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return '', False
-        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return '1d22b9c2d', True
         if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
             return '', False
@@ -1547,11 +1547,11 @@ def test_select_apply_compare_ref_uses_tag_when_head_is_on_tag(tmp_path):
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v2026.5.16\nv2026.5.10', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.16', True
-        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.16', True
         raise AssertionError(f'unexpected git args: {args!r}')
 
@@ -1572,12 +1572,12 @@ def test_select_apply_compare_ref_falls_through_when_head_is_past_tag(tmp_path):
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v2026.5.16', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             # HEAD's nearest tag is v2026.5.16; HEAD is 608 commits past it.
             return 'v2026.5.16', True
-        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.16-608-g1d22b9c2d', True
         if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
             return 'origin/main', True
@@ -1597,7 +1597,7 @@ def test_select_apply_compare_ref_no_tags_uses_upstream(tmp_path):
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return '', True
         if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
             return 'origin/feat/foo', True
@@ -1614,7 +1614,7 @@ def test_select_apply_compare_ref_no_tags_no_upstream_uses_default_branch(tmp_pa
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return '', True
         if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
             return '', False
@@ -1638,11 +1638,11 @@ def test_check_and_apply_paths_agree_when_head_is_past_tag(tmp_path):
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v2026.5.16', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.16', True
-        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.16-608-g1d22b9c2d', True
         if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
             return 'origin/main', True
@@ -1675,9 +1675,9 @@ def test_check_repo_release_falls_through_when_head_contains_newer_tag(tmp_path)
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v2026.5.29.2\nv2026.5.29', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.29', True
         if args == ['merge-base', '--is-ancestor', 'v2026.5.29.2', 'HEAD']:
             return '', True
@@ -1697,9 +1697,9 @@ def test_select_apply_compare_ref_falls_through_when_head_contains_newer_tag(tmp
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v2026.5.29.2\nv2026.5.29', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.29', True
         if args == ['merge-base', '--is-ancestor', 'v2026.5.29.2', 'HEAD']:
             return '', True
@@ -1733,12 +1733,12 @@ def test_select_apply_compare_ref_case_d_older_tag_with_commits_and_newer_tag_ex
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v2026.5.16\nv2026.5.10', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             # HEAD's nearest reachable tag (older one)
             return 'v2026.5.10', True
-        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             # HEAD has 3 commits past v2026.5.10, but it does not contain
             # the newer v2026.5.16 release tag.
             return 'v2026.5.10-3-gabcdef12', True
@@ -1771,11 +1771,11 @@ def test_check_repo_release_falls_through_when_latest_tag_is_not_ff_reachable(tm
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v2026.5.29.2\nv2026.5.29', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.29', True
-        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.29-265-g5921d6678', True
         if args == ['merge-base', '--is-ancestor', 'v2026.5.29.2', 'HEAD']:
             return '', False
@@ -1794,11 +1794,11 @@ def test_select_apply_compare_ref_falls_through_when_latest_tag_is_not_ff_reacha
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+        if args == ['tag', '--list', 'v*', '--sort=-creatordate']:
             return 'v2026.5.29.2\nv2026.5.29', True
-        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.29', True
-        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+        if args == ['describe', '--tags', '--always', '--match', 'v*', '--exclude', 'v*+*', '--exclude', 'v*-*']:
             return 'v2026.5.29-265-g5921d6678', True
         if args == ['merge-base', '--is-ancestor', 'v2026.5.29.2', 'HEAD']:
             return '', False

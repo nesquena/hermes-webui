@@ -858,7 +858,8 @@ def test_load_session_rebuilds_live_tail_before_snapshot_fallback():
     inflight_pos = body.find("const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);")
     prepare_pos = body.find("const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);")
     drop_assistant_pos = body.find("S.messages=_dropCurrentTurnAssistantMessages(S.messages);")
-    merge_pos = body.find("S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);")
+    # Prefix match: the call may pass the optional turn-owner argument (#8698).
+    merge_pos = body.find("S.messages=_mergeInflightTailMessages(S.messages,inflightMessages")
     restore_pos = body.find("restoreLiveTurnHtmlForSession(sid)")
     assert ensure_pos != -1 and inflight_pos != -1
     assert prepare_pos != -1
