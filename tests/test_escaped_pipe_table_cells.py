@@ -184,3 +184,28 @@ class TestEscapedPipeInteractsWithExistingProtection:
         md = "| a | b |\n|---|---|\n| ok | y |"
         html = _render(driver_path, md)
         assert _row_cell_counts(html) == [2, 2], f"got: {html!r}"
+
+    def test_escaped_pipe_inside_backticks_renders_without_the_backslash(self, driver_path):
+        """GFM: the escape is consumed inside other inline spans too.
+
+        The reviewer's case — the most common shape in model output. The
+        ``<code>`` protection rule runs first and used to stash the pipe before
+        the ``\\|`` rule ever saw the backslash, so ``<code>a\\|b</code>`` kept
+        the backslash instead of showing ``a|b``. Cell COUNT alone cannot catch
+        this (the row still had two cells), so assert the rendered text.
+        """
+        md = "| pattern | note |\n|---|---|\n| `a\\|b` | x |"
+        html = _render(driver_path, md)
+        assert _row_cell_counts(html) == [2, 2], f"got: {html!r}"
+        assert "<code>a|b</code>" in html, (
+            "the escaped pipe inside backticks must render as a bare pipe, "
+            f"not keep the backslash; got: {html!r}"
+        )
+        assert "a\\|b" not in html, f"the backslash leaked into the output: {html!r}"
+
+    def test_escaped_pipe_inside_backticks_in_a_body_row(self, driver_path):
+        """Same rule for a body row, not just the header."""
+        md = "| h1 | h2 |\n|---|---|\n| `x\\|y` | z |"
+        html = _render(driver_path, md)
+        assert _row_cell_counts(html) == [2, 2], f"got: {html!r}"
+        assert "<code>x|y</code>" in html, f"got: {html!r}"
