@@ -18,6 +18,8 @@ outbound I/O blocked). No Agent, live endpoint or real profile is used.
 from __future__ import annotations
 
 import json
+import os
+import pathlib
 import sys
 import types
 
@@ -420,8 +422,16 @@ def aux_calls(monkeypatch):
 
 
 def _title_route(monkeypatch, aux, providers, main_provider="openai"):
+    """WebUI's view and, until :func:`_agent_scope` overrides it, the Agent's
+    config file (``hermes_cli.config.get_config_path()``) hold the same config."""
     monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: dict(aux))
-    _bind(monkeypatch, _config(main_provider, providers, base_url=BUILTIN_URL))
+    data = _config(main_provider, providers, base_url=BUILTIN_URL)
+    _bind(monkeypatch, data)
+    agent_cfg = _write_profile_config(
+        pathlib.Path(os.environ["HERMES_CONFIG_PATH"]).parent.parent / "agent-same" / "config.yaml", data)
+    fake_cfg = types.ModuleType("hermes_cli.config")
+    fake_cfg.get_config_path = lambda: agent_cfg
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", fake_cfg)
 
 
 @pytest.mark.parametrize("aux, caller", [
@@ -461,3 +471,50 @@ def test_title_generation_with_an_unambiguous_route_is_unchanged(monkeypatch, au
     streaming.generate_title_raw_via_aux("hello there", "hi, how can I help")
     assert aux_calls and aux_calls[0]["task"] == "title_generation"
     assert aux_calls[0]["provider"] == (aux.get("provider") if aux.get("provider") != "auto" else None)
+
+
+# ── Codex r4: the title guard reads the profile the Agent's call_llm will load ──
+
+
+def _agent_scope(monkeypatch, aux_calls, tmp_path, agent_providers, main_provider=None):
+    """The Agent's view in a background title worker: its own config path (the
+    session profile) and, for auto routes, its current main provider."""
+    agent_cfg = _write_profile_config(tmp_path / "agent-profile" / "config.yaml",
+                                      _config("openai", agent_providers, base_url=BUILTIN_URL))
+    fake_cfg = types.ModuleType("hermes_cli.config")
+    fake_cfg.get_config_path = lambda: agent_cfg
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", fake_cfg)
+    if main_provider is not None:
+        sys.modules["agent.auxiliary_client"]._read_main_provider = lambda: main_provider
+
+
+AMBIGUOUS = _records("openai", "named-first")
+PLAIN = {"openai": {"base_url": BUILTIN_URL, "api_key": BUILTIN_KEY}}
+
+
+def test_title_guard_refuses_when_the_agents_profile_is_ambiguous(monkeypatch, aux_calls, tmp_path):
+    """Converse of Codex r4 #1: the worker binds the session profile's env for the
+    Agent while WebUI's own view is the default profile (unambiguous here)."""
+    _title_route(monkeypatch, {"provider": "openai"}, PLAIN)
+    _agent_scope(monkeypatch, aux_calls, tmp_path, AMBIGUOUS)
+    assert streaming.generate_title_raw_via_aux("hello there", "hi") == (None, TITLE_REFUSED)
+    assert aux_calls == []
+
+
+def test_title_guard_allows_an_unambiguous_agent_profile(monkeypatch, aux_calls, tmp_path):
+    """Codex r4 #1: an ambiguous default profile must not block another profile's titles."""
+    _title_route(monkeypatch, {"provider": "openai"}, AMBIGUOUS)
+    _agent_scope(monkeypatch, aux_calls, tmp_path, PLAIN)
+    streaming.generate_title_raw_via_aux("hello there", "hi")
+    assert aux_calls and aux_calls[0]["provider"] == "openai"
+
+
+@pytest.mark.parametrize("agent_main, refused", [("anthropic", False), ("openai", True)])
+def test_auto_title_routes_use_the_agents_current_main_provider(monkeypatch, aux_calls, tmp_path, agent_main, refused):
+    """Codex r4 #2: model.provider: ${MAIN_PROVIDER}; the cache holds a stale expansion."""
+    cached_main = "anthropic" if agent_main == "openai" else "openai"
+    _title_route(monkeypatch, {"provider": "auto"}, AMBIGUOUS, main_provider=cached_main)
+    _agent_scope(monkeypatch, aux_calls, tmp_path, AMBIGUOUS, main_provider=agent_main)
+    raw, status = streaming.generate_title_raw_via_aux("hello there", "hi")
+    assert (status == TITLE_REFUSED) is refused
+    assert bool(aux_calls) is not refused

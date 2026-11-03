@@ -6739,14 +6739,32 @@ def _title_provider_name_ambiguous(provider: str, base_url: str) -> bool:
     records. ``auto`` / unset without a URL is the Agent's main provider. The
     title then falls back to the local (non-LLM) one; the warning carries the
     verdict message, which names records and never a URL or credential.
-    """
-    from api.config import get_config, provider_name_ambiguity_verdict
 
+    Both inputs are read the way ``call_llm`` will read them (Codex r4): the
+    config file the Agent's ``get_config_path()`` names, unexpanded (a title
+    worker binds the session profile's env for the Agent, not WebUI's profile
+    view), and the Agent's current ``_read_main_provider()`` (re-expanded from
+    the profile .env, unlike WebUI's cache). WebUI's own view is the fallback
+    only when the Agent's readers are unavailable.
+    """
+    from api.config import _load_yaml_config_file_raw, get_config, provider_name_ambiguity_verdict
+
+    try:
+        from hermes_cli.config import get_config_path as agent_config_path
+
+        source = _load_yaml_config_file_raw(Path(agent_config_path()))
+    except Exception:
+        source = None
     name = provider
     if not name and not base_url:
-        main = get_config().get('model')
-        name = main.get('provider', '') if isinstance(main, dict) else ''
-    verdict = provider_name_ambiguity_verdict(name) if name else None
+        try:
+            from agent.auxiliary_client import _read_main_provider
+
+            name = str(_read_main_provider() or '')
+        except Exception:
+            main = get_config().get('model')
+            name = main.get('provider', '') if isinstance(main, dict) else ''
+    verdict = provider_name_ambiguity_verdict(name, config=source) if name else None
     if verdict is None:
         return False
     logger.warning("skipping LLM title generation: %s", verdict['message'])
