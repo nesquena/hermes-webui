@@ -29,8 +29,9 @@ def _get(path):
     return handler.status, handler.json_body()
 
 
+@pytest.mark.usefixtures('isolated_state')
 @pytest.mark.parametrize('trigger', ['create', 'revoke'])
-def test_delayed_rename_does_not_orphan_a_newer_share(isolated_state, monkeypatch, trigger):
+def test_delayed_rename_does_not_orphan_a_newer_share(monkeypatch, trigger):
     import threading
     import api.models as models
     import api.routes as routes
