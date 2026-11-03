@@ -4293,7 +4293,10 @@ def _provider_identity_sources(config: object) -> tuple:
     except Exception:
         logger.debug("provider name check: raw config unreadable", exc_info=True)
         raw = None
-    return (_with_managed_scope(raw), _with_managed_scope(get_config()))
+    # A detached snapshot, not get_config()'s live cache dict: another profile's request can
+    # refill that dict in place while this check runs, and a retained reference then judged
+    # this profile's name against the other profile's records (release-lane tag-delta audit).
+    return (_with_managed_scope(raw), _with_managed_scope(get_config_snapshot()))
 
 
 def _with_managed_scope(view: object) -> object:

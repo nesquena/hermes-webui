@@ -17,6 +17,7 @@ outbound I/O blocked). No Agent, live endpoint or real profile is used.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import pathlib
@@ -61,6 +62,9 @@ def isolated(monkeypatch, tmp_path):
 def _bind(monkeypatch, data):
     monkeypatch.setattr(config, "cfg", data)
     monkeypatch.setattr(config, "get_config", lambda: data)
+    # The identity check reads a detached snapshot; bind it too so these tests never refresh
+    # the real config cache (that leaked into later files' in-place cfg patches).
+    monkeypatch.setattr(config, "get_config_snapshot", lambda: copy.deepcopy(data))
 
 
 def _records(pid, order, named_url=NAMED_URL):
@@ -654,3 +658,22 @@ def test_the_managed_overlay_mutates_neither_the_cache_nor_the_raw_config(monkey
     assert local == before
     raw_cached = config._load_yaml_config_file_raw(tmp_path / "profile" / "config.yaml", _copy=False)
     assert raw_cached == raw_before
+
+
+def test_identity_sources_are_detached_from_the_live_config_cache(monkeypatch):
+    """Release-lane tag-delta audit (r1103): the cached view must be a snapshot.
+
+    ``get_config()`` returns the shared cache dict, which another profile's reload refills in
+    place while this check runs. A retained reference then judged this profile's provider name
+    against the other profile's records and refused a valid send (reproduced over loopback HTTP
+    with two profiles). ``get_config_snapshot()`` copies under the config lock.
+    """
+    data = _config("openai", {"custom:openai": {"base_url": NAMED_URL, "api_key": NAMED_KEY}})
+    _bind(monkeypatch, data)
+    cached = config._provider_identity_sources(None)[-1]
+    other = _config("openai", {"openai": {"base_url": BUILTIN_URL, "api_key": BUILTIN_KEY}})
+    data.clear()
+    data.update(other)
+    providers = (cached or {}).get("providers") or {}
+    assert "custom:openai" in providers, cached
+    assert "openai" not in providers, cached
