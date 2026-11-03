@@ -28,7 +28,9 @@ refusal.
 
 from __future__ import annotations
 
+import tempfile
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -40,10 +42,8 @@ from tests._updater_restart_isolation import (
     isolated_restart_scheduler,
     live_restart_workers,
 )
-from tests.test_issue7293_restart_drain_policy import (
-    test_successful_update_keeps_admission_closed_until_restart,
-)
-from tests.test_update_checker import TestApplyUpdateDiagnostics
+from tests import test_issue7293_restart_drain_policy as drain_policy
+from tests import test_update_checker as update_checker
 
 
 class TestRestartWorkerIsolation:
@@ -75,7 +75,9 @@ class TestRestartWorkerIsolation:
         """The #7293 success path must not leave a worker behind."""
         run_drain._reset_for_tests()
         try:
-            test_successful_update_keeps_admission_closed_until_restart(tmp_path, monkeypatch)
+            drain_policy.test_successful_update_keeps_admission_closed_until_restart(
+                tmp_path, monkeypatch
+            )
         finally:
             run_drain._reset_for_tests()
 
@@ -89,7 +91,9 @@ class TestRestartWorkerIsolation:
         """The update-checker success path must not leave a worker behind."""
         run_drain._reset_for_tests()
         try:
-            TestApplyUpdateDiagnostics().test_successful_update_still_returns_ok(tmp_path)
+            update_checker.TestApplyUpdateDiagnostics().test_successful_update_still_returns_ok(
+                tmp_path
+            )
         finally:
             run_drain._reset_for_tests()
 
@@ -107,15 +111,28 @@ class TestRestartWorkerIsolation:
         """
         run_drain._reset_for_tests()
         try:
-            TestApplyUpdateDiagnostics().test_successful_update_still_returns_ok(tmp_path)
+            update_checker.TestApplyUpdateDiagnostics().test_successful_update_still_returns_ok(tmp_path)
         finally:
             run_drain._reset_for_tests()
 
         # Give a leaked worker the moment it needs to take the lock.
         assert_no_restart_worker_escaped(timeout=5.0)
 
-        result = updates.apply_update("webui")
-        assert result.get("ok") is not False, result
+        # Drive the real refusal path (apply_update takes _apply_lock with
+        # blocking=False) against a throwaway repo, so the assertion is about
+        # the lock and not about anybody's git checkout.
+        with tempfile.TemporaryDirectory() as repo:
+            repo_path = Path(repo)
+            (repo_path / ".git").mkdir()
+            monkeypatch.setattr(updates, "REPO_ROOT", repo_path)
+            monkeypatch.setattr(updates, "_AGENT_DIR", repo_path)
+            monkeypatch.setattr(updates, "_update_cache", {"webui": None, "agent": None, "checked_at": 1})
+            monkeypatch.setattr(updates, "_cache_lock", threading.Lock())
+            monkeypatch.setattr(updates, "_run_git", lambda *a, **k: ("", True))
+            monkeypatch.setattr(updates, "_schedule_restart", lambda *a, **k: None)
+
+            result = updates.apply_update("webui")
+
         assert "already in progress" not in str(result.get("message", "")).lower(), result
 
     def test_assertion_helper_detects_a_leaked_worker(self):
