@@ -10,6 +10,10 @@ from api.session_image_persistence_override import (
 )
 
 
+def _b64_bytes(raw: bytes) -> str:
+    return base64.b64encode(raw).decode("ascii")
+
+
 def _data_url(raw: bytes, mime: str = "image/jpeg") -> str:
     return f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
 
@@ -334,3 +338,125 @@ def test_non_image_api_content_is_left_byte_identical(session_dir):
 
     persisted = json.loads((session_dir / "apic-plain.json").read_text())
     assert persisted["messages"][0]["api_content"] == mirror
+
+
+def _cycle_session(session_dir, sid, rows, cycles=3):
+    import api.models as models
+    session = models.Session(session_id=sid, messages=rows)
+    counts = []
+    for _ in range(cycles):
+        session.save(touch_updated_at=False)
+        counts.append(json.loads((session_dir / f"{sid}.json").read_text())["message_count"])
+        session = models.Session.load(sid)
+    return counts
+
+
+def test_rows_differing_only_by_image_detail_survive_cold_cycles(session_dir):
+    """The marker erases the whole part, so the discriminator must cover structure.
+
+    Two rows with identical bytes but a different accepted `image_url.detail` are
+    distinct canonical rows; hashing only the payload string would make them equal
+    after projection and the next save would delete one.
+    """
+    url = _data_url(b"identical-bytes")
+    identity = {"role": "user", "id": "detail-event", "timestamp": 40.5}
+    low = {**identity, "content": [{"type": "image_url", "image_url": {"url": url, "detail": "low"}}]}
+    high = {**identity, "content": [{"type": "image_url", "image_url": {"url": url, "detail": "high"}}]}
+
+    counts = _cycle_session(session_dir, "detail-cycle", [low, high])
+
+    assert counts == [2, 2, 2], counts
+    persisted = json.loads((session_dir / "detail-cycle.json").read_text())
+    digests = {m["_image_payload_digest"] for m in persisted["messages"]}
+    assert len(digests) == 2
+
+
+@pytest.mark.parametrize("variant_a,variant_b", [
+    ({"type": "image_url", "image_url": {"url": "SAME"}},
+     {"type": "input_image", "image_url": {"url": "SAME"}}),
+    ({"type": "image_url", "image_url": {"url": "SAME"}},
+     {"type": "image_url", "image_url": {"url": "SAME"}, "cache_control": {"type": "ephemeral"}}),
+])
+def test_part_type_and_container_variants_survive_cold_cycles(session_dir, variant_a, variant_b):
+    url = _data_url(b"same-payload-here")
+    identity = {"role": "user", "id": "variant-event", "timestamp": 41.5}
+
+    def materialize(variant):
+        return {**identity, "content": [json.loads(json.dumps(variant).replace("SAME", url))]}
+
+    counts = _cycle_session(session_dir, "variant-cycle", [materialize(variant_a), materialize(variant_b)])
+
+    assert counts == [2, 2, 2], counts
+
+
+def test_mirror_only_inline_image_is_bounded(session_dir):
+    """Display content can be plain text while the mirror holds the only image."""
+    raw = _b64_bytes(b"mirror-only")
+    content = [{"type": "text", "text": "plain display"}]
+    row = {"role": "user", "content": content,
+           "api_content": json.dumps([{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + raw}}])}
+    session = Session(session_id="mirror-only", messages=[row])
+
+    session.save(touch_updated_at=False)
+
+    persisted = json.loads((session_dir / "mirror-only.json").read_text())
+    assert "data:image" not in json.dumps(persisted["messages"])
+    assert json.loads(persisted["messages"][0]["api_content"]) == [{"type": "text", "text": "[image attachment]"}]
+
+
+def test_project_message_payloads_stamps_display_rows_by_default():
+    """New-writer callers must inherit the display identity contract.
+
+    Without the discriminator these writers turn legacy same-ID/timestamp rows
+    with different bytes into equal marker rows: 2 immediately after the
+    rewrite, 1 after the first cold save.
+    """
+    import base64 as _b64
+
+    from api.session_image_persistence_override import project_message_payloads
+
+    identity = {"role": "user", "id": "writer-event", "timestamp": 42.5}
+    payload = {
+        "session_id": "writer",
+        "messages": [
+            {**identity, "content": [_openai_part("data:image/jpeg;base64," + _b64.b64encode(b"first").decode())]},
+            {**identity, "content": [_openai_part("data:image/jpeg;base64," + _b64.b64encode(b"second").decode())]},
+        ],
+    }
+
+    projected = project_message_payloads(payload)
+
+    assert projected is not payload
+    digests = {m.get("_image_payload_digest") for m in projected["messages"]}
+    assert None not in digests and len(digests) == 2
+    # Provider-replay arrays still never receive the key.
+    replay = {"context_messages": [dict(payload["messages"][0])]}
+    assert all(
+        "_image_payload_digest" not in m
+        for m in project_message_payloads(replay, keys=("context_messages",))["context_messages"]
+    )
+
+
+def test_new_writer_rows_survive_a_later_cold_save(session_dir):
+    """The writer stamps what it wrote, so the next save keeps both rows."""
+    import api.models as models
+    from api.session_image_persistence_override import project_message_payloads
+
+    identity = {"role": "user", "id": "writer-cycle", "timestamp": 43.5}
+    rows = [
+        {**identity, "content": [_openai_part(_data_url(b"alpha"))]},
+        {**identity, "content": [_openai_part(_data_url(b"beta"))]},
+    ]
+    payload = {"session_id": "writer-cycle", "message_count": 2, "messages": rows,
+               "tool_calls": [], "anchor_activity_scenes": {}}
+    projected = project_message_payloads(payload)
+    (session_dir / "writer-cycle.json").write_text(json.dumps(projected))
+
+    session = models.Session.load("writer-cycle")
+    counts = []
+    for _ in range(3):
+        session.save(touch_updated_at=False)
+        counts.append(json.loads((session_dir / "writer-cycle.json").read_text())["message_count"])
+        session = models.Session.load("writer-cycle")
+
+    assert counts == [2, 2, 2], counts

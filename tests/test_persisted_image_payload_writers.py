@@ -11,8 +11,7 @@ from __future__ import annotations
 import base64
 import json
 from collections import OrderedDict
-
-import pytest
+from pathlib import Path
 
 
 def _huge_part(chars=200_000):
@@ -115,3 +114,89 @@ def test_shrink_backup_does_not_copy_legacy_image_bytes(tmp_path, monkeypatch):
     assert bak.exists(), "expected a shrink backup"
     assert "data:image" not in bak.read_text()
     assert "data:image" not in (sessions / "bak-1.json").read_text()
+
+
+def _write_legacy_sidecar(sessions, sid, rows):
+    (sessions / f"{sid}.json").write_text(json.dumps({
+        "session_id": sid, "message_count": len(rows), "messages": rows,
+        "tool_calls": [], "anchor_activity_scenes": {}, "workspace": "/old/path",
+    }))
+
+
+def _cold_cycle_counts(sessions, sid, cycles=3):
+    import api.models as models
+    session = models.Session.load(sid)
+    counts = []
+    for _ in range(cycles):
+        session.save(touch_updated_at=False)
+        counts.append(json.loads((sessions / f"{sid}.json").read_text())["message_count"])
+        session = models.Session.load(sid)
+    return counts
+
+
+def _distinct_image_rows():
+    import base64 as _b64
+
+    url = "data:image/jpeg;base64," + _b64.b64encode(b"payload").decode()
+    identity = {"role": "user", "id": "writer-detail", "timestamp": 50.5}
+    return [
+        {**identity, "content": [{"type": "image_url", "image_url": {"url": url, "detail": "low"}}]},
+        {**identity, "content": [{"type": "image_url", "image_url": {"url": url, "detail": "high"}}]},
+    ]
+
+
+def test_workspace_rewrite_preserves_distinct_rows_across_cold_saves(tmp_path, monkeypatch):
+    """The workspace writer rewrites the whole sidecar; it must keep the contract."""
+    import api.models as models
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", sessions)
+    _write_legacy_sidecar(sessions, "ws-cycle", _distinct_image_rows())
+
+    session = models.Session.load("ws-cycle")
+    models.persist_recovered_workspace_binding(session, "/new/path")
+
+    rewritten = json.loads((sessions / "ws-cycle.json").read_text())
+    assert len(rewritten["messages"]) == 2
+    assert rewritten["workspace"] == "/new/path"
+    assert _cold_cycle_counts(sessions, "ws-cycle") == [2, 2, 2]
+
+
+def test_migration_keeps_distinct_rows_after_a_later_cold_save(tmp_path, monkeypatch):
+    import importlib.util
+    import api.models as models
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", sessions)
+    _write_legacy_sidecar(sessions, "mig-cycle", _distinct_image_rows())
+
+    script_path = Path(__file__).resolve().parent.parent / "scripts" / "migrate_persisted_image_payloads.py"
+    spec = importlib.util.spec_from_file_location("mig_payloads", script_path)
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    assert script.main(["--session-dir", str(sessions), "--apply"]) == 0
+
+    assert _cold_cycle_counts(sessions, "mig-cycle") == [2, 2, 2]
+
+
+def test_recovery_materialization_preserves_distinct_rows_across_cold_saves(tmp_path, monkeypatch):
+    import api.models as models
+    import api.session_recovery as recovery
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", sessions)
+    rows = _distinct_image_rows()
+    monkeypatch.setattr(recovery, "_read_state_db_missing_sidecar_rows", lambda *a, **k: [
+        {"id": "rec-cycle", "messages": rows},
+    ])
+    monkeypatch.setattr(
+        recovery, "_state_db_row_to_sidecar",
+        lambda r: {"session_id": r["id"], "messages": r["messages"], "message_count": len(r["messages"])},
+    )
+
+    recovery.recover_missing_sidecars_from_state_db(sessions, None)
+
+    assert _cold_cycle_counts(sessions, "rec-cycle") == [2, 2, 2]

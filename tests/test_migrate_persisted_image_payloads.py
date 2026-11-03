@@ -6,8 +6,6 @@ import importlib.util
 import json
 from pathlib import Path
 
-import pytest
-
 
 def _load_script():
     path = Path(__file__).resolve().parent.parent / "scripts" / "migrate_persisted_image_payloads.py"
@@ -104,3 +102,26 @@ def test_backup_is_never_overwritten(tmp_path):
     assert script.main(["--session-dir", str(tmp_path), "--apply"]) == 0
 
     assert backup.read_text() == "PRE-EXISTING"
+
+
+def test_concurrent_write_is_refused(tmp_path, monkeypatch):
+    """A live writer touching the file between read and replace aborts that file."""
+    script = _load_script()
+    target = tmp_path / "legacy.json"
+    target.write_text(json.dumps(_legacy_payload("legacy")))
+
+    calls = {"n": 0}
+    real = script._stat_signature
+
+    def flaky(path):
+        calls["n"] += 1
+        signature = real(path)
+        if calls["n"] == 2:  # second probe happens after the backup write
+            return ("changed", 0)
+        return signature
+
+    monkeypatch.setattr(script, "_stat_signature", flaky)
+
+    assert script.main(["--session-dir", str(tmp_path), "--apply"]) == 1
+
+    assert "data:image" in target.read_text(), "file must not be replaced on conflict"

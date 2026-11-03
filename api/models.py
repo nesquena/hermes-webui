@@ -2155,6 +2155,11 @@ class Session:
             'skill_provenance',
             'skill_provenance_generation',
         ]
+        # The display projection MUST be content-preserving with respect to the
+        # lossless dedup guard: compact_persisted_image_parts stamps
+        # _image_payload_digest over every distinction it erases (payload bytes
+        # AND part structure), so two distinct rows stay distinct across cold
+        # save/load cycles. See tests/test_persisted_image_payload_writers.py.
         guarded_messages, exact_replay_rows_removed = _deduplicate_exact_stable_messages(self.messages)
         # IMPORTANT: local compatibility override. Keep this call at the save
         # boundary across upstream updates; see api/session_image_persistence_override.py

@@ -99,6 +99,47 @@ def _is_inline_image_part(part) -> bool:
     return _inline_image_payload(part) is not None
 
 
+_MASK = "<inline-image>"
+
+
+def _mask_inline_payload(part):
+    """Return the part with its inline payload masked, preserving every other key.
+
+    The projection replaces a whole part with one shared marker, so any structural
+    or value distinction the part carried -- ``detail: low`` vs ``high``, the part
+    type, a container key, an extra field -- is erased along with the bytes. The
+    persisted discriminator must therefore cover what was erased, not only the
+    payload string, or two legitimately distinct rows collapse on the next save.
+    """
+    masked = copy.deepcopy(part)
+    url_value = masked.get("image_url")
+    if isinstance(url_value, dict):
+        url_value["url"] = _MASK
+    elif isinstance(url_value, str):
+        masked["image_url"] = _MASK
+    source = masked.get("source")
+    if isinstance(source, dict) and source.get("type") == "base64":
+        source["data"] = _MASK
+    return masked
+
+
+def _update_part_digest(digest, part, payload):
+    """Feed the masked structure AND the payload bytes into the discriminator."""
+    try:
+        masked = json.dumps(
+            _mask_inline_payload(part),
+            sort_keys=True,
+            ensure_ascii=False,
+            default=str,
+        )
+    except (TypeError, ValueError):
+        masked = repr(part)
+    digest.update(masked.encode("utf-8", "surrogatepass"))
+    digest.update(b"\x00")
+    digest.update(payload.encode("utf-8", "surrogatepass"))
+    digest.update(b"\x00")
+
+
 def _project_parts(content, digest):
     """Return (projected_parts, removed_payloads) for one content array."""
     projected = []
@@ -108,8 +149,7 @@ def _project_parts(content, digest):
         if payload is None:
             projected.append(part)
             continue
-        digest.update(payload.encode("utf-8", "surrogatepass"))
-        digest.update(b"\x00")
+        _update_part_digest(digest, part, payload)
         projected.append(dict(_MARKER))
         removed.append(payload)
     return projected, removed
@@ -138,7 +178,14 @@ def _project_api_content(raw, digest):
     projected, removed = _project_parts(parsed, digest)
     if not removed:
         return None
-    return json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+    # The mirror is reserialized, so its original byte layout is not reproducible.
+    # Feed the masked structural view of the ORIGINAL list into the discriminator:
+    # any distinction that the reserialization would flatten still counts.
+    projected_json = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+    digest.update(b"\x01mirror\x00")
+    digest.update(projected_json.encode("utf-8", "surrogatepass"))
+    digest.update(b"\x00")
+    return projected_json
 
 
 def compact_persisted_image_parts(messages, *, stamp_digest: bool = True) -> int:
@@ -188,24 +235,37 @@ def compact_persisted_image_parts(messages, *, stamp_digest: bool = True) -> int
 
 
 def _has_inline_image(value) -> bool:
-    """Cheap early-out scan: does this payload hold any inline image part?"""
+    """Cheap early-out scan: does this payload hold any inline image bytes?
+
+    Must recognise every representation the projector downstream can compact,
+    including the STRING ``api_content`` mirror: a message whose display content
+    is plain text can still carry an inline image only in that mirror, and
+    missing it here would skip projection entirely.
+    """
     if isinstance(value, list):
         return any(_has_inline_image(item) for item in value)
     if isinstance(value, dict):
         if _inline_image_payload(value) is not None:
             return True
         return any(_has_inline_image(child) for child in value.values())
+    if isinstance(value, str):
+        return "data:image/" in value
     return False
 
 
-def project_message_payloads(value, *, stamp_digest: bool = False, keys=None):
+def project_message_payloads(value, *, stamp_digest=None, keys=None):
     """Return a bounded copy of a JSON-shaped payload, or the SAME object if clean.
 
     Every embedded ``messages`` / ``context_messages`` array is projected through
     :func:`compact_persisted_image_parts`. Copy-on-write: a payload with no inline
     image bytes is returned unchanged, so callers on hot paths pay a scan, not a
-    deep copy. Used by the other durable writers (run journal, recovery
-    materialization, backups) that bypass ``Session.save()``.
+    deep copy. Used by the other durable writers (recovery materialization, the
+    workspace-binding repair, the shrink backup, the offline migration) that
+    bypass ``Session.save()``.
+
+    ``stamp_digest`` defaults to "auto": the display transcript gets the
+    discriminator (it is deduplicated), provider-replay arrays never do (they are
+    replayed to strict provider schemas and must not gain unknown keys).
     """
     message_keys = _DISPLAY_MESSAGE_KEYS if keys is None else frozenset(keys)
     if isinstance(value, dict):
@@ -215,7 +275,10 @@ def project_message_payloads(value, *, stamp_digest: bool = False, keys=None):
                 if not _has_inline_image(child):
                     continue
                 projected = copy.deepcopy(child)
-                if compact_persisted_image_parts(projected, stamp_digest=stamp_digest):
+                stamp = (
+                    (key in _DISPLAY_MESSAGE_KEYS) if stamp_digest is None else bool(stamp_digest)
+                )
+                if compact_persisted_image_parts(projected, stamp_digest=stamp):
                     if out is None:
                         out = dict(value)
                     out[key] = projected

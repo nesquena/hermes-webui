@@ -8,6 +8,11 @@ still carry megabytes of ``data:image/...;base64,...`` in ``messages`` and
 
 This tool is opt-in and conservative:
 
+* REQUIRES A QUIESCENT WRITER: stop the WebUI service (or accept that a
+  concurrent save may be overwritten) before using ``--apply``. The tool
+  re-reads each file and aborts that file if it changed between the read and the
+  replace, but it does not take the per-session mutation lock, so it cannot
+  serialise against a live writer.
 * default is a dry run; nothing is written without ``--apply``
 * every changed file is first copied to ``<name>.preimage-migration.bak``
   (never overwriting an existing backup)
@@ -63,6 +68,14 @@ def _projection_keys(include_context: bool):
     return ("messages", "context_messages") if include_context else ("messages",)
 
 
+def _stat_signature(path: Path):
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_size, stat.st_mtime_ns)
+
+
 def migrate_file(path: Path, *, apply: bool, include_context: bool = False) -> dict:
     """Rewrite one session file. Returns a per-file report dict."""
     report = {"file": path.name, "changed": False, "error": None,
@@ -103,9 +116,17 @@ def migrate_file(path: Path, *, apply: bool, include_context: bool = False) -> d
     if not apply:
         return report
 
+    # Conflict check: refuse to replace a file a live writer touched since we
+    # read it. The tool does not hold the per-session mutation lock, so this is
+    # best-effort protection, not a lock -- run it with writers stopped.
+    signature_before = _stat_signature(path)
     backup = path.with_suffix(path.suffix + ".preimage-migration.bak")
     if not backup.exists():
         backup.write_text(raw, encoding="utf-8")
+    if _stat_signature(path) != signature_before:
+        report["error"] = "concurrent_write_detected"
+        report["changed"] = False
+        return report
     tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
     try:
         with open(tmp, "w", encoding="utf-8") as handle:
