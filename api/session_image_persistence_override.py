@@ -123,8 +123,18 @@ def _mask_inline_payload(part):
     return masked
 
 
-def _update_part_digest(digest, part, payload):
-    """Feed the masked structure AND the payload bytes into the discriminator."""
+def _update_part_digest(digest, part, payload, position):
+    """Feed the position, masked structure AND payload bytes into the digest.
+
+    ``position`` is the part's index in the ORIGINAL array. The projection emits
+    the same marker regardless of where the image sat, so
+    ``[image, text("[image attachment]")]`` and
+    ``[text("[image attachment]"), image]`` would otherwise produce identical
+    markers and an identical digest -- two legitimately distinct rows collapsing
+    on the next save.
+    """
+    digest.update(f"pos={position}".encode("utf-8", "surrogatepass"))
+    digest.update(b"\x00")
     try:
         masked = json.dumps(
             _mask_inline_payload(part),
@@ -144,12 +154,12 @@ def _project_parts(content, digest):
     """Return (projected_parts, removed_payloads) for one content array."""
     projected = []
     removed = []
-    for part in content:
+    for position, part in enumerate(content):
         payload = _inline_image_payload(part)
         if payload is None:
             projected.append(part)
             continue
-        _update_part_digest(digest, part, payload)
+        _update_part_digest(digest, part, payload, position)
         projected.append(dict(_MARKER))
         removed.append(payload)
     return projected, removed
@@ -178,11 +188,14 @@ def _project_api_content(raw, digest):
     projected, removed = _project_parts(parsed, digest)
     if not removed:
         return None
-    # The mirror is reserialized, so its original byte layout is not reproducible.
-    # Feed the masked structural view of the ORIGINAL list into the discriminator:
-    # any distinction that the reserialization would flatten still counts.
     projected_json = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+    # The mirror is reserialized to one canonical layout, so the ORIGINAL string's
+    # arrangement (compact vs indented, key order, escaping) is erased too. Feed
+    # both the original bytes and the reserialized result into the discriminator:
+    # otherwise two rows whose mirrors differ only in layout collapse to one.
     digest.update(b"\x01mirror\x00")
+    digest.update(raw.encode("utf-8", "surrogatepass"))
+    digest.update(b"\x00")
     digest.update(projected_json.encode("utf-8", "surrogatepass"))
     digest.update(b"\x00")
     return projected_json
@@ -249,7 +262,23 @@ def _has_inline_image(value) -> bool:
             return True
         return any(_has_inline_image(child) for child in value.values())
     if isinstance(value, str):
-        return "data:image/" in value
+        # A string is either an ``api_content`` mirror (JSON part list) or a bare
+        # payload. Parse first so the SAME shape recognition the projector uses
+        # decides: a literal substring scan misses Anthropic base64 mirrors
+        # (no ``data:image/`` at all), case variants (``DATA:IMAGE/``) and
+        # JSON-escaped URLs (``data:image\/jpeg``).
+        stripped = value.lstrip()
+        if stripped[:1] in ("[", "{"):
+            try:
+                parsed = json.loads(stripped)
+            except (ValueError, TypeError):
+                parsed = None
+            if parsed is not None and parsed is not value:
+                if _has_inline_image(parsed):
+                    return True
+                # A well-formed mirror with no inline part is authoritative.
+                return False
+        return "data:image/" in value.lower()
     return False
 
 

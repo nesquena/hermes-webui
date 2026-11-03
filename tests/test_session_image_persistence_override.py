@@ -460,3 +460,87 @@ def test_new_writer_rows_survive_a_later_cold_save(session_dir):
         session = models.Session.load("writer-cycle")
 
     assert counts == [2, 2, 2], counts
+
+
+# --- Position and mirror-layout cold-cycle controls (maintainer supplement,
+# 2026-11-03). Both lanes; real save -> cold load -> save. ---
+
+_MARKER_TEXT = {"type": "text", "text": "[image attachment]"}
+
+
+def _position_rows(identity, url, *, lane):
+    """Two rows with identical bytes, differing only in WHERE the image sits."""
+    if lane == "content":
+        return [
+            {**identity, "content": [_openai_part(url), dict(_MARKER_TEXT)]},
+            {**identity, "content": [dict(_MARKER_TEXT), _openai_part(url)]},
+        ]
+    return [
+        {**identity, "content": "plain", "api_content": json.dumps([_openai_part(url), dict(_MARKER_TEXT)])},
+        {**identity, "content": "plain", "api_content": json.dumps([dict(_MARKER_TEXT), _openai_part(url)])},
+    ]
+
+
+@pytest.mark.parametrize("lane", ["content", "mirror"])
+def test_image_position_is_preserved_across_cold_cycles(session_dir, lane):
+    """The marker is position-independent, so the digest must carry the index.
+
+    `[image, text]` and `[text, image]` are distinct rows; without the position in
+    the digest they produce identical digests and collapse 2 -> 1 -> 1.
+    """
+    rows = _position_rows(
+        {"role": "user", "id": f"pos-{lane}", "timestamp": 80.5},
+        _data_url(b"identical-position-bytes"),
+        lane=lane,
+    )
+
+    counts = _cycle_session(session_dir, f"pos-{lane}", rows)
+
+    assert counts == [2, 2, 2], counts
+
+
+def test_original_mirror_layout_is_preserved_across_cold_cycles(session_dir):
+    """The mirror is reserialized canonically, so its ORIGINAL bytes must be hashed.
+
+    Compact and indented JSON parse identically but are different persisted
+    strings; the digest has to cover the original arrangement.
+    """
+    parts = [_openai_part(_data_url(b"identical-layout-bytes"))]
+    compact = json.dumps(parts, separators=(",", ":"))
+    indented = json.dumps(parts, indent=2)
+    assert compact != indented and json.loads(compact) == json.loads(indented)
+
+    identity = {"role": "user", "id": "layout", "timestamp": 81.5}
+    rows = [
+        {**identity, "content": "plain", "api_content": compact},
+        {**identity, "content": "plain", "api_content": indented},
+    ]
+
+    counts = _cycle_session(session_dir, "layout", rows)
+
+    assert counts == [2, 2, 2], counts
+
+
+def test_preflight_recognises_every_shape_the_projector_accepts():
+    """Early-out must not be narrower than the projector (mirror-only rows).
+
+    The old literal `data:image/` scan missed Anthropic base64 mirrors, uppercase
+    data URLs, and JSON-escaped slashes -- all of which the projector accepts.
+    """
+    from api.session_image_persistence_override import _has_inline_image
+
+    raw = _b64_bytes(b"preflight-shape")
+    escaped = ('[{"type":"image_url","image_url":{"url":"data:image\\/jpeg;base64,'
+               + raw + '"}}]')
+    assert "data:image/" not in escaped, "fixture must not contain the literal the old scan looked for"
+
+    shapes = {
+        "anthropic": json.dumps([_anthropic_part(b"preflight-shape")]),
+        "uppercase": json.dumps([{"type": "image_url", "image_url": {"url": "DATA:IMAGE/JPEG;BASE64," + raw}}]),
+        "json-escaped": escaped,
+    }
+    for label, mirror in shapes.items():
+        assert _has_inline_image(mirror) is True, label
+
+    # Clean mirrors must still early-out.
+    assert _has_inline_image(json.dumps([{"type": "text", "text": "no image"}])) is False

@@ -13,6 +13,8 @@ import json
 from collections import OrderedDict
 from pathlib import Path
 
+import pytest
+
 
 def _huge_part(chars=200_000):
     raw = base64.b64encode(b"\xff\xd8\xff\xe0" + b"A" * chars).decode()
@@ -200,3 +202,88 @@ def test_recovery_materialization_preserves_distinct_rows_across_cold_saves(tmp_
     recovery.recover_missing_sidecars_from_state_db(sessions, None)
 
     assert _cold_cycle_counts(sessions, "rec-cycle") == [2, 2, 2]
+
+
+# --- Writer-entry-point mirror preflight (maintainer: "Reuse parsed-shape
+# recognition and test these writer entry points. The direct-save mirror-only
+# test does not exercise this early-out.") ---
+
+def _mirror_only_row(identity, mirror_string):
+    """Display content is plain text; the ONLY inline image lives in the mirror."""
+    return {**identity, "content": "plain display text", "api_content": mirror_string}
+
+
+def _anthropic_mirror(raw: bytes) -> str:
+    import base64 as _b64
+    return json.dumps([{
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": _b64.b64encode(raw).decode("ascii"),
+        },
+    }])
+
+
+def _case_variant_mirror(raw: bytes) -> str:
+    import base64 as _b64
+    return json.dumps([{
+        "type": "image_url",
+        "image_url": {"url": "DATA:IMAGE/JPEG;BASE64," + _b64.b64encode(raw).decode("ascii")},
+    }])
+
+
+def _json_escaped_mirror(raw: bytes) -> str:
+    """A legal JSON escape of the slash: parses to a real data URL, but the RAW
+    string never contains the literal `data:image/` the old scan looked for."""
+    import base64 as _b64
+    return ('[{"type":"image_url","image_url":{"url":"data:image\\/jpeg;base64,'
+            + _b64.b64encode(raw).decode("ascii") + '"}}]')
+
+
+PREFLIGHT_MIRRORS = [
+    ("anthropic-base64", _anthropic_mirror),
+    ("case-variant", _case_variant_mirror),
+    ("json-escaped", _json_escaped_mirror),
+]
+
+
+@pytest.mark.parametrize("label,builder", PREFLIGHT_MIRRORS)
+def test_workspace_rewrite_bounds_mirror_only_shapes(tmp_path, monkeypatch, label, builder):
+    """The workspace writer must reach mirror-only images in every accepted shape."""
+    import api.models as models
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", sessions)
+    identity = {"role": "user", "id": f"ws-{label}", "timestamp": 70.5}
+    _write_legacy_sidecar(sessions, f"ws-{label}", [_mirror_only_row(identity, builder(b"m" * 64))])
+
+    session = models.Session.load(f"ws-{label}")
+    models.persist_recovered_workspace_binding(session, "/new/path")
+
+    rewritten = (sessions / f"ws-{label}.json").read_text()
+    persisted = json.loads(rewritten)
+    assert "base64," not in persisted["messages"][0]["api_content"], f"{label} mirror leaked bytes"
+    assert json.loads(persisted["messages"][0]["api_content"]) == [{"type": "text", "text": "[image attachment]"}]
+
+
+@pytest.mark.parametrize("label,builder", PREFLIGHT_MIRRORS)
+def test_migration_bounds_mirror_only_shapes(tmp_path, monkeypatch, label, builder):
+    import importlib.util
+    import api.models as models
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", sessions)
+    identity = {"role": "user", "id": f"mig-{label}", "timestamp": 71.5}
+    _write_legacy_sidecar(sessions, f"mig-{label}", [_mirror_only_row(identity, builder(b"m" * 64))])
+
+    script_path = Path(__file__).resolve().parent.parent / "scripts" / "migrate_persisted_image_payloads.py"
+    spec = importlib.util.spec_from_file_location("mig_payloads_preflight", script_path)
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    assert script.main(["--session-dir", str(sessions), "--apply"]) == 0
+
+    persisted = json.loads((sessions / f"mig-{label}.json").read_text())
+    assert json.loads(persisted["messages"][0]["api_content"]) == [{"type": "text", "text": "[image attachment]"}]
