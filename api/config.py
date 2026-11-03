@@ -9921,6 +9921,12 @@ def merge_model_alias_runtime_bundle(
                 CUSTOM_ROUTE_NO_CREDENTIAL,
                 provider or f"model alias {route.get('alias') or '<unknown>'}",
             )
+        elif not explicit_credential:
+            # The credential came from the provider's runtime, host-gated against the
+            # alias URL. For a name two records claim that is the shared pool's key,
+            # which can be the other record's (#8690): the alias takes the provider's
+            # verdict. An alias with its own key owns both halves and is untouched.
+            _refuse_ambiguous_provider_name(bundle, logical_provider)
         return bundle
 
     resolved_provider = provider

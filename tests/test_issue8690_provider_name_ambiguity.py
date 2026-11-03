@@ -344,6 +344,31 @@ def test_a_provider_only_model_alias_takes_the_same_refusal(monkeypatch, alias_p
         config.raise_for_custom_provider_route(streaming._resolve_model_alias_connection_bundle(alias, runtime))
 
 
+def test_a_url_alias_without_its_own_key_takes_the_same_refusal(monkeypatch):
+    """``model_aliases: {fast: {provider: openai, base_url: <named URL>}}`` with no key of its own.
+
+    The Agent resolves the alias host's credential from the provider's shared pool, which with
+    a sibling claiming ``openai`` is the built-in record's key (#8690): the alias takes the
+    provider's verdict. An alias that declares its own key owns both halves (next test).
+    """
+    _bind(monkeypatch, _config("openai", _records("openai", "named-first")))
+    alias = {"alias": "fast", "model": "gpt-synthetic", "provider": "openai", "base_url": NAMED_URL,
+             "base_url_explicit": True, "credential_explicit": False}
+    runtime = {"base_url": NAMED_URL, "api_key": BUILTIN_KEY}  # _resolve_model_alias_endpoint_runtime's shape
+    _assert_refused(config.merge_model_alias_runtime_bundle(alias, runtime), "'custom:openai'")
+    with pytest.raises(config.CustomProviderRouteError):
+        config.raise_for_custom_provider_route(streaming._resolve_model_alias_connection_bundle(alias, runtime))
+
+
+def test_a_url_alias_without_its_own_key_routes_when_nothing_else_claims_the_name(monkeypatch):
+    _bind(monkeypatch, _config("openai", {"openai": {"base_url": BUILTIN_URL, "api_key": BUILTIN_KEY}}))
+    alias = {"alias": "fast", "model": "gpt-synthetic", "provider": "openai", "base_url": NAMED_URL,
+             "base_url_explicit": True, "credential_explicit": False}
+    bundle = config.raise_for_custom_provider_route(
+        config.merge_model_alias_runtime_bundle(alias, {"base_url": NAMED_URL, "api_key": BUILTIN_KEY}))
+    assert (bundle["provider"], bundle["base_url"], bundle["api_key"]) == ("openai", NAMED_URL, BUILTIN_KEY)
+
+
 def test_an_alias_with_its_own_endpoint_and_key_is_unchanged(monkeypatch):
     """A URL+key alias owns both halves and is resolved by URL (``requested=custom``)."""
     _bind(monkeypatch, _config("openai", _records("openai", "named-first")))
