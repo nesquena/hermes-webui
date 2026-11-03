@@ -193,6 +193,12 @@ function closeModelDropdown() {}
 function syncModelChip() {}
 function _refreshOpenModelDropdown() {}
 
+// The real row click goes through selectModelFromDropdown(), which resolves
+// the option with _ensureModelOptionInDropdown() and then re-renders.
+function selectModelFromDropdown(value, provider) {
+  _ensureModelOptionInDropdown(value, modelSelect, provider || '');
+}
+
 for (const name of [
   '_normalizeConfiguredModelKey',
   '_configuredModelIdentity',
@@ -229,33 +235,60 @@ renderModelDropdown();
 
 // Rows directly under the "Configured" heading are the Configured section;
 // every other row (group bodies, ungrouped tail) is reported separately.
-const configured = [];
-const rows = [];
-let section = '';
-const visit = (node) => {
-  for (const child of node.children || []) {
-    const cls = String(child.className || '').split(/\s+/);
-    if (node === dropdown && cls.includes('model-group')) {
-      section = child.textContent === 'model_group_configured' ? 'configured' : 'groups';
-      continue;
+function collect() {
+  const configured = [];
+  const configuredNodes = [];
+  const rows = [];
+  const more = [];
+  let section = '';
+  const visit = (node) => {
+    for (const child of node.children || []) {
+      const cls = String(child.className || '').split(/\s+/);
+      if (node === dropdown && cls.includes('model-group')) {
+        section = child.textContent === 'model_group_configured' ? 'configured' : 'groups';
+        continue;
+      }
+      const html = String(child._innerHTML || '');
+      if (cls.includes('model-opt-more')) more.push(section);
+      const id = (html.match(/class="model-opt-id">([^<]*)</) || [])[1];
+      if (id !== undefined && cls.includes('model-opt')) {
+        const badge = (html.match(/model-opt-badge--(?!selected)([a-z]+)">([^<]*)</) || []).slice(1);
+        const row = { id, role: badge[0] || '', badge: badge[1] || '', active: cls.includes('active') };
+        if (node === dropdown && section === 'configured') {
+          configured.push(row);
+          configuredNodes.push(child);
+        } else rows.push(row);
+      }
+      if (cls.includes('model-group-body')) visit(child);
     }
-    const html = String(child._innerHTML || '');
-    const id = (html.match(/class="model-opt-id">([^<]*)</) || [])[1];
-    if (id !== undefined && cls.includes('model-opt')) {
-      const badge = (html.match(/model-opt-badge--(?!selected)([a-z]+)">([^<]*)</) || []).slice(1);
-      const row = { id, role: badge[0] || '', badge: badge[1] || '' };
-      if (node === dropdown && section === 'configured') configured.push(row);
-      else rows.push(row);
-    }
-    if (cls.includes('model-group-body')) visit(child);
+  };
+  visit(dropdown);
+  return {
+    configured,
+    configuredNodes,
+    rows,
+    more,
+    options: modelSelect.options.map(o => o.value),
+    selected: modelSelect.value,
+  };
+}
+
+const first = collect();
+const out = { ...first };
+delete out.configuredNodes;
+// Click the given Configured row `clicks` times, re-rendering after each click
+// as the page does, and report the state after the last one.
+if (payload.click !== undefined) {
+  let state = first;
+  for (let n = 0; n < (payload.clicks || 1); n++) {
+    state.configuredNodes[n === 0 ? payload.click : 0].onclick();
+    renderModelDropdown();
+    state = collect();
   }
-};
-visit(dropdown);
-process.stdout.write(JSON.stringify({
-  configured,
-  rows,
-  options: modelSelect.options.map(o => o.value),
-}));
+  out.afterClick = { ...state };
+  delete out.afterClick.configuredNodes;
+}
+process.stdout.write(JSON.stringify(out));
 """
 
 
@@ -326,11 +359,9 @@ def test_live_replacement_keeps_exactly_one_primary_in_configured(tmp_path, badg
     # The real live merge did replace the catalog twin.
     assert "@openai:openai/gpt-6.1-sol" in data["options"]
     assert "openai/gpt-6.1-sol" not in data["options"]
-    # The live row carries the badge, and Configured selects the configured id
-    # itself: the live row is sent as `openai/gpt-6.1-sol`, a different wire id.
-    assert _row(data, "@openai:openai/gpt-6.1-sol")["role"] == "primary"
+    # The live row carries the badge and is the one Configured row, as on .615.
     assert [(row["id"], row["role"]) for row in data["configured"]] == [
-        ("gpt-6.1-sol", "primary")
+        ("@openai:openai/gpt-6.1-sol", "primary")
     ]
 
 
@@ -650,38 +681,105 @@ assert.notStrictEqual(_configuredModelIdentity('any/x','magpie'),_configuredMode
     )
 
 
-def test_dedup_agrees_with_lookup_for_every_wrapper_shape():
-    """A badge key is dropped as a duplicate only when the lookup shows its
-    badge on the existing row, so no configured entry is lost. The one case
-    where the row shows the badge but the key is kept is a row sent as
-    `<provider>/<key>`: a different wire id, so the native row is synthesized
-    and the Configured section merges the two (covered by the render tests)."""
-    _run_node(
-        """
-const providers=['','openai','openrouter','custom:foo','custom:foo-bar','magpie'];
-const bases=['gpt-6.1-sol','GPT-6-1-sol','anthropic/claude-sonnet-4.6'];
-const ids=[...new Set(bases.flatMap(id=>{
-  const out=[id,`vendor/${id}`];
-  for(const p of providers.filter(Boolean)) out.push(`@${p}:${id}`,`${p}/${id}`,`@${p}:${p}/${id}`);
-  return out;
-}))];
-const wire=(v,p)=>{const s=String(v||'').trim().toLowerCase();const at=`@${p}:`;
-  return (s.startsWith(at)?s.slice(at.length):s).replace(/-/g,'.');};
-const lost=[],kept=[];
-for(const key of ids) for(const bp of providers){
-  const badge=bp?{role:'primary',label:'Primary',provider:bp}:{role:'primary',label:'Primary'};
-  for(const row of ids) for(const rp of providers){
-    const shown=!!_getConfiguredModelBadge(row,{[key]:badge},rp);
-    const dropped=_isEquivalentConfiguredModelEntry(key,badge,[{value:row,providerId:rp}]);
-    if(dropped&&!shown) lost.push([key,bp,row,rp]);
-    if(shown&&!dropped){
-      const ip=(bp||rp).toLowerCase();
-      const prefixed=!!ip&&wire(row,ip)===`${ip.replace(/-/g,'.')}/${wire(key,ip)}`;
-      if(!prefixed) kept.push([key,bp,row,rp]);
-    }
-  }
-}
-assert.deepStrictEqual(lost.slice(0,5),[]);
-assert.deepStrictEqual(kept.slice(0,5),[]);
-"""
+@pytest.mark.parametrize(
+    "extra, more",
+    [
+        # Sent as `custom:foo-bar/acme/example-model`: a different model id from
+        # the Configured row, so "Show all" must still reach it (as on master).
+        (_FOO_BAR_ROW, ["groups"]),
+        # The configured id itself: Configured already shows it.
+        ("acme/example-model", []),
+    ],
+    ids=["provider-prefixed-twin", "configured-id"],
+)
+def test_show_all_counts_only_hidden_rows_configured_does_not_send(tmp_path, extra, more):
+    """Gate r1103e: a hidden overflow row stays out of the "Show all" count only
+    when a Configured row sends its model id."""
+    data = _render(
+        tmp_path,
+        {
+            "groups": [
+                {
+                    "provider": "Foo Bar",
+                    "provider_id": "custom:foo-bar",
+                    "models": [{"id": "acme/other-model"}],
+                    "extra_models": [{"id": extra}],
+                }
+            ],
+            "selectedValue": "acme/other-model",
+            "configuredBadges": {"acme/example-model": _badge("custom:foo-bar")},
+        },
     )
+
+    assert len(data["configured"]) == 1
+    assert data["more"] == more
+
+
+@pytest.mark.parametrize("clicks", [1, 2], ids=["first-click", "second-click"])
+@pytest.mark.parametrize(
+    "payload, configured_id",
+    [
+        (
+            {
+                "groups": [
+                    {
+                        "provider": "Anthropic",
+                        "provider_id": "anthropic",
+                        "models": [{"id": "acme/other-model"}, {"id": "anthropic/acme/example-model"}],
+                    }
+                ],
+                "selectedValue": "acme/other-model",
+                "configuredBadges": {"acme/example-model": _badge("anthropic")},
+            },
+            "acme/example-model",
+        ),
+        (
+            {
+                "groups": [{"provider": "OpenRouter", "provider_id": "openrouter", "models": [{"id": "x/other"}]}],
+                "selectedValue": "x/other",
+                "configuredBadges": {"anthropic/claude-sonnet-4.6": _badge("openrouter")},
+                "requested": "openrouter/anthropic/claude-sonnet-4.6",
+            },
+            "anthropic/claude-sonnet-4.6",
+        ),
+    ],
+    ids=["catalog-alias", "typed-alias"],
+)
+def test_the_clicked_configured_row_stays_the_selected_configured_row(tmp_path, payload, configured_id, clicks):
+    """Gate r1103e: clicking the native Configured row selects the configured id;
+    on re-render the Configured row must be that selected row, not the
+    `<provider>/<model>` alias, so a second click sends the same id."""
+    data = _render(tmp_path, dict(payload, click=0, clicks=clicks))
+
+    assert [row["id"] for row in data["configured"]] == [configured_id]
+    after = data["afterClick"]
+    assert len(after["configured"]) == 1
+    assert after["configured"][0]["active"] is True
+    assert after["selected"] == after["configured"][0]["id"]
+    assert after["selected"].endswith(":" + configured_id)
+
+
+@pytest.mark.parametrize("clicks", [0, 1, 2], ids=["render", "first-click", "second-click"])
+def test_a_providerless_entry_is_one_configured_row(tmp_path, clicks):
+    """A providerless badge shows on a provider-wrapped row too (the identity
+    peels that row's `@p:p/` wrappers), and the native id is still synthesized.
+    Both rows show the same configured entry, so Configured has one row for it,
+    and clicking it keeps that row selected (master shows one row here)."""
+    payload = {
+        "groups": [{"provider": "OpenAI", "provider_id": "openai", "models": [{"id": "x/other-model"}]}],
+        "selectedValue": "x/other-model",
+        "configuredBadges": {"acme/example-model": _badge(None)},
+        "requested": "openai/acme/example-model",
+        "requestedProvider": "openai",
+    }
+    if clicks:
+        payload.update(click=0, clicks=clicks)
+    data = _render(tmp_path, payload)
+
+    assert len(data["configured"]) == 1
+    if clicks:
+        after = data["afterClick"]
+        assert len(after["configured"]) == 1
+        assert after["configured"][0]["active"] is True
+        assert after["selected"] == after["configured"][0]["id"]
+

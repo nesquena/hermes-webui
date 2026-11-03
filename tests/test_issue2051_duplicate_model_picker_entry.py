@@ -75,7 +75,6 @@ def test_provider_qualified_badge_alias_is_not_a_second_picker_row():
     """All three spellings of one configured model collapse to one row (#2051)."""
     script = HARNESS + js(
         "_normalizeConfiguredModelKey",
-        "_configuredModelIdentity",
         "_isEquivalentConfiguredModelEntry",
     ) + f"""
 const entries=[{CATALOG_ROW}];
@@ -98,7 +97,6 @@ def test_a_genuinely_different_model_is_never_suppressed():
     """The new rule must not hide a model the catalog does not have."""
     script = HARNESS + js(
         "_normalizeConfiguredModelKey",
-        "_configuredModelIdentity",
         "_isEquivalentConfiguredModelEntry",
     ) + f"""
 const entries=[{CATALOG_ROW}];
@@ -118,13 +116,11 @@ assert.strictEqual(
     [{{value:'acme/example-model',providerId:'custom'}}]), false,
   'a same-named model owned by a different provider must keep its own row');
 
-// A badge with no provider has no prefix proof of its own: only the existing
-// row's own provider wrapper counts as routing syntax, exactly as the badge
-// lookup reads the same pair (#8756), so another provider's prefix keeps its row.
+// A badge with no provider cannot use the prefix proof at all.
 assert.strictEqual(
-  _isEquivalentConfiguredModelEntry('otherprovider/acme/example-model',
+  _isEquivalentConfiguredModelEntry('custom/acme/example-model',
     {{role:'primary',label:'Primary'}},entries), false,
-  'a provider-less badge must not be collapsed by another provider prefix');
+  'a provider-less badge must not be collapsed by the prefix rule');
 
 // The prefix must be a real path segment, not a substring of the first segment.
 assert.strictEqual(
@@ -136,29 +132,29 @@ console.log('OK');
 
 
 def test_prefix_rule_mirrors_the_at_provider_rule_structurally():
-    """The `<provider>/` and `@<provider>:` proofs are one identity (#8756).
+    """The `<provider>/` proof must require the same three clauses as `@<provider>:`.
 
-    Structural, not behavioural: it pins that the predicate rejects a row owned
-    by another provider, and strips routing prefixes only through the identity
-    the badge lookup uses, keyed on one provider for both spellings, so dedup
-    and lookup cannot disagree about which prefix is routing syntax.
+    Structural, not behavioural: it pins that the new branch is gated on the
+    badge-declared provider, on a literal prefix match, and on an existing entry
+    of that same provider — so it cannot grow into a loose label comparison.
     """
     src = extract_function(UI_JS, "_isEquivalentConfiguredModelEntry")
-    assert "if(provider&&entryProvider&&entryProvider!==provider) return false;" in src, (
+    assert "const slashPrefix=provider?`${provider}/`:'';" in src, (
+        "the provider-qualified alias rule must derive its prefix from the "
+        "badge-declared provider"
+    )
+    assert "rawId.toLowerCase().startsWith(slashPrefix)" in src, (
+        "the rule must require a literal `<provider>/` prefix on the badge key"
+    )
+    assert "_entryProvider(entry)===provider" in src, (
         "the rule must require an existing picker row owned by the same provider"
-    )
-    assert "_configuredModelIdentity(existing&&existing.value,identityProvider)" in src, (
-        "the existing row must be compared through the shared configured identity"
-    )
-    assert "_configuredModelIdentity(modelId,identityProvider)" in src, (
-        "the badge key must be compared through the same identity and provider"
     )
     assert "(entry&&entry.providerId)||(entry&&entry.badge&&entry.badge.provider)" in src, (
         "row provider authority must be structural providerId first, then the "
         "configured badge provider (#7290), never a loose label comparison"
     )
-    lookup = extract_function(UI_JS, "_getConfiguredModelBadge")
-    assert (
-        "_configuredModelIdentity(candidate,identityProvider)===_configuredModelIdentity(modelId,identityProvider)"
-        in lookup
-    ), "the badge lookup must use the same identity as the dedup predicate"
+    # It must run before the `@provider:` early return, which would otherwise
+    # short-circuit every non-`@` alias to false.
+    assert src.index("slashPrefix") < src.index(
+        "if(!prefix||!rawId.toLowerCase().startsWith(prefix)) return false;"
+    ), "the `<provider>/` rule must be reached before the `@<provider>:` early return"

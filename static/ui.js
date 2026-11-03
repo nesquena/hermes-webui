@@ -6038,54 +6038,58 @@ function _configuredModelIdentity(modelId,providerId){
 }
 
 function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
+  const normalized=_normalizeConfiguredModelKey(modelId);
   const provider=String(badge&&badge.provider||'').toLowerCase();
   // A row synthesized from an ungrouped top-level OPTION (temporary/custom
   // entries added by _ensureModelOptionInDropdown) is stored with providerId:''
   // even when the option carries provider identity, so that row's provider
   // authority has to fall back to its badge provider (same fallback already
-  // used by _modelProviderForSelectedBadge below). Without it the provider
-  // check below would read the row as providerless (#7290).
+  // used by _modelProviderForSelectedBadge below). Without it neither the
+  // same-normalized fast path nor the routed spellings can see the row as
+  // belonging to that provider (#7290).
   const _entryProvider=(entry)=>String(
     (entry&&entry.providerId)||(entry&&entry.badge&&entry.badge.provider)||''
   ).toLowerCase();
-  // configured_model_badges holds every spelling of a configured model and
-  // renderModelDropdown() synthesises a row for each key this predicate does
-  // not recognise. A key is a duplicate only when an existing row of the same
-  // provider (#3360, #7290) already shows its configured entry: the row shares
-  // the identity _getConfiguredModelBadge() matches on, so lookup and dedup
-  // cannot disagree (#8756), or the row carries the same entry's badge (same
-  // role and label) because the backend linked the two spellings across a
-  // vendor namespace (`qwen3` -> `Qwen/qwen3`, via _norm_model_id), which the
-  // identity keeps apart.
-  const role=String(badge&&badge.role||'');
-  const label=String(badge&&badge.label||'');
-  const _showsSameEntry=(entry)=>!!label&&!!(entry&&entry.badge)
-    &&String(entry.badge.label||'')===label
-    &&String(entry.badge.role||'')===role
-    &&String(entry.badge.provider||'').toLowerCase()===provider;
-  return (entries||[]).some(existing=>{
+  const matchingEntries=(entries||[]).filter(existing=>
+    _normalizeConfiguredModelKey(existing.value)===normalized
+  );
+  if(matchingEntries.some(existing=>{
     const entryProvider=_entryProvider(existing);
-    if(provider&&entryProvider&&entryProvider!==provider) return false;
-    const identityProvider=provider||entryProvider;
-    // A row is sent as its value less only the `@provider:` routing prefix, so
-    // `<provider>/<model>` (a typed `openrouter/<vendor>/<model>` alias, or a
-    // catalog/live/overflow row composed as `@p:p/<model>`) is a different wire
-    // id from the configured `<model>`. Such a row never stands in for the
-    // configured id, whatever section it is in: the native row is synthesized,
-    // and the Configured section merges the two and prefers it, so clicking
-    // Configured always selects the id the user configured.
-    if(identityProvider&&existing){
-      const at=`@${identityProvider}:`;
-      const wire=(v)=>{
-        const s=String(v||'').trim().toLowerCase();
-        return (s.startsWith(at)?s.slice(at.length):s).replace(/-/g,'.');
-      };
-      if(wire(existing.value)===`${identityProvider.replace(/-/g,'.')}/${wire(modelId)}`) return false;
-    }
-    if(_showsSameEntry(existing)) return true;
-    return _configuredModelIdentity(existing&&existing.value,identityProvider)
-      ===_configuredModelIdentity(modelId,identityProvider);
-  });
+    return !provider||!entryProvider||entryProvider===provider;
+  })) return true;
+  // @provider:model is an equivalent routing spelling only when an existing
+  // picker row belongs to that same provider. This supports named custom
+  // providers (@custom:name:model) without collapsing matching model IDs from
+  // different providers.
+  const rawId=String(modelId||'');
+  // `<provider>/<model>` is another routing spelling of `<model>`, so its badge
+  // key must not become a second picker row. configured_model_badges holds every
+  // spelling of a configured model and renderModelDropdown() synthesises a row
+  // for each key this predicate does not recognise. The provider-qualified
+  // spelling was missed because _normalizeConfiguredModelKey() strips only one
+  // leading slash segment (#3360 keeps `vendor_a/x` and `vendor_b/y/x` distinct),
+  // so `acme/example-model` and `custom/acme/example-model` normalise to
+  // different keys and the picker lists one model twice.
+  // Match it the way the `@provider:` rule below does: the badge declares a
+  // provider, the key starts with that provider's `<provider>/` prefix, and an
+  // existing row from the same provider normalises equal to the remainder. Two
+  // different models never satisfy the last clause, so this can only drop a
+  // duplicate of a row the catalog already produced.
+  const slashPrefix=provider?`${provider}/`:'';
+  if(slashPrefix&&rawId.toLowerCase().startsWith(slashPrefix)){
+    const slashRoutedId=rawId.slice(slashPrefix.length);
+    if(slashRoutedId&&(entries||[]).some(entry=>
+      _entryProvider(entry)===provider
+      &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(slashRoutedId)
+    )) return true;
+  }
+  const prefix=provider?`@${provider}:`:'';
+  if(!prefix||!rawId.toLowerCase().startsWith(prefix)) return false;
+  const routedId=rawId.slice(prefix.length);
+  return (entries||[]).some(entry=>
+    _entryProvider(entry)===provider
+    &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(routedId)
+  );
 }
 
 function _getConfiguredModelBadge(modelId,badgeMap,providerId){
@@ -7020,6 +7024,14 @@ function renderModelDropdown(){
     const semanticKeyByEntry=new Map();
     const _configuredProviderKey=(m)=>String((m&&m.badge&&m.badge.provider)||_providerFromModelValue(m&&m.value)||'').toLowerCase();
     const _configuredModelKey=(m)=>_configuredModelIdentity(m&&m.value||'',_configuredProviderKey(m));
+    const _sendsProviderAlias=(m)=>{
+      const p=_configuredProviderKey(m);
+      if(!p) return false;
+      const s=String(m&&m.value||'').trim().toLowerCase();
+      const at=`@${p}:`;
+      const w=(s.startsWith(at)?s.slice(at.length):s).replace(/-/g,'.');
+      return w.startsWith(`${p.replace(/-/g,'.')}/`);
+    };
     const _configuredDisplayPriority=(m)=>{
       // Prefer plain IDs over provider-qualified aliases for readability.
       const v=String((m&&m.value)||'');
@@ -7032,13 +7044,22 @@ function renderModelDropdown(){
       // backend also badges spellings it linked across a vendor namespace
       // (`qwen3` and `Qwen/qwen3`, via _norm_model_id), which the identity
       // keeps apart, so a later row showing an entry already placed joins
-      // that row's key (#8756).
-      const entryKey=candidate.badge.label?`${_configuredProviderKey(candidate)}::${candidate.badge.role||''}::${candidate.badge.label}`:'';
+      // that row's key (#8756). The badge names the entry, so its own provider
+      // (none for a providerless badge) keys it, not the row's routing prefix.
+      const entryKey=candidate.badge.label?`${String(candidate.badge.provider||'').toLowerCase()}::${candidate.badge.role||''}::${candidate.badge.label}`:'';
       const semanticKey=(entryKey&&semanticKeyByEntry.get(entryKey))||`${_configuredProviderKey(candidate)}::${_configuredModelKey(candidate)}`;
       if(entryKey&&!semanticKeyByEntry.has(entryKey)) semanticKeyByEntry.set(entryKey,semanticKey);
       const existing=configuredBySemanticKey.get(semanticKey);
       if(!existing){
         configuredBySemanticKey.set(semanticKey,candidate);
+        continue;
+      }
+      // A row that sends `<provider>/<model>` is an alias of the configured id;
+      // a row that sends the configured id itself always wins the Configured slot.
+      const candidateAlias=_sendsProviderAlias(candidate);
+      const existingAlias=_sendsProviderAlias(existing);
+      if(candidateAlias!==existingAlias){
+        if(!candidateAlias) configuredBySemanticKey.set(semanticKey,candidate);
         continue;
       }
       const candidatePriority=_configuredDisplayPriority(candidate);
@@ -7062,11 +7083,21 @@ function renderModelDropdown(){
     const configuredIds=new Set(configuredModels.map(m=>m.value));
     // Every configured row's own key, including rows merged into another row
     // by configured entry above.
-    const configuredSemanticKeys=new Set(configuredCandidates.map(m=>`${_configuredProviderKey(m)}::${_configuredModelKey(m)}`));
+    // A hidden row stays out of the Show-more count only when a Configured row
+    // already sends its wire id (value less `@provider:`, dash-folded); a row
+    // that sends `<provider>/<model>` is a different wire id and stays reachable.
+    const _configuredWireKey=(m)=>{
+      const p=_configuredProviderKey(m);
+      const s=String(m&&m.value||'').trim().toLowerCase();
+      const at=`@${p}:`;
+      return `${p}::${(p&&s.startsWith(at)?s.slice(at.length):s).replace(/-/g,'.')}`;
+    };
+    const configuredWireKeys=new Set(configuredModels.map(_configuredWireKey));
     const _effectiveHiddenCount=(groupKey)=>_modelData.filter(m=>
       m.groupKey===groupKey
       && m.hiddenByDefault
-      && !configuredSemanticKeys.has(`${_configuredProviderKey(m)}::${_configuredModelKey(m)}`)
+      && !configuredIds.has(m.value)
+      && !configuredWireKeys.has(_configuredWireKey(m))
     ).length;
     dd.innerHTML='';
     dd.appendChild(_scopeNote);
