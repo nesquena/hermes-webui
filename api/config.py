@@ -7982,14 +7982,27 @@ def _configured_badge_fallback_provider(entry: dict, config_obj: dict | None) ->
     Uses the same resolution as the active provider, so a legacy
     ``custom_providers`` name such as ``magpie`` becomes the ``custom:magpie``
     group id instead of a bare alias no picker row carries (#8732).
+
+    A badge is cosmetic, so a malformed entry must not take ``/api/models``
+    down with it: ``base_url: "http://[bad"`` makes ``urlparse`` raise inside
+    the base-url match, and that entry then badges with its plain provider
+    alias (the pre-#8732 spelling) instead of failing the whole catalog.
     """
     model = str(entry.get("model") or "").strip()
-    return _resolve_configured_provider_id(
-        entry.get("provider"),
-        config_obj,
-        base_url=entry.get("base_url"),
-        model_id=model or None,
-    )
+    try:
+        return _resolve_configured_provider_id(
+            entry.get("provider"),
+            config_obj,
+            base_url=entry.get("base_url"),
+            model_id=model or None,
+        )
+    except Exception as exc:
+        logger.debug(
+            "fallback_providers entry %r: provider resolution failed for its badge (%s); using the plain alias",
+            entry.get("provider"),
+            exc,
+        )
+        return _resolve_provider_alias(entry.get("provider")) or ""
 
 
 def _configured_badge_option_ids(groups: list[dict]) -> list[str]:
@@ -8024,19 +8037,44 @@ def _configured_badge_provider_match(
 
     Rows owned by another provider are never candidates. A row owned by the
     configured provider wins over a row with no provider id.
+
+    When no row has the configured id's identity, the id may still name one
+    row under a vendor spelling: a bare ``claude-sonnet-4`` on a relay that
+    lists ``anthropic/claude-sonnet-4``, or ``anthropic/claude-sonnet-4`` on a
+    relay that lists only ``claude-sonnet-4``. Such a row matches only when
+    one identity ends with the other at a ``/`` boundary and exactly one row
+    qualifies, so the badge (and the picker's "Configured" row, which the
+    frontend only shows on a badged row or a key it cannot dedupe) does not
+    vanish for an unambiguous match. Two rows that differ only by vendor
+    namespace (``any/`` and ``codex/``) never end with each other, so a
+    sibling still never borrows the badge, and two vendor spellings of one
+    bare id (``anthropic/`` and ``bedrock/``) are ambiguous and badge neither.
+    OpenRouter is excluded: its route text must match exactly
+    (docs/architecture/model-picker-routing.md).
     """
     target = _configured_badge_model_identity(model, provider)
+    if not target:
+        return None
     unowned_match = None
+    vendor_spellings: list[str] = []
     for opt_id in option_ids:
         opt_provider = option_provider_lookup.get(opt_id, "")
         if opt_provider and opt_provider != provider:
             continue
-        if _configured_badge_model_identity(opt_id, provider) != target:
-            continue
-        if opt_provider == provider:
-            return opt_id
-        unowned_match = unowned_match or opt_id
-    return unowned_match
+        identity = _configured_badge_model_identity(opt_id, provider)
+        if identity == target:
+            if opt_provider == provider:
+                return opt_id
+            unowned_match = unowned_match or opt_id
+        elif identity.endswith(f"/{target}") or target.endswith(f"/{identity}"):
+            vendor_spellings.append(opt_id)
+    if unowned_match:
+        return unowned_match
+    if provider == "openrouter":
+        return None
+    if len(vendor_spellings) == 1:
+        return vendor_spellings[0]
+    return None
 
 
 def _configured_model_badges_from_static_catalog(

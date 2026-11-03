@@ -15,16 +15,30 @@ builders had the same two defects:
 The shape below is the one pinned in the issue: a legacy custom provider
 ``magpie`` serving 34 ids with ``codex/gpt-6.1-sol`` listed last, and
 ``fallback_providers: [{provider: magpie, model: codex/gpt-6.1-sol}]``.
+
+The review of #8741 added two shapes, covered at the end of this file:
+
+- a fallback entry whose ``base_url`` ``urlparse`` rejects must not fail the
+  whole ``/api/models`` response (the handler calls ``get_available_models()``
+  with no guard, so a raise there is an HTTP 500);
+- a bare configured id (``claude-sonnet-4``) on a relay that lists it under one
+  vendor spelling (``anthropic/claude-sonnet-4``) keeps its badge on that row,
+  because the frontend dedupes the bare key against that row and would
+  otherwise show neither a badge nor a "Configured" row.
 """
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
 
 import api.config as config
+from tests.js_source_extract import extract_function
 
 TARGET = "codex/gpt-6.1-sol"
 SIBLINGS = ["any/gpt-6.1-sol", "auto/gpt-6.1-sol"]
@@ -32,9 +46,21 @@ SIBLINGS = ["any/gpt-6.1-sol", "auto/gpt-6.1-sol"]
 # (past the cut, so it lives in ``extra_models``).
 MAGPIE_IDS = SIBLINGS + [f"vendor{i:02d}/model-{i:02d}" for i in range(31)] + [TARGET]
 
+MAGPIE = {"name": "magpie", "base_url": "https://magpie.example/v1", "api_key": "magpie-key"}
+RELAY = {"name": "relay", "base_url": "https://relay.example/v1", "api_key": "relay-key"}
+# The review's entry: ``urlparse("http://[bad")`` raises ``ValueError: Invalid IPv6 URL``.
+MALFORMED_FALLBACK = {"provider": "custom", "base_url": "http://[bad", "model": "gpt-4o"}
 
-def _available_models(monkeypatch, tmp_path, fallback_provider: str, model_ids: list[str]) -> dict:
-    """Live ``get_available_models()`` with ``magpie`` served from a local mock."""
+UI_JS = (Path(__file__).resolve().parents[1] / "static" / "ui.js").read_text(encoding="utf-8")
+NODE = shutil.which("node")
+
+
+def _live_models(monkeypatch, tmp_path, *, custom_providers, fallback_providers, served, model=None) -> dict:
+    """Live ``get_available_models()`` with each custom provider served from a local mock.
+
+    ``served`` maps a mock host (``magpie.example``) to the ids its ``/v1/models`` lists.
+    ``model`` is the primary ``model:`` config; the default keeps it off the mocked providers.
+    """
 
     class FakeResponse:
         def __init__(self, payload):
@@ -51,8 +77,9 @@ def _available_models(monkeypatch, tmp_path, fallback_provider: str, model_ids: 
 
     def fake_urlopen(req, timeout=10):
         url = getattr(req, "full_url", str(req))
-        if "magpie.example" in url:
-            return FakeResponse({"data": [{"id": model_id} for model_id in model_ids]})
+        for host, model_ids in served.items():
+            if host in url:
+                return FakeResponse({"data": [{"id": model_id} for model_id in model_ids]})
         raise urllib.error.URLError(f"no network in this test: {url}")
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
@@ -63,11 +90,9 @@ def _available_models(monkeypatch, tmp_path, fallback_provider: str, model_ids: 
     monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "auth.json")
     for name, value in (
         ("cfg", {
-            "model": {"provider": "openai-codex", "default": "gpt-5.4"},
-            "custom_providers": [
-                {"name": "magpie", "base_url": "https://magpie.example/v1", "api_key": "magpie-key"}
-            ],
-            "fallback_providers": [{"provider": fallback_provider, "model": TARGET}],
+            "model": model or {"provider": "openai-codex", "default": "gpt-5.4"},
+            "custom_providers": custom_providers,
+            "fallback_providers": fallback_providers,
             "providers": {},
         }),
         ("_cfg_mtime", 0.0),
@@ -80,10 +105,25 @@ def _available_models(monkeypatch, tmp_path, fallback_provider: str, model_ids: 
     return config.get_available_models()
 
 
-def _magpie_group(result: dict) -> dict:
-    groups = [g for g in result.get("groups", []) if g.get("provider_id") == "custom:magpie"]
+def _available_models(monkeypatch, tmp_path, fallback_provider: str, model_ids: list[str]) -> dict:
+    """The issue's shape: legacy ``magpie`` serving *model_ids*, one fallback entry on it."""
+    return _live_models(
+        monkeypatch,
+        tmp_path,
+        custom_providers=[MAGPIE],
+        fallback_providers=[{"provider": fallback_provider, "model": TARGET}],
+        served={"magpie.example": model_ids},
+    )
+
+
+def _group(result: dict, provider_id: str) -> dict:
+    groups = [g for g in result.get("groups", []) if g.get("provider_id") == provider_id]
     assert len(groups) == 1, [g.get("provider_id") for g in result.get("groups", [])]
     return groups[0]
+
+
+def _magpie_group(result: dict) -> dict:
+    return _group(result, "custom:magpie")
 
 
 def _option_ids(group: dict) -> list[str]:
@@ -170,13 +210,20 @@ def test_static_catalog_badges_match_the_live_builder():
         assert f"@custom:magpie:{sibling}" not in badges
 
 
-def _static_badges(groups: list[dict], fallback_providers: list[dict]) -> dict:
+def _static_badges(
+    groups: list[dict],
+    fallback_providers: list[dict],
+    custom_providers: list[dict] | None = None,
+    *,
+    active_provider: str | None = None,
+    default_model: str = "",
+) -> dict:
     old_cfg = dict(config.cfg)
     config.cfg.clear()
-    config.cfg.update({"fallback_providers": fallback_providers})
+    config.cfg.update({"fallback_providers": fallback_providers, "custom_providers": custom_providers or []})
     try:
         return config._configured_model_badges_from_static_catalog(
-            groups, active_provider=None, default_model=""
+            groups, active_provider=active_provider, default_model=default_model
         )
     finally:
         config.cfg.clear()
@@ -212,3 +259,260 @@ def test_openrouter_identity_keeps_dash_and_dot_routes_apart():
     badges = _static_badges(groups, [{"provider": "openrouter", "model": "Vendor/Model-4-5"}])
     assert badges.get("vendor/model-4-5", {}).get("label") == "Fallback 1"
     assert "vendor/model-4.5" not in badges
+
+
+# ---------------------------------------------------------------------------
+# Review of #8741, point 1: a malformed fallback entry must not fail /api/models.
+# ---------------------------------------------------------------------------
+
+
+def _relay_groups(model_ids: list[str]) -> list[dict]:
+    return [
+        {
+            "provider": "relay",
+            "provider_id": "custom:relay",
+            "models": [{"id": f"@custom:relay:{i}"} for i in model_ids],
+        }
+    ]
+
+
+def test_malformed_fallback_base_url_falls_back_to_the_plain_provider_alias():
+    # The base-url match is what raises; the badge helper must swallow it and
+    # keep the entry's plain alias, which is what the builders used before #8732.
+    with pytest.raises(ValueError):
+        config._normalize_base_url_for_match(MALFORMED_FALLBACK["base_url"])
+    assert config._configured_badge_fallback_provider(MALFORMED_FALLBACK, {"custom_providers": [RELAY]}) == "custom"
+
+
+def test_malformed_fallback_base_url_keeps_the_static_badges():
+    badges = _static_badges(
+        _relay_groups(["claude-sonnet-4", "openai/gpt-4o"]),
+        [MALFORMED_FALLBACK, {"provider": "relay", "model": "claude-sonnet-4"}],
+        custom_providers=[RELAY],
+    )
+    # The malformed entry still badges, under its plain alias ...
+    assert badges.get("gpt-4o") == {"role": "fallback", "label": "Fallback 1", "provider": "custom"}
+    # ... and the entries after it are unaffected.
+    assert badges.get("@custom:relay:claude-sonnet-4") == {"role": "fallback", "label": "Fallback 2", "provider": "custom:relay"}
+
+
+def test_malformed_fallback_base_url_does_not_fail_get_available_models(monkeypatch, tmp_path):
+    # /api/models calls get_available_models() with no guard (api/routes.py), so
+    # a ValueError out of the badge builder is the HTTP 500 the review reproduced.
+    result = _live_models(
+        monkeypatch,
+        tmp_path,
+        custom_providers=[RELAY],
+        fallback_providers=[MALFORMED_FALLBACK, {"provider": "relay", "model": "claude-sonnet-4"}],
+        served={"relay.example": ["claude-sonnet-4", "openai/gpt-4o"]},
+    )
+    ids = _option_ids(_group(result, "custom:relay"))
+    badges = result["configured_model_badges"]
+    assert badges.get("gpt-4o", {}).get("provider") == "custom"
+    configured_id = next(i for i in ids if i.endswith("claude-sonnet-4"))
+    assert badges.get(configured_id) == {"role": "fallback", "label": "Fallback 2", "provider": "custom:relay"}
+
+
+# ---------------------------------------------------------------------------
+# Review of #8741, point 2: a bare configured id keeps its badge on the one row
+# that spells it with a vendor prefix. The frontend dedupes the bare key against
+# that row (static/ui.js _isEquivalentConfiguredModelEntry), so without a row
+# key the picker showed neither a badge nor a "Configured" row.
+# ---------------------------------------------------------------------------
+
+BARE_FALLBACK = [{"provider": "relay", "model": "claude-sonnet-4"}]
+
+
+def test_bare_configured_id_badges_its_single_vendor_spelling():
+    badges = _static_badges(_relay_groups(["anthropic/claude-sonnet-4", "openai/gpt-4o"]), BARE_FALLBACK, custom_providers=[RELAY])
+    assert badges.get("@custom:relay:anthropic/claude-sonnet-4") == {"role": "fallback", "label": "Fallback 1", "provider": "custom:relay"}
+    assert "@custom:relay:openai/gpt-4o" not in badges
+
+
+def test_vendor_qualified_configured_id_badges_the_bare_row():
+    # The other direction: config says ``anthropic/claude-sonnet-4``, the relay lists the bare id.
+    badges = _static_badges(
+        _relay_groups(["claude-sonnet-4", "openai/gpt-4o"]),
+        [{"provider": "relay", "model": "anthropic/claude-sonnet-4"}],
+        custom_providers=[RELAY],
+    )
+    assert badges.get("@custom:relay:claude-sonnet-4", {}).get("label") == "Fallback 1"
+    assert "@custom:relay:openai/gpt-4o" not in badges
+
+
+def test_exact_identity_beats_a_vendor_spelling():
+    badges = _static_badges(_relay_groups(["anthropic/claude-sonnet-4", "claude-sonnet-4"]), BARE_FALLBACK, custom_providers=[RELAY])
+    assert badges.get("@custom:relay:claude-sonnet-4", {}).get("label") == "Fallback 1"
+    assert "@custom:relay:anthropic/claude-sonnet-4" not in badges
+
+
+def test_two_vendor_spellings_of_a_bare_id_badge_neither():
+    # Ambiguous: the config does not say which vendor it means, so no row is
+    # guessed from list order (that guess was the #8732 defect).
+    badges = _static_badges(_relay_groups(["anthropic/claude-sonnet-4", "bedrock/claude-sonnet-4"]), BARE_FALLBACK, custom_providers=[RELAY])
+    assert "@custom:relay:anthropic/claude-sonnet-4" not in badges
+    assert "@custom:relay:bedrock/claude-sonnet-4" not in badges
+    # The configured spelling itself stays keyed for the frontend.
+    assert badges.get("claude-sonnet-4", {}).get("provider") == "custom:relay"
+
+
+def test_single_same_provider_sibling_still_gets_no_badge():
+    # The vendor-spelling match never crosses vendor namespaces: ``codex/x``
+    # configured and only ``any/x`` served is still a sibling, not a spelling.
+    groups = [{"provider": "magpie", "provider_id": "custom:magpie", "models": [{"id": "@custom:magpie:any/gpt-6.1-sol"}]}]
+    badges = _static_badges(groups, [{"provider": "magpie", "model": TARGET}], custom_providers=[MAGPIE])
+    assert "@custom:magpie:any/gpt-6.1-sol" not in badges
+
+
+def test_deeper_vendor_spelling_matches_and_a_different_vendor_does_not():
+    # ``deepseek/x`` configured: ``vendor_a/deepseek/x`` is a spelling of it,
+    # ``vendor_b/deepseek/y`` is not, and ``vendor_a/x`` would be a sibling (#3360).
+    badges = _static_badges(
+        _relay_groups(["vendor_a/deepseek/deepseek-v4-pro", "vendor_b/deepseek/deepseek-v4", "vendor_a/deepseek-v4-pro"]),
+        [{"provider": "relay", "model": "deepseek/deepseek-v4-pro"}],
+        custom_providers=[RELAY],
+    )
+    assert badges.get("@custom:relay:vendor_a/deepseek/deepseek-v4-pro", {}).get("label") == "Fallback 1"
+    assert "@custom:relay:vendor_b/deepseek/deepseek-v4" not in badges
+    assert "@custom:relay:vendor_a/deepseek-v4-pro" not in badges
+
+
+def test_openrouter_bare_id_does_not_badge_a_vendor_route():
+    # docs/architecture/model-picker-routing.md: an OpenRouter route matches
+    # exactly; no vendor path is split to find it.
+    groups = [{"provider": "OpenRouter", "provider_id": "openrouter", "models": [{"id": "openai/gpt-4o"}]}]
+    badges = _static_badges(groups, [{"provider": "openrouter", "model": "gpt-4o"}])
+    assert "openai/gpt-4o" not in badges
+
+
+def test_live_builder_badges_the_single_vendor_spelling_too(monkeypatch, tmp_path):
+    result = _live_models(
+        monkeypatch,
+        tmp_path,
+        custom_providers=[RELAY],
+        fallback_providers=BARE_FALLBACK,
+        served={"relay.example": ["anthropic/claude-sonnet-4", "openai/gpt-4o"]},
+    )
+    ids = _option_ids(_group(result, "custom:relay"))
+    badges = result["configured_model_badges"]
+    vendor_row = next(i for i in ids if i.endswith("anthropic/claude-sonnet-4"))
+    other_row = next(i for i in ids if i.endswith("openai/gpt-4o"))
+    assert badges.get(vendor_row) == {"role": "fallback", "label": "Fallback 1", "provider": "custom:relay"}
+    assert other_row not in badges
+
+
+# The primary entry (``model: {provider: relay, default: claude-sonnet-4}``) goes
+# through the same match, so the review's shape holds for it as well.
+
+
+def test_bare_primary_model_badges_its_single_vendor_spelling():
+    badges = _static_badges(
+        _relay_groups(["anthropic/claude-sonnet-4", "openai/gpt-4o"]),
+        [],
+        custom_providers=[RELAY],
+        active_provider="custom:relay",
+        default_model="claude-sonnet-4",
+    )
+    assert badges.get("@custom:relay:anthropic/claude-sonnet-4") == {"role": "primary", "label": "Primary", "provider": "custom:relay"}
+    assert "@custom:relay:openai/gpt-4o" not in badges
+
+
+def test_live_builder_badges_the_primary_single_vendor_spelling_too(monkeypatch, tmp_path):
+    result = _live_models(
+        monkeypatch,
+        tmp_path,
+        custom_providers=[RELAY],
+        fallback_providers=[],
+        served={"relay.example": ["anthropic/claude-sonnet-4", "openai/gpt-4o"]},
+        model={"provider": "relay", "default": "claude-sonnet-4"},
+    )
+    ids = _option_ids(_group(result, "custom:relay"))
+    badges = result["configured_model_badges"]
+    vendor_row = next(i for i in ids if i.endswith("anthropic/claude-sonnet-4"))
+    other_row = next(i for i in ids if i.endswith("openai/gpt-4o"))
+    assert badges.get(vendor_row) == {"role": "primary", "label": "Primary", "provider": "custom:relay"}
+    assert other_row not in badges
+
+
+# The combined tree: this backend's badge map through the real frontend helpers
+# (#8730's provider-scoped badge lookup and the dedupe that decides whether a
+# badge key becomes a synthesized "Configured" row), composed the way
+# renderModelDropdown() does it in static/ui.js.
+_PICKER_DRIVER = r"""
+var window={};
+__SOURCE__
+const [badgeMap, rows] = JSON.parse(process.argv[1]);
+const modelData = rows.map(r => ({
+  value: r.value,
+  providerId: r.providerId,
+  badge: _getConfiguredModelBadge(r.value, badgeMap, r.providerId),
+}));
+const synthesized = [];
+for (const [modelId, badge] of Object.entries(badgeMap)) {
+  if (_isEquivalentConfiguredModelEntry(modelId, badge, modelData)) continue;
+  synthesized.push(modelId);
+}
+process.stdout.write(JSON.stringify({
+  badged: modelData.filter(m => m.badge).map(m => [m.value, m.badge.label]),
+  synthesized,
+}));
+"""
+
+
+def _picker_rows(badge_map: dict, rows: list[dict]) -> dict:
+    source = "\n".join(
+        extract_function(UI_JS, name)
+        for name in (
+            "_normalizeConfiguredModelKey",
+            "_configuredModelIdentity",
+            "_isEquivalentConfiguredModelEntry",
+            "_getConfiguredModelBadge",
+        )
+    )
+    result = subprocess.run(
+        [NODE, "-e", _PICKER_DRIVER.replace("__SOURCE__", source), json.dumps([badge_map, rows])],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_combined_tree_bare_configured_id_shows_one_badged_row_and_no_extra_row():
+    # Before this change: no row key from the backend, and the frontend deduped
+    # the bare key against the vendor row, so the picker showed no badge and no
+    # "Configured" row for a configured model the relay does serve.
+    groups = _relay_groups(["anthropic/claude-sonnet-4", "openai/gpt-4o"])
+    badges = _static_badges(groups, BARE_FALLBACK, custom_providers=[RELAY])
+    rows = [{"value": m["id"], "providerId": "custom:relay"} for m in groups[0]["models"]]
+    picker = _picker_rows(badges, rows)
+    assert picker["badged"] == [["@custom:relay:anthropic/claude-sonnet-4", "Fallback 1"]]
+    assert picker["synthesized"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_combined_tree_sibling_shape_badges_only_the_configured_id():
+    groups = [
+        {
+            "provider": "magpie",
+            "provider_id": "custom:magpie",
+            "models": [{"id": f"@custom:magpie:{i}"} for i in SIBLINGS + [TARGET]],
+        }
+    ]
+    badges = _static_badges(groups, [{"provider": "magpie", "model": TARGET}], custom_providers=[MAGPIE])
+    rows = [{"value": m["id"], "providerId": "custom:magpie"} for m in groups[0]["models"]]
+    picker = _picker_rows(badges, rows)
+    assert picker["badged"] == [[f"@custom:magpie:{TARGET}", "Fallback 1"]]
+    assert picker["synthesized"] == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_combined_tree_bare_primary_model_shows_one_badged_row_and_no_extra_row():
+    groups = _relay_groups(["anthropic/claude-sonnet-4", "openai/gpt-4o"])
+    badges = _static_badges(groups, [], custom_providers=[RELAY], active_provider="custom:relay", default_model="claude-sonnet-4")
+    rows = [{"value": m["id"], "providerId": "custom:relay"} for m in groups[0]["models"]]
+    picker = _picker_rows(badges, rows)
+    assert picker["badged"] == [["@custom:relay:anthropic/claude-sonnet-4", "Primary"]]
+    assert picker["synthesized"] == []
