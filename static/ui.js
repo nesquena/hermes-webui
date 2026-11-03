@@ -6067,12 +6067,14 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
     const entryProvider=_entryProvider(existing);
     if(provider&&entryProvider&&entryProvider!==provider) return false;
     const identityProvider=provider||entryProvider;
-    // A typed or custom option (the ungrouped tail) is sent as typed, less only
-    // the `@provider:` routing prefix, so `openrouter/<vendor>/<model>` stays a
-    // different wire id from the configured `<vendor>/<model>`. Such a row never
-    // stands in for the native configured id: keep the synthesized native row,
-    // and the Configured section merges the two and prefers it.
-    if(identityProvider&&existing&&existing.groupKey==='__ungrouped__'){
+    // A row is sent as its value less only the `@provider:` routing prefix, so
+    // `<provider>/<model>` (a typed `openrouter/<vendor>/<model>` alias, or a
+    // catalog/live/overflow row composed as `@p:p/<model>`) is a different wire
+    // id from the configured `<model>`. Such a row never stands in for the
+    // configured id, whatever section it is in: the native row is synthesized,
+    // and the Configured section merges the two and prefers it, so clicking
+    // Configured always selects the id the user configured.
+    if(identityProvider&&existing){
       const at=`@${identityProvider}:`;
       const wire=(v)=>{
         const s=String(v||'').trim().toLowerCase();

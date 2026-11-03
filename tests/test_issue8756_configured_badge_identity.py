@@ -326,8 +326,11 @@ def test_live_replacement_keeps_exactly_one_primary_in_configured(tmp_path, badg
     # The real live merge did replace the catalog twin.
     assert "@openai:openai/gpt-6.1-sol" in data["options"]
     assert "openai/gpt-6.1-sol" not in data["options"]
+    # The live row carries the badge, and Configured selects the configured id
+    # itself: the live row is sent as `openai/gpt-6.1-sol`, a different wire id.
+    assert _row(data, "@openai:openai/gpt-6.1-sol")["role"] == "primary"
     assert [(row["id"], row["role"]) for row in data["configured"]] == [
-        ("@openai:openai/gpt-6.1-sol", "primary")
+        ("gpt-6.1-sol", "primary")
     ]
 
 
@@ -420,6 +423,59 @@ def test_typed_alias_on_a_hyphenated_provider_keeps_the_native_id(tmp_path):
 
     assert [(row["id"], row["role"]) for row in data["configured"]] == [
         ("acme/example-model", "primary")
+    ]
+
+
+_FOO_BAR_ROW = "@custom:foo-bar:custom:foo-bar/acme/example-model"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "groups": [
+                {
+                    "provider": "Foo Bar",
+                    "provider_id": "custom:foo-bar",
+                    "models": [{"id": "acme/other-model"}, {"id": _FOO_BAR_ROW}],
+                }
+            ],
+        },
+        {
+            "groups": [
+                {
+                    "provider": "Foo Bar",
+                    "provider_id": "custom:foo-bar",
+                    "models": [{"id": "acme/other-model"}],
+                    "extra_models": [{"id": _FOO_BAR_ROW}],
+                }
+            ],
+        },
+        {
+            "groups": [
+                {"provider": "Foo Bar", "provider_id": "custom:foo-bar", "models": [{"id": "acme/other-model"}]}
+            ],
+            "activeProvider": "custom:foo-bar",
+            "live": {"provider": "custom:foo-bar", "models": [{"id": "custom:foo-bar/acme/example-model"}]},
+        },
+    ],
+    ids=["catalog", "overflow", "live"],
+)
+def test_a_provider_prefixed_row_never_replaces_the_configured_id(tmp_path, payload):
+    """Gate r1103d: a catalog, overflow or live row composed as
+    `@p:p/<model>` is sent as `p/<model>`, so Configured must still select the
+    configured `<model>` (master does), in every section, not only typed rows."""
+    data = _render(
+        tmp_path,
+        dict(
+            payload,
+            selectedValue="acme/other-model",
+            configuredBadges={"acme/example-model": _badge("custom:foo-bar")},
+        ),
+    )
+
+    assert [(row["id"], row["role"]) for row in data["configured"]] == [
+        ("acme/example-model", "fallback")
     ]
 
 
@@ -595,26 +651,37 @@ assert.notStrictEqual(_configuredModelIdentity('any/x','magpie'),_configuredMode
 
 
 def test_dedup_agrees_with_lookup_for_every_wrapper_shape():
-    """A badge key is dropped as a duplicate exactly when the lookup shows its
-    badge on the existing row: never both, never neither."""
+    """A badge key is dropped as a duplicate only when the lookup shows its
+    badge on the existing row, so no configured entry is lost. The one case
+    where the row shows the badge but the key is kept is a row sent as
+    `<provider>/<key>`: a different wire id, so the native row is synthesized
+    and the Configured section merges the two (covered by the render tests)."""
     _run_node(
         """
-const providers=['','openai','openrouter','custom:foo','magpie'];
+const providers=['','openai','openrouter','custom:foo','custom:foo-bar','magpie'];
 const bases=['gpt-6.1-sol','GPT-6-1-sol','anthropic/claude-sonnet-4.6'];
 const ids=[...new Set(bases.flatMap(id=>{
   const out=[id,`vendor/${id}`];
   for(const p of providers.filter(Boolean)) out.push(`@${p}:${id}`,`${p}/${id}`,`@${p}:${p}/${id}`);
   return out;
 }))];
-const mismatches=[];
+const wire=(v,p)=>{const s=String(v||'').trim().toLowerCase();const at=`@${p}:`;
+  return (s.startsWith(at)?s.slice(at.length):s).replace(/-/g,'.');};
+const lost=[],kept=[];
 for(const key of ids) for(const bp of providers){
   const badge=bp?{role:'primary',label:'Primary',provider:bp}:{role:'primary',label:'Primary'};
   for(const row of ids) for(const rp of providers){
     const shown=!!_getConfiguredModelBadge(row,{[key]:badge},rp);
     const dropped=_isEquivalentConfiguredModelEntry(key,badge,[{value:row,providerId:rp}]);
-    if(shown!==dropped) mismatches.push([key,bp,row,rp,shown,dropped]);
+    if(dropped&&!shown) lost.push([key,bp,row,rp]);
+    if(shown&&!dropped){
+      const ip=(bp||rp).toLowerCase();
+      const prefixed=!!ip&&wire(row,ip)===`${ip.replace(/-/g,'.')}/${wire(key,ip)}`;
+      if(!prefixed) kept.push([key,bp,row,rp]);
+    }
   }
 }
-assert.deepStrictEqual(mismatches.slice(0,5),[]);
+assert.deepStrictEqual(lost.slice(0,5),[]);
+assert.deepStrictEqual(kept.slice(0,5),[]);
 """
     )
