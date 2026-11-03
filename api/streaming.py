@@ -6731,6 +6731,28 @@ def _extract_title_response(resp, *, aux: bool = False) -> tuple[str, str]:
         return '', f'llm_empty{suffix}'
 
 
+def _title_provider_name_ambiguous(provider: str, base_url: str) -> bool:
+    """True when the title route's provider name has two claimants (#8690).
+
+    ``call_llm`` hands the name to the Agent, which answers it with the first
+    record that claims it, so the endpoint and key could come from different
+    records. ``auto`` / unset without a URL is the Agent's main provider. The
+    title then falls back to the local (non-LLM) one; the warning carries the
+    verdict message, which names records and never a URL or credential.
+    """
+    from api.config import get_config, provider_name_ambiguity_verdict
+
+    name = provider
+    if not name and not base_url:
+        main = get_config().get('model')
+        name = main.get('provider', '') if isinstance(main, dict) else ''
+    verdict = provider_name_ambiguity_verdict(name) if name else None
+    if verdict is None:
+        return False
+    logger.warning("skipping LLM title generation: %s", verdict['message'])
+    return True
+
+
 def generate_title_raw_via_aux(
     user_text: str,
     assistant_text: str,
@@ -6762,6 +6784,8 @@ def generate_title_raw_via_aux(
         provider = normalized_provider or ''
     except ValueError:
         pass
+    if _title_provider_name_ambiguous(provider, base_url):
+        return None, 'provider_name_ambiguous_aux'
     api_key = ''
     if not caller_supplied_route:
         api_key = str(configured.get('api_key', '') or '').strip()
@@ -7144,6 +7168,7 @@ _TITLE_FAILURE_HUMAN_REASONS = {
     'empty_user_message': 'this session has no user message to title yet',
     'empty_title': 'no title could be produced for this session',
     'title_generation_disabled': 'title generation is disabled for this profile',
+    'provider_name_ambiguous_aux': "two providers claim the title model's provider name",
 }
 
 

@@ -397,3 +397,67 @@ def test_the_raw_identities_follow_the_active_profile_config(monkeypatch, tmp_pa
     assert config.provider_name_ambiguity_verdict("openai") is None
     monkeypatch.setenv("HERMES_CONFIG_PATH", str(templated))
     assert config.provider_name_ambiguity_verdict("openai")["reason"] == REASON
+
+
+# ── Codex r1 (deferred): title generation calls the Agent with a provider name ──
+
+TITLE_REFUSED = "provider_name_ambiguous_aux"
+
+
+@pytest.fixture
+def aux_calls(monkeypatch):
+    """A stand-in ``agent.auxiliary_client`` that records every ``call_llm``."""
+    calls = []
+    fake = types.ModuleType("agent.auxiliary_client")
+    fake.call_llm = lambda **kwargs: calls.append(kwargs)
+    pkg = sys.modules.get("agent")
+    if pkg is None:
+        pkg = types.ModuleType("agent")
+        pkg.__path__ = []
+        monkeypatch.setitem(sys.modules, "agent", pkg)
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", fake)
+    return calls
+
+
+def _title_route(monkeypatch, aux, providers, main_provider="openai"):
+    monkeypatch.setattr(streaming, "_get_aux_title_config", lambda: dict(aux))
+    _bind(monkeypatch, _config(main_provider, providers, base_url=BUILTIN_URL))
+
+
+@pytest.mark.parametrize("aux, caller", [
+    ({"provider": "openai", "model": "gpt-synthetic"}, {}),           # auxiliary.title_generation
+    ({"provider": "custom:openai"}, {}),                              # explicit selector
+    ({}, {"provider": "openai", "model": "gpt-synthetic"}),           # use_agent_model pass-through
+    ({"provider": "auto"}, {}),                                       # auto -> the main provider
+    ({}, {}),                                                         # unset -> the main provider
+])
+def test_title_generation_with_an_ambiguous_name_never_calls_the_agent(monkeypatch, aux_calls, caplog, aux, caller):
+    _title_route(monkeypatch, aux, _records("openai", "named-first"))
+    with caplog.at_level("WARNING"):
+        raw, status = streaming.generate_title_raw_via_aux("hello there", "hi, how can I help", **caller)
+    assert aux_calls == [] and (raw, status) == (None, TITLE_REFUSED)
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "title" in logged.lower() and "'custom:openai'" in logged
+    for secret in SECRETS:
+        assert secret not in logged
+
+
+def test_the_refused_title_falls_back_to_the_local_title(monkeypatch, aux_calls):
+    _title_route(monkeypatch, {"provider": "openai"}, _records("openai", "builtin-first"))
+    title, status, preview = streaming._generate_llm_session_title_via_aux("hello there", "hi")
+    assert (title, status, preview) == (None, TITLE_REFUSED, "") and aux_calls == []
+    # Not an LLM error/invalid answer: no retry through another route, local title next.
+    assert status not in {"llm_error_aux", "llm_invalid_aux", "llm_language_mismatch_aux"}
+    assert "provider" in streaming._human_title_failure_reason(status)
+
+
+@pytest.mark.parametrize("aux", [
+    {"provider": "openai", "model": "gpt-synthetic"},
+    {"provider": "auto"},
+    {"base_url": NAMED_URL, "model": "named-model"},  # a URL route carries no name
+])
+def test_title_generation_with_an_unambiguous_route_is_unchanged(monkeypatch, aux_calls, aux):
+    _title_route(monkeypatch, aux, {"openai": {"base_url": BUILTIN_URL, "api_key": BUILTIN_KEY}})
+    streaming.generate_title_raw_via_aux("hello there", "hi, how can I help")
+    assert aux_calls and aux_calls[0]["task"] == "title_generation"
+    assert aux_calls[0]["provider"] == (aux.get("provider") if aux.get("provider") != "auto" else None)
