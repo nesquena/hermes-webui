@@ -4241,9 +4241,15 @@ def _claiming_value(values: tuple, names: set) -> str | None:
     ``opencode_go`` and ``opencode-go`` as one id), so no spelling variant hides
     a claim. The value is returned so a message can name the record by the very
     field that claims the name, which is never a URL or a credential.
+
+    A value still holding a ``${...}`` reference claims every name: the Agent
+    expands ``${env:VAR}`` in its own secret scope, which WebUI cannot reproduce
+    with certainty, so an unexpanded identity is treated as ambiguous.
     """
     for value in values:
         text = str(value or "").strip()
+        if "${" in text:
+            return text
         aliases = _custom_provider_alias_set(text, "") if text else frozenset()
         if names & (aliases | {alias.replace("_", "-") for alias in aliases}):
             return text
@@ -4302,7 +4308,8 @@ def provider_name_ambiguity_verdict(provider: object, config: object = None) -> 
         key_text = str(key or "").strip()
         if not key_text or not isinstance(record, dict):
             continue
-        claimed_by = _claiming_value((key_text, record.get("name"), record.get("provider_key")), names)
+        # The Agent's identities for a keyed record: its ``name`` (or key) and its key.
+        claimed_by = _claiming_value((key_text, record.get("name")), names)
         if claimed_by is None:
             continue
         if not key_text.lower().startswith("custom:") and _canonicalise_provider_id(key_text) == builtin:
@@ -4310,12 +4317,10 @@ def provider_name_ambiguity_verdict(provider: object, config: object = None) -> 
         else:
             others.append(f"'{key_text}'" + (f" (named '{claimed_by}')" if claimed_by != key_text else ""))
     legacy = source.get("custom_providers")
-    rows = legacy.items() if isinstance(legacy, dict) else enumerate(legacy if isinstance(legacy, list) else ())
-    for index, row in rows:
-        if not isinstance(row, dict):
-            continue
-        fallback = index if isinstance(legacy, dict) else None
-        claimed_by = _claiming_value((row.get("name"), row.get("provider_key"), fallback), names)
+    # A legacy row's only identity is its ``name``; the Agent ignores a
+    # non-list section and a row's raw ``provider_key``.
+    for row in legacy if isinstance(legacy, list) else ():
+        claimed_by = _claiming_value((row.get("name"),), names) if isinstance(row, dict) else None
         if claimed_by is not None:
             others.append(f"custom_providers entry '{claimed_by}'")
     if explicit:

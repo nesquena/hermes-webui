@@ -173,7 +173,6 @@ def test_every_claimant_is_named(monkeypatch):
     {"custom_providers": [{"name": "openai", "baseUrl": NAMED_URL, "api_key": NAMED_KEY}]},
     {"custom_providers": [{"name": "openai", "base_url": NAMED_URL, "api_key": NAMED_KEY, "enabled": False}]},
     {"custom_providers": [{"name": "  OpenAI ", "base_url": NAMED_URL, "api_key": NAMED_KEY}]},
-    {"custom_providers": [{"name": "My Proxy", "provider_key": "custom:openai", "base_url": NAMED_URL}]},
     {"providers": {"custom:openai": {"base_url": NAMED_URL, "api_key": NAMED_KEY, "enabled": "false"}}},
     {"providers": {"custom:OpenAI": {"base_url": NAMED_URL, "api_key": NAMED_KEY}}},
     {"providers": {" custom:openai ": {"base_url": NAMED_URL, "api_key": NAMED_KEY}}},
@@ -183,7 +182,7 @@ def test_every_claimant_is_named(monkeypatch):
     {"providers": {"OpenAI": {"base_url": NAMED_URL, "api_key": NAMED_KEY}}},
 ], ids=[
     "legacy-base_url", "legacy-url", "legacy-api", "legacy-baseUrl", "legacy-disabled",
-    "legacy-case-whitespace", "legacy-provider_key", "keyed-disabled", "keyed-case",
+    "legacy-case-whitespace", "keyed-disabled", "keyed-case",
     "keyed-whitespace", "display-name", "display-name-custom-prefix", "generic-custom-named",
     "second-builtin-spelling",
 ])
@@ -204,6 +203,31 @@ def test_an_env_templated_sibling_url_is_refused_without_reading_it(monkeypatch)
                                base_url=BUILTIN_URL))
     _both_refused("openai", _agent_runtime(NAMED_URL, BUILTIN_KEY), "'custom:openai'",
                   configured_base_url=BUILTIN_URL)
+
+
+@pytest.mark.parametrize("name", ["${env:SIBLING_NAME}", "${SIBLING_NAME}"])
+def test_an_env_templated_sibling_name_is_refused(monkeypatch, name):
+    """Codex r1: the Agent expands ``${env:VAR}`` names in its own secret scope."""
+    monkeypatch.setenv("SIBLING_NAME", "openai")
+    providers = {"myproxy": {"name": name, "base_url": NAMED_URL, "api_key": NAMED_KEY},
+                 "openai": {"base_url": BUILTIN_URL, "api_key": BUILTIN_KEY}}
+    _bind(monkeypatch, _config("openai", providers, base_url=BUILTIN_URL))
+    _both_refused("openai", _agent_runtime(NAMED_URL, NAMED_KEY), "'myproxy'", configured_base_url=BUILTIN_URL)
+
+
+@pytest.mark.parametrize("extra", [
+    {"custom_providers": {"openai": {"name": "openai", "base_url": NAMED_URL, "api_key": NAMED_KEY}}},
+    {"providers": {"myproxy": {"provider_key": "openai", "base_url": NAMED_URL, "api_key": NAMED_KEY}}},
+    {"custom_providers": [{"name": "My Proxy", "provider_key": "openai", "base_url": NAMED_URL}]},
+], ids=["dict-shaped-legacy-section", "keyed-provider_key-field", "legacy-provider_key-field"])
+def test_identities_the_agent_ignores_do_not_claim_the_name(monkeypatch, extra):
+    """Codex r1: the Agent skips a non-list ``custom_providers`` and raw ``provider_key``."""
+    data = _config("openai", {"openai": {"base_url": BUILTIN_URL, "api_key": BUILTIN_KEY}})
+    data["providers"].update(extra.get("providers", {}))
+    if "custom_providers" in extra:
+        data["custom_providers"] = extra["custom_providers"]
+    _bind(monkeypatch, data)
+    _both_route("openai", _agent_runtime(BUILTIN_URL, BUILTIN_KEY), ("openai", BUILTIN_URL, BUILTIN_KEY))
 
 
 @pytest.mark.parametrize("model_base_url", [None, OPENAI_DEFAULT_URL], ids=["no-model-base_url", "model-base_url"])
