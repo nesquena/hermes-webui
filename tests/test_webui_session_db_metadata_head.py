@@ -698,6 +698,82 @@ def test_marked_prefix_without_last_message_at_takes_the_full_read(session_store
     assert rows[0]["last_message_at"] == 200.0
 
 
+def test_oversized_marked_prefix_with_the_ordering_value_past_the_cut(
+    session_store, monkeypatch
+):
+    """The budgeted admission must require the ordering value too.
+
+    Companion to ``test_marked_prefix_without_last_message_at_takes_the_full_read``
+    on the OTHER admission. Here every other projected field is already ahead of
+    ``messages`` and the writer's marker is present, so neither the marker nor
+    the six-field subset can decline this prefix: the only thing that keeps the
+    row honest is ``last_message_at`` being a required projected key. Without
+    that entry the budgeted reader admits the prefix, ``_metadata_row`` falls
+    back to ``updated_at`` and the row lists 200 where the full read lists 100.
+    """
+    sid = "fat-marker-lma-after"
+    payload = {
+        "session_id": sid,
+        "title": "Marker LMA After",
+        "profile": "work",
+        "archived": True,
+        "pinned": True,
+        "raw_source": "telegram",
+        "source_label": "Telegram",
+        "created_at": 100.0,
+        "updated_at": 200.0,
+        "message_count": 1,
+        "_mc_v": models._MESSAGE_COUNT_MARKER,
+        "_row_layout": models._ROW_LAYOUT_VERSION,
+        "anchor_scene_index": {},
+        # 80,000 bytes of metadata: past the 64 KiB head window, inside the
+        # 1 MiB budgeted window, so the budgeted reader is the admission here.
+        "compression_anchor_summary": "S" * 80_000,
+        "messages": [{"role": "user", "content": "hi"}],
+        "last_message_at": 100.0,  # the ONLY projected key past the cut
+    }
+    path = session_store / f"{sid}.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    assert DB._read_metadata_head(path) is None, (
+        "the fixture must overflow the head window, or the budgeted path is "
+        "never exercised"
+    )
+    seen: list[str] = []
+    real_budgeted = models._read_metadata_json_prefix
+
+    def _spy(p, *args, **kwargs):
+        raw = real_budgeted(p, *args, **kwargs)
+        seen.append(raw or "")
+        return raw
+
+    monkeypatch.setattr(models, "_read_metadata_json_prefix", _spy)
+    source = DB._read_metadata_row_source(path)
+    monkeypatch.setattr(models, "_read_metadata_json_prefix", real_budgeted)
+
+    assert len(seen) == 1
+    prefix = json.loads(seen[0])
+    # The prefix really carries the marker and the six fields -- so it is only
+    # the missing ordering value that can decline it.
+    assert prefix["_row_layout"] == models._ROW_LAYOUT_VERSION
+    for field in REORDERED_FIELDS:
+        assert field in prefix, field
+    assert "messages" not in prefix
+    assert "last_message_at" not in prefix
+
+    assert isinstance(source, dict)
+    assert "messages" in source, "the row must come from the complete reader"
+    full = DB._read_path(path)
+    assert isinstance(full, dict)
+    assert DB._metadata_row(sid, source) == DB._metadata_row(sid, full)
+    rows = DB(session_store).list_sessions()
+    assert rows == [DB._metadata_row(sid, full)]
+    assert rows[0]["last_message_at"] == 100.0, (
+        "an admitted prefix would list updated_at (200) instead of the attached "
+        "ordering value (100)"
+    )
+
+
 def test_oversized_reordered_prefix_takes_the_full_read(session_store, monkeypatch):
     """An oversized prefix without a valid layout proof must fall back whole.
 
