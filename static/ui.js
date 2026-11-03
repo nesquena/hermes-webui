@@ -11072,7 +11072,7 @@ function renderMd(raw){
     // backslashes into the rendered text. The escape is consumed here (the
     // sentinel restore emits only the pipe) because GFM defines `\|` as an
     // escaped literal, not as a backslash followed by a pipe.
-    const _protectPipes=r=>{let prev;do{prev=r;r=r.replace(/([([\x7b][^)\]\x7d]*)[|]([^)\]\x7d]*[)\]\x7d])/g,(_,a,b)=>a+'\x00PIPE\x00'+b);r=r.replace(/(<code>[^<]*)[|]([^<]*<\/code>)/g,(_,a,b)=>a+'\x00PIPE\x00'+b);r=r.replace(/\\[|]/g,'\x00PIPE\x00');}while(r!==prev);return r;};
+    const _protectPipes=r=>{let prev;r=r.replace(/\\[|]/g,'\x00PIPE\x00');do{prev=r;r=r.replace(/([([\x7b][^)\]\x7d]*)[|]([^)\]\x7d]*[)\]\x7d])/g,(_,a,b)=>a+'\x00PIPE\x00'+b);r=r.replace(/(<code>[^<]*)[|]([^<]*<\/code>)/g,(_,a,b)=>a+'\x00PIPE\x00'+b);r=r.replace(/\\[|]/g,'\x00PIPE\x00');}while(r!==prev);return r;};
     const _restorePipes=s=>s.replace(/\x00PIPE\x00/g,'|');
     const parseRow=r=>{r=_protectPipes(r);return r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<td>${inlineMd(_restorePipes(c.trim()))}</td>`).join('');};
     const parseHeader=r=>{r=_protectPipes(r);return r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<th>${inlineMd(_restorePipes(c.trim()))}</th>`).join('');};
