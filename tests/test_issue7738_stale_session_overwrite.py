@@ -2000,7 +2000,7 @@ def test_share_writer_does_not_undo_effort_pick(tmp_path, monkeypatch, path):
             "share_message_count": 2, "share_updated_at": 1.0,
         }
 
-    monkeypatch.setattr(routes, "create_or_refresh_share", _pick_in_window)
+    monkeypatch.setattr(routes, "write_share_snapshot", _pick_in_window)
     monkeypatch.setattr(routes, "revoke_share", _pick_in_window)
     captured = _capture_post(monkeypatch, writer_body)
     routes.handle_post(_FakeHandler(b"{}"), SimpleNamespace(path=path))
