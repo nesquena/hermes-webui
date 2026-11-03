@@ -4280,15 +4280,20 @@ def _claiming_value(keys: tuple, values: tuple, names: set) -> str | None:
     """The first identity in ``keys`` / ``values`` whose spellings include one of ``names``.
 
     Spellings: the Agent's alias vocabulary (:func:`_custom_provider_alias_set`)
-    plus underscore folding. The claiming identity is returned for the message
-    (never a URL or credential). A value the Agent env-expands claims every name:
-    WebUI cannot reproduce the Agent's secret scope with certainty.
+    plus underscore folding. The claiming identity is returned for the message in
+    its raw spelling (never a URL, credential or expanded value). A value the Agent
+    env-expands is judged by the Agent's own expansion (:func:`_agent_expanded_text`,
+    an unset reference stays verbatim); when that is unavailable it claims every
+    name, since WebUI cannot reproduce the Agent's secret scope with certainty.
     """
     for value, expandable in (*((key, False) for key in keys), *((val, True) for val in values)):
-        text = str(value or "").strip()
+        text = spelled = str(value or "").strip()
         if expandable and _agent_expands_env_ref(value):
-            return text
-        aliases = _custom_provider_alias_set(text, "") if text else frozenset()
+            expanded = _agent_expanded_text(value)
+            if expanded is None:
+                return text
+            spelled = expanded.strip()
+        aliases = _custom_provider_alias_set(spelled, "") if spelled else frozenset()
         if names & (aliases | {alias.replace("_", "-") for alias in aliases}):
             return text
     return None
@@ -4327,7 +4332,8 @@ def _with_managed_scope(view: object) -> object:
     IT-pushed managed config over the profile's, managed winning per leaf
     (``hermes_cli.config._merge_managed_overlay``). Same reader and merge as
     ``managed_scope.apply_managed_overlay``, minus its ``${VAR}`` expansion, so
-    a managed reference stays a wildcard. ``view`` is never mutated; an Agent
+    a managed reference is judged by the Agent's expander like any other
+    (:func:`_claiming_value`). ``view`` is never mutated; an Agent
     without managed scope, or no managed config, leaves it unchanged.
     """
     try:

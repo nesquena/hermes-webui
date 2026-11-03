@@ -533,6 +533,62 @@ def test_the_raw_identities_follow_the_active_profile_config(monkeypatch, tmp_pa
     assert config.provider_name_ambiguity_verdict("openai")["reason"] == REASON
 
 
+BUILTIN_IDS = ("openai", "anthropic", "openrouter", "x-ai", "google")
+
+
+@pytest.mark.parametrize("name", ["${PROXY_NAME}", "${env:PROXY_NAME}", " ${PROXY_NAME} "])
+@pytest.mark.parametrize("value", ["myproxy", None], ids=["set-to-another-name", "unset"])
+def test_a_templated_name_is_judged_by_the_agents_expansion(monkeypatch, tmp_path, name, value):
+    """Gate r1103c (Codex CORE #2): ``name: ${PROXY_NAME}`` with PROXY_NAME=myproxy refused
+    every built-in route. The Agent expands the name (an unset reference stays verbatim, which
+    names no built-in), so only the expanded value can claim."""
+    _install_agent_expander(monkeypatch)
+    if value is None:
+        monkeypatch.delenv("PROXY_NAME", raising=False)
+    else:
+        monkeypatch.setenv("PROXY_NAME", value)
+    _write_profile_config(tmp_path / "profile" / "config.yaml", _sibling_named(name))
+    _bind(monkeypatch, _sibling_named(name))
+    for pid in BUILTIN_IDS:
+        assert config.provider_name_ambiguity_verdict(pid) is None, pid
+    _both_route("openai", _agent_runtime(BUILTIN_URL, BUILTIN_KEY), ("openai", BUILTIN_URL, BUILTIN_KEY),
+                configured_base_url=BUILTIN_URL)
+
+
+@pytest.mark.parametrize("name", ["${PROXY_NAME}", "${env:PROXY_NAME}"])
+@pytest.mark.parametrize("value", ["openai", "OpenAI", "custom:openai"])
+def test_a_templated_name_that_expands_to_the_builtin_is_still_refused(monkeypatch, tmp_path, name, value):
+    """A genuine same-name conflict after expansion: refused, and the message keeps the raw
+    spelling (never the expanded value)."""
+    _install_agent_expander(monkeypatch)
+    monkeypatch.setenv("PROXY_NAME", value)
+    _write_profile_config(tmp_path / "profile" / "config.yaml", _sibling_named(name))
+    _bind(monkeypatch, _sibling_named(name))
+    text = _assert_refused(_streaming_bundle("openai", _agent_runtime(NAMED_URL, NAMED_KEY), BUILTIN_URL),
+                           f"'myproxy' (named '{name}')")
+    _assert_refused(lambda: _routes_bundle("openai", _agent_runtime(NAMED_URL, NAMED_KEY), BUILTIN_URL), "'myproxy'")
+    assert config.provider_name_ambiguity_verdict("anthropic") is None
+    assert f"(named '{value}')" not in text
+
+
+def test_a_stale_cache_cannot_hide_a_name_the_agent_expands_to_the_builtin(monkeypatch, tmp_path):
+    """Codex r3 with the Agent's expander: the cache still says 'unrelated', the Agent now
+    expands ``${SIBLING_NAME}`` to 'openai'. The raw view, judged the Agent's way, refuses."""
+    _install_agent_expander(monkeypatch)
+    monkeypatch.setenv("SIBLING_NAME", "openai")
+    _write_profile_config(tmp_path / "profile" / "config.yaml", _sibling_named("${SIBLING_NAME}"))
+    _bind(monkeypatch, _sibling_named("unrelated"))
+    _both_refused("openai", _agent_runtime(BUILTIN_URL, NAMED_KEY), "'myproxy'", configured_base_url=BUILTIN_URL)
+
+
+def test_a_templated_name_without_the_agents_expander_is_still_a_wildcard(monkeypatch, tmp_path):
+    """No Agent expander: the Agent's value is unknown, so the name claims (fail closed)."""
+    monkeypatch.setenv("PROXY_NAME", "myproxy")
+    _write_profile_config(tmp_path / "profile" / "config.yaml", _sibling_named("${PROXY_NAME}"))
+    _bind(monkeypatch, _sibling_named("${PROXY_NAME}"))
+    _both_refused("openai", _agent_runtime(BUILTIN_URL, BUILTIN_KEY), "'myproxy'", configured_base_url=BUILTIN_URL)
+
+
 # ── Codex r1 (deferred): title generation calls the Agent with a provider name ──
 
 TITLE_REFUSED = "provider_name_ambiguous_aux"
@@ -639,6 +695,23 @@ def test_title_guard_allows_an_unambiguous_agent_profile(monkeypatch, aux_calls,
     _agent_scope(monkeypatch, aux_calls, tmp_path, PLAIN)
     streaming.generate_title_raw_via_aux("hello there", "hi")
     assert aux_calls and aux_calls[0]["provider"] == "openai"
+
+
+@pytest.mark.parametrize("value, refused", [("myproxy", False), (None, False), ("openai", True)])
+def test_the_title_guard_judges_a_templated_name_by_the_agents_expansion(monkeypatch, aux_calls, tmp_path, value, refused):
+    """Gate r1103c (Codex CORE #2) on the title path: the Agent profile's raw file is judged
+    with the same expander, so an unrelated templated name no longer blocks LLM titles."""
+    _title_route(monkeypatch, {"provider": "openai"}, PLAIN)
+    _agent_scope(monkeypatch, aux_calls, tmp_path, {
+        "myproxy": {"name": "${PROXY_NAME}", "base_url": NAMED_URL, "api_key": NAMED_KEY}, **PLAIN})
+    _install_agent_expander(monkeypatch)
+    if value is None:
+        monkeypatch.delenv("PROXY_NAME", raising=False)
+    else:
+        monkeypatch.setenv("PROXY_NAME", value)
+    raw, status = streaming.generate_title_raw_via_aux("hello there", "hi")
+    assert (status == TITLE_REFUSED) is refused
+    assert bool(aux_calls) is not refused
 
 
 @pytest.mark.parametrize("agent_main, refused", [("anthropic", False), ("openai", True)])
