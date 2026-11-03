@@ -1573,14 +1573,23 @@ def _forget_agent_holder_locked(agent_pid: int, ref: Callable[[], Any]) -> None:
             # and the release then closed the client under this departed
             # agent's queued save. The manager is a different object with a
             # different identity, so the two never collide.
-            manager = holder.manager()
-            if manager is not None and _manager_has_outstanding_work(manager):
-                entry.work[id(manager)] = holder.manager
+            #
+            # The queued-work check allocates; a nested callback's prune must
+            # not take the entry before the hold is filed (see
+            # ``_forget_holder_locked``), so it is marked as claimed meanwhile.
+            entry.claiming += 1
+            try:
+                manager = holder.manager()
+                if manager is not None and _manager_has_outstanding_work(manager):
+                    entry.work[id(manager)] = holder.manager
+            finally:
+                entry.claiming -= 1
         # An entry nobody holds any more, with no teardown and no queued work
         # to protect, leaves the table — unless a release is claiming it
-        # right now (#8613 round 2, finding B).
+        # right now (#8613 round 2, finding B). A nested prune may already have
+        # taken it, so the removal tolerates a missing key.
         if not entry.holders and not entry.teardown and not entry.work and not entry.claiming and entry.intent is None:
-            del _provider_holders[key]
+            _provider_holders.pop(key, None)
 
 
 def _live_holders_entry(provider: Any) -> Optional[_InstanceHolders]:
@@ -1701,7 +1710,7 @@ def unregister_provider_holders(agent: Any) -> None:
             # to protect, leaves the table — unless a release is claiming it
             # right now (#8613 round 2, finding B).
             if not entry.holders and not entry.teardown and not entry.work and not entry.claiming and entry.intent is None:
-                del _provider_holders[key]
+                _provider_holders.pop(key, None)
 
 
 def _forget_holder_locked(entry: _InstanceHolders, agent_pid: int, manager: Any) -> None:
@@ -1717,8 +1726,16 @@ def _forget_holder_locked(entry: _InstanceHolders, agent_pid: int, manager: Any)
     holder = entry.holders.pop(agent_pid, None)
     if holder is None:
         return
-    if manager is not None and _manager_has_outstanding_work(manager):
-        entry.work[id(manager)] = holder.manager
+    # The queued-work check allocates, an allocation can run a GC on this thread,
+    # and a collected agent's callback prunes inline (the lock is reentrant): the
+    # entry has just lost a holder and not yet filed the work hold, so it is
+    # marked as claimed for the duration (#8613, same window as the claim's).
+    entry.claiming += 1
+    try:
+        if manager is not None and _manager_has_outstanding_work(manager):
+            entry.work[id(manager)] = holder.manager
+    finally:
+        entry.claiming -= 1
 
 
 def _last_provider_holder_locked(agent: Any, *, self_dropped: bool = False) -> tuple[bool, str, str]:
@@ -1978,13 +1995,6 @@ def _claim_last_held_teardown(agent: Any, *, retain: "Optional[_ReleaseIntent]" 
         ok, why, claimed = _agent_holds_instances_locked(agent)
         if not ok:
             return False, why, []
-        # This agent is leaving: it must not count as its own co-holder, and a
-        # queued save of its own must keep holding what it writes through.
-        manager = _agent_manager(agent)
-        for provider in claimed:
-            entry = _live_holders_entry(provider)
-            if entry is not None:
-                _forget_holder_locked(entry, id(agent), manager)
         # #8613 round 2 (finding B): the claim removes this agent from the
         # holder sets BEFORE it may wait, so while it waits the entry has no
         # holders, no teardown flag and no queued work — and every prune site
@@ -1996,7 +2006,13 @@ def _claim_last_held_teardown(agent: Any, *, retain: "Optional[_ReleaseIntent]" 
         #
         # The claim is therefore MARKED on the entries it is waiting for: a
         # claiming entry is never pruned, and the mark is dropped when the claim
-        # settles (success, refusal or timeout).
+        # settles (success, refusal or timeout). The mark goes on BEFORE this
+        # agent leaves the holder sets: leaving allocates (the queued-work check
+        # lists the manager's futures), an allocation can run a GC on this
+        # thread, and a collected agent's callback runs inline here because the
+        # lock is reentrant — its prune would take an entry that has just lost
+        # its last holder and is not yet marked, and the proof below would
+        # answer "not tracked", releasing and retaining nothing.
         claiming_entries: list[_InstanceHolders] = []
         for provider in claimed:
             entry = _live_holders_entry(provider)
@@ -2004,6 +2020,11 @@ def _claim_last_held_teardown(agent: Any, *, retain: "Optional[_ReleaseIntent]" 
                 entry.claiming += 1
                 claiming_entries.append(entry)
         try:
+            # This agent is leaving: it must not count as its own co-holder, and a
+            # queued save of its own must keep holding what it writes through.
+            manager = _agent_manager(agent)
+            for entry in claiming_entries:
+                _forget_holder_locked(entry, id(agent), manager)
             while True:
                 ok, why, wait_for = _last_provider_holder_locked(agent, self_dropped=True)
                 if ok:
@@ -2104,7 +2125,7 @@ def _settle_last_held_teardown(agent: Any, claimed: list, *, released: bool = Fa
         # (#8613 round 2, finding B).
         for key, entry in list(_provider_holders.items()):
             if not entry.holders and not entry.teardown and not entry.work and not entry.claiming and entry.intent is None:
-                del _provider_holders[key]
+                _provider_holders.pop(key, None)
     return raced
 
 
@@ -2361,7 +2382,7 @@ def _drop_intent_locked(intent: _ReleaseIntent) -> None:
         if entry.intent is intent:
             entry.intent = None
             if not entry.holders and not entry.teardown and not entry.work and not entry.claiming:
-                del _provider_holders[key]
+                _provider_holders.pop(key, None)
 
 
 def _arm_release_intent(intent: _ReleaseIntent) -> str:

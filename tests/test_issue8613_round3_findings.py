@@ -197,6 +197,11 @@ os._exit(0)
         for name in ("PATH", "HOME", "SYSTEMROOT", "HERMES_AGENT_DIR")
         if name in os.environ
     }
+    if "HERMES_AGENT_DIR" not in env:
+        # The parent may have found the Agent through another candidate (a
+        # sibling checkout); point the child at the same package.
+        import agent.memory_manager as _agent_module
+        env["HERMES_AGENT_DIR"] = os.path.dirname(os.path.dirname(os.path.abspath(_agent_module.__file__)))
     env["HERMES_HOME"] = (
         os.environ.get("HERMES_HOME") or os.environ.get("HERMES_WEBUI_TEST_STATE_DIR", "")
     )
