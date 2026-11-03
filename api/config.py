@@ -4233,22 +4233,39 @@ def _custom_record_names_identity(display_name: object, provider_key: object, pi
     )
 
 
-def _claiming_value(values: tuple, names: set) -> str | None:
-    """The first of ``values`` whose identity spellings include one of ``names``.
+# ``hermes_cli.config._ENV_REF_RE``: the references the Agent expands in string values.
+_AGENT_ENV_REF_RE = re.compile(r"\$\{([^}]+)\}")
 
-    Spellings are the Agent's alias vocabulary (:func:`_custom_provider_alias_set`)
-    plus their underscore-folded forms (:func:`_canonicalise_provider_id` treats
-    ``opencode_go`` and ``opencode-go`` as one id), so no spelling variant hides
-    a claim. The value is returned so a message can name the record by the very
-    field that claims the name, which is never a URL or a credential.
 
-    A value still holding a ``${...}`` reference claims every name: the Agent
-    expands ``${env:VAR}`` in its own secret scope, which WebUI cannot reproduce
-    with certainty, so an unexpanded identity is treated as ambiguous.
+def _agent_expands_env_ref(value: object) -> bool:
+    """True when the Agent expands a ``${VAR}`` / ``${env:VAR}`` in string ``value``.
+
+    Mirror of ``hermes_cli.config._env_ref_var_name``; ``${env:}``, other sources
+    (``${file:...}``) and an incomplete ``${`` stay verbatim, as do mapping keys.
     """
-    for value in values:
+    if not isinstance(value, str):
+        return False
+    for inner in _AGENT_ENV_REF_RE.findall(value):
+        ref = inner.strip()
+        if ref.startswith("env:"):
+            if ref[len("env:"):].strip():
+                return True
+        elif not re.match(r"^[a-z][a-z0-9_-]*:", ref):
+            return True
+    return False
+
+
+def _claiming_value(keys: tuple, values: tuple, names: set) -> str | None:
+    """The first identity in ``keys`` / ``values`` whose spellings include one of ``names``.
+
+    Spellings: the Agent's alias vocabulary (:func:`_custom_provider_alias_set`)
+    plus underscore folding. The claiming identity is returned for the message
+    (never a URL or credential). A value the Agent env-expands claims every name:
+    WebUI cannot reproduce the Agent's secret scope with certainty.
+    """
+    for value, expandable in (*((key, False) for key in keys), *((val, True) for val in values)):
         text = str(value or "").strip()
-        if "${" in text:
+        if expandable and _agent_expands_env_ref(value):
             return text
         aliases = _custom_provider_alias_set(text, "") if text else frozenset()
         if names & (aliases | {alias.replace("_", "-") for alias in aliases}):
@@ -4259,33 +4276,20 @@ def _claiming_value(values: tuple, names: set) -> str | None:
 def provider_name_ambiguity_verdict(provider: object, config: object = None) -> dict | None:
     """Terminal verdict when one built-in provider name has two claimants (#8690).
 
-    Hermes Agent answers a provider name with the first ``providers:`` /
-    ``custom_providers`` record whose alias set contains it, and keys the
-    credential pool by name, so when the built-in ``openai`` and a record that
-    also answers to ``openai`` (``providers['custom:openai']``, a legacy row named
-    ``openai``, a record whose ``name`` is ``openai``) coexist, the endpoint and
-    the key it returns can come from different records depending on config
-    order. Which pair is right cannot be decided from the WebUI side without
-    re-implementing that selection, so the route fails closed instead.
+    The Agent answers a name with the first record whose alias set contains it
+    and shares one credential pool between such records, so the endpoint and key
+    it returns can belong to different records depending on config order. The
+    route fails closed instead. Purely name-based (no URL is read); a record
+    claims in any spelling the Agent accepts, enabled or not (the Agent's legacy
+    view still selects disabled rows).
 
-    Purely name-based: no URL is read or compared. A record claims the name in
-    any spelling the Agent accepts (case, surrounding whitespace, spaces vs
-    dashes, the ``custom:`` prefix) whether enabled or not, because the Agent's
-    legacy view still selects rows the user switched off.
-
-    * Bare built-in route ``X``: ambiguous when ANY record other than the
-      built-in's own ``providers.X`` claims ``X`` (or two records are keyed
-      ``X``). With no ``providers.X`` the built-in identity still exists (its
-      default endpoint and ambient key), and WebUI routes bare ``X`` as that
-      built-in (#8685) while the Agent answers with the sibling, so it is still
-      two claimants.
-    * Explicit ``custom:X`` where ``X`` is a built-in id: ambiguous only when
-      ``providers.X`` exists and another record also answers to ``custom:X``;
-      the Agent's alias set for ``providers.X`` contains ``custom:X``. Without
-      ``providers.X`` the selector names exactly one record and is untouched.
-
-    Returns ``None`` for every other route, including named custom providers
-    whose name is not a built-in id.
+    * Bare built-in ``X``: ambiguous when any record other than ``providers.X``
+      claims ``X``, or two keys are ``X``. Without ``providers.X`` the built-in
+      identity (default endpoint, ambient key) is still the second claimant:
+      WebUI routes bare ``X`` as the built-in (#8685), the Agent as the sibling.
+    * Explicit ``custom:X`` (``X`` built-in): ambiguous when ``providers.X``
+      exists and another record also claims ``custom:X`` (the Agent's alias set
+      for ``providers.X`` contains it). Otherwise untouched.
     """
     route = str(provider or "").strip().lower().replace(" ", "-")
     explicit = route.startswith("custom:")
@@ -4309,7 +4313,7 @@ def provider_name_ambiguity_verdict(provider: object, config: object = None) -> 
         if not key_text or not isinstance(record, dict):
             continue
         # The Agent's identities for a keyed record: its ``name`` (or key) and its key.
-        claimed_by = _claiming_value((key_text, record.get("name")), names)
+        claimed_by = _claiming_value((key_text,), (record.get("name"),), names)
         if claimed_by is None:
             continue
         if not key_text.lower().startswith("custom:") and _canonicalise_provider_id(key_text) == builtin:
@@ -4320,7 +4324,7 @@ def provider_name_ambiguity_verdict(provider: object, config: object = None) -> 
     # A legacy row's only identity is its ``name``; the Agent ignores a
     # non-list section and a row's raw ``provider_key``.
     for row in legacy if isinstance(legacy, list) else ():
-        claimed_by = _claiming_value((row.get("name"),), names) if isinstance(row, dict) else None
+        claimed_by = _claiming_value((), (row.get("name"),), names) if isinstance(row, dict) else None
         if claimed_by is not None:
             others.append(f"custom_providers entry '{claimed_by}'")
     if explicit:

@@ -215,6 +215,19 @@ def test_an_env_templated_sibling_name_is_refused(monkeypatch, name):
     _both_refused("openai", _agent_runtime(NAMED_URL, NAMED_KEY), "'myproxy'", configured_base_url=BUILTIN_URL)
 
 
+@pytest.mark.parametrize("providers", [
+    {"myproxy": {"name": "Proxy ${", "base_url": NAMED_URL, "api_key": NAMED_KEY}},
+    {"myproxy": {"name": "${file:PROXY_ID}", "base_url": NAMED_URL, "api_key": NAMED_KEY}},
+    {"myproxy": {"name": "${env:}", "base_url": NAMED_URL, "api_key": NAMED_KEY}},
+    {"${env:SIBLING_NAME}": {"base_url": NAMED_URL, "api_key": NAMED_KEY}},
+], ids=["incomplete-ref", "non-env-source", "empty-env-ref", "templated-mapping-key"])
+def test_references_the_agent_leaves_verbatim_do_not_claim_the_name(monkeypatch, providers):
+    """Codex r2: only ``${VAR}`` / ``${env:VAR}`` in a string value is expanded by the Agent."""
+    monkeypatch.setenv("SIBLING_NAME", "openai")
+    _bind(monkeypatch, _config("openai", {**providers, "openai": {"base_url": BUILTIN_URL, "api_key": BUILTIN_KEY}}))
+    _both_route("openai", _agent_runtime(BUILTIN_URL, BUILTIN_KEY), ("openai", BUILTIN_URL, BUILTIN_KEY))
+
+
 @pytest.mark.parametrize("extra", [
     {"custom_providers": {"openai": {"name": "openai", "base_url": NAMED_URL, "api_key": NAMED_KEY}}},
     {"providers": {"myproxy": {"provider_key": "openai", "base_url": NAMED_URL, "api_key": NAMED_KEY}}},
