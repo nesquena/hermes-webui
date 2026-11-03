@@ -123,17 +123,58 @@ def _mask_inline_payload(part):
     return masked
 
 
+def _encode_nested_path(path):
+    """Canonical, length-delimited, TYPE-TAGGED encoding of a provenance path.
+
+    Concatenating raw keys with punctuation aliases distinct traversals. Both of
+    these render as the text ``a.b``:
+
+        {"a.b": <image>}        -> literal key "a.b"
+        {"a": {"b": <image>}}   -> traversal a then b
+
+    and both of these render as ``a[0]``:
+
+        {"a[0]": <image>}       -> literal key "a[0]"
+        {"a": [<image>]}        -> list a at index 0
+
+    Two partial rows that differ only in such placement therefore produced
+    identical hash input. That is not a hash collision -- the bytes fed to the
+    digest were literally equal -- so the loader's duplicate guard dropped one
+    row on the next save (measured 2 -> 1 -> 1).
+
+    Each segment carries a type tag (``k`` for a dict key, ``i`` for a list
+    index) and a byte length, so no key content can shift a boundary and no key
+    can impersonate a traversal.
+    """
+    out = bytearray(b"\x02nested")
+    for kind, value in path:
+        if kind == "k":
+            segment = value.encode("utf-8", "surrogatepass")
+            tag = b"k"
+        else:
+            segment = str(value).encode("ascii")
+            tag = b"i"
+        out += b"\x00" + tag + b"\x00" + str(len(segment)).encode("ascii")
+        out += b"\x00" + segment
+    return bytes(out)
+
+
 def _update_part_digest(digest, part, payload, position):
     """Feed the position, masked structure AND payload bytes into the digest.
 
-    ``position`` is the part's index in the ORIGINAL array. The projection emits
+    ``position`` is either the part's index in the ORIGINAL array (flat ``content``
+    lane) or a typed tuple path (nested ``_partial_tool_calls`` lane); both are
+    encoded unambiguously. The projection emits
     the same marker regardless of where the image sat, so
     ``[image, text("[image attachment]")]`` and
     ``[text("[image attachment]"), image]`` would otherwise produce identical
     markers and an identical digest -- two legitimately distinct rows collapsing
     on the next save.
     """
-    digest.update(f"pos={position}".encode("utf-8", "surrogatepass"))
+    if isinstance(position, tuple):
+        digest.update(_encode_nested_path(position))
+    else:
+        digest.update(f"pos={position}".encode("utf-8", "surrogatepass"))
     digest.update(b"\x00")
     try:
         masked = json.dumps(
@@ -186,7 +227,7 @@ def _project_nested(value, digest, path):
             return dict(_MARKER), True
         out = None
         for key, child in value.items():
-            new_child, changed = _project_nested(child, digest, f"{path}.{key}")
+            new_child, changed = _project_nested(child, digest, path + (("k", key),))
             if changed:
                 if out is None:
                     out = dict(value)
@@ -195,7 +236,7 @@ def _project_nested(value, digest, path):
     if isinstance(value, list):
         out = None
         for index, item in enumerate(value):
-            new_item, changed = _project_nested(item, digest, f"{path}[{index}]")
+            new_item, changed = _project_nested(item, digest, path + (("i", index),))
             if changed:
                 if out is None:
                     out = list(value)
@@ -282,7 +323,7 @@ def compact_persisted_image_parts(messages, *, stamp_digest: bool = True) -> int
         partials = message.get("_partial_tool_calls")
         if isinstance(partials, list):
             projected_partials, partials_changed = _project_nested(
-                partials, digest, "_partial_tool_calls"
+                partials, digest, (("k", "_partial_tool_calls"),)
             )
             if partials_changed:
                 message["_partial_tool_calls"] = projected_partials

@@ -728,3 +728,112 @@ def test_distinct_partial_tool_call_images_do_not_collapse(session_dir):
     persisted = json.loads((session_dir / "ptc-distinct.json").read_text())
     digests = {m.get("_image_payload_digest") for m in persisted["messages"]}
     assert None not in digests and len(digests) == 2
+
+
+def _partial_row(args, when):
+    return {
+        "role": "assistant",
+        "content": "partial",
+        "timestamp": when,
+        "_partial": True,
+        "_partial_tool_calls": [{"name": "t", "args": args, "done": False}],
+    }
+
+
+def _cold_cycle_counts(session_dir, session_id, rows, cycles=3):
+    session = Session(session_id=session_id, messages=rows)
+    counts = []
+    for _ in range(cycles):
+        session.save(touch_updated_at=False)
+        counts.append(json.loads((session_dir / f"{session_id}.json").read_text())["message_count"])
+        session = Session.load(session_id)
+    return counts
+
+
+def test_dotted_key_does_not_alias_nested_traversal(session_dir):
+    """A literal key `a.b` must not hash the same as the traversal a -> b.
+
+    Path segments used to be joined with punctuation, so `{"a.b": image}` and
+    `{"a": {"b": image}}` produced identical digest input. Two rows differing only
+    in that placement then collapsed on a cold reload. Measured pre-fix:
+    2 -> 1 -> 1.
+    """
+    image = _openai_part(_data_url(b"dotted"))
+    marker = {"type": "text", "text": "[image attachment]"}
+    rows = [
+        _partial_row({"a.b": image, "a": {"b": marker}}, 11.0),
+        _partial_row({"a.b": marker, "a": {"b": image}}, 11.0),
+    ]
+
+    counts = _cold_cycle_counts(session_dir, "ptc-dot", rows)
+
+    assert counts == [2, 2, 2], counts
+
+
+def test_bracket_key_does_not_alias_list_index(session_dir):
+    """A literal key `a[0]` must not hash the same as list `a` at index 0."""
+    image = _openai_part(_data_url(b"bracket"))
+    marker = {"type": "text", "text": "[image attachment]"}
+    rows = [
+        _partial_row({"a[0]": image, "a": [marker]}, 12.0),
+        _partial_row({"a[0]": marker, "a": [image]}, 12.0),
+    ]
+
+    counts = _cold_cycle_counts(session_dir, "ptc-brk", rows)
+
+    assert counts == [2, 2, 2], counts
+
+
+def test_ordinary_positional_swap_remains_distinct(session_dir):
+    """Control: the plain position case the typed path must keep preserving."""
+    image = _openai_part(_data_url(b"ordinary"))
+    marker = {"type": "text", "text": "[image attachment]"}
+    rows = [
+        _partial_row({"p": [image, marker]}, 13.0),
+        _partial_row({"p": [marker, image]}, 13.0),
+    ]
+
+    counts = _cold_cycle_counts(session_dir, "ptc-ord", rows)
+
+    assert counts == [2, 2, 2], counts
+
+
+def test_nested_list_swap_remains_distinct(session_dir):
+    """Control: deeper nesting, position inside an inner list."""
+    image = _openai_part(_data_url(b"nested-swap"))
+    marker = {"type": "text", "text": "[image attachment]"}
+    rows = [
+        _partial_row({"a": {"b": [image, marker]}}, 14.0),
+        _partial_row({"a": {"b": [marker, image]}}, 14.0),
+    ]
+
+    counts = _cold_cycle_counts(session_dir, "ptc-nst", rows)
+
+    assert counts == [2, 2, 2], counts
+
+
+def test_path_encoder_is_injective_on_adversarial_keys():
+    """The encoder itself: distinct structured paths must never encode equal.
+
+    Exercises the aliasing shapes directly, including keys crafted to mimic the
+    separator/type-tag bytes, a length that could shift a boundary, and unicode.
+    """
+    from api.session_image_persistence_override import _encode_nested_path
+
+    def enc(*segments):
+        return _encode_nested_path(tuple(segments))
+
+    pairs = [
+        (enc(("k", "a.b")), enc(("k", "a"), ("k", "b"))),
+        (enc(("k", "a[0]")), enc(("k", "a"), ("i", 0))),
+        (enc(("k", "a"), ("i", 0)), enc(("k", "a"), ("k", "0"))),
+        (enc(("k", "a\x00b")), enc(("k", "a"), ("k", "b"))),
+        (enc(("k", "1")), enc(("i", 1))),
+        (enc(("k", "ü")), enc(("k", "u"))),
+        (enc(("k", "k"), ("k", "v")), enc(("k", "kv"))),
+    ]
+    for left, right in pairs:
+        assert left != right, (left, right)
+
+    # Identical paths must still encode identically.
+    assert enc(("k", "a"), ("i", 1)) == enc(("k", "a"), ("i", 1))
