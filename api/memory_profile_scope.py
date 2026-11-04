@@ -1635,19 +1635,59 @@ def _is_legacy_manager(manager: Any) -> bool:
     )
 
 
-def _mark_legacy_shut_down(holder: Any) -> None:
-    """After an old Agent's provider was released, make the agent's own
-    ``shutdown_memory_provider`` a no-op (#8804). On those Agents it runs
-    ``on_session_end`` unconditionally, so a later ``close()`` would commit under an
-    owner nobody could resolve, then shut the providers down a second time. Current
-    Agents get the same effect from the soft-release teardown claim. A
-    ``_ReleaseIntent`` (the agent already left) has nothing to mark."""
-    if isinstance(holder, _ReleaseIntent):
-        return
+def end_unowned_context_engine(agent: Any, *, session_id: str, messages: Any = None) -> bool:
+    """Finish an evicted agent whose ``shutdown_memory_provider`` the WebUI refused
+    (#8804, the collateral half of #8613 item 2). True when the engine's end ran.
+
+    ``shutdown_memory_provider`` ends BOTH the memory provider and the context engine
+    (the Agent's ``_notify_context_engine_session_end``: flush the engine's per-session
+    state, close its databases). ``call_as_session_owner`` refuses the whole call when
+    the session's owner cannot be resolved, because the memory session end is a commit
+    and an unknown owner never commits (#8517). The context engine's end is cleanup
+    that was skipped along with it, which v0.52.544 always ran. It runs here once:
+
+    * only when the Agent's own shutdown did not run (``_memory_provider_shutdown`` is
+      still False; a hook-time refusal happens INSIDE that shutdown, which already
+      ended the engine);
+    * in the profile home the WebUI built the agent under, where the engine was
+      started, never the ambient env mirror (another profile's);
+    * exactly as the Agent calls it, ``on_session_end(session_id, messages)``, with any
+      error swallowed (the Agent's own ``_quietly``).
+
+    Either way the agent is then marked shut down, the end state v0.52.544 left an
+    evicted agent in, so a later ``shutdown_memory_provider`` cannot end the engine a
+    second time or (on an Agent before 2026-10-19, which has no teardown claim) run a
+    memory session end under the unknown owner."""
+    if agent is None or getattr(agent, "_memory_provider_shutdown", False):
+        return False
     try:
-        holder._memory_provider_shutdown = True
-    except Exception:
-        logger.debug("[webui] #8804: could not mark the released agent shut down", exc_info=True)
+        engine = getattr(agent, "context_compressor", None)
+        end = getattr(engine, "on_session_end", None) if engine is not None else None
+        if not callable(end):
+            return False
+        build_home = str(getattr(agent, _BUILD_HOME_ATTR, "") or "")
+        restore, reason = _enter_profile_home(build_home, profile_home_key(build_home) if build_home else None)
+        if reason is not None:
+            _log_once(
+                "engine-end-scope",
+                "[webui] #8804: the context engine of an evicted agent whose memory shutdown "
+                "was refused did not get its session end (%s); it keeps its per-session state "
+                "until the agent is collected.",
+                reason,
+            )
+            return False
+        try:
+            end(getattr(agent, "session_id", None) or session_id or "", list(messages or []))
+        except Exception:
+            logger.debug("[webui] #8804: the context engine's session end failed for %s", session_id, exc_info=True)
+        finally:
+            restore()
+        return True
+    finally:
+        try:
+            agent._memory_provider_shutdown = True
+        except Exception:
+            logger.debug("[webui] #8804: could not mark the evicted agent shut down", exc_info=True)
 
 
 def register_provider_holders(agent: Any, *, home_key: str = "") -> int:
@@ -2359,7 +2399,6 @@ def _run_claimed_release(holder: Any, claimed: list, *, manager: Any, bound_home
             # queued work was drained before the claim, and nothing here runs
             # ``on_session_end``.
             manager.shutdown_all()
-            _mark_legacy_shut_down(holder)
         else:
             manager.release_soft()
         released = True

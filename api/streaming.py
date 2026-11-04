@@ -94,6 +94,8 @@ from api.memory_profile_scope import (
     # #8613: release an unowned eviction's memory provider only when its agent is
     # the last holder of the instance.
     release_unowned_memory_provider,
+    # #8804: the context engine's end, skipped along with a refused memory shutdown.
+    end_unowned_context_engine,
     # #8613: refuse the release instead of waiting on the acquisition fence,
     # for a caller that holds a lock and must not block.
     release_without_fence_wait,
@@ -13873,6 +13875,8 @@ def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
     if not should_close_evicted_agent:
         return False
 
+    shutdown_refused = False
+    session_messages = []
     try:
         shutdown_memory_provider = getattr(agent, 'shutdown_memory_provider', None)
         if callable(shutdown_memory_provider):
@@ -13889,9 +13893,18 @@ def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
                 # its own bound profile, without a session end. A no-op unless this
                 # agent is the LAST holder of every instance it serves — a provider
                 # shared with a live agent of the same profile keeps running.
+                shutdown_refused = True
                 release_unowned_memory_provider(agent, session_id=session_id, owner_home=_owner_home)
     except Exception:
         logger.debug("Failed to shut down evicted agent memory provider for session %s", session_id, exc_info=True)
+
+    # #8804: the refused shutdown also skipped the context engine's session end, which
+    # is cleanup, not a memory commit: run it in the agent's own profile home.
+    if shutdown_refused:
+        try:
+            end_unowned_context_engine(agent, session_id=session_id, messages=session_messages)
+        except Exception:
+            logger.debug("Failed to end the evicted agent's context engine for session %s", session_id, exc_info=True)
 
     # #8613: this agent is out of the cache for good, so it holds no provider
     # instance any more — whether or not one was released above.
