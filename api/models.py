@@ -2470,6 +2470,12 @@ class Session:
         # during the parse (TOCTOU guard against an atomic replace mid-read).
         _pre_read_sig = _sidecar_stat_signature(p)
         data = json.loads(p.read_text(encoding='utf-8'))
+        if isinstance(data, dict) and _sidecar_keys_after_body(data, _SHARE_FIELD_KEYS):
+            # #8830: exp-v0.52.621..630 left a shared legacy sidecar's share
+            # fields after ``messages``; move them where the prefix reader
+            # (metadata reloads, the sidebar) sees them. The parsed values are
+            # the same either way, so this load continues with ``data``.
+            _repair_misplaced_share_fields(sid)
         # The writer (`save`) already validated the eager-checkpoint fact
         # against the transcript it persisted, so a full load restores it as
         # written and keeps only the turn-identity check (fact vs
@@ -6402,19 +6408,30 @@ _CLI_SOURCE_IDENTITY_MARKERS = ("is_cli_session", "source_tag", "raw_source", "s
 _SIDECAR_BODY_KEYS = frozenset({'messages', 'tool_calls', 'anchor_activity_scenes'})
 
 
+# The share fields exp-v0.52.621..630 appended after the body of a legacy sidecar (#8815, #8830).
+_SHARE_FIELD_KEYS = ('share_token', 'share_created_at')
+
+
+def _sidecar_keys_after_body(data: dict, keys) -> set:
+    """The ``keys`` that sit after the message body in ``data``'s key order,
+    where the bounded metadata prefix reader never sees them."""
+    after = set()
+    body_seen = False
+    for key in data:
+        if key in _SIDECAR_BODY_KEYS:
+            body_seen = True
+        elif body_seen and key in keys:
+            after.add(key)
+    return after
+
+
 def _set_sidecar_metadata_fields(data: dict, fields: dict) -> dict:
     """Return ``data`` with ``fields`` set; a key the sidecar lacks is placed
     before the message body, where save() and the bounded prefix reader keep
     metadata. An existing key keeps its position, unless it sits after the
     body (exp-v0.52.621..630 appended share fields there, #8815): it is moved
     before the body, so the prefix reader sees it again."""
-    misplaced = set()
-    body_seen = False
-    for key in data:
-        if key in _SIDECAR_BODY_KEYS:
-            body_seen = True
-        elif body_seen and key in fields:
-            misplaced.add(key)
+    misplaced = _sidecar_keys_after_body(data, fields)
     missing = {k: v for k, v in fields.items() if k not in data or k in misplaced}
     for key, value in fields.items():
         if key in data and key not in misplaced:
@@ -8259,6 +8276,30 @@ def update_session_share_fields(
     sid = str(session_id or "").strip()
     if not sid or not is_safe_session_id(sid):
         return False
+    # #8815: a sidecar last saved before shares existed has no share keys.
+    # Plain assignment would append them after ``messages``, past the prefix
+    # that ``load_metadata_only`` reads, so every metadata reload would lose
+    # the token (and the UI its Stop sharing control) while the link stays
+    # live. The helper places a missing key before the message body, moves
+    # one an exp-v0.52.621..630 build left after the body back before it,
+    # and keeps a key already in the metadata prefix where it is.
+    return _patch_session_sidecar(
+        sid,
+        lambda _payload: {"share_token": share_token, "share_created_at": share_created_at},
+    ) is not False
+
+
+def _patch_session_sidecar(sid: str, fields_for) -> bool | None:
+    """Read-patch-replace ``sid``'s sidecar under ``_session_persist_lock(sid)``.
+
+    ``fields_for(payload)`` returns the metadata fields to set on the sidecar
+    as read inside the lock, or None to leave the file untouched. The fields
+    go through ``_set_sidecar_metadata_fields``, the payload is replaced
+    atomically and the sidebar index is refreshed from it, the way
+    ``update_session_share_fields`` documents. Returns False when the sidecar
+    does not exist, None when ``fields_for`` declined, True after a write.
+    Unreadable sidecars and I/O errors raise.
+    """
     path = SESSION_DIR / f"{sid}.json"
     with _session_persist_lock(sid):
         try:
@@ -8268,17 +8309,10 @@ def update_session_share_fields(
         payload = json.loads(original.decode("utf-8"))
         if not isinstance(payload, dict):
             raise ValueError(f"Session sidecar {sid!r} is not a JSON object")
-        # #8815: a sidecar last saved before shares existed has no share keys.
-        # Plain assignment would append them after ``messages``, past the prefix
-        # that ``load_metadata_only`` reads, so every metadata reload would lose
-        # the token (and the UI its Stop sharing control) while the link stays
-        # live. The helper places a missing key before the message body, moves
-        # one an exp-v0.52.621..630 build left after the body back before it,
-        # and keeps a key already in the metadata prefix where it is.
-        payload = _set_sidecar_metadata_fields(
-            payload,
-            {"share_token": share_token, "share_created_at": share_created_at},
-        )
+        fields = fields_for(payload)
+        if fields is None:
+            return None
+        payload = _set_sidecar_metadata_fields(payload, fields)
         tmp = path.with_suffix(
             f".tmp.{os.getpid()}.{threading.current_thread().ident}"
         )
@@ -8317,6 +8351,33 @@ def update_session_share_fields(
             except Exception:
                 pass
     return True
+
+
+def _repair_misplaced_share_fields(sid: str) -> None:
+    """#8830: move share fields an exp-v0.52.621..630 build left after the body.
+
+    Those builds appended ``share_token``/``share_created_at`` after
+    ``messages`` when sharing a legacy sidecar (#8815), so metadata reloads and
+    the sidebar saw the conversation as unshared while its link stayed live.
+    A full load that finds them there rewrites only those keys into the
+    prefix, re-checking under the persistence lock so a writer that repaired
+    or replaced the sidecar in the meantime wins. Best effort: a failed repair
+    is logged and the load continues with the values it parsed.
+    """
+    def fields_for(payload):
+        misplaced = _sidecar_keys_after_body(payload, _SHARE_FIELD_KEYS)
+        if not misplaced:
+            return None
+        return {key: payload[key] for key in _SHARE_FIELD_KEYS if key in payload}
+
+    try:
+        _patch_session_sidecar(sid, fields_for)
+    except Exception:
+        logger.warning(
+            "session %s: could not move its share fields before the message body",
+            sid,
+            exc_info=True,
+        )
 
 
 def persist_recovered_workspace_binding(
