@@ -1193,7 +1193,12 @@ const ctx = {
   fetch: async (url) => {
     const href = String(url);
     if (href.includes('api/models')) {
-      return {json: async () => scenario.modelsPayload};
+      // modelsStatus / modelsFetchError let a scenario model a DEGRADED
+      // catalog refresh (HTTP 500 with a JSON body, or a transport failure)
+      // instead of a healthy 200. Default behaviour is unchanged.
+      if (scenario.modelsFetchError) throw new Error(String(scenario.modelsFetchError));
+      const status=(typeof scenario.modelsStatus==='number')?scenario.modelsStatus:200;
+      return {status: status, ok: status>=200&&status<300, json: async () => scenario.modelsPayload};
     }
     throw new Error('unexpected fetch ' + href);
   },
@@ -1613,3 +1618,161 @@ def test_ordinary_refresh_without_a_pending_reset_still_preserves_the_selection(
         {"value": "gpt-5.1", "provider": "openai"},
         {"value": "gpt-5.1-mini", "provider": "openai"},
     ], f"the rebuilt catalog must be intact; got {after['pickerOptions']!r}"
+
+
+# ---------------------------------------------------------------------------
+# Maintainer re-gate (2026-11-03, PR #8576 P2): an ordinary catalog refresh
+# must not cost the user the model/provider pair the next New Chat sends.
+#
+# populateModelDropdown()'s empty-catalog branch cleared the <select>
+# UNCONDITIONALLY ("drop the stale options so an empty catalog can never be
+# picked from"). That quarantine is a DESTINATION-PROFILE isolation: it may
+# only run while a profile-switch model reset is still pending. On an
+# ORDINARY refresh (freshness:'session_visit', no pending switch) the
+# <select> still holds THIS profile's own legal options, and clearing it
+# dropped the pair the next New Chat would have sent:
+#
+#   1. an ordinary refresh, no pending switch, an existing gpt-5.1/openai
+#      session, NO configured default model and NO persisted picker
+#      preference -- so the legal pair lives only in the picker's selection
+#   2. the catalog refresh comes back empty (or degraded: HTTP 500 with a
+#      JSON body) -> the <select> is emptied
+#   3. New Chat -> newSession()'s picker fallback has no value left and the
+#      persisted fallback is empty too -> the POST carries NEITHER model NOR
+#      model_provider
+#
+# The tests below drive the REAL populateModelDropdown and the REAL
+# newSession over an ordinary refresh and assert that the picker keeps its
+# legal selection and that the next New Chat still sends the pair.
+# ---------------------------------------------------------------------------
+
+
+def _ordinary_refresh_scenario(**overrides):
+    """An ordinary (no profile switch) session-visit refresh of a profile that
+    configures NO default model and has NO persisted picker preference: the
+    legal model/provider pair exists only in the picker's own selection."""
+    scenario = {
+        "flow": "none",
+        "modelsPayload": _EMPTY_CATALOG_PAYLOAD,
+        "defaultModel": None,
+        "activeProvider": "openai",
+        "session": {
+            "session_id": "sid-openai",
+            "model": "gpt-5.1",
+            "model_provider": "openai",
+            "messages": [],
+        },
+        "messages": [],
+        "modelSelect": {
+            "value": "gpt-5.1",
+            "groups": [
+                {
+                    "provider": "OpenAI",
+                    "provider_id": "openai",
+                    "options": [
+                        {
+                            "value": "gpt-5.1",
+                            "label": "GPT-5.1",
+                            "dataset": {"provider": "openai"},
+                        },
+                    ],
+                },
+            ],
+        },
+    }
+    scenario.update(overrides)
+    return scenario
+
+
+def _assert_ordinary_refresh_kept_the_pair(result, label):
+    assert result["ok"], result.get("error")
+    after = result["afterRefresh"]
+    assert after["pickerValue"] == "gpt-5.1", (
+        f"[{label}] an ordinary refresh must keep the picker's legal selection; "
+        f"got {after['pickerValue']!r}"
+    )
+    assert after["pickerOptions"] == [
+        {"value": "gpt-5.1", "provider": "openai"},
+    ], (
+        f"[{label}] an ordinary refresh must keep the picker's legal options; "
+        f"got {after['pickerOptions']!r}"
+    )
+    bodies = result["newSessionBodies"]
+    assert len(bodies) == 1, f"[{label}] expected exactly one New Chat POST; got {len(bodies)}"
+    body = bodies[0]
+    assert body.get("model") == "gpt-5.1", (
+        f"[{label}] the next New Chat must still send the model; got {body.get('model')!r}"
+    )
+    assert body.get("model_provider") == "openai", (
+        f"[{label}] the next New Chat must still send the provider; got "
+        f"{body.get('model_provider')!r}"
+    )
+
+
+def test_ordinary_empty_catalog_refresh_keeps_the_next_new_chat_model_pair():
+    """A successful-but-empty catalog on an ORDINARY refresh must not cost the
+    user the model/provider pair the next New Chat sends.
+
+    RED on the reviewed head: the empty-catalog branch cleared the <select>
+    even with no pending profile switch, so the next New Chat posted neither
+    model nor model_provider.
+    """
+    result = _run_refresh_driver(_ordinary_refresh_scenario())
+    _assert_ordinary_refresh_kept_the_pair(result, "empty catalog")
+
+
+def test_ordinary_degraded_catalog_refresh_keeps_the_next_new_chat_model_pair():
+    """A DEGRADED catalog (HTTP 500 whose body is still JSON) on an ORDINARY
+    refresh must not cost the user the pair either -- the response says
+    "nothing right now", not "this profile owns nothing".
+
+    RED on the reviewed head for the same reason as the empty-catalog arm.
+    """
+    result = _run_refresh_driver(_ordinary_refresh_scenario(
+        modelsStatus=500,
+        modelsPayload={"detail": "catalog backend unavailable"},
+    ))
+    _assert_ordinary_refresh_kept_the_pair(result, "degraded catalog")
+
+
+def test_ordinary_failed_catalog_fetch_keeps_the_next_new_chat_model_pair():
+    """A transport failure (the fetch itself rejects) already kept the picker
+    on the reviewed head -- the catch branch never cleared it. Pin that the
+    degraded and failed paths agree, so a fix for the degraded branch cannot
+    leave the failed branch behind.
+    """
+    result = _run_refresh_driver(_ordinary_refresh_scenario(
+        modelsFetchError="catalog backend unreachable",
+    ))
+    _assert_ordinary_refresh_kept_the_pair(result, "failed fetch")
+
+
+def test_empty_catalog_quarantine_is_scoped_to_a_pending_profile_switch():
+    """The empty-catalog branch may only drop the picker's options while a
+    profile-switch model reset is pending -- that quarantine is a
+    destination-profile isolation, and outside a profile switch the options
+    are the CURRENT profile's own legal catalog.
+    """
+    ui_src = UI_JS.read_text()
+    body = ui_src[ui_src.index("async function populateModelDropdown"):ui_src.index("function _addLiveModelsToSelect")]
+    empty_branch = body[body.index("if(!groups.length){"):body.index("// Clear existing options")]
+    assert "sel.innerHTML='';" in empty_branch, (
+        "the empty-catalog branch must still be able to quarantine the options"
+    )
+    # ...but only behind the pending-switch guard: the clear must be
+    # conditional on S._profileSwitchModelReset.
+    clear_index = empty_branch.index("sel.innerHTML='';")
+    prefix = empty_branch[:clear_index]
+    guard_index = prefix.rfind("_profileSwitchModelReset")
+    assert guard_index >= 0, (
+        "the empty-catalog clear must be guarded by the pending profile-switch "
+        "reset -- an ordinary refresh must keep the current profile's own "
+        "options (#8576 P2)"
+    )
+    # the guard must be the CONDITION of the if() that opens the clear's block,
+    # not merely a mention somewhere above it.
+    cond_open = prefix.rfind("if(", 0, guard_index)
+    assert cond_open >= 0 and ")" not in prefix[cond_open:guard_index], (
+        "the empty-catalog clear must sit inside an if() whose condition is "
+        "the pending profile-switch reset (#8576 P2)"
+    )

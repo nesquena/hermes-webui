@@ -5767,7 +5767,30 @@ async function populateModelDropdown(opts={}){
       // empty catalog can never be picked from. (The hardcoded-HTML fallback
       // only applies to a FAILED fetch — the catch below — never to a
       // successful empty response.)
-      sel.innerHTML='';
+      //
+      // #8576 P2: that quarantine is a DESTINATION-PROFILE isolation, so it
+      // may only run while a profile-switch model reset is actually pending
+      // (S._profileSwitchModelReset — armed by the switch writers in
+      // panels.js/sessions.js and released only after a successful rebuild).
+      // On an ORDINARY refresh (freshness:'session_visit', no pending switch)
+      // the <select> holds THIS profile's OWN legal catalog, and an empty or
+      // degraded catalog response means "nothing right now", not "this profile
+      // owns nothing". Clearing it there dropped the model/provider pair the
+      // next New Chat had to send — the only legal source of that pair when
+      // the profile configures no default model and no picker preference was
+      // persisted (#8576 P2: ordinary catalog refresh loses the next New Chat
+      // model choice).
+      if((typeof S!=='undefined'&&S&&S._profileSwitchModelReset)){
+        sel.innerHTML='';
+        if(typeof syncModelChip==='function') syncModelChip();
+        return; // no server groups and no configured fallback
+      }
+      // Ordinary refresh with an empty or degraded catalog: KEEP the current
+      // profile's own options and the selection inside them. Only the chip is
+      // re-synced — the picker itself must survive, because newSession()'s
+      // picker fallback reads this selection together with the option's own
+      // provider (sessions.js), and that pair is the only legal source of the
+      // new session's model when no default model is configured.
       if(typeof syncModelChip==='function') syncModelChip();
       return; // no server groups and no configured fallback
     }
