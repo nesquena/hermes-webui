@@ -8156,7 +8156,15 @@ function _sessionSearchContentPreview(session, query){
 // goes to outline.js's full-session jump (reached through window: that helper
 // lives in another script's IIFE) together with the clicked session id for the
 // session-switch guard. No/invalid index or a non-content hit: just the open.
-function _jumpToSessionSearchHit(session, hitQuery){
+// The search-jump generation (#5106): every row open, a changed or cleared query
+// and an outline jump advance it, and outline.js drops a jump whose generation is
+// no longer current.
+function _nextSessionSearchJumpGen(){
+  if(typeof window==='undefined') return null;
+  return window._sessionSearchJumpGen=(Number(window._sessionSearchJumpGen)||0)+1;
+}
+
+function _jumpToSessionSearchHit(session, hitQuery, hitGen){
   if(!session||session.match_type!=='content') return false;
   const idx=session.match_message_idx;
   const sid=session.session_id;
@@ -8166,9 +8174,17 @@ function _jumpToSessionSearchHit(session, hitQuery){
   // contains it (merged/stitched transcripts can shift indices).
   let query=typeof hitQuery==='string'?hitQuery.trim():'';
   if(!query){ try{ query=((typeof $==='function'&&$('sessionSearch')&&$('sessionSearch').value)||'').trim(); }catch(_e){} }
+  // hitGen is minted when the row is clicked, BEFORE the session opens: a query
+  // changed (or another row opened) while it loaded has superseded this hit.
+  let gen=hitGen;
+  if(Number.isSafeInteger(gen)){
+    if(window._sessionSearchJumpGen!==gen) return false;
+  }else{
+    gen=_nextSessionSearchJumpGen();
+  }
   window.setTimeout(()=>{
     try{
-      const pending=window._jumpToFullSessionMessage(idx,sid,query);
+      const pending=window._jumpToFullSessionMessage(idx,sid,query,gen);
       if(pending&&typeof pending.catch==='function') pending.catch(()=>{});
     }catch(_e){}
   },0);
@@ -8299,6 +8315,10 @@ function filterSessions(){
   if(q!==_lastSessionSearchQuery){
     _lastSessionSearchQuery=q;
     _hideSearchPreviewsAfterSelect=false;
+    // A changed or cleared query cancels a search-hit jump still in flight (#5106).
+    // Inline (not _nextSessionSearchJumpGen) so harnesses that extract
+    // filterSessions alone keep working.
+    if(typeof window!=='undefined') window._sessionSearchJumpGen=(Number(window._sessionSearchJumpGen)||0)+1;
   }
   renderSessionListFromCache();
   clearTimeout(_searchDebounceTimer);
@@ -11042,9 +11062,12 @@ function renderSessionListFromCache(){
       if(_renamingSid) return;
       try{
         const _hitQuery=($('sessionSearch').value||'').trim();
+        // Minted before the open awaits, so a query changed while the session
+        // loads (or a later row click) cancels this hit's jump (#5106).
+        const _hitGen=_nextSessionSearchJumpGen();
         if(($('sessionSearch').value||'').trim()) _hideSearchPreviewsAfterSelect=true;
         await _openSidebarSession(s);
-        _jumpToSessionSearchHit(s,_hitQuery);
+        _jumpToSessionSearchHit(s,_hitQuery,_hitGen);
       }finally{
         el.classList.remove('loading');
       }

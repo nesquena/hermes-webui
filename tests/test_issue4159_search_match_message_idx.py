@@ -211,9 +211,19 @@ global._messageRenderableMessageCount=()=>S.messages.length;
 // scenario.mountedFrom models transcript virtualization: only rows from that
 // local index on are mounted, until a full (_virtualFallback) render.
 let rows=[];
+// scenario.displayOnlyAt: local indices of display-only rows (recovered prompts).
+// ui.js stamps the canonical session index, which skips them.
+if(scenario.displayOnlyAt){
+  global._messageSessionIndexForRawIdx=(i)=>scenario.displayOnlyAt.includes(i)?null:
+    _oldestIdx+i-scenario.displayOnlyAt.filter(d=>d<i).length;
+}
+function stampIdx(base,i){
+  if(scenario.displayOnlyAt){const v=_messageSessionIndexForRawIdx(i);return v===null?'':String(v);}
+  return String(base+i);
+}
 function stamp(base, full){
   const from=(!full&&scenario.mountedFrom!=null)?scenario.mountedFrom:0;
-  rows=S.messages.map((m,i)=>({id:m.role==='user'?'msg-user-'+i:'',dataset:{msgIdx:String(i),sessionMsgIdx:String(base+i)},m,
+  rows=S.messages.map((m,i)=>({id:m.role==='user'?'msg-user-'+i:'',dataset:{msgIdx:String(i),sessionMsgIdx:stampIdx(base,i)},m,
     getClientRects(){return [{}];}})).filter((r,i)=>i>=from);
 }
 stamp(scenario.staleBase!=null?scenario.staleBase:_oldestIdx, false);
@@ -238,6 +248,10 @@ let ensureOpts=null;
 global._ensureAllMessagesLoaded=async(opts)=>{
   events.push('ensure-all');
   ensureOpts=opts===undefined?null:opts;
+  if(scenario.supersedeDuringLoad){
+    // The user typed a new query (or opened another hit) while history loaded.
+    window._sessionSearchJumpGen++;
+  }
   if(scenario.switchDuringLoad){
     // The user opened session b meanwhile (fully loaded, offset 0): the shared
     // loader bails, and a's index must not be applied to b's transcript.
@@ -267,7 +281,8 @@ for(const name of ['_currentSid','_expandOutlineRenderWindow','_searchHitMessage
 (async()=>{
   let idx=scenario.idx;
   if(scenario.idxKind==='nan') idx=NaN;
-  const p=_jumpToFullSessionMessage(idx, scenario.targetSid===undefined?'a':scenario.targetSid, scenario.query);
+  if(scenario.searchGen!==undefined) window._sessionSearchJumpGen=scenario.searchGen;
+  const p=_jumpToFullSessionMessage(idx, scenario.targetSid===undefined?'a':scenario.targetSid, scenario.query, scenario.searchGen);
   for(let i=0;i<20;i++){
     await new Promise(r=>setImmediate(r));
     if(scenario.switchDuringFrame&&frames.length) S.session={session_id:'b'};
@@ -646,8 +661,21 @@ for(const name of ['_messageSessionIndexBase','_messageRawIdxForSessionIndex','_
 for(const name of ['_currentSid','_expandOutlineRenderWindow','_searchHitMessageText','_jumpToFullSessionMessage']) eval(extractFrom(outlineSrc,name));
 (async()=>{
   const targetInDomBefore=rows.some(r=>r.dataset.msgIdx===String(scenario.idx));
-  const p=_jumpToFullSessionMessage(scenario.idx,'a');
-  for(let i=0;i<20;i++){await new Promise(r=>setImmediate(r));while(frames.length) frames.shift()();}
+  if(scenario.searchGen!==undefined) window._sessionSearchJumpGen=scenario.searchGen;
+  const p=_jumpToFullSessionMessage(scenario.idx,'a',undefined,scenario.searchGen);
+  let interrupted=false;
+  for(let i=0;i<20;i++){
+    await new Promise(r=>setImmediate(r));
+    // jumpToTurnQuestion() has returned and its frames are queued: the user now
+    // opens another session, or a newer search supersedes this hit.
+    if(!interrupted&&frames.length&&(scenario.switchBeforeFrames||scenario.supersedeBeforeFrames)){
+      interrupted=true;
+      if(scenario.switchBeforeFrames) S.session={session_id:'b'};
+      if(scenario.supersedeBeforeFrames) window._sessionSearchJumpGen++;
+      events.push('interrupted');
+    }
+    while(frames.length) frames.shift()();
+  }
   const ok=await p;
   console.log(JSON.stringify({ok,events,targetInDomBefore}));
 })().catch(e=>{console.error(e);process.exitCode=1;});
@@ -704,6 +732,7 @@ window.setTimeout=(f)=>{timers.push(f);return timers.length;};
 if(scenario.helper==='ok') window._jumpToFullSessionMessage=(idx,sid)=>{calls.push([idx,sid]);return Promise.resolve(true);};
 if(scenario.helper==='throws') window._jumpToFullSessionMessage=()=>{calls.push('threw');throw new Error('boom');};
 if(scenario.helper==='rejects') window._jumpToFullSessionMessage=()=>{calls.push('rejected');return Promise.reject(new Error('boom'));};
+eval(extract('_nextSessionSearchJumpGen'));
 eval(extract('_jumpToSessionSearchHit'));
 (async()=>{
   const scheduled=_jumpToSessionSearchHit(scenario.session);
@@ -761,9 +790,12 @@ def test_row_open_dispatches_jump_after_the_session_opens():
     src = _SESSIONS_JS.read_text(encoding="utf-8")
     start = src.index("const _openRowSession=async()=>{")
     body = src[start:src.index("};", start)]
-    assert body.index("await _openSidebarSession(s);") < body.index("_jumpToSessionSearchHit(s,_hitQuery);")
+    assert body.index("await _openSidebarSession(s);") < body.index("_jumpToSessionSearchHit(s,_hitQuery,_hitGen);")
     # The query is captured before the open, so the jump can confirm its target.
     assert body.index("const _hitQuery=") < body.index("await _openSidebarSession(s);")
+    # The search-jump generation is minted before the open awaits, so a query
+    # changed while the session loads supersedes this hit (#5106 r1104 delta audit).
+    assert body.index("const _hitGen=_nextSessionSearchJumpGen();") < body.index("await _openSidebarSession(s);")
 
 
 def test_cross_script_wiring_goes_through_window():
@@ -773,7 +805,7 @@ def test_cross_script_wiring_goes_through_window():
     outline = _OUTLINE_JS.read_text(encoding="utf-8")
     assert "window._jumpToFullSessionMessage = _jumpToFullSessionMessage" in outline
     sessions = _SESSIONS_JS.read_text(encoding="utf-8")
-    assert "window._jumpToFullSessionMessage(idx,sid,query)" in sessions
+    assert "window._jumpToFullSessionMessage(idx,sid,query,gen)" in sessions
     bare = re.findall(r"(?<![.\w])_jumpTo(?:FullSession)?Message\s*\(", sessions)
     assert not bare, "sessions.js must call the outline jump helpers via window"
 
@@ -855,3 +887,137 @@ def test_question_and_answer_jumps_use_the_distance_aware_behavior():
     ui = _UI_JS.read_text(encoding="utf-8")
     assert "seg.scrollIntoView({block:'start',behavior:_messageJumpScrollBehavior(container,seg)})" in ui
     assert "row.scrollIntoView({block:'center',behavior:_messageJumpScrollBehavior(container,row)})" in ui
+
+
+# --------------------------------------------------------------------------- #
+# 7. Cancellation inside the deferred frames, and superseded search hits (#5106 r1104)
+# --------------------------------------------------------------------------- #
+def _after(events, marker):
+    return events[events.index(marker) + 1:] if marker in events else []
+
+
+@needs_node
+def test_switch_after_the_jump_helper_returns_never_scrolls_or_flashes_the_new_session():
+    r = _run_virtual(idx=10, switchBeforeFrames=True)
+    assert "interrupted" in r["events"]
+    late = _after(r["events"], "interrupted")
+    assert not [e for e in late if e.startswith(("scroll:", "highlight:", "render@"))], late
+    assert r["ok"] is False
+
+
+@needs_node
+def test_superseded_hit_inside_the_jump_helper_frames_never_scrolls_or_flashes():
+    r = _run_virtual(idx=10, searchGen=7, supersedeBeforeFrames=True)
+    assert "interrupted" in r["events"]
+    late = _after(r["events"], "interrupted")
+    assert not [e for e in late if e.startswith(("scroll:", "highlight:", "render@"))], late
+    assert r["ok"] is False
+
+
+@needs_node
+def test_current_search_generation_still_lands_in_the_virtual_window():
+    r = _run_virtual(idx=10, searchGen=7)
+    assert r["ok"] is True
+    assert "scroll:10:center" in r["events"]
+    assert "highlight:10" in r["events"]
+
+
+@needs_node
+def test_query_changed_while_full_history_loads_drops_the_jump():
+    r = _run_jump(idx=2, truncated=True, searchGen=3, supersedeDuringLoad=True)
+    assert r["ok"] is False
+    assert "render" not in r["events"]
+    assert r["delegated"] is None
+
+
+@needs_node
+def test_unchanged_search_generation_keeps_the_jump():
+    r = _run_jump(idx=2, truncated=True, searchGen=3)
+    assert r["ok"] is True
+    assert r["delegated"] is not None
+
+
+@needs_node
+def test_display_only_rows_before_the_target_do_not_force_a_full_render():
+    # The indexed message (0) lacks the query, so the jump falls back to the first
+    # message containing it (local 2). A display-only row at local 1 shifts the
+    # stamped canonical index to 1; comparing against base + local (2) would misread
+    # the row as stale and re-render the whole transcript.
+    r = _run_jump(idx=0, query="NEEDLE", displayOnlyAt=[1])
+    assert r["ok"] is True
+    assert "render-full" not in r["events"]
+    assert r["delegated"]["q"] == 2
+
+
+_GEN_DRIVER = r"""
+const fs=require('fs');
+const source=fs.readFileSync(process.argv[1],'utf8');
+const scenario=JSON.parse(process.argv[2]);
+function extract(name){
+  const start=source.search(new RegExp('function\\s+'+name+'\\s*\\('));
+  if(start<0) throw Error('missing '+name);
+  let i=source.indexOf('{',start),depth=1; i++;
+  while(depth&&i<source.length){if(source[i]==='{')depth++;if(source[i]==='}')depth--;i++;}
+  return source.slice(start,i);
+}
+global.window=global;
+const calls=[];
+window._jumpToFullSessionMessage=(idx,sid,query,gen)=>{calls.push(gen);return Promise.resolve(true);};
+window.setTimeout=(f)=>{f();return 0;};
+const input={value:''};
+global.$=id=>id==='sessionSearch'?input:null;
+global.syncSessionSearchClear=()=>{};
+global._syncArchivedSearchPagingRefresh=()=>{};
+global.renderSessionListFromCache=()=>{};
+global._searchDebounceTimer=null;
+global._contentSearchResults=[];
+global._lastSessionSearchQuery='';
+global._hideSearchPreviewsAfterSelect=false;
+global.api=async()=>({sessions:[]});
+eval(extract('_nextSessionSearchJumpGen'));
+eval(extract('_jumpToSessionSearchHit'));
+eval(extract('filterSessions'));
+const hit={session_id:'a',match_type:'content',match_message_idx:2};
+const gens=[];
+input.value='needle'; filterSessions(); gens.push(window._sessionSearchJumpGen);
+_jumpToSessionSearchHit(hit,'needle'); gens.push(window._sessionSearchJumpGen);
+filterSessions(); gens.push(window._sessionSearchJumpGen);
+_jumpToSessionSearchHit(hit,'needle'); gens.push(window._sessionSearchJumpGen);
+input.value='needletitle'; filterSessions(); gens.push(window._sessionSearchJumpGen);
+input.value=''; filterSessions(); gens.push(window._sessionSearchJumpGen);
+// A row click mints its generation before the open awaits; the query changes
+// while the session loads; the resumed click must not dispatch.
+const clickGen=_nextSessionSearchJumpGen();
+input.value='needle2'; filterSessions();
+const supersededScheduled=_jumpToSessionSearchHit(hit,'needle',clickGen);
+// Control: nothing changed while the session loaded, so the click's own
+// generation is used (not a fresh one).
+const quietGen=_nextSessionSearchJumpGen();
+const quietScheduled=_jumpToSessionSearchHit(hit,'needle2',quietGen);
+console.log(JSON.stringify({calls,gens,supersededScheduled,quietScheduled,quietGen,genAfterQuiet:window._sessionSearchJumpGen}));
+"""
+
+
+@needs_node
+def test_hits_and_query_changes_advance_the_search_jump_generation():
+    result = subprocess.run(
+        [NODE, "-e", _GEN_DRIVER, str(_SESSIONS_JS), "{}"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    r = json.loads(result.stdout)
+    gens = r["gens"]
+    # typed query, hit, same query again (no change), second hit, changed query, cleared query
+    assert gens[1] > gens[0]
+    assert gens[2] == gens[1], "re-filtering an unchanged query must not cancel the jump"
+    assert gens[3] > gens[2]
+    assert gens[4] > gens[3] and gens[5] > gens[4]
+    # a query changed while the clicked session loaded supersedes the click
+    assert r["supersededScheduled"] is False
+    # an undisturbed click dispatches with its own generation, minting no new one
+    assert r["quietScheduled"] is True
+    assert r["genAfterQuiet"] == r["quietGen"]
+    # each dispatched jump carries the generation current when it was clicked
+    assert r["calls"] == [gens[1], gens[3], r["quietGen"]]

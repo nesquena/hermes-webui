@@ -94,6 +94,8 @@ function _excerptText(content) {
 async function _jumpToMessage(rawIdx) {
   const sid = _currentSid();
   if (!sid) return;
+  // The user's own outline navigation supersedes a search-hit jump still in flight.
+  window._sessionSearchJumpGen = (Number(window._sessionSearchJumpGen) || 0) + 1;
 
   const rowId = 'msg-user-' + rawIdx;
   const targetRow = function() {
@@ -160,12 +162,16 @@ function _searchHitMessageText(message) {
   return String(content || '');
 }
 
-async function _jumpToFullSessionMessage(fullIdx, targetSid, query) {
+async function _jumpToFullSessionMessage(fullIdx, targetSid, query, searchGen) {
   const sid = targetSid || _currentSid();
   if (!sid || !Number.isSafeInteger(fullIdx) || fullIdx < 0) return false;
   // The user may have switched (or started switching) sessions before this
   // fired: never apply one session's match index to another's transcript.
+  // `searchGen` is the search-jump generation sessions.js stamped on this hit: a
+  // later hit, a changed or cleared query, or an outline jump bumps
+  // window._sessionSearchJumpGen, and the superseded jump then does nothing.
   const stillTarget = function() {
+    if (Number.isSafeInteger(searchGen) && window._sessionSearchJumpGen !== searchGen) return false;
     if (_currentSid() !== sid) return false;
     return typeof _loadingSessionId === 'undefined' || _loadingSessionId === null || _loadingSessionId === sid;
   };
@@ -205,7 +211,11 @@ async function _jumpToFullSessionMessage(fullIdx, targetSid, query) {
       if (_searchHitMessageText(m).toLowerCase().includes(q)) { localIdx = i; msg = m; break; }
     }
     if (!msg) return false;
-    expectedAbs = _messageSessionIndexBase() + localIdx;
+    // Rows are stamped with the canonical session index, which skips display-only
+    // rows (recovered prompts); base + localIdx would force a needless full render.
+    expectedAbs = typeof _messageSessionIndexForRawIdx === 'function'
+      ? _messageSessionIndexForRawIdx(localIdx)
+      : _messageSessionIndexBase() + localIdx;
   }
   if (!msg || !Number.isSafeInteger(localIdx) || localIdx < 0) return false;  // not in the loaded window
   const container = document.getElementById('messages');
@@ -241,7 +251,7 @@ async function _jumpToFullSessionMessage(fullIdx, targetSid, query) {
   // row itself is centred and highlighted.
   if (typeof jumpToTurnQuestion !== 'function') return false;
   const assistantIdx = msg.role === 'user' ? -1 : localIdx;
-  await jumpToTurnQuestion(localIdx, assistantIdx);
+  await jumpToTurnQuestion(localIdx, assistantIdx, { isValid: stillTarget });
   if (!offWindow) return true;
   // A target outside the virtual window. jumpToTurnQuestion() mounts it through the window when it can, which is
   // cheap; it cannot when no earlier history is hidden, and then leaves the view at the tail with no error (Codex
@@ -256,7 +266,7 @@ async function _jumpToFullSessionMessage(fullIdx, targetSid, query) {
   if (typeof renderMessages === 'function') renderMessages({ preserveScroll: true, _virtualFallback: true });
   await new Promise(function(resolve) { requestAnimationFrame(resolve); });
   if (!stillTarget()) return false;
-  await jumpToTurnQuestion(localIdx, assistantIdx);
+  await jumpToTurnQuestion(localIdx, assistantIdx, { isValid: stillTarget });
   return true;
 }
 

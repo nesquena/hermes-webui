@@ -1890,9 +1890,18 @@ function _highlightQuestionRow(row){
   else start();
 }
 
-async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
+async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx, opts){
   const container=$('messages');
   if(!container||typeof questionRawIdx!=='number'||questionRawIdx<0) return;
+  // The frames scheduled below run after this call returns. A session switch in between, or a caller that
+  // cancelled the jump (opts.isValid, e.g. a superseded search hit), must not scroll, re-render or flash the
+  // transcript that is on screen by then (#5106).
+  const currentJumpSid=()=>(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)||null;
+  const jumpSid=currentJumpSid();
+  const stillValid=()=>{
+    if(currentJumpSid()!==jumpSid) return false;
+    return !(opts&&typeof opts.isValid==='function')||!!opts.isValid();
+  };
   const clampTargetScrollTop=(scrollTop)=>{
     const maxTop=Math.max(0,container.scrollHeight-container.clientHeight);
     const n=Number(scrollTop);
@@ -1938,11 +1947,11 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
     _messageVirtualWindowKey='';
     renderMessages({ preserveScroll:true });
     requestAnimationFrame(()=>{
-      if(!scrollToTarget()&&_messageHiddenBeforeCount()>0){
+      if(stillValid()&&!scrollToTarget()&&_messageHiddenBeforeCount()>0){
         _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
         _messageVirtualWindowKey='';
         renderMessages({ preserveScroll:true });
-        requestAnimationFrame(scrollToTarget);
+        requestAnimationFrame(()=>{ if(stillValid()) scrollToTarget(); });
       }
       _deferClearProgrammaticScroll();
     });
@@ -1952,7 +1961,7 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
     _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
     _messageVirtualWindowKey='';
     renderMessages({ preserveScroll:true });
-    requestAnimationFrame(scrollToTarget);
+    requestAnimationFrame(()=>{ if(stillValid()) scrollToTarget(); });
   }
 }
 
