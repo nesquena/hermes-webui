@@ -8041,13 +8041,23 @@ def _configured_badge_provider_match(
     When no row has the configured id's identity, a bare configured id may
     still name one row under a vendor spelling: ``claude-sonnet-4`` on a relay
     that lists ``anthropic/claude-sonnet-4``. Such a row matches only when its
-    identity ends with the configured identity at a ``/`` boundary and exactly
-    one row qualifies, so the badge (and the picker's "Configured" row, which
-    the frontend dedupes against that row) does not vanish for an unambiguous
-    match. Two rows that differ only by vendor namespace (``any/`` and
-    ``codex/``) never end with each other, so a sibling still never borrows
-    the badge, and two vendor spellings of one bare id (``anthropic/`` and
-    ``bedrock/``) are ambiguous and badge neither.
+    identity is exactly ``<vendor>/<configured id>`` with no ``/`` in either
+    part and exactly one row qualifies, so the badge (and the picker's
+    "Configured" row, which the frontend dedupes against that row) does not
+    vanish for an unambiguous match. Two rows that differ only by vendor
+    namespace (``any/`` and ``codex/``) never spell each other, so a sibling
+    still never borrows the badge, and two vendor spellings of one bare id
+    (``anthropic/`` and ``bedrock/``) are ambiguous and badge neither.
+
+    That is the only shape the frontend proves equivalent: its
+    ``_normalizeConfiguredModelKey()`` strips exactly one leading segment
+    (#3360 keeps ``vendor_a/x`` and ``vendor_b/y/x`` distinct), so a deeper
+    row is never deduped against the configured key. A configured
+    ``deepseek/deepseek-v4-pro`` therefore does not badge
+    ``vendor_a/deepseek/deepseek-v4-pro``, and a bare ``deepseek-v4-pro``
+    does not either; badging such a row showed two "Configured" choices that
+    save different ids (re-gate of #8741). Both stay unbadged and the picker
+    keeps the one choice that saves the configured id, as on master.
 
     The other direction is deliberately not matched: a configured
     ``anthropic/claude-sonnet-4`` on a relay that lists only
@@ -8074,7 +8084,9 @@ def _configured_badge_provider_match(
             if opt_provider == provider:
                 return opt_id
             unowned_match = unowned_match or opt_id
-        elif identity.endswith(f"/{target}"):
+        elif "/" not in target and identity.partition("/")[2] == target:
+            # Exactly ``<vendor>/<target>``: the one vendor spelling the
+            # picker dedupes against the configured key (see docstring).
             vendor_spellings.append(opt_id)
     if unowned_match:
         return unowned_match

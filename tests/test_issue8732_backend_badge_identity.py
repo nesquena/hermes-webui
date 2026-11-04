@@ -35,6 +35,14 @@ choice that saves the configured id under its own provider (as on master). The
 last section runs the production ``renderModelDropdown()`` under a fake DOM on
 this backend's live and static payloads and asserts how many "Configured"
 choices it lays out and what clicking each of them saves.
+
+The re-gate found the deeper shape duplicating the same way: a configured
+``deepseek/deepseek-v4-pro`` (or a bare ``deepseek-v4-pro``) on a relay that
+lists ``vendor_a/deepseek/deepseek-v4-pro`` badged that row, but the picker
+strips only one leading segment (#3360) and does not dedupe the configured key
+against it. The vendor-spelling match is now limited to exactly
+``<vendor>/<bare id>``, the one shape the picker dedupes, so those rows stay
+unbadged and the picker keeps the one choice that saves the configured id.
 """
 from __future__ import annotations
 
@@ -395,17 +403,54 @@ def test_single_same_provider_sibling_still_gets_no_badge():
     assert "@custom:magpie:any/gpt-6.1-sol" not in badges
 
 
-def test_deeper_vendor_spelling_matches_and_a_different_vendor_does_not():
-    # ``deepseek/x`` configured: ``vendor_a/deepseek/x`` is a spelling of it,
-    # ``vendor_b/deepseek/y`` is not, and ``vendor_a/x`` would be a sibling (#3360).
+DEEPER_FALLBACK = [{"provider": "relay", "model": "deepseek/deepseek-v4-pro"}]
+BARE_DEEPER_FALLBACK = [{"provider": "relay", "model": "deepseek-v4-pro"}]
+DEEPER_SERVED = ["vendor_a/deepseek/deepseek-v4-pro", "openai/gpt-4o"]
+
+
+def test_deeper_vendor_spelling_badges_no_row():
+    # Re-gate of #8741: ``deepseek/deepseek-v4-pro`` configured and only
+    # ``vendor_a/deepseek/deepseek-v4-pro`` served. The picker strips one
+    # leading segment (#3360), so it does not dedupe the configured key against
+    # that row; badging the row laid out two "Configured" choices that saved
+    # different ids. No row is badged: ``vendor_b/deepseek/deepseek-v4`` is a
+    # different model and ``vendor_a/deepseek-v4-pro`` a sibling. The configured
+    # spellings stay keyed, so the picker synthesizes the one choice.
     badges = _static_badges(
         _relay_groups(["vendor_a/deepseek/deepseek-v4-pro", "vendor_b/deepseek/deepseek-v4", "vendor_a/deepseek-v4-pro"]),
-        [{"provider": "relay", "model": "deepseek/deepseek-v4-pro"}],
+        DEEPER_FALLBACK,
         custom_providers=[RELAY],
     )
-    assert badges.get("@custom:relay:vendor_a/deepseek/deepseek-v4-pro", {}).get("label") == "Fallback 1"
+    assert "@custom:relay:vendor_a/deepseek/deepseek-v4-pro" not in badges
     assert "@custom:relay:vendor_b/deepseek/deepseek-v4" not in badges
     assert "@custom:relay:vendor_a/deepseek-v4-pro" not in badges
+    assert badges.get("deepseek/deepseek-v4-pro") == {"role": "fallback", "label": "Fallback 1", "provider": "custom:relay"}
+    assert badges.get("@custom:relay:deepseek/deepseek-v4-pro") == {"role": "fallback", "label": "Fallback 1", "provider": "custom:relay"}
+
+
+def test_bare_configured_id_does_not_badge_a_deeper_vendor_row():
+    # The same picker limit from the other side: a bare ``deepseek-v4-pro`` is
+    # deduped against ``<vendor>/deepseek-v4-pro`` only, never against
+    # ``vendor_a/deepseek/deepseek-v4-pro``.
+    badges = _static_badges(_relay_groups(DEEPER_SERVED), BARE_DEEPER_FALLBACK, custom_providers=[RELAY])
+    assert "@custom:relay:vendor_a/deepseek/deepseek-v4-pro" not in badges
+    assert "@custom:relay:openai/gpt-4o" not in badges
+    assert badges.get("deepseek-v4-pro") == {"role": "fallback", "label": "Fallback 1", "provider": "custom:relay"}
+
+
+def test_live_builder_badges_no_row_for_the_deeper_vendor_spelling(monkeypatch, tmp_path):
+    result = _live_models(
+        monkeypatch,
+        tmp_path,
+        custom_providers=[RELAY],
+        fallback_providers=DEEPER_FALLBACK,
+        served={"relay.example": DEEPER_SERVED},
+    )
+    ids = _option_ids(_group(result, "custom:relay"))
+    badges = result["configured_model_badges"]
+    deeper_row = next(i for i in ids if i.endswith("vendor_a/deepseek/deepseek-v4-pro"))
+    assert deeper_row not in badges
+    assert badges.get("deepseek/deepseek-v4-pro", {}).get("provider") == "custom:relay"
 
 
 def test_openrouter_bare_id_does_not_badge_a_vendor_route():
@@ -868,3 +913,38 @@ def test_production_picker_sibling_shape_has_one_configured_choice(tmp_path):
     assert [(c["id"], c["saves"]) for c in picker["configured"]] == [
         (f"@custom:magpie:{TARGET}", [[f"@custom:magpie:{TARGET}", "custom:magpie"]])
     ]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("fallback", [DEEPER_FALLBACK, BARE_DEEPER_FALLBACK], ids=["vendor-path-target", "bare-target"])
+def test_production_picker_deeper_vendor_row_keeps_one_configured_choice_static(tmp_path, fallback):
+    # Re-gate shape: with the deeper row badged (the re-gated head) the dropdown
+    # laid out two "Configured" choices that saved
+    # ``@custom:relay:vendor_a/deepseek/deepseek-v4-pro`` and the configured id.
+    configured = fallback[0]["model"]
+    groups = _relay_groups(DEEPER_SERVED)
+    badges = _static_badges(groups, fallback, custom_providers=[RELAY])
+    picker = _render_picker(tmp_path, groups, badges)
+    assert _relay_choices(picker) == [(configured, [[configured, "custom:relay"]])]
+    assert len(picker["configured"]) == 1
+    # The deeper row stays a selectable catalog row, just not a configured one.
+    assert "@custom:relay:vendor_a/deepseek/deepseek-v4-pro" in picker["allRows"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("fallback", [DEEPER_FALLBACK, BARE_DEEPER_FALLBACK], ids=["vendor-path-target", "bare-target"])
+def test_production_picker_deeper_vendor_row_keeps_one_configured_choice_live(monkeypatch, tmp_path, fallback):
+    configured = fallback[0]["model"]
+    result = _live_models(
+        monkeypatch,
+        tmp_path,
+        custom_providers=[RELAY],
+        fallback_providers=fallback,
+        served={"relay.example": DEEPER_SERVED},
+    )
+    picker = _render_picker(tmp_path, result["groups"], result["configured_model_badges"])
+    assert _relay_choices(picker) == [(configured, [[configured, "custom:relay"]])]
+    # The primary entry (openai-codex, not mocked) is the only other choice.
+    assert [c["id"] for c in picker["configured"] if c["id"] != configured] == ["gpt-5.4"]
+    deeper_row = next(i for i in _option_ids(_group(result, "custom:relay")) if i.endswith("vendor_a/deepseek/deepseek-v4-pro"))
+    assert deeper_row in picker["allRows"]
