@@ -661,7 +661,16 @@ def construct_profile_scoped_agent(
         # registration below and through an aborted build alike — so the
         # last-holder proof can never prove the old agent alone while this
         # construction is acquiring the same instance.
-        _reserve_acquisition(target_key or "")
+        if not _reserve_acquisition(target_key or ""):
+            logger.warning(
+                "[webui] #8804: a teardown of the memory provider of profile home %r is still "
+                "running, and this Hermes Agent cannot keep a new agent off the instance it "
+                "closes (no claim_instance; older than 2026-10-17). The agent built for "
+                "session %s runs without memory this turn and is not cached; the next turn "
+                "constructs it again.",
+                profile_home, session_id,
+            )
+            return _build_without_memory(agent_cls, agent_kwargs, params), False
         try:
             # #8517 (master): the shared-instance guard refuses a provider another
             # profile already owns; the Agent drops it and keeps the rest. Recorded
@@ -1323,13 +1332,53 @@ def release_without_fence_wait():
         _skip_fence_wait.reset(token)
 
 
-def _reserve_acquisition(home_key: str) -> None:
+# #8804: how long a construction on an Agent without ``claim_instance`` waits for a
+# teardown of its profile's provider instance before it builds without memory. Well
+# above the Agent's own bounded waits inside ``shutdown_all``.
+_UNFENCED_TEARDOWN_WAIT_S = 30.0
+
+
+def _teardown_running_locked(home_key: str) -> bool:
+    """A teardown is closing a provider instance ``home_key``'s agents may share
+    (#8804). Holder lock held. An entry without a home key could serve any profile,
+    so it counts for every one."""
+    return any(
+        entry.teardown and (not entry.home_key or entry.home_key == home_key)
+        for entry in _provider_holders.values()
+    )
+
+
+def _reserve_acquisition(home_key: str) -> bool:
     """Reserve the acquisition of ``home_key``'s provider instances BEFORE they
-    are initialised (#8613). Paired with ``_end_acquisition`` in a ``finally``."""
+    are initialised (#8613). Paired with ``_end_acquisition`` in a ``finally``.
+
+    #8804: on an Agent without ``claim_instance`` (before 2026-10-17) the instance a
+    teardown is closing cannot be refused to a new agent: the Agent initialises the
+    shared instance inside its constructor, so a build that ran during another
+    agent's ``shutdown_all`` re-opened the instance and the teardown then closed it
+    under the new agent. Such a construction therefore WAITS here, before it
+    reserves and in the same critical section as the release's claim, until no
+    teardown of an instance its profile may share is running; the release's
+    settlement wakes it. It never waits while holding a reservation, so it cannot
+    hold up the claim's own wait for constructions in flight. False (nothing
+    reserved) when the wait runs out: the caller builds without memory and does not
+    cache the agent. The holder lock is not held across the teardown itself.
+
+    An Agent with the seam refuses the instance itself (``_claim_for_profile``), so
+    its constructions never wait here and reserve exactly as before."""
     if not home_key:
-        return
+        return True
+    webui_fences = _claim_seam_available() is not True
     with _provider_holders_lock:
+        if webui_fences and _teardown_running_locked(home_key):
+            deadline = time.monotonic() + _UNFENCED_TEARDOWN_WAIT_S
+            while _teardown_running_locked(home_key):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                _provider_holders_cond.wait(remaining)
         _inflight_homes[home_key] = _inflight_homes.get(home_key, 0) + 1
+    return True
 
 
 def _end_acquisition(home_key: str) -> None:
@@ -1635,59 +1684,19 @@ def _is_legacy_manager(manager: Any) -> bool:
     )
 
 
-def end_unowned_context_engine(agent: Any, *, session_id: str, messages: Any = None) -> bool:
-    """Finish an evicted agent whose ``shutdown_memory_provider`` the WebUI refused
-    (#8804, the collateral half of #8613 item 2). True when the engine's end ran.
-
-    ``shutdown_memory_provider`` ends BOTH the memory provider and the context engine
-    (the Agent's ``_notify_context_engine_session_end``: flush the engine's per-session
-    state, close its databases). ``call_as_session_owner`` refuses the whole call when
-    the session's owner cannot be resolved, because the memory session end is a commit
-    and an unknown owner never commits (#8517). The context engine's end is cleanup
-    that was skipped along with it, which v0.52.544 always ran. It runs here once:
-
-    * only when the Agent's own shutdown did not run (``_memory_provider_shutdown`` is
-      still False; a hook-time refusal happens INSIDE that shutdown, which already
-      ended the engine);
-    * in the profile home the WebUI built the agent under, where the engine was
-      started, never the ambient env mirror (another profile's);
-    * exactly as the Agent calls it, ``on_session_end(session_id, messages)``, with any
-      error swallowed (the Agent's own ``_quietly``).
-
-    Either way the agent is then marked shut down, the end state v0.52.544 left an
-    evicted agent in, so a later ``shutdown_memory_provider`` cannot end the engine a
-    second time or (on an Agent before 2026-10-19, which has no teardown claim) run a
-    memory session end under the unknown owner."""
-    if agent is None or getattr(agent, "_memory_provider_shutdown", False):
-        return False
+def _mark_legacy_shut_down(holder: Any) -> None:
+    """After an old Agent's provider was released, make the agent's own
+    ``shutdown_memory_provider`` a no-op (#8804). On those Agents it runs
+    ``on_session_end`` unconditionally, so a later ``close()`` would commit under an
+    owner nobody could resolve, then shut the providers down a second time. Current
+    Agents get the same effect from the soft-release teardown claim. A
+    ``_ReleaseIntent`` (the agent already left) has nothing to mark."""
+    if isinstance(holder, _ReleaseIntent):
+        return
     try:
-        engine = getattr(agent, "context_compressor", None)
-        end = getattr(engine, "on_session_end", None) if engine is not None else None
-        if not callable(end):
-            return False
-        build_home = str(getattr(agent, _BUILD_HOME_ATTR, "") or "")
-        restore, reason = _enter_profile_home(build_home, profile_home_key(build_home) if build_home else None)
-        if reason is not None:
-            _log_once(
-                "engine-end-scope",
-                "[webui] #8804: the context engine of an evicted agent whose memory shutdown "
-                "was refused did not get its session end (%s); it keeps its per-session state "
-                "until the agent is collected.",
-                reason,
-            )
-            return False
-        try:
-            end(getattr(agent, "session_id", None) or session_id or "", list(messages or []))
-        except Exception:
-            logger.debug("[webui] #8804: the context engine's session end failed for %s", session_id, exc_info=True)
-        finally:
-            restore()
-        return True
-    finally:
-        try:
-            agent._memory_provider_shutdown = True
-        except Exception:
-            logger.debug("[webui] #8804: could not mark the evicted agent shut down", exc_info=True)
+        holder._memory_provider_shutdown = True
+    except Exception:
+        logger.debug("[webui] #8804: could not mark the released agent shut down", exc_info=True)
 
 
 def register_provider_holders(agent: Any, *, home_key: str = "") -> int:
@@ -2183,6 +2192,7 @@ def _settle_last_held_teardown(agent: Any, claimed: list, *, released: bool = Fa
     raced: list[str] = []
     agent_pid = id(agent)
     manager = _agent_manager(agent)
+    webui_fences = _claim_seam_available() is not True
     with _provider_holders_lock:
         # #8613 round 3 (finding 1): apply the queued forgets before the table is
         # read, so a collected agent is not counted as a live holder here.
@@ -2211,6 +2221,10 @@ def _settle_last_held_teardown(agent: Any, claimed: list, *, released: bool = Fa
         for key, entry in list(_provider_holders.items()):
             if not entry.holders and not entry.teardown and not entry.work and not entry.claiming and entry.intent is None:
                 _provider_holders.pop(key, None)
+        if webui_fences:
+            # #8804: a construction on an Agent without ``claim_instance`` may be
+            # waiting in ``_reserve_acquisition`` for this teardown to settle.
+            _provider_holders_cond.notify_all()
     return raced
 
 
@@ -2399,6 +2413,7 @@ def _run_claimed_release(holder: Any, claimed: list, *, manager: Any, bound_home
             # queued work was drained before the claim, and nothing here runs
             # ``on_session_end``.
             manager.shutdown_all()
+            _mark_legacy_shut_down(holder)
         else:
             manager.release_soft()
         released = True

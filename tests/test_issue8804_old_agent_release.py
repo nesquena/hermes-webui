@@ -133,6 +133,34 @@ def test_an_old_agents_sole_unowned_eviction_stops_its_provider(hc, homes, holde
     assert agent._memory_provider_shutdown is True
 
 
+def test_the_old_managers_shutdown_all_runs_exactly_once(hc, homes, holder_registry):
+    """The release runs the real manager's ``shutdown_all`` once, and nothing after it
+    (a later ``close()`` or a second boundary included) runs it again or runs a
+    session end."""
+    provider = RecordingProvider()
+    agent = _legacy_agent(homes["alpha"], provider, "8804-once")
+    inner = object.__getattribute__(agent._memory_manager, "_inner")
+    calls = {"shutdown_all": 0, "on_session_end": 0}
+    real_shutdown_all, real_on_session_end = inner.shutdown_all, inner.on_session_end
+
+    def counted_shutdown_all():
+        calls["shutdown_all"] += 1
+        real_shutdown_all()
+
+    def counted_on_session_end(messages):
+        calls["on_session_end"] += 1
+        real_on_session_end(messages)
+
+    inner.shutdown_all, inner.on_session_end = counted_shutdown_all, counted_on_session_end
+
+    assert streaming._close_evicted_agent_at_session_boundary("8804-once", agent) is True
+    agent.shutdown_memory_provider([])
+    assert streaming._close_evicted_agent_at_session_boundary("8804-once", agent) is True
+
+    assert calls == {"shutdown_all": 1, "on_session_end": 0}, calls
+    assert provider.shutdowns == 1 and provider.session_ends == 0
+
+
 def test_a_later_close_of_the_released_old_agent_runs_no_session_end(hc, homes, holder_registry):
     """v0.22.2's ``shutdown_memory_provider`` has no teardown claim: if the release did
     not mark the agent, a later ``close()`` would commit under an owner nobody could
@@ -227,7 +255,9 @@ def test_an_owned_old_agent_session_keeps_its_session_end(hc, homes, holder_regi
 
 def test_the_old_agent_release_runs_its_teardown_outside_the_holder_lock(hc, homes, holder_registry):
     """The release takes the holder lock for the proof and claim only; the teardown
-    itself runs outside it, so another thread can still register a holder meanwhile.
+    itself runs outside it (the module never holds it across provider I/O). A build
+    that would attach to the instance meanwhile is held off by the reservation
+    instead (``tests/test_issue8804_unfenced_teardown.py``).
 
     ``_provider_holders_lock`` is an RLock, so the check must come from ANOTHER thread
     than the one running the teardown: the teardown is paused at the provider's
@@ -256,119 +286,6 @@ def test_the_old_agent_release_runs_its_teardown_outside_the_holder_lock(hc, hom
     assert not t.is_alive()
     assert got is True, "the provider teardown ran with the holder lock held"
     assert provider.shutdowns == 1
-
-
-# ── the context engine's session end (#8804, finding 2 of the 544..627 whole-range read) ──
-
-from tests.test_issue8613_provider_instance_holders import (  # noqa: E402,F401
-    SharedInstanceProvider,
-    _shared_agent,
-)
-
-
-class RecordingEngine:
-    """A context engine whose ``on_session_end`` records the session, the context-local
-    profile home it ran under, and how many transcript messages it was given."""
-
-    def __init__(self, fail=False):
-        self.ends: list = []
-        self.fail = fail
-
-    def on_session_end(self, session_id, messages):
-        import hermes_constants  # noqa: PLC0415 - the hc fixture installs it
-
-        self.ends.append((session_id, str(hermes_constants.get_hermes_home()), len(messages)))
-        if self.fail:
-            raise RuntimeError("engine flush failed")
-
-
-def _with_engine(agent, engine, messages=2):
-    agent.context_compressor = engine
-    agent._session_messages = [{"role": "user", "content": "x"}] * messages
-    return agent
-
-
-def test_an_unowned_eviction_ends_the_context_engine_once_in_the_agents_own_home(hc, homes, holder_registry):
-    engine = RecordingEngine()
-    agent = _with_engine(_shared_agent(homes["alpha"], SharedInstanceProvider(), "8804-ce-current"), engine)
-
-    assert streaming._close_evicted_agent_at_session_boundary("8804-ce-current", agent) is True
-
-    assert engine.ends == [("8804-ce-current", str(homes["alpha"]), 2)], (
-        "v0.52.544 ended the context engine on this eviction; it must run once, in the profile "
-        "home the agent was built under (the ambient home is the default profile here)"
-    )
-    assert agent._memory_provider_shutdown is True
-    agent.shutdown_memory_provider([])
-    assert len(engine.ends) == 1
-
-
-def test_an_old_agents_unowned_eviction_ends_its_context_engine_too(hc, homes, holder_registry):
-    engine = RecordingEngine()
-    provider = RecordingProvider()
-    agent = _with_engine(_legacy_agent(homes["alpha"], provider, "8804-ce-old"), engine, messages=1)
-
-    assert streaming._close_evicted_agent_at_session_boundary("8804-ce-old", agent) is True
-
-    assert engine.ends == [("8804-ce-old", str(homes["alpha"]), 1)]
-    assert provider.shutdowns == 1 and provider.session_ends == 0
-    agent.shutdown_memory_provider([])
-    assert getattr(agent, "shutdown_bodies_run", 0) == 0
-
-
-def test_the_engine_ends_even_when_a_live_agent_keeps_the_shared_provider(hc, homes, holder_registry):
-    """The context engine belongs to the evicted agent alone, so it ends even while the
-    shared memory provider keeps running for the other agent."""
-    provider = SharedInstanceProvider()
-    engine = RecordingEngine()
-    first = _with_engine(_shared_agent(homes["alpha"], provider, "8804-ce-shared-a"), engine)
-    _shared_agent(homes["alpha"], provider, "8804-ce-shared-b")
-
-    assert streaming._close_evicted_agent_at_session_boundary("8804-ce-shared-a", first) is True
-
-    assert [e[0] for e in engine.ends] == ["8804-ce-shared-a"]
-    assert provider.shutdowns == 0 and provider.client.is_closed is False
-
-
-def test_an_engine_whose_end_raises_does_not_break_the_eviction(hc, homes, holder_registry):
-    engine = RecordingEngine(fail=True)
-    agent = _with_engine(_shared_agent(homes["alpha"], SharedInstanceProvider(), "8804-ce-fail"), engine)
-
-    assert streaming._close_evicted_agent_at_session_boundary("8804-ce-fail", agent) is True
-    assert len(engine.ends) == 1
-    assert agent._memory_provider_shutdown is True
-
-
-def test_an_owned_eviction_leaves_the_engine_to_the_agents_own_shutdown(hc, homes, holder_registry, monkeypatch):
-    """With a resolvable owner the Agent's own ``shutdown_memory_provider`` runs (and ends
-    the engine itself on a real Agent); the WebUI must not end it a second time."""
-    engine = RecordingEngine()
-    agent = _with_engine(_shared_agent(homes["alpha"], SharedInstanceProvider(), "8804-ce-owned"), engine)
-    monkeypatch.setattr(scope, "session_owner_profile_home", lambda sid: str(homes["alpha"]))
-
-    assert streaming._close_evicted_agent_at_session_boundary("8804-ce-owned", agent) is True
-    assert engine.ends == []
-
-
-def test_an_agent_whose_own_shutdown_already_ran_is_not_ended_again(hc, homes, holder_registry):
-    engine = RecordingEngine()
-    agent = _with_engine(_shared_agent(homes["alpha"], SharedInstanceProvider(), "8804-ce-done"), engine)
-    agent._memory_provider_shutdown = True
-
-    assert scope.end_unowned_context_engine(agent, session_id="8804-ce-done") is False
-    assert engine.ends == []
-
-
-def test_an_agent_without_a_recorded_build_home_keeps_its_engine_unended(hc, homes, holder_registry, caplog):
-    engine = RecordingEngine()
-    agent = _with_engine(_shared_agent(homes["alpha"], SharedInstanceProvider(), "8804-ce-nohome"), engine)
-    delattr(agent, scope._BUILD_HOME_ATTR)
-    caplog.set_level(logging.WARNING)
-
-    assert scope.end_unowned_context_engine(agent, session_id="8804-ce-nohome") is False
-    assert engine.ends == []
-    assert agent._memory_provider_shutdown is True
-    assert any("did not get its session end" in r.getMessage() for r in caplog.records)
 
 
 def test_a_canary_agent_with_a_bound_scope_but_no_soft_release_is_released_in_its_bound_home(
