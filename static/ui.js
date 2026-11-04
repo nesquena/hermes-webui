@@ -10878,9 +10878,13 @@ function renderMd(raw){
   // Used inside list items and blockquotes where the text may already contain
   // HTML from the pre-pass → bold pipeline, so we cannot call esc() directly.
   function inlineMd(t){
-    // Stash backtick code spans first so bold/italic never esc() their content
+    // Stash existing/backtick code spans first so later passes never alter their content
     const _code_stash=[];
+    t=t.replace(/(<code\b[^>]*>[\s\S]*?<\/code>)/g,m=>{_code_stash.push(m);return `\x00C${_code_stash.length-1}\x00`;});
     t=t.replace(/`([^`\n]+)`/g,(_,x)=>{_code_stash.push(`<code>${esc(x)}</code>`);return `\x00C${_code_stash.length-1}\x00`;});
+    // GFM consumes escaped backslash pairs in plain text. Code spans are
+    // already stashed, so their literal backslashes remain unchanged.
+    t=t.replace(/\\\\/g,'\\');
     t=t.replace(/\*\*\*(.+?)\*\*\*/g,(_,x)=>`<strong><em>${esc(x)}</em></strong>`);
     t=t.replace(/\*\*(.+?)\*\*/g,(_,x)=>`<strong>${esc(x)}</strong>`);
     t=t.replace(/\*([^\s*](?:[^*\n]*?[^\s*])?)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
