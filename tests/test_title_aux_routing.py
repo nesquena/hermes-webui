@@ -106,6 +106,17 @@ class TestAuxTitleConfigured(unittest.TestCase):
     def test_all_empty_returns_false(self):
         self.assertFalse(self._call({'provider': '', 'model': '', 'base_url': ''}))
 
+    def test_prefer_fast_model_routes_implicit_titles_via_aux(self):
+        self.assertTrue(self._call({
+            'provider': 'auto', 'model': '', 'base_url': '', 'prefer_fast_model': True,
+        }))
+        self.assertTrue(self._call({
+            'provider': '', 'model': '', 'base_url': '', 'prefer_fast_model': 'on',
+        }))
+        self.assertFalse(self._call({
+            'provider': 'auto', 'model': '', 'base_url': '', 'prefer_fast_model': 'false',
+        }))
+
     def test_empty_dict_returns_false(self):
         self.assertFalse(self._call({}))
 
@@ -274,7 +285,11 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
             'base_url': 'http://openrouter:4000/v1',
             'api_key': 'test-title-api-key',
         }
-        with _patch_tg_config(tg_config):
+        # Patch the streaming boundary directly so this regression is
+        # independent of any real/stub Agent module or shared config/import
+        # state from another test.  The blank provider assertion below is the
+        # route-preservation contract for an explicit custom endpoint.
+        with patch('api.streaming._get_aux_title_config', return_value=tg_config):
             with patch('agent.auxiliary_client.call_llm', side_effect=fake_call_llm, create=True):
                 result, status = generate_title_raw_via_aux(
                     user_text='Summarize this title routing bug.',
@@ -1080,6 +1095,69 @@ class TestAuxInvalidAuxTriggersAgentFallback(unittest.TestCase):
 
         # Agent route must NOT have been invoked
         mock_agent_title.assert_not_called()
+
+
+class TestFastModelBackgroundTitleRouting(unittest.TestCase):
+    """Exercise both real callers through the actual auxiliary request boundary."""
+
+    def _run_case(self, *, refresh):
+        from contextlib import nullcontext
+        from api.streaming import _run_background_title_update, _run_background_title_refresh
+
+        session = MagicMock()
+        session.title = 'Old Title' if refresh else 'Untitled'
+        session.llm_title_generated = bool(refresh)
+        session.messages = [
+            {'role': 'user', 'content': 'What is new?'},
+            {'role': 'assistant', 'content': 'A faster model.'},
+        ]
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'New Fast Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming.get_session', return_value=session), patch(
+            'api.streaming._get_aux_title_config',
+            return_value={
+                'provider': 'auto', 'model': '', 'base_url': '',
+                'prefer_fast_model': True,
+            },
+        ), patch('api.config.cfg', {
+            'model': {'provider': 'opencode-zen', 'default': 'main-model', 'api_key': 'main-key'},
+        }), patch(
+            'api.profiles.profile_env_for_background_worker', return_value=nullcontext(),
+        ), patch(
+            'api.streaming._generate_llm_session_title_for_agent',
+        ) as agent_title, patch(
+            'agent.auxiliary_client._main_route_target',
+            return_value=('opencode-zen', 'fast-title-model', '', 'fast-key', ''),
+            create=True,
+        ), patch(
+            'agent.auxiliary_client.call_llm', side_effect=call_llm, create=True,
+        ), patch('api.state_sync.sync_session_title', create=True):
+            args = {
+                'session_id': 'fast-route-session',
+                'user_text': 'What is new?',
+                'assistant_text': 'A faster model.',
+                'put_event': lambda _t, _d: None,
+                'agent': MagicMock(),
+            }
+            if refresh:
+                _run_background_title_refresh(current_title='Old Title', **args)
+            else:
+                _run_background_title_update(placeholder_title='Untitled', **args)
+            agent_title.assert_not_called()
+
+        self.assertTrue(captured, 'Both callers must reach the auxiliary client')
+        self.assertEqual(captured[-1]['model'], 'fast-title-model')
+        self.assertEqual(captured[-1]['api_key'], 'fast-key')
+
+    def test_initial_title_uses_fast_agent_selected_auxiliary_model(self):
+        self._run_case(refresh=False)
+
+    def test_refresh_title_uses_fast_agent_selected_auxiliary_model(self):
+        self._run_case(refresh=True)
 
 
 class TestAuxTitleConversationContext(unittest.TestCase):

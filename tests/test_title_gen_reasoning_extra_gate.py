@@ -1,56 +1,1055 @@
-"""Consolidated regression tests for title-gen reasoning extra_body gating.
-
-Consolidates #2083 (suppress thinking on reasoning models so titles aren't
-polluted) with #4161 (OpenAI/Azure Chat Completions reject the `reasoning`
-extra_body param with a 400 -> silent fallback to heuristic titles).
-
-Aux path (`generate_title_raw_via_aux`, no agent object): inject the
-reasoning-disable EXCEPT on reject-listed routes (OpenAI/Azure).
-Agent path (`generate_title_raw_via_agent`): inject only when the agent's
-canonical `_supports_reasoning_extra_body()` says the route is reasoning-
-tolerant AND the route is not reject-listed — which additionally excludes
-OpenRouter Anthropic mandatory-reasoning models (Claude Sonnet 4.6 / Opus 4.8)
-that are reasoning-capable but 400 on a disable.
-"""
+"""Regression coverage for auxiliary title reasoning-suppression routing."""
 from __future__ import annotations
 
-from api.streaming import _route_rejects_reasoning_extra
+import importlib
+import importlib.util
+import sys
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
+
+_MISSING = object()
+_AGENT_BEFORE_COLLECTION = sys.modules.get("agent", _MISSING)
+_AGENT_SPEC_BEFORE_COLLECTION = getattr(_AGENT_BEFORE_COLLECTION, "__spec__", _MISSING)
+_AGENT_PATH_BEFORE_COLLECTION = getattr(_AGENT_BEFORE_COLLECTION, "__path__", _MISSING)
+try:
+    _AGENT_IMPORT_SPEC_BEFORE_COLLECTION = importlib.util.find_spec("agent")
+except (ImportError, ValueError):
+    _AGENT_IMPORT_SPEC_BEFORE_COLLECTION = None
+
+from api.streaming import _route_accepts_reasoning_extra, generate_title_raw_via_aux
+
+_AGENT_AFTER_COLLECTION = sys.modules.get("agent", _MISSING)
 
 
-class TestAuxRejectList:
-    def test_openai_direct_is_reject_listed(self):
-        assert _route_rejects_reasoning_extra("openai", "gpt-5.5", "https://api.openai.com/v1") is True
+def test_collection_preserves_the_real_agent_package():
+    """Importing this regression module must not poison later Agent imports."""
+    if _AGENT_BEFORE_COLLECTION is _MISSING:
+        agent_module = _AGENT_AFTER_COLLECTION
+        if agent_module is _MISSING:
+            if _AGENT_IMPORT_SPEC_BEFORE_COLLECTION is None:
+                pytest.skip("Hermes Agent is not installed in this WebUI-only environment")
+            agent_module = importlib.import_module("agent")
 
-    def test_azure_is_reject_listed(self):
-        assert _route_rejects_reasoning_extra("azure", "gpt-4", "https://x.openai.azure.com/") is True
-        assert _route_rejects_reasoning_extra("azure/foo", "gpt-4", "") is True
+        agent_spec = getattr(agent_module, "__spec__", None)
+        agent_path = getattr(agent_module, "__path__", _MISSING)
+        assert agent_spec is not None
+        assert agent_path is not _MISSING
+        if _AGENT_IMPORT_SPEC_BEFORE_COLLECTION is not None:
+            assert agent_spec.origin == _AGENT_IMPORT_SPEC_BEFORE_COLLECTION.origin
+            assert tuple(agent_path) == tuple(
+                _AGENT_IMPORT_SPEC_BEFORE_COLLECTION.submodule_search_locations or ()
+            )
+        try:
+            assert importlib.import_module("agent.model_metadata") is not None
+        except ImportError as exc:
+            pytest.skip(f"Installed Agent dependencies unavailable: {exc}")
+        return
 
-    def test_azure_foundry_aliases_reject_listed(self):
-        assert _route_rejects_reasoning_extra("azure-foundry", "gpt-5", "") is True
-        assert _route_rejects_reasoning_extra("azure-ai-foundry", "gpt-5", "") is True
-        assert _route_rejects_reasoning_extra("azure-ai", "gpt-5", "") is True
-        # Foundry host-based detection (services.ai.azure.com / cognitiveservices)
-        assert _route_rejects_reasoning_extra("custom", "gpt-5", "https://x.services.ai.azure.com/v1") is True
+    assert _AGENT_AFTER_COLLECTION is _AGENT_BEFORE_COLLECTION
+    assert getattr(_AGENT_AFTER_COLLECTION, "__spec__", _MISSING) is _AGENT_SPEC_BEFORE_COLLECTION
+    assert getattr(_AGENT_AFTER_COLLECTION, "__path__", _MISSING) is _AGENT_PATH_BEFORE_COLLECTION
+    # Earlier tests can insert a spec-less synthetic agent module. This
+    # module must preserve it, not claim that the pre-existing stub was real.
+    if _AGENT_SPEC_BEFORE_COLLECTION is not None and _AGENT_PATH_BEFORE_COLLECTION is not _MISSING:
+        try:
+            assert importlib.import_module("agent.model_metadata") is not None
+        except ImportError as exc:
+            pytest.skip(f"Installed Agent dependencies unavailable: {exc}")
 
-    def test_hostname_match_not_substring(self):
-        # A proxy whose PATH merely contains api.openai.com must NOT be reject-listed.
-        assert _route_rejects_reasoning_extra("custom", "qwen3", "https://proxy.example.test/api.openai.com/v1") is False
-        # but the real OpenAI host is.
-        assert _route_rejects_reasoning_extra("custom", "gpt-5", "https://api.openai.com/v1") is True
 
-    def test_openai_codex_alias_is_reject_listed(self):
-        assert _route_rejects_reasoning_extra("openai-codex", "gpt-5", "") is True
+@pytest.fixture
+def _scoped_auxiliary_client_module(monkeypatch):
+    """Provide a call boundary per test without mutating collection state."""
+    try:
+        auxiliary_client = importlib.import_module("agent.auxiliary_client")
+    except Exception:
+        agent_module = sys.modules.get("agent")
+        if agent_module is None:
+            agent_spec = importlib.util.spec_from_loader(
+                "agent", loader=None, is_package=True
+            )
+            agent_module = importlib.util.module_from_spec(agent_spec)
+            monkeypatch.setitem(sys.modules, "agent", agent_module)
 
-    def test_openrouter_non_anthropic_is_not_reject_listed(self):
-        assert _route_rejects_reasoning_extra("openrouter", "deepseek/deepseek-r1", "https://openrouter.ai/api/v1") is False
+        auxiliary_spec = importlib.util.spec_from_loader(
+            "agent.auxiliary_client", loader=None
+        )
+        auxiliary_client = importlib.util.module_from_spec(auxiliary_spec)
+        monkeypatch.setitem(
+            sys.modules, "agent.auxiliary_client", auxiliary_client
+        )
+        monkeypatch.setattr(
+            agent_module, "auxiliary_client", auxiliary_client, raising=False
+        )
 
-    def test_openrouter_anthropic_mandatory_is_reject_listed(self):
-        # Promoted into the shared helper so BOTH aux and agent paths skip it.
-        assert _route_rejects_reasoning_extra("openrouter", "anthropic/claude-sonnet-4.6", "https://openrouter.ai/api/v1") is True
-        assert _route_rejects_reasoning_extra("openrouter", "anthropic/claude-opus-4.8", "https://openrouter.ai/api/v1") is True
+    yield auxiliary_client
 
-    def test_local_lmstudio_is_not_reject_listed(self):
-        assert _route_rejects_reasoning_extra("lmstudio", "qwen3-8b", "http://localhost:1234/v1") is False
 
-    def test_minimax_is_not_reject_listed(self):
-        assert _route_rejects_reasoning_extra("", "minimax-m2", "https://api.minimaxi.com/v1") is False
+@pytest.mark.usefixtures("_scoped_auxiliary_client_module")
+class TestAuxReasoningExtraRouteContract:
+    def test_known_reasoning_routes_keep_suppression(self):
+        assert _route_accepts_reasoning_extra(
+            'openrouter', 'deepseek/deepseek-r1', 'https://openrouter.ai/api/v1'
+        ) is True
+        assert _route_accepts_reasoning_extra('lmstudio', 'qwen3-8b', 'http://localhost:1234/v1') is True
+        assert _route_accepts_reasoning_extra('', 'minimax-m2', 'https://api.minimaxi.com/v1') is True
+        assert _route_accepts_reasoning_extra('', 'MiniMax-M3', 'https://api.minimax.io/v1') is True
+        assert _route_accepts_reasoning_extra('', 'MiniMax-M3', 'https://edge.api.minimax.io/v1') is True
+
+    def test_builtin_routes_are_resolved_when_url_is_implicit(self):
+        assert _route_accepts_reasoning_extra('deepseek', 'deepseek-reasoner', '') is True
+        assert _route_accepts_reasoning_extra('anthropic', 'claude-sonnet-4-6', '') is True
+        assert _route_accepts_reasoning_extra('lmstudio', 'qwen3-8b', '') is True
+        assert _route_accepts_reasoning_extra('google-gemini', 'gemini-2.5-pro', '') is True
+        assert _route_accepts_reasoning_extra('x-ai', 'grok-4', '') is True
+        assert _route_accepts_reasoning_extra('ollama', 'qwen3', '') is True
+
+    @pytest.mark.parametrize('provider', (
+        'ai-gateway',
+        'vercel',
+        'vercel-ai-gateway',
+        'ai_gateway',
+        'aigateway',
+    ))
+    def test_ai_gateway_request_keeps_reasoning_suppression(self, provider):
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': provider,
+            'model': 'google/gemini-3-flash',
+            'base_url': '',
+        }), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+            generate_title_raw_via_aux('question', 'answer')
+
+        request = captured[-1]
+        assert (request['provider'], request['model'], request['base_url']) == (
+            provider,
+            'google/gemini-3-flash',
+            None,
+        )
+        assert request['extra_body'] == {'reasoning': {'enabled': False}}
+
+    @pytest.mark.parametrize(
+        ("provider", "model", "base_url"),
+        (
+            ("openai", "gpt-5", "https://api.openai.com/v1"),
+            ("openai-codex", "gpt-5", ""),
+            ("azure", "gpt-4", ""),
+            ("azure-foundry", "gpt-4", ""),
+            ("azure-ai-foundry", "gpt-4", ""),
+            ("azure-ai", "gpt-4", ""),
+            ("azure/deployment", "gpt-4", ""),
+            ("azure-deployment", "gpt-4", ""),
+            ("custom", "gpt-5", "https://x.openai.azure.com/v1"),
+            ("custom", "gpt-5", "https://x.services.ai.azure.com/v1"),
+            ("custom", "gpt-5", "https://x.cognitiveservices.azure.com/v1"),
+            (
+                "openrouter",
+                "anthropic/claude-sonnet-4.6",
+                "https://openrouter.ai/api/v1",
+            ),
+            (
+                "openrouter",
+                "anthropic/claude-opus-4.8",
+                "https://openrouter.ai/api/v1",
+            ),
+        ),
+    )
+    def test_known_reject_routes_omit_suppression(
+        self, provider, model, base_url
+    ):
+        assert _route_accepts_reasoning_extra(provider, model, base_url) is False
+
+    def test_unknown_custom_route_omits_suppression(self):
+        assert _route_accepts_reasoning_extra('custom:relay', 'reasoning-model', 'https://relay.example.test/v1') is False
+
+    def test_hostname_matching_does_not_use_path_substrings(self):
+        assert _route_accepts_reasoning_extra(
+            'deepseek', 'deepseek-r1', 'https://proxy.example.test/api.openai.com/v1'
+        ) is True
+
+    def test_missing_route_fields_are_not_treated_as_resolved(self):
+        assert _route_accepts_reasoning_extra('', '', '') is False
+        assert _route_accepts_reasoning_extra('custom:relay', '', 'https://relay.example.test/v1') is False
+        assert _route_accepts_reasoning_extra('', 'reasoning-model', '') is False
+
+    def test_aux_route_matrix_uses_one_resolved_route_for_request_and_gate(self):
+        cases = (
+            # auxiliary_provider, auxiliary_model, auxiliary_url,
+            # default_provider, default_model, default_url, request route, extra_body
+            ('auto', '', '', 'qwen', 'qwen3-title', '',
+             ('qwen', 'qwen3-title', None), {'reasoning': {'enabled': False}}),
+            ('local', '', '', 'deepseek', 'deepseek-reasoner', '',
+             ('deepseek', 'deepseek-reasoner', None), {'reasoning': {'enabled': False}}),
+            ('deepseek', '', '', 'deepseek', 'deepseek-reasoner', '',
+             ('deepseek', 'deepseek-v4-flash', None), {'reasoning': {'enabled': False}}),
+            ('auto', '', '', 'openai', 'gpt-5', '',
+             ('openai', 'gpt-5', None), None),
+            ('local', '', '', 'custom', 'title-model', 'https://relay.example/v1',
+             ('custom', 'title-model', 'https://relay.example/v1'), None),
+            ('auto', '@openrouter:deepseek/deepseek-r1:free', '', 'openai', 'gpt-5', '',
+             ('openrouter', 'deepseek/deepseek-r1:free', None), {'reasoning': {'enabled': False}}),
+            ('auto', '@custom:relay:vendor/model:thinking', 'https://relay.example/v1', 'openai', 'gpt-5', '',
+             ('custom:relay', 'vendor/model:thinking', 'https://relay.example/v1'), None),
+            ('auto', '', '', 'minimax', 'MiniMax-M2.5', 'https://api.minimaxi.com/v1',
+             ('minimax', 'MiniMax-M2.5', 'https://api.minimaxi.com/v1'),
+             {'reasoning': {'enabled': False}, 'reasoning_split': True}),
+            # Explicit routes must not inherit a differing main route's model
+            # or endpoint, including namespaced OpenRouter identifiers.
+            ('deepseek', 'deepseek-reasoner', 'https://api.deepseek.com/v1', 'openai', 'gpt-5.5', 'https://api.openai.com/v1',
+             ('deepseek', 'deepseek-reasoner', 'https://api.deepseek.com/v1'),
+             {'reasoning': {'enabled': False}}),
+            ('openrouter', 'deepseek/deepseek-r1:free', 'https://openrouter.ai/api/v1', 'openai', 'gpt-5.5', 'https://api.openai.com/v1',
+             ('openrouter', 'deepseek/deepseek-r1:free', 'https://openrouter.ai/api/v1'),
+             {'reasoning': {'enabled': False}}),
+            ('openrouter', 'anthropic/claude-sonnet-4.6:thinking', 'https://openrouter.ai/api/v1', 'openai', 'gpt-5.5', 'https://api.openai.com/v1',
+             ('openrouter', 'anthropic/claude-sonnet-4.6:thinking', 'https://openrouter.ai/api/v1'), None),
+            # An explicit relay/model contract with a blank provider is
+            # Agent-custom, not a request to borrow the differing main route.
+            ('', 'gemma-4-31b-it', 'https://relay.example.test/v1', 'openai', 'gpt-main', 'https://api.openai.com/v1',
+             (None, 'gemma-4-31b-it', 'https://relay.example.test/v1'), None),
+        )
+        for (
+            provider, model, base_url, default_provider, default_model, default_url,
+            expected_route, expected_extra,
+        ) in cases:
+            captured = []
+
+            def call_llm(*, _captured=captured, **kwargs):
+                _captured.append(kwargs)
+                return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+            with patch('api.streaming._get_aux_title_config', return_value={
+                'provider': provider, 'model': model, 'base_url': base_url,
+            }), patch('api.config.cfg', {
+                'model': {
+                    'provider': default_provider,
+                    'default': default_model,
+                    'base_url': default_url,
+                },
+            }), patch(
+                'agent.auxiliary_client._get_aux_model_for_provider',
+                side_effect=lambda provider: {'deepseek': 'deepseek-v4-flash'}.get(provider, ''),
+                create=True,
+            ), patch(
+                'agent.auxiliary_client._main_route_target',
+                side_effect=lambda runtime, task: (
+                    runtime.get('provider'), runtime.get('model'),
+                    runtime.get('base_url'), runtime.get('api_key'), runtime.get('api_mode'),
+                ),
+                create=True,
+            ), patch(
+                'agent.auxiliary_client._resolve_auto_route',
+                side_effect=lambda main_runtime, task: (
+                    SimpleNamespace(
+                        base_url=main_runtime.get('base_url') or '',
+                        api_key=main_runtime.get('api_key') or '',
+                    ),
+                    main_runtime.get('model'), main_runtime.get('provider'),
+                ),
+                create=True,
+            ), patch(
+                'agent.auxiliary_client._effective_provider_for_client',
+                side_effect=lambda client, provider: provider,
+                create=True,
+            ), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+                generate_title_raw_via_aux('question', 'answer')
+            request = captured[-1]
+            if provider in ('auto', 'local', '') and not base_url and not model.startswith('@'):
+                # The compatibility gate sees the resolved main route, but the
+                # Agent request remains auto to retain HTTP-failure fallbacks.
+                assert (request['provider'], request['model'], request['base_url']) == (
+                    'auto', model or None, None,
+                )
+                assert request['main_runtime']['provider'] == default_provider
+                assert request['main_runtime']['model'] == default_model
+            else:
+                assert (request['provider'], request['model'], request['base_url']) == expected_route
+            assert request['extra_body'] == expected_extra
+
+    def test_explicit_blank_model_uses_its_own_default_not_the_main_route(self):
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': 'deepseek', 'model': '', 'base_url': '',
+        }), patch('api.config.cfg', {
+            'model': {'provider': 'openai', 'default': 'gpt-5.5', 'base_url': 'https://api.openai.com/v1'},
+            'providers': {'deepseek': {'models': ['deepseek-chat']}},
+        }), patch(
+            'agent.auxiliary_client._get_aux_model_for_provider',
+            return_value='deepseek-v4-flash',
+            create=True,
+        ) as aux_default, patch(
+            'agent.auxiliary_client.call_llm', side_effect=call_llm, create=True,
+        ):
+            generate_title_raw_via_aux('question', 'answer')
+
+        request = captured[-1]
+        aux_default.assert_called_once_with('deepseek')
+        assert request['provider'] == 'deepseek'
+        assert request['model'] == 'deepseek-v4-flash'
+        assert request['base_url'] is None
+        assert request['extra_body'] == {'reasoning': {'enabled': False}}
+
+    def test_explicit_blank_model_with_custom_url_uses_its_own_default(self):
+        """A custom endpoint must not bypass an explicit provider's default."""
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': 'deepseek', 'model': '', 'base_url': 'https://deepseek.example.test/v1',
+        }), patch('api.config.cfg', {
+            'model': {'provider': 'openai', 'default': 'gpt-5.5', 'base_url': 'https://api.openai.com/v1'},
+        }), patch(
+            'agent.auxiliary_client._get_aux_model_for_provider',
+            return_value='deepseek-chat',
+            create=True,
+        ) as aux_default, patch(
+            'agent.auxiliary_client.call_llm', side_effect=call_llm, create=True,
+        ):
+            generate_title_raw_via_aux('question', 'answer')
+
+        request = captured[-1]
+        aux_default.assert_called_once_with('deepseek')
+        assert (request['provider'], request['model'], request['base_url']) == (
+            'deepseek', 'deepseek-chat', 'https://deepseek.example.test/v1',
+        )
+        assert request['extra_body'] == {'reasoning': {'enabled': False}}
+
+    def test_explicit_blank_model_without_a_provider_default_fails_closed(self):
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': 'custom:unconfigured', 'model': '', 'base_url': 'https://relay.example/v1',
+        }), patch('api.config.cfg', {
+            'model': {'provider': 'openai', 'default': 'gpt-5.5', 'base_url': 'https://api.openai.com/v1'},
+        }), patch(
+            'agent.auxiliary_client._get_aux_model_for_provider',
+            return_value='',
+            create=True,
+        ), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+            generate_title_raw_via_aux('question', 'answer')
+
+        request = captured[-1]
+        assert (request['provider'], request['model'], request['base_url']) == (
+            'custom:unconfigured', None, 'https://relay.example/v1',
+        )
+        assert request['extra_body'] is None
+
+    def test_unresolved_minimax_endpoint_keeps_only_minimax_transport_control(self):
+        """MiniMax transport control is independent of generic reasoning suppression."""
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': 'custom:unconfigured',
+            'model': '',
+            'base_url': 'https://api.minimaxi.com/v1',
+        }), patch(
+            'agent.auxiliary_client._get_aux_model_for_provider',
+            return_value='',
+            create=True,
+        ), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+            generate_title_raw_via_aux('question', 'answer')
+
+        request = captured[-1]
+        assert (request['provider'], request['model'], request['base_url']) == (
+            'custom:unconfigured', None, 'https://api.minimaxi.com/v1',
+        )
+        assert request['extra_body'] == {'reasoning_split': True}
+
+    @pytest.mark.parametrize('provider', (
+        'minimax-oauth',
+        'minimax-portal',
+        'minimax-global',
+        'minimax_oauth',
+    ))
+    def test_minimax_oauth_and_agent_aliases_keep_title_controls(self, provider):
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        aliases = {
+            'minimax-oauth': 'minimax-oauth',
+            'minimax-portal': 'minimax-oauth',
+            'minimax-global': 'minimax-oauth',
+            'minimax_oauth': 'minimax-oauth',
+        }
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': provider,
+            'model': 'MiniMax-M2.7',
+            'base_url': '',
+        }), patch(
+            'agent.auxiliary_client._normalize_aux_provider',
+            side_effect=lambda value: aliases.get(value, value),
+            create=True,
+        ), patch(
+            'agent.auxiliary_client.call_llm', side_effect=call_llm, create=True,
+        ):
+            generate_title_raw_via_aux('question', 'answer')
+
+        request = captured[-1]
+        assert (request['provider'], request['model'], request['base_url']) == (
+            provider, 'MiniMax-M2.7', None,
+        )
+        assert request['extra_body'] == {
+            'reasoning': {'enabled': False},
+            'reasoning_split': True,
+        }
+
+    @pytest.mark.parametrize(('provider', 'model', 'url'), (
+        ('custom:relay', 'MiniMax-M3', 'https://relay.example/v1'),
+        ('custom:relay', 'vendor/model', 'https://relay.example/minimax/v1'),
+        ('custom:relay', 'minimax-model', 'https://relay.example/minimaxi.com/v1'),
+    ))
+    def test_custom_relay_cannot_spoof_minimax_transport(self, provider, model, url):
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': provider, 'model': model, 'base_url': url,
+        }), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+            generate_title_raw_via_aux('question', 'answer')
+
+        assert captured[-1]['extra_body'] is None
+
+    def test_main_resolved_key_is_sent_with_implicit_title_route(self):
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': 'auto', 'model': '', 'base_url': '',
+            'prefer_fast_model': True,
+        }), patch('api.config.cfg', {
+            'model': {'provider': 'opencode-zen', 'default': 'main-model', 'api_key': 'main-key'},
+        }), patch(
+            'agent.auxiliary_client._main_route_target',
+            return_value=('opencode-zen', 'fast-model', '', 'resolved-key', ''),
+            create=True,
+        ), patch(
+            'agent.auxiliary_client.call_llm', side_effect=call_llm, create=True,
+        ):
+            generate_title_raw_via_aux('question', 'answer')
+
+        assert captured[-1]['model'] == 'fast-model'
+        assert captured[-1]['api_key'] == 'resolved-key'
+
+    def test_explicit_title_key_takes_precedence_over_main_resolved_key(self):
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': 'auto', 'model': '', 'base_url': '',
+            'prefer_fast_model': True, 'api_key': 'title-key',
+        }), patch('api.config.cfg', {
+            'model': {'provider': 'opencode-zen', 'default': 'main-model'},
+        }), patch(
+            'agent.auxiliary_client._main_route_target',
+            return_value=('opencode-zen', 'fast-model', '', 'resolved-key', ''),
+            create=True,
+        ), patch(
+            'agent.auxiliary_client.call_llm', side_effect=call_llm, create=True,
+        ):
+            generate_title_raw_via_aux('question', 'answer')
+
+        assert captured[-1]['api_key'] == 'title-key'
+
+    def test_auto_route_honors_agent_title_fast_model_resolution(self):
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        seen = {}
+
+        def main_route_target(runtime, task):
+            seen['runtime'] = dict(runtime)
+            seen['task'] = task
+            return ('opencode-zen', 'gemini-3-flash', '', '', '')
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': 'auto',
+            'model': '',
+            'base_url': '',
+            'prefer_fast_model': True,
+        }), patch('api.config.cfg', {
+            'model': {
+                'provider': 'opencode-zen',
+                'default': 'deepseek-v4-flash-free',
+                'base_url': '',
+            },
+        }), patch(
+            'agent.auxiliary_client._main_route_target',
+            side_effect=main_route_target,
+            create=True,
+        ), patch(
+            'agent.auxiliary_client._resolve_auto_route',
+            return_value=(
+                SimpleNamespace(base_url='', api_key=''),
+                'gemini-3-flash', 'opencode-zen',
+            ),
+            create=True,
+        ), patch(
+            'agent.auxiliary_client._effective_provider_for_client',
+            side_effect=lambda client, provider: provider,
+            create=True,
+        ), patch(
+            'agent.auxiliary_client.call_llm', side_effect=call_llm, create=True,
+        ):
+            generate_title_raw_via_aux('question', 'answer')
+
+        request = captured[-1]
+        assert seen['task'] == 'title_generation'
+        assert seen['runtime']['provider'] == 'opencode-zen'
+        assert seen['runtime']['model'] == 'deepseek-v4-flash-free'
+        assert (request['provider'], request['model'], request['base_url']) == (
+            'auto', None, None,
+        )
+        assert request['main_runtime']['model'] == 'deepseek-v4-flash-free'
+
+    def test_blank_provider_minimax_global_endpoint_preserves_route_and_extras(self):
+        """The canonical global MiniMax endpoint must not inherit the main route."""
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': '',
+            'model': 'MiniMax-M3',
+            'base_url': 'https://api.minimax.io/v1',
+        }), patch('api.config.cfg', {
+            'model': {
+                'provider': 'openai',
+                'default': 'gpt-main',
+                'base_url': 'https://api.openai.com/v1',
+            },
+        }), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+            generate_title_raw_via_aux('question', 'answer')
+
+        request = captured[-1]
+        assert (request['provider'], request['model'], request['base_url']) == (
+            None, 'MiniMax-M3', 'https://api.minimax.io/v1',
+        )
+        assert request['extra_body'] == {
+            'reasoning': {'enabled': False},
+            'reasoning_split': True,
+        }
+
+    @pytest.mark.parametrize(
+        ('main_provider', 'main_model', 'main_base_url'),
+        (
+            ('openai', 'gpt-main', 'https://api.openai.com/v1'),
+            ('anthropic', 'claude-main', 'https://api.anthropic.com'),
+        ),
+    )
+    def test_explicit_relay_route_never_uses_the_differing_main_resolver(
+        self, main_provider, main_model, main_base_url,
+    ):
+        """Production resolver regression: relay config is its own route."""
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': '',
+            'model': 'gemma-4-31b-it',
+            'base_url': 'https://relay.example.test/v1',
+        }), patch('api.config.cfg', {
+            'model': {
+                'provider': main_provider,
+                'default': main_model,
+                'base_url': main_base_url,
+            },
+        }), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+            generate_title_raw_via_aux('question', 'answer')
+
+        request = captured[-1]
+        assert (request['provider'], request['model'], request['base_url']) == (
+            None, 'gemma-4-31b-it', 'https://relay.example.test/v1',
+        )
+        assert request['extra_body'] is None
+
+    def test_base_url_only_route_is_custom_not_the_anthropic_main_route(self):
+        """A URL alone is an auxiliary custom-route contract."""
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': '', 'model': '', 'base_url': 'https://relay.example.test/v1',
+        }), patch('api.config.cfg', {
+            'model': {
+                'provider': 'anthropic',
+                'default': 'claude-main',
+                'base_url': 'https://api.anthropic.com',
+            },
+        }), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+            generate_title_raw_via_aux('question', 'answer')
+
+        request = captured[-1]
+        assert (request['provider'], request['model'], request['base_url']) == (
+            'custom', None, 'https://relay.example.test/v1',
+        )
+        assert request['extra_body'] is None
+
+    def test_legacy_local_base_url_route_is_custom_not_the_codex_main_route(self):
+        """The legacy local spelling must use the custom auxiliary client path."""
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': 'local', 'model': '', 'base_url': 'https://relay.example.test/v1',
+        }), patch('api.config.cfg', {
+            'model': {
+                'provider': 'openai-codex',
+                'default': 'gpt-main',
+                'base_url': 'https://chatgpt.com/backend-api/codex',
+            },
+        }), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+            generate_title_raw_via_aux('question', 'answer')
+
+        request = captured[-1]
+        assert (request['provider'], request['model'], request['base_url']) == (
+            'custom', None, 'https://relay.example.test/v1',
+        )
+        assert request['extra_body'] is None
+
+    @pytest.mark.parametrize('model', (
+        '@openai:gpt-5.5',
+        '@openrouter:anthropic/claude-sonnet-4.6',
+    ))
+    def test_auto_provider_qualified_reject_routes_omit_suppression(self, model):
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {'choices': [{'message': {'content': 'Title'}, 'finish_reason': 'stop'}]}
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': 'auto', 'model': model, 'base_url': '',
+        }), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
+            generate_title_raw_via_aux('question', 'answer')
+
+        assert captured[-1]['extra_body'] is None
+
+    @pytest.mark.parametrize('url', (
+        '(https://USER MARKER:PASSWORD MARKER@relay.example/v1)?api_key=(KEY MARKER)&token=[TOKEN MARKER]',
+        '["https://USER [MARKER] : PASSWORD (MARKER) @relay.example/v1"?token="TOKEN MARKER"&key=\'KEY MARKER\']',
+    ))
+    def test_delimiter_wrapped_url_is_redacted_from_route_and_traceback(self, url):
+        logged = []
+
+        def fail(**_kwargs):
+            raise RuntimeError(f'provider failed at {url}')
+
+        with patch('api.streaming._get_aux_title_config', return_value={
+            'provider': 'custom:relay', 'model': 'title-model', 'base_url': url,
+        }), patch('agent.auxiliary_client.call_llm', side_effect=fail, create=True), patch(
+            'api.streaming.logger.error', side_effect=lambda *args: logged.append(args),
+        ):
+            generate_title_raw_via_aux('question', 'answer')
+
+        output = '\n'.join(' '.join(map(str, args)) for args in logged)
+        for marker in ('USER', 'PASSWORD', 'KEY', 'TOKEN'):
+            assert marker not in output
+
+
+@pytest.mark.usefixtures("_scoped_auxiliary_client_module")
+class TestResolvedAutoTitleTransportAndFallback:
+    """Regressions for the title route re-gated on 2026-10-08."""
+
+    @pytest.mark.parametrize("task_mode, expected_mode", (
+        ("", "anthropic_messages"),
+        ("codex_responses", "codex_responses"),
+    ))
+    @pytest.mark.parametrize("title_model", ("", "title-model"))
+    def test_auto_title_retains_main_anthropic_transport_unless_task_overrides(
+        self, task_mode, expected_mode, title_model,
+    ):
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {"choices": [{"message": {"content": "Working title"}, "finish_reason": "stop"}]}
+
+        config = {"provider": "auto", "model": title_model, "base_url": ""}
+        if task_mode:
+            config["api_mode"] = task_mode
+        resolved_client = SimpleNamespace(
+            api_key="runtime-key", base_url="https://anthropic-wire.example/v1",
+        )
+        with patch("api.streaming._get_aux_title_config", return_value=config), patch(
+            "api.config.cfg",
+            {"model": {
+                "provider": "custom", "default": "main-model",
+                "base_url": "https://anthropic-wire.example/v1",
+                "api_key": "runtime-key", "api_mode": "anthropic_messages",
+            }},
+        ), patch(
+            "agent.auxiliary_client._main_route_target",
+            return_value=(
+                "custom", "main-model", "https://anthropic-wire.example/v1",
+                "runtime-key", "anthropic_messages",
+            ),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._resolve_auto_route",
+            return_value=(resolved_client, "main-model", "custom"),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._effective_provider_for_client",
+            side_effect=lambda client, provider: provider,
+            create=True,
+        ), patch("agent.auxiliary_client.call_llm", side_effect=call_llm, create=True):
+            title, status = generate_title_raw_via_aux("question", "answer")
+
+        assert (title, status) == ("Working title", "llm_aux")
+        # The Agent owns transport selection for this auto request. Its task
+        # config (including an explicit task api_mode) remains authoritative.
+        assert captured[-1]["provider"] == "auto"
+        assert captured[-1]["api_mode"] is None
+        assert captured[-1]["main_runtime"]["api_mode"] == "anthropic_messages"
+        assert captured[-1]["model"] == (title_model or None)
+        assert captured[-1]["base_url"] is None
+
+    def test_auto_title_selects_working_fallback_instead_of_unavailable_main(self):
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {"choices": [{"message": {"content": "Fallback title"}, "finish_reason": "stop"}]}
+
+        fallback_client = SimpleNamespace(
+            api_key="fallback-key", base_url="https://fallback.example/v1",
+        )
+        with patch("api.streaming._get_aux_title_config", return_value={
+            "provider": "auto", "model": "", "base_url": "",
+        }), patch("api.config.cfg", {
+            "model": {"provider": "custom:unavailable", "default": "dead-model",
+                      "api_mode": "anthropic_messages"},
+        }), patch(
+            "agent.auxiliary_client._main_route_target",
+            return_value=("custom:unavailable", "dead-model", "", "", "anthropic_messages"),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._resolve_auto_route",
+            return_value=(fallback_client, "fallback-model", "custom"),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._effective_provider_for_client",
+            side_effect=lambda client, provider: provider,
+            create=True,
+        ), patch("agent.auxiliary_client.call_llm", side_effect=call_llm, create=True):
+            title, status = generate_title_raw_via_aux("question", "answer")
+
+        assert (title, status) == ("Fallback title", "llm_aux")
+        assert captured[-1]["provider"] == "custom"
+        assert captured[-1]["model"] == "fallback-model"
+        assert captured[-1]["base_url"] == "https://fallback.example/v1"
+        assert captured[-1]["api_key"] == "fallback-key"
+        assert captured[-1]["api_mode"] is None  # Do not leak the failed main transport.
+
+
+    @pytest.mark.parametrize("configured_overrides", (
+        {},
+        {"api_key": "primary-dummy", "api_mode": "codex_responses"},
+    ))
+    def test_named_fallback_retains_selected_endpoint_key_and_transport(
+        self, configured_overrides,
+    ):
+        """Named fallback overrides are authoritative, not its registered defaults."""
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {"choices": [{"message": {"content": "Fallback title"}, "finish_reason": "stop"}]}
+
+        fallback_client = SimpleNamespace(
+            api_key="fallback-dummy",
+            base_url="https://relay.example/default/v1",
+            _hermes_fallback_destination=SimpleNamespace(
+                base_url="https://relay.example/override/v1",
+                api_mode="anthropic_messages",
+            ),
+        )
+        config = {"provider": "auto", "model": "", "base_url": "", **configured_overrides}
+        with patch("api.streaming._get_aux_title_config", return_value=config), patch(
+            "api.config.cfg",
+            {"model": {"provider": "custom:unavailable", "default": "dead-model"}},
+        ), patch(
+            "agent.auxiliary_client._main_route_target",
+            return_value=("custom:unavailable", "dead-model", "", "", "chat_completions"),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._resolve_auto_route",
+            return_value=(fallback_client, "fallback-model", "custom:relay"),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._effective_provider_for_client",
+            side_effect=lambda client, provider: provider,
+            create=True,
+        ), patch(
+            "agent.auxiliary_client.call_llm", side_effect=call_llm, create=True,
+        ):
+            title, status = generate_title_raw_via_aux("question", "answer")
+
+        assert (title, status) == ("Fallback title", "llm_aux")
+        request = captured[-1]
+        assert request["provider"] == "custom:relay"
+        assert request["model"] == "fallback-model"
+        assert request["base_url"] == "https://relay.example/override/v1"
+        assert request["api_key"] == "fallback-dummy"
+        assert request["api_mode"] == "anthropic_messages"
+
+    def test_anonymous_fallback_ignores_primary_task_credentials_and_transport(self):
+        """The title primary's Anthropic key/mode must not hijack a chat fallback."""
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {"choices": [{"message": {"content": "Fallback title"}, "finish_reason": "stop"}]}
+
+        fallback_client = SimpleNamespace(
+            api_key="fallback-dummy", base_url="https://relay.example/fallback/v1",
+        )
+        with patch("api.streaming._get_aux_title_config", return_value={
+            "provider": "auto", "model": "", "base_url": "",
+            "api_key": "primary-dummy", "api_mode": "anthropic_messages",
+        }), patch(
+            "api.config.cfg",
+            {"model": {"provider": "custom:unavailable", "default": "dead-model"}},
+        ), patch(
+            "agent.auxiliary_client._main_route_target",
+            return_value=("custom:unavailable", "dead-model", "", "", "anthropic_messages"),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._resolve_auto_route",
+            return_value=(fallback_client, "fallback-model", "custom"),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._effective_provider_for_client",
+            side_effect=lambda client, provider: provider,
+            create=True,
+        ), patch(
+            "agent.auxiliary_client.call_llm", side_effect=call_llm, create=True,
+        ):
+            title, status = generate_title_raw_via_aux("question", "answer")
+
+        assert (title, status) == ("Fallback title", "llm_aux")
+        assert captured[-1]["base_url"] == "https://relay.example/fallback/v1"
+        assert captured[-1]["api_key"] == "fallback-dummy"
+        assert captured[-1]["api_mode"] is None
+
+    def test_named_profile_main_route_does_not_use_root_config(self):
+        """Background title preflight and the Agent runtime share the named home."""
+        profile_cfg = {
+            "model": {
+                "provider": "custom", "default": "profile-model",
+                "base_url": "https://relay.example/profile/v1",
+                "api_key": "profile-key",
+            }
+        }
+        root_cfg = {
+            "model": {
+                "provider": "custom", "default": "root-model",
+                "base_url": "https://relay.example/root/v1",
+                "api_key": "root-key",
+            }
+        }
+        homes = []
+        requests = []
+
+        def get_profile_config(home):
+            homes.append(str(home))
+            return profile_cfg
+
+        def auto_route(main_runtime, task):
+            return (
+                SimpleNamespace(
+                    base_url=main_runtime["base_url"], api_key=main_runtime["api_key"],
+                ),
+                main_runtime["model"], main_runtime["provider"],
+            )
+
+        def call_llm(**kwargs):
+            requests.append(kwargs)
+            return {"choices": [{"message": {"content": "Profile title"}, "finish_reason": "stop"}]}
+
+        with patch.dict(sys.modules, {
+            "hermes_constants": SimpleNamespace(get_hermes_home=lambda: "/named/home"),
+        }), patch("api.config.get_config_for_profile_home", side_effect=get_profile_config), patch(
+            "api.config.cfg", root_cfg,
+        ), patch("api.streaming._get_aux_title_config", return_value={
+            "provider": "auto", "model": "", "base_url": "",
+        }), patch(
+            "agent.auxiliary_client._main_route_target",
+            side_effect=lambda runtime, task: (
+                runtime["provider"], runtime["model"], runtime["base_url"],
+                runtime["api_key"], "",
+            ),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._resolve_auto_route", side_effect=auto_route, create=True,
+        ), patch(
+            "agent.auxiliary_client._effective_provider_for_client",
+            side_effect=lambda client, provider: provider, create=True,
+        ), patch(
+            "agent.auxiliary_client.call_llm", side_effect=call_llm, create=True,
+        ):
+            assert generate_title_raw_via_aux("question", "answer") == (
+                "Profile title", "llm_aux",
+            )
+
+        assert homes == ["/named/home"]
+        request = requests[0]
+        assert request["provider"] == "auto"
+        assert request["base_url"] is None
+        assert request["api_key"] is None
+        assert request["main_runtime"]["base_url"] == "https://relay.example/profile/v1"
+        assert request["main_runtime"]["api_key"] == "profile-key"
+        assert "root-key" not in repr(request)
+
+    def test_named_picker_lets_agent_resolve_the_active_profile(self):
+        """Do not look up a named custom provider in WebUI's root cfg."""
+        requests = []
+
+        def call_llm(**kwargs):
+            requests.append(kwargs)
+            return {"choices": [{"message": {"content": "Picker title"}, "finish_reason": "stop"}]}
+
+        with patch("api.streaming._get_aux_title_config", return_value={
+            "provider": "auto", "model": "@custom:relay:title-model", "base_url": "",
+        }), patch(
+            "api.streaming.resolve_model_provider",
+            side_effect=AssertionError("ambient model catalog must not resolve a picker"),
+        ), patch("agent.auxiliary_client.call_llm", side_effect=call_llm, create=True):
+            assert generate_title_raw_via_aux("question", "answer") == (
+                "Picker title", "llm_aux",
+            )
+
+        assert requests[0]["provider"] == "custom:relay"
+        assert requests[0]["model"] == "title-model"
+        assert requests[0]["base_url"] is None
+        assert requests[0]["api_key"] is None
+
+    def test_http_auth_failure_keeps_agent_auto_fallback(self):
+        """A preflight-healthy primary can fail with 401 at request time."""
+        requests = []
+
+        def call_llm(**kwargs):
+            requests.append(kwargs)
+            if kwargs["provider"] != "auto" or not kwargs["main_runtime"]:
+                raise RuntimeError("401: explicit provider bypassed Agent auto fallback")
+            # Stand in for the Agent's own primary-401 -> configured fallback.
+            return {"choices": [{"message": {"content": "Fallback title"}, "finish_reason": "stop"}]}
+
+        with patch("api.streaming._get_aux_title_config", return_value={
+            "provider": "auto", "model": "", "base_url": "",
+        }), patch("api.config.cfg", {
+            "model": {"provider": "custom", "default": "primary-model",
+                      "base_url": "https://primary.example/v1", "api_key": "primary-key"},
+        }), patch(
+            "agent.auxiliary_client._main_route_target",
+            side_effect=lambda runtime, task: (
+                runtime["provider"], runtime["model"], runtime["base_url"],
+                runtime["api_key"], "",
+            ),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._resolve_auto_route",
+            side_effect=lambda main_runtime, task: (
+                SimpleNamespace(
+                    base_url=main_runtime["base_url"], api_key=main_runtime["api_key"],
+                ), main_runtime["model"], main_runtime["provider"],
+            ),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._effective_provider_for_client",
+            side_effect=lambda client, provider: provider, create=True,
+        ), patch("agent.auxiliary_client.call_llm", side_effect=call_llm, create=True):
+            assert generate_title_raw_via_aux("question", "answer") == (
+                "Fallback title", "llm_aux",
+            )
+
+        assert len(requests) == 1
+        request = requests[0]
+        assert request["provider"] == "auto"
+        assert request["model"] is None
+        assert request["base_url"] is None
+        assert request["api_key"] is None
+        assert request["main_runtime"]["provider"] == "custom"
+
+    def test_minimax_chat_is_a_verified_minimax_endpoint(self):
+        from api.streaming import _is_minimax_route
+        assert _is_minimax_route("custom", "MiniMax-M3", "https://api.minimax.chat/v1")
+        assert not _is_minimax_route(
+            "custom", "MiniMax-M3", "https://relay.example/minimax.chat/v1"
+        )
+
+
+def test_real_agent_auto_resolver_selects_configured_fallback():
+    """Exercise the installed Agent's real fallback decision, not a mock of the resolver."""
+    try:
+        aux = importlib.import_module("agent.auxiliary_client")
+    except Exception:
+        pytest.skip("Agent auxiliary runtime is unavailable")
+    if not hasattr(aux, "_resolve_auto_route"):
+        pytest.skip("Installed Agent lacks the full auto resolver")
+    fallback_client = SimpleNamespace(
+        api_key="fallback-key", base_url="https://fallback.example/v1",
+    )
+    with patch.object(aux, "_main_route_target", return_value=(
+        "custom:unavailable", "dead-model", "", "", "anthropic_messages",
+    )), patch.object(aux, "_try_main_provider_route", return_value=None), patch.object(
+        aux, "_try_configured_fallback_chain", return_value=(None, None, ""),
+    ), patch.object(
+        aux, "_try_main_fallback_chain",
+        return_value=(fallback_client, "fallback-model", "custom"),
+    ):
+        client, model, provider = aux._resolve_auto_route(
+            main_runtime={"provider": "custom:unavailable", "model": "dead-model"},
+            task="title_generation",
+        )
+    assert client is fallback_client
+    assert (model, provider) == ("fallback-model", "custom")
