@@ -133,6 +133,55 @@ def test_a_list_run_through_the_shell_is_refused(fake_git):
     assert _lines(fake_git) == []
 
 
+def test_config_keys_and_values_are_not_places(fake_git, tmp_path):
+    """A temp repo's config may name the checkout's own interpreter or a path inside it (the
+    supported runner's Python is <checkout>/.venv/bin/python); only --file names a place."""
+    inside = str(REPO_ROOT / '.venv' / 'bin' / 'python')
+    subprocess.run(['git', 'config', 'core.fsmonitor', f'{inside} hook.py'], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'core.sshCommand', inside], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', 'user.name', str(REPO_ROOT)], cwd=tmp_path, check=True)
+    subprocess.run(['git', 'config', '--get', str(REPO_ROOT / 'tests')], cwd=tmp_path, check=True)
+    assert _lines(fake_git) == [
+        f'config core.fsmonitor {inside} hook.py',
+        f'config core.sshCommand {inside}',
+        f'config user.name {REPO_ROOT}',
+        f'config --get {REPO_ROOT / "tests"}',
+    ]
+    with refused():
+        subprocess.run(['git', 'config', '-f', str(REPO_ROOT / '.git' / 'config'), 'core.bare', 'false'], cwd=tmp_path)
+    assert len(_lines(fake_git)) == 4
+
+
+def test_a_bytes_cwd_is_read_like_a_str(fake_git, tmp_path):
+    with refused():
+        subprocess.run(['git', 'reset', '--hard', 'HEAD'], cwd=os.fsencode(REPO_ROOT))
+    subprocess.run(['git', 'reset', '--hard', 'HEAD'], cwd=os.fsencode(tmp_path), check=True)
+    assert _lines(fake_git) == ['reset --hard HEAD']
+
+
+def test_a_basetemp_inside_the_checkout_is_not_the_checkout(monkeypatch):
+    monkeypatch.setattr(guard, '_EXEMPT', [])
+    basetemp = REPO_ROOT / '.pytest-basetemp'
+    guard.pytest_configure(SimpleNamespace(getoption=lambda name, default=None: str(basetemp)))
+    assert not guard.is_real_checkout(basetemp / 'test_x0' / 'repo')
+    assert guard.is_real_checkout(REPO_ROOT)
+    assert guard.refusal(['git', 'init'], cwd=str(basetemp / 'test_x0' / 'repo')) is None
+    assert guard.refusal(['git', 'reset', '--hard', 'HEAD'], cwd=str(REPO_ROOT)) is not None
+    guard.pytest_configure(SimpleNamespace(getoption=lambda name, default=None: None))
+    assert guard.is_real_checkout(basetemp / 'test_x0' / 'repo')
+
+
+def test_install_guards_the_main_checkout_of_a_linked_worktree(tmp_path, monkeypatch):
+    main, linked = tmp_path / 'main', tmp_path / 'wt'
+    (main / '.git' / 'worktrees' / 'wt').mkdir(parents=True)
+    linked.mkdir()
+    (linked / '.git').write_text(f'gitdir: {main}/.git/worktrees/wt\n', encoding='utf-8')
+    monkeypatch.setattr(guard, '_ROOTS', [])
+    guard.install(linked)
+    assert guard._ROOTS == sorted({linked.resolve(), main.resolve()})
+    assert guard.is_real_checkout(main / 'src')
+
+
 def test_executable_names_the_program(fake_git):
     with refused():
         subprocess.run(['vcs', 'reset', '--hard', 'HEAD'], executable=str(shutil.which('git') or 'git'), cwd=REPO_ROOT)

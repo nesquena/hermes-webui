@@ -30,6 +30,7 @@ import pytest
 REAL_POPEN = subprocess.Popen
 REFUSALS = []
 _ROOTS = []
+_EXEMPT = []  # pytest's --basetemp when it lies inside a guarded root: the temp repos there are not the checkout
 
 _READ_ONLY_VERBS = frozenset({
     'blame', 'cat-file', 'check-ignore', 'check-ref-format', 'describe', 'diff', 'diff-index',
@@ -122,6 +123,8 @@ def is_real_checkout(cwd) -> bool:
         p = pathlib.Path(os.getcwd() if cwd is None else cwd).expanduser().resolve()
     except (OSError, RuntimeError, TypeError, ValueError):
         return True
+    if any(p == exempt or exempt in p.parents for exempt in _EXEMPT):
+        return False
     return any(p == root or root in p.parents or p in root.parents for root in _ROOTS)
 
 
@@ -139,6 +142,11 @@ def _program_named_git(token) -> bool:
 
 def refusal(args, cwd, *, shell=False, executable=None, env=None):
     """Return why this Popen call must not run, or None when it may."""
+    if cwd is not None:
+        try:
+            cwd = os.fsdecode(cwd)
+        except (TypeError, ValueError):
+            return 'unparseable cwd'  # cannot tell where it acts: fail closed
     if isinstance(args, os.PathLike):
         args = [os.fspath(args)]
     if shell and not isinstance(args, (str, bytes)):
@@ -225,13 +233,25 @@ def refusal(args, cwd, *, shell=False, executable=None, env=None):
     # A verb argument that names a protected place is a target too (`push <real> HEAD:x`,
     # `config --file <real>/.git/config`, `remote add o <real>`): an absolute path, or a
     # relative one that exists from `here`; a ref such as refs/heads/x is neither.
-    for arg in verb_args[1:]:
-        if arg.startswith('-'):
-            if '=' not in arg:
-                continue
-            arg = arg.split('=', 1)[1]  # an attached value, such as --file=<path>
-            if not arg:
-                continue
+    path_args = []
+    if verb_args and verb_args[0] == 'config':
+        # keys and values are not places (`config core.fsmonitor <checkout>/.venv/bin/python hook.py`
+        # in a temp repo is fine): only `--file <path>`, `-f <path>` and `--file=<path>` name one
+        for j, arg in enumerate(verb_args[1:], 1):
+            if arg in ('-f', '--file') and j + 1 < len(verb_args):
+                path_args.append(verb_args[j + 1])
+            elif arg.startswith('--file='):
+                path_args.append(arg[len('--file='):])
+    else:
+        for arg in verb_args[1:]:
+            if arg.startswith('-'):
+                if '=' not in arg:
+                    continue
+                arg = arg.split('=', 1)[1]  # an attached value, such as --output=<path>
+            path_args.append(arg)
+    for arg in path_args:
+        if not arg:
+            continue
         candidate = _join(here, arg)
         if os.path.isabs(arg) or os.path.exists(candidate):
             targets.append(candidate)
@@ -295,10 +315,38 @@ class GuardedPopen(REAL_POPEN):
         super().__init__(args, *popen_args, **popen_kwargs)
 
 
+def _main_checkout(root):
+    """The main checkout owning a linked worktree's shared refs (its `.git` is a `gitdir:` file), else None."""
+    try:
+        dotgit = root / '.git'
+        if not dotgit.is_file():
+            return None
+        pointer = dotgit.read_text(encoding='utf-8', errors='replace').strip()
+    except OSError:
+        return None
+    if not pointer.startswith('gitdir:'):
+        return None
+    gitdir = (root / pointer[len('gitdir:'):].strip()).resolve()  # <main>/.git/worktrees/<name>
+    if gitdir.parent.name == 'worktrees' and gitdir.parent.parent.name == '.git':
+        return gitdir.parent.parent.parent
+    return None
+
+
 def install(*roots):
-    """Guard *roots* (resolved; None entries ignored) in addition to any guarded already."""
-    _ROOTS[:] = sorted({*_ROOTS, *(pathlib.Path(r).resolve() for r in roots if r is not None)})
+    """Guard *roots* (resolved; None entries ignored) in addition to any guarded already.
+
+    A root that is a linked worktree also guards the main checkout its refs live in.
+    """
+    resolved = [pathlib.Path(r).resolve() for r in roots if r is not None]
+    resolved += [main for main in map(_main_checkout, resolved) if main is not None]
+    _ROOTS[:] = sorted({*_ROOTS, *resolved})
     subprocess.Popen = GuardedPopen
+
+
+def pytest_configure(config):
+    """Temp repos under a ``--basetemp`` inside the checkout are not the checkout."""
+    basetemp = config.getoption('basetemp', default=None)
+    _EXEMPT[:] = [pathlib.Path(basetemp).expanduser().resolve()] if basetemp else []
 
 
 def pytest_runtest_logstart(nodeid, location):
