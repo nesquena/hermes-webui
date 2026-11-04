@@ -102,6 +102,11 @@ def _is_inline_image_part(part) -> bool:
 
 _MASK = "<inline-image>"
 
+# Agent-written rows store structured content as this literal prefix followed by
+# a JSON array (``_STATE_DB_CONTENT_JSON_PREFIX`` in api/models.py). Kept as a
+# local literal so this module stays importable on its own.
+_STATE_DB_CONTENT_PREFIX = "\x00json:"
+
 # A run long enough to be a stored image payload rather than prose that merely
 # mentions the scheme. Real snippets carry ~4,000-char previews; the minimum
 # keeps ordinary discussion of data URLs untouched.
@@ -302,6 +307,35 @@ def _project_nested(value, digest, path):
     return value, False
 
 
+def _project_sentinelled_content(raw, digest):
+    """Compact a ``\\x00json:``-prefixed structured-content string.
+
+    Agent-written rows store their content parts as the literal prefix
+    ``\x00json:`` followed by a JSON array (see
+    ``_STATE_DB_CONTENT_JSON_PREFIX`` in ``api/models.py``). The list branch in
+    ``compact_persisted_image_parts`` never sees those, so the recovery and
+    discoverability writers -- which pass ``_state_db_row_to_sidecar`` output
+    through unchanged -- persisted the full inline image bytes.
+
+    Returns the re-encoded sentinelled string, or None when the value is not in
+    that form or holds no inline bytes (so an untouched row stays byte-identical).
+    """
+    if not raw.startswith(_STATE_DB_CONTENT_PREFIX):
+        return None
+    body = raw[len(_STATE_DB_CONTENT_PREFIX):]
+    try:
+        parsed = json.loads(body)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(parsed, list):
+        return None
+    projected, removed = _project_parts(parsed, digest)
+    if not removed:
+        return None
+    encoded = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+    return _STATE_DB_CONTENT_PREFIX + encoded
+
+
 def _project_api_content(raw, digest):
     """Project the per-message ``api_content`` sidecar, which can duplicate the bytes.
 
@@ -367,6 +401,19 @@ def compact_persisted_image_parts(messages, *, stamp_digest: bool = True) -> int
                 message["content"] = projected
                 changed += len(removed)
                 message_changed = True
+        elif isinstance(content, str):
+            # Agent-written rows store structured content in a sentinel form:
+            # the literal prefix ``\x00json:`` followed by the JSON part list.
+            # ``_state_db_row_to_sidecar`` passes that string through unchanged,
+            # so the recovery and discoverability writers persisted the full
+            # image bytes even though this projector was wired into them -- the
+            # list branch above never matched. Compact the decoded list and
+            # re-encode in the SAME storage form, leaving the text intact.
+            reencoded = _project_sentinelled_content(content, digest)
+            if reencoded is not None:
+                message["content"] = reencoded
+                changed += 1
+                message_changed = True
         # The provider-shaped mirror duplicates the same bytes; leaving it alone
         # would persist a full base64 copy per image row.
         projected_api_content = _project_api_content(message.get("api_content"), digest)
@@ -417,6 +464,13 @@ def _has_inline_image(value) -> bool:
         # (no ``data:image/`` at all), case variants (``DATA:IMAGE/``) and
         # JSON-escaped URLs (``data:image\/jpeg``).
         stripped = value.lstrip()
+        # Agent-written rows prefix the part list with a sentinel, so the first
+        # character is the NUL of "\x00json:", not "[". Without this the
+        # preflight fell through to the substring scan and returned False for an
+        # Anthropic base64 mirror (which carries no "data:image/" text), so the
+        # projector was never invoked and the bytes stayed on disk.
+        if stripped.startswith(_STATE_DB_CONTENT_PREFIX):
+            stripped = stripped[len(_STATE_DB_CONTENT_PREFIX):]
         if stripped[:1] in ("[", "{"):
             try:
                 parsed = json.loads(stripped)

@@ -2250,22 +2250,29 @@ class Session:
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
-        # Durable contract for BOTH histories: `messages` is the display
-        # transcript, `context_messages` is the provider replay prefix. Neither
-        # may persist inline image bytes. The provider replay is bounded to a
-        # marker (the same policy upstream applies to completed tool images),
-        # and the live objects stay untouched so the next model call still sees
-        # real bytes. Attachment availability after reload comes from the
-        # unchanged `attachments` field plus the files in the session inbox --
-        # the renderer never drew inline user image parts (static/ui.js:20548).
-        from api.session_image_persistence_override import compact_persisted_image_parts
-        # `context_messages` is the provider replay prefix and is persisted
-        # EXACTLY as loaded: an existing contract requires those rows to survive
-        # a save/load round trip byte-identically (so the next model call replays
-        # what the user actually sent). Bounding this array needs load-time
-        # rehydration of bounded attachment references, which is a separate
-        # change; `scripts/migrate_persisted_image_payloads.py --include-context`
-        # is the opt-in operator path until then.
+        # The two histories have DIFFERENT durable contracts:
+        #
+        #   `messages`          the display transcript. Inline image bytes are
+        #                       replaced with a marker so a transcript cannot
+        #                       grow into a multi-MB file. The live objects stay
+        #                       untouched, so the next model call still sees real
+        #                       bytes. After reload, attachments come from the
+        #                       unchanged `attachments` field plus the files in
+        #                       the session inbox -- the renderer never drew
+        #                       inline user image parts (static/ui.js:20548).
+        #
+        #   `context_messages`  the provider replay prefix. Persisted EXACTLY as
+        #                       loaded: an existing contract requires those rows
+        #                       to survive a save/load round trip byte-identically
+        #                       so the next model call replays what the user
+        #                       actually sent. It is NOT bounded here. Bounding it
+        #                       needs load-time rehydration of bounded attachment
+        #                       references, which is a separate change;
+        #                       `scripts/migrate_persisted_image_payloads.py
+        #                       --include-context` is the opt-in operator path
+        #                       until then.
+        # (`compact_persisted_image_parts` is already imported and applied to the
+        # guarded snapshot above; this second import was a duplicate.)
         extra['context_messages'] = getattr(self, 'context_messages', None) or []
         payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
         try:

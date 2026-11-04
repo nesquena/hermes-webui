@@ -52,9 +52,22 @@ from api.session_image_persistence_override import (  # noqa: E402
 
 
 def _default_session_dir() -> Path:
+    """Resolve the session directory exactly as the server does.
+
+    Mirrors ``api/config.py``: ``HERMES_WEBUI_STATE_DIR`` wins; otherwise the
+    state home is ``HERMES_HOME`` (or the platform default) plus ``webui``.
+    Hard-coding ``~/.hermes/webui`` meant that on an installation with a custom
+    ``HERMES_HOME`` and no ``HERMES_WEBUI_STATE_DIR`` this tool silently rewrote
+    a DIFFERENT installation's sessions while leaving the intended files alone.
+    """
     state = os.getenv("HERMES_WEBUI_STATE_DIR", "").strip()
-    base = Path(state).expanduser() if state else Path.home() / ".hermes" / "webui"
-    return base / "sessions"
+    if state:
+        return Path(state).expanduser().resolve() / "sessions"
+    hermes_home = os.getenv("HERMES_HOME", "").strip()
+    state_home = (
+        Path(hermes_home).expanduser() if hermes_home else Path.home() / ".hermes"
+    )
+    return state_home / "webui" / "sessions"
 
 
 def _iter_session_files(session_dir: Path):
@@ -124,6 +137,13 @@ def migrate_file(path: Path, *, apply: bool, include_context: bool = False) -> d
     except OSError as exc:
         report["error"] = f"read_failed:{exc}"
         return report
+    except UnicodeDecodeError as exc:
+        # A file that is not valid UTF-8 (torn write, foreign bytes) raised past
+        # this handler -- UnicodeDecodeError derives from ValueError, NOT OSError
+        # -- and main() has no per-file guard, so ONE damaged session aborted the
+        # whole batch. Report it and let the scan continue.
+        report["error"] = f"decode_failed:{exc}"
+        return report
     report["bytes_before"] = len(raw.encode("utf-8"))
     report["bytes_after"] = report["bytes_before"]
     try:
@@ -157,7 +177,15 @@ def migrate_file(path: Path, *, apply: bool, include_context: bool = False) -> d
     signature_before = _stat_signature(path)
     backup = path.with_suffix(path.suffix + ".preimage-migration.bak")
     if not backup.exists():
-        backup.write_text(raw, encoding="utf-8")
+        try:
+            backup.write_text(raw, encoding="utf-8")
+        except OSError as exc:
+            # This ran outside the write handler below, so a full disk or a
+            # permissions error here escaped main() and killed the whole batch
+            # instead of failing this one file.
+            report["error"] = f"backup_failed:{exc}"
+            report["changed"] = False
+            return report
     if _stat_signature(path) != signature_before:
         report["error"] = "concurrent_write_detected"
         report["changed"] = False

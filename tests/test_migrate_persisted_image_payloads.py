@@ -198,3 +198,65 @@ def test_migration_preserves_indented_layout(tmp_path):
     assert "\n  " in text, "indented layout was flattened"
     assert after < before, f"file grew: {before} -> {after}"
     assert "data:image" not in text
+
+
+def test_hermes_home_is_honoured_when_state_dir_is_unset(monkeypatch, tmp_path):
+    """A custom HERMES_HOME must be honoured, matching api/config.py.
+
+    Hard-coding ``~/.hermes/webui/sessions`` meant an install with a custom
+    ``HERMES_HOME`` (and no ``HERMES_WEBUI_STATE_DIR``) had this tool rewrite a
+    different installation's sessions while leaving the intended files untouched.
+
+    Note: the shared test conftest sets HERMES_WEBUI_STATE_DIR globally, so this
+    test removes it for the duration to exercise the HERMES_HOME branch.
+    """
+    monkeypatch.delenv("HERMES_WEBUI_STATE_DIR", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "custom-home"))
+    script = _load_script()
+    assert script._default_session_dir() == (tmp_path / "custom-home").resolve() / "webui" / "sessions"
+
+
+def test_state_dir_env_wins_over_hermes_home(monkeypatch, tmp_path):
+    """HERMES_WEBUI_STATE_DIR takes precedence, as it does in api/config.py."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("HERMES_WEBUI_STATE_DIR", str(tmp_path / "explicit"))
+    script = _load_script()
+    assert script._default_session_dir() == (tmp_path / "explicit").resolve() / "sessions"
+
+
+def test_invalid_utf8_file_does_not_abort_the_batch(tmp_path):
+    """One undecodable session must not stop the scan.
+
+    read_text raised UnicodeDecodeError (a ValueError, NOT an OSError), which
+    escaped migrate_file's handler; main() has no per-file guard, so a single
+    damaged file aborted the entire migration instead of reporting one failure.
+    """
+    script = _load_script()
+    bad = tmp_path / "aaa-broken.json"
+    bad.write_bytes(b'{"messages": []}\xff\xfe not utf-8')
+    good = tmp_path / "zzz-good.json"
+    legacy = _legacy_payload("good")
+    good.write_text(json.dumps(legacy), encoding="utf-8")
+
+    # main() returns 1 to SIGNAL that some files failed, but the healthy file is
+    # still migrated -- the point is that the batch continues, not the exit code.
+    assert script.main(["--session-dir", str(tmp_path), "--apply"]) == 1
+
+    # The healthy file still got migrated despite the broken one sorting first.
+    # Only the display lane is checked: context_messages keeps its bytes by
+    # default (the documented replay contract), so asserting the whole file is
+    # free of "data:image" would be wrong here.
+    migrated = json.loads(good.read_text(encoding="utf-8"))
+    assert "data:image" not in json.dumps(migrated["messages"])
+    assert bad.read_bytes().endswith(b"not utf-8")
+
+
+def test_report_flags_the_undecodable_file(tmp_path):
+    """The damaged file is reported per-file rather than taking down the run."""
+    script = _load_script()
+    bad = tmp_path / "broken.json"
+    bad.write_bytes(b'\xff\xfe nope')
+    report = script.migrate_file(bad, apply=False)
+    assert report["error"] is not None
+    assert report["error"].startswith("decode_failed")
+    assert report["changed"] is False

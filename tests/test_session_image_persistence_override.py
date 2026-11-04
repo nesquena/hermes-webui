@@ -979,3 +979,74 @@ def test_clean_snippet_is_not_mutated(session_dir):
 
     prose = "{'content': [{'type': 'text', 'text': 'no images here'}]}"
     assert _mask_inline_string(prose) is None
+
+
+def test_state_db_prefixed_string_content_is_bounded(session_dir):
+    """`content` stored in the Agent's sentinel form must still be compacted.
+
+    Real `state.db` rows reach the recovery and discoverability writers with
+    `content` as a ``\\x00json:``-prefixed JSON string. The projector only handled
+    a list-valued `content`, so recovery persisted the full image bytes and the
+    wiring this PR adds never bounded them.
+    """
+    import base64 as _b64
+
+    payload = _b64.b64encode(b"Z" * 40_000).decode()
+    parts = [
+        {"type": "text", "text": "what is this"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64," + payload}},
+    ]
+    stored = "\x00json:" + json.dumps(parts, separators=(",", ":"))
+    row = {"role": "user", "content": stored, "timestamp": 41.0, "id": "state-db-row"}
+
+    session = Session(session_id="statedb", messages=[row])
+    session.save(touch_updated_at=False)
+
+    text = (session_dir / "statedb.json").read_text()
+    assert payload not in text, "sentinelled content kept its inline image bytes"
+
+    kept = json.loads(text)["messages"][0]["content"]
+    assert isinstance(kept, str) and kept.startswith("\x00json:"), "storage form was not preserved"
+    decoded = json.loads(kept[len("\x00json:"):])
+    assert decoded[0]["text"] == "what is this", "the visible text was lost"
+
+
+def test_sentinelled_content_without_images_is_untouched(session_dir):
+    """A sentinelled list with no image parts must round-trip byte-identically."""
+    stored = "\x00json:" + json.dumps([{"type": "text", "text": "just words"}])
+    session = Session(session_id="clean-sentinel", messages=[
+        {"role": "user", "content": stored, "timestamp": 42.0, "id": "r1"},
+    ])
+    session.save(touch_updated_at=False)
+    kept = json.loads((session_dir / "clean-sentinel.json").read_text())["messages"][0]["content"]
+    assert kept == stored
+
+
+def test_sentinelled_anthropic_mirror_is_bounded_through_projection():
+    """`project_message_payloads` must bound a sentinelled Anthropic base64 row.
+
+    The preflight inspected the first character, which for a sentinelled value is
+    the NUL of ``\\x00json:`` rather than ``[``. It therefore fell through to the
+    substring scan and returned False for an Anthropic base64 mirror, which holds
+    no ``data:image/`` text at all -- so the projector was never invoked and the
+    recovery writers still wrote the payload.
+    """
+    import base64 as _b64
+
+    from api.session_image_persistence_override import (
+        _has_inline_image,
+        project_message_payloads,
+    )
+
+    payload = _b64.b64encode(b"Q" * 20_000).decode()
+    parts = [
+        {"type": "text", "text": "describe"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": payload}},
+    ]
+    stored = "\x00json:" + json.dumps(parts, separators=(",", ":"))
+    envelope = {"messages": [{"role": "user", "content": stored, "timestamp": 43.0, "id": "s1"}]}
+
+    assert _has_inline_image(envelope["messages"]) is True
+    projected = project_message_payloads(envelope)
+    assert projected is not envelope
+    assert payload not in json.dumps(projected)
