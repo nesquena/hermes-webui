@@ -8272,8 +8272,9 @@ def update_session_share_fields(
         # Plain assignment would append them after ``messages``, past the prefix
         # that ``load_metadata_only`` reads, so every metadata reload would lose
         # the token (and the UI its Stop sharing control) while the link stays
-        # live. The helper places a missing key before the message body and
-        # keeps an existing key where it is.
+        # live. The helper places a missing key before the message body, moves
+        # one an exp-v0.52.621..630 build left after the body back before it,
+        # and keeps a key already in the metadata prefix where it is.
         payload = _set_sidecar_metadata_fields(
             payload,
             {"share_token": share_token, "share_created_at": share_created_at},
