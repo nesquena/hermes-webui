@@ -495,3 +495,47 @@ def test_clean_anchor_scene_payload_is_returned_unchanged():
         "anchor_activity_scenes": {"k" * 64: {"scene": {"activity_rows": [{"tool": {"snippet": "text"}}]}}},
     }
     assert project_message_payloads(envelope) is envelope
+
+
+def test_every_known_heavyweight_field_is_actually_bounded():
+    """Behavioural guard: each field known to carry base64 must be bounded.
+
+    `project_message_payloads` is key-driven, so a NEW top-level field carrying
+    inline bytes would pass straight through -- and there is no safe blanket fix,
+    because walking every string would rewrite provider payloads and compression
+    state whose byte-exactness is contractual.
+
+    These are the fields that carry >=256-char base64 in the live store today,
+    measured by enumerating all 108 session files. This asserts the PROJECTOR's
+    actual behaviour on each, so dropping one of the lanes fails here rather than
+    silently reopening the bug class. Adding a heavyweight field to the session
+    schema means adding it here on purpose.
+    """
+    from api.session_image_persistence_override import project_message_payloads
+
+    payload = base64.b64encode(b"K" * 4000).decode("ascii")
+    url = f"data:image/jpeg;base64,{payload}"
+    part = {"type": "image_url", "image_url": {"url": url}}
+    stamp = {"id": "m0", "timestamp": 1.0}
+
+    cases = {
+        # field -> an envelope whose ONLY inline bytes live in that field
+        "messages": {"messages": [{"role": "user", "content": [part], **stamp}]},
+        "api_content": {"messages": [{"role": "user", "content": "hi", "api_content": json.dumps([part]), **stamp}]},
+        "_partial_tool_calls": {"messages": [{"role": "user", "content": "hi", "_partial_tool_calls": [{"args": {"p": url}}], **stamp}]},
+        "anchor_activity_scenes": {
+            "anchor_activity_scenes": {
+                "a" * 64: {"scene": {"activity_rows": [{"tool": {"snippet": f"{{'u': '{url}'}}"}}]}}
+            }
+        },
+        "content as \\x00json: string": {"messages": [{"role": "user", "content": "\x00json:" + json.dumps([part]), **stamp}]},
+        "content as plain string": {"messages": [{"role": "user", "content": url, **stamp}]},
+    }
+
+    for label, envelope in cases.items():
+        projected = project_message_payloads(envelope)
+        assert payload not in json.dumps(projected), f"{label}: inline bytes survived projection"
+        # context_messages is never projected; assert that too so the exemption is
+        # pinned rather than assumed.
+        ctx = {"context_messages": [{"role": "user", "content": [part], **stamp}]}
+        assert project_message_payloads(ctx) is ctx, "context_messages must stay byte-exact"
