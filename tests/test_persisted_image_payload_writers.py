@@ -447,3 +447,51 @@ def test_save_bounds_anchor_scene_snippets_end_to_end(tmp_path, monkeypatch):
     assert record["message_index"] == 3
     assert record["stream_id"] == "st-1"
     assert record["updated_at"] == 42.0
+
+
+def test_project_message_payloads_bounds_anchor_scene_snippets():
+    """The SHARED writer entry point must bound anchor scenes too.
+
+    `project_message_payloads` is what the recovery, discoverability,
+    workspace-binding, shrink-backup and migration writers all call. It only
+    projected `messages`/`context_messages`, so every one of those writers left
+    anchor-scene snippet base64 in place -- which is exactly why 122 KB survived
+    the migration across four sessions.
+    """
+    from api.session_image_persistence_override import project_message_payloads
+
+    payload = base64.b64encode(b"Y" * 4000).decode("ascii")
+    snippet = f"{{'url': 'data:image/jpeg;base64,{payload}'}}"
+    envelope = {
+        "messages": [{"role": "user", "content": "hi", "id": "m1", "timestamp": 1.0}],
+        "anchor_activity_scenes": {
+            "9" * 64: {
+                "scene": {"activity_rows": [{"tool": {"snippet": snippet}}]},
+                "message_ref": "8" * 64,
+                "message_index": 2,
+                "updated_at": 5.0,
+            }
+        },
+    }
+
+    projected = project_message_payloads(envelope)
+
+    assert projected is not envelope, "anchor-scene base64 was not projected"
+    assert payload not in json.dumps(projected), "base64 survived the shared projector"
+    # The live payload must be untouched (copy-on-write contract).
+    assert payload in json.dumps(envelope)
+    record = projected["anchor_activity_scenes"]["9" * 64]
+    assert record["message_ref"] == "8" * 64
+    assert record["message_index"] == 2
+    assert record["updated_at"] == 5.0
+
+
+def test_clean_anchor_scene_payload_is_returned_unchanged():
+    """No inline bytes anywhere -> the SAME object, so a clean write stays byte-identical."""
+    from api.session_image_persistence_override import project_message_payloads
+
+    envelope = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "anchor_activity_scenes": {"k" * 64: {"scene": {"activity_rows": [{"tool": {"snippet": "text"}}]}}},
+    }
+    assert project_message_payloads(envelope) is envelope

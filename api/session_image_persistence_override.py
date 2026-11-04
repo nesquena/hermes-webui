@@ -539,6 +539,20 @@ def project_message_payloads(value, *, stamp_digest=None, keys=None):
                         out = dict(value)
                     out[key] = projected
                 continue
+            if key == "anchor_activity_scenes" and isinstance(child, dict):
+                # A vision tool records its preview inside this field's
+                # `scene.activity_rows[].tool.snippet`, which no message lane
+                # covers. Every writer that funnels through here -- recovery,
+                # discoverability, workspace binding, shrink backup, migration --
+                # therefore left those bytes on disk.
+                if not _has_inline_image(child):
+                    continue
+                projected_scenes, changed = compact_persisted_anchor_scenes(child)
+                if changed:
+                    if out is None:
+                        out = dict(value)
+                    out[key] = projected_scenes
+                continue
             projected_child = project_message_payloads(child, stamp_digest=stamp_digest, keys=message_keys)
             if projected_child is not child:
                 if out is None:
