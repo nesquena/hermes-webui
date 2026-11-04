@@ -239,6 +239,46 @@ def test_opening_the_conversation_repairs_a_sidecar_an_earlier_build_left_damage
     assert shares.load_share(token) is not None
 
 
+UI_MESSAGE_FETCHES = {
+    # messages.js:7759/7959 and sessions.js:4373 (the first page of a conversation)
+    "msg_limit=30": "messages=1&resolve_model=0&msg_limit=30&expand_renderable=1",
+    # sessions.js:4373 without a limit
+    "reload": "messages=1&resolve_model=0",
+    # sessions.js:5316/5382 (older pages)
+    "msg_before": "messages=1&resolve_model=0&msg_before=2&msg_limit=30",
+    # sessions.js:5524 ("load all")
+    "msg_limit=all": "messages=1&resolve_model=0&msg_limit=all",
+}
+
+
+@pytest.mark.parametrize("fetch", list(UI_MESSAGE_FETCHES))
+def test_the_ui_open_sequence_repairs_it(isolated_state, active_profile, fetch):
+    """The client opens a conversation with a metadata GET (sessions.js:244/2989), then fetches
+    messages. The server cache is NOT cleared between the two, as on a live server, so the
+    metadata-only object from the first GET is what the second one finds."""
+    from api import models
+    from api.routes import handle_get
+    path, token = _shared_then_damaged()
+    models.SESSIONS.clear()
+
+    def get(query):
+        handler = _FakeHandler()
+        handle_get(handler, urllib.parse.urlparse(f"/api/session?session_id={SID}&{query}"))
+        assert handler.status == 200, (query, handler.status)
+        return handler.json_body()["session"]
+
+    opened = get("messages=0&resolve_model=0")
+    assert opened.get("share_token") is None  # the damage: the prefix has no token
+    fetched = get(UI_MESSAGE_FETCHES[fetch])
+    assert fetched.get("share_token") == token
+    assert _before_body(path, "share_token") and _before_body(path, "share_created_at")
+    # the next reload, warm and cold, now shows the token
+    assert get("messages=0&resolve_model=0").get("share_token") == token
+    models.SESSIONS.clear()
+    assert get("messages=0&resolve_model=0").get("share_token") == token
+    assert _metadata_reload() == (token, token)
+
+
 def test_a_load_alone_never_writes(isolated_state):
     """``Session.load`` runs before (or without) an ownership decision, so it only notes the damage."""
     path, token = _shared_then_damaged()
@@ -415,6 +455,8 @@ REFUSED_ROUTES = [
     ("GET", f"/api/session?session_id={SID}&messages=0", None),
     ("POST", "/api/session/archive", {"session_id": SID}),
     ("POST", "/api/chat/start", {"session_id": SID, "message": "hello"}),
+    ("POST", "/api/session/import_cli", {"session_id": SID}),
+    ("POST", "/api/session/import_cli", {"session_id": SID, "all_profiles": True, "profile": "default"}),
     # refused by the generic request guard
     ("GET", f"/api/session/status?session_id={SID}", None),
     ("POST", "/api/share/create", {"session_id": SID}),
@@ -423,7 +465,7 @@ REFUSED_ROUTES = [
 ]
 
 
-@pytest.mark.parametrize("method,url,body", REFUSED_ROUTES, ids=[f"{m} {u.split('?')[0]}{'?messages=' + u[-1] if 'messages=' in u else ''}" for m, u, _b in REFUSED_ROUTES])
+@pytest.mark.parametrize("method,url,body", REFUSED_ROUTES, ids=[f"{m} {u.split('?')[0]}{'?messages=' + u[-1] if 'messages=' in u else ''}{' all_profiles' if (b or {}).get('all_profiles') else ''}" for m, u, b in REFUSED_ROUTES])
 def test_a_refused_route_never_writes_a_foreign_damaged_sidecar(isolated_state, active_profile, method, url, body):
     from api import models
     from api.routes import handle_get, handle_post
