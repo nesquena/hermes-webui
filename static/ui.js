@@ -11355,10 +11355,11 @@ function renderMd(raw){
   // These will be rendered by renderKatexBlocks() after DOM insertion
   s=s.replace(/\x00M(\d+)\x00/g,(_,i)=>{
     const item=math_stash[+i];
+    const src=escDollarStash.length ? item.src.replace(/\x00S(\d+)\x00/g,(_,si)=>'\\'+escDollarStash[+si]) : item.src;
     if(item.type==='display'){
-      return `<div class="katex-block" data-katex="display">${esc(item.src)}</div>`;
+      return `<div class="katex-block" data-katex="display">${esc(src)}</div>`;
     }
-    return `<span class="katex-inline" data-katex="inline">${esc(item.src)}</span>`;
+    return `<span class="katex-inline" data-katex="inline">${esc(src)}</span>`;
   });
   // Restore fenced block stash (\x00P) → <pre><code> HTML.
   // Happens AFTER all markdown passes (lists, headings, tables, etc.) so

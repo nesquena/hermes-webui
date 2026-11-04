@@ -508,6 +508,16 @@ def test_numeric_inline_math_in_code_stays_literal(sample):
     assert '$0.5$' in html
 
 
+@pytest.mark.parametrize("sample,body", [
+    (r"\(\text{\$5}\)", r"\text{\$5}"),
+    (r"$x+\text{\$5}$", r"x+\text{\$5}"),
+])
+def test_escaped_dollars_inside_math_are_restored(sample, body):
+    html = _run_renderers(sample)["assistant"]
+    assert f'<span class="katex-inline" data-katex="inline">{body}</span>' in html
+    assert "\x00" not in html
+
+
 def test_display_math_stashed_before_inline():
     """$$...$$ display math must be stashed before $...$ inline math.
 
