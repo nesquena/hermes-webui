@@ -10711,7 +10711,8 @@ function renderMd(raw){
   }
   function _isCurrencyOpenerAt(text, idx){
     if(text[idx]!=='$'||_isEscapedAt(text,idx)||text[idx-1]==='$'||text[idx+1]==='$') return false;
-    if(/[\d.]/.test(text[idx+1]||'')) return true;
+    if(/\d/.test(text[idx+1]||'')) return true;
+    if(/^\.\d/.test(text.slice(idx+1,idx+3))) return true;
     return /^[ \u00a0]\d/.test(text.slice(idx+1,idx+3))&&/^[A-Za-z]$/.test(text[idx-1]||'');
   }
   function _findClosingSingleDollar(text, start){
@@ -10722,10 +10723,11 @@ function renderMd(raw){
     }
     return -1;
   }
-  function isLikelyNumericInlineMath(body, followingChar){
+  function isLikelyNumericInlineMath(body, followingSlice){
     const v=body.trim();
     if(!/^\d/.test(v)) return false;
-    if(/[+\-*/=<>^_,;:(–—]$/.test(v)||/[\d.]/.test(followingChar)) return false;
+    if(/[+\-*/=<>^_,;:(–—]$/.test(v)) return false;
+    if(/\d/.test(followingSlice.charAt(0))||/^\.\d/.test(followingSlice)) return false;
     if(/https?:\/\//i.test(v)) return false;
     return /[+\-*/=<>^_{}]|\d[.,]\d|\\[A-Za-z]+/.test(v);
   }
@@ -10734,7 +10736,7 @@ function renderMd(raw){
     for(let i=0;i<text.length;i++){
       if(!_isCurrencyOpenerAt(text,i)) continue;
       const closer=_findClosingSingleDollar(text,i);
-      if(closer!==-1&&!_isCurrencyOpenerAt(text,closer)&&isLikelyNumericInlineMath(text.slice(i+1,closer),text[closer+1]||'')){
+      if(closer!==-1&&!_isCurrencyOpenerAt(text,closer)&&isLikelyNumericInlineMath(text.slice(i+1,closer),text.slice(closer+1,closer+3))){
         i=closer;
         continue;
       }
@@ -10743,6 +10745,9 @@ function renderMd(raw){
     }
     return out+text.slice(copied);
   }
+  // Stash escaped dollar signs (\$ -> \x00S) so escaped prices (\$5-\$10) never match as math delimiters
+  const escDollarStash=[];
+  s=s.replace(/\\(\$)/g,(_,d)=>{escDollarStash.push(d);return `\x00S${escDollarStash.length-1}\x00`;});
   s=_maskCurrencyDollars(s);
   // Inline math: $...$ — require non-space boundaries and keep currency prose literal.
   s=s.replace(/\$([^\s$\n][^$\n]*?[^\s$\n]|[^\s$\n])\$/g,(_,m)=>{if(m.includes(' | '))return '\$'+m+'\$';math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
@@ -10750,6 +10755,7 @@ function renderMd(raw){
   // Match a single literal backslash before the delimiter (the common LLM form).
   s=s.replace(/\\\((.+?)\\\)/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
   s=s.replace(/\x00CURRENCY\x00/g,'$');
+  s=s.replace(/\x00S(\d+)\x00/g,(_,i)=>'\\'+escDollarStash[+i]);
   // Safe tag → markdown equivalent (these produce the same output as **text** etc.)
   // Stash raw <pre> blocks so the inline <code> rewrite below does not run
   // inside them. Running that rewrite in <pre> content can introduce stray

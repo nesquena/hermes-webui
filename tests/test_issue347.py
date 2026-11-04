@@ -462,6 +462,7 @@ def test_numeric_inline_math_renders(body):
     "$5 - $10",
     "$0.50–$.99",
     "$0.50-$0.99",
+    r"\$5-\$10",
     "$0.5 and $10",
     "$5+$10",
     "$5/$10",
@@ -479,6 +480,7 @@ def test_currency_and_non_math_numeric_candidates_stay_literal(sample):
 
 @pytest.mark.parametrize("sample,expected_math,expected_text", [
     ("Costs $5 ($x$ per unit)", "x", "Costs $5 ("),
+    (r"Costs \$5 ($x$ per unit).", "x", r"Costs \$5 ("),
     ("$5 and $x$", "x", "$5 and "),
     ("probability $p$ is $0.5$ and cost is $20", "0.5", "cost is $20"),
 ])
@@ -486,6 +488,17 @@ def test_mixed_currency_and_inline_math(sample, expected_math, expected_text):
     html = _run_renderers(sample)["assistant"]
     assert f'<span class="katex-inline" data-katex="inline">{expected_math}</span>' in html
     assert expected_text in html
+
+
+@pytest.mark.parametrize("sample,expected_math", [
+    ("Variable is $x$.", "x"),
+    ("Value is $0.5$.", "0.5"),
+    (r"Formula $1 - 0{,}8 = \mathbf{0{,}2}$.", r"1 - 0{,}8 = \mathbf{0{,}2}"),
+])
+def test_sentence_ending_inline_math(sample, expected_math):
+    html = _run_renderers(sample)["assistant"]
+    assert f'<span class="katex-inline" data-katex="inline">{expected_math}</span>' in html
+    assert html.strip().endswith(".</p>")
 
 
 @pytest.mark.parametrize("sample", ["`$0.5$`", "```\n$0.5$\n```"])
