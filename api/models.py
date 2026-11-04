@@ -14907,11 +14907,14 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
     # without removing the fuzzy work bound and without merging two
     # established different occurrences: both sides must be established AND
     # different to be treated as distinct.  Runs only when a prebuilt lookup
-    # is available (the reconciliation merge path) and ONLY over the fuzzy
-    # bound: a lookup-less over-bound probe still returns None exactly as
-    # before, so the work bound is never silently lifted, and under the bound
-    # the existing fuzzy loop below already applies the same wildcard rule,
-    # keeping its first-match bookkeeping (metadata-merge target /
+    # is available (the reconciliation merge path), and only in the two cases
+    # where nothing else can collapse the replay: over the fuzzy bound (the
+    # fallback below short-circuits before reaching its wildcard rule) and for
+    # structural content (which has no fuzzy fallback at all and used to
+    # return None below the bound, duplicating image turns).  Scalar text
+    # under the bound still goes through the existing fuzzy loop below, which
+    # already applies the same wildcard rule, keeping its first-match
+    # bookkeeping (metadata-merge target /
     # skipped-count bucket) byte-identical.
     # Exact identity remains authoritative at every size, and structural
     # (non-string) content has NO fuzzy fallback at all -- it returns None
