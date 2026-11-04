@@ -25,6 +25,16 @@ The review of #8741 added two shapes, covered at the end of this file:
   vendor spelling (``anthropic/claude-sonnet-4``) keeps its badge on that row,
   because the frontend dedupes the bare key against that row and would
   otherwise show neither a badge nor a "Configured" row.
+
+The re-review found the other direction regressing: a configured
+``anthropic/claude-sonnet-4`` on a relay that lists only ``claude-sonnet-4``
+badged the bare row, and the frontend does not dedupe the configured key
+against that row, so the picker showed two "Configured" choices that save
+different ids. That direction now badges no row, so the picker keeps the one
+choice that saves the configured id under its own provider (as on master). The
+last section runs the production ``renderModelDropdown()`` under a fake DOM on
+this backend's live and static payloads and asserts how many "Configured"
+choices it lays out and what clicking each of them saves.
 """
 from __future__ import annotations
 
@@ -329,15 +339,36 @@ def test_bare_configured_id_badges_its_single_vendor_spelling():
     assert "@custom:relay:openai/gpt-4o" not in badges
 
 
-def test_vendor_qualified_configured_id_badges_the_bare_row():
-    # The other direction: config says ``anthropic/claude-sonnet-4``, the relay lists the bare id.
-    badges = _static_badges(
-        _relay_groups(["claude-sonnet-4", "openai/gpt-4o"]),
-        [{"provider": "relay", "model": "anthropic/claude-sonnet-4"}],
-        custom_providers=[RELAY],
-    )
-    assert badges.get("@custom:relay:claude-sonnet-4", {}).get("label") == "Fallback 1"
+REVERSE_FALLBACK = [{"provider": "relay", "model": "anthropic/claude-sonnet-4"}]
+
+
+def test_vendor_qualified_configured_id_leaves_the_bare_row_unbadged():
+    # The other direction: config says ``anthropic/claude-sonnet-4``, the relay
+    # lists the bare id. Nothing proves the relay routes both strings to one
+    # model, and the frontend does not dedupe the configured key against the
+    # bare row (re-review of #8741: badging it showed two "Configured" choices
+    # that save different ids). Only the configured spellings stay keyed, so the
+    # picker synthesizes the one choice that saves the configured id.
+    badges = _static_badges(_relay_groups(["claude-sonnet-4", "openai/gpt-4o"]), REVERSE_FALLBACK, custom_providers=[RELAY])
+    assert "@custom:relay:claude-sonnet-4" not in badges
     assert "@custom:relay:openai/gpt-4o" not in badges
+    assert badges.get("anthropic/claude-sonnet-4") == {"role": "fallback", "label": "Fallback 1", "provider": "custom:relay"}
+    assert badges.get("@custom:relay:anthropic/claude-sonnet-4") == {"role": "fallback", "label": "Fallback 1", "provider": "custom:relay"}
+
+
+def test_live_builder_leaves_the_bare_row_unbadged_too(monkeypatch, tmp_path):
+    result = _live_models(
+        monkeypatch,
+        tmp_path,
+        custom_providers=[RELAY],
+        fallback_providers=REVERSE_FALLBACK,
+        served={"relay.example": ["claude-sonnet-4", "openai/gpt-4o"]},
+    )
+    ids = _option_ids(_group(result, "custom:relay"))
+    badges = result["configured_model_badges"]
+    bare_row = next(i for i in ids if i.endswith(":claude-sonnet-4"))
+    assert bare_row not in badges
+    assert badges.get("anthropic/claude-sonnet-4", {}).get("provider") == "custom:relay"
 
 
 def test_exact_identity_beats_a_vendor_spelling():
@@ -516,3 +547,324 @@ def test_combined_tree_bare_primary_model_shows_one_badged_row_and_no_extra_row(
     picker = _picker_rows(badges, rows)
     assert picker["badged"] == [["@custom:relay:anthropic/claude-sonnet-4", "Primary"]]
     assert picker["synthesized"] == []
+
+
+# ---------------------------------------------------------------------------
+# Re-review of #8741: the production picker, not only its helpers. The real
+# renderModelDropdown() from static/ui.js runs under the fake DOM that
+# tests/test_configured_model_picker_dedup.py uses, fed this backend's groups
+# and badge map (static builder and live get_available_models()). Each test
+# asserts how many "Configured" choices the dropdown lays out and what clicking
+# each of them hands to selectModelFromDropdown: (model id, provider id).
+# ---------------------------------------------------------------------------
+
+_RENDER_DRIVER = r"""
+const fs = require('fs');
+const ui = fs.readFileSync(process.argv[2], 'utf8');
+
+function extractFunc(name) {
+  const re = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(');
+  const start = ui.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = ui.indexOf('(', start) + 1;
+  let parenDepth = 1;
+  while (parenDepth > 0 && i < ui.length) {
+    if (ui[i] === '(') parenDepth++;
+    else if (ui[i] === ')') parenDepth--;
+    i++;
+  }
+  let depth = 1;
+  i = ui.indexOf('{', i);
+  if (i < 0) throw new Error(name + ' body not found');
+  i++;
+  while (depth > 0 && i < ui.length) {
+    if (ui[i] === '{') depth++;
+    else if (ui[i] === '}') depth--;
+    i++;
+  }
+  if (ui[i] === ';') i++;
+  return ui.slice(start, i);
+}
+
+function makeClassList(initial) {
+  const set = new Set(initial || []);
+  return {
+    _set: set,
+    add(cls) { set.add(cls); },
+    remove(cls) { set.delete(cls); },
+    contains(cls) { return set.has(cls); },
+    toggle(cls, force) {
+      if (force === true) { set.add(cls); return true; }
+      if (force === false) { set.delete(cls); return false; }
+      if (set.has(cls)) { set.delete(cls); return false; }
+      set.add(cls);
+      return true;
+    },
+  };
+}
+
+function makeNode(tag) {
+  const node = {
+    tagName: String(tag || '').toUpperCase(),
+    children: [],
+    dataset: {},
+    style: {},
+    parentElement: null,
+    textContent: '',
+    value: '',
+    tabIndex: 0,
+    onclick: null,
+    _listeners: {},
+    _innerHTML: '',
+    appendChild(child) {
+      child.parentElement = this;
+      this.children.push(child);
+      if (this.tagName === 'OPTGROUP' && this._ownerSelect && child.tagName === 'OPTION') {
+        this._ownerSelect.options.push(child);
+      }
+      return child;
+    },
+    addEventListener(type, handler) { this._listeners[type] = handler; },
+    querySelector(selector) { return this._qs ? this._qs[selector] || null : null; },
+    setAttribute(name, value) { this[name] = value; },
+    hasAttribute(name) { return this[name] !== undefined && this[name] !== null; },
+    focus() { this._focused = true; },
+  };
+  node.classList = makeClassList();
+  Object.defineProperty(node, 'className', {
+    get() { return [...node.classList._set].join(' '); },
+    set(v) { node.classList = makeClassList(String(v || '').split(/\s+/).filter(Boolean)); },
+  });
+  Object.defineProperty(node, 'innerHTML', {
+    get() { return this._innerHTML; },
+    set(v) {
+      this._innerHTML = String(v || '');
+      this.children = [];
+      this._qs = {};
+      if (this.tagName === 'DIV' && this._innerHTML.includes('model-search-input')) {
+        const input = makeNode('input');
+        input.className = 'model-search-input';
+        const clear = makeNode('button');
+        clear.className = 'model-search-clear';
+        this._qs['.model-search-input'] = input;
+        this._qs['.model-search-clear'] = clear;
+      } else if (this.tagName === 'DIV' && this._innerHTML.includes('model-custom-input')) {
+        const input = makeNode('input');
+        input.className = 'model-custom-input';
+        const btn = makeNode('button');
+        btn.className = 'model-custom-btn';
+        this._qs['.model-custom-input'] = input;
+        this._qs['.model-custom-btn'] = btn;
+      }
+    },
+  });
+  return node;
+}
+
+function makeSelect(groups) {
+  const sel = { id: 'modelSelect', children: [], options: [], _value: '' };
+  Object.defineProperty(sel, 'value', { get() { return sel._value; }, set(v) { sel._value = String(v || ''); } });
+  Object.defineProperty(sel, 'selectedOptions', { get() { const o = sel.options.find(x => x.value === sel._value); return o ? [o] : []; } });
+  sel.appendChild = function (option) { option.parentElement = sel; sel.children.push(option); sel.options.push(option); };
+  sel.querySelectorAll = function () { return []; };
+  for (const group of groups || []) {
+    const og = makeNode('optgroup');
+    og.label = group.provider || '';
+    og.dataset.provider = group.provider_id || '';
+    og._ownerSelect = sel;
+    if (group.extra_models && group.extra_models.length) og.dataset.extraModels = JSON.stringify(group.extra_models);
+    for (const model of group.models || []) {
+      const opt = makeNode('option');
+      opt.value = model.id;
+      opt.textContent = model.label || model.id;
+      og.appendChild(opt);
+    }
+    sel.children.push(og);
+    sel.options.push(...og.children);
+  }
+  return sel;
+}
+
+const payload = JSON.parse(process.argv[3]);
+const dropdown = makeNode('div');
+dropdown.classList.add('open');
+const modelSelect = makeSelect(payload.groups);
+
+function $(id) {
+  if (id === 'composerModelDropdown') return dropdown;
+  if (id === 'modelSelect') return modelSelect;
+  return null;
+}
+const window = { _configuredModelBadges: payload.configuredBadges || {} };
+const document = { createElement(tag) { return makeNode(tag); } };
+function esc(v) { return String(v || ''); }
+function t(key, ...args) {
+  if (key === 'model_show_all_models') return `Show all ${args[0]} models`;
+  return key;
+}
+function li() { return 'x'; }
+function getModelLabel(v) { return String(v || ''); }
+function closeModelDropdown() {}
+function syncModelChip() {}
+function _refreshOpenModelDropdown() {}
+function _deduplicateModelPickerOptions() { return 0; }
+
+for (const name of [
+  '_normalizeConfiguredModelKey',
+  '_configuredModelIdentity',
+  '_getConfiguredModelBadge',
+  '_providerFromModelValue',
+  '_readModelOverflowData',
+  '_appendOverflowOptionsToGroup',
+  '_isEquivalentConfiguredModelEntry',
+  '_getOptionProviderId',
+  '_modelStateForSelect',
+  '_findModelInDropdown',
+  '_applyModelToDropdown',
+  '_ensureModelOptionInDropdown',
+  'renderModelDropdown',
+]) {
+  eval(extractFunc(name));
+}
+
+// Capture what a click hands to the selection path, the way the composer
+// picker wires it (opts.selectModel defaults to selectModelFromDropdown).
+const saved = [];
+renderModelDropdown({ selectModel: (value, provider) => { saved.push([value, provider]); } });
+
+// The "Configured" section is the run of rows between its heading and the next
+// group heading, in document order, exactly as the dropdown lays them out.
+const configuredHeading = t('model_group_configured');
+const configured = [];
+let inConfigured = false;
+for (const n of dropdown.children) {
+  if (n.classList.contains('model-group')) {
+    inConfigured = n.textContent === configuredHeading;
+    continue;
+  }
+  if (!inConfigured || !n.classList.contains('model-opt')) continue;
+  const html = String(n._innerHTML || '');
+  const before = saved.length;
+  n.onclick();
+  configured.push({
+    id: (html.match(/class="model-opt-id">([^<]*)</) || [])[1] || '',
+    saves: saved.slice(before),
+  });
+}
+const allRows = [];
+const stack = [...dropdown.children];
+while (stack.length) {
+  const n = stack.shift();
+  const html = String(n._innerHTML || '');
+  if (typeof n.onclick === 'function' && html.includes('model-opt-id')) {
+    allRows.push((html.match(/class="model-opt-id">([^<]*)</) || [])[1] || '');
+  }
+  if (n.children && n.children.length) stack.push(...n.children);
+}
+process.stdout.write(JSON.stringify({ configured, allRows }));
+"""
+
+
+def _render_picker(tmp_path, groups: list[dict], badges: dict) -> dict:
+    """Production ``renderModelDropdown()`` on *groups* + *badges*.
+
+    Returns ``configured``: the "Configured" choices in dropdown order, each
+    with the row id and the ``[model, provider]`` pairs its click saved, and
+    ``allRows``: every clickable row in the dropdown.
+    """
+    driver = tmp_path / "picker_driver.js"
+    driver.write_text(_RENDER_DRIVER, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(driver), str(Path(__file__).resolve().parents[1] / "static" / "ui.js"), json.dumps({"groups": groups, "configuredBadges": badges})],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def _relay_choices(picker: dict) -> list[tuple[str, list]]:
+    """The "Configured" choices owned by the relay, as ``(row id, clicks)``."""
+    return [(c["id"], c["saves"]) for c in picker["configured"] if any(p == "custom:relay" for _m, p in c["saves"])]
+
+
+REVERSE_SERVED = ["claude-sonnet-4", "openai/gpt-4o"]
+FORWARD_SERVED = ["anthropic/claude-sonnet-4", "openai/gpt-4o"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_production_picker_reverse_spelling_keeps_one_configured_choice_static(tmp_path):
+    # Re-review shape: configured ``anthropic/claude-sonnet-4``, relay serves
+    # ``claude-sonnet-4``. With the bare row badged (the previous head) the
+    # dropdown laid out two "Configured" choices that saved
+    # ``@custom:relay:claude-sonnet-4`` and ``anthropic/claude-sonnet-4``.
+    groups = _relay_groups(REVERSE_SERVED)
+    badges = _static_badges(groups, REVERSE_FALLBACK, custom_providers=[RELAY])
+    picker = _render_picker(tmp_path, groups, badges)
+    assert _relay_choices(picker) == [("anthropic/claude-sonnet-4", [["anthropic/claude-sonnet-4", "custom:relay"]])]
+    assert len(picker["configured"]) == 1
+    # The bare row stays a selectable catalog row, just not a configured one.
+    assert "@custom:relay:claude-sonnet-4" in picker["allRows"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_production_picker_reverse_spelling_keeps_one_configured_choice_live(monkeypatch, tmp_path):
+    result = _live_models(
+        monkeypatch,
+        tmp_path,
+        custom_providers=[RELAY],
+        fallback_providers=REVERSE_FALLBACK,
+        served={"relay.example": REVERSE_SERVED},
+    )
+    picker = _render_picker(tmp_path, result["groups"], result["configured_model_badges"])
+    assert _relay_choices(picker) == [("anthropic/claude-sonnet-4", [["anthropic/claude-sonnet-4", "custom:relay"]])]
+    # The primary entry (openai-codex, not mocked) is the only other choice.
+    assert [c["id"] for c in picker["configured"] if c["id"] != "anthropic/claude-sonnet-4"] == ["gpt-5.4"]
+    bare_row = next(i for i in _option_ids(_group(result, "custom:relay")) if i.endswith(":claude-sonnet-4"))
+    assert bare_row in picker["allRows"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_production_picker_bare_configured_id_keeps_one_badged_choice_static(tmp_path):
+    # The repaired direction (review point 2) through the production renderer:
+    # the vendor row is the one "Configured" choice and saves its own id.
+    groups = _relay_groups(FORWARD_SERVED)
+    badges = _static_badges(groups, BARE_FALLBACK, custom_providers=[RELAY])
+    picker = _render_picker(tmp_path, groups, badges)
+    assert _relay_choices(picker) == [
+        ("@custom:relay:anthropic/claude-sonnet-4", [["@custom:relay:anthropic/claude-sonnet-4", "custom:relay"]])
+    ]
+    assert len(picker["configured"]) == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_production_picker_bare_configured_id_keeps_one_badged_choice_live(monkeypatch, tmp_path):
+    result = _live_models(
+        monkeypatch,
+        tmp_path,
+        custom_providers=[RELAY],
+        fallback_providers=BARE_FALLBACK,
+        served={"relay.example": FORWARD_SERVED},
+    )
+    picker = _render_picker(tmp_path, result["groups"], result["configured_model_badges"])
+    vendor_row = next(i for i in _option_ids(_group(result, "custom:relay")) if i.endswith("anthropic/claude-sonnet-4"))
+    assert _relay_choices(picker) == [(vendor_row, [[vendor_row, "custom:relay"]])]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_production_picker_sibling_shape_has_one_configured_choice(tmp_path):
+    # The issue's shape: the configured ``codex/`` id is the one choice, and
+    # neither sibling is badged or synthesized.
+    groups = [
+        {
+            "provider": "magpie",
+            "provider_id": "custom:magpie",
+            "models": [{"id": f"@custom:magpie:{i}"} for i in SIBLINGS + [TARGET]],
+        }
+    ]
+    badges = _static_badges(groups, [{"provider": "magpie", "model": TARGET}], custom_providers=[MAGPIE])
+    picker = _render_picker(tmp_path, groups, badges)
+    assert [(c["id"], c["saves"]) for c in picker["configured"]] == [
+        (f"@custom:magpie:{TARGET}", [[f"@custom:magpie:{TARGET}", "custom:magpie"]])
+    ]

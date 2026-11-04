@@ -8038,18 +8038,26 @@ def _configured_badge_provider_match(
     Rows owned by another provider are never candidates. A row owned by the
     configured provider wins over a row with no provider id.
 
-    When no row has the configured id's identity, the id may still name one
-    row under a vendor spelling: a bare ``claude-sonnet-4`` on a relay that
-    lists ``anthropic/claude-sonnet-4``, or ``anthropic/claude-sonnet-4`` on a
-    relay that lists only ``claude-sonnet-4``. Such a row matches only when
-    one identity ends with the other at a ``/`` boundary and exactly one row
-    qualifies, so the badge (and the picker's "Configured" row, which the
-    frontend only shows on a badged row or a key it cannot dedupe) does not
-    vanish for an unambiguous match. Two rows that differ only by vendor
-    namespace (``any/`` and ``codex/``) never end with each other, so a
-    sibling still never borrows the badge, and two vendor spellings of one
-    bare id (``anthropic/`` and ``bedrock/``) are ambiguous and badge neither.
-    OpenRouter is excluded: its route text must match exactly
+    When no row has the configured id's identity, a bare configured id may
+    still name one row under a vendor spelling: ``claude-sonnet-4`` on a relay
+    that lists ``anthropic/claude-sonnet-4``. Such a row matches only when its
+    identity ends with the configured identity at a ``/`` boundary and exactly
+    one row qualifies, so the badge (and the picker's "Configured" row, which
+    the frontend dedupes against that row) does not vanish for an unambiguous
+    match. Two rows that differ only by vendor namespace (``any/`` and
+    ``codex/``) never end with each other, so a sibling still never borrows
+    the badge, and two vendor spellings of one bare id (``anthropic/`` and
+    ``bedrock/``) are ambiguous and badge neither.
+
+    The other direction is deliberately not matched: a configured
+    ``anthropic/claude-sonnet-4`` on a relay that lists only
+    ``claude-sonnet-4`` badges no row. Nothing proves the relay routes the
+    two strings to the same model, and the frontend does not dedupe the
+    configured key against the bare row, so badging it would show two
+    "Configured" choices that save different ids. Left unbadged, the picker
+    keeps one choice that saves the configured id under its own provider,
+    as it does on master. OpenRouter is excluded from the vendor-spelling
+    pass: its route text must match exactly
     (docs/architecture/model-picker-routing.md).
     """
     target = _configured_badge_model_identity(model, provider)
@@ -8066,7 +8074,7 @@ def _configured_badge_provider_match(
             if opt_provider == provider:
                 return opt_id
             unowned_match = unowned_match or opt_id
-        elif identity.endswith(f"/{target}") or target.endswith(f"/{identity}"):
+        elif identity.endswith(f"/{target}"):
             vendor_spellings.append(opt_id)
     if unowned_match:
         return unowned_match
