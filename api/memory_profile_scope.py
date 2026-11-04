@@ -1706,6 +1706,121 @@ def _mark_legacy_shut_down(holder: Any) -> None:
         logger.debug("[webui] #8804: could not mark the released agent shut down", exc_info=True)
 
 
+# The reason the Agent itself passes to ``PreparedCompaction.discard`` when it releases an
+# agent (``agent.prepared_compaction.release_for_agent``: cache eviction, rewind, close).
+_AGENT_RELEASED_DISCARD = ("agent released", "agent_released")
+
+
+# The methods of the Agent's ``PreparedCompaction`` that ``discard`` runs on the instance
+# itself. Shadowing any of them on the instance would run someone else's code there.
+_AGENT_DISCARD_PATH = frozenset({"discard", "_count_unspliced"})
+
+
+def _agent_context_classes() -> tuple:
+    """The Agent's built-in ``ContextCompressor`` and ``PreparedCompaction`` classes
+    (either is None when this Agent does not have it; ``PreparedCompaction`` is v0.22.6+)."""
+    classes = []
+    for module_name, class_name in (
+        ("agent.context_compressor", "ContextCompressor"),
+        ("agent.prepared_compaction", "PreparedCompaction"),
+    ):
+        try:
+            module = sys.modules.get(module_name) or importlib.import_module(module_name)
+            classes.append(getattr(module, class_name, None))
+        except Exception:
+            classes.append(None)
+    return tuple(classes)
+
+
+def release_unowned_context_engine(agent: Any, *, session_id: str) -> bool:
+    """Cancel the background summary work of an evicted agent whose
+    ``shutdown_memory_provider`` the WebUI refused (#8804 follow-up). True when this
+    function called the Agent's own ``PreparedCompaction.discard``, whether or not that call
+    raised (an exception is caught and logged at DEBUG); the caller does not use the value.
+
+    ``call_as_session_owner`` refuses the whole shutdown when the session's owner cannot
+    be resolved, because a session end may write under an owner nobody can confirm
+    (#8517; fail closed, AGENTS.md). That includes the context engine's
+    ``on_session_end``: ``agent/context_engine.py`` makes it a plugin extension point that
+    may flush session data, so it is NEVER called here, and stays behind the owner check.
+
+    What the built-in ``ContextCompressor``'s end does beyond resetting the in-memory
+    state of an engine that is being discarded is ``prepared_compaction.discard`` (Agent
+    v0.22.6+). It cancels a background summary pass that would otherwise run to
+    completion, a model call nobody will use. That is close-only: no session data, only an
+    aggregate opt-in metric count. The Agent makes the same call itself when it releases an
+    agent (``release_for_agent``: cache eviction, rewind, close), with the same reason. So
+    that one call runs here, in the profile home the WebUI built the agent under (never the
+    ambient env mirror). An older Agent has no prepared compaction, and nothing to cancel.
+
+    Only the Agent's own code may run on this path, because the session's owner is unknown.
+    So nothing on the engine or its class is read before the identity check
+    ``type(engine) is ContextCompressor``: not ``isinstance`` (it can consult a plugin's
+    ``__class__``), not a method or ``__name__`` (a plugin's descriptor or metaclass would
+    run). Any other engine is the plugin's and is left alone, with a once-only line that
+    names no class. Then the engine must hold exactly the Agent's ``PreparedCompaction``,
+    with no instance attribute shadowing ``discard`` or ``_count_unspliced``.
+
+    The caller runs this only when the Agent's own shutdown did not run (a refusal at hook
+    time happens INSIDE that shutdown), decided before the memory release, which marks an
+    old Agent's agent shut down (#8806). Either way the agent is then marked shut down,
+    the state v0.52.544 left an evicted agent in, so a later ``shutdown_memory_provider``
+    cannot run a session end under the unresolved owner."""
+    if agent is None:
+        return False
+    try:
+        engine = getattr(agent, "context_compressor", None)
+        if engine is None:
+            return False
+        compressor_class, prepared_class = _agent_context_classes()
+        # The first touch of the engine: an identity compare of its exact type.
+        if compressor_class is None or type(engine) is not compressor_class:
+            _log_once(
+                "engine-end-owner",
+                "[webui] #8804: an evicted agent's context engine is not the Agent's built-in "
+                "compressor, so it is left alone: its session end may write session data and the "
+                "session's owner could not be confirmed, so it stays behind the owner check (fail "
+                "closed).",
+            )
+            return False
+        prepared = getattr(engine, "prepared_compaction", None)  # the Agent's own engine
+        if prepared is None:  # the opt-in prepare_ahead is off, or an Agent before v0.22.6
+            return False
+        if (
+            prepared_class is None
+            or type(prepared) is not prepared_class
+            or _AGENT_DISCARD_PATH.intersection(vars(prepared))
+        ):
+            logger.debug(
+                "[webui] #8804: the built-in context engine of evicted session %s holds "
+                "prepared-summary state that is not the Agent's own; it is left alone.",
+                session_id,
+            )
+            return False
+        build_home = str(getattr(agent, _BUILD_HOME_ATTR, "") or "")
+        restore, reason = _enter_profile_home(build_home, profile_home_key(build_home) if build_home else None)
+        if reason is not None:
+            _log_once(
+                "engine-release-scope",
+                "[webui] #8804: the background summary pass of an evicted agent whose memory "
+                "shutdown was refused was not cancelled (%s); it runs to completion unused.",
+                reason,
+            )
+            return False
+        try:
+            prepared.discard(*_AGENT_RELEASED_DISCARD)
+        except Exception:
+            logger.debug("[webui] #8804: cancelling the prepared summary failed for %s", session_id, exc_info=True)
+        finally:
+            restore()
+        return True
+    finally:
+        try:
+            agent._memory_provider_shutdown = True
+        except Exception:
+            logger.debug("[webui] #8804: could not mark the evicted agent shut down", exc_info=True)
+
+
 def register_provider_holders(agent: Any, *, home_key: str = "") -> int:
     """Record ``agent`` as a holder of every provider instance its memory manager
     serves (#8613). Idempotent per (agent, instance) — a turn that reuses a cached
