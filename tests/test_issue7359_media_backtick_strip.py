@@ -38,9 +38,9 @@ JS_SITES: dict[str, list[str]] = {
         r"/MEDIA: ?[^\s]+/g",             # TTS flattener (no paren/bracket exclusion)
     ],
     "static/messages.js": [
-        r"/^MEDIA: ?([^\s\)\]]+)$/",      # streaming chunk finalize
-        r"/MEDIA: ?([^\s\)\]]+)/g",       # streaming combined walk
-        r"/MEDIA: ?[^\s\)\]]*$/",         # streaming partial tail
+        r"/^MEDIA: ?([^\s\)\]\u0001\u0002]+)$/",   # streaming chunk finalize
+        r"/MEDIA: ?([^\s\)\]\u0001\u0002]+)/g",   # streaming combined walk
+        r"/MEDIA: ?[^\s\)\]\u0001\u0002]*$/",     # streaming partial tail
     ],
 }
 PY_SITES: dict[str, str] = {
