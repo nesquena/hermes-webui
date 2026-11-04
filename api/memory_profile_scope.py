@@ -1706,6 +1706,58 @@ def _mark_legacy_shut_down(holder: Any) -> None:
         logger.debug("[webui] #8804: could not mark the released agent shut down", exc_info=True)
 
 
+def end_unowned_context_engine(agent: Any, *, session_id: str, messages: Any = None) -> bool:
+    """End the context engine of an evicted agent whose ``shutdown_memory_provider``
+    the WebUI refused (#8804 follow-up). True when the engine's end ran.
+
+    ``shutdown_memory_provider`` ends BOTH the memory provider and the context engine
+    (the Agent's ``_notify_context_engine_session_end``: flush the engine's per-session
+    state, close its databases). ``call_as_session_owner`` refuses the whole call when
+    the session's owner cannot be resolved, because the memory session end is a commit
+    and an unknown owner never commits (#8517). The engine's end is cleanup that was
+    skipped along with it; v0.52.544 always ran it. The caller runs this only when the
+    Agent's own shutdown did not run (a refusal at hook time happens INSIDE that
+    shutdown, which already ended the engine) and decides that BEFORE the memory
+    release, which marks an old Agent's agent shut down (#8804).
+
+    The end runs once, exactly as the Agent calls it (``on_session_end(session_id,
+    messages)``, errors swallowed like the Agent's ``_quietly``), in the profile home the
+    WebUI built the agent under, where the engine was started; never under the ambient
+    env mirror, which can name another profile. Either way the agent is then marked
+    shut down, the state v0.52.544 left an evicted agent in, so a later
+    ``shutdown_memory_provider`` cannot end the engine a second time."""
+    if agent is None:
+        return False
+    try:
+        engine = getattr(agent, "context_compressor", None)
+        end = getattr(engine, "on_session_end", None) if engine is not None else None
+        if not callable(end):
+            return False
+        build_home = str(getattr(agent, _BUILD_HOME_ATTR, "") or "")
+        restore, reason = _enter_profile_home(build_home, profile_home_key(build_home) if build_home else None)
+        if reason is not None:
+            _log_once(
+                "engine-end-scope",
+                "[webui] #8804: the context engine of an evicted agent whose memory shutdown "
+                "was refused did not get its session end (%s); it keeps its per-session state "
+                "until the agent is collected.",
+                reason,
+            )
+            return False
+        try:
+            end(getattr(agent, "session_id", None) or session_id or "", list(messages or []))
+        except Exception:
+            logger.debug("[webui] #8804: the context engine's session end failed for %s", session_id, exc_info=True)
+        finally:
+            restore()
+        return True
+    finally:
+        try:
+            agent._memory_provider_shutdown = True
+        except Exception:
+            logger.debug("[webui] #8804: could not mark the evicted agent shut down", exc_info=True)
+
+
 def register_provider_holders(agent: Any, *, home_key: str = "") -> int:
     """Record ``agent`` as a holder of every provider instance its memory manager
     serves (#8613). Idempotent per (agent, instance) — a turn that reuses a cached
