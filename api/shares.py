@@ -118,16 +118,18 @@ def _redact_share_paths(text: str, extra_paths) -> str:
 
 # Regex matching local MEDIA:<path> references — same pattern that
 # _inlineMediaHtmlForRef() in ui.js handles when rendering messages.
-# Excludes MEDIA: followed by http/https URLs so external images pass
-# through unchanged.  file:// references are NOT matched here — they are
-# always rejected at the public-share boundary (absolute, un-scoped).
+# Tolerates the agent-facing one-space form (``MEDIA: <path>``) exactly like
+# the other MEDIA: scan sites (see #8800). Excludes MEDIA: followed by
+# http/https URLs so external images pass through unchanged.  file://
+# references are NOT matched here — they are always rejected at the
+# public-share boundary (absolute, un-scoped).
 # `data:` URIs DO match, and _replace_ref() always replaces them with
 # _INLINE_DATA_PLACEHOLDER without touching the filesystem: feeding a multi-KB
 # base64 blob to Path(...).resolve()/stat() raised OSError ENAMETOOLONG (errno
 # 36) and 500'd share creation (#7949). _sanitize_message() already removes
 # them in _placeholder_inline_data_uris(); the branch keeps direct callers safe.
 _SHARE_MEDIA_RE = re.compile(
-    r"MEDIA:(?!https?://)([^\s\)\]>]+)"
+    r"MEDIA: ?(?!https?://)([^\s\)\]>]+)"
 )
 
 # Content-supplied inline data: URIs are never published in a public share.
