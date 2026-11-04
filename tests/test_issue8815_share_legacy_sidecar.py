@@ -158,3 +158,54 @@ def test_a_sidecar_that_has_the_share_keys_keeps_its_key_order(isolated_state):
     assert status == 200
     assert _key_order(path) == before
     assert _metadata_reload() == (reply["share"]["token"],) * 2
+
+
+def _damage_like_621(path):
+    """Move the share keys after ``messages``, as exp-v0.52.621..630 left a shared legacy sidecar."""
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    moved = {key: raw.pop(key) for key in ("share_token", "share_created_at")}
+    raw.update(moved)
+    path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    keys = list(raw)
+    assert keys.index("share_token") > keys.index("messages")
+
+
+def test_a_reshare_repairs_a_sidecar_an_earlier_build_left_damaged(isolated_state):
+    """A sidecar shared on .621..630 already has the token after ``messages``; updating it in
+    place would leave the reloaded page without its Stop sharing control."""
+    from api import models, shares
+
+    path = _save_session(legacy=True)
+    status, reply = _post("/api/share/create", {"session_id": SID})
+    assert status == 200
+    token = reply["share"]["token"]
+    _damage_like_621(path)
+    models.SESSIONS.clear()
+    assert _metadata_reload() == (None, None)  # the damaged state the issue describes
+
+    status, reply = _post("/api/share/create", {"session_id": SID})
+    assert status == 200
+    assert reply["share"]["token"] == token  # the live link is reused, not replaced
+    keys = _key_order(path)
+    assert keys.index("share_token") < keys.index("messages"), keys
+    assert keys.count("share_token") == 1
+    assert _metadata_reload() == (token, token)
+    assert shares.load_share(token) is not None
+
+
+def test_a_revoke_repairs_a_sidecar_an_earlier_build_left_damaged(isolated_state):
+    from api import models, shares
+
+    path = _save_session(legacy=True)
+    status, reply = _post("/api/share/create", {"session_id": SID})
+    assert status == 200
+    token = reply["share"]["token"]
+    _damage_like_621(path)
+    models.SESSIONS.clear()
+
+    status, _payload = _post("/api/share/revoke", {"session_id": SID})
+    assert status == 200
+    assert shares.load_share(token) is None
+    keys = _key_order(path)
+    assert keys.index("share_token") < keys.index("messages"), keys
+    assert _metadata_reload() == (None, None)
