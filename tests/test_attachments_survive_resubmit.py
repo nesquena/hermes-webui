@@ -138,7 +138,6 @@ def test_resend_never_picks_another_sessions_picture(attachment):
     parts = _image_parts(out)
     assert parts, "own-session attachment was not resolved"
     import base64 as _b64
-    from urllib.parse import unquote
 
     url = parts[0]["image_url"]["url"]
     decoded = _b64.b64decode(url.split("base64,", 1)[1])
