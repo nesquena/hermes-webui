@@ -1,11 +1,20 @@
 from collections import Counter
 from pathlib import Path
+import json
 import re
+import shutil
+import subprocess
+import tempfile
+
+import pytest
+
 from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
 from tests.scripts_fallback_keys import scripts_fallback_keys
 
 
 REPO = Path(__file__).resolve().parent.parent
+I18N_JS = REPO / "static" / "i18n.js"
+NODE = shutil.which("node")
 PROFILE_CONCEPT_FALLBACK_KEYS = {
     *PROFILE_CONCEPT_KEYS,
     "workspace_artifact_source_session",
@@ -202,3 +211,132 @@ def test_czech_locale_uses_real_utf8_diacritics():
     cs_block = extract_locale_block(src, "cs")
     diacritics = "áčďéěíňóřšťúůýžÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ"
     assert any(ch in cs_block for ch in diacritics), "Czech locale has no diacritics"
+
+
+# ── Runtime (node) coverage ────────────────────────────────────────────────
+# Source-text assertions cannot tell a JS escape (`\n`, one backslash) from a
+# double-escaped value (`\\n`, which renders as literal backslash-n text).  The
+# reviewed base was green while `showConfirmDialog` displayed the escape text,
+# so these tests drive the real `setLocale()` / `t()` and assert on the string
+# the UI would actually render.
+
+def _i18n_runtime(js_body: str) -> dict:
+    """Run `js_body` in a fresh node process after `static/i18n.js` is loaded."""
+    src = read(I18N_JS)
+    # Drop the boot-time loadLocale() call so the driver picks the locale.
+    src = re.sub(r"\nloadLocale\(\);\s*$", "", src, count=1)
+    driver = f"""
+const src = {src!r};
+global.localStorage = {{ getItem: () => null, setItem: () => {{}} }};
+global.document = {{
+  documentElement: {{ set lang(_) {{}} }},
+  querySelectorAll: () => [],
+  querySelector: () => null,
+  addEventListener: () => {{}},
+}};
+eval(src);
+{js_body}
+"""
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".js", delete=False, encoding="utf-8"
+    ) as f:
+        f.write(driver)
+        path = f.name
+    try:
+        result = subprocess.run(
+            [NODE, path], capture_output=True, text=True, timeout=120
+        )
+    finally:
+        Path(path).unlink(missing_ok=True)
+    assert result.returncode == 0, (
+        f"node driver failed: rc={result.returncode} stderr={result.stderr!r}"
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_czech_share_confirm_renders_real_paragraph_break():
+    """cs.share_session_existing_confirm must reach the dialog as a real
+    paragraph break, not as literal `\\n` escape text.
+
+    `showConfirmDialog` assigns the value to `textContent`, so the escape text
+    is exactly what a Czech user saw: one run-on line with backslash-n in the
+    middle.
+    """
+    values = _i18n_runtime(
+        """
+setLocale('cs');
+const cs = t('share_session_existing_confirm');
+setLocale('en');
+const en = t('share_session_existing_confirm');
+process.stdout.write(JSON.stringify({ cs, en }));
+"""
+    )
+
+    cs = values["cs"]
+    en = values["en"]
+    assert "\\n" not in cs, f"Czech value leaks a literal escape sequence: {cs!r}"
+    assert "\\" not in cs, f"Czech value contains a literal backslash: {cs!r}"
+    assert cs.count("\n") == 2, f"expected two newlines, got {cs.count(chr(10))}"
+    paragraphs = cs.split("\n\n")
+    assert len(paragraphs) == 2 and all(p.strip() for p in paragraphs)
+    # Same paragraph shape as English, so the dialog keeps its two paragraphs.
+    assert cs.count("\n") == en.count("\n")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_no_czech_value_leaks_escape_sequences_through_t():
+    """Any cs value whose source accidentally double-escapes a newline (or a
+    unicode escape) renders the backslash to the user.  `t()` is the only
+    seam the UI uses, so scan every translated value through it.
+    """
+    src = read(I18N_JS)
+    keys = sorted(locale_keys(src, "cs"))
+    values = _i18n_runtime(
+        f"""
+setLocale('cs');
+const keys = {json.dumps(keys)};
+const out = {{}};
+for (const k of keys) {{
+  try {{
+    const v = t(k);
+    if (typeof v === 'string') out[k] = v;
+  }} catch (_) {{}}
+}}
+process.stdout.write(JSON.stringify(out));
+"""
+    )
+
+    leaked = sorted(
+        key
+        for key, value in values.items()
+        if "\\n" in value or "\\t" in value or "\\u" in value
+    )
+    assert leaked == [], f"Czech values render escape sequences: {leaked}"
+
+
+PROFILE_NAME_GRAMMAR = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_czech_profile_example_uses_a_valid_profile_identifier():
+    """The onboarding example must not tell users to create a profile the form rejects.
+
+    `saveProfileForm` in static/panels.js validates the name against an
+    ASCII-only grammar, so a Czech example naming a profile with diacritics
+    („výzkumník“) describes an identifier the user cannot type.
+    """
+    panels = read(REPO / "static" / "panels.js")
+    assert "/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)" in panels, (
+        "saveProfileForm no longer validates the profile name with the grammar "
+        "this test asserts against"
+    )
+    values = _i18n_runtime(
+        "setLocale('cs');process.stdout.write(JSON.stringify(t('profile_concept_example')));"
+    )
+    match = re.search(r"profil\s+[„\"»]([^„“\"»«]+)[“\"«]", values)
+    assert match, f"no quoted profile identifier in the example: {values!r}"
+    identifier = match.group(1)
+    assert PROFILE_NAME_GRAMMAR.match(identifier), (
+        f"the example asks for profile {identifier!r}, which saveProfileForm rejects"
+    )
