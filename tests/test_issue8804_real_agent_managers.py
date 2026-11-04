@@ -245,6 +245,12 @@ def test_a_build_during_an_old_agents_teardown_waits_and_gets_a_live_provider(ag
         attaching.start()
         attaching.join(0.5)
         assert attaching.is_alive(), "the build did not wait for the teardown of the instance it shares"
+        # A wake-up meant for something else (another teardown's settlement, a construction
+        # of another profile ending) must not let the build through: it re-checks.
+        with scope._provider_holders_cond:
+            scope._provider_holders_cond.notify_all()
+        attaching.join(0.3)
+        assert attaching.is_alive(), "a stray wake-up let the build through while the teardown still runs"
         assert [i["session"] for i in provider.inits] == ["8804-race-old"], "re-initialised mid-teardown"
     finally:
         finish.set()
