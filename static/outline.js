@@ -162,6 +162,20 @@ function _searchHitMessageText(message) {
   return String(content || '');
 }
 
+// The full render a search jump runs before it scrolls. _beginMessageJumpScroll() has released the
+// reader's pin by then, so the preserve-scroll render treats the older history it mounts as content
+// that arrived while the reader was away and raises the "New message" cue (seen at 390 px: the pill
+// read "New message" after a far search jump). Older history is not a new message, so a cue this
+// render raised is cleared; one that was already showing before the jump is kept.
+function _renderTranscriptForJump() {
+  const cueBefore = typeof _newMessageCueVisible !== 'undefined' && !!_newMessageCueVisible;
+  if (typeof renderMessages === 'function') renderMessages({ preserveScroll: true, _virtualFallback: true });
+  if (!cueBefore && typeof _newMessageCueVisible !== 'undefined' && _newMessageCueVisible
+      && typeof _clearNewMessageScrollCue === 'function') {
+    _clearNewMessageScrollCue();
+  }
+}
+
 async function _jumpToFullSessionMessage(fullIdx, targetSid, query, searchGen) {
   const sid = targetSid || _currentSid();
   if (!sid || !Number.isSafeInteger(fullIdx) || fullIdx < 0) return false;
@@ -241,7 +255,7 @@ async function _jumpToFullSessionMessage(fullIdx, targetSid, query, searchGen) {
     _cancelBottomSettle();
     _beginMessageJumpScroll(container);
     _expandOutlineRenderWindow();
-    if (typeof renderMessages === 'function') renderMessages({ preserveScroll: true, _virtualFallback: true });
+    _renderTranscriptForJump();
     await new Promise(function(resolve) { requestAnimationFrame(resolve); });
     if (!stillTarget()) return false;
   }
@@ -263,7 +277,7 @@ async function _jumpToFullSessionMessage(fullIdx, targetSid, query, searchGen) {
   _cancelBottomSettle();
   _beginMessageJumpScroll(container);
   _expandOutlineRenderWindow();
-  if (typeof renderMessages === 'function') renderMessages({ preserveScroll: true, _virtualFallback: true });
+  _renderTranscriptForJump();
   await new Promise(function(resolve) { requestAnimationFrame(resolve); });
   if (!stillTarget()) return false;
   await jumpToTurnQuestion(localIdx, assistantIdx, { isValid: stillTarget });

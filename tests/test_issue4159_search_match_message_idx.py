@@ -237,10 +237,15 @@ global.document={getElementById:id=>id==='messages'?container:(rows.find(r=>r.id
 global.requestAnimationFrame=f=>{frames.push(f);return frames.length;};
 global._cancelBottomSettle=()=>events.push('cancel-settle');
 global._beginMessageJumpScroll=()=>events.push('begin-jump');
+// The "New message" scroll cue (ui.js). scenario.renderRaisesCue models ui.js's preserve-scroll render
+// raising it for the older history a jump's full render mounts while the jump has released the pin.
+global._newMessageCueVisible=!!scenario.cueBefore;
+global._clearNewMessageScrollCue=()=>{events.push('clear-cue');_newMessageCueVisible=false;};
 global.renderMessages=(opts)=>{
   const full=!!(opts&&opts._virtualFallback);
   events.push(full?'render-full':'render');
   if(full) events.push('render');
+  if(full&&scenario.renderRaisesCue) _newMessageCueVisible=true;
   stamp(_oldestIdx, full);
 };
 global.api=async()=>{events.push('direct-api');return null;};
@@ -277,7 +282,7 @@ global.jumpToTurnQuestion=async(q,a)=>{
   events.push('delegate');
 };
 for(const name of ['_messageSessionIndexBase','_messageRawIdxForSessionIndex']) eval(extractFrom(uiSrc,name));
-for(const name of ['_currentSid','_expandOutlineRenderWindow','_searchHitMessageText','_jumpToFullSessionMessage']) eval(extractFrom(outlineSrc,name));
+for(const name of ['_currentSid','_expandOutlineRenderWindow','_searchHitMessageText','_renderTranscriptForJump','_jumpToFullSessionMessage']) eval(extractFrom(outlineSrc,name));
 (async()=>{
   let idx=scenario.idx;
   if(scenario.idxKind==='nan') idx=NaN;
@@ -289,7 +294,7 @@ for(const name of ['_currentSid','_expandOutlineRenderWindow','_searchHitMessage
     while(frames.length) frames.shift()();
   }
   const ok=await p;
-  console.log(JSON.stringify({ok,events,delegated,oldestIdx:_oldestIdx,ensureOpts,messageCount:S.messages.length}));
+  console.log(JSON.stringify({ok,events,delegated,oldestIdx:_oldestIdx,ensureOpts,messageCount:S.messages.length,cueVisible:_newMessageCueVisible}));
 })().catch(e=>{console.error(e);process.exitCode=1;});
 """
 
@@ -396,6 +401,37 @@ def test_target_outside_the_virtual_window_is_mounted_before_jumping(truncated):
     assert events.index("render-full") < last_delegate
     assert r["delegated"]["rowSessionIdx"] == 2
     assert r["delegated"]["rowContent"] == "NEEDLE 2"
+
+
+@needs_node
+@pytest.mark.parametrize(
+    "scenario",
+    [{"truncated": True}, {"truncated": False, "mountedFrom": 6}],
+    ids=["history-loaded-by-the-jump", "off-window-fallback"],
+)
+def test_jump_render_does_not_leave_a_new_message_cue(scenario):
+    """A jump's full render runs after _beginMessageJumpScroll() released the pin, so ui.js's
+    preserve-scroll render takes the older history it mounts for content that arrived while the
+    reader was away and raises the "New message" cue. At 390 px the pill then read "New message"
+    after a far search jump although nothing new had arrived. The cue that render raised is cleared,
+    on both render paths, and the jump still lands."""
+    r = _run_jump(idx=2, renderRaisesCue=True, **scenario)
+    events = r["events"]
+    assert r["ok"] is True
+    assert r["delegated"]["rowContent"] == "NEEDLE 2"
+    assert "clear-cue" in events
+    assert events.index("render-full") < events.index("clear-cue")
+    assert r["cueVisible"] is False
+
+
+@needs_node
+def test_jump_render_keeps_a_new_message_cue_that_was_already_showing():
+    """A real "New message" cue showing before the jump (a reply arrived while the reader was
+    scrolled up) is not the jump's to clear."""
+    r = _run_jump(idx=2, truncated=True, renderRaisesCue=True, cueBefore=True)
+    assert r["ok"] is True
+    assert "clear-cue" not in r["events"]
+    assert r["cueVisible"] is True
 
 
 @needs_node
@@ -658,7 +694,7 @@ global._messageVirtualScrollTopForVisibleIdx=(vis,idx,c)=>Math.max(0,idx*ROW-Mat
 global.window.setTimeout=(f)=>0;
 global._ensureAllMessagesLoaded=async()=>{events.push('ensure-all');};
 for(const name of ['_messageSessionIndexBase','_messageRawIdxForSessionIndex','_messageVisibleIndexForRawIdx','_userMessageDomId','_highlightQuestionRow','_messageJumpScrollBehavior','jumpToTurnQuestion']) eval(extractFrom(uiSrc,name));
-for(const name of ['_currentSid','_expandOutlineRenderWindow','_searchHitMessageText','_jumpToFullSessionMessage']) eval(extractFrom(outlineSrc,name));
+for(const name of ['_currentSid','_expandOutlineRenderWindow','_searchHitMessageText','_renderTranscriptForJump','_jumpToFullSessionMessage']) eval(extractFrom(outlineSrc,name));
 (async()=>{
   const targetInDomBefore=rows.some(r=>r.dataset.msgIdx===String(scenario.idx));
   if(scenario.searchGen!==undefined) window._sessionSearchJumpGen=scenario.searchGen;
