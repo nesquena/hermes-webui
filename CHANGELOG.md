@@ -5,6 +5,8 @@
 
 ### Added
 
+- **The test suite refuses git commands that would change the real checkout.** A test that runs a mutating git command (fetch, checkout, stash, reset and so on) against the WebUI or Agent checkout (including from a linked worktree of it) now fails with the command and directory, instead of changing the clone, as a broken mock once did with a real `git fetch`. Read-only git, temporary repositories, `git config` writes to other repositories and non-git commands are unaffected, and a test can opt out explicitly. Tests only. (#8801)
+
 - **Tasks has a read-only Scripts tab.** Next to Jobs, a Scripts tab lists the active profile's `scripts/` folder (the scripts cron jobs can run) with each file's size, age and the description from its leading comment. The tab only lists (there is no viewer yet; to view or edit a script, open the file on the server); a read-only `GET /api/scripts/raw` returns one file's text for a later viewer. Reads stay inside that folder (no symlinks out, size-capped), a platform that cannot open the folder safely says so instead of showing an empty list, and the tab hides "New job" since it cannot create anything. Thanks @happy5318. (#7685, for #2316)
 
 - **The workspace Artifacts panel shows which skills each conversation used.** A new "Skills used" section lists every skill the session loaded and how many times, counted from successful skill loads (the Agent's `skill_view`, `/use` and bundle commands) and kept per session and profile. Files and skills sit in their own collapsible sections ("Files changed N", "Skills used N"), and the Artifacts badge counts both. Thanks @rodboev. (#6693, for #6593)
