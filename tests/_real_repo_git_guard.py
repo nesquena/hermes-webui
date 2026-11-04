@@ -30,7 +30,7 @@ import pytest
 REAL_POPEN = subprocess.Popen
 REFUSALS = []
 _ROOTS = []
-_EXEMPT = []  # pytest's --basetemp when it lies inside a guarded root: the temp repos there are not the checkout
+_EXEMPT = []  # pytest's --basetemp: temp repos under it are not the checkout (the nearest ancestor wins, see is_real_checkout)
 
 _READ_ONLY_VERBS = frozenset({
     'blame', 'cat-file', 'check-ignore', 'check-ref-format', 'describe', 'diff', 'diff-index',
@@ -114,18 +114,29 @@ def is_read_only(verb_args) -> bool:
     return False
 
 
+def _nearest(p, dirs):
+    """The deepest of *dirs* that is *p* or an ancestor of it, else None."""
+    hits = [d for d in dirs if p == d or d in p.parents]
+    return max(hits, key=lambda d: len(d.parts)) if hits else None
+
+
 def is_real_checkout(cwd) -> bool:
     """True when *cwd* is a real checkout, inside one, or above one.
 
-    An unresolvable cwd counts as the real checkout (fail closed).
+    The nearest ancestor decides between a guarded root and an exempt basetemp: a
+    ``--basetemp`` inside the checkout makes the temp repos under it not the
+    checkout, while a root installed under a basetemp (a test's fake checkout) is
+    guarded, and a basetemp outside every root exempts nothing. An unresolvable
+    cwd counts as the real checkout (fail closed).
     """
     try:
         p = pathlib.Path(os.getcwd() if cwd is None else cwd).expanduser().resolve()
     except (OSError, RuntimeError, TypeError, ValueError):
         return True
-    if any(p == exempt or exempt in p.parents for exempt in _EXEMPT):
+    root, exempt = _nearest(p, _ROOTS), _nearest(p, _EXEMPT)
+    if exempt is not None and (root is None or root == exempt or root in exempt.parents):
         return False
-    return any(p == root or root in p.parents or p in root.parents for root in _ROOTS)
+    return root is not None or any(p in r.parents for r in _ROOTS)
 
 
 def _join(base, path):
@@ -359,7 +370,7 @@ def install(*roots):
 
 
 def pytest_configure(config):
-    """Temp repos under a ``--basetemp`` inside the checkout are not the checkout."""
+    """Record pytest's ``--basetemp``: temp repos under it are not the checkout (see ``is_real_checkout``)."""
     basetemp = config.getoption('basetemp', default=None)
     _EXEMPT[:] = [pathlib.Path(basetemp).expanduser().resolve()] if basetemp else []
 

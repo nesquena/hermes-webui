@@ -191,6 +191,29 @@ def test_a_basetemp_inside_the_checkout_is_not_the_checkout(monkeypatch):
     assert guard.is_real_checkout(basetemp / 'test_x0' / 'repo')
 
 
+def test_a_basetemp_outside_the_checkout_exempts_nothing(tmp_path, monkeypatch):
+    """The supported runner passes an explicit --basetemp outside the checkout; a fake
+    checkout a test installs under it must still be guarded, and the real one too."""
+    monkeypatch.setattr(guard, '_EXEMPT', [tmp_path.parent.resolve()])
+    monkeypatch.setattr(guard, '_ROOTS', list(guard._ROOTS))
+    fake = tmp_path / 'fake'
+    fake.mkdir()
+    guard.install(fake)
+    assert guard.is_real_checkout(fake / 'src')
+    assert guard.is_real_checkout(REPO_ROOT)
+    assert not guard.is_real_checkout(tmp_path)
+
+
+def test_a_fake_root_under_a_basetemp_inside_the_checkout_is_guarded(monkeypatch):
+    basetemp = REPO_ROOT / '.pytest-basetemp'
+    monkeypatch.setattr(guard, '_EXEMPT', [basetemp])
+    monkeypatch.setattr(guard, '_ROOTS', list(guard._ROOTS))
+    guard.install(basetemp / 'test_x0' / 'main')
+    assert guard.is_real_checkout(basetemp / 'test_x0' / 'main' / 'src')
+    assert not guard.is_real_checkout(basetemp / 'test_x0' / 'other')
+    assert guard.is_real_checkout(REPO_ROOT)
+
+
 def test_install_guards_the_main_checkout_of_a_linked_worktree(tmp_path, monkeypatch):
     main, linked = tmp_path / 'main', tmp_path / 'wt'
     (main / '.git' / 'worktrees' / 'wt').mkdir(parents=True)
