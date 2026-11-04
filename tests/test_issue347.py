@@ -16,6 +16,8 @@ import re
 import subprocess
 import textwrap
 
+import pytest
+
 REPO = pathlib.Path(__file__).parent.parent
 UI_JS   = (REPO / 'static' / 'ui.js').read_text(encoding='utf-8')
 INDEX   = (REPO / 'static' / 'index.html').read_text(encoding='utf-8')
@@ -421,8 +423,8 @@ def test_safe_tags_span_is_narrowly_scoped():
 def test_inline_math_regex_requires_non_space_boundaries():
     """The $...$ inline regex must require non-space at both boundaries.
 
-    This prevents 'costs $5 and $10' from matching — the space after the opening
-    $ means it's a currency amount, not math.
+    This prevents the dollars in 'costs $5 and $10' from forming a math
+    candidate because the would-be body ends in whitespace.
     """
     # The inline math stash push is type:'inline' — find its containing replace() line
     inline_push_idx = UI_JS.find("type:'inline',src:m")
@@ -435,22 +437,49 @@ def test_inline_math_regex_requires_non_space_boundaries():
         f"Inline math regex must exclude spaces at boundaries to prevent false "
         f"positives on currency like $5. Found: {inline_line[:120]}"
     )
-def test_inline_math_regex_rejects_digit_after_opening_dollar():
-    """The $...$ inline regex must reject $ followed by a digit.
 
-    Currency like '$1,000 xuống ~$95' must NOT be parsed as math.
-    The opening $ followed by a digit (0-9) is a strong currency signal.
-    Aligns with smd's se() guard which also rejects $ + digit.
-    """
-    inline_push_idx = UI_JS.find("type:'inline',src:m")
-    assert inline_push_idx != -1
-    line_start = UI_JS.rfind('\n', 0, inline_push_idx) + 1
-    inline_line = UI_JS[line_start:inline_push_idx + 50]
-    # The regex character class for the first char must exclude \d
-    assert '\\d' in inline_line, (
-        f"Inline math regex must exclude digits at opening boundary to prevent "
-        f"false positives on currency like $1,000. Found: {inline_line[:120]}"
-    )
+
+@pytest.mark.parametrize("body", [
+    "0{,}8",
+    r"1 - 0{,}8 = \mathbf{0{,}2}",
+    "0.5",
+    r"1 - 0{,}1 = \mathbf{0{,}9}",
+    "0{,}0 - 0{,}1",
+    "2+3",
+    r"2\pi",
+    "0,5",
+])
+def test_numeric_inline_math_renders(body):
+    html = _run_renderers(f"${body}$")["assistant"]
+    assert f'<span class="katex-inline" data-katex="inline">{body}</span>' in html
+
+
+@pytest.mark.parametrize("sample", [
+    "$1,000",
+    "$1,000 xuống ~$95",
+    "costs $5 and $10",
+    "$5-$10",
+    "$5 - $10",
+    "$0.5 and $10",
+    "$5+$10",
+    "$5/$10",
+    "$5=$10",
+    "$5$",
+    "$0.5\n+1$",
+    "$ 0.5$",
+    "$0.5 $",
+])
+def test_currency_and_non_math_numeric_candidates_stay_literal(sample):
+    html = _run_renderers(sample)["assistant"]
+    assert 'katex-inline' not in html
+    assert sample.replace("\n", "<br>") in html
+
+
+@pytest.mark.parametrize("sample", ["`$0.5$`", "```\n$0.5$\n```"])
+def test_numeric_inline_math_in_code_stays_literal(sample):
+    html = _run_renderers(sample)["assistant"]
+    assert 'katex-inline' not in html
+    assert '$0.5$' in html
 
 
 def test_display_math_stashed_before_inline():
