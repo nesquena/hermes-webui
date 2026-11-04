@@ -20,9 +20,12 @@ hook is logged and left for the next boundary.  Nothing waits for an
 acknowledgement and nothing latches a debt.  The installed Agent returns None
 and swallows provider errors, so no caller here can observe whether extraction
 ran; a release path that claimed otherwise would gate on a signal that can
-never arrive.  The only condition the pressure valve consults is the
-transcript's own persistence (see
-``api/agent_cache_governance.py::transcript_persistence_caught_up``).
+never arrive.  What IS observable is whether the session's work is still
+pending: the pressure valve keeps the transcript when a pre-release delivery was
+refused, so the next boundary can still hand that extraction its payload (the
+only losslessness conditions it consults are
+``api/agent_cache_governance.py::transcript_persistence_caught_up`` for the
+conversation and this ledger for the extraction).
 
 CLI-parity semantics — post-turn marking, boundary extraction/commit:
 
