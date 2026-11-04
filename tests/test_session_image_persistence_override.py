@@ -1122,3 +1122,34 @@ def test_anchor_scene_fingerprint_is_stable_across_projection():
     projected, changed = compact_persisted_anchor_scenes(scenes)
     assert changed is True
     assert _anchor_scene_index_from_records(projected) == before
+
+
+def test_plain_string_content_carrying_a_data_url_is_bounded():
+    """A message whose `content` is a bare STRING holding a data URL.
+
+    `_project_sentinelled_content` only handles the `\\x00json:` storage form, so a
+    plain string fell through and was never compacted even though
+    `_has_inline_image` reported it as carrying bytes. Not present in the live
+    store today (verified: 0 occurrences across all 108 files), so this is a
+    latent hole rather than an active leak -- closed here because it is the same
+    unwired-lane class as the other four findings.
+    """
+    from api.session_image_persistence_override import compact_persisted_image_parts
+
+    payload = _b64_bytes(b"V" * 4000)
+    message = {"role": "user", "content": f"data:image/png;base64,{payload}", "id": "a", "timestamp": 1.0}
+
+    changed = compact_persisted_image_parts([message])
+
+    assert changed, "plain string data URL was not compacted"
+    assert payload not in json.dumps(message)
+    assert "<inline-image>" in message["content"]
+
+
+def test_plain_string_without_images_is_untouched():
+    """Ordinary prose must not be rewritten (no false positives)."""
+    from api.session_image_persistence_override import compact_persisted_image_parts
+
+    message = {"role": "user", "content": "just some ordinary text", "id": "b", "timestamp": 2.0}
+    assert compact_persisted_image_parts([message]) == 0
+    assert message["content"] == "just some ordinary text"

@@ -414,6 +414,21 @@ def compact_persisted_image_parts(messages, *, stamp_digest: bool = True) -> int
                 message["content"] = reencoded
                 changed += 1
                 message_changed = True
+            else:
+                # A PLAIN string carrying a raw data URL. `_has_inline_image`
+                # reports these as holding bytes, but only the sentinel form was
+                # handled, so they fell through uncompacted. Not present in the
+                # live store today (0 across 108 files) -- closed because it is
+                # the same unwired-lane class as the other findings, and because
+                # a lane the preflight flags but the projector ignores is exactly
+                # the inconsistency that produced them. Only the base64 RUN is
+                # replaced; surrounding prose is kept verbatim.
+                masked = _mask_inline_string(content)
+                if masked is not None:
+                    _update_part_digest(digest, {"type": "text", "text": _MASK}, content, ())
+                    message["content"] = masked
+                    changed += 1
+                    message_changed = True
         # The provider-shaped mirror duplicates the same bytes; leaving it alone
         # would persist a full base64 copy per image row.
         projected_api_content = _project_api_content(message.get("api_content"), digest)
