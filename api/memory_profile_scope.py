@@ -1706,48 +1706,89 @@ def _mark_legacy_shut_down(holder: Any) -> None:
         logger.debug("[webui] #8804: could not mark the released agent shut down", exc_info=True)
 
 
-def end_unowned_context_engine(agent: Any, *, session_id: str, messages: Any = None) -> bool:
-    """End the context engine of an evicted agent whose ``shutdown_memory_provider``
-    the WebUI refused (#8804 follow-up). True when the engine's end ran.
+# The modules that define the Agent's own context engines (the base class and the
+# built-in compressor). An ``on_session_end`` defined anywhere else is a plugin's.
+_AGENT_ENGINE_MODULES = frozenset({"agent.context_engine", "agent.context_compressor"})
+# The reason the Agent's own session end passes to ``PreparedCompaction.discard``.
+_SESSION_BOUNDARY_DISCARD = "session boundary"
 
-    ``shutdown_memory_provider`` ends BOTH the memory provider and the context engine
-    (the Agent's ``_notify_context_engine_session_end``: flush the engine's per-session
-    state, close its databases). ``call_as_session_owner`` refuses the whole call when
-    the session's owner cannot be resolved, because the memory session end is a commit
-    and an unknown owner never commits (#8517). The engine's end is cleanup that was
-    skipped along with it; v0.52.544 always ran it. The caller runs this only when the
-    Agent's own shutdown did not run (a refusal at hook time happens INSIDE that
-    shutdown, which already ended the engine) and decides that BEFORE the memory
-    release, which marks an old Agent's agent shut down (#8804).
 
-    The end runs once, exactly as the Agent calls it (``on_session_end(session_id,
-    messages)``, errors swallowed like the Agent's ``_quietly``), in the profile home the
-    WebUI built the agent under, where the engine was started; never under the ambient
-    env mirror, which can name another profile. Either way the agent is then marked
-    shut down, the state v0.52.544 left an evicted agent in, so a later
-    ``shutdown_memory_provider`` cannot end the engine a second time."""
+def _agents_prepared_compaction(engine: Any) -> Any:
+    """The engine's prepared-summary state when it is the Agent's own ``PreparedCompaction``
+    (Agent v0.22.6+) with the Agent's own ``discard``; otherwise None (an older Agent, a
+    plugin's object, or a plugin's override of ``discard``)."""
+    prepared = getattr(engine, "prepared_compaction", None)
+    if prepared is None:
+        return None
+    try:
+        module = sys.modules.get("agent.prepared_compaction") or importlib.import_module("agent.prepared_compaction")
+        agents_class = module.PreparedCompaction
+    except Exception:
+        return None
+    if not isinstance(prepared, agents_class):
+        return None
+    if getattr(type(prepared), "discard", None) is not getattr(agents_class, "discard", None):
+        return None
+    return prepared
+
+
+def release_unowned_context_engine(agent: Any, *, session_id: str) -> bool:
+    """Cancel the background summary work of an evicted agent whose
+    ``shutdown_memory_provider`` the WebUI refused (#8804 follow-up). True when the
+    Agent's own ``PreparedCompaction.discard`` ran.
+
+    ``call_as_session_owner`` refuses the whole shutdown when the session's owner cannot
+    be resolved, because a session end may write under an owner nobody can confirm
+    (#8517; fail closed, AGENTS.md). That includes the context engine's
+    ``on_session_end``: ``agent/context_engine.py`` makes it a plugin extension point that
+    may flush session data, so it is NEVER called here, and stays behind the owner check.
+
+    What the built-in ``ContextCompressor``'s end does beyond resetting the in-memory
+    state of an engine that is being discarded is ``prepared_compaction.discard`` (Agent
+    v0.22.6+). It cancels a background summary pass that would otherwise run to
+    completion, a model call nobody will use. That is close-only: no session data, only an
+    aggregate opt-in metric count. So that one call runs here, through the Agent's own
+    method, in the profile home the WebUI built the agent under (never the ambient env
+    mirror). A plugin engine's session end is skipped, logged once. An older Agent has
+    no prepared compaction, and nothing to cancel.
+
+    The caller runs this only when the Agent's own shutdown did not run (a refusal at hook
+    time happens INSIDE that shutdown), decided before the memory release, which marks an
+    old Agent's agent shut down (#8806). Either way the agent is then marked shut down,
+    the state v0.52.544 left an evicted agent in, so a later ``shutdown_memory_provider``
+    cannot run a session end under the unresolved owner."""
     if agent is None:
         return False
     try:
         engine = getattr(agent, "context_compressor", None)
-        end = getattr(engine, "on_session_end", None) if engine is not None else None
-        if not callable(end):
+        if engine is None:
+            return False
+        session_end = getattr(type(engine), "on_session_end", None)
+        if session_end is not None and getattr(session_end, "__module__", "") not in _AGENT_ENGINE_MODULES:
+            _log_once(
+                "engine-end-owner",
+                "[webui] #8804: the context engine %s of an evicted agent did not get its session "
+                "end: the session's owner could not be confirmed, and that hook may write session "
+                "data, so it stays behind the owner check (fail closed).",
+                type(engine).__name__,
+            )
+        prepared = _agents_prepared_compaction(engine)
+        if prepared is None:
             return False
         build_home = str(getattr(agent, _BUILD_HOME_ATTR, "") or "")
         restore, reason = _enter_profile_home(build_home, profile_home_key(build_home) if build_home else None)
         if reason is not None:
             _log_once(
-                "engine-end-scope",
-                "[webui] #8804: the context engine of an evicted agent whose memory shutdown "
-                "was refused did not get its session end (%s); it keeps its per-session state "
-                "until the agent is collected.",
+                "engine-release-scope",
+                "[webui] #8804: the background summary pass of an evicted agent whose memory "
+                "shutdown was refused was not cancelled (%s); it runs to completion unused.",
                 reason,
             )
             return False
         try:
-            end(getattr(agent, "session_id", None) or session_id or "", list(messages or []))
+            prepared.discard(_SESSION_BOUNDARY_DISCARD)
         except Exception:
-            logger.debug("[webui] #8804: the context engine's session end failed for %s", session_id, exc_info=True)
+            logger.debug("[webui] #8804: cancelling the prepared summary failed for %s", session_id, exc_info=True)
         finally:
             restore()
         return True
