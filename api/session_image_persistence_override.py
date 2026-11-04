@@ -442,6 +442,30 @@ def compact_persisted_image_parts(messages, *, stamp_digest: bool = True) -> int
     return changed
 
 
+def compact_persisted_anchor_scenes(records):
+    """Bound inline image bytes inside ``anchor_activity_scenes`` snippets.
+
+    ``Session.save()`` serializes this field verbatim, and a vision tool records
+    its preview inside ``scene.activity_rows[].tool.snippet`` (and the mirrored
+    ``.payload.snippet``). Those lanes are not ``messages`` or
+    ``context_messages``, so :func:`compact_persisted_image_parts` never visited
+    them: after migration the live store still carried ~122 KB of >=256-char
+    base64 in this one field across four sessions.
+
+    Returns ``(records, changed)``. Copy-on-write: the caller's live object is
+    never mutated, because the render path and the #5854 scene-key fingerprint
+    both read the original bytes. Identity fields (``message_ref``,
+    ``message_index``, ``stream_id``, ``updated_at``, ``version``) and the key
+    map are preserved verbatim so ref/index matching cannot drift.
+    """
+    if not isinstance(records, dict) or not records:
+        return records, False
+    digest = hashlib.sha256()
+    projected, changed = _project_nested(records, digest, (("k", "anchor_activity_scenes"),))
+    if not changed:
+        return records, False
+    return projected, True
+
 
 def _has_inline_image(value) -> bool:
     """Cheap early-out scan: does this payload hold any inline image bytes?

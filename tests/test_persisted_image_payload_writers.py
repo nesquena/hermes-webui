@@ -402,3 +402,48 @@ def test_projected_content_stays_renderable(label, parts):
     assert decoded is not projected, f"{label}: projected content no longer decodes"
     assert _is_supported_content_part_list(decoded), f"{label}: decoded parts unsupported"
     assert isinstance(decoded, list) and decoded, f"{label}: became an empty row"
+
+
+def test_save_bounds_anchor_scene_snippets_end_to_end(tmp_path, monkeypatch):
+    """`Session.save()` itself must bound anchor-scene snippets.
+
+    The unit test for `compact_persisted_anchor_scenes` passes even if nothing
+    CALLS it, so it cannot catch the actual defect (an unwired writer lane -- the
+    same class of gap Greptile found twice). This drives the real save path and
+    asserts on the bytes that land on disk.
+    """
+    import api.models as models
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", sessions)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", sessions / "_index.json")
+
+    # A real scene snippet is a plain STRING holding a data URL (the captured
+    # tool preview), not a structured part dict.
+    payload = base64.b64encode(b"Z" * 4000).decode("ascii")
+    snippet = f"{{'type': 'image_url', 'url': 'data:image/jpeg;base64,{payload}'}}"
+    session = models.Session(session_id="anchor-e2e")
+    session.anchor_activity_scenes = {
+        "e" * 64: {
+            "scene": {"activity_rows": [{"tool": {"snippet": snippet}, "payload": {"snippet": snippet}}]},
+            "message_ref": "f" * 64,
+            "message_index": 3,
+            "stream_id": "st-1",
+            "updated_at": 42.0,
+        }
+    }
+
+    session.save()
+
+    written = json.loads((sessions / "anchor-e2e.json").read_text(encoding="utf-8"))
+    scenes = written.get("anchor_activity_scenes") or {}
+    assert scenes, "anchor_activity_scenes was dropped entirely"
+    assert "data:image" not in json.dumps(scenes), "save() persisted anchor-scene image bytes"
+    assert payload not in json.dumps(written), "base64 survived the save"
+    # Identity must survive so ref/index matching and the #5854 fingerprint agree.
+    record = scenes["e" * 64]
+    assert record["message_ref"] == "f" * 64
+    assert record["message_index"] == 3
+    assert record["stream_id"] == "st-1"
+    assert record["updated_at"] == 42.0

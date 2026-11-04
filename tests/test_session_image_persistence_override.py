@@ -1050,3 +1050,75 @@ def test_sentinelled_anthropic_mirror_is_bounded_through_projection():
     projected = project_message_payloads(envelope)
     assert projected is not envelope
     assert payload not in json.dumps(projected)
+
+
+def test_anchor_activity_scenes_snippets_are_bounded():
+    """A saved scene snippet must not persist inline image bytes.
+
+    `Session.save()` serializes `anchor_activity_scenes` verbatim, and a vision
+    tool records its preview inside `scene.activity_rows[].tool.snippet` and
+    `.payload.snippet`. Those lanes are NOT `messages`/`context_messages`, so
+    `compact_persisted_image_parts` never visited them: the live store still held
+    ~122 KB of >=256-char base64 in this one field across four sessions after
+    migration, e.g. 24748c2f63ab.json.
+    """
+    from api.session_image_persistence_override import compact_persisted_anchor_scenes
+
+    payload = _b64_bytes(b"Q" * 4000)
+    snippet = f"{{'type': 'image_url', 'image_url': {{'url': 'data:image/jpeg;base64,{payload}'}}}}"
+    scenes = {
+        "a" * 64: {
+            "scene": {"activity_rows": [{"tool": {"snippet": snippet}, "payload": {"snippet": snippet}}]},
+            "message_ref": "b" * 64,
+            "message_index": 7,
+            "stream_id": "s-1",
+            "updated_at": 1234.5,
+            "version": 3,
+        }
+    }
+
+    projected, changed = compact_persisted_anchor_scenes(scenes)
+
+    assert changed is True, "scene snippet base64 was not bounded"
+    assert payload not in json.dumps(projected)
+    # Copy-on-write: the live object must be untouched so the render path and the
+    # scene-key fingerprint keep reading the original bytes.
+    assert payload in json.dumps(scenes), "live object was mutated"
+    # Identity fields and the key map must survive verbatim, or the read path's
+    # ref/index matching and _anchor_scene_index_from_records would drift.
+    record = projected["a" * 64]
+    assert sorted(projected.keys()) == sorted(scenes.keys())
+    assert record["message_ref"] == "b" * 64
+    assert record["message_index"] == 7
+    assert record["stream_id"] == "s-1"
+    assert record["updated_at"] == 1234.5
+    assert record["version"] == 3
+
+
+def test_clean_anchor_scenes_are_returned_unchanged():
+    """No inline bytes -> the SAME object, so a clean save stays byte-identical."""
+    from api.session_image_persistence_override import compact_persisted_anchor_scenes
+
+    scenes = {"k" * 64: {"scene": {"activity_rows": [{"tool": {"snippet": "plain text"}}]}}}
+    projected, changed = compact_persisted_anchor_scenes(scenes)
+    assert changed is False
+    assert projected is scenes
+
+
+def test_anchor_scene_fingerprint_is_stable_across_projection():
+    """The #5854 sidebar fingerprint must not move when snippets are bounded."""
+    from api.models import _anchor_scene_index_from_records
+    from api.session_image_persistence_override import compact_persisted_anchor_scenes
+
+    payload = _b64_bytes(b"Q" * 4000)
+    scenes = {
+        "c" * 64: {
+            "scene": {"activity_rows": [{"tool": {"snippet": f"data:image/png;base64,{payload}"}}]},
+            "message_ref": "d" * 64,
+            "updated_at": 99.0,
+        }
+    }
+    before = _anchor_scene_index_from_records(scenes)
+    projected, changed = compact_persisted_anchor_scenes(scenes)
+    assert changed is True
+    assert _anchor_scene_index_from_records(projected) == before

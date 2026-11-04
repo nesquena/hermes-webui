@@ -2189,7 +2189,10 @@ class Session:
         # The guard above already returns a deep scan snapshot, so compacting it
         # in place never touches the owner-visible transcript and preserves the
         # scan-time snapshot contract (a mutation after the scan stays out).
-        from api.session_image_persistence_override import compact_persisted_image_parts
+        from api.session_image_persistence_override import (
+            compact_persisted_anchor_scenes,
+            compact_persisted_image_parts,
+        )
         compact_persisted_image_parts(guarded_messages)
         if exact_replay_rows_removed:
             logger.warning(
@@ -2243,7 +2246,16 @@ class Session:
         self._anchor_scene_index = dict(meta['anchor_scene_index'])
         meta['messages'] = guarded_messages
         meta['tool_calls'] = self.tool_calls
-        meta['anchor_activity_scenes'] = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
+        # `anchor_activity_scenes` is serialized verbatim, and a vision tool records
+        # its preview inside `scene.activity_rows[].tool.snippet` / `.payload.snippet`
+        # -- lanes the message compactor never visits, so ~122 KB of base64 survived
+        # migration in this one field across four live sessions. The projection is
+        # copy-on-write and preserves the scene keys and every identity field, so
+        # the fingerprint computed above (from the LIVE object) stays valid.
+        # See api/session_image_persistence_override.py.
+        _anchors = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
+        _anchors_projected, _anchors_changed = compact_persisted_anchor_scenes(_anchors)
+        meta['anchor_activity_scenes'] = _anchors_projected if _anchors_changed else _anchors
         # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end. Exclude
         # the keys we placed explicitly above so they aren't emitted twice.
         _placed = {'message_count', '_mc_v', 'anchor_scene_index', 'messages', 'tool_calls', 'anchor_activity_scenes'}
