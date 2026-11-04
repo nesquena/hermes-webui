@@ -299,6 +299,61 @@ def release_in_flight(session_id: str) -> bool:
         return True
 
 
+def forget_released_agent(session_id: str, agent) -> bool:
+    """Drop the ledger's strong reference to a SOFT-RELEASED agent handle.
+
+    A pressure shed pops the entry out of ``SESSION_AGENT_CACHE`` and calls
+    ``release_clients()``, which deliberately KEEPS the memory provider (the
+    session may resume).  The ledger's ``agent`` slot is a second, independent
+    strong reference to that same handle, so without this the provider stays
+    alive for the life of the process: nothing can reach the handle again (the
+    idle sweep only walks the cache) and the next turn builds a DIFFERENT agent
+    regardless.  The entry itself is kept — ``generation`` /
+    ``committed_generation`` / ``profile_home`` are what make the next turn's
+    re-registration cheap and correct.
+
+    Only MEMORY is dropped, never WORK: an uncommitted segment's owner is the
+    handle whose transcript is the only payload that extraction can still be
+    given, so it is kept.  The caller releases only after the fence showed
+    nothing pending, so no such segment should exist; the check below enforces
+    that rather than assuming it, and refuses to clear (loudly) if it does not
+    hold.  Owners of fully committed segments are dead weight — the commit path
+    pops those on success — so they are cleared too.
+
+    Returns True when at least one reference to ``agent`` was dropped.
+    """
+    if not session_id or agent is None:
+        return False
+    with _condition:
+        entry = _sessions.get(session_id)
+        if entry is None:
+            return False
+        committed = entry["committed_generation"]
+        segments = entry["segments"]
+        if any(seg.get("end", 0) > committed and seg.get("agent") is agent for seg in segments):
+            # The fence says this cannot happen; if it does, the reference is
+            # the retry payload and keeps the handle alive on purpose.
+            logger.warning(
+                "session_lifecycle: refusing to forget released agent for %s — an "
+                "uncommitted segment still owns it (generation %d, committed %d)",
+                session_id,
+                entry["generation"],
+                committed,
+            )
+            return False
+        dropped = False
+        if entry["agent"] is agent:
+            entry["agent"] = None
+            dropped = True
+        for seg in segments:
+            if seg.get("end", 0) <= committed and seg.get("agent") is agent:
+                seg["agent"] = None
+                dropped = True
+        if dropped:
+            _condition.notify_all()
+        return dropped
+
+
 def _first_uncommitted_segment(entry: dict) -> dict | None:
     committed = entry["committed_generation"]
     for segment in entry["segments"]:

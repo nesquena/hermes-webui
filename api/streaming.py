@@ -13815,6 +13815,12 @@ def _lifecycle_discard_session(session_id: str, *, agent=None) -> bool:
     return discard_session(session_id, agent=agent)
 
 
+def _lifecycle_forget_released_agent(session_id: str, agent) -> bool:
+    from api.session_lifecycle import forget_released_agent
+
+    return forget_released_agent(session_id, agent)
+
+
 def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
     """Commit and tear down an evicted cached agent at a WebUI session boundary.
 

@@ -159,55 +159,87 @@ def _positive_int(value: Any, default: int) -> int:
     return parsed if parsed >= 0 else default
 
 
-def _cgroup_memory_limit_bytes() -> Optional[int]:
-    """Return the memory limit this process runs under, if cgroup-capped.
+def _cgroup_group_chain(own: Optional[str]) -> List[str]:
+    """Cgroup paths from ``own`` up to the hierarchy root (``/``), own first."""
+    own = (own or "").strip()
+    if not own or own == "/":
+        return ["/"]
+    chain: List[str] = []
+    path = own if own.startswith("/") else f"/{own}"
+    while True:
+        chain.append(path)
+        if path == "/":
+            return chain
+        path = path.rsplit("/", 1)[0] or "/"
 
-    Mirrors gateway/agent_cache_pressure.py: prefers cgroup v2 ``memory.max``
-    (and ``memory.high``) on the process's own cgroup, then the root files.
-    ``max`` / near-2^63 sentinels mean "unlimited" → None.
+
+def _cgroup_level_files(group: str) -> Tuple[str, ...]:
+    """The limit files to read for ONE cgroup level (v2 first, then v1)."""
+    prefix = "" if group == "/" else group
+    return (
+        f"/sys/fs/cgroup{prefix}/memory.high",
+        f"/sys/fs/cgroup{prefix}/memory.max",
+        # cgroup v1: a level lives under the v1 memory-controller mount, not at
+        # the unified root.  Without this a server in a capped v1 child with an
+        # unlimited root reads "unlimited" and the pressure pass never fires.
+        f"/sys/fs/cgroup/memory{prefix}/memory.limit_in_bytes",
+    )
+
+
+def _finite_cgroup_limit(path: str) -> Optional[int]:
+    """One limit file as a finite cap; None when missing, empty, max/sentinel."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = fh.read().strip()
+    except OSError:
+        return None
+    if not raw or raw == "max":
+        return None
+    try:
+        limit = int(raw)
+    except ValueError:
+        return None
+    # A v1 root reads the near-2^63 sentinel; both spellings mean unlimited.
+    return limit if 0 < limit < (1 << 62) else None
+
+
+def _cgroup_memory_limit_bytes() -> Optional[int]:
+    """Return the smallest memory limit this process runs under, if capped.
+
+    Walks the process's OWN cgroup and every PARENT up to the hierarchy root,
+    reading ``memory.high``/``memory.max`` (v2) and ``memory.limit_in_bytes``
+    (v1) at each level, then keeps the SMALLEST finite value.  A ``max`` (or a
+    v1 near-2^63 sentinel) at one level therefore cannot hide a finite cap at
+    another, and a cap larger than one below it never wins.
+
+    Why the walk and not the gateway's two probes: a container/pod limit
+    normally lands on a PARENT of the process's group (``/kubepods/.../podX``
+    caps the pod while the container group reads ``max``; a systemd slice
+    ``MemoryMax=`` sits above the unit's scope).  Reading only own + root makes
+    that case look uncapped, so ``auto`` would derive the budget from HOST RAM,
+    the pass would never fire, and the OOM killer would take the process before
+    any shedding happened.
+
+    DIVERGENCE (intentional, documented): ``gateway/agent_cache_pressure.py``
+    ``_cgroup_limit_bytes`` reads own + root only and returns the FIRST finite
+    hit.  This walk is strictly stricter — it reports the tightest cap on the
+    chain, never a larger one than the gateway would — so it is gateway parity
+    plus inherited caps, not a different policy.  Non-Linux returns None (no
+    cgroup files), and every unreadable level is skipped.
     """
     if not sys_platform_linux():
         return None
-    candidates: List[str] = []
     try:
         own = _own_cgroup_path()
-        if own and own != "/":
-            candidates.extend(
-                (
-                    f"/sys/fs/cgroup{own}/memory.high",
-                    f"/sys/fs/cgroup{own}/memory.max",
-                    # cgroup v1: the process's own group lives under the v1
-                    # memory-controller mount, not at the unified root.  Without
-                    # this a server in a capped v1 child with an unlimited root
-                    # reads "unlimited" and the pressure pass never fires.
-                    f"/sys/fs/cgroup/memory{own}/memory.limit_in_bytes",
-                )
-            )
     except Exception:
-        pass
-    candidates.extend(
-        (
-            "/sys/fs/cgroup/memory.high",
-            "/sys/fs/cgroup/memory.max",
-            "/sys/fs/cgroup/memory/memory.limit_in_bytes",
-        )
-    )
-    for candidate in candidates:
-        try:
-            with open(candidate, "r", encoding="utf-8") as fh:
-                raw = fh.read().strip()
-        except OSError:
-            continue
-        if not raw or raw == "max":
-            continue
-        try:
-            limit = int(raw)
-        except ValueError:
-            continue
-        if limit <= 0 or limit >= (1 << 62):
-            continue
-        return limit
-    return None
+        own = None
+    limits = [
+        limit
+        for group in _cgroup_group_chain(own)
+        for limit in (_finite_cgroup_limit(p) for p in _cgroup_level_files(group))
+        if limit is not None
+    ]
+    return min(limits) if limits else None
 
 
 def sys_platform_linux() -> bool:
@@ -630,6 +662,29 @@ def _abandon_aborted_release(session_id: str, agent: Any, exc: BaseException) ->
     )
 
 
+def _forget_released_agent(session_id: str, agent: Any) -> bool:
+    """Drop the lifecycle ledger's strong reference to a released handle.
+
+    ``release_clients()`` keeps the memory provider on purpose (the session may
+    resume), and the claim already popped the entry out of the cache — so after
+    a shed the ledger's ``agent`` slot is the ONLY reference that can still reach
+    the handle.  Nothing else ever will: the idle sweep walks the cache, and the
+    next turn builds a different agent.  Leaving it there pins the provider for
+    the life of the process.
+
+    The ENTRY stays: its ``generation`` / ``committed_generation`` is what the
+    next turn's registration continues from, and an uncommitted segment keeps
+    its owner (the fence guarantees none exists here; the callee asserts it).
+    """
+    try:
+        from api.streaming import _lifecycle_forget_released_agent
+
+        return _lifecycle_forget_released_agent(session_id, agent)
+    except Exception:
+        logger.debug("could not drop the ledger reference for %s", session_id, exc_info=True)
+        return False
+
+
 def _release_pressure_batch(plan: List[Tuple[str, Any]]) -> None:
     """Release one pressure batch sequentially: commit, then soft release.
 
@@ -642,6 +697,11 @@ def _release_pressure_batch(plan: List[Tuple[str, Any]]) -> None:
 
     * no resident transcript -> skip without a commit (nothing to free, no
       payload to deliver);
+    * transcript released -> the lifecycle ledger's reference to the handle is
+      dropped as well (``_forget_released_agent``): the entry and its
+      generation ledger stay for the next turn, but the released agent — and the
+      memory provider ``release_clients()`` keeps — becomes collectable instead
+      of living for the rest of the process;
     * commit refused (Exception) -> KEEP the transcript for the next session
       boundary instead of shedding it; no pass re-delivers to a hook that is
       refusing, and an empty-payload commit never happens;
@@ -673,6 +733,7 @@ def _release_pressure_batch(plan: List[Tuple[str, Any]]) -> None:
                 )
             else:
                 soft_release_transcript(agent)
+                _forget_released_agent(key, agent)
         except Exception:
             logger.debug("pressure soft-release failed for %s", key, exc_info=True)
         except BaseException as exc:  # noqa: BLE001 — see the docstring

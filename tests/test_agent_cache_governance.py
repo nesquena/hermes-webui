@@ -138,12 +138,13 @@ def test_cgroup_v1_child_limit_is_read(monkeypatch):
         # v1 root is unlimited (near-2^63 sentinel).
         "/sys/fs/cgroup/memory/memory.limit_in_bytes": "9223372036854771712",
     }
-    real_open = builtins.open
 
     def _open(path, *a, **k):
+        # Hermetic: anything outside the fake tree is absent, never the host's
+        # real cgroup files (the parent walk reads many more of them).
         if path in files:
             return io.StringIO(files[path])
-        return real_open(path, *a, **k)
+        raise FileNotFoundError(2, "no such file or directory", path)
 
     monkeypatch.setattr(builtins, "open", _open, raising=True)
     monkeypatch.setattr(gmod, "sys_platform_linux", lambda: True)
@@ -151,7 +152,108 @@ def test_cgroup_v1_child_limit_is_read(monkeypatch):
     assert gmod._cgroup_memory_limit_bytes() == gib
 
 
-# ── plan_pressure_evictions ───────────────────────────────────────────────
+def _fake_cgroup_tree(monkeypatch, own_path, files):
+    """Install a hermetic fake cgroup tree; returns the governance module.
+
+    Only ``files`` exist: any other ``/sys/fs/cgroup`` or ``/proc/self/cgroup``
+    path raises FileNotFoundError instead of falling through to the host's real
+    files, so neither a pass nor a failure can come from the machine pytest runs
+    on.
+    """
+    import builtins
+    import io
+
+    import api.agent_cache_governance as gmod
+
+    tree = dict(files)
+    tree.setdefault("/proc/self/cgroup", f"0::{own_path}\n")
+    real_open = builtins.open
+
+    def _open(path, *a, **k):
+        if path in tree:
+            return io.StringIO(tree[path])
+        if str(path).startswith("/sys/fs/cgroup") or path == "/proc/self/cgroup":
+            raise FileNotFoundError(2, "no such file or directory", path)
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", _open, raising=True)
+    monkeypatch.setattr(gmod, "sys_platform_linux", lambda: True)
+    return gmod
+
+
+def test_cgroup_limit_comes_from_a_parent_group(monkeypatch):
+    """A pod/container cap lands on a PARENT while the own group reads ``max``.
+
+    Reading own + root only (the pre-fix behaviour) returns None here, so
+    ``auto`` falls back to HOST RAM and the budget exceeds the service's real
+    limit — the process is OOM-killed before the valve sheds anything.  This is
+    the regression for that gap and it fails without the parent walk.
+    """
+    mib = 1024 * 1024
+    gmod = _fake_cgroup_tree(
+        monkeypatch,
+        "/kubepods/burstable/podA/ctr1",
+        {
+            "/sys/fs/cgroup/kubepods/burstable/podA/ctr1/memory.max": "max",
+            "/sys/fs/cgroup/kubepods/burstable/podA/memory.max": str(4096 * mib),
+            "/sys/fs/cgroup/memory.max": "max",
+        },
+    )
+
+    assert gmod._cgroup_memory_limit_bytes() == 4096 * mib
+    # The consequence, not just the number: the budget is derived from the
+    # inherited 4 GiB cap, never from the 64 GiB host (which would be 41600).
+    assert resolve_memory_high_mb("auto", total_ram_mb=64 * 1024) == 2662
+
+
+def test_cgroup_limit_keeps_the_tightest_level(monkeypatch):
+    """Smallest finite limit wins: a roomier parent never widens the budget."""
+    gib = 1024 * 1024 * 1024
+    gmod = _fake_cgroup_tree(
+        monkeypatch,
+        "/a/b/c",
+        {
+            "/sys/fs/cgroup/a/b/c/memory.max": str(2 * gib),
+            "/sys/fs/cgroup/a/b/memory.max": str(4 * gib),
+            # A grandparent throttling point is tighter than any child max.
+            "/sys/fs/cgroup/a/memory.high": str(gib),
+            "/sys/fs/cgroup/memory.max": "max",
+        },
+    )
+    assert gmod._cgroup_memory_limit_bytes() == gib
+
+
+def test_cgroup_max_at_one_level_does_not_hide_a_finite_grandparent(monkeypatch):
+    """``max`` is "no cap at THIS level", not "no cap on the chain"."""
+    mib = 1024 * 1024
+    gmod = _fake_cgroup_tree(
+        monkeypatch,
+        "/slice/scope/sub",
+        {
+            "/sys/fs/cgroup/slice/scope/sub/memory.max": "max",
+            "/sys/fs/cgroup/slice/scope/memory.max": "max",
+            "/sys/fs/cgroup/slice/memory.high": str(256 * mib),
+            "/sys/fs/cgroup/memory.max": "max",
+        },
+    )
+    assert gmod._cgroup_memory_limit_bytes() == 256 * mib
+
+
+def test_cgroup_all_levels_unlimited_returns_none(monkeypatch):
+    """Every level unlimited (both sentinel spellings) → uncapped, not a bogus cap."""
+    gmod = _fake_cgroup_tree(
+        monkeypatch,
+        "/x/y",
+        {
+            "/sys/fs/cgroup/x/y/memory.max": "max",
+            "/sys/fs/cgroup/x/memory.max": "9223372036854771712",
+            "/sys/fs/cgroup/memory/memory.limit_in_bytes": "9223372036854771712",
+        },
+    )
+    assert gmod._cgroup_memory_limit_bytes() is None
+
+
+# ── plan_pressure_evictions ────────────────────────────────────────────────
 def test_plan_evicts_lru_skips_recent():
     agents = [(f"k{i}", _FakeAgent()) for i in range(10)]
     plan = plan_pressure_evictions(agents, lambda k, a: True, protect_recent=3)
@@ -1390,6 +1492,130 @@ def test_a_base_exception_releases_the_in_flight_claim_and_the_next_commit_works
     )
     assert agent.commits == [captured]
     assert has_uncommitted_work("k0") is False
+
+
+class _FakeMemoryProvider:
+    """The provider object ``AIAgent.release_clients()`` deliberately KEEPS.
+
+    ``release_clients`` frees LLM clients and leaves session tool state — the
+    memory provider included — in place so the session can resume.  A bytearray
+    makes the retention measurable and lets a weakref prove collectability.
+    """
+
+    def __init__(self, mb=32):
+        self.buffer = bytearray(mb << 20)
+
+
+class _ProviderHoldingAgent(_ReleasingAgent):
+    """A releasing agent that also carries a provider (as AIAgent does)."""
+
+    def __init__(self, mb=32, **kw):
+        super().__init__(**kw)
+        self.memory_provider = _FakeMemoryProvider(mb)
+
+
+def test_a_shed_agent_is_not_retained_by_the_lifecycle_ledger():
+    """The ledger must not keep the shed agent (and its provider) alive.
+
+    ``release_clients()`` keeps the memory provider on purpose, and the claim
+    has already popped the entry out of the cache — so the lifecycle entry's
+    ``agent`` slot was the LAST strong reference.  Nothing could ever reach it
+    again (the idle sweep only walks the cache, the next turn builds a different
+    agent), so the provider lived for the rest of the process: measured 32.0 MB
+    retained before this fix (32.0 MB -> 32.1 MB across the shed, i.e. nothing
+    freed) and 32.0 MB -> 0.1 MB after it (31.9 MB freed).
+    """
+    import gc
+    import tracemalloc
+    import weakref
+
+    # A running server always has api.streaming imported (server.py, every turn
+    # path).  Import it BEFORE the sweep so this asserts the ledger reference and
+    # not the one-off cost of the worker's first import of that module.
+    import api.streaming  # noqa: F401
+
+    from api.session_lifecycle import _reset_for_tests, _sessions, commit_session_memory
+
+    _reset_for_tests()
+    tracemalloc.start()
+    try:
+        agent = _ProviderHoldingAgent()
+        captured = _pending_session("s1", agent)
+        agent_ref = weakref.ref(agent)
+        provider_ref = weakref.ref(agent.memory_provider)
+        cache = _cache_with([("s1", agent)])
+
+        g = _governor(cache, memory_high_mb=100, protect_recent=0,
+                      running_check=lambda k: False)
+        gc.collect()
+        before = tracemalloc.get_traced_memory()[0]
+        assert g.sweep_pressure(rss_mb=500) == 1
+        _wait_release(g)
+        assert agent.commits == [captured], "the pre-release commit did not run"
+        del agent
+        gc.collect()
+        after = tracemalloc.get_traced_memory()[0]
+    finally:
+        tracemalloc.stop()
+
+    assert agent_ref() is None, (
+        "the lifecycle ledger still holds the shed agent: nothing can reach it "
+        "again, so its provider is pinned for the life of the process"
+    )
+    assert provider_ref() is None, (
+        "the memory provider release_clients() keeps was never collectable"
+    )
+    assert after <= before - (24 << 20), (
+        f"the 32 MB provider was not freed: before={before} after={after}"
+    )
+
+    # The ENTRY and its ledger stay: the next turn re-attaches instead of
+    # starting a fresh generation, and the committed work is not re-delivered.
+    entry = _sessions["s1"]
+    assert entry["agent"] is None
+    assert entry["generation"] == entry["committed_generation"] == 1
+    assert entry["segments"] == [], "the committed segment kept its owner"
+    assert commit_session_memory("s1") is False, "the ledger re-opened finished work"
+
+    # Next turn: a DIFFERENT agent on the same entry, rebuilt transcript, and
+    # the commit/shed path still works end to end.
+    rebuilt = _ProviderHoldingAgent()
+    rebuilt_messages = _pending_session("s1", rebuilt, text="next turn")
+    assert _sessions["s1"]["agent"] is rebuilt
+    assert _sessions["s1"]["generation"] == 2
+    cache["s1"] = (rebuilt, "sig")
+    assert g.sweep_pressure(rss_mb=500) == 1
+    _wait_release(g)
+
+    assert rebuilt.commits == [rebuilt_messages], "the rebuilt agent's commit path broke"
+    assert rebuilt._session_messages == []
+    assert _sessions["s1"]["committed_generation"] == 2
+    assert _sessions["s1"]["agent"] is None
+
+
+def test_an_uncommitted_segment_owner_is_never_forgotten():
+    """Only MEMORY is dropped: a dirty owner is the retry payload's only handle.
+
+    The release path refuses to shed while work is pending, so this cannot be
+    reached from the valve — it is the assertion that the helper does not clear
+    a reference the ledger still needs.
+    """
+    from api.session_lifecycle import (
+        _reset_for_tests,
+        _sessions,
+        forget_released_agent,
+        mark_turn_completed,
+        register_agent,
+    )
+
+    _reset_for_tests()
+    agent = _FakeAgent()
+    register_agent("s2", agent)
+    mark_turn_completed("s2", agent=agent)  # commit is pending from here on
+
+    assert forget_released_agent("s2", agent) is False
+    assert _sessions["s2"]["agent"] is agent
+    assert _sessions["s2"]["segments"][0]["agent"] is agent
 
 
 def test_soft_release_releases_clients_before_dropping_the_transcript():
