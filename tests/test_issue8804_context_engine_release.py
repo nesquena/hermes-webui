@@ -67,10 +67,10 @@ class PluginEngine:
         self.ends.append(session_id)
 
 
-def _running_pass(prepared, session_id, *, fail=False):
-    """A real ``PreparedCompaction`` with a real summary pass still running. The pass
-    records the context-local profile home it is cancelled under."""
-    state = prepared.PreparedCompaction()
+def _running_pass(prepared, session_id, *, fail=False, cls=None):
+    """A real ``PreparedCompaction`` (or ``cls``) with a real summary pass still running.
+    The pass records the context-local profile home it is cancelled under."""
+    state = (cls or prepared.PreparedCompaction)()
     pending = prepared._PendingPass(prepared._Window(session_id, 0, 0, ()))
     cancelled_in: list = []
     cancel = pending.cancel
@@ -145,20 +145,39 @@ def test_a_plugin_engines_session_end_is_never_run_on_an_unowned_eviction(hc, ho
     assert any(OWNER_SKIP_LOG in r.getMessage() for r in caplog.records)
 
 
-def test_a_plugin_engine_carrying_the_agents_prepared_compaction_gets_only_the_cancel(
+def test_a_plugin_engine_carrying_the_agents_prepared_compaction_is_left_alone(
     hc, homes, holder_registry, prepared
 ):
+    """Everything a plugin engine carries is the plugin's to replace, so nothing it holds
+    is called on this path, not even an object of the Agent's own class."""
     state, pending, cancelled_in = _running_pass(prepared, "8804-ce-plugin-pc")
     engine = PluginEngine(state)
     agent = _with_engine(_shared_agent(homes["alpha"], SharedInstanceProvider(), "8804-ce-plugin-pc"), engine)
 
     assert streaming._close_evicted_agent_at_session_boundary("8804-ce-plugin-pc", agent) is True
 
-    assert pending.cancelled.is_set() and cancelled_in == [str(homes["alpha"])]
+    assert cancelled_in == [] and not pending.cancelled.is_set()
     assert engine.ends == []
+    assert agent._memory_provider_shutdown is True
 
 
-def test_a_plugins_own_discard_is_not_called(hc, homes, holder_registry, prepared):
+def test_a_subclass_of_the_built_in_compressor_is_left_alone(hc, homes, holder_registry, prepared):
+    """A plugin engine subclassing the built-in compressor is still a plugin's engine."""
+    compressor = pytest.importorskip("agent.context_compressor")
+
+    class PluginsCompressor(compressor.ContextCompressor):
+        pass
+
+    state, pending, cancelled_in = _running_pass(prepared, "8804-ce-subclass-engine")
+    agent = _with_engine(_shared_agent(homes["alpha"], SharedInstanceProvider(), "8804-ce-subclass-engine"),
+                         _shell(PluginsCompressor, state))
+
+    assert streaming._close_evicted_agent_at_session_boundary("8804-ce-subclass-engine", agent) is True
+    assert cancelled_in == [] and not pending.cancelled.is_set()
+    assert agent._memory_provider_shutdown is True
+
+
+def test_a_plugins_own_discard_is_not_called(hc, homes, holder_registry, prepared, builtin_engine):
     """Only the Agent's own close-only ``discard`` runs; a plugin's override of it is a
     plugin hook like any other."""
     calls: list = []
@@ -167,11 +186,46 @@ def test_a_plugins_own_discard_is_not_called(hc, homes, holder_registry, prepare
         def discard(self, reason, code="session_boundary"):
             calls.append(reason)
 
-    engine = PluginEngine(PluginsPreparedCompaction())
-    agent = _with_engine(_shared_agent(homes["alpha"], SharedInstanceProvider(), "8804-ce-override"), engine)
+    agent = _with_engine(_shared_agent(homes["alpha"], SharedInstanceProvider(), "8804-ce-override"),
+                         builtin_engine(PluginsPreparedCompaction()))
 
     assert streaming._close_evicted_agent_at_session_boundary("8804-ce-override", agent) is True
-    assert calls == [] and engine.ends == []
+    assert calls == []
+    assert agent._memory_provider_shutdown is True
+
+
+def test_a_subclass_overriding_what_discard_calls_is_not_run(hc, homes, holder_registry, prepared, builtin_engine):
+    """Codex r2: a subclass can inherit ``discard`` unchanged and override a method it
+    calls (``_count_unspliced``); that override must not run on this path."""
+    calls: list = []
+
+    class Sneaky(prepared.PreparedCompaction):
+        def _count_unspliced(self):
+            calls.append("_count_unspliced")
+
+    state, pending, cancelled_in = _running_pass(prepared, "8804-ce-sneaky", cls=Sneaky)
+    agent = _with_engine(_shared_agent(homes["alpha"], SharedInstanceProvider(), "8804-ce-sneaky"),
+                         builtin_engine(state))
+
+    assert streaming._close_evicted_agent_at_session_boundary("8804-ce-sneaky", agent) is True
+    assert calls == [] and cancelled_in == [] and not pending.cancelled.is_set()
+    assert agent._memory_provider_shutdown is True
+
+
+@pytest.mark.parametrize("shadowed", ["discard", "_count_unspliced"])
+def test_an_instance_shadowing_discard_or_what_it_calls_is_not_run(
+    hc, homes, holder_registry, prepared, builtin_engine, shadowed
+):
+    """Codex r2: an exact ``PreparedCompaction`` whose ``discard`` (or a method it calls)
+    is replaced on the instance runs someone else's code; it must be left alone."""
+    calls: list = []
+    state, pending, cancelled_in = _running_pass(prepared, f"8804-ce-shadow-{shadowed}")
+    setattr(state, shadowed, lambda *args, **kwargs: calls.append(shadowed))
+    agent = _with_engine(_shared_agent(homes["alpha"], SharedInstanceProvider(), f"8804-ce-shadow-{shadowed}"),
+                         builtin_engine(state))
+
+    assert streaming._close_evicted_agent_at_session_boundary(f"8804-ce-shadow-{shadowed}", agent) is True
+    assert calls == [] and cancelled_in == [] and not pending.cancelled.is_set()
     assert agent._memory_provider_shutdown is True
 
 
@@ -232,16 +286,18 @@ def test_an_owned_eviction_leaves_the_engine_to_the_agents_own_shutdown(hc, home
     assert len(engine.ends) == 1, engine.ends  # the Agent's own end, once
 
 
-def test_a_refusal_at_hook_time_releases_nothing_more(hc, homes, holder_registry, monkeypatch, prepared):
+def test_a_refusal_at_hook_time_releases_nothing_more(hc, homes, holder_registry, monkeypatch, prepared,
+                                                     builtin_engine):
     """A refusal can also happen INSIDE the Agent's own shutdown (at a memory hook): the
-    shutdown then ran and handled the engine itself, so the WebUI must not touch it."""
+    shutdown then ran and handled the engine itself, so the WebUI must not touch it. The
+    built-in engine is used, because the WebUI would release it if the release were due."""
     state, pending, _ = _running_pass(prepared, "8804-ce-hook")
-    engine = PluginEngine(state)
-    agent = _with_engine(_shared_agent(homes["alpha"], SharedInstanceProvider(), "8804-ce-hook"), engine)
+    agent = _with_engine(_shared_agent(homes["alpha"], SharedInstanceProvider(), "8804-ce-hook"), builtin_engine(state))
+    own_ends: list = []
 
     def agents_own_shutdown(messages=None):  # the real Agent's shape: flag, memory, then the engine
         agent._memory_provider_shutdown = True
-        engine.on_session_end(agent.session_id or "", messages or [])
+        own_ends.append("engine end")
 
     agent.shutdown_memory_provider = agents_own_shutdown
 
@@ -251,7 +307,7 @@ def test_a_refusal_at_hook_time_releases_nothing_more(hc, homes, holder_registry
 
     monkeypatch.setattr(streaming, "call_as_session_owner", refuse_at_hook_time)
     assert streaming._close_evicted_agent_at_session_boundary("8804-ce-hook", agent) is True
-    assert len(engine.ends) == 1, engine.ends  # the Agent's own end, once
+    assert own_ends == ["engine end"]  # the Agent's own end, once
     assert not pending.cancelled.is_set(), "the WebUI released an engine the Agent's own shutdown already handled"
 
 

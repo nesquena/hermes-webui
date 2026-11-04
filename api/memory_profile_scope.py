@@ -1713,21 +1713,42 @@ _AGENT_ENGINE_MODULES = frozenset({"agent.context_engine", "agent.context_compre
 _SESSION_BOUNDARY_DISCARD = "session boundary"
 
 
-def _agents_prepared_compaction(engine: Any) -> Any:
-    """The engine's prepared-summary state when it is the Agent's own ``PreparedCompaction``
-    (Agent v0.22.6+) with the Agent's own ``discard``; otherwise None (an older Agent, a
-    plugin's object, or a plugin's override of ``discard``)."""
-    prepared = getattr(engine, "prepared_compaction", None)
-    if prepared is None:
-        return None
+# The methods of the Agent's ``PreparedCompaction`` that ``discard`` runs on the instance
+# itself. Shadowing any of them on the instance would run someone else's code there.
+_AGENT_DISCARD_PATH = frozenset({"discard", "_count_unspliced"})
+
+
+def _builtin_engines_prepared_compaction(engine: Any) -> Any:
+    """The prepared-summary state of the Agent's own built-in compressor, or None.
+
+    Only the Agent's code may run on this path, because the session's owner is unknown.
+    So ``engine`` must be exactly the Agent's ``ContextCompressor`` (not a plugin's
+    engine, nor a subclass of the compressor). It must hold exactly the Agent's
+    ``PreparedCompaction`` (Agent v0.22.6+; not a subclass, which could override a method
+    ``discard`` calls), with no instance attribute shadowing ``discard`` or
+    ``_count_unspliced``. Anything a plugin engine carries is the plugin's, so it is left
+    alone, as is an older Agent, which has no prepared compaction."""
     try:
-        module = sys.modules.get("agent.prepared_compaction") or importlib.import_module("agent.prepared_compaction")
-        agents_class = module.PreparedCompaction
+        compressor_module = sys.modules.get("agent.context_compressor") or importlib.import_module(
+            "agent.context_compressor"
+        )
+        prepared_module = sys.modules.get("agent.prepared_compaction") or importlib.import_module(
+            "agent.prepared_compaction"
+        )
+        compressor_class = compressor_module.ContextCompressor
+        prepared_class = prepared_module.PreparedCompaction
     except Exception:
         return None
-    if not isinstance(prepared, agents_class):
+    if type(engine) is not compressor_class:
         return None
-    if getattr(type(prepared), "discard", None) is not getattr(agents_class, "discard", None):
+    prepared = getattr(engine, "prepared_compaction", None)
+    if type(prepared) is not prepared_class:
+        return None
+    try:
+        own_attributes = vars(prepared)
+    except TypeError:
+        return None
+    if _AGENT_DISCARD_PATH.intersection(own_attributes):
         return None
     return prepared
 
@@ -1747,10 +1768,12 @@ def release_unowned_context_engine(agent: Any, *, session_id: str) -> bool:
     state of an engine that is being discarded is ``prepared_compaction.discard`` (Agent
     v0.22.6+). It cancels a background summary pass that would otherwise run to
     completion, a model call nobody will use. That is close-only: no session data, only an
-    aggregate opt-in metric count. So that one call runs here, through the Agent's own
-    method, in the profile home the WebUI built the agent under (never the ambient env
-    mirror). A plugin engine's session end is skipped, logged once. An older Agent has
-    no prepared compaction, and nothing to cancel.
+    aggregate opt-in metric count. So that one call runs here, only for the Agent's own
+    built-in compressor and its own ``PreparedCompaction`` (exact types, nothing shadowed:
+    ``_builtin_engines_prepared_compaction``), in the profile home the WebUI built the
+    agent under (never the ambient env mirror). A plugin engine is left alone, and its
+    session end skipped is logged once. An older Agent has no prepared compaction, and
+    nothing to cancel.
 
     The caller runs this only when the Agent's own shutdown did not run (a refusal at hook
     time happens INSIDE that shutdown), decided before the memory release, which marks an
@@ -1772,7 +1795,7 @@ def release_unowned_context_engine(agent: Any, *, session_id: str) -> bool:
                 "data, so it stays behind the owner check (fail closed).",
                 type(engine).__name__,
             )
-        prepared = _agents_prepared_compaction(engine)
+        prepared = _builtin_engines_prepared_compaction(engine)
         if prepared is None:
             return False
         build_home = str(getattr(agent, _BUILD_HOME_ATTR, "") or "")
