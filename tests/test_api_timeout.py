@@ -222,9 +222,16 @@ def test_update_flows_keep_explicit_longer_timeouts():
     # apply/force now build their body inline to optionally carry the offered
     # channel (Codex debounce-race fix), but MUST still carry the 120s override.
     assert "api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:120000})" in src
-    # #7293: force builds its body in _forceBody (it may carry the explicit
-    # force_active_runs override), same shape as apply's _applyBody.
+    # #7679 + #7293: force builds its body in _forceBody (it may carry the
+    # explicit force_active_runs override), and it carries the GRANT's frozen
+    # channel, not a live re-read — a channel switch that races the confirm
+    # must not silently change the destructive action's target channel
+    # (stale-authority bug). The 120s override is the contract this pin exists
+    # for and is unchanged.
     assert "api('/api/updates/force',{method:'POST',body:JSON.stringify(_forceBody),timeoutMs:120000})" in src
+    assert "if(grantSnapshot.channel) _forceBody.channel=grantSnapshot.channel;" in src, (
+        "the force POST must carry the grant's frozen channel, not a live re-read"
+    )
 
 
 def test_session_message_loads_keep_explicit_longer_timeouts():

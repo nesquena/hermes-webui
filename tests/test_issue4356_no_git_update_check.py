@@ -32,7 +32,7 @@ def test_check_repo_still_returns_dict_when_dot_git_exists(tmp_path):
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
-        if args == ['diff-index', '--quiet', 'HEAD', '--']:
+        if args == ['diff', '--quiet', 'HEAD', '--']:
             return '', True  # clean tree
         if args == ['fetch', 'origin', '--tags', '--force']:
             return 'network unreachable', False
