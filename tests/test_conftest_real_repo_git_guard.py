@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -39,11 +40,11 @@ def fake_git(tmp_path, monkeypatch):
     monkeypatch.setenv('FAKE_GIT_LOG', str(log))
     monkeypatch.setenv('PATH', f'{bindir}{os.pathsep}{os.environ.get("PATH", "")}')
     monkeypatch.setattr(updates, '_resolve_git_executable', lambda: str(exe))
-    return log
+    return SimpleNamespace(log=log, exe=exe)  # the fake's absolute path, for cases that spell the program out
 
 
-def _lines(log):
-    return log.read_text(encoding='utf-8').splitlines() if log.exists() else []
+def _lines(fake):
+    return fake.log.read_text(encoding='utf-8').splitlines() if fake.log.exists() else []
 
 
 @contextlib.contextmanager
@@ -69,21 +70,22 @@ def refused():
     ['git', '-c', 'alias.st=!git reset --hard', 'st'],  # an alias can expand to anything
     ['sh', '-c', 'git reset --hard HEAD'],
     ['sh', '-c', 'cd /tmp && exec git reset --hard HEAD'],
-    ['env', 'GIT_TERMINAL_PROMPT=0', '/usr/bin/git', 'reset', '--hard', 'HEAD'],
+    ['env', 'GIT_TERMINAL_PROMPT=0', '{git}', 'reset', '--hard', 'HEAD'],  # the fake, by absolute path
+    ['git', 'remote', 'show', 'origin'],  # contacts the remote without -n
 ])
 def test_mutating_or_opaque_git_on_real_checkout_is_refused(fake_git, argv):
     with refused():
-        subprocess.run(argv, cwd=REPO_ROOT)
+        subprocess.run([a.format(git=fake_git.exe) for a in argv], cwd=REPO_ROOT)
     assert _lines(fake_git) == []
 
 
 @pytest.mark.parametrize('line', [
-    'git reset --hard HEAD', '/usr/bin/git reset --hard HEAD', 'true && git clean -fd',
+    'git reset --hard HEAD', '{git} reset --hard HEAD', 'true && git clean -fd',
     'GIT_TERMINAL_PROMPT=0 git fetch origin', 'if git reset --hard HEAD; then echo ok; fi',
 ])
 def test_shell_command_line_naming_git_is_refused(fake_git, line):
     with refused():
-        subprocess.run(line, shell=True, cwd=REPO_ROOT)
+        subprocess.run(line.format(git=fake_git.exe), shell=True, cwd=REPO_ROOT)
     assert _lines(fake_git) == []
 
 
@@ -104,6 +106,7 @@ def _named_target_cases(tmp):
     ['git', '--work-tree={tmp}', 'update-ref', 'refs/heads/m', 'HEAD'],  # the repository is still cwd's
     ['git', '--git-dir={tmp}/x.git', 'push', '{real}', 'HEAD:refs/heads/x'],  # the argument names the checkout
     ['git', '--git-dir={tmp}/x.git', 'config', '--file', '{real}/.git/config', 'core.bare', 'false'],
+    ['git', '--git-dir={tmp}/x.git', 'config', '--file={real}/.git/config', 'core.bare', 'false'],  # attached value
 ])
 def test_a_single_override_from_the_checkout_is_refused(fake_git, tmp_path, argv):
     with refused():
@@ -169,6 +172,18 @@ def test_positional_cwd_is_seen(fake_git):
     assert _lines(fake_git) == []
 
 
+def test_the_updaters_own_agent_root_is_guarded(fake_git, tmp_path):
+    root = tmp_path / 'agent-root'
+    root.mkdir()
+    guard.install(root)  # as conftest does with api.updates._AGENT_DIR
+    try:
+        with refused():
+            subprocess.run(['git', 'fetch', 'origin'], cwd=root)
+    finally:
+        guard._ROOTS[:] = [r for r in guard._ROOTS if r != root.resolve()]
+    assert _lines(fake_git) == []
+
+
 def test_mutating_git_on_agent_checkout_is_refused(fake_git):
     if HERMES_AGENT is None:
         pytest.skip('no hermes-agent checkout discovered')
@@ -218,6 +233,7 @@ def test_read_only_git_on_real_checkout_passes_through(fake_git):
     assert updates._run_git(['symbolic-ref', 'refs/remotes/origin/HEAD'], REPO_ROOT) == ('abc123', True)
     subprocess.run(['git', '--version'], cwd=REPO_ROOT, check=True)
     subprocess.run(['git', 'remote', '-v'], cwd=REPO_ROOT, check=True)
+    subprocess.run(['git', 'remote', 'show', '-n', 'origin'], cwd=REPO_ROOT, check=True)
     subprocess.run(['git', 'branch', '--show-current'], cwd=REPO_ROOT, check=True)
     subprocess.run(['git', 'stash', 'list'], cwd=REPO_ROOT, check=True)
     subprocess.run(['git', 'branch'], cwd=REPO_ROOT, check=True)
@@ -233,6 +249,7 @@ def test_read_only_git_on_real_checkout_passes_through(fake_git):
         'symbolic-ref refs/remotes/origin/HEAD',
         '--version',
         'remote -v',
+        'remote show -n origin',
         'branch --show-current',
         'stash list',
         'branch',

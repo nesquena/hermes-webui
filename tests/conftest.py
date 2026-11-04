@@ -837,7 +837,9 @@ def allow_outbound_network(monkeypatch):
 # Installed once here, like the network guard above: see tests/_real_repo_git_guard.py.
 from tests import _real_repo_git_guard as _repo_git_guard  # noqa: E402
 
-_repo_git_guard.install(REPO_ROOT, HERMES_AGENT)
+from api.config import _AGENT_DIR as _PRODUCTION_AGENT_DIR  # noqa: E402  (the runtime's own discovery)
+
+_repo_git_guard.install(REPO_ROOT, HERMES_AGENT, _PRODUCTION_AGENT_DIR)
 pytest_runtest_logstart = _repo_git_guard.pytest_runtest_logstart
 pytest_runtest_makereport = _repo_git_guard.pytest_runtest_makereport
 

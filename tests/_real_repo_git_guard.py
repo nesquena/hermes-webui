@@ -96,8 +96,9 @@ def is_read_only(verb_args) -> bool:
         return bool(_TAG_LISTING_FLAGS & flags) or (not positional and not (_TAG_WRITING_FLAGS & flags))
     if verb == 'config':
         return any(a.startswith('--get') or a in ('--list', '-l') for a in rest)
-    if verb == 'remote':
-        return not positional or positional[0] in ('get-url', 'show')
+    if verb == 'remote':  # `remote show <name>` contacts the remote unless -n
+        return not positional or positional[0] == 'get-url' or (
+            positional[0] == 'show' and bool({'-n', '--no-query'} & flags))
     if verb == 'branch':  # listings read; `branch <name>` writes, even with -v/-a/-r
         return flags <= _BRANCH_LISTING_FLAGS and (not positional or bool(_BRANCH_FORCED_LISTING_FLAGS & flags))
     if verb == 'stash':
@@ -223,7 +224,11 @@ def refusal(args, cwd, *, shell=False, executable=None, env=None):
     # relative one that exists from `here`; a ref such as refs/heads/x is neither.
     for arg in verb_args[1:]:
         if arg.startswith('-'):
-            continue
+            if '=' not in arg:
+                continue
+            arg = arg.split('=', 1)[1]  # an attached value, such as --file=<path>
+            if not arg:
+                continue
         candidate = _join(here, arg)
         if os.path.isabs(arg) or os.path.exists(candidate):
             targets.append(candidate)
