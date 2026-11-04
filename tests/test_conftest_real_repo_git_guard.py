@@ -179,16 +179,26 @@ def test_a_bytes_cwd_is_read_like_a_str(fake_git, tmp_path):
     assert _lines(fake_git) == ['reset --hard HEAD']
 
 
-def test_a_basetemp_inside_the_checkout_is_not_the_checkout(monkeypatch):
-    monkeypatch.setattr(guard, '_EXEMPT', [])
+def test_a_basetemp_inside_the_checkout_exempts_nothing(fake_git, monkeypatch):
+    """A plain directory under a basetemp inside the checkout is discovered by git as the
+    checkout, so it stays guarded; that layout is not one the suite supports."""
     basetemp = REPO_ROOT / '.pytest-basetemp'
+    monkeypatch.setattr(guard, '_EXEMPT', [])
     guard.pytest_configure(SimpleNamespace(getoption=lambda name, default=None: str(basetemp)))
-    assert not guard.is_real_checkout(basetemp / 'test_x0' / 'repo')
+    assert guard._EXEMPT == [basetemp]
+    plain = basetemp / 'test_x0' / 'plain'
+    assert guard.is_real_checkout(plain)
+    assert guard.is_real_checkout(basetemp)
     assert guard.is_real_checkout(REPO_ROOT)
-    assert guard.refusal(['git', 'init'], cwd=str(basetemp / 'test_x0' / 'repo')) is None
-    assert guard.refusal(['git', 'reset', '--hard', 'HEAD'], cwd=str(REPO_ROOT)) is not None
+    for argv, cwd in (
+        (['git', 'reset', '--hard', 'HEAD'], plain),
+        (['git', 'fetch', 'origin'], plain),
+        (['git', 'init'], plain),
+        (['git', 'clean', '-fdx'], basetemp),
+    ):
+        assert guard.refusal(argv, cwd=str(cwd)) is not None, (argv, cwd)
     guard.pytest_configure(SimpleNamespace(getoption=lambda name, default=None: None))
-    assert guard.is_real_checkout(basetemp / 'test_x0' / 'repo')
+    assert guard._EXEMPT == []
 
 
 def test_a_basetemp_outside_the_checkout_exempts_nothing(tmp_path, monkeypatch):
@@ -210,7 +220,7 @@ def test_a_fake_root_under_a_basetemp_inside_the_checkout_is_guarded(monkeypatch
     monkeypatch.setattr(guard, '_ROOTS', list(guard._ROOTS))
     guard.install(basetemp / 'test_x0' / 'main')
     assert guard.is_real_checkout(basetemp / 'test_x0' / 'main' / 'src')
-    assert not guard.is_real_checkout(basetemp / 'test_x0' / 'other')
+    assert guard.is_real_checkout(basetemp / 'test_x0' / 'other')  # still inside the real checkout
     assert guard.is_real_checkout(REPO_ROOT)
 
 
