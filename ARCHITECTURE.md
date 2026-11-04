@@ -295,6 +295,8 @@ passes so a high-volume worker source cannot consume that interactive window:
   chips, so the assigned recovery pass still reaches one filed under a project.
   An explicit `source_filter="oneshot"` lists the newest ones, and a session
   the user opens by id resolves through `get_cli_session_by_id()`.
+- Tool (`--source tool`): handled like one-shot runs. Hermes Agent uses this
+  tag for integration sessions that should stay out of user session lists.
 
 Source-specific views still use their dedicated bounds, and the later sidebar
 visibility stage decides whether recovered background rows are shown. In
@@ -1874,8 +1876,24 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
                                -> {"stream_id", "session_id"}. Starts agent daemon thread.
     /api/chat                  (fallback, sync) {"session_id", "message", "model"?, "workspace"?}
                                -> blocks until agent finishes. Returns full result.
-    /api/share/create          {"session_id"} -> creates or refreshes a public read-only snapshot link
-    /api/share/revoke          {"session_id"} -> revokes the current public snapshot link
+    /api/share/create          {"session_id"} -> creates or refreshes a public read-only snapshot link.
+                               A recorded token is reused only while its snapshot is live: a
+                               revoked token is never republished (the handler checks it, and
+                               the snapshot writer leaves a revoked file untouched and mints a
+                               new token), so an old URL stays dead for anyone who kept it.
+    /api/share/revoke          {"session_id"} -> revokes the current public snapshot link.
+                               The token is resolved from the durable session sidecar under a
+                               per-session *share* lock (create/revoke only — never the agent
+                               turn lock) and not from the LRU-cached session, whose share
+                               fields are not part of the cache freshness check. The session is
+                               re-read inside that lock, so a concurrent writer's save is not
+                               reverted. The call fails with an error if the snapshot still
+                               resolves afterwards, and a session with no share revokes
+                               idempotently with {"ok": true}.
+                               Both calls patch only the two share fields in the sidecar, and a
+                               whole-session save made from a copy loaded before that patch
+                               keeps the persisted share pair instead of writing back its own
+                               stale one.
     /api/approval/respond      {"session_id", "choice": once|session|always|deny}
                                -> {"ok": true, "choice": choice}
 
