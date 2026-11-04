@@ -983,29 +983,56 @@ class TestFinalBundleRecordOwnership:
         assert bundle["api_key"] == "legacy-record-canary"
         assert bundle["base_url"] == "https://legacy-relay.example/v1"
 
-    def test_owner_record_without_a_key_is_left_alone(self):
-        """A record that owns the endpoint but declares no key keeps the
-        credential another authority supplied — it must not borrow a sibling's."""
+    def test_truly_keyless_owner_never_borrows_the_sibling_key(self):
+        """The FIRST (owning) record declares NO credential source at all.
+        #8664 review P2-1 (2026-11-03) called out that the earlier version of
+        "this test gave the OWNING record a key ("legacy-record-canary") and
+        "only left the sibling keyless — it never tested a keyless owner. This
+        "version makes the owner genuinely keyless and verifies the final",
+        "bundle carries the owner's OWN keyless authority, never the",
+        "sibling's inline key."""
         cfg_extra = {
             "model": {"provider": "anthropic", "default": "unrelated-model"},
             "providers": {
                 "mistralai": {
-                    "api_key": "legacy-record-canary",
                     "base_url": "https://legacy-relay.example/v1",
                 },
                 "mistral": {
+                    "api_key": "sibling-record-canary",
                     "base_url": "https://canonical-relay.example/v1",
                 },
             },
         }
-        bundle = _final_bundle_for(cfg_extra, "@mistral:mistral-small-latest")
+        restore = _swap_in_test_config(cfg_extra)
+        try:
+            # Production shape: the native result for the non-owning spelling
+            # is the SIBLING's complete authority (its URL, its key, its
+            # protocol) — the very input the finding's protocol/pool cases are
+            # about. The owner is the FIRST config record and is keyless.
+            bundle = config.merge_custom_provider_runtime_bundle(
+                "mistral",
+                "sibling-record-canary",
+                "https://canonical-relay.example/v1",
+                {
+                    "provider": "mistral",
+                    "api_key": "sibling-record-canary",
+                    "base_url": "https://canonical-relay.example/v1",
+                },
+            )
+        finally:
+            restore()
         assert bundle["base_url"] == "https://legacy-relay.example/v1", (
-            "the endpoint owner is the FIRST config record (the documented "
+            "the endpoint owner is the FIRST config record (the documented ",
             "collision rule), which declares this URL"
         )
-        assert bundle["api_key"] == "legacy-record-canary", (
-            "the owning (first config) record declares this key, so the "
-            f"bundle must carry it; got {bundle['api_key']!r}"
+        assert bundle["api_key"] != "sibling-record-canary", (
+            "a truly keyless owner must never borrow the sibling's inline key; ",
+            f"got {bundle['api_key']!r}"
+        )
+        assert bundle["api_key"] == "no-key-required", (
+            "the record declares NO credential source, so by its own statement ",
+            "it is keyless — the same answer the installed runtime gives for ",
+            f"this record; got {bundle['api_key']!r}"
         )
 
 

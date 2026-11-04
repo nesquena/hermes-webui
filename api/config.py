@@ -4339,6 +4339,121 @@ def _custom_record_pool_runtime(base_url: str | None, record: dict) -> dict | No
         return None
 
 
+# Placeholder for a record that DECLARES no credential source at all. Matches
+# the installed runtime's own keyless signal (_custom_runtime substitutes
+# no-key-required), so the WebUI bundle says the same thing a CLI send of
+# the same record would. Distinct from KEYLESS_CUSTOM_API_KEY, which is
+# only ever substituted for named custom:* routes.
+_CUSTOM_NO_AUTH_PLACEHOLDER = "no-key-required"
+
+
+def _custom_record_effective_api_mode(record: dict, base_url: str | None) -> str | None:
+    """Wire protocol a raw ``providers:`` record runs on: its declared
+    api_mode / transport, else the protocol the INSTALLED runtime would
+    assume for its OWN endpoint (host-detected, else None and the caller's
+    OpenAI-compatible default fills the last rung).
+
+    Delegating the URL-detected rung keeps the WebUI answer identical to the
+    agent's for the same record; a build without the installed runtime simply
+    reports no detected mode and the caller falls back to its default.
+    """
+    declared = _custom_record_api_mode(record)
+    if declared:
+        return declared
+    if not base_url:
+        return None
+    try:
+        import hermes_cli.runtime_provider as _runtime_provider
+
+        detect = getattr(_runtime_provider, "_detect_api_mode_for_url", None)
+        if detect is None:
+            return None
+        detected = detect(base_url)
+        if isinstance(detected, str) and detected.strip():
+            return detected.strip()
+    except Exception:
+        return None
+    return None
+
+
+def _raw_provider_record_runtime_authority(
+    record: dict,
+    provider_key: str,
+    fallback_url: str | None = None,
+) -> dict:
+    """Resolve ONE raw ``providers:`` record as its COMPLETE runtime authority.
+
+    Mirrors the installed runtime's named-custom ladder — credential pool first
+    (the real native pool selection), then the record's own api_key/key_env,
+    then a host-gated env key, then key_cmd; wire protocol declared or
+    URL-detected or the OpenAI-compatible default; and the record's own pool
+    and ACP transport — driven ENTIRELY by this record.
+
+    A field the record does not declare takes the record's OWN answer, never
+    the value another alias record resolved to (#8664 review P2-1): an
+    omitted api_mode falls back to the endpoint default, an omitted
+    credential keeps the record keyless (_CUSTOM_NO_AUTH_PLACEHOLDER), an
+    omitted pool is no pool.
+
+    Returns a dict with base_url, api_key, api_mode, credential_pool,
+    acp_command, acp_args.
+    """
+    base_url = _custom_record_base_url(record)
+    if not base_url:
+        base_url = str(fallback_url or "").strip() or None
+
+    pool_runtime = _custom_record_pool_runtime(base_url, record) if base_url else None
+    api_key = None
+    if pool_runtime:
+        api_key = pool_runtime.get("api_key") or None
+    if not api_key:
+        api_key = _resolve_custom_record_key(
+            record.get("api_key"), record.get("key_env"), provider_key
+        )
+    if not api_key:
+        api_key = _host_gated_env_key(base_url)
+    if not pool_runtime:
+        token_provider = _custom_record_key_cmd_provider(base_url, record, provider_key)
+        if token_provider is not None:
+            api_key = token_provider
+    if (
+        not api_key
+        and base_url
+        and not _custom_record_declares_credential(record, base_url, pool_runtime)
+    ):
+        # The record's own statement: it declares NO credential source at all.
+        # That is the record's keyless claim — the same answer the installed
+        # runtime gives for this same record, never a sibling's key.
+        api_key = _CUSTOM_NO_AUTH_PLACEHOLDER
+
+    if pool_runtime:
+        pool_mode = pool_runtime.get("api_mode")
+        if isinstance(pool_mode, str) and pool_mode.strip():
+            api_mode = pool_mode.strip()
+        else:
+            api_mode = _custom_record_effective_api_mode(record, base_url)
+    else:
+        api_mode = _custom_record_effective_api_mode(record, base_url)
+    if not api_mode:
+        api_mode = "chat_completions"
+
+    credential_pool = None
+    if pool_runtime and pool_runtime.get("credential_pool") is not None:
+        credential_pool = pool_runtime.get("credential_pool")
+    elif record.get("credential_pool") is not None:
+        credential_pool = record.get("credential_pool")
+
+    acp = _custom_record_acp_transport(record)
+    return {
+        "base_url": base_url,
+        "api_key": api_key,
+        "api_mode": api_mode,
+        "credential_pool": credential_pool,
+        "acp_command": acp.get("acp_command"),
+        "acp_args": acp.get("acp_args"),
+    }
+
+
 def _host_gated_env_key(base_url: str | None) -> str | None:
     """Env credential the installed runtime would accept for ``base_url``, else None.
 
@@ -4825,45 +4940,40 @@ def _custom_provider_runtime_bundle_with_provenance(
         # spelling. A collision therefore produced
         # ``api_key`` from one record and ``base_url`` from the other.
         #
-        # Re-attach the credential to the record the ENDPOINT already chose,
-        # so endpoint/key/protocol/pool all agree on one owner. Only an
-        # EXACT-mismatch is repaired: when the requested spelling already names
-        # the owning record (the common case, and the only case for a
-        # non-colliding config) the value is untouched, so an ambient/registry
+        # Re-attach EVERYTHING to the record the ENDPOINT already chose, so
+        # endpoint/key/protocol/pool all agree on one owner. Only a genuine
+        # split is repaired — when the resolved result DISAGREES with the
+        # owning record — so when the requested spelling already names the
+        # owning record (the common case, and the only case for a
+        # non-colliding config) the value is untouched and an ambient/registry
         # credential that legitimately belongs to the requested provider is
         # never replaced by a sibling record's key.
         #
-        # A record that owns the endpoint but declares NO key is left alone too:
-        # its credential may legitimately come from the env, a key_cmd, or a
-        # credential pool, and substituting a sibling's key would invent a
-        # credential the selected record never had.
+        # A record that owns the endpoint but declares NO key is not left
+        # alone AND not lent the sibling's: on a genuine split it is resolved
+        # as its OWN complete authority — its env/pool/key_cmd ladder, and the
+        # keyless signal of the installed runtime when that ladder is empty
+        # (#8664 review P2-1, 2026-11-03).
         owner_key = _raw_provider_key_for_provider_id(lookup)
         if isinstance(owner_key, str) and owner_key:
             owner_cfg = (_get_providers_cfg() or {}).get(owner_key)
             if isinstance(owner_cfg, dict):
                 # #8664 review P2-2 (nesquena-hermes 2026-11-03): the repair
-                # must fire ONLY on an EXACT mismatch — i.e. when the requested
-                # spelling does NOT already name the owning record. Without this
-                # guard the assignment had no condition at all, so an ordinary
+                # must fire ONLY on a REAL mismatch — the resolver's result
+                # DISAGREEING with the owning record — never because the
+                # requested spelling merely differs. Otherwise an ordinary
                 # NON-colliding provider (``openrouter`` with an inline key, and
                 # a valid ambient key the resolver had legitimately selected)
                 # had its ambient credential replaced by the record's inline
                 # one. That is the resolver's authority, and it must survive.
                 #
-                # #8664 review P2-2 (nesquena-hermes 2026-11-03): the repair
-                # is scoped to a REAL COLLISION — two or more raw ``providers:``
-                # keys canonicalising to the same slug. That is the only
-                # situation in which the native resolver can hand back a
-                # SIBLING's endpoint/key/protocol while the requested spelling
-                # names the owner.
-                #
-                # A NON-colliding provider (``openrouter`` with one record) must
-                # keep the resolver's authority: its ambient or credential-pool
-                # key is legitimately selected, and substituting the record's
-                # inline key there was review P2-2. Comparing the requested
-                # spelling to ``owner_key`` cannot express this — under a
-                # collision the spelling names the owner while the resolved
-                # values still come from the sibling.
+                # The mismatch that fires the repair can only be supplied by a
+                # SIBLING: a second raw ``providers:`` key canonicalising to the
+                # same slug is the only way the native resolver can hand back
+                # an endpoint/key/protocol that does NOT belong to the record
+                # the WebUI selected. With fewer than two records the only
+                # repairable shape is the different-spelling single record whose
+                # declared key the resolver missed entirely.
                 canonical_lookup = _canonicalise_provider_id(str(lookup).strip())
                 colliding = [
                     raw_key
@@ -4872,17 +4982,22 @@ def _custom_provider_runtime_bundle_with_provenance(
                 ]
                 owner_url_declared = str(owner_cfg.get("base_url") or "").strip()
                 owner_key_declared = str(owner_cfg.get("api_key") or "").strip()
-                # #8664 review P2-1 + P2-2 (nesquena-hermes 2026-11-03): the ONE
+                owner_mode_declared = _custom_record_api_mode(owner_cfg)
+
+                # #8664 review P2-1 (nesquena-hermes 2026-11-03): the ONE
                 # invariant that decides whether this repair runs is whether the
                 # resolver's result DISAGREES with the owning record's declared
-                # values. That covers every shape the two findings describe:
+                # values. That covers every shape the finding describes:
                 #
                 #   * collision, resolver returned the sibling's endpoint ->
-                #     endpoint disagrees -> repair (P2-1).
-                #   * collision, resolver returned the sibling's protocol while
-                #     key/endpoint happened to match -> the whole-record
-                #     re-selection below still runs, because a declared api_mode
-                #     that differs from the resolver's is a split too.
+                #     endpoint disagrees -> repair.
+                #   * collision, resolver returned the sibling's key -> key
+                #     disagrees -> repair.
+                #   * collision, resolver returned the sibling's PROTOCOL while
+                #     key/endpoint happened to match -> a declared api_mode that
+                #     differs from the resolved one is a split too, so the
+                #     whole-record re-selection below still runs instead of the
+                #     sibling's wire format surviving a handoff untouched.
                 #   * single record addressed by a DIFFERENT spelling (provider
                 #     ``mistral`` while config carries ``providers.mistralai``)
                 #     -> the resolver returns nothing for that spelling ->
@@ -4893,11 +5008,9 @@ def _custom_provider_runtime_bundle_with_provenance(
                 # A NON-colliding provider whose credential came from an ambient
                 # env var or a credential pool must keep that authority (P2-2):
                 # such a value is NOT the owner's declared value, but it is not
-                # a sibling split either. The guard below distinguishes them by
-                # requiring an actual SIBLING to have supplied the disagreement:
-                # with fewer than two records, only a MISSING credential (the
-                # resolver produced nothing) is repairable — an ambient key the
-                # record never declared is the resolver's legitimate choice.
+                # a sibling split either, and the guards below distinguish them
+                # by requiring an actual SIBLING to have supplied the
+                # disagreement.
                 sibling_exists = len(colliding) >= 2
                 url_split = bool(
                     owner_url_declared
@@ -4907,8 +5020,19 @@ def _custom_provider_runtime_bundle_with_provenance(
                     owner_key_declared
                     and str(resolved_api_key or "").strip() != owner_key_declared
                 )
+                resolved_mode = _rt.get("api_mode") if isinstance(_rt, dict) else None
+                resolved_mode_str = (
+                    str(resolved_mode).strip().lower()
+                    if isinstance(resolved_mode, str)
+                    else "",
+                )
+                mode_split = bool(
+                    owner_mode_declared
+                    and resolved_mode_str
+                    != str(owner_mode_declared).strip().lower(),
+                )
                 if sibling_exists:
-                    split = url_split or key_split
+                    split = url_split or key_split or mode_split
                 else:
                     # No sibling can be the source, so the only legitimate repair
                     # is "the resolver produced no credential for this record
@@ -4921,41 +5045,36 @@ def _custom_provider_runtime_bundle_with_provenance(
                 if not split:
                     return bundle, None
                 # #8664 review P2-1 (nesquena-hermes 2026-11-03): resolve the
-                # selected raw record as ONE COMPLETE runtime bundle. The earlier
-                # version replaced only ``base_url`` and ``api_key``, leaving
-                # ``api_mode`` and ``credential_pool`` from the native result —
-                # which under a collision can belong to the canonical SIBLING.
-                # A caller then received the owner's key and endpoint with the
-                # sibling's protocol, and the converse when the config order or
-                # the requested spelling was reversed.
+                # selected raw record as ONE COMPLETE runtime authority and
+                # replace the bundle's connection side wholesale. The earlier
+                # versions replaced only the fields the record declared, leaving
+                # protocol, pool and ACP from the native result — which under a
+                # collision belong to the SIBLING. A caller then received the
+                # owner's key and endpoint with the sibling's wire protocol, and
+                # an owner that declared NO key / NO protocol / NO pool kept the
+                # sibling's key / protocol / pool because "not declared" was
+                # read as "no opinion".
                 #
-                # Endpoint, credential, protocol and pool must all agree on one
-                # record, and the native resolver must not independently choose
-                # its sibling for any of them.
-                owner_url = str(owner_cfg.get("base_url") or "").strip()
-                if owner_url:
-                    bundle["base_url"] = owner_url
-                # The credential follows the same record — but ONLY when that
-                # record declares one. A record that owns the endpoint while
-                # leaving the key to the env, a key_cmd or a credential pool
-                # must not borrow a sibling's key: that would invent a
-                # credential the selected record never had.
-                declared = str(owner_cfg.get("api_key") or "").strip()
-                if declared:
-                    bundle["api_key"] = declared
-                # The PROTOCOL follows the same record. A record that declares
-                # no api_mode keeps the native value (it never expressed an
-                # opinion), but a declared one is authoritative — otherwise the
-                # caller runs the owner's endpoint with the sibling's wire
-                # protocol.
-                owner_mode = _custom_record_api_mode(owner_cfg)
-                if owner_mode:
-                    bundle["api_mode"] = owner_mode
-                # The POOL follows the same record for the same reason. A
-                # record with no pool of its own must not inherit the sibling's
-                # rotating credentials.
-                if "credential_pool" in owner_cfg:
-                    bundle["credential_pool"] = owner_cfg.get("credential_pool")
+                # The core semantic is that the owning record IS the complete
+                # authority: endpoint, credential, protocol, pool and ACP must
+                # all agree on it, and the fields it does not declare take its
+                # OWN defaults — the protocol the installed runtime would assume
+                # for its endpoint, a keyless record's own keyless signal, no
+                # pool when it has none. Nothing here may keep a sibling's value.
+                authority = _raw_provider_record_runtime_authority(
+                    owner_cfg,
+                    owner_key,
+                    resolved_base_url,
+                )
+                for field in (
+                    "base_url",
+                    "api_key",
+                    "api_mode",
+                    "credential_pool",
+                    "acp_command",
+                    "acp_args",
+                ):
+                    bundle[field] = authority[field]
         return bundle, None
 
     custom = resolve_custom_provider_bundle(lookup, connection_resolver=connection_resolver)
