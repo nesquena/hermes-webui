@@ -35,6 +35,7 @@ import api.streaming as streaming  # noqa: E402
 from tests.test_issue8517_profile_scoped_memory import hc, homes  # noqa: E402,F401
 from tests.test_issue8613_post_drain_release import RecordingProvider, _wait_for  # noqa: E402
 from tests.test_issue8613_provider_instance_holders import _pause_saves, holder_registry  # noqa: E402,F401
+from tests.test_issue8804_unfenced_teardown import FenceProbe  # noqa: E402
 
 AGENT_VERSIONS = ("v0.22.2", "v0.22.7")
 
@@ -239,18 +240,15 @@ def test_a_build_during_an_old_agents_teardown_waits_and_gets_a_live_provider(ag
     def build_new():
         built["agent"], built["cacheable"] = _build(v, provider, "8804-race-new")
 
+    attaching = threading.Thread(target=build_new)
     try:
         assert in_teardown.wait(30), "the teardown never reached the provider"
-        attaching = threading.Thread(target=build_new)
-        attaching.start()
-        attaching.join(0.5)
-        assert attaching.is_alive(), "the build did not wait for the teardown of the instance it shares"
-        # A wake-up meant for something else (another teardown's settlement, a construction
-        # of another profile ending) must not let the build through: it re-checks.
-        with scope._provider_holders_cond:
-            scope._provider_holders_cond.notify_all()
-        attaching.join(0.3)
-        assert attaching.is_alive(), "a stray wake-up let the build through while the teardown still runs"
+        with FenceProbe(attaching) as fence:
+            attaching.start()
+            attaching.join(0.5)
+            assert attaching.is_alive(), "the build did not wait for the teardown of the instance it shares"
+            fence.stray_wake_inside_the_wait()
+            assert attaching.is_alive(), "a stray wake-up let the build through while the teardown still runs"
         assert [i["session"] for i in provider.inits] == ["8804-race-old"], "re-initialised mid-teardown"
     finally:
         finish.set()

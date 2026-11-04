@@ -208,6 +208,50 @@ def test_an_old_agents_shared_instance_keeps_running_for_the_live_agent(old_agen
     assert provider.shutdowns == 1 and provider.session_ends == 0
 
 
+
+class FenceProbe:
+    """Counts the fence's teardown checks made from one thread, so a test knows the
+    build is INSIDE the wait rather than merely alive. ``_reserve_acquisition`` checks
+    twice (the ``if``, then the ``while``) before its first wait and once after every
+    wake-up, all under the holder lock, which the build only lets go of in ``wait()``.
+    Shared with ``test_issue8804_real_agent_managers``."""
+
+    def __init__(self, thread):
+        self.thread = thread
+        self.checks = 0
+        self._seen = threading.Condition()
+        self._real = scope._teardown_running_locked
+
+    def __enter__(self):
+        scope._teardown_running_locked = self._check
+        return self
+
+    def __exit__(self, *exc):
+        scope._teardown_running_locked = self._real
+        return False
+
+    def _check(self, home_key):
+        running = self._real(home_key)
+        if threading.current_thread() is self.thread:
+            with self._seen:
+                self.checks += 1
+                self._seen.notify_all()
+        return running
+
+    def reached(self, checks, timeout=30.0):
+        with self._seen:
+            return self._seen.wait_for(lambda: self.checks >= checks, timeout)
+
+    def stray_wake_inside_the_wait(self):
+        """Send a wake-up meant for something else (another teardown's settlement, a
+        construction of another profile ending) while the build is waiting."""
+        assert self.reached(2), "the build never reached the fence's wait"
+        # The build holds the holder lock from its second check until wait() lets go of
+        # it, so taking the Condition here proves the build is inside the wait.
+        with scope._provider_holders_cond:
+            scope._provider_holders_cond.notify_all()
+        assert self.reached(3, 5.0), "a stray wake-up let the build through without re-checking the teardown"
+
 def test_a_build_during_an_old_agents_teardown_waits_and_gets_a_live_provider(old_agent_root):
     """The #8651 crux without ``claim_teardown``: a same-profile agent attaching while
     the evicted agent's ``shutdown_all`` runs must not have the instance closed under it."""
@@ -221,18 +265,15 @@ def test_a_build_during_an_old_agents_teardown_waits_and_gets_a_live_provider(ol
     def build_new():
         built["agent"], built["cacheable"] = _build(old_agent_root, provider, "8804-race-new")
 
+    attaching = threading.Thread(target=build_new)
     try:
         assert in_teardown.wait(30), "the teardown never reached the provider"
-        attaching = threading.Thread(target=build_new)
-        attaching.start()
-        attaching.join(0.5)
-        assert attaching.is_alive(), "the build did not wait for the teardown of the instance it shares"
-        # A wake-up meant for something else (another teardown's settlement, a construction
-        # of another profile ending) must not let the build through: it re-checks.
-        with scope._provider_holders_cond:
-            scope._provider_holders_cond.notify_all()
-        attaching.join(0.3)
-        assert attaching.is_alive(), "a stray wake-up let the build through while the teardown still runs"
+        with FenceProbe(attaching) as fence:
+            attaching.start()
+            attaching.join(0.5)
+            assert attaching.is_alive(), "the build did not wait for the teardown of the instance it shares"
+            fence.stray_wake_inside_the_wait()
+            assert attaching.is_alive(), "a stray wake-up let the build through while the teardown still runs"
         assert provider.inits == ["8804-race-old"], "the build re-initialised the instance mid-teardown"
     finally:
         finish.set()
