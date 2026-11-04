@@ -14,6 +14,7 @@ The ``prepared`` fixture uses the installed Agent's real ``PreparedCompaction`` 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import pytest
 
@@ -107,6 +108,29 @@ def _with_engine(agent, engine):
     return agent
 
 
+@pytest.fixture(autouse=True)
+def _fresh_once_only_logs(monkeypatch):
+    monkeypatch.setattr(scope, "_logged_once", set())
+
+
+PLUGIN_RAN = "plugin-ran.txt"
+
+
+def _plugin_code_ran(calls, label):
+    """What a plugin hook does when it runs: it records the profile home it ran under and
+    writes a file there, the write the owner check exists to stop."""
+    import hermes_constants  # noqa: PLC0415 - the hc fixture installs it
+
+    home = hermes_constants.get_hermes_home()
+    calls.append((label, str(home)))
+    (Path(home) / PLUGIN_RAN).write_text(label)
+
+
+def _no_plugin_file_under_any_profile(homes):
+    written = [str(f) for home in homes.values() for f in Path(home).rglob(PLUGIN_RAN)]
+    assert written == [], f"plugin code wrote under a profile: {written}"
+
+
 def test_an_unowned_eviction_cancels_the_running_summary_pass_in_the_agents_own_home(
     hc, homes, holder_registry, prepared, builtin_engine, caplog
 ):
@@ -117,7 +141,7 @@ def test_an_unowned_eviction_cancels_the_running_summary_pass_in_the_agents_own_
 
     assert streaming._close_evicted_agent_at_session_boundary("8804-ce-current", agent) is True
 
-    assert pending.cancelled.is_set() and pending.cancel_reason == "session_boundary"
+    assert pending.cancelled.is_set() and pending.cancel_reason == "agent_released"  # the Agent's own release code
     assert state._pending is None
     assert cancelled_in == [str(homes["alpha"])], (
         "the pass must be cancelled in the profile home the agent was built under "
@@ -335,3 +359,129 @@ def test_an_older_agents_engine_without_prepared_compaction_is_left_alone(hc, ho
     assert scope.release_unowned_context_engine(agent, session_id="8804-ce-older") is False
     assert agent._memory_provider_shutdown is True
     assert not any(OWNER_SKIP_LOG in r.getMessage() for r in caplog.records)
+
+
+def test_a_descriptor_on_a_plugin_engines_class_never_runs(hc, homes, holder_registry, prepared, caplog):
+    """Codex r3: reading ``on_session_end`` from a plugin's engine class runs its
+    descriptor. Nothing on the engine's class may be read before the identity check."""
+    compressor = pytest.importorskip("agent.context_compressor")
+    calls: list = []
+
+    class SessionEndDescriptor:
+        def __get__(self, obj, cls):
+            _plugin_code_ran(calls, "descriptor")
+            return lambda *args: None
+
+    class PluginCompressor(compressor.ContextCompressor):
+        on_session_end = SessionEndDescriptor()
+
+    state, pending, cancelled_in = _running_pass(prepared, "8804-ce-descriptor")
+    agent = _with_engine(_shared_agent(homes["alpha"], SharedInstanceProvider(), "8804-ce-descriptor"),
+                         _shell(PluginCompressor, state))
+    caplog.set_level(logging.WARNING)
+
+    assert streaming._close_evicted_agent_at_session_boundary("8804-ce-descriptor", agent) is True
+    assert calls == [], f"plugin code ran under the unresolved owner: {calls}"
+    _no_plugin_file_under_any_profile(homes)
+    assert cancelled_in == [] and not pending.cancelled.is_set()
+    assert agent._memory_provider_shutdown is True
+    skips = [r.getMessage() for r in caplog.records if OWNER_SKIP_LOG in r.getMessage()]
+    assert len(skips) == 1 and "PluginCompressor" not in skips[0], skips
+
+
+def test_a_plugin_engines_metaclass_never_runs(hc, homes, holder_registry, prepared, caplog):
+    """Codex r3: ``type(engine).__name__`` (or any read on the class) runs a plugin's
+    metaclass ``__getattribute__``."""
+    compressor = pytest.importorskip("agent.context_compressor")
+    calls: list = []
+    armed: list = []
+
+    class EngineMeta(type(compressor.ContextCompressor)):
+        def __getattribute__(cls, name):
+            if armed:
+                _plugin_code_ran(calls, f"metaclass {name}")
+            return super().__getattribute__(name)
+
+    class PluginCompressor(compressor.ContextCompressor, metaclass=EngineMeta):
+        def on_session_end(self, session_id, messages):
+            _plugin_code_ran(calls, "session end")
+
+    state, pending, cancelled_in = _running_pass(prepared, "8804-ce-metaclass")
+    agent = _with_engine(_shared_agent(homes["alpha"], SharedInstanceProvider(), "8804-ce-metaclass"),
+                         _shell(PluginCompressor, state))
+    caplog.set_level(logging.WARNING)
+    armed.append(True)
+    try:
+        assert streaming._close_evicted_agent_at_session_boundary("8804-ce-metaclass", agent) is True
+    finally:
+        armed.clear()
+    assert calls == [], f"plugin code ran under the unresolved owner: {calls}"
+    _no_plugin_file_under_any_profile(homes)
+    assert cancelled_in == [] and not pending.cancelled.is_set()
+    assert agent._memory_provider_shutdown is True
+    assert any(OWNER_SKIP_LOG in r.getMessage() for r in caplog.records)
+
+
+def test_a_plugin_engine_claiming_the_compressor_class_through_a_class_property_never_runs(
+    hc, homes, holder_registry, prepared, caplog
+):
+    """``isinstance`` falls back to ``obj.__class__`` when the type isn't a subclass, and a
+    plugin can define ``__class__`` as a property, so the check must be an identity compare
+    of ``type(engine)``."""
+    compressor = pytest.importorskip("agent.context_compressor")
+    calls: list = []
+    state, pending, cancelled_in = _running_pass(prepared, "8804-ce-class-property")
+
+    class ClaimsToBeTheCompressor:
+        prepared_compaction = state
+
+        @property
+        def __class__(self):
+            _plugin_code_ran(calls, "__class__")
+            return compressor.ContextCompressor
+
+        def on_session_end(self, session_id, messages):
+            _plugin_code_ran(calls, "session end")
+
+    agent = _with_engine(_shared_agent(homes["alpha"], SharedInstanceProvider(), "8804-ce-class-property"),
+                         ClaimsToBeTheCompressor())
+    caplog.set_level(logging.WARNING)
+
+    assert streaming._close_evicted_agent_at_session_boundary("8804-ce-class-property", agent) is True
+    assert calls == [], f"plugin code ran under the unresolved owner: {calls}"
+    _no_plugin_file_under_any_profile(homes)
+    assert cancelled_in == [] and not pending.cancelled.is_set()
+    assert agent._memory_provider_shutdown is True
+    assert any(OWNER_SKIP_LOG in r.getMessage() for r in caplog.records)
+
+
+def test_prepared_state_claiming_the_agents_class_through_a_class_property_is_left_alone(
+    hc, homes, holder_registry, prepared, builtin_engine, caplog
+):
+    """The same for the object the built-in engine holds: an identity compare of
+    ``type(prepared)``, and a debug line that names no class."""
+    calls: list = []
+
+    class ClaimsToBePreparedCompaction:
+        @property
+        def __class__(self):
+            _plugin_code_ran(calls, "__class__")
+            return prepared.PreparedCompaction
+
+        def discard(self, *args, **kwargs):
+            _plugin_code_ran(calls, "discard")
+
+        def _count_unspliced(self):
+            _plugin_code_ran(calls, "_count_unspliced")
+
+    agent = _with_engine(_shared_agent(homes["alpha"], SharedInstanceProvider(), "8804-ce-prepared-property"),
+                         builtin_engine(ClaimsToBePreparedCompaction()))
+    caplog.set_level(logging.DEBUG, logger=scope.logger.name)
+
+    assert streaming._close_evicted_agent_at_session_boundary("8804-ce-prepared-property", agent) is True
+    assert calls == [], f"plugin code ran under the unresolved owner: {calls}"
+    _no_plugin_file_under_any_profile(homes)
+    assert agent._memory_provider_shutdown is True
+    skipped = [r.getMessage() for r in caplog.records if "is left alone" in r.getMessage()
+               and "prepared-summary state" in r.getMessage()]
+    assert len(skipped) == 1 and "ClaimsToBePreparedCompaction" not in skipped[0], skipped

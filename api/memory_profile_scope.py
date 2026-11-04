@@ -1706,11 +1706,9 @@ def _mark_legacy_shut_down(holder: Any) -> None:
         logger.debug("[webui] #8804: could not mark the released agent shut down", exc_info=True)
 
 
-# The modules that define the Agent's own context engines (the base class and the
-# built-in compressor). An ``on_session_end`` defined anywhere else is a plugin's.
-_AGENT_ENGINE_MODULES = frozenset({"agent.context_engine", "agent.context_compressor"})
-# The reason the Agent's own session end passes to ``PreparedCompaction.discard``.
-_SESSION_BOUNDARY_DISCARD = "session boundary"
+# The reason the Agent itself passes to ``PreparedCompaction.discard`` when it releases an
+# agent (``agent.prepared_compaction.release_for_agent``: cache eviction, rewind, close).
+_AGENT_RELEASED_DISCARD = ("agent released", "agent_released")
 
 
 # The methods of the Agent's ``PreparedCompaction`` that ``discard`` runs on the instance
@@ -1718,39 +1716,20 @@ _SESSION_BOUNDARY_DISCARD = "session boundary"
 _AGENT_DISCARD_PATH = frozenset({"discard", "_count_unspliced"})
 
 
-def _builtin_engines_prepared_compaction(engine: Any) -> Any:
-    """The prepared-summary state of the Agent's own built-in compressor, or None.
-
-    Only the Agent's code may run on this path, because the session's owner is unknown.
-    So ``engine`` must be exactly the Agent's ``ContextCompressor`` (not a plugin's
-    engine, nor a subclass of the compressor). It must hold exactly the Agent's
-    ``PreparedCompaction`` (Agent v0.22.6+; not a subclass, which could override a method
-    ``discard`` calls), with no instance attribute shadowing ``discard`` or
-    ``_count_unspliced``. Anything a plugin engine carries is the plugin's, so it is left
-    alone, as is an older Agent, which has no prepared compaction."""
-    try:
-        compressor_module = sys.modules.get("agent.context_compressor") or importlib.import_module(
-            "agent.context_compressor"
-        )
-        prepared_module = sys.modules.get("agent.prepared_compaction") or importlib.import_module(
-            "agent.prepared_compaction"
-        )
-        compressor_class = compressor_module.ContextCompressor
-        prepared_class = prepared_module.PreparedCompaction
-    except Exception:
-        return None
-    if type(engine) is not compressor_class:
-        return None
-    prepared = getattr(engine, "prepared_compaction", None)
-    if type(prepared) is not prepared_class:
-        return None
-    try:
-        own_attributes = vars(prepared)
-    except TypeError:
-        return None
-    if _AGENT_DISCARD_PATH.intersection(own_attributes):
-        return None
-    return prepared
+def _agent_context_classes() -> tuple:
+    """The Agent's built-in ``ContextCompressor`` and ``PreparedCompaction`` classes
+    (either is None when this Agent does not have it; ``PreparedCompaction`` is v0.22.6+)."""
+    classes = []
+    for module_name, class_name in (
+        ("agent.context_compressor", "ContextCompressor"),
+        ("agent.prepared_compaction", "PreparedCompaction"),
+    ):
+        try:
+            module = sys.modules.get(module_name) or importlib.import_module(module_name)
+            classes.append(getattr(module, class_name, None))
+        except Exception:
+            classes.append(None)
+    return tuple(classes)
 
 
 def release_unowned_context_engine(agent: Any, *, session_id: str) -> bool:
@@ -1768,12 +1747,18 @@ def release_unowned_context_engine(agent: Any, *, session_id: str) -> bool:
     state of an engine that is being discarded is ``prepared_compaction.discard`` (Agent
     v0.22.6+). It cancels a background summary pass that would otherwise run to
     completion, a model call nobody will use. That is close-only: no session data, only an
-    aggregate opt-in metric count. So that one call runs here, only for the Agent's own
-    built-in compressor and its own ``PreparedCompaction`` (exact types, nothing shadowed:
-    ``_builtin_engines_prepared_compaction``), in the profile home the WebUI built the
-    agent under (never the ambient env mirror). A plugin engine is left alone, and its
-    session end skipped is logged once. An older Agent has no prepared compaction, and
-    nothing to cancel.
+    aggregate opt-in metric count. The Agent makes the same call itself when it releases an
+    agent (``release_for_agent``: cache eviction, rewind, close), with the same reason. So
+    that one call runs here, in the profile home the WebUI built the agent under (never the
+    ambient env mirror). An older Agent has no prepared compaction, and nothing to cancel.
+
+    Only the Agent's own code may run on this path, because the session's owner is unknown.
+    So nothing on the engine or its class is read before the identity check
+    ``type(engine) is ContextCompressor``: not ``isinstance`` (it can consult a plugin's
+    ``__class__``), not a method or ``__name__`` (a plugin's descriptor or metaclass would
+    run). Any other engine is the plugin's and is left alone, with a once-only line that
+    names no class. Then the engine must hold exactly the Agent's ``PreparedCompaction``,
+    with no instance attribute shadowing ``discard`` or ``_count_unspliced``.
 
     The caller runs this only when the Agent's own shutdown did not run (a refusal at hook
     time happens INSIDE that shutdown), decided before the memory release, which marks an
@@ -1786,17 +1771,30 @@ def release_unowned_context_engine(agent: Any, *, session_id: str) -> bool:
         engine = getattr(agent, "context_compressor", None)
         if engine is None:
             return False
-        session_end = getattr(type(engine), "on_session_end", None)
-        if session_end is not None and getattr(session_end, "__module__", "") not in _AGENT_ENGINE_MODULES:
+        compressor_class, prepared_class = _agent_context_classes()
+        # The first touch of the engine: an identity compare of its exact type.
+        if compressor_class is None or type(engine) is not compressor_class:
             _log_once(
                 "engine-end-owner",
-                "[webui] #8804: the context engine %s of an evicted agent did not get its session "
-                "end: the session's owner could not be confirmed, and that hook may write session "
-                "data, so it stays behind the owner check (fail closed).",
-                type(engine).__name__,
+                "[webui] #8804: an evicted agent's context engine is not the Agent's built-in "
+                "compressor, so it is left alone: its session end may write session data and the "
+                "session's owner could not be confirmed, so it stays behind the owner check (fail "
+                "closed).",
             )
-        prepared = _builtin_engines_prepared_compaction(engine)
-        if prepared is None:
+            return False
+        prepared = getattr(engine, "prepared_compaction", None)  # the Agent's own engine
+        if prepared is None:  # the opt-in prepare_ahead is off, or an Agent before v0.22.6
+            return False
+        if (
+            prepared_class is None
+            or type(prepared) is not prepared_class
+            or _AGENT_DISCARD_PATH.intersection(vars(prepared))
+        ):
+            logger.debug(
+                "[webui] #8804: the built-in context engine of evicted session %s holds "
+                "prepared-summary state that is not the Agent's own; it is left alone.",
+                session_id,
+            )
             return False
         build_home = str(getattr(agent, _BUILD_HOME_ATTR, "") or "")
         restore, reason = _enter_profile_home(build_home, profile_home_key(build_home) if build_home else None)
@@ -1809,7 +1807,7 @@ def release_unowned_context_engine(agent: Any, *, session_id: str) -> bool:
             )
             return False
         try:
-            prepared.discard(_SESSION_BOUNDARY_DISCARD)
+            prepared.discard(*_AGENT_RELEASED_DISCARD)
         except Exception:
             logger.debug("[webui] #8804: cancelling the prepared summary failed for %s", session_id, exc_info=True)
         finally:
