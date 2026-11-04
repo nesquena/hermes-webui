@@ -287,3 +287,89 @@ def test_migration_bounds_mirror_only_shapes(tmp_path, monkeypatch, label, build
 
     persisted = json.loads((sessions / f"mig-{label}.json").read_text())
     assert json.loads(persisted["messages"][0]["api_content"]) == [{"type": "text", "text": "[image attachment]"}]
+
+
+def _make_real_state_db(path, *, sid, role, content_value, source="webui"):
+    """Create a REAL sqlite state.db row -- no mocks, as the reviewer required."""
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, "
+            "model TEXT, started_at REAL, message_count INTEGER)"
+        )
+        conn.execute(
+            "CREATE TABLE messages (id TEXT, session_id TEXT, role TEXT, "
+            "content TEXT, timestamp REAL)"
+        )
+        conn.execute(
+            "INSERT INTO sessions (id, source, title, model, started_at, message_count) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (sid, source, "Real row", "test-model", 1.0, 1),
+        )
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, timestamp) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (f"{sid}-m0", sid, role, content_value, 10.0),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+_STATE_DB_PREFIX = "\x00json:"
+
+
+@pytest.mark.parametrize("role", ["user", "tool"])
+def test_recovery_bounds_a_real_sqlite_state_db_row(tmp_path, role):
+    """Both roles must be bounded through a REAL state.db row.
+
+    The reviewer's point: the recovery writer copies `messages.content` as the
+    Agent's `\\x00json:` string, so the projection never saw list-valued parts and
+    a real SQLite row retained the complete data URL. Mocking decoded lists hid
+    this. This builds the actual sqlite representation instead.
+    """
+    import api.session_recovery as recovery
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    db = tmp_path / "state.db"
+    parts = [{"type": "text", "text": "hi"}, _huge_part(4000)]
+    _make_real_state_db(db, sid="real-rec", role=role, content_value=_STATE_DB_PREFIX + json.dumps(parts))
+
+    recovery.recover_missing_sidecars_from_state_db(session_dir, db)
+
+    written = (session_dir / "real-rec.json").read_text()
+    assert "data:image" not in written, f"role={role}: real SQLite row was NOT bounded"
+    # Identity survives.
+    payload = json.loads(written)
+    assert payload.get("message_count") == 1
+    assert any(m.get("role") == role for m in payload.get("messages", []))
+    # The surrounding text is preserved, not blanked.
+    assert "hi" in written
+
+
+@pytest.mark.parametrize("role", ["user", "tool"])
+def test_discoverability_writer_bounds_a_real_sqlite_state_db_row(tmp_path, role):
+    """The discoverability repair writer needs the same real-row guarantee.
+
+    `_materialize_sidecar_from_state_db` is the discoverability writer that
+    bypasses Session.save() and calls the projection directly.
+    """
+    import api.session_discoverability as disc
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    db = tmp_path / "state.db"
+    parts = [{"type": "text", "text": "hi"}, _huge_part(4000)]
+    _make_real_state_db(db, sid="real-disc", role=role, content_value=_STATE_DB_PREFIX + json.dumps(parts))
+
+    result = disc._materialize_sidecar_from_state_db(
+        session_dir, db, "real-disc", tmp_path / "backup", {}
+    )
+    assert result.get("applied") is True, f"writer did not apply: {result}"
+
+    written = (session_dir / "real-disc.json").read_text()
+    assert "data:image" not in written, f"role={role}: discoverability row was NOT bounded"
+    assert "hi" in written

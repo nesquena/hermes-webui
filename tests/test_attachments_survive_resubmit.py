@@ -109,3 +109,44 @@ def test_name_only_dict_attachment_rebuilds_image_part(attachment):
         "", "look", [{"name": name, "path": "", "mime": ""}], str(image.parent.parent)
     )
     assert _image_parts(out), "name-only attachment was dropped on resubmit"
+
+
+def test_resend_never_picks_another_sessions_picture(attachment):
+    """A filename-only attachment must resolve inside ITS OWN session directory.
+
+    Two sessions can upload the same name (`photo.png`). Searching every session
+    directory and taking the first match could hand the model another chat's
+    picture even when the correct file still exists -- a cross-session leak.
+    """
+    from api.upload import _attachment_root
+
+    inbox = _attachment_root()
+    mine = inbox / "session-mine"
+    theirs = inbox / "session-theirs"
+    for directory in (mine, theirs):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    # Their copy sorts FIRST, so any "first match anywhere" would win.
+    theirs_image = theirs / "photo.png"
+    theirs_image.write_bytes(_PNG)
+    mine_image = mine / "photo.png"
+    mine_image.write_bytes(_PNG + b"\x00mine")
+
+    out = _build_native_multimodal_message(
+        "", "look", ["photo.png"], str(inbox), session_id="session-mine"
+    )
+    parts = _image_parts(out)
+    assert parts, "own-session attachment was not resolved"
+    import base64 as _b64
+    from urllib.parse import unquote
+
+    url = parts[0]["image_url"]["url"]
+    decoded = _b64.b64decode(url.split("base64,", 1)[1])
+    assert decoded.endswith(b"\x00mine"), "resolved ANOTHER session's picture"
+
+
+def test_resend_without_session_id_still_resolves(attachment):
+    """Omitting session_id keeps the previous behaviour (inbox-wide search)."""
+    image, name = attachment
+    out = _build_native_multimodal_message("", "look", [name], str(image.parent.parent))
+    assert _image_parts(out)

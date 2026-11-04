@@ -260,3 +260,40 @@ def test_report_flags_the_undecodable_file(tmp_path):
     assert report["error"] is not None
     assert report["error"].startswith("decode_failed")
     assert report["changed"] is False
+
+
+def test_backup_write_failure_does_not_abort_the_batch(tmp_path, monkeypatch):
+    """A refused preimage backup must fail one file, not the whole run.
+
+    The reviewer asked for this as an explicit filesystem fault-injection seam:
+    `backup.write_text` sat outside the write handler, so a PermissionError there
+    escaped migrate_file and killed the batch before any later file was reached.
+    """
+    script = _load_script()
+    first = tmp_path / "aaa.json"
+    first.write_text(json.dumps(_legacy_payload("first")), encoding="utf-8")
+    second = tmp_path / "zzz.json"
+    second.write_text(json.dumps(_legacy_payload("second")), encoding="utf-8")
+
+    real_write_text = Path.write_text
+
+    def refuse_backup(self, *args, **kwargs):
+        if self.name.endswith(".preimage-migration.bak"):
+            raise PermissionError(13, "Permission denied (injected)")
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", refuse_backup)
+
+    # Returns 1 (some files failed) but STILL processes the later file.
+    rc = script.main(["--session-dir", str(tmp_path), "--apply"])
+    assert rc == 1
+
+    # Capture the per-file report WHILE the injection is still active.
+    report = script.migrate_file(first, apply=True)
+    assert report["error"] is not None
+    assert report["error"].startswith("backup_failed")
+
+    # The source is untouched -- a refused backup must never leave it rewritten.
+    assert json.dumps(_legacy_payload("first")) == first.read_text(encoding="utf-8")
+    # The LATER file still got its own backup attempt, i.e. the batch reached it.
+    assert first.with_suffix(".json.preimage-migration.bak").exists() is False
