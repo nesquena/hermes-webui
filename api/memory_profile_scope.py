@@ -2247,17 +2247,26 @@ def release_unowned_memory_provider(agent: Any, *, session_id: str, owner_home: 
 
     * the owner is still unresolvable; a refusal for any other reason (provider bound
       to another profile, no home override) leaves the provider alone;
-    * the manager has ``release_soft`` AND ``claim_teardown`` (Agent 2026-10-19+).
-      ``release_soft`` is not a pure cancellation: it claims teardown once (a later
-      session-end shutdown of this manager then runs neither ``on_session_end`` nor a
-      second ``shutdown_all``), waits up to 10 s for writes the agent ALREADY queued
-      (they run in the provider's bound profile, ``in_owner_home``), then runs
-      ``shutdown_all`` (bounded drain + each provider's ``shutdown()``). It never
-      calls ``on_session_end`` and adds no write of its own;
-    * the manager reports the profile home it is bound to (``_bound_scope``); the
-      release runs with that home held as the context-local home, so anything
-      resolved during the drain or a provider's ``shutdown()`` names the provider's
-      own profile, never the ambient env mirror (another profile's);
+    * the manager has ``release_soft`` AND ``claim_teardown`` (Agent 2026-10-19+), or
+      neither (an older Agent, #8804). ``release_soft`` is not a pure cancellation: it
+      claims teardown once (a later session-end shutdown of this manager then runs
+      neither ``on_session_end`` nor a second ``shutdown_all``), waits up to 10 s for
+      writes the agent ALREADY queued (they run in the provider's bound profile,
+      ``in_owner_home``), then runs ``shutdown_all`` (bounded drain + each provider's
+      ``shutdown()``). An older manager has nothing softer than ``shutdown_all``: it
+      runs after this agent's own queued work was drained, and the agent (or the one
+      a deferred ``_ReleaseIntent`` stands in for) is then marked shut down so its own
+      ``shutdown_memory_provider`` cannot run a session end or a second teardown
+      (``_mark_legacy_shut_down``). Neither path calls ``on_session_end`` or adds a
+      write of its own. A manager with only part of the soft-release seam is left
+      alone;
+    * the profile home the provider is bound to is known: the manager reports it
+      (``_bound_scope``, Agent 2026-10-17+), or, on an older Agent that reports
+      nothing, it is the home the WebUI built the agent under (``_record_build_home``;
+      such an Agent keeps an external provider only while one profile is served,
+      #8585). The release runs with that home held as the context-local home, so
+      anything resolved during the drain or a provider's ``shutdown()`` names the
+      provider's own profile, never the ambient env mirror (another profile's);
     * this agent is the LAST holder of every provider instance it serves
       (``agent_is_last_provider_holder``, claimed atomically with
       ``_claim_last_held_teardown``). A provider that hands one instance to every
@@ -2272,7 +2281,10 @@ def release_unowned_memory_provider(agent: Any, *, session_id: str, owner_home: 
       A construction in flight is waited for, bounded, rather than refused: the
       build either registers a holder or acquires nothing. An instance this
       release DID tear down is claimed again — and re-initialised — by the next
-      construction, exactly as after an owned session-end teardown.
+      construction, exactly as after an owned session-end teardown. On an Agent
+      without ``claim_instance`` a construction that starts while the teardown runs
+      waits for it to settle (``_reserve_acquisition``, #8804), because such an Agent
+      cannot refuse the instance itself.
     * the manager's teardown has not been claimed already: ``release_soft`` is a
       no-op when it has, and a no-op must not be reported as a release (the
       provider's worker is still alive).
