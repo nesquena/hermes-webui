@@ -373,3 +373,32 @@ def test_discoverability_writer_bounds_a_real_sqlite_state_db_row(tmp_path, role
     written = (session_dir / "real-disc.json").read_text()
     assert "data:image" not in written, f"role={role}: discoverability row was NOT bounded"
     assert "hi" in written
+
+
+@pytest.mark.parametrize("label,parts", [
+    ("image-only", [_huge_part(4000)]),
+    ("text-then-image", [{"type": "text", "text": "hi"}, _huge_part(4000)]),
+    ("image-then-image", [_huge_part(4000), _huge_part(4000)]),
+])
+def test_projected_content_stays_renderable(label, parts):
+    """A bounded row must still decode back into supported parts.
+
+    The reviewer noted image-only rows need "their own preservation-safe
+    treatment; the existing display decoder's renderability filter is not a
+    universal repair". This pins the actual property that matters: whatever the
+    projector writes must pass `_decode_state_db_content` and remain a SUPPORTED
+    part list, i.e. the row is still renderable after being bounded.
+    """
+    from api.models import _decode_state_db_content, _is_supported_content_part_list
+    from api.session_image_persistence_override import project_message_payloads
+
+    stored = "\x00json:" + json.dumps(parts)
+    env = {"messages": [{"role": "user", "content": stored, "id": "a", "timestamp": 1.0}]}
+    out = project_message_payloads(env)
+
+    assert "data:image" not in json.dumps(out), f"{label}: not bounded"
+    projected = out["messages"][0]["content"]
+    decoded = _decode_state_db_content(projected)
+    assert decoded is not projected, f"{label}: projected content no longer decodes"
+    assert _is_supported_content_part_list(decoded), f"{label}: decoded parts unsupported"
+    assert isinstance(decoded, list) and decoded, f"{label}: became an empty row"
