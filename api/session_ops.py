@@ -297,6 +297,7 @@ def _bounded_tail_snapshot_if_safe(session, read_floor):
     profile = getattr(session, "profile", None)
     from api.models import (
         _session_message_visible_key,
+        _visible_key_without_occurrence,
         get_state_db_regeneration_tail_snapshot,
     )
 
@@ -333,17 +334,24 @@ def _bounded_tail_snapshot_if_safe(session, read_floor):
             sidecar_keys.append(key)
     if list(snap["prefix_keys"]) != sidecar_keys:
         return None  # mismatch → full read
-    # Occurrence-count collision (#6826 r3 #1): if any bounded-tail key ALSO
-    # occurs in the skipped prefix, the reconciler may drop the repeated tail
-    # row — fall back conservatively.
-    prefix_key_set = set(snap["prefix_keys"])
+    # Occurrence-count collision (#6826 r3 #1) and in-tail duplicate (#6826
+    # r5): both proofs compare the OCCURRENCE-FREE identity, not the #7587
+    # occurrence-sensitive keys.  The bounded snapshot feeds a CLOCK-TOLERANT
+    # downstream (state_db_delta_after_context), which collapses a genuinely
+    # later repeated exchange onto its earlier twin regardless of clock.  An
+    # occurrence-sensitive proof lets such a repeated exchange pass as
+    # "distinct" (no in-tail duplicate, no prefix collision), so the bounded
+    # path is taken and the alignment swallows the fresh exchange — the
+    # full and bounded reads then disagree (Revisions differ) and
+    # plan_regeneration raises stale_regeneration_revision with no
+    # intervening write (#8672 gate r2).  Refusing the bounded path falls
+    # back to the full read, which is what master always did for these
+    # shapes, so full/bounded revision parity is restored.
+    prefix_key_set = {_visible_key_without_occurrence(k) for k in snap["prefix_keys"]}
     for key in snap["tail_keys"]:
-        if key in prefix_key_set:
+        if _visible_key_without_occurrence(key) in prefix_key_set:
             return None
-    # In-tail duplicates (#6826 r5): a repeated message wholly inside the
-    # bounded tail makes the reconciler's context dedup diverge from the full
-    # read (display may still match) → refuse the bounded path.
-    if len(snap["tail_keys"]) != len(set(snap["tail_keys"])):
+    if len(snap["tail_keys"]) != len({_visible_key_without_occurrence(k) for k in snap["tail_keys"]}):
         return None
     return snap["tail"]
 
