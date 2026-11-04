@@ -127,17 +127,25 @@ def is_real_checkout(cwd) -> bool:
     above it: a plain directory under a basetemp INSIDE the checkout is still
     discovered by git as the checkout, so it stays guarded (that layout is not one
     the suite supports; its runners pass no basetemp or one outside the checkout).
-    A root installed under a basetemp (a test's fake checkout) is guarded. An
+    A root installed under a basetemp (a test's fake checkout) is guarded, and so
+    is a linked worktree of a guarded checkout wherever it was made. An
     unresolvable cwd counts as the real checkout (fail closed).
     """
     try:
         p = pathlib.Path(os.getcwd() if cwd is None else cwd).expanduser().resolve()
     except (OSError, RuntimeError, TypeError, ValueError):
         return True
-    root = _nearest(p, _ROOTS)
-    if root is None and _nearest(p, _EXEMPT) is not None:
-        return False
-    return root is not None or any(p in r.parents for r in _ROOTS)
+    if _nearest(p, _ROOTS) is not None:
+        return True
+    if _nearest(p, _EXEMPT) is None and any(p in r.parents for r in _ROOTS):
+        return True
+    # A linked worktree of a guarded checkout made after install() (its `.git` points into that checkout).
+    return any(_linked_to_guarded_checkout(d) for d in (p, *p.parents))
+
+
+def _linked_to_guarded_checkout(path) -> bool:
+    main = _main_checkout(path)
+    return main is not None and _nearest(main, _ROOTS) is not None
 
 
 def _join(base, path):

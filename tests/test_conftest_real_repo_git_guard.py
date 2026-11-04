@@ -224,6 +224,25 @@ def test_a_fake_root_under_a_basetemp_inside_the_checkout_is_guarded(monkeypatch
     assert guard.is_real_checkout(REPO_ROOT)
 
 
+def test_a_linked_worktree_of_the_checkout_made_during_a_test_is_guarded(fake_git, tmp_path, monkeypatch):
+    """Its `.git` file points into the checkout's repository, so its refs and config are the checkout's."""
+    linked = tmp_path / 'wt'
+    linked.mkdir()
+    (linked / '.git').write_text(f'gitdir: {REPO_ROOT}/.git/worktrees/wt-test\n', encoding='utf-8')
+    for exempt in ([], [tmp_path.parent.resolve()]):
+        monkeypatch.setattr(guard, '_EXEMPT', exempt)
+        assert guard.is_real_checkout(linked)
+        assert guard.is_real_checkout(linked / 'sub')
+        with refused():
+            subprocess.run(['git', 'tag', 'scratch'], cwd=linked)
+    other = tmp_path / 'other-wt'
+    other.mkdir()
+    (other / '.git').write_text(f'gitdir: {tmp_path}/other/.git/worktrees/w\n', encoding='utf-8')
+    assert not guard.is_real_checkout(other)
+    subprocess.run(['git', 'tag', 'scratch'], cwd=other, check=True)
+    assert _lines(fake_git) == ['tag scratch']
+
+
 def test_install_guards_the_main_checkout_of_a_linked_worktree(tmp_path, monkeypatch):
     main, linked = tmp_path / 'main', tmp_path / 'wt'
     (main / '.git' / 'worktrees' / 'wt').mkdir(parents=True)
