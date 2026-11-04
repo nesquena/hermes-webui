@@ -1734,8 +1734,9 @@ def _agent_context_classes() -> tuple:
 
 def release_unowned_context_engine(agent: Any, *, session_id: str) -> bool:
     """Cancel the background summary work of an evicted agent whose
-    ``shutdown_memory_provider`` the WebUI refused (#8804 follow-up). True when the
-    Agent's own ``PreparedCompaction.discard`` ran.
+    ``shutdown_memory_provider`` the WebUI refused (#8804 follow-up). True when this
+    function called the Agent's own ``PreparedCompaction.discard``, whether or not that call
+    raised (an exception is caught and logged at DEBUG); the caller does not use the value.
 
     ``call_as_session_owner`` refuses the whole shutdown when the session's owner cannot
     be resolved, because a session end may write under an owner nobody can confirm
