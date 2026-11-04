@@ -88,10 +88,18 @@ from api.memory_profile_scope import (
     agent_has_memory,
     call_as_session_owner,
     construct_profile_scoped_agent,
+    # #8652 (master): the server-authoritative memory status notice.
     memory_status_event,
     session_memory_status,
+    # #8613: release an unowned eviction's memory provider only when its agent is
+    # the last holder of the instance.
+    release_unowned_memory_provider,
+    # #8613: refuse the release instead of waiting on the acquisition fence,
+    # for a caller that holds a lock and must not block.
+    release_without_fence_wait,
     session_profile_home_or_empty,
     turn_memory_reason,
+    unregister_provider_holders,
 )
 from api.models import (
     StateDBSessionMessagesSnapshot,
@@ -1113,7 +1121,15 @@ def _attempt_model_alias_credential_self_heal(
         with SESSION_AGENT_CACHE_LOCK:
             evicted = SESSION_AGENT_CACHE.pop(session_id, None)
         if evicted is not None:
-            _close_cached_agent_entry_at_session_boundary(session_id, evicted)
+            # #8613 round 3 (the maintainer's note): this close runs inside the
+            # per-session agent lock, so it must NOT wait — neither on the
+            # construction fence nor on the evicted agent's own queued memory
+            # write (the release drains it, bounded). The wait would stall the
+            # user's next turn while the lock is held. The release is refused
+            # right away instead, and the provider keeps its worker until the
+            # next session boundary.
+            with release_without_fence_wait():
+                _close_cached_agent_entry_at_session_boundary(session_id, evicted)
     except Exception:
         logger.debug("[webui] self-heal: alias agent-cache eviction failed", exc_info=True)
     return fresh_route, _resolve_model_alias_endpoint_runtime(
@@ -13690,7 +13706,15 @@ def _attempt_credential_self_heal(
         with SESSION_AGENT_CACHE_LOCK:
             _evicted_entry = SESSION_AGENT_CACHE.pop(session_id, None)
         if _evicted_entry is not None:
-            _close_cached_agent_entry_at_session_boundary(session_id, _evicted_entry)
+            # #8613 round 3 (the maintainer's note): this close runs inside the
+            # per-session agent lock, so it must NOT wait — neither on the
+            # construction fence nor on the evicted agent's own queued memory
+            # write (the release drains it, bounded). The wait would stall the
+            # user's next turn while the lock is held. The release is refused
+            # right away instead, and the provider keeps its worker until the
+            # next session boundary.
+            with release_without_fence_wait():
+                _close_cached_agent_entry_at_session_boundary(session_id, _evicted_entry)
 
         # 3. Invalidate the credential pool for this provider
         invalidate_credential_pool_cache(provider_id)
@@ -13853,15 +13877,28 @@ def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
         shutdown_memory_provider = getattr(agent, 'shutdown_memory_provider', None)
         if callable(shutdown_memory_provider):
             session_messages = vars(agent).get('_session_messages', [])
-            call_as_session_owner(
+            if not call_as_session_owner(
                 agent,
                 lambda: shutdown_memory_provider(session_messages),
                 session_id=session_id,
                 owner_home=_owner_home,
                 what="memory provider shutdown",
-            )
+            ):
+                # #8613: an owner that cannot be resolved also skipped the provider
+                # teardown inside shutdown_memory_provider; release the provider in
+                # its own bound profile, without a session end. A no-op unless this
+                # agent is the LAST holder of every instance it serves — a provider
+                # shared with a live agent of the same profile keeps running.
+                release_unowned_memory_provider(agent, session_id=session_id, owner_home=_owner_home)
     except Exception:
         logger.debug("Failed to shut down evicted agent memory provider for session %s", session_id, exc_info=True)
+
+    # #8613: this agent is out of the cache for good, so it holds no provider
+    # instance any more — whether or not one was released above.
+    try:
+        unregister_provider_holders(agent)
+    except Exception:
+        logger.debug("Failed to drop provider holders for evicted session %s", session_id, exc_info=True)
 
     try:
         session_db = getattr(agent, '_session_db', None)
@@ -16784,7 +16821,14 @@ def _run_agent_streaming(
                                 )
                     if _skipped_agent_migration_entry is not None:
                         try:
-                            _close_cached_agent_entry_at_session_boundary(old_sid, _skipped_agent_migration_entry)
+                            # #8613: this close runs inside the per-session agent
+                            # lock, so it must NOT wait on the acquisition fence —
+                            # the wait would stall the user's next turn while the
+                            # lock is held. The release is refused right away
+                            # instead, and the provider keeps its worker until the
+                            # next session boundary.
+                            with release_without_fence_wait():
+                                _close_cached_agent_entry_at_session_boundary(old_sid, _skipped_agent_migration_entry)
                         except Exception:
                             logger.debug("Failed to close skipped compression-migration cached agent for session %s", old_sid, exc_info=True)
                     _compressed = True
