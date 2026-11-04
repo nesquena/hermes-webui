@@ -729,6 +729,78 @@ def test_runner_request_resolves_effort_inside_session_profile_scope(monkeypatch
     assert effort == "high"
 
 
+
+@pytest.mark.parametrize(
+    ("stored_effort", "expected"),
+    [("high", "high"), ("", None)],
+)
+def test_runner_request_prefers_saved_session_effort(monkeypatch, stored_effort, expected):
+    """A stored effort wins over the profile default; empty means provider default."""
+    from api import gateway_chat, routes
+
+    @contextmanager
+    def fake_scope(*_args, **_kwargs):
+        yield
+
+    captured = {}
+
+    def fake_resolver(cfg, **kwargs):
+        captured["session_effort"] = kwargs.get("session_effort")
+        stored = kwargs.get("session_effort")
+        if stored is not None:
+            return stored or None
+        return cfg["agent"]["reasoning_effort"]
+
+    monkeypatch.setattr(routes, "profile_scope_for_request_read", fake_scope)
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: {"agent": {"reasoning_effort": "none"}})
+    monkeypatch.setattr(gateway_chat, "_gateway_reasoning_effort_for_request", fake_resolver)
+
+    session = SimpleNamespace(profile="named-profile", reasoning_effort=stored_effort)
+    effort = routes._runner_reasoning_effort_for_session(session, model="test-model")
+
+    assert captured["session_effort"] == stored_effort
+    assert effort == expected
+
+
+def test_runner_request_pins_session_owned_config_path(monkeypatch, tmp_path):
+    """A launcher config override must not redirect a named-profile runner read."""
+    from api import config, gateway_chat, profiles, routes
+
+    profile_home = tmp_path / "profiles" / "analyst"
+    profile_home.mkdir(parents=True)
+    expected_path = profile_home / "config.yaml"
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _name: profile_home)
+    monkeypatch.setattr(gateway_chat, "_profile_config_path", lambda _home: expected_path)
+
+    @contextmanager
+    def fake_scope(*_args, **_kwargs):
+        yield
+
+    seen_paths = []
+
+    def snapshot():
+        seen_paths.append(getattr(config._thread_ctx, "config_snapshot_path", None))
+        return {"agent": {"reasoning_effort": "high"}}
+
+    monkeypatch.setattr(routes, "profile_scope_for_request_read", fake_scope)
+    monkeypatch.setattr(routes, "get_config_snapshot", snapshot)
+    monkeypatch.setattr(
+        gateway_chat,
+        "_gateway_reasoning_effort_for_request",
+        lambda cfg, **_kwargs: cfg["agent"]["reasoning_effort"],
+    )
+    prior_path = getattr(config._thread_ctx, "config_snapshot_path", None)
+
+    effort = routes._runner_reasoning_effort_for_session(
+        SimpleNamespace(profile="analyst", reasoning_effort=None),
+        model="test-model",
+    )
+
+    assert seen_paths == [expected_path]
+    assert getattr(config._thread_ctx, "config_snapshot_path", None) == prior_path
+    assert effort == "high"
+
+
 def test_profile_request_settings_use_deep_config_snapshots(monkeypatch):
     """Both lanes must capture request config via get_config_snapshot().
 

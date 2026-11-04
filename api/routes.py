@@ -29207,29 +29207,45 @@ def _external_model_alias_lane_response(alias_route, *, external_owned: bool) ->
 
 
 def _runner_reasoning_effort_for_session(session, *, model=None, model_provider=None):
-    """Resolve the runner override under the session's authoritative profile."""
-    from api.gateway_chat import _gateway_reasoning_effort_for_request
-
-    def _resolve():
-        # Same capture rule as _gateway_request_settings_for_session:
-        # get_config_snapshot() copies under the cache lock, so a concurrent
-        # default-profile read cannot swap this lane's resolved settings.
-        return _gateway_reasoning_effort_for_request(
-            get_config_snapshot(),
-            model=model,
-            model_provider=model_provider,
-        )
+    """Resolve the runner override from the session-owned profile snapshot."""
+    from api.config import _thread_ctx
+    from api.gateway_chat import (
+        _gateway_reasoning_effort_for_request,
+        _profile_config_path,
+        _stored_session_reasoning_effort,
+    )
+    from api.profiles import get_hermes_home_for_profile
 
     profile_name = str(getattr(session, "profile", "") or "").strip()
-    # Read-only scope: this resolver runs on the request thread, so it must not
-    # mirror the profile env into os.environ for other threads (see
-    # profile_scope_for_request_read).
+    profile_home = get_hermes_home_for_profile(profile_name)
+
+    # The read-only scope binds profile env values, but the config snapshot
+    # must also be pinned to this session's file rather than a live launcher
+    # HERMES_CONFIG_PATH that can belong to the process owner or a parked worker.
     with profile_scope_for_request_read(
         profile_name,
         "runner reasoning request settings",
         logger_override=logger,
     ):
-        return _resolve()
+        previous_config_path = getattr(_thread_ctx, "config_snapshot_path", None)
+        _thread_ctx.config_snapshot_path = _profile_config_path(profile_home)
+        try:
+            cfg = get_config_snapshot()
+        finally:
+            if previous_config_path is None:
+                try:
+                    del _thread_ctx.config_snapshot_path
+                except AttributeError:
+                    pass
+            else:
+                _thread_ctx.config_snapshot_path = previous_config_path
+
+        return _gateway_reasoning_effort_for_request(
+            cfg,
+            model=model,
+            model_provider=model_provider,
+            session_effort=_stored_session_reasoning_effort(session),
+        )
 
 
 def _start_run(
