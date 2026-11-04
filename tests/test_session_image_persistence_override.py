@@ -1153,3 +1153,67 @@ def test_plain_string_without_images_is_untouched():
     message = {"role": "user", "content": "just some ordinary text", "id": "b", "timestamp": 2.0}
     assert compact_persisted_image_parts([message]) == 0
     assert message["content"] == "just some ordinary text"
+
+
+def test_text_part_data_url_is_bounded_in_the_same_pass():
+    """A TEXT part holding a data URL must be masked on the FIRST save.
+
+    Greptile P1 on a4...: `_project_parts` only masked image-typed parts, so a
+    `{"type": "text", "text": "...data:image/...;base64,<long>..."}` part kept its
+    URL after the image part was replaced by the marker. On the NEXT save
+    `_project_sentinelled_content` returns None (nothing left to compact), so the
+    plain-string fallback masked the leftover URL and re-stamped
+    `_image_payload_digest` from a string that no longer distinguished two
+    originally-different rows -- and the dedup guard then deleted one.
+    """
+    from api.session_image_persistence_override import compact_persisted_image_parts
+
+    text_url = "data:image/png;base64," + _b64_bytes(b"T" * 2000)
+    image = _b64_bytes(b"A" * 2000)
+    parts = [
+        {"type": "text", "text": "shared context " + text_url},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64," + image}},
+    ]
+    message = {"role": "user", "content": "\x00json:" + json.dumps(parts), "id": "s", "timestamp": 1.0}
+
+    compact_persisted_image_parts([message])
+
+    assert text_url not in message["content"], "text-part data URL survived the first save"
+    assert image not in message["content"]
+
+
+def test_two_rows_differing_by_text_url_survive_repeated_saves():
+    """End-to-end reproduction of the reported deletion.
+
+    Two rows share `id`, `timestamp` and a text part, and differ only in their
+    image payload. Row count must stay 2 across repeated cold saves; the pre-fix
+    code produced 2 -> 2 -> 1 -> 1.
+    """
+    from api.models import _deduplicate_exact_stable_messages
+    from api.session_image_persistence_override import compact_persisted_image_parts
+
+    text_url = "data:image/png;base64," + _b64_bytes(b"T" * 2000)
+
+    def row(image_bytes):
+        parts = [
+            {"type": "text", "text": "shared context " + text_url},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + _b64_bytes(image_bytes)}},
+        ]
+        return {
+            "role": "user",
+            "content": "\x00json:" + json.dumps(parts),
+            "id": "same-id",
+            "timestamp": 5.0,
+        }
+
+    messages = [row(b"A" * 2000), row(b"B" * 2000)]
+    counts = []
+    for _ in range(4):
+        guarded, _removed = _deduplicate_exact_stable_messages(messages)
+        compact_persisted_image_parts(guarded)
+        messages = guarded
+        counts.append(len(messages))
+
+    assert counts == [2, 2, 2, 2], f"distinct rows were collapsed: {counts}"
+    digests = {m.get("_image_payload_digest") for m in messages}
+    assert len(digests) == 2, "the two rows must keep distinct provenance"

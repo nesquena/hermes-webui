@@ -237,13 +237,27 @@ def _update_part_digest(digest, part, payload, position):
 
 
 def _project_parts(content, digest):
-    """Return (projected_parts, removed_payloads) for one content array."""
+    """Return (projected_parts, removed_payloads) for one content array.
+
+    Every part is compacted in ONE pass: an image-typed part becomes the marker,
+    and any other part is walked for nested strings carrying a raw data URL. That
+    second half matters because a ``{"type": "text", "text": "...data:image/..."
+    }`` part holds bytes too, and leaving them for a later save makes the digest
+    unstable: the next save finds nothing left in the sentinel form, falls back to
+    the plain-string lane, and re-stamps ``_image_payload_digest`` from a string
+    that no longer distinguishes two originally-different rows -- after which the
+    replay guard deletes one (reproduced: row count 2 -> 2 -> 1 -> 1).
+    """
     projected = []
     removed = []
     for position, part in enumerate(content):
         payload = _inline_image_payload(part)
         if payload is None:
-            projected.append(part)
+            # Not an image part, but it may still CONTAIN inline bytes in a nested
+            # string. Project it in this same pass so the digest is stamped from
+            # the complete original exactly once.
+            nested, nested_changed = _project_nested(part, digest, (("i", position),))
+            projected.append(nested if nested_changed else part)
             continue
         _update_part_digest(digest, part, payload, position)
         projected.append(dict(_MARKER))
