@@ -13,20 +13,57 @@ The gateway solved exactly this problem with three valves
 idle TTL, and a memory-pressure pass that soft-evicts LRU transcripts once
 anonymous RSS crosses a budget.  This module ports the latter two to the WebUI:
 
-* ``sweep_idle_cached_agents`` — fully evicts cached agents idle past the TTL.
-* ``sweep_agent_cache_under_pressure`` — soft-evicts the least-recently-used
-  transcripts (drops ``_session_messages`` only, keeping the agent object so
-  cross-turn state survives); the transcript is rebuilt from the persisted
-  session on the next turn.
+* ``AgentCacheGovernor.sweep_idle`` — fully evicts cached agents idle past the
+  TTL (commit, then release clients / close the session DB).
+* ``AgentCacheGovernor.sweep_pressure`` — sheds the least-recently-used
+  transcripts: the entry leaves the cache, the agent handle and its tool state
+  survive, ``_session_messages`` is dropped, and the next turn rebuilds the
+  transcript from the persisted session.
 
 Both are driven by one daemon thread started from ``server.py``.  Everything
 here is pure/read-only so it can be unit-tested without a running server.
+
+DESIGN NOTE — the pressure valve IS the gateway's, not a new one
+---------------------------------------------------------------
+These four points are the whole contract; anything not written here was
+deliberately left out.
+
+1. The ONLY losslessness condition is the persistence gate,
+   ``transcript_persistence_caught_up(agent)``
+   (gateway/agent_cache_pressure.py:198): a transcript may be shed only when
+   ``_last_flushed_db_idx >= len(_session_messages)`` — the session DB already
+   holds every message the in-RAM list does, and the flush index only advances
+   on a fully successful write.  Unknown shapes count as NOT caught up: a
+   skipped eviction costs memory, a wrong one costs the conversation.
+2. The commit before a shed is BEST EFFORT
+   (gateway/run_agent_cache.py:890 ``_commit_memory_before_soft_evict``): the
+   captured transcript is delivered to ``AIAgent.commit_memory_session()``
+   inside the session owner's profile scope, the hook's return value is
+   ignored, and a raising hook is logged and dropped.  There is NO
+   acknowledgement, NO per-session release debt and NO retry loop.  The
+   installed Agent returns None and runs provider I/O through a swallow-all
+   helper, so no caller can observe whether extraction happened; gating a
+   release on that confirmation would mean never releasing.  What keeps the
+   conversation safe is (1), not the commit.
+3. The release is SOFT (gateway/run_agent_cache.py:911
+   ``_release_evicted_agent_soft``): the plan is popped out of the LRU cache
+   under the cache lock, the agent handle is kept (no session-DB teardown),
+   ``_session_messages`` and ``_db_flush_scan_prefix`` are dropped, and the
+   next turn rebuilds the transcript from the persisted session.
+4. One pass sheds at most ``_MAX_EVICTIONS_PER_PASS`` transcripts, LRU first,
+   and hands the batch to the one pressure-release daemon thread
+   (``PressureReleaseWorker``), so a provider commit can never hold the cache
+   lock or stall the pass.  ``protect_recent`` is clamped to half the cache.
+   When nothing is shedable above budget the pass logs the gateway's warning
+   once, with the cached / mid-turn / un-flushed counts — the only way an
+   operator learns the valve is stuck rather than idle.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import queue
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -282,98 +319,15 @@ def plan_pressure_evictions(
     return plan
 
 
-def _agent_has_resident_transcript(agent: Any) -> bool:
-    """True when the cached agent still pins transcript memory.
-
-    A soft-released entry keeps ``_session_messages == []`` and
-    ``_db_flush_scan_prefix is None``; it pins nothing worth re-dropping.
-    Re-selecting it would waste the pass's eviction budget on work that
-    frees nothing while the entries that still hold memory are never reached
-    (see the two-pass regression).  This is the "not evictable" branch the
-    maintainer asked for: an entry with no resident transcript and no scan
-    prefix is excluded until the next turn rebuilds the transcript.
-    """
-    if agent is None:
-        return False
-    try:
-        messages = getattr(agent, "_session_messages", None)
-        prefix = getattr(agent, "_db_flush_scan_prefix", None)
-        return bool(messages) or bool(prefix)
-    except Exception:
-        return False
-
-
-def _pending_work_outstanding(session_id: str) -> bool:
-    """True when memory work still needs the transcript.
-
-    That is uncommitted/in-flight work OR an unacknowledged release debt: the
-    debt is latched outside ``committed_generation``, so an ordinary commit (the
-    New Chat background worker, a boundary drain) can make the session look
-    clean while the release gate's refusal still stands.  Consulting only
-    ``has_uncommitted_work`` here would let the next pass clear a transcript no
-    extraction confirmed.
-
-    Fail closed: an unreadable lifecycle registry reads as "assume pending", so
-    the release is skipped rather than dropping a transcript that work may still
-    depend on.
-    """
-    try:
-        from api.streaming import _lifecycle_has_release_debt, _lifecycle_has_uncommitted_work
-
-        return bool(_lifecycle_has_uncommitted_work(session_id)) or bool(
-            _lifecycle_has_release_debt(session_id)
-        )
-    except Exception:
-        logger.debug("pending-work probe failed for %s", session_id, exc_info=True)
-        return True
-
-
-def _commit_pending_memory(session_id: str, agent: Any) -> bool:
-    """Commit pending lifecycle memory work BEFORE a pressure release.
-
-    soft_release_transcript() empties the agent's transcript; a later
-    shutdown/commit boundary then sees [] and batch-extraction providers
-    with empty-input guards skip fact extraction, losing the session's
-    memories.  Committing here — with the captured transcript still
-    resident and delivered explicitly — lets the provider extract from the
-    real messages.
-
-    Returns True when the release may proceed (nothing pending, or the
-    commit was delivered for the selected owner/generation, acknowledged, and
-    left nothing newer pending); False when the transcript must be kept —
-    pending work could not be committed (in-flight elsewhere, provider failure,
-    no message-accepting commit hook), the commit was not acknowledged, or a
-    successor registered work during the commit I/O.
-
-    The payload comes from the lifecycle: it belongs to the segment OWNER, not
-    to whichever agent is cached now (a rebuild leaves the older handle owning
-    its dirty generation), so the governor does not hand over the replacement's
-    transcript for an older owner's work.
-    """
-    if not _pending_work_outstanding(session_id):
-        return True
-    try:
-        from api.streaming import _lifecycle_commit_pending_for_release
-
-        return bool(_lifecycle_commit_pending_for_release(session_id, agent))
-    except Exception:
-        logger.debug(
-            "pending-memory commit before release failed for %s",
-            session_id,
-            exc_info=True,
-        )
-        return False
-
-
-
 def soft_release_transcript(agent: Any) -> None:
-    """Drop the live transcript from a cached agent without tearing it down.
+    """Drop the live transcript from an evicted agent without tearing it down.
 
-    The next turn rebuilds messages from the persisted session (the WebUI feeds
-    ``get_state_db_session_messages`` fresh each turn), so dropping the in-RAM
-    list is safe and is the single biggest lever on resident memory.  Keeps the
-    agent object itself so cross-turn state (_user_turn_count, memory-provider
-    state) survives the pressure pass.
+    Mirrors gateway/run_agent_cache.py:911 ``_release_evicted_agent_soft``: the
+    agent handle and its tool state (terminal sandbox, browser, background
+    processes) are kept — the session may resume — while the conversation is
+    given back.  The next turn rebuilds messages from the persisted session (the
+    WebUI feeds ``get_state_db_session_messages`` fresh each turn), so dropping
+    the in-RAM list is safe and is the single biggest lever on resident memory.
 
     Only safe once the transcript is fully on disk: clearing the sole complete
     in-memory copy while persistence lags loses history on the next rebuild.
@@ -399,7 +353,8 @@ def soft_release_transcript(agent: Any) -> None:
 def transcript_persistence_caught_up(agent: Any) -> bool:
     """True when the agent's live transcript is fully on disk (gateway parity).
 
-    Mirrors ``gateway/agent_cache_pressure.py::transcript_persistence_caught_up``:
+    Mirrors ``gateway/agent_cache_pressure.py::transcript_persistence_caught_up``
+    (line 198 — the only losslessness condition this module consults):
     ``_last_flushed_db_idx`` is advanced to ``len(messages)`` by
     ``AIAgent._flush_messages_to_session_db`` only on a fully successful write,
     so ``flushed >= len(messages)`` means the in-memory list is exactly what the
@@ -413,6 +368,85 @@ def transcript_persistence_caught_up(agent: Any) -> bool:
     if not isinstance(flushed, int) or isinstance(flushed, bool):
         return False
     return flushed >= len(messages)
+
+
+def _commit_before_soft_release(session_id: str, agent: Any) -> None:
+    """Best-effort memory commit before the transcript is dropped.
+
+    Mirrors gateway/run_agent_cache.py:890 ``_commit_memory_before_soft_evict``:
+    the return value is ignored and a raising hook is only logged.  The call
+    goes through the session lifecycle so (a) it runs inside the session
+    owner's profile scope (#8517) and (b) the provider receives the OWNER's
+    captured transcript instead of ``[]`` — a batch-extraction provider with an
+    empty-input guard would otherwise skip the session's memories entirely.
+    """
+    try:
+        from api.streaming import _lifecycle_commit_session_memory
+
+        _lifecycle_commit_session_memory(session_id, agent=agent, wait=False)
+    except Exception:
+        logger.debug("pre-release memory commit failed for %s", session_id, exc_info=True)
+
+
+def _release_pressure_batch(plan: List[Tuple[str, Any]]) -> None:
+    """Release one pressure batch sequentially: commit, then soft release.
+
+    The plan is drained (``pop(0)`` + ``del``) rather than iterated so no local
+    reference pins the evicted agents until the batch ends
+    (gateway/run_agent_cache.py:1036 drains its batch the same way).
+    """
+    while plan:
+        key, agent = plan.pop(0)  # FIFO — LRU-first order preserved
+        try:
+            _commit_before_soft_release(key, agent)
+            soft_release_transcript(agent)
+        except Exception:
+            logger.debug("pressure soft-release failed for %s", key, exc_info=True)
+        del agent
+
+
+class PressureReleaseWorker:
+    """ONE daemon thread that drains pressure batches, strictly in order.
+
+    The gateway starts a fresh daemon thread per batch
+    (gateway/run_agent_cache.py:1026).  ``Thread.start()`` blocks until the
+    child is scheduled, and under the cache churn this valve exists for that
+    costs tens of milliseconds per pass on some platforms (measured ~47ms on
+    Windows/CPython with a thread spinning on the cache lock) — enough to turn
+    the valve itself into the stall it exists to prevent.  One long-lived
+    worker gives the same contract — the commit (provider I/O) never runs on
+    the pass or under the cache lock — without paying that per pass.
+
+    ``submit(plan, done)`` is non-blocking; ``done`` (an Event) is set when the
+    batch finishes.  Ordering is FIFO, so LRU-first order across batches is
+    preserved.
+    """
+
+    def __init__(self) -> None:
+        self._batches: "queue.SimpleQueue" = queue.SimpleQueue()
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+
+    def submit(self, plan: List[Tuple[str, Any]], done: threading.Event) -> None:
+        with self._lock:
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(
+                    target=self._run,
+                    name="agent-cache-pressure",
+                    daemon=True,
+                )
+                self._thread.start()
+        self._batches.put((plan, done))
+
+    def _run(self) -> None:
+        while True:
+            plan, done = self._batches.get()
+            try:
+                _release_pressure_batch(plan)
+            except Exception:
+                logger.debug("pressure batch release failed", exc_info=True)
+            finally:
+                done.set()
 
 
 class AgentCacheGovernor:
@@ -452,6 +486,11 @@ class AgentCacheGovernor:
         # agents / injected test agents).  Refreshed at the top of each sweep;
         # None until the first sweep (unknown → fail closed).
         self._last_active_snapshot: Optional[set] = None
+        # The single daemon thread that releases pressure batches (provider
+        # I/O must never run on the pass or under the cache lock), and the
+        # Event for the batch most recently submitted.
+        self._release_worker = PressureReleaseWorker()
+        self._last_release_done: Optional[threading.Event] = None
 
     def _entry_turn_active(self, key: str, agent: Any) -> bool:
         """True when the cached entry is mid-turn (per-entry lease).
@@ -459,8 +498,8 @@ class AgentCacheGovernor:
         The streaming layer maintains ``agent._turn_active`` at turn
         boundaries (api.config.register_active_run / unregister_active_run),
         so reading it here inside the cache lock yields the NEWEST liveness
-        state — the plan-time snapshot can be stale by the time a release
-        runs.  Entries without a lease (pre-lease agents, injected test
+        state — the plan-time snapshot can be stale by the time the plan is
+        built.  Entries without a lease (pre-lease agents, injected test
         agents) fall back to the plan-time snapshot for compatibility.  An
         unknown liveness (no lease AND no snapshot yet) is treated as ACTIVE:
         never evict an agent whose liveness we cannot determine (fail closed).
@@ -556,20 +595,21 @@ class AgentCacheGovernor:
 
     # ── Memory pressure ─────────────────────────────────────────────────────
     def sweep_pressure(self, rss_mb: Optional[int] = None) -> int:
-        """Soft-evict LRU transcripts once anonymous RSS crosses the budget.
+        """Shed LRU transcripts once anonymous RSS crosses the budget.
 
-        Returns the number of transcripts dropped (0 when memory is fine or the
-        pass is disabled).
+        Mirrors gateway/run_agent_cache.py:961
+        ``_sweep_agent_cache_under_pressure``: over budget, plan the LRU
+        transcripts that are live, not mid-turn, and whose persistence is
+        caught up; pop the plan OUT of the cache under ``self._lock``; then
+        hand the batch to the single pressure-release daemon thread
+        (``PressureReleaseWorker``), because the commit is provider I/O and
+        must hold neither the cache lock nor the pass.  Popping under
+        the lock is what makes the release race-free without a re-check: a turn
+        that starts right after misses the cache and rebuilds its agent, so the
+        batch can only touch agents nobody is serving.
 
-        Concurrency: the cache snapshot is taken under ``self._lock`` so the
-        plan is built from a consistent view (no dict-mutation RuntimeError
-        while server threads churn the cache).  Each planned soft-release is
-        then re-validated immediately before clearing the transcript: the entry
-        must still exist, still hold the SAME agent object we planned (a turn
-        could have replaced it), the session must not be mid-turn, and the
-        transcript must be fully persisted.  A new turn can start after the
-        plan but before release; skipping the eviction then costs memory, a
-        wrong release costs the user their conversation.
+        Returns the number of transcripts claimed for release (0 when memory is
+        fine, the pass is disabled, or nothing is shedable).
         """
         if not self.memory_high_mb:
             return 0
@@ -577,15 +617,6 @@ class AgentCacheGovernor:
             rss_mb = read_anon_rss_mb()
         if rss_mb is None or rss_mb < self.memory_high_mb:
             return 0
-
-        # Snapshot under the lock: the live OrderedDict is mutated by server
-        # threads on every turn, and iterating it unlocked races an insert or
-        # eviction (RuntimeError: dictionary changed size during iteration).
-        with self._lock:
-            snapshot = [
-                (key, entry[0] if isinstance(entry, tuple) and entry else entry)
-                for key, entry in self._cache.items()
-            ]
 
         try:
             active = self._active_sids_fn()
@@ -596,75 +627,96 @@ class AgentCacheGovernor:
         self._last_active_snapshot = active
 
         def _is_evictable(key: str, agent: Any) -> bool:
+            # Gateway parity: _is_live(agent) and transcript_persistence_caught_up.
             if agent is None:
                 return False
-            if key in active:
+            if self._entry_turn_active(key, agent):
                 return False
-            if not _agent_has_resident_transcript(agent):
-                return False  # already released — exclude from this pass
-            if not transcript_persistence_caught_up(agent):
-                return False
-            return True
+            return transcript_persistence_caught_up(agent)
 
-        plan = plan_pressure_evictions(
-            snapshot,
-            _is_evictable,
-            protect_recent=self.protect_recent,
+        # Snapshot AND claim under the lock: the live OrderedDict is mutated by
+        # server threads on every turn, and iterating it unlocked races an
+        # insert or eviction (RuntimeError: dictionary changed size).
+        with self._lock:
+            ordered = [
+                (key, entry[0] if isinstance(entry, tuple) and entry else entry)
+                for key, entry in self._cache.items()
+            ]
+            if not ordered:
+                # Nothing cached — whatever is using the heap, it isn't us, and
+                # warning about it every tick would point at the wrong subsystem.
+                return 0
+            plan = plan_pressure_evictions(
+                ordered,
+                _is_evictable,
+                protect_recent=self.protect_recent,
+                max_evictions=_MAX_EVICTIONS_PER_PASS,
+            )
+            for key, agent in plan:
+                # Only drop the entry we validated: a turn can re-insert the key
+                # between planning and this pop, and that replacement is a live
+                # handle nobody planned to shed.
+                entry = self._cache.get(key)
+                current = entry[0] if isinstance(entry, tuple) and entry else entry
+                if current is agent:
+                    self._cache.pop(key, None)
+
+        if not plan:
+            self._warn_nothing_shedable(ordered, rss_mb)
+            return 0
+
+        claimed = len(plan)  # the worker drains `plan` in place
+        # One summary line per shedding pass (INFO: the WARNING below is
+        # reserved for a valve that cannot shed at all).
+        logger.info(
+            "Agent cache pressure: anon RSS %sMB over budget %sMB — shedding "
+            "%d LRU transcript(s): %s",
+            rss_mb, self.memory_high_mb, claimed, ", ".join(key for key, _ in plan),
         )
-        dropped = 0
-        for key, agent in plan:
-            try:
-                # Revalidate under the lock immediately before release: the
-                # plan can go stale between planning and execution.  The
-                # mid-turn check here uses the per-entry lease (newest state),
-                # NOT the plan-time snapshot — a turn that started after the
-                # snapshot must stop the release.
-                #
-                # Three-stage release: the pending-memory commit performs
-                # provider I/O and must NOT run while holding the cache lock
-                # (it would stall every cache user).  The cache-lock hold is
-                # only the cheap revalidation; the commit runs outside the
-                # lock; the release itself re-locks and re-validates, so a
-                # turn that started during the commit is still protected.
-                with self._lock:
-                    entry = self._cache.get(key)
-                    current = entry[0] if isinstance(entry, tuple) and entry else entry
-                    if current is not agent:
-                        continue  # entry replaced since planning — leave it
-                    if self._entry_turn_active(key, agent) or not transcript_persistence_caught_up(agent):
-                        continue  # went active / not persisted — skip
-                # Commit pending memory work with the captured transcript
-                # BEFORE the release empties it; skip the release when the
-                # commit could not run (a skipped release costs memory, a
-                # wrong release costs the user's memories).
-                if not _commit_pending_memory(key, agent):
-                    continue
-                with self._lock:
-                    entry = self._cache.get(key)
-                    current = entry[0] if isinstance(entry, tuple) and entry else entry
-                    if current is not agent:
-                        continue  # entry replaced during the commit — leave it
-                    if self._entry_turn_active(key, agent) or not transcript_persistence_caught_up(agent):
-                        continue  # went active / not persisted — skip
-                    if _pending_work_outstanding(key):
-                        # Ownership/generation fence shared with turn
-                        # publication: a successor that started and finished
-                        # while the commit I/O ran has registered work that
-                        # still needs this transcript, and a turn that is
-                        # mid-flight has not registered anything yet.
-                        continue
-                    soft_release_transcript(agent)
-                if self._eviction_hook is not None:
+        if self._eviction_hook is not None:
+            for key, agent in plan:
+                try:
                     self._eviction_hook(key, agent, soft=True)
-                logger.info(
-                    "Agent-cache governor: pressure soft-evicted session=%s "
-                    "(rss=%sMB budget=%sMB, cache_size=%d)",
-                    key, rss_mb, self.memory_high_mb, len(self._cache),
-                )
-                dropped += 1
-            except Exception:
-                logger.debug("pressure soft-evict failed for %s", key, exc_info=True)
-        return dropped
+                except Exception:
+                    logger.debug("eviction hook failed for %s", key, exc_info=True)
+        done = threading.Event()
+        self._last_release_done = done
+        try:
+            self._release_worker.submit(plan, done)
+        except Exception:
+            # Worker could not be started (interpreter shutdown): inline.
+            _release_pressure_batch(plan)
+            done.set()
+        return claimed
+
+    def _warn_nothing_shedable(self, ordered: List[Tuple[str, Any]], rss_mb: int) -> None:
+        """Log the gateway's one warning when over budget with nothing to shed.
+
+        Same shape as gateway/run_agent_cache.py:1004-1019: the counts say
+        whether memory is pinned by turns that are still running (it will fall
+        on its own) or by transcripts that never reach the session DB (the valve
+        is stuck, and the operator has to look at persistence).
+        """
+        mid_turn = sum(
+            1 for key, agent in ordered if agent is not None and self._entry_turn_active(key, agent)
+        )
+        unflushed = sum(
+            1 for _key, agent in ordered
+            if agent is not None and not transcript_persistence_caught_up(agent)
+        )
+        logger.warning(
+            "Agent cache pressure: anon RSS %sMB over budget %sMB but no "
+            "evictable session (%d cached, %d mid-turn, %d blocked on "
+            "un-flushed persistence)%s",
+            rss_mb, self.memory_high_mb, len(ordered), mid_turn, unflushed,
+            (
+                " — transcripts are not reaching the session DB (session "
+                "persistence disabled or failing?); the memory valve cannot "
+                "shed sessions until they persist."
+                if unflushed and not mid_turn
+                else " — memory will keep climbing until those turns finish."
+            ),
+        )
 
     def run_pass(self) -> Dict[str, int]:
         """Run one full governance pass; returns {idle_evicted, pressure_dropped}."""

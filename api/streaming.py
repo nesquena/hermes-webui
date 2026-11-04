@@ -13797,18 +13797,6 @@ def _lifecycle_has_uncommitted_work(session_id: str) -> bool:
     return has_uncommitted_work(session_id)
 
 
-def _lifecycle_commit_pending_for_release(session_id: str, agent) -> bool:
-    from api.session_lifecycle import commit_pending_for_release
-
-    return commit_pending_for_release(session_id, agent)
-
-
-def _lifecycle_has_release_debt(session_id: str) -> bool:
-    from api.session_lifecycle import has_release_debt
-
-    return has_release_debt(session_id)
-
-
 def _lifecycle_unregister_agent(session_id: str, *, agent=None) -> None:
     from api.session_lifecycle import unregister_agent
 

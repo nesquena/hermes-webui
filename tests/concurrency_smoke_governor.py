@@ -49,16 +49,25 @@ def run_smoke(passes: int = 300, n: int = 2000) -> dict:
     for i in range(n):
         cache[f"s{i}"] = (FakeAgent(f"s{i}", flushed=True), object())
     lock = threading.Lock()
+    stop = threading.Event()
+    stats = {"churn": 0, "evicted": 0, "unpersisted_at_claim": 0}
+
+    def _claim_hook(key, agent, soft):
+        # Runs at claim time, while the transcript is still resident: this is
+        # the only moment the persistence gate can be observed directly.  A
+        # shed transcript that was NOT fully on disk would lose history on the
+        # next rebuild, so count it here (the post-hoc check below cannot see
+        # it: an emptied list is trivially 'caught up').
+        if soft and not transcript_persistence_caught_up(agent):
+            stats["unpersisted_at_claim"] += 1
 
     gov = AgentCacheGovernor(
         cache, lock,
         idle_ttl_secs=0,          # pressure path only
         memory_high_mb=1,         # force over-budget (production code reads RSS; rss_mb overrides)
         protect_recent=0,
+        eviction_hook=_claim_hook,
     )
-
-    stop = threading.Event()
-    stats = {"churn": 0, "evicted": 0}
 
     def churn():
         i = 0
@@ -90,10 +99,9 @@ def run_smoke(passes: int = 300, n: int = 2000) -> dict:
     t.join(timeout=5)
     elapsed = time.time() - start
 
-    # A released agent's _session_messages must be empty AND persistence must
-    # have been caught up at release time. We cannot trace the release moment
-    # afterwards, so instead assert: every agent still in the cache whose
-    # messages are empty must have flush idx == len(messages at release).
+    # Nothing shed may have been un-persisted at claim time (see
+    # _claim_hook); the post-hoc sweep below is a second, weaker net for
+    # entries that are still cached with an emptied transcript.
     bad = 0
     with lock:
         for key, entry in cache.items():
@@ -107,7 +115,7 @@ def run_smoke(passes: int = 300, n: int = 2000) -> dict:
         "churn_ops": stats["churn"],
         "dropped": stats["evicted"],
         "errors": errors,
-        "unpersisted": bad,
+        "unpersisted": bad + stats["unpersisted_at_claim"],
         "elapsed": elapsed,
     }
 
