@@ -14728,10 +14728,28 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
         if not content or not isinstance(content, str):
             continue
         by_role.setdefault(role, []).append(key)
+    # Clock-free exact-identity index (#8672 gate r2): maps an identity with
+    # the #7587 occurrence discriminator stripped back to the original keys.
+    # _matching_visible_duplicate probes it BEFORE the bounded fuzzy fallback
+    # short-circuits, so a row whose clock is missing can still collapse onto
+    # an exact identity replay on transcripts over the fuzzy bound, without
+    # merging two established different occurrences.  Structural (non-string)
+    # content rows are included: this probe is exact identity only and can
+    # never fuzzy-match a scalar.
+    by_clockfree = {}
+    for key in visible_keys:
+        if not isinstance(key, tuple) or not key:
+            continue
+        by_clockfree.setdefault(_visible_key_without_occurrence(key), []).append(key)
     # Keep loose_by_key lazy.  Some transcripts contain multi-megabyte tool
     # outputs; eagerly casefolding + regex-tokenizing every visible key on every
     # duplicate probe made /api/session take 10s+ and blocked /api/sessions.
-    return {"keys": visible_keys, "by_role": by_role, "loose_by_key": {}}
+    return {
+        "keys": visible_keys,
+        "by_role": by_role,
+        "loose_by_key": {},
+        "by_clockfree": by_clockfree,
+    }
 
 
 _VISIBLE_DUPLICATE_FUZZY_MAX_KEYS = 1000
@@ -14866,6 +14884,38 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
     occurrence = _visible_key_field(visible_key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
     if not content:
         return None
+    # Clock-optional EXACT replay match (#8672 gate r2).  The #7587
+    # occurrence discriminator separates two distinct-clock occurrences, but
+    # a row whose clock is missing cannot prove it is a different occurrence
+    # (see _visible_keys_share_occurrence): it must still collapse onto an
+    # exact identity replay.  The fuzzy loop below carries that rule, but on
+    # transcripts over the fuzzy bound it short-circuits BEFORE reaching it,
+    # and the in-window user path then appends the replay as a second row.
+    # This index probe (constant time, fed by the prebuilt clock-free index
+    # in _build_visible_duplicate_lookup) restores the collapse at every size
+    # without removing the fuzzy work bound and without merging two
+    # established different occurrences: both sides must be established AND
+    # different to be treated as distinct.  Runs only when a prebuilt lookup
+    # is available (the reconciliation merge path) and ONLY over the fuzzy
+    # bound: a lookup-less over-bound probe still returns None exactly as
+    # before, so the work bound is never silently lifted, and under the bound
+    # the existing fuzzy loop below already applies the same wildcard rule,
+    # keeping its first-match bookkeeping (metadata-merge target /
+    # skipped-count bucket) byte-identical.
+    if (
+        lookup is not None
+        and len(visible_keys) > _VISIBLE_DUPLICATE_FUZZY_MAX_KEYS
+    ):
+        by_clockfree = lookup.get("by_clockfree")
+        if by_clockfree:
+            candidates = by_clockfree.get(_visible_key_without_occurrence(visible_key))
+            if candidates:
+                for cand in candidates:
+                    if _visible_keys_share_occurrence(
+                        occurrence,
+                        _visible_key_field(cand, _VISIBLE_KEY_OCCURRENCE_INDEX, ""),
+                    ):
+                        return cand
     # Structured content is matched by exact identity only (checked above).
     # Substring/token matching would otherwise compare a canonical list
     # serialisation against arbitrary text and pair a rich row with a scalar.

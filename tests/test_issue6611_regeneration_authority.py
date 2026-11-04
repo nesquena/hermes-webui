@@ -938,3 +938,91 @@ def test_in_tail_duplicate_guard_refuses_bounded_and_full_revision_accepted(monk
     assert full_rev
     plan = plan_regeneration(session, expected_revision=full_rev, lock_held=True)
     assert plan is not None and plan.revision == full_rev
+
+
+def test_in_tail_distinct_clock_repeated_exchange_keeps_full_bounded_parity(monkeypatch, tmp_path):
+    """#8672 gate r2: a genuinely LATER repeated exchange (a fresh clock) wholly
+    inside the bounded tail must refuse the bounded path so the full and bounded
+    regeneration reads agree.
+
+    The #7587 occurrence discriminator separates the fresh exchange from its
+    earlier twin, so the occurrence-sensitive in-tail-duplicate proof no longer
+    sees a repeat.  But the bounded snapshot feeds a CLOCK-TOLERANT downstream
+    (state_db_delta_after_context), which collapses the repeated exchange onto
+    the earlier twin regardless of clock: the bounded read then returns fewer
+    context rows than the full read, the revisions differ, and
+    plan_regeneration(expected_revision=<full revision>) raises
+    stale_regeneration_revision with no intervening write.  The guard must fall
+    back to the full read exactly as master always did for these shapes.
+    """
+    import sqlite3
+
+    from api import models
+    from api.session_ops import (
+        _bounded_tail_snapshot_if_safe,
+        _sidecar_regeneration_read_floor,
+        plan_regeneration,
+        regeneration_revision_for,
+        regeneration_state,
+    )
+
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, "
+        "content TEXT, timestamp REAL, tool_calls TEXT, active INTEGER)"
+    )
+    # Sidecar/context: 202 alternating rows m0000..m0201, timestamps 100..301.
+    for i in range(202):
+        role = "user" if i % 2 == 0 else "assistant"
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp, active) VALUES (?,?,?,?,1)",
+            ("s1", role, f"m{i:04d}", 100.0 + i),
+        )
+    # state.db adds a fresh exchange repeating m0200 / m0201 at 400 / 401.
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp, active) VALUES (?,?,?,?,1)",
+        ("s1", "user", "m0200", 400.0),
+    )
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp, active) VALUES (?,?,?,?,1)",
+        ("s1", "assistant", "m0201", 401.0),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
+
+    sidecar = []
+    for i in range(202):
+        role = "user" if i % 2 == 0 else "assistant"
+        sidecar.append({"role": role, "content": f"m{i:04d}", "timestamp": 100.0 + i})
+    session = Session(
+        session_id="s1",
+        messages=list(sidecar),
+        context_messages=list(sidecar),
+    )
+
+    floor = _sidecar_regeneration_read_floor(session)
+    assert floor == 102.0, f"anchor budget floor: {floor}"
+    # The occurrence-sensitive tail keys are all distinct (fresh clocks differ),
+    # yet the guard must still refuse: the clock-tolerant context alignment
+    # would consume the fresh exchange and diverge from the full read.
+    snap = models.get_state_db_regeneration_tail_snapshot("s1", floor)
+    assert snap is not None and len(snap["tail_keys"]) == len(set(snap["tail_keys"]))
+    assert _bounded_tail_snapshot_if_safe(session, floor) is None, \
+        "distinct-clock in-tail repeated exchange must refuse the bounded path"
+
+    # Full and bounded reads must agree, and the full-read revision must be
+    # accepted by the actual planner.
+    full_rows, full_context = regeneration_state(session, use_sidecar=False)
+    bounded_rows, bounded_context = regeneration_state(session, use_sidecar=True)
+    full_rev = regeneration_revision_for(full_rows, session=session, context=full_context)
+    bounded_rev = regeneration_revision_for(
+        bounded_rows, session=session, context=bounded_context
+    )
+    assert len(full_rows) == len(bounded_rows) == 204
+    assert len(full_context) == len(bounded_context) == 204
+    assert full_rev == bounded_rev
+    plan = plan_regeneration(session, expected_revision=full_rev, lock_held=True)
+    assert plan is not None and plan.revision == full_rev
+
