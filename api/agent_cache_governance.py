@@ -80,25 +80,43 @@ deliberately left out.
    the hook's return value is ignored — but the LIFECYCLE LEDGER still knows
    whether the session's extraction is pending, and that pending extraction has
    exactly one payload: the live transcript.  So a delivery the owner scope
-   refused (or a hook that raised) does not clear it: the entry still leaves the
-   cache (no pass re-delivers to a hook that is refusing), the transcript stays
-   resident for the next session boundary, and no empty-payload commit is ever
-   issued in its place.  A session with nothing pending is released normally.
+   refused does not clear it: the entry still leaves the cache (no pass
+   re-delivers to a hook that is refusing), the transcript stays resident for
+   the next session boundary, and no empty-payload commit is ever issued in its
+   place.  A session with nothing pending is released normally.
 
-MEASURED COST (like-for-like only; see the review evidence)
------------------------------------------------------------
-With a REAL provider commit on the wire, the pass stops paying for it: 43.6 ms
--> 0.13 ms per over-budget pass measured here (200 cached, 16 shedable, 5 ms
-commit); the independent review measured 88.4 ms -> 0.063 ms with its own
-harness shape.  That is the claim this design buys.
+   THIS IS THE DELIBERATE DIVERGENCE FROM THE GATEWAY: the gateway logs a
+   raising hook and DROPS it (point 2).  Here a raising hook is logged, the
+   transcript is RETAINED for the next boundary, and the ledger stays dirty —
+   because the ledger says that extraction is still owed and the transcript is
+   the only payload it can be given.  Retaining is the whole difference: no
+   retry loop, no debt, no timer lives in this valve; the next session boundary
+   re-attempts the delivery as it would for any pending generation.
 
-Walking the cache is NOT the win.  At 2000 entries a pass costs ~0.45 ms mean
-here against ~0.76 ms before the PR and ~0.44 ms on the previous revision of
-this branch — the same order (the review's 0.762 ms mean / 0.180 ms median vs
-0.915 / 0.199 says so too).  Do not quote a pass-latency win measured on an
-EMPTY cache (the ~2 us early return), and do not quote the churn smoke's wall
-clock: that is import amortisation and it disappears once ``api.streaming`` is
-already imported, as it always is in a running server.
+   The price of that choice, recorded rather than fixed: a session whose commit
+   is permanently REFUSED keeps its transcript and its provider client until the
+   next boundary (reviewer-measured: 40 such sessions -> 32 MB over 24 h).  The
+   valve cannot free the transcript without losing the extraction, and the only
+   release path here (``soft_release_transcript``) frees the client and drops
+   the transcript in one step — so a refused session keeps both.  That is the
+   price of not silently losing extraction.  An entry whose commit raises
+   ``BaseException`` is a different case: it is ABANDONED explicitly (claim
+   released, clients released, transcript kept and logged as kept), because
+   nothing else will ever touch that handle.
+
+MEASURED COST (ordering only; the numbers are one machine's, not a benchmark)
+-----------------------------------------------------------------------------
+What is defensible is the ORDERING: the provider commit is moved off the pass
+(it runs on the release worker, never on the pass and never under the cache
+lock), and the cache walk is unchanged.  The reviewer's harness, which is
+shape-independent in method, measured 87.7 ms -> 0.226 ms per over-budget pass
+once the commit is real (5 ms), and a pure cache walk of 0.184 ms -> 0.119 ms.
+Those are measurements from ONE machine and do not reproduce elsewhere — the
+same code re-measured on another host is 4-7x apart, so treat them as the shape
+of the win, not as numbers to quote.  What must not be claimed: a pass-latency
+win measured on an EMPTY cache (the ~2 us early return), or the churn smoke's
+wall clock — that is import amortisation and it disappears once
+``api.streaming`` is already imported, as it always is in a running server.
 """
 
 from __future__ import annotations
@@ -502,13 +520,22 @@ def _commit_before_soft_release(session_id: str, agent: Any) -> bool:
     instead of ``[]`` — a batch-extraction provider with an empty-input guard
     would otherwise skip the session's memories entirely.
 
-    Returns True when the transcript may be released:
+    Returns True when the transcript may be released — never because "the hook
+    ran", only because the LEDGER has nothing pending for this session:
 
     * the lifecycle has no pending work for the session — nothing needs the
       payload, so there is nothing to commit and no commit is issued; or
-    * the commit ran for the selected owner/generation and advanced the ledger.
+    * after the delivery, the ledger shows no pending work left.
 
-    False means the pending extraction was REFUSED (owner scope refused, hook
+    The second condition has to be re-read after the attempt: the delivery
+    commits the session's EARLIEST pending segment
+    (``session_lifecycle._first_uncommitted_segment``), so an agent that owns a
+    later generation can watch an OLDER owner's segment succeed while its own
+    generation is still pending.  Treating that as success cleared the agent's
+    transcript, and the next boundary then committed ``payload=None`` and marked
+    its extraction clean.
+
+    False means a pending extraction was REFUSED (owner scope refused, hook
     raised, or the lifecycle could not even be probed): the transcript is the
     only payload that extraction can still be given, so the caller must keep it.
     Clearing it there is how the ledger ended up committing ``payload=None`` at
@@ -526,15 +553,81 @@ def _commit_before_soft_release(session_id: str, agent: Any) -> bool:
     try:
         if not _lifecycle_has_uncommitted_work(session_id):
             return True
-        if _lifecycle_commit_session_memory(session_id, agent=agent, wait=False):
-            return True
-        # Refused or failed (or already in flight elsewhere).  A concurrent
-        # boundary may have committed it for us while we were refused; if the
-        # work is still pending, the payload has to stay.
+        _lifecycle_commit_session_memory(session_id, agent=agent, wait=False)
+        # The delivery commits the session's EARLIEST pending segment, which is
+        # not necessarily this agent's: a rebuilt agent can own a later
+        # generation while an older owner's segment is still pending.  "The hook
+        # ran" is therefore not "this transcript is free" — the ledger is the
+        # only fence, and it is re-read AFTER the attempt (which also covers a
+        # concurrent boundary that committed the work while we were refused).
         return not _lifecycle_has_uncommitted_work(session_id)
     except Exception:
         logger.debug("pre-release memory commit failed for %s", session_id, exc_info=True)
         return False
+
+
+def _abandon_aborted_release(session_id: str, agent: Any, exc: BaseException) -> None:
+    """Give up on ONE entry whose release raised a ``BaseException``.
+
+    A commit hook can raise past ``Exception`` — ``SystemExit`` from a lazy
+    relaunch import, an interrupt.  ``commit_session_memory`` unwinds from the
+    provider call without reaching either of its ``in_flight`` clear points, so
+    without this the session's claim stays set for the life of the process:
+    ``commit_session_memory(wait=True)`` then blocks on every later boundary and
+    ``discard_session`` refuses, while the provider client stays open
+    (measured by the reviewer: claim stuck, >3 s per call, client never
+    released).
+
+    So the abandonment is explicit and logged: hand the in-flight claim back,
+    release the LLM clients with the same helper the normal path uses, and keep
+    the transcript.  It is kept because the ledger still reports the extraction
+    as pending and the transcript is the only payload a later boundary can give
+    it — dropping it is precisely the silent data loss this valve avoids.
+    Releasing the clients does not disable that retry: ``release_clients()``
+    keeps the memory provider (gateway parity), so ``commit_memory_session``
+    still works on the next boundary.  A legacy agent shape with no
+    ``release_clients()`` only has the full close, which takes the transcript
+    with it; the log says that instead of pretending the payload survived.
+    """
+    released = False
+    try:
+        from api.streaming import _lifecycle_release_in_flight
+
+        released = _lifecycle_release_in_flight(session_id)
+    except Exception:
+        logger.debug(
+            "could not release the in-flight commit claim for %s", session_id, exc_info=True
+        )
+    # The legacy shape (no ``release_clients``) only has the FULL close, which
+    # also drops the transcript — report what actually happened to the payload
+    # instead of claiming it survived.
+    soft = callable(getattr(agent, "release_clients", None))
+    _release_agent_clients(agent)
+    kept = bool(getattr(agent, "_session_messages", None))
+    if not kept:
+        fate = (
+            "and its transcript went with the legacy full close (that agent shape "
+            "has no soft release), so the next boundary has no payload for the "
+            "extraction that is still pending."
+        )
+    elif soft:
+        fate = (
+            "transcript KEPT because its extraction is still pending and the "
+            "transcript is the only payload the next session boundary can deliver."
+        )
+    else:
+        fate = (
+            "transcript KEPT — the legacy full close left it in place, so the next "
+            "boundary can still deliver the pending extraction."
+        )
+    logger.warning(
+        "Agent cache pressure: release for session=%s aborted by %s; abandoning "
+        "that entry — in-flight commit claim %s, LLM clients released, %s",
+        session_id,
+        type(exc).__name__,
+        "released" if released else "was not held",
+        fate,
+    )
 
 
 def _release_pressure_batch(plan: List[Tuple[str, Any]]) -> None:
@@ -542,7 +635,7 @@ def _release_pressure_batch(plan: List[Tuple[str, Any]]) -> None:
 
     The plan is drained (``pop(0)`` + ``del``) rather than iterated so no local
     reference pins the evicted agents until the batch ends
-    (gateway/run_agent_cache.py:1036 drains its batch the same way).
+    (gateway/run_agent_cache.py:1041 drains its batch the same way).
 
     Failure policy per entry — the plan was popped out of the cache at claim
     time, so whatever happens next the entry is unreachable for later passes:
@@ -552,12 +645,13 @@ def _release_pressure_batch(plan: List[Tuple[str, Any]]) -> None:
     * commit refused (Exception) -> KEEP the transcript for the next session
       boundary instead of shedding it; no pass re-delivers to a hook that is
       refusing, and an empty-payload commit never happens;
-    * BaseException (SystemExit from a lazy import, an interrupt) -> log it,
-      keep that entry's transcript, and continue with the REST of the batch.
-      The gateway's thread-per-batch shape loses only its own batch to this;
-      this port has one worker for the process's lifetime, so letting the
-      exception escape would both strand the remaining claimed transcripts and
-      permanently disable the valve.
+    * BaseException (SystemExit from a lazy import, an interrupt) -> abandon
+      THAT entry explicitly (``_abandon_aborted_release``: in-flight claim
+      handed back, clients released, transcript kept and logged as kept) and
+      continue with the REST of the batch.  The gateway's thread-per-batch shape
+      loses only its own batch to this; this port has one worker for the
+      process's lifetime, so letting the exception escape would both strand the
+      remaining claimed transcripts and permanently disable the valve.
     """
     while plan:
         key, agent = plan.pop(0)  # FIFO — LRU-first order preserved
@@ -565,11 +659,16 @@ def _release_pressure_batch(plan: List[Tuple[str, Any]]) -> None:
             if not _agent_has_resident_transcript(agent):
                 logger.debug("pressure release skipped %s: no resident transcript", key)
             elif not _commit_before_soft_release(key, agent):
+                # Not necessarily a refusal: the delivery may have committed an
+                # OLDER owner's segment and left this agent's extraction
+                # pending (see _commit_before_soft_release).  Either way the
+                # transcript is the only payload that extraction can still be
+                # given, so the log states the fact, not a guessed cause.
                 logger.warning(
-                    "Agent cache pressure: the pre-release memory commit for "
-                    "session=%s was refused; keeping its transcript for the next "
-                    "session boundary instead of shedding it (shedding it would "
-                    "leave the pending extraction with no payload).",
+                    "Agent cache pressure: session=%s still has a pending "
+                    "extraction after the pre-release memory commit; keeping its "
+                    "transcript for the next session boundary instead of shedding "
+                    "it (shedding it would leave that extraction with no payload).",
                     key,
                 )
             else:
@@ -577,11 +676,10 @@ def _release_pressure_batch(plan: List[Tuple[str, Any]]) -> None:
         except Exception:
             logger.debug("pressure soft-release failed for %s", key, exc_info=True)
         except BaseException as exc:  # noqa: BLE001 — see the docstring
-            logger.warning(
-                "Agent cache pressure: release for session=%s aborted by %s; "
-                "continuing the batch (its transcript is kept)",
-                key, type(exc).__name__,
-            )
+            try:
+                _abandon_aborted_release(key, agent, exc)
+            except BaseException:  # noqa: BLE001 — never strand the rest of the batch
+                logger.debug("pressure abort cleanup failed for %s", key, exc_info=True)
         del agent
 
 
@@ -589,7 +687,7 @@ class PressureReleaseWorker:
     """ONE daemon thread that drains pressure batches, strictly in order.
 
     The gateway starts a fresh daemon thread per batch
-    (gateway/run_agent_cache.py:1026).  ``Thread.start()`` blocks until the
+    (gateway/run_agent_cache.py:1027).  ``Thread.start()`` blocks until the
     child is scheduled, and under the cache churn this valve exists for that
     costs tens of milliseconds on some platforms (measured locally on
     Windows/CPython with a thread spinning on the cache lock; not reproduced

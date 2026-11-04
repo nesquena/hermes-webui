@@ -271,6 +271,34 @@ def has_uncommitted_work(session_id: str) -> bool:
         return entry["generation"] > entry["committed_generation"]
 
 
+def release_in_flight(session_id: str) -> bool:
+    """Clear a session's in-flight claim after an ABANDONED commit.
+
+    ``in_flight`` is an advisory mutex — it only stops a second commit from
+    starting while one is inside the provider — not a record of work.  A
+    delivery that raises ``BaseException`` (``SystemExit`` from a lazy relaunch
+    import, an interrupt) unwinds through ``commit_session_memory`` without
+    reaching either of its clear points, and the claim then wedges the session
+    for the life of the process: every later ``commit_session_memory(wait=True)``
+    blocks on it and ``discard_session`` refuses.
+
+    The caller that observed the abort is the only one that knows the delivery
+    is over, so it hands the claim back here.  The ledger is untouched:
+    ``generation`` / ``committed_generation`` still say the work is pending, so
+    the next boundary retries it with whatever payload the caller kept.  Returns
+    True when a claim was actually held and cleared.
+    """
+    if not session_id:
+        return False
+    with _condition:
+        entry = _sessions.get(session_id)
+        if entry is None or not entry["in_flight"]:
+            return False
+        entry["in_flight"] = False
+        _condition.notify_all()
+        return True
+
+
 def _first_uncommitted_segment(entry: dict) -> dict | None:
     committed = entry["committed_generation"]
     for segment in entry["segments"]:

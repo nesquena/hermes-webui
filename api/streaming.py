@@ -13797,6 +13797,12 @@ def _lifecycle_has_uncommitted_work(session_id: str) -> bool:
     return has_uncommitted_work(session_id)
 
 
+def _lifecycle_release_in_flight(session_id: str) -> bool:
+    from api.session_lifecycle import release_in_flight
+
+    return release_in_flight(session_id)
+
+
 def _lifecycle_unregister_agent(session_id: str, *, agent=None) -> None:
     from api.session_lifecycle import unregister_agent
 

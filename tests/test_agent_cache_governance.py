@@ -12,6 +12,7 @@ sys.path.insert(0, ".")
 
 from api.agent_cache_governance import (
     AgentCacheGovernor,
+    _commit_before_soft_release,
     _positive_int,
     plan_pressure_evictions,
     resolve_memory_high_mb,
@@ -913,6 +914,22 @@ class _LegacyAgent(_FakeAgent):
         self.closes += 1
 
 
+class _FatalOnceCommitAgent(_ReleasingAgent):
+    """Raises a BaseException ONCE (a lazy relaunch import), then commits."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.attempts = 0
+        self._fatal_left = 1
+
+    def commit_memory_session(self, messages=None):
+        self.attempts += 1
+        if self._fatal_left > 0:
+            self._fatal_left -= 1
+            raise SystemExit("relaunch")
+        self.commits.append(None if messages is None else list(messages))
+
+
 def _pending_session(session_id, agent, text="remember this", flushed=True):
     """Register a session with one completed (therefore committable) turn."""
     from api.session_lifecycle import mark_turn_completed, register_agent
@@ -1137,7 +1154,7 @@ def test_a_raising_commit_hook_keeps_the_transcript_instead_of_shedding_it(caplo
     assert agent._session_messages == captured, "a refused commit cleared the transcript"
     assert has_uncommitted_work("k0") is True, "the ledger was advanced by a refused commit"
     assert cache == {}, "the entry must leave the cache (no per-pass re-delivery)"
-    assert "was refused; keeping its transcript" in caplog.text
+    assert "still has a pending extraction" in caplog.text
 
     # A later pass cannot reach the handle, so there is no retry loop...
     assert g.sweep_pressure(rss_mb=500) == 0
@@ -1240,6 +1257,138 @@ def test_owner_scope_refusal_keeps_the_transcript_and_no_empty_payload_is_commit
     assert commit_session_memory("k0", agent=agent) is True
     assert agent.commits == [captured], "the boundary commit lost the payload"
     assert None not in agent.commits, "an empty-payload commit was issued"
+    assert has_uncommitted_work("k0") is False
+
+
+def test_dirty_owners_each_receive_their_own_transcript():
+    """Owner, generation and payload are selected together (restored from base).
+
+    A rebuild leaves the older handle owning its earlier dirty generation; the
+    older owner must receive ITS transcript, not the cached replacement's (the
+    re-gate measured both hooks receiving the NEW owner's memory).  The first
+    call also proves the post-commit fence: the delivery advanced the ledger, but
+    the replacement's own generation was still pending, so its transcript must
+    stay.
+    """
+    from api.session_lifecycle import _reset_for_tests, register_agent
+
+    _reset_for_tests()
+    old = _RecordingCommitAgent(flushed=True)
+    new = _RecordingCommitAgent(flushed=True)
+    old_msgs = _pending_session("s1", old, text="OLD owner memory")
+    register_agent("s1", new)
+    new_msgs = _pending_session("s1", new, text="NEW owner memory")
+
+    # First call commits the earliest dirty segment (the OLD owner) with the OLD
+    # owner's own payload; the newer generation is still pending, so the
+    # transcript is kept.
+    assert _commit_before_soft_release("s1", new) is False
+    assert old.commits == [old_msgs], "the old owner received the wrong payload"
+    assert new.commits == []
+
+    # Second call commits the NEW segment with the NEW owner's payload.
+    assert _commit_before_soft_release("s1", new) is True
+    assert new.commits == [new_msgs]
+    assert old.commits == [old_msgs], "the old owner must not be re-committed"
+
+
+def test_pressure_keeps_a_successor_transcript_while_its_generation_is_pending(caplog):
+    """Reviewer repro: an older owner's commit must not free a NEWER transcript.
+
+    STEP1 A's boundary commit is refused, so its transcript is kept and the
+    entry leaves the cache with the ledger still owned by A.  STEP2 the next
+    turn rebuilds agent B, so the session has segments [(1,1,A), (2,2,B)].
+    STEP3 pressure claims B and commits the EARLIEST segment (A's): returning
+    "the hook ran" from there cleared B's transcript although generation 2 was
+    still pending, and STEP4 the next boundary committed ``payload=None`` and
+    marked the ledger clean — B's memories silently marked done with nothing to
+    extract.
+    """
+    from api.session_lifecycle import _reset_for_tests, commit_session_memory, has_uncommitted_work
+
+    _reset_for_tests()
+    a = _RaisingCommitAgent()
+    a_msgs = _pending_session("s1", a, text="A memory")
+    g = _governor(_cache_with([("s1", a)]), memory_high_mb=100, protect_recent=0,
+                  running_check=lambda k: False)
+    with caplog.at_level(logging.WARNING, logger="api.agent_cache_governance"):
+        assert g.sweep_pressure(rss_mb=500) == 1
+        _wait_release(g)
+
+    # STEP1: refused, so the payload stays and the ledger is still A's.
+    assert a.attempts == 1
+    assert a._session_messages == a_msgs
+    assert has_uncommitted_work("s1") is True
+
+    # STEP2: the next turn rebuilds the agent; generation 2 belongs to B.
+    b = _RecordingCommitAgent()
+    b_msgs = _pending_session("s1", b, text="B memory")
+    cache = _cache_with([("s1", b)])
+    g2 = _governor(cache, memory_high_mb=100, protect_recent=0,
+                   running_check=lambda k: False)
+
+    # STEP3: the shed commits ONLY A's earliest segment.
+    with caplog.at_level(logging.WARNING, logger="api.agent_cache_governance"):
+        assert g2.sweep_pressure(rss_mb=500) == 1
+        _wait_release(g2)
+
+    assert a.commits == [a_msgs], "the older owner did not receive its own payload"
+    assert b._session_messages == b_msgs, (
+        "an older owner's commit freed a transcript whose own generation is "
+        "still pending — the next boundary would commit payload=None"
+    )
+    assert has_uncommitted_work("s1") is True
+    assert cache == {}, "the entry still leaves the cache (no per-pass re-delivery)"
+    assert "still has a pending extraction" in caplog.text
+
+    # STEP4: the next boundary delivers B's REAL payload, never an empty one.
+    assert commit_session_memory("s1", agent=b) is True
+    assert b.commits == [b_msgs]
+    assert None not in b.commits, "an empty-payload commit was issued"
+    assert has_uncommitted_work("s1") is False
+
+
+def test_a_base_exception_releases_the_in_flight_claim_and_the_next_commit_works(caplog):
+    """An abandoned commit must not wedge the session's in-flight claim.
+
+    ``commit_session_memory`` clears ``in_flight`` on its normal and refused
+    paths only; a ``SystemExit`` from a lazy relaunch import unwinds past both,
+    so the claim stayed set for the life of the process: every later
+    ``commit_session_memory(wait=True)`` blocked on it, ``discard_session``
+    refused, and the provider client stayed open (measured by the reviewer).
+    """
+    from api.session_lifecycle import _reset_for_tests, commit_session_memory, has_uncommitted_work
+
+    _reset_for_tests()
+    agent = _FatalOnceCommitAgent()
+    captured = _pending_session("k0", agent)
+    cache = _cache_with([("k0", agent)])
+    g = _governor(cache, memory_high_mb=100, protect_recent=0,
+                  running_check=lambda k: False)
+
+    with caplog.at_level(logging.WARNING, logger="api.agent_cache_governance"):
+        assert g.sweep_pressure(rss_mb=500) == 1
+        _wait_release(g)
+
+    # The abandonment is logged, with the session and the reason.
+    assert "session=k0 aborted by SystemExit" in caplog.text
+    assert "transcript KEPT" in caplog.text
+    # …and it actually happened: clients released, transcript kept for the
+    # extraction that is still pending.
+    assert agent.releases == 1, "the abandoned entry kept its provider client open"
+    assert agent._session_messages == captured, (
+        "the aborted entry lost the payload its pending extraction needs"
+    )
+    assert has_uncommitted_work("k0") is True
+
+    # The claim was handed back: the next commit does not block and delivers.
+    started = time.monotonic()
+    assert commit_session_memory("k0", agent=agent, wait=True, timeout=5.0) is True
+    assert time.monotonic() - started < 2.0, (
+        "the in-flight claim was never released: the commit waited for a "
+        "delivery that had already been abandoned"
+    )
+    assert agent.commits == [captured]
     assert has_uncommitted_work("k0") is False
 
 
