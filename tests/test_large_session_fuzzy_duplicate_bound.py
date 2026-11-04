@@ -319,3 +319,69 @@ def test_over_bound_missing_clock_structured_replay_collapses_exactly():
     distinct = ("user", structured, "", "501")
     assert models._matching_visible_duplicate(distinct, keys, lookup) is None
 
+
+
+def test_small_transcript_missing_clock_structured_replay_collapses_exactly():
+    """Greptile finding #1: image turns appear twice.
+
+    A structured (image) row whose sidecar copy carries a clock and whose
+    state.db copy does not must still collapse on a SMALL transcript.  Below
+    the fuzzy bound the structured branch used to return before any
+    clock-optional probe ran, so the merge appended the same image turn again.
+    """
+    import api.models as models
+
+    structured = models._content_identity_for_key(["image", "payload"])
+    keys = {("assistant", "hello", "", "")}  # small: far below the fuzzy bound
+    keys.add(("user", structured, "", "500"))
+    lookup = models._build_visible_duplicate_lookup(keys)
+
+    missing_clock = ("user", structured, "", "")
+    matched = models._matching_visible_duplicate(missing_clock, keys, lookup)
+    assert matched is not None
+    assert matched[3] == "500", "must collapse onto the clocked image twin"
+
+    # A genuinely different established occurrence still stays separate.
+    distinct = ("user", structured, "", "501")
+    assert models._matching_visible_duplicate(distinct, keys, lookup) is None
+
+
+def test_repeated_prompt_group_probe_is_constant_work(monkeypatch):
+    """Greptile finding #2: repeated prompts slow loading.
+
+    The clock-free probe used to scan every occurrence of the same content for
+    each incoming row, bypassing the fuzzy work bound.  Thousands of repeated
+    prompts at distinct timestamps made one row cost O(occurrences).  The
+    prebuilt group must answer in constant work.
+    """
+    import api.models as models
+
+    repeats = 400
+    keys = {("user", "are you done yet", "", str(1000 + idx)) for idx in range(repeats)}
+    keys |= {
+        ("assistant", f"filler {idx}", "", str(5000 + idx))
+        for idx in range(models._VISIBLE_DUPLICATE_FUZZY_MAX_KEYS + 1 - repeats)
+    }
+    assert len(keys) > models._VISIBLE_DUPLICATE_FUZZY_MAX_KEYS
+    lookup = models._build_visible_duplicate_lookup(keys)
+
+    calls = {"n": 0}
+    original_share = models._visible_keys_share_occurrence
+
+    def counting_share(left, right):
+        calls["n"] += 1
+        return original_share(left, right)
+
+    monkeypatch.setattr(models, "_visible_keys_share_occurrence", counting_share)
+
+    fresh = ("user", "are you done yet", "", "9999")  # a new, genuinely distinct occurrence
+    assert models._matching_visible_duplicate(fresh, keys, lookup) is None
+    assert calls["n"] == 0, (
+        "the group probe must not scan occurrences per incoming row "
+        f"(saw {calls['n']} comparisons for {repeats} repeats)"
+    )
+
+    # The clock-less wildcard still collapses onto the group's representative.
+    missing_clock = ("user", "are you done yet", "", "")
+    matched = models._matching_visible_duplicate(missing_clock, keys, lookup)
+    assert matched is not None

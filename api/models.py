@@ -14740,7 +14740,18 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
     for key in visible_keys:
         if not isinstance(key, tuple) or not key:
             continue
-        by_clockfree.setdefault(_visible_key_without_occurrence(key), []).append(key)
+        group = by_clockfree.setdefault(
+            _visible_key_without_occurrence(key),
+            {"any": key, "clockless": None, "by_occurrence": {}},
+        )
+        occurrence = _visible_key_field(key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
+        if occurrence == "":
+            # A row with no usable clock is a wildcard for every incoming
+            # occurrence, so one representative is enough for the whole group.
+            if group["clockless"] is None:
+                group["clockless"] = key
+        else:
+            group["by_occurrence"].setdefault(occurrence, key)
     # Keep loose_by_key lazy.  Some transcripts contain multi-megabyte tool
     # outputs; eagerly casefolding + regex-tokenizing every visible key on every
     # duplicate probe made /api/session take 10s+ and blocked /api/sessions.
@@ -14902,20 +14913,35 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
     # the existing fuzzy loop below already applies the same wildcard rule,
     # keeping its first-match bookkeeping (metadata-merge target /
     # skipped-count bucket) byte-identical.
-    if (
-        lookup is not None
-        and len(visible_keys) > _VISIBLE_DUPLICATE_FUZZY_MAX_KEYS
+    # Exact identity remains authoritative at every size, and structural
+    # (non-string) content has NO fuzzy fallback at all -- it returns None
+    # below, so an image turn whose sidecar row carries a clock and whose
+    # state.db row does not was appended as a second row on small transcripts
+    # (Greptile: "Image turns appear twice").  Probe the clock-free index in
+    # both of those cases.  For scalar text below the bound the existing fuzzy
+    # loop keeps its first-match bookkeeping (metadata-merge target /
+    # skipped-count bucket) byte-identical.
+    if lookup is not None and (
+        not isinstance(content, str)
+        or len(visible_keys) > _VISIBLE_DUPLICATE_FUZZY_MAX_KEYS
     ):
         by_clockfree = lookup.get("by_clockfree")
         if by_clockfree:
-            candidates = by_clockfree.get(_visible_key_without_occurrence(visible_key))
-            if candidates:
-                for cand in candidates:
-                    if _visible_keys_share_occurrence(
-                        occurrence,
-                        _visible_key_field(cand, _VISIBLE_KEY_OCCURRENCE_INDEX, ""),
-                    ):
-                        return cand
+            group = by_clockfree.get(_visible_key_without_occurrence(visible_key))
+            if group:
+                # Constant work per incoming row: the group pre-buckets its
+                # occurrences, so a repeated prompt with thousands of
+                # occurrences never rescans the whole list (Greptile: "Repeated
+                # prompts slow loading").  A clock-less row is a wildcard, so a
+                # single representative serves every incoming occurrence.
+                if occurrence == "":
+                    return group["clockless"] or group["any"]
+                cand = group["by_occurrence"].get(occurrence)
+                if cand is not None:
+                    return cand
+                clockless = group["clockless"]
+                if clockless is not None:
+                    return clockless
     # Structured content is matched by exact identity only (checked above).
     # Substring/token matching would otherwise compare a canonical list
     # serialisation against arbitrary text and pair a rich row with a scalar.
