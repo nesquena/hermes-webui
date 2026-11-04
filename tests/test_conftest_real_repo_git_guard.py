@@ -147,9 +147,28 @@ def test_config_keys_and_values_are_not_places(fake_git, tmp_path):
         f'config user.name {REPO_ROOT}',
         f'config --get {REPO_ROOT / "tests"}',
     ]
-    with refused():
-        subprocess.run(['git', 'config', '-f', str(REPO_ROOT / '.git' / 'config'), 'core.bare', 'false'], cwd=tmp_path)
+    config = str(REPO_ROOT / '.git' / 'config')
+    for spelling in (['-f', config], ['--file', config], ['--fil', config], ['--fil=' + config], ['-f' + config]):
+        with refused():
+            subprocess.run(['git', 'config', *spelling, 'core.bare', 'false'], cwd=tmp_path)
     assert len(_lines(fake_git)) == 4
+
+
+@pytest.mark.parametrize('key', ['GIT_CONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_COMMON_DIR'])
+def test_the_config_files_git_writes_from_the_environment_are_targets(fake_git, tmp_path, key):
+    inside = str(REPO_ROOT / '.git' / ('config' if key != 'GIT_COMMON_DIR' else ''))
+    with refused():
+        subprocess.run(['git', 'config', 'core.bare', 'false'], cwd=tmp_path, env={**os.environ, key: inside})
+    subprocess.run(['git', 'config', 'core.bare', 'false'], cwd=tmp_path, env={**os.environ, key: str(tmp_path / 'cfg')}, check=True)
+    assert _lines(fake_git) == ['config core.bare false']
+
+
+def test_an_unreadable_cwd_only_matters_to_git(fake_git, tmp_path):
+    with refused():
+        subprocess.run(['git', 'reset', '--hard', 'HEAD'], cwd=5)
+    with pytest.raises(TypeError):
+        subprocess.run(['ls'], cwd=5)
+    assert _lines(fake_git) == []
 
 
 def test_a_bytes_cwd_is_read_like_a_str(fake_git, tmp_path):

@@ -142,11 +142,12 @@ def _program_named_git(token) -> bool:
 
 def refusal(args, cwd, *, shell=False, executable=None, env=None):
     """Return why this Popen call must not run, or None when it may."""
+    cwd_unreadable = False
     if cwd is not None:
         try:
             cwd = os.fsdecode(cwd)
         except (TypeError, ValueError):
-            return 'unparseable cwd'  # cannot tell where it acts: fail closed
+            cwd_unreadable = True  # only matters for a git command: see below
     if isinstance(args, os.PathLike):
         args = [os.fspath(args)]
     if shell and not isinstance(args, (str, bytes)):
@@ -170,6 +171,8 @@ def refusal(args, cwd, *, shell=False, executable=None, env=None):
             argv = []
     if argv == []:
         return None  # not a git command
+    if cwd_unreadable:
+        return 'unparseable cwd'  # cannot tell where it acts: fail closed
     # Where the command may act: cwd after any -C (`here`) plus every --git-dir/--work-tree and
     # GIT_DIR/GIT_WORK_TREE from the child's environment; `init`/`clone`/`daemon` act on the
     # directory they name instead of cwd.
@@ -223,6 +226,8 @@ def refusal(args, cwd, *, shell=False, executable=None, env=None):
             targets.append(_join(here, value))
             repository_named |= key == 'GIT_DIR'
             work_tree_named |= key == 'GIT_WORK_TREE'
+        elif key in ('GIT_COMMON_DIR', 'GIT_CONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM') and value:
+            targets.append(_join(here, value))  # `GIT_CONFIG=<real>/.git/config git config k v` writes it
     # `here` is a target too: with only one of the repository or the work tree named, git takes
     # the other half from cwd (`--git-dir=<tmp>/.git reset --hard` rewrites cwd's files, and
     # `--work-tree=<tmp> reset --hard` rewrites cwd's index). The one exception: another
@@ -238,10 +243,15 @@ def refusal(args, cwd, *, shell=False, executable=None, env=None):
         # keys and values are not places (`config core.fsmonitor <checkout>/.venv/bin/python hook.py`
         # in a temp repo is fine): only `--file <path>`, `-f <path>` and `--file=<path>` name one
         for j, arg in enumerate(verb_args[1:], 1):
-            if arg in ('-f', '--file') and j + 1 < len(verb_args):
-                path_args.append(verb_args[j + 1])
-            elif arg.startswith('--file='):
-                path_args.append(arg[len('--file='):])
+            option, attached, value = arg.partition('=')
+            file_option = option == '-f' or (len(option) >= 5 and '--file'.startswith(option))  # git takes `--fil`
+            if file_option and not attached:
+                if j + 1 < len(verb_args):
+                    path_args.append(verb_args[j + 1])
+            elif file_option:
+                path_args.append(value)  # --file=<path>, --fil=<path>
+            elif arg.startswith('-f') and not arg.startswith('--'):
+                path_args.append(arg[2:])  # -f<path>
     else:
         for arg in verb_args[1:]:
             if arg.startswith('-'):
