@@ -13,6 +13,15 @@ Prescription this module pins (nesquena-hermes):
   settlement and synchronous chat. Required regressions: replay-cleaned
   context and display agree; stale-user repair keeps the same integer ID
   through a subsequent settlement; sync chat dedups before minting.
+* 2026-11-02 (#8574 review): a token-bearing collision resolves against every
+  retained same-key durable owner before appending; a replaced slot's exact-key
+  entries are invalidated before a new invalid/idless owner is rejected; the
+  synchronous settle persists the identity-deduped context.
+* 2026-11-03 (#8574 review P2-3): the distinct-occurrence count spans the whole
+  historical ownership group, rows that already own a valid id included; a
+  distinct unowned occurrence receives collision-free ownership, while an
+  unowned replay of an established exact-key occurrence reconciles onto that
+  owner's id instead of being over-split.
 
 Every test drives the REAL components (``_deduplicate_context_messages``,
 ``_dedupe_replayed_context_messages``, ``_sanitize_messages_for_agent``,

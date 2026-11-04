@@ -10659,6 +10659,19 @@ def _reconcile_prefix_occurrence_ownership(previous_context, result_messages):
 
     Synthetic ids are allocated above every real id already in play, so a
     stamped row can never be mistaken for an existing owner.
+
+    #8574 review P2-3 (nesquena-hermes 2026-11-03): the distinct-occurrence
+    COUNT spans the whole ownership group, rows that already own a valid id
+    included. The count used to skip owned rows first, so a group holding one
+    owned occurrence plus one distinct UNOWNED occurrence looked like a
+    singleton: no id was minted for the unowned occurrence and the identity
+    dedup then collapsed it against the owned one, deleting a genuine turn the
+    display transcript still showed. An owned row still keeps its own id -
+    only the count sees it now. An unowned row whose exact key an owned row
+    already carries is a REPLAY of that established occurrence, not a new one,
+    so it is reconciled onto the owner's id instead of minting a second one;
+    minting would over-split a replay into a survivor the dedup must still
+    collapse.
     """
     if not isinstance(previous_context, list) or not previous_context:
         return previous_context
@@ -10678,19 +10691,28 @@ def _reconcile_prefix_occurrence_ownership(previous_context, result_messages):
         )
 
     # ---- pass 1: which content groups hold more than one distinct occurrence?
+    # #8574 review P2-3 (nesquena-hermes 2026-11-03): count the WHOLE group,
+    # owned rows included. Skipping them first made a group of one owned
+    # occurrence plus one distinct unowned occurrence look like a singleton, so
+    # the unowned occurrence was never minted an id and the identity dedup
+    # collapsed a genuine turn. An owned row keeps its id; only the count sees
+    # it. ``owner_by_exact`` remembers which owned id already holds an exact
+    # key so pass 2 can reconcile an unowned REPLAY of that occurrence onto its
+    # owner instead of over-splitting it into a second survivor.
     groups = {}
+    owner_by_exact = {}
     for row in previous_context:
         if not isinstance(row, dict):
             continue
         if row.get("_active_turn_token"):
             continue
-        stable_id, stable_valid = _stable_message_ownership_id(row)
-        if stable_valid and stable_id is not None:
-            continue
         exact = _exact_clock_key(row)
         if exact is None:
             continue
         groups.setdefault(exact[0], []).append(exact)
+        stable_id, stable_valid = _stable_message_ownership_id(row)
+        if stable_valid and stable_id is not None and exact not in owner_by_exact:
+            owner_by_exact[exact] = stable_id
     split_groups = {
         replay_key for replay_key, exacts in groups.items() if len(set(exacts)) >= 2
     }
@@ -10723,6 +10745,18 @@ def _reconcile_prefix_occurrence_ownership(previous_context, result_messages):
         stable_id, stable_valid = _stable_message_ownership_id(row)
         if stable_valid and stable_id is not None:
             out.append(row)
+            continue
+        # #8574 review P2-3 (nesquena-hermes 2026-11-03): an unowned row whose
+        # exact key an owned row of the SAME group already carries is a replay
+        # of that established occurrence. Reconcile it onto the owner's id: the
+        # dedup's same-id path then collapses the replay exactly as the
+        # legacy exact-key collapse did, and no second id is minted for a row
+        # that must not survive as an independent occurrence.
+        owner_id = owner_by_exact.get(exact)
+        if owner_id is not None:
+            stamped = dict(row)
+            stamped["id"] = int(owner_id)
+            out.append(stamped)
             continue
         if exact not in assigned:
             assigned[exact] = next_id
