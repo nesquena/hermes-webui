@@ -453,11 +453,32 @@ def test_idle_sweep_fail_closed_when_registry_unavailable():
 
 
 def test_pressure_sweep_never_plans_a_mid_turn_session():
-    """The lease (per-entry mid-turn marker) overrides a stale empty snapshot."""
-    cache = _cache_with([("k", _FakeAgent(flushed=True, turn_active=True))])
+    """The lease (per-entry mid-turn marker) overrides a stale empty snapshot.
+
+    The pass still sheds the idle peer in the SAME pass: one busy session must
+    not stop the valve, and the busy one must be skipped on its lease alone (the
+    registry snapshot here is the real, empty one).  Both carry pending work, so
+    the debt-era code — which waited for an acknowledgement the installed Agent
+    cannot give — shed nothing at all.
+    """
+    from api.session_lifecycle import _reset_for_tests
+
+    _reset_for_tests()
+    busy = _RecordingCommitAgent()
+    busy._turn_active = True
+    idle = _RecordingCommitAgent()
+    cache = _cache_with([("busy", busy), ("idle", idle)])
+    _pending_session("busy", busy)
+    idle_captured = _pending_session("idle", idle)
+
     g = _governor(cache, memory_high_mb=100, protect_recent=0)
-    assert g.sweep_pressure(rss_mb=500) == 0
-    assert cache["k"][0]._session_messages
+    assert g.sweep_pressure(rss_mb=500) == 1  # the idle peer only
+    _wait_release(g)
+
+    assert cache["busy"][0] is busy and busy._session_messages
+    assert busy.commits == [], "the mid-turn session was committed for a shed"
+    assert idle._session_messages == []
+    assert idle.commits == [idle_captured]
 
 
 
@@ -814,7 +835,24 @@ class _RecordingCommitAgent(_FakeAgent):
 
 
 class _RaisingCommitAgent(_FakeAgent):
-    """The hook itself raises (owner scope refused / arity mismatch)."""
+    """The hook raises (owner scope refused / arity mismatch) `fail_times` times."""
+
+    def __init__(self, fail_times=1, **kw):
+        super().__init__(**kw)
+        self.attempts = 0
+        self.commits = []
+        self._fail_left = fail_times
+
+    def commit_memory_session(self, messages=None):
+        self.attempts += 1
+        if self._fail_left > 0:
+            self._fail_left -= 1
+            raise RuntimeError("commit hook unavailable")
+        self.commits.append(None if messages is None else list(messages))
+
+
+class _FatalCommitAgent(_FakeAgent):
+    """The hook raises a BaseException (a lazy import's RelaunchExit)."""
 
     def __init__(self, **kw):
         super().__init__(**kw)
@@ -822,7 +860,57 @@ class _RaisingCommitAgent(_FakeAgent):
 
     def commit_memory_session(self, messages=None):
         self.attempts += 1
-        raise RuntimeError("commit hook unavailable")
+        raise SystemExit("relaunch")
+
+
+class _GatedCommitAgent(_FakeAgent):
+    """Commit blocks until the test opens the gate (a slow provider)."""
+
+    def __init__(self, gate, started, **kw):
+        super().__init__(**kw)
+        self._gate = gate
+        self._started = started
+        self._caller_ident = threading.get_ident()
+        self.commits = []
+
+    def commit_memory_session(self, messages=None):
+        assert threading.get_ident() != self._caller_ident, (
+            "the pre-release commit ran on the pass thread: provider I/O is "
+            "back on the pass instead of the release worker"
+        )
+        self._started.set()
+        assert self._gate.wait(10), "the test never opened the commit gate"
+        self.commits.append(None if messages is None else list(messages))
+
+
+class _ReleasingAgent(_RecordingCommitAgent):
+    """Records release_clients() and the state it saw when it ran."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.releases = 0
+        self.commits_at_release = None
+        self.transcript_len_at_release = None
+
+    def release_clients(self):
+        self.releases += 1
+        self.commits_at_release = len(self.commits)
+        self.transcript_len_at_release = len(self._session_messages)
+
+
+class _LegacyAgent(_FakeAgent):
+    """An agent shape with no release_clients() (legacy full-close path)."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.shutdowns = []
+        self.closes = 0
+
+    def shutdown_memory_provider(self, messages=None):
+        self.shutdowns.append(None if messages is None else list(messages))
+
+    def close(self):
+        self.closes += 1
 
 
 def _pending_session(session_id, agent, text="remember this", flushed=True):
@@ -837,43 +925,34 @@ def _pending_session(session_id, agent, text="remember this", flushed=True):
     return messages
 
 
-def test_commit_session_memory_delivers_the_owner_transcript():
-    """The boundary commit hands the provider the real transcript.
+def test_pressure_release_delivers_the_owner_transcript_and_ignores_the_hook_result():
+    """The pre-shed commit hands the provider the REAL transcript, once.
 
-    Calling the hook with no payload (or an empty list) makes a
-    batch-extraction provider skip extraction behind its empty-input guard.
+    Two contracts at once, both at the point where they matter (the release):
+    the payload is the owner's captured transcript — not ``None``/``[]``, which
+    a batch-extraction provider's empty-input guard would skip — and the hook's
+    return value (the installed Agent returns ``None`` even when extraction
+    worked) neither blocks nor repeats the release.  Fails on the debt-era code,
+    which required an acknowledgement the installed Agent can never give and so
+    never shed at all.
     """
     from api.session_lifecycle import _reset_for_tests, commit_session_memory
 
     _reset_for_tests()
     agent = _RecordingCommitAgent(acknowledged=None)
     captured = _pending_session("s1", agent)
+    cache = _cache_with([("s1", agent)])
+    g = _governor(cache, memory_high_mb=100, protect_recent=0,
+                  running_check=lambda k: False)
 
-    assert commit_session_memory("s1", agent=agent) is True
+    assert g.sweep_pressure(rss_mb=500) == 1
+    _wait_release(g)
+
     assert agent.commits == [captured], "the provider did not receive the transcript"
-
-
-def test_commit_session_memory_ignores_the_hook_return_value():
-    """Installed contract: the hook returns None and the ledger still advances.
-
-    The gateway never gates on the hook's return value, because the installed
-    Agent returns None even when extraction worked — and None again when the
-    provider threw behind its swallow-all helper.
-    """
-    from api.session_lifecycle import (
-        _reset_for_tests,
-        commit_session_memory,
-        has_uncommitted_work,
-    )
-
-    _reset_for_tests()
-    agent = _RecordingCommitAgent(acknowledged=None)
-    _pending_session("s1", agent)
-
-    assert commit_session_memory("s1", agent=agent) is True
-    assert has_uncommitted_work("s1") is False
-    assert commit_session_memory("s1", agent=agent) is False  # nothing pending
-    assert len(agent.commits) == 1
+    assert agent._session_messages == []
+    # The ledger advanced on that delivery, so the next boundary is a no-op.
+    assert commit_session_memory("s1", agent=agent) is False
+    assert agent.commits == [captured], "the boundary re-delivered a finished commit"
 
 
 def test_unflushed_session_is_never_shed_and_is_counted_in_the_warning(caplog):
@@ -955,23 +1034,48 @@ def test_flushed_idle_session_is_shed_and_the_next_turn_rebuilds_it():
         tracemalloc.stop()
 
 
-def test_mid_turn_session_is_never_shed():
-    """(c) A mid-turn session is never touched, in either liveness spelling."""
-    busy = _FakeAgent(flushed=True, turn_active=True)
-    registered = _FakeAgent(flushed=True)  # no lease: registry snapshot decides
-    cache = _cache_with([("busy", busy), ("registered", registered)])
+def test_mid_turn_session_is_never_shed_and_is_shed_once_the_turn_ends(caplog):
+    """(c) Mid-turn protection is TEMPORARY: both liveness spellings.
 
+    While the turn is live neither spelling may be touched, and the gateway
+    warning counts them (mid-turn, not "blocked on un-flushed persistence").
+    The moment the lease clears / the registry empties, the next pass sheds the
+    same agents — a guard that never releases would wedge the valve, and both
+    sessions carry pending work, which is what the debt-era code refused to shed
+    at all (it waited for an acknowledgement the installed Agent cannot give).
+    """
+    from api.session_lifecycle import _reset_for_tests
+
+    _reset_for_tests()
+    busy = _RecordingCommitAgent()          # no lease: registry snapshot decides
+    leased = _RecordingCommitAgent()        # lease decides
+    leased._turn_active = True
+    cache = _cache_with([("busy", busy), ("leased", leased)])
+    _pending_session("busy", busy)
+    _pending_session("leased", leased)
+
+    running = {"busy": True}
     g = _governor(
         cache,
         memory_high_mb=100,
         protect_recent=0,
-        running_check=lambda k: k == "registered",
+        running_check=lambda k: running.get(k, False),
     )
-    assert g.sweep_pressure(rss_mb=500) == 0
-    _wait_release(g)
+    with caplog.at_level(logging.WARNING, logger="api.agent_cache_governance"):
+        assert g.sweep_pressure(rss_mb=500) == 0
+        _wait_release(g)
 
     assert cache["busy"][0] is busy and busy._session_messages
-    assert cache["registered"][0] is registered and registered._session_messages
+    assert cache["leased"][0] is leased and leased._session_messages
+    assert busy.commits == [] and leased.commits == []
+    assert "(2 cached, 2 mid-turn, 0 blocked on un-flushed persistence)" in caplog.text
+
+    # The turns finish: the same two agents must now be shed on the next pass.
+    running["busy"] = False
+    leased._turn_active = False
+    assert g.sweep_pressure(rss_mb=500) == 2
+    _wait_release(g)
+    assert busy._session_messages == [] and leased._session_messages == []
 
 
 def test_best_effort_commit_runs_once_per_shed_session_and_is_never_retried(monkeypatch):
@@ -1005,44 +1109,361 @@ def test_best_effort_commit_runs_once_per_shed_session_and_is_never_retried(monk
     assert len(agent.commits) == 1, "the boundary retried a finished commit"
 
 
-def test_a_raising_commit_hook_is_swallowed_and_not_retried_by_the_pass():
-    """(d, failure half) The hook raises, the shed still happens, once."""
-    from api.session_lifecycle import _reset_for_tests
+def test_a_raising_commit_hook_keeps_the_transcript_instead_of_shedding_it(caplog):
+    """(d, failure half) A REFUSED commit must not clear the transcript.
+
+    The hook raises (owner scope refused / arity mismatch), so the lifecycle
+    ledger stays dirty: that pending extraction has exactly one payload, the
+    live transcript.  Clearing it here made the NEXT boundary commit
+    ``payload=None`` and mark the extraction done — the memories were silently
+    lost.  The entry still leaves the cache (no pass re-delivers to a hook that
+    is refusing), the transcript stays resident, and the next boundary delivers
+    it for real.
+    """
+    from api.session_lifecycle import _reset_for_tests, commit_session_memory, has_uncommitted_work
 
     _reset_for_tests()
     agent = _RaisingCommitAgent()
+    captured = _pending_session("k0", agent)
     cache = _cache_with([("k0", agent)])
-    _pending_session("k0", agent)
+
+    g = _governor(cache, memory_high_mb=100, protect_recent=0,
+                  running_check=lambda k: False)
+    with caplog.at_level(logging.WARNING, logger="api.agent_cache_governance"):
+        assert g.sweep_pressure(rss_mb=500) == 1
+        _wait_release(g)
+
+    assert agent.attempts == 1, "the batch retried a refusing hook"
+    assert agent._session_messages == captured, "a refused commit cleared the transcript"
+    assert has_uncommitted_work("k0") is True, "the ledger was advanced by a refused commit"
+    assert cache == {}, "the entry must leave the cache (no per-pass re-delivery)"
+    assert "was refused; keeping its transcript" in caplog.text
+
+    # A later pass cannot reach the handle, so there is no retry loop...
+    assert g.sweep_pressure(rss_mb=500) == 0
+    _wait_release(g)
+    assert agent.attempts == 1
+
+    # ...and the next boundary now delivers the REAL payload.
+    assert commit_session_memory("k0", agent=agent) is True
+    assert agent.attempts == 2
+    assert agent.commits == [captured], "the boundary commit lost the payload"
+
+
+def test_base_exception_in_a_commit_does_not_kill_the_worker_or_strand_the_batch():
+    """A BaseException must not disable the valve or strand the whole batch.
+
+    Measured on the previous revision: a ``SystemExit`` raised inside a commit
+    (a lazy import reaching ``hermes_bootstrap``'s relaunch) killed the single
+    long-lived worker and left 4 of 4 claimed transcripts resident and
+    unreachable — the gateway's thread-per-batch shape loses only its own
+    batch, this one loses the valve for the process's lifetime.
+    """
+    from api.session_lifecycle import _reset_for_tests
+
+    _reset_for_tests()
+    fatal = _FatalCommitAgent()
+    others = [_RecordingCommitAgent() for _ in range(3)]
+    pairs = [("k0", fatal)] + [(f"k{i}", a) for i, a in enumerate(others, start=1)]
+    cache = _cache_with(pairs)
+    for key, agent in pairs:
+        _pending_session(key, agent)
+
+    g = _governor(cache, memory_high_mb=100, protect_recent=0,
+                  running_check=lambda k: False)
+    assert g.sweep_pressure(rss_mb=500) == 4
+    _wait_release(g)
+
+    worker = g._release_worker._thread
+    assert worker is not None and worker.is_alive(), (
+        "the single release worker died on a BaseException — the valve is off"
+    )
+    # The aborted entry keeps its transcript (its payload is still owed)...
+    assert fatal.attempts == 1
+    assert fatal._session_messages, "the aborted entry lost a transcript it still owes"
+    # ...but the rest of the batch is released, not stranded.
+    for key, agent in pairs[1:]:
+        assert agent._session_messages == [], f"{key} was stranded by another entry's abort"
+
+    # The valve still works on the next pass.
+    fresh = _RecordingCommitAgent()
+    cache["fresh"] = (fresh, "sig")
+    _pending_session("fresh", fresh)
+    assert g.sweep_pressure(rss_mb=500) == 1, (
+        "the valve stopped shedding after a BaseException"
+    )
+    _wait_release(g)
+    assert fresh._session_messages == []
+
+
+def test_owner_scope_refusal_keeps_the_transcript_and_no_empty_payload_is_committed(monkeypatch):
+    """A REFUSED pre-release commit must not clear the transcript (reviewer repro).
+
+    Measured on the previous revision: the owner scope refused the pre-release
+    delivery, the shed still cleared ``_session_messages``, and the NEXT boundary
+    then committed ``payload=None`` and advanced the ledger — the extraction the
+    transcript existed for was silently marked done with nothing to extract.
+    """
+    import api.session_lifecycle as lifecycle
+    from api.session_lifecycle import _reset_for_tests, commit_session_memory, has_uncommitted_work
+
+    _reset_for_tests()
+    agent = _RecordingCommitAgent()
+    captured = _pending_session("k0", agent)
+    cache = _cache_with([("k0", agent)])
+
+    real_owner_call = lifecycle.call_as_session_owner
+    refuse = {"on": True}
+
+    def _maybe_refuse(*args, **kwargs):
+        if refuse["on"]:
+            return False  # the owner scope refused: the hook never ran
+        return real_owner_call(*args, **kwargs)
+
+    monkeypatch.setattr(lifecycle, "call_as_session_owner", _maybe_refuse)
 
     g = _governor(cache, memory_high_mb=100, protect_recent=0,
                   running_check=lambda k: False)
     assert g.sweep_pressure(rss_mb=500) == 1
     _wait_release(g)
-    assert agent._session_messages == []
-    assert agent.attempts == 1
 
-    assert g.sweep_pressure(rss_mb=500) == 0
-    _wait_release(g)
-    assert agent.attempts == 1, "the governor retried a shed session"
+    assert agent.commits == [], "a refused delivery reached the provider"
+    assert agent._session_messages == captured, (
+        "the refused commit cleared the transcript — its pending extraction had "
+        "no payload left"
+    )
+    assert has_uncommitted_work("k0") is True
+    assert cache == {}, "the entry still leaves the cache (no per-pass re-delivery)"
+
+    # The refusal was transient: the next boundary commits the REAL payload.
+    refuse["on"] = False
+    assert commit_session_memory("k0", agent=agent) is True
+    assert agent.commits == [captured], "the boundary commit lost the payload"
+    assert None not in agent.commits, "an empty-payload commit was issued"
+    assert has_uncommitted_work("k0") is False
 
 
-def test_unflushed_session_gets_no_provider_call_over_ten_passes():
-    """(e) No per-pass re-delivery: 10 over-budget passes, 0 provider calls."""
+def test_soft_release_releases_clients_before_dropping_the_transcript():
+    """(gateway/run_agent_cache.py:911) release_clients() before the transcript.
+
+    Every shed session used to keep its provider client open for the life of the
+    process: the entry is gone from the cache, so the idle-TTL teardown can never
+    reach the handle (measured 0 client releases / 0 provider shutdowns for shed
+    agents).  Order matters too: the memory commit needs the live manager, and
+    the client release needs the transcript still present for the legacy
+    fallback.
+    """
     from api.session_lifecycle import _reset_for_tests
 
     _reset_for_tests()
-    agent = _RecordingCommitAgent(acknowledged=None)
+    agent = _ReleasingAgent()
+    captured = _pending_session("k0", agent)
     cache = _cache_with([("k0", agent)])
-    _pending_session("k0", agent, flushed=False)
 
     g = _governor(cache, memory_high_mb=100, protect_recent=0,
                   running_check=lambda k: False)
-    for _ in range(10):
+    assert g.sweep_pressure(rss_mb=500) == 1
+    _wait_release(g)
+
+    assert agent.releases == 1, "a shed agent kept its LLM clients open"
+    assert agent.commits_at_release == 1, "clients were released before the commit"
+    assert agent.transcript_len_at_release == len(captured), (
+        "clients must be released while the transcript is still present"
+    )
+    assert agent._session_messages == []
+    assert agent.commits == [captured], "no commit after the release"
+
+    # No second release, and the transcript is rebuilt by the next turn.
+    assert g.sweep_pressure(rss_mb=500) == 0
+    _wait_release(g)
+    assert agent.releases == 1, "the released handle was released again"
+
+
+def test_soft_release_falls_back_to_the_legacy_close():
+    """No release_clients(): the gateway's full-close fallback, transcript first."""
+    agent = _LegacyAgent()
+    assert not hasattr(agent, "release_clients")
+    soft_release_transcript(agent)
+    assert agent.shutdowns == [[{"role": "user", "content": "x" * 1000}]], (
+        "the legacy fallback did not drain the memory provider with the transcript"
+    )
+    assert agent.closes == 1
+    assert agent._session_messages == []
+
+
+def test_released_handle_reinserted_in_the_cache_is_not_reclaimed():
+    """The dropped ``_agent_has_resident_transcript`` guard, restored.
+
+    Streaming re-inserts the agent it fetched, so a released handle comes back
+    into the cache with an empty transcript — which is trivially "caught up"
+    (``0 >= 0``).  Without the guard every later pass re-claims it (measured
+    5 of 5), wasting an eviction slot on entries that hold no memory and issuing
+    a no-payload ``commit_memory_session()`` for a transcript that no longer
+    exists.
+    """
+    from api.session_lifecycle import _reset_for_tests
+
+    _reset_for_tests()
+    agent = _RecordingCommitAgent()
+    captured = _pending_session("k0", agent)
+    cache = _cache_with([("k0", agent)])
+
+    g = _governor(cache, memory_high_mb=100, protect_recent=0,
+                  running_check=lambda k: False)
+    assert g.sweep_pressure(rss_mb=500) == 1
+    _wait_release(g)
+
+    cache["k0"] = (agent, "sig")  # the next turn re-inserts the fetched handle
+    for _ in range(5):
+        assert g.sweep_pressure(rss_mb=500) == 0, "a released handle was re-claimed"
+        _wait_release(g)
+
+    assert agent.commits == [captured], (
+        f"a released handle issued {len(agent.commits) - 1} extra commit(s)"
+    )
+    assert agent._session_messages == [], "the next turn has not rebuilt the transcript yet"
+
+
+def test_twelve_over_budget_passes_touch_only_the_flushed_session(caplog):
+    """(e) 12 over-budget passes: 0 provider calls for the un-flushed session.
+
+    The mixed cache is the point.  The un-flushed session must cost the
+    provider nothing at all over 12 passes (that transcript is the only
+    complete copy: it is the gate, not the commit, that keeps it) and it must be
+    counted in the warning each time.  Its flushed neighbour, in the SAME cache,
+    must be shed exactly once and then never delivered again — the debt-era code
+    re-delivered a commit on every single pass (12 calls) because it waited for
+    an acknowledgement the installed Agent cannot give.
+    """
+    from api.session_lifecycle import _reset_for_tests
+
+    _reset_for_tests()
+    dirty = _RecordingCommitAgent()
+    clean = _RecordingCommitAgent()
+    cache = _cache_with([("dirty", dirty), ("clean", clean)])
+    _pending_session("dirty", dirty, flushed=False)
+    captured = _pending_session("clean", clean, flushed=True)
+
+    g = _governor(cache, memory_high_mb=100, protect_recent=0,
+                  running_check=lambda k: False)
+    claims = []
+    with caplog.at_level(logging.WARNING, logger="api.agent_cache_governance"):
+        for _ in range(12):
+            claims.append(g.sweep_pressure(rss_mb=500))
+            _wait_release(g)
+
+    assert claims == [1] + [0] * 11, f"unexpected claims across 12 passes: {claims}"
+    assert dirty.commits == [], "an un-flushed session must never reach the provider"
+    assert dirty._session_messages, "the un-flushed transcript was dropped"
+    assert cache["dirty"][0] is dirty
+    assert "1 blocked on un-flushed persistence" in caplog.text
+    assert clean.commits == [captured], (
+        f"the flushed session was delivered {len(clean.commits)} times, expected 1"
+    )
+    assert clean._session_messages == []
+    assert "clean" not in cache
+
+
+def test_pressure_keeps_one_batch_in_flight_and_logs_the_backlog(caplog):
+    """B1: a slow drain must not let the valve queue pinned transcripts.
+
+    The pass claims by popping entries OUT of the cache, so every queued batch
+    is a transcript still resident while the log says it was shed.  Measured on
+    the previous revision with a slow drain: depth 1 -> 10, then 4 -> 41 pinned
+    transcripts over 12 over-budget passes.  Now: one batch in flight, the skip
+    logged with the observed backlog, and every claimed transcript released
+    exactly once when the drain finishes.
+    """
+    from api.session_lifecycle import _reset_for_tests
+
+    _reset_for_tests()
+    gate, started = threading.Event(), threading.Event()
+    agents = [(f"k{i}", _GatedCommitAgent(gate, started)) for i in range(20)]
+    cache = _cache_with(agents)
+    for key, agent in agents:
+        _pending_session(key, agent)
+
+    g = _governor(cache, memory_high_mb=100, protect_recent=0,
+                  running_check=lambda k: False)
+
+    claims = []
+    with caplog.at_level(logging.INFO, logger="api.agent_cache_governance"):
+        claims.append(g.sweep_pressure(rss_mb=500))
+        assert started.wait(10), "the release worker never started the batch"
+        for _ in range(11):
+            claims.append(g.sweep_pressure(rss_mb=500))
+        backlog = g._release_worker.backlog()
+        assert backlog["batches"] == 1, f"batches in flight: {backlog}"
+        assert backlog["transcripts"] <= 16, f"transcripts pinned by the queue: {backlog}"
+        assert backlog["depth"] <= 1, f"queue depth grew past one batch: {backlog}"
+        gate.set()
+        _wait_release(g)
+
+    assert claims == [16] + [0] * 11, f"claims across 12 passes: {claims}"
+    assert "still pinned by the release worker" in caplog.text
+    assert "queue depth" in caplog.text
+    # Nothing was lost and nothing was duplicated: 16 released once each, the
+    # 4 beyond the per-pass cap still resident and still cached.
+    for key, agent in agents[:16]:
+        assert agent._session_messages == [], f"{key} was claimed but never released"
+        assert len(agent.commits) == 1, f"{key} was committed {len(agent.commits)} times"
+    assert set(cache) == {f"k{i}" for i in range(16, 20)}, (
+        f"only the per-pass cap may be claimed, still cached: {sorted(cache)}"
+    )
+    for key, agent in agents[16:]:
+        assert agent._session_messages, f"{key} was claimed past the per-pass cap"
+
+
+def test_pressure_sheds_on_the_pass_after_a_busy_one():
+    """B1: skipping a pass must not disable the valve — the next one sheds."""
+    from api.session_lifecycle import _reset_for_tests
+
+    _reset_for_tests()
+    gate, started = threading.Event(), threading.Event()
+    slow = _GatedCommitAgent(gate, started)
+    cache = _cache_with([("slow", slow)])
+    _pending_session("slow", slow)
+
+    g = _governor(cache, memory_high_mb=100, protect_recent=0,
+                  running_check=lambda k: False)
+
+    assert g.sweep_pressure(rss_mb=500) == 1
+    assert started.wait(10)
+    # A second entry appears while the first batch is still draining.
+    later = _RecordingCommitAgent()
+    cache["later"] = (later, "sig")
+    _pending_session("later", later)
+    assert g.sweep_pressure(rss_mb=500) == 0, "a second batch was queued"
+    assert later._session_messages, "the skipped pass claimed the new entry anyway"
+
+    gate.set()
+    _wait_release(g)
+    assert slow._session_messages == []
+
+    # The backlog is gone: the very next pass sheds the entry it skipped.
+    assert g.sweep_pressure(rss_mb=500) == 1
+    _wait_release(g)
+    assert later._session_messages == []
+
+
+def test_warning_counts_mid_turn_sessions_once(caplog):
+    """B4: the gateway's buckets are exclusive (mid-turn is NOT also un-flushed).
+
+    Same state in the gateway prints "0 blocked on un-flushed persistence"; this
+    port printed 1 because a mid-turn session was counted in both buckets, which
+    sends an operator hunting a session-persistence failure when the memory is
+    simply pinned by a running turn.
+    """
+    busy = _FakeAgent(flushed=False, turn_active=True)  # mid-turn AND lagging
+    stale = _FakeAgent(flushed=False)                   # idle and lagging
+    cache = _cache_with([("busy", busy), ("stale", stale)])
+
+    g = _governor(cache, memory_high_mb=100, protect_recent=0)
+    with caplog.at_level(logging.WARNING, logger="api.agent_cache_governance"):
         assert g.sweep_pressure(rss_mb=500) == 0
         _wait_release(g)
 
-    assert agent.commits == [], "an un-flushed session must never reach the provider"
-    assert agent._session_messages
+    assert "(2 cached, 1 mid-turn, 1 blocked on un-flushed persistence)" in caplog.text
 
 
 def test_protect_recent_clamp_and_lru_order_at_governor_level():

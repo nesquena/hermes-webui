@@ -39,15 +39,22 @@ class FakeAgent:
         return f"<FakeAgent {self.session_id} flushed={self._last_flushed_db_idx == len(self._session_messages)}>"
 
 
-def run_smoke(passes: int = 300, n: int = 2000) -> dict:
+def run_smoke(passes: int = 300, n: int = 2000, unflushed_every: int = 7) -> dict:
     """Run the churn smoke; returns {passes, churn_ops, dropped, errors, unpersisted}.
 
     The cache lock is SHARED with the churn thread — production callers all take
     it, and a churn writer on a different lock still races the locked snapshot.
+
+    ``unflushed_every`` plants agents whose transcript has NOT reached the
+    session DB.  They are what makes the ``unpersisted_at_claim`` assertion mean
+    anything: with an all-flushed population the persistence gate can never fire
+    (measured: removing the gate still reported 0, while un-flushed fixtures
+    reported 480 claimed-unpersisted), so the assertion passed no matter what
+    the gate did.
     """
     cache = {}
     for i in range(n):
-        cache[f"s{i}"] = (FakeAgent(f"s{i}", flushed=True), object())
+        cache[f"s{i}"] = (FakeAgent(f"s{i}", flushed=not (unflushed_every and i % unflushed_every == 0)), object())
     lock = threading.Lock()
     stop = threading.Event()
     stats = {"churn": 0, "evicted": 0, "unpersisted_at_claim": 0}
@@ -77,7 +84,8 @@ def run_smoke(passes: int = 300, n: int = 2000) -> dict:
                     # evict an arbitrary entry
                     key = next(iter(cache))
                     cache.pop(key, None)
-                cache[f"churn{i % 500}"] = (FakeAgent(f"churn{i % 500}", flushed=True), object())
+                flushed = not (unflushed_every and i % unflushed_every == 0)
+                cache[f"churn{i % 500}"] = (FakeAgent(f"churn{i % 500}", flushed=flushed), object())
                 i += 1
                 stats["churn"] += 1
 
@@ -103,12 +111,18 @@ def run_smoke(passes: int = 300, n: int = 2000) -> dict:
     # _claim_hook); the post-hoc sweep below is a second, weaker net for
     # entries that are still cached with an emptied transcript.
     bad = 0
+    unflushed_remaining = 0
     with lock:
         for key, entry in cache.items():
             agent = entry[0] if isinstance(entry, tuple) and entry else entry
-            if agent is not None and getattr(agent, "_session_messages", None) == []:
+            if agent is None:
+                continue
+            if getattr(agent, "_session_messages", None) == []:
                 if not transcript_persistence_caught_up(agent):
                     bad += 1
+            elif not transcript_persistence_caught_up(agent):
+                # Still resident and still behind the DB: the gate kept it.
+                unflushed_remaining += 1
 
     return {
         "passes": passes,
@@ -116,6 +130,8 @@ def run_smoke(passes: int = 300, n: int = 2000) -> dict:
         "dropped": stats["evicted"],
         "errors": errors,
         "unpersisted": bad + stats["unpersisted_at_claim"],
+        "unflushed_remaining": unflushed_remaining,
+        "unflushed_present": stats["unpersisted_at_claim"] + unflushed_remaining,
         "elapsed": elapsed,
     }
 
@@ -126,9 +142,19 @@ def test_pressure_sweeps_under_churn_stay_clean():
     A module that only defines main() is collected by pytest without running
     anything, so the documented smoke command used to pass while checking
     nothing.  This is the pytest entry point; main() keeps the script form.
+
+    The un-flushed fixtures are not decoration: they are the only way the
+    ``unpersisted`` assertion can fail.  ``unflushed_present > 0`` proves the
+    population really contained un-flushed transcripts (so a gate that stopped
+    working would have claimed them), and ``dropped > 0`` proves the flushed
+    majority was still shed — the smoke is neither vacuous nor inert.
     """
     result = run_smoke(passes=60, n=400)
     assert not result["errors"], result["errors"][0]
+    assert result["unflushed_present"] > 0, (
+        "no un-flushed agent was ever present: the persistence-gate assertion "
+        "is vacuous"
+    )
     assert result["unpersisted"] == 0, (
         f"{result['unpersisted']} released agents were NOT persisted at release time"
     )
@@ -138,9 +164,15 @@ def test_pressure_sweeps_under_churn_stay_clean():
 def main():
     result = run_smoke()
     print(f"passes={result['passes']} churn_ops={result['churn_ops']} "
-          f"dropped_total={result['dropped']} elapsed={result['elapsed']:.1f}s")
+          f"dropped_total={result['dropped']} "
+          f"unflushed_present={result['unflushed_present']} "
+          f"elapsed={result['elapsed']:.1f}s")
     if result["errors"]:
         print(f"FAIL: {len(result['errors'])} errors, first: {result['errors'][0]}")
+        sys.exit(1)
+    if result["unflushed_present"] == 0:
+        print("FAIL: no un-flushed fixture ever entered the cache — the gate "
+              "assertion below is vacuous")
         sys.exit(1)
     if result["unpersisted"]:
         print(f"FAIL: {result['unpersisted']} released agents were NOT persisted at release time")
