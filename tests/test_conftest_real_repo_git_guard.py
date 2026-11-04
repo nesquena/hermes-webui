@@ -73,7 +73,8 @@ def refused():
     ['env', 'GIT_TERMINAL_PROMPT=0', '{git}', 'reset', '--hard', 'HEAD'],  # the fake, by absolute path
     ['git', 'remote', 'show', 'origin'],  # contacts the remote without -n
     ['git', 'config', '--', 'core.guardprobe', '--get'],  # after `--` the read option is the value written
-    ['git', 'tag', '--', '--list'],  # creates a tag named `--list`
+    ['git', 'tag', '--', '--list'],  # `--list` is a tag name here, not a listing
+    ['git', 'stash', '--', 'list'],  # `stash push -- list`
 ])
 def test_mutating_or_opaque_git_on_real_checkout_is_refused(fake_git, argv):
     with refused():
