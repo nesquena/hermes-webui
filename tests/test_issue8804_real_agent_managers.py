@@ -33,8 +33,8 @@ import api.memory_profile_scope as scope  # noqa: E402
 import api.profiles as profiles_api  # noqa: E402
 import api.streaming as streaming  # noqa: E402
 from tests.test_issue8517_profile_scoped_memory import hc, homes  # noqa: E402,F401
-from tests.test_issue8613_post_drain_release import RecordingProvider  # noqa: E402
-from tests.test_issue8613_provider_instance_holders import holder_registry  # noqa: E402,F401
+from tests.test_issue8613_post_drain_release import RecordingProvider, _wait_for  # noqa: E402
+from tests.test_issue8613_provider_instance_holders import _pause_saves, holder_registry  # noqa: E402,F401
 
 AGENT_VERSIONS = ("v0.22.2", "v0.22.7")
 
@@ -261,3 +261,36 @@ def test_a_build_during_an_old_agents_teardown_waits_and_gets_a_live_provider(ag
     assert provider.client.is_closed is False
     provider.remember("the new agent's save")
     assert provider.writes == ["the new agent's save"]
+
+
+def test_a_deferred_release_then_a_late_close_leaves_the_successor_its_provider(agent_version):
+    """Codex r3's reproduction: queue a save, evict (the release waits for the save),
+    let the deferred release run, build a successor sharing the provider, then close
+    the departed agent. One shutdown, no session end, and the successor's client open."""
+    v = agent_version
+    provider = _pause_saves(RecordingProvider())
+    old, _ = _build(v, provider, f"8804-{v.tag}-deferred-old")
+    hc_mod = sys.modules["hermes_constants"]
+    token = hc_mod.set_hermes_home_override(str(v.root))
+    try:
+        old._memory_manager.sync_all("the departed agent's save", "reply", session_id=old.session_id)
+        assert provider.save_started.wait(30), "the queued save never reached the provider"
+    finally:
+        hc_mod.reset_hermes_home_override(token)
+    with scope.release_without_fence_wait():
+        assert streaming._close_evicted_agent_at_session_boundary(f"8804-{v.tag}-deferred-old", old) is True
+    assert provider.shutdowns == 0
+    provider.save_resume.set()
+    assert provider.save_landed.wait(30)
+    assert _wait_for(lambda: provider.shutdowns == 1, 30), f"{v.tag}: the deferred release never ran"
+
+    successor, cacheable = _build(v, provider, f"8804-{v.tag}-deferred-new")
+    assert cacheable is True and provider.client.is_closed is False
+    old.shutdown_memory_provider([])  # the departed agent's own close, later
+
+    assert provider.session_ends == 0, f"{v.tag}: the late close ran a session end under the unknown owner"
+    assert provider.shutdowns == 1, f"{v.tag}: the late close shut the provider down a second time"
+    assert provider.client.is_closed is False
+    provider.remember("the successor's save")
+    assert provider.writes[-1] == "the successor's save"
+    assert successor._memory_manager is not None

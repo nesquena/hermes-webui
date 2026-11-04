@@ -1688,13 +1688,20 @@ def _mark_legacy_shut_down(holder: Any) -> None:
     """After an old Agent's provider was released, make the agent's own
     ``shutdown_memory_provider`` a no-op (#8804). On those Agents it runs
     ``on_session_end`` unconditionally, so a later ``close()`` would commit under an
-    owner nobody could resolve, then shut the providers down a second time. Current
-    Agents get the same effect from the soft-release teardown claim. A
-    ``_ReleaseIntent`` (the agent already left) has nothing to mark."""
+    owner nobody could resolve, then shut the providers down a second time (closing
+    the client under any successor that shares the instance). Current Agents get the
+    same effect from the soft-release teardown claim.
+
+    A deferred release runs for a ``_ReleaseIntent``: the agent it stands in for is
+    marked through the intent's weak reference, when that agent is still alive."""
+    target = holder
     if isinstance(holder, _ReleaseIntent):
-        return
+        ref = holder.agent_ref
+        target = ref() if ref is not None else None
+        if target is None:
+            return
     try:
-        holder._memory_provider_shutdown = True
+        target._memory_provider_shutdown = True
     except Exception:
         logger.debug("[webui] #8804: could not mark the released agent shut down", exc_info=True)
 
@@ -2342,7 +2349,11 @@ def release_unowned_memory_provider(agent: Any, *, session_id: str, owner_home: 
         # that same outstanding write and RETAINS the cleanup intent, so the
         # release runs once the write drains instead of waiting for a session
         # boundary of some later agent that may never come.
-    intent = _ReleaseIntent(manager, bound_home, bound_key, session_id)
+    try:
+        departing = weakref.ref(agent)
+    except TypeError:
+        departing = None
+    intent = _ReleaseIntent(manager, bound_home, bound_key, session_id, agent_ref=departing)
     ok, why, claimed = _claim_last_held_teardown(agent, retain=intent)
     if not ok:
         armed = _arm_release_intent(intent)
@@ -2472,13 +2483,18 @@ class _ReleaseIntent:
     work, or once the release has run.
     """
 
-    __slots__ = ("_memory_manager", "bound_home", "bound_key", "session_id", "armed")
+    __slots__ = ("_memory_manager", "bound_home", "bound_key", "session_id", "armed", "agent_ref")
 
-    def __init__(self, manager: Any, bound_home: str, bound_key: Optional[str], session_id: str):
+    def __init__(self, manager: Any, bound_home: str, bound_key: Optional[str], session_id: str,
+                 agent_ref: Optional[Callable[[], Any]] = None):
         self._memory_manager = manager
         self.bound_home = bound_home
         self.bound_key = bound_key
         self.session_id = session_id
+        # #8804: a PLAIN weak reference to the departed agent (no holder-table
+        # callback, never a strong one), so a deferred legacy release can mark it
+        # shut down if it is still alive (``_mark_legacy_shut_down``).
+        self.agent_ref = agent_ref
         # Futures already carrying this intent's done-callback, by identity (the
         # future itself is kept so a reused id() can never match). Holder lock.
         self.armed: dict = {}

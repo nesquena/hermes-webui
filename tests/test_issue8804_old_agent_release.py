@@ -219,6 +219,41 @@ def test_an_old_agents_queued_save_lands_before_its_provider_is_released(hc, hom
     assert provider.shutdown_homes == [str(homes["alpha"])], provider.shutdown_homes
 
 
+
+def test_a_deferred_release_marks_the_departed_agent_so_its_late_close_spares_a_successor(
+    hc, homes, holder_registry
+):
+    """Codex r3: the release deferred on a queued save runs for a ``_ReleaseIntent``.
+    If it did not mark the departed agent, that agent's own v0.22.2
+    ``shutdown_memory_provider`` (no teardown claim) could later run a session end under
+    the unknown owner and a second ``shutdown_all``, which closes the client under a
+    successor that shares the instance."""
+    provider = _pause_saves(RecordingProvider())
+    agent = _legacy_agent(homes["alpha"], provider, "8804-deferred")
+    token = hc.set_hermes_home_override(str(homes["alpha"]))
+    try:
+        agent._memory_manager.sync_all("the departed agent's save", "reply", session_id=agent.session_id)
+        assert provider.save_started.wait(30), "the queued save never reached the provider"
+    finally:
+        hc.reset_hermes_home_override(token)
+    with scope.release_without_fence_wait():
+        assert streaming._close_evicted_agent_at_session_boundary("8804-deferred", agent) is True
+    provider.save_resume.set()
+    assert provider.save_landed.wait(30)
+    _released_exactly_once(provider)
+    assert agent._memory_provider_shutdown is True, "the deferred release did not mark the departed agent"
+
+    successor = _legacy_agent(homes["alpha"], provider, "8804-deferred-next")
+    assert provider.client.is_closed is False
+    agent.shutdown_memory_provider([])  # the departed agent's own close, later
+
+    assert getattr(agent, "shutdown_bodies_run", 0) == 0
+    assert provider.session_ends == 0 and provider.shutdowns == 1
+    assert provider.client.is_closed is False, "the late close shut the provider down under its successor"
+    provider.remember("the successor's save")
+    assert provider.writes[-1] == "the successor's save"
+    assert successor._memory_provider_shutdown is False
+
 def test_an_old_agent_without_a_recorded_build_home_is_left_alone(hc, homes, holder_registry, caplog):
     provider = RecordingProvider()
     agent = _legacy_agent(homes["alpha"], provider, "8804-nohome")
