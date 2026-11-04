@@ -148,7 +148,8 @@ def test_config_keys_and_values_are_not_places(fake_git, tmp_path):
         f'config --get {REPO_ROOT / "tests"}',
     ]
     config = str(REPO_ROOT / '.git' / 'config')
-    for spelling in (['-f', config], ['--file', config], ['--fil', config], ['--fil=' + config], ['-f' + config]):
+    for spelling in (['-f', config], ['--file', config], ['--fil', config], ['--fil=' + config], ['-f' + config],
+                     ['-zf', config], ['-zf' + config]):
         with refused():
             subprocess.run(['git', 'config', *spelling, 'core.bare', 'false'], cwd=tmp_path)
     assert len(_lines(fake_git)) == 4

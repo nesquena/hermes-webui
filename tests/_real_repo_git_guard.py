@@ -244,14 +244,19 @@ def refusal(args, cwd, *, shell=False, executable=None, env=None):
         # in a temp repo is fine): only `--file <path>`, `-f <path>` and `--file=<path>` name one
         for j, arg in enumerate(verb_args[1:], 1):
             option, attached, value = arg.partition('=')
-            file_option = option == '-f' or (len(option) >= 5 and '--file'.startswith(option))  # git takes `--fil`
-            if file_option and not attached:
-                if j + 1 < len(verb_args):
+            if len(option) >= 5 and '--file'.startswith(option):  # git takes any unambiguous prefix: `--fil`
+                if attached:
+                    path_args.append(value)  # --file=<path>, --fil=<path>
+                elif j + 1 < len(verb_args):
                     path_args.append(verb_args[j + 1])
-            elif file_option:
-                path_args.append(value)  # --file=<path>, --fil=<path>
-            elif arg.startswith('-f') and not arg.startswith('--'):
-                path_args.append(arg[2:])  # -f<path>
+                continue
+            short = re.match(r'-[^-]*?f(.*)', arg, re.S)  # a short cluster ending in f: -f, -zf, -zf<path>
+            if short is None or arg.startswith('--'):
+                continue
+            if short.group(1):
+                path_args.append(short.group(1))  # -f<path>, -zf<path>
+            elif j + 1 < len(verb_args):
+                path_args.append(verb_args[j + 1])  # -f <path>, -zf <path>
     else:
         for arg in verb_args[1:]:
             if arg.startswith('-'):
