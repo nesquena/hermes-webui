@@ -126,7 +126,16 @@ def _mask_inline_string(value):
     """
     if "data:image/" not in value.lower():
         return None
-    masked, count = _INLINE_DATA_URL_RE.subn(_MASK, value, count=1)
+    # Replace EVERY qualifying run in one pass. Masking one run per save let a
+    # later save mask the next run and re-stamp ``_image_payload_digest`` from a
+    # string that had already lost the distinction the digest exists to capture:
+    # two partial rows whose snippets held ``[image A, image C]`` and
+    # ``[image B, image C]`` collapsed after cold reload (2 -> 2 -> 1 -> 1 rows),
+    # because the second save digested an identical, fully-projected remainder.
+    # Masking all runs here erases every payload on the FIRST save, while the
+    # digest is taken from the COMPLETE original string, so the distinction
+    # survives on the row itself.
+    masked, count = _INLINE_DATA_URL_RE.subn(_MASK, value)
     if not count:
         # The substring is present but no run is long enough to be a payload.
         return None

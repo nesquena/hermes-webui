@@ -884,3 +884,98 @@ def test_short_data_url_mention_is_not_masked():
     assert _mask_inline_string(prose) is None
     # A JSON *part list* string is handled by the part-lane projector, not here.
     assert _mask_inline_string(json.dumps([_openai_part(_data_url(b"x" * 300))])) is not None
+
+
+def _snippet_row(urls, *, stable_id, when=31.0):
+    """A partial assistant row whose captured snippet holds several data URLs.
+
+    The snippet is a Python ``repr`` preview, matching the production shape.
+    """
+    parts = ", ".join(
+        "{'type': 'image_url', 'image_url': {'url': '%s'}}" % u for u in urls
+    )
+    snippet = (
+        "{'_multimodal': True, 'content': [{'type': 'text', 'text': 'look'}, "
+        + parts
+        + "]}"
+    )
+    return {
+        "role": "assistant",
+        "id": stable_id,
+        "timestamp": when,
+        "content": "partial",
+        "_partial_tool_calls": [{"name": "vision_analyze", "snippet": snippet, "done": False}],
+    }
+
+
+def test_multi_url_snippet_survives_cold_cycles(session_dir):
+    """Several data URLs in ONE snippet must all be masked in a single save pass.
+
+    `_mask_inline_string` used ``subn(..., count=1)``, so a save masked only the
+    first qualifying URL. The second URL was masked on a LATER save, by which time
+    the digest had already been stamped from the partially-projected string -- so
+    distinctions erased by the first save were lost and a distinct row was deleted.
+    Reviewer-measured pre-fix: 2 -> 2 -> 1 -> 1.
+    """
+    shared = _data_url(b"C" * 400)
+    rows = [
+        _snippet_row([_data_url(b"A" * 400), shared], stable_id="evt-shared"),
+        _snippet_row([_data_url(b"B" * 400), shared], stable_id="evt-shared"),
+    ]
+    # Two rows differ only in their FIRST image; both share the later one.
+    counts = _cold_cycle_counts(session_dir, "multi", rows, cycles=4)
+    assert counts == [2, 2, 2, 2], f"a distinct row was deleted: {counts}"
+
+
+def test_all_snippet_urls_removed_in_one_save(session_dir):
+    """One save must leave NO qualified data URL behind in a snippet."""
+    urls = [_data_url(b"D" * 400), _data_url(b"E" * 400), _data_url(b"F" * 400)]
+    session = Session(session_id="one-pass", messages=[_snippet_row(urls, stable_id="s1")])
+    session.save(touch_updated_at=False)
+
+    text = (session_dir / "one-pass.json").read_text()
+    assert "data:image" not in text, "a save left image bytes behind"
+    # Surrounding capture text is still preserved verbatim.
+    snippet = json.loads(text)["messages"][0]["_partial_tool_calls"][0]["snippet"]
+    assert snippet.startswith("{'_multimodal': True, 'content': [{'type': 'text', 'text': 'look'},")
+
+
+def test_three_url_snippet_cold_cycles(session_dir):
+    """Three URLs, differing in the first, must also preserve both rows."""
+    shared_a, shared_b = _data_url(b"G" * 400), _data_url(b"H" * 400)
+    rows = [
+        _snippet_row([_data_url(b"I" * 400), shared_a, shared_b], stable_id="evt3"),
+        _snippet_row([_data_url(b"J" * 400), shared_a, shared_b], stable_id="evt3"),
+    ]
+    assert _cold_cycle_counts(session_dir, "three", rows, cycles=4) == [2, 2, 2, 2]
+
+
+def test_single_url_snippet_still_preserves_rows(session_dir):
+    """The already-working one-URL case must not regress."""
+    rows = [
+        _snippet_row([_data_url(b"K" * 400)], stable_id="evt1"),
+        _snippet_row([_data_url(b"L" * 400)], stable_id="evt1"),
+    ]
+    assert _cold_cycle_counts(session_dir, "single", rows, cycles=4) == [2, 2, 2, 2]
+
+
+def test_identical_snippet_rows_still_collapse(session_dir):
+    """Exact duplicates must STILL collapse -- the guard's purpose is not defeated."""
+    url = _data_url(b"M" * 400)
+    rows = [
+        _snippet_row([url], stable_id="dup"),
+        _snippet_row([url], stable_id="dup"),
+    ]
+    counts = _cold_cycle_counts(session_dir, "dup", rows, cycles=3)
+    # Measured on current head: the lossless replay guard fires on the FIRST
+    # save, so exact duplicates are already collapsed at counts[0]. Asserting
+    # counts[0] == 2 was my wrong expectation, not a bug.
+    assert counts == [1, 1, 1], f"duplicate collapse broken: {counts}"
+
+
+def test_clean_snippet_is_not_mutated(session_dir):
+    """A snippet with no inline bytes is returned untouched (non-mutating control)."""
+    from api.session_image_persistence_override import _mask_inline_string
+
+    prose = "{'content': [{'type': 'text', 'text': 'no images here'}]}"
+    assert _mask_inline_string(prose) is None
