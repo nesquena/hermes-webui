@@ -236,8 +236,8 @@ def render_session_html(session: dict, theme: str = "dark", palette: dict | None
     updated = _fmt_ts(session.get("updated_at"))
     messages = session.get("messages") or []
     # Skip system messages by default (usually long boilerplate); keep user/assistant/tool.
-    # Hidden internal rows (delegation_wakeup) are private model plumbing — they
-    # must not leak into a shared/exported document (#quiet-delegation gate).
+    # Omit hidden transcript rows, including internal delegation handoffs and
+    # provider-error cards the user dismissed.
     from api.process_event_utils import is_hidden_transcript_row
 
     visible = [

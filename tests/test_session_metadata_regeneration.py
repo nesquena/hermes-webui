@@ -81,6 +81,36 @@ class SessionMetadataRegenerationTests(unittest.TestCase):
         self.assertNotIn("regeneration_revision", payload)
         self.history.assert_not_called()
 
+    def test_metadata_poll_does_not_build_provider_error_capabilities(self):
+        from api.session_ops import project_provider_error_dismissal_capabilities
+
+        with patch(
+            "api.session_ops.project_provider_error_dismissal_capabilities",
+            wraps=project_provider_error_dismissal_capabilities,
+        ) as project:
+            payload = self.request("messages=0")
+        self.assertEqual(payload["messages"], [])
+        project.assert_not_called()
+
+    def test_full_detail_projects_only_the_provider_error_reference(self):
+        self.session.session_source = "webui"
+        self.session.source_tag = "webui"
+        self.session.raw_source = "webui"
+        self.session.messages.append({
+            "role": "assistant",
+            "content": "provider failed",
+            "provider_details": "upstream unavailable",
+            "_error": True,
+            "_provider_error_type": "error",
+            "id": "provider-error-row",
+            "timestamp": 1002.0,
+        })
+        self.session.save(touch_updated_at=False)
+        payload = self.request("messages=1&msg_limit=all")
+        row = payload["messages"][-1]
+        self.assertRegex(row["_provider_error_dismiss_ref"], r"^[0-9a-f]{64}$")
+        self.assertFalse({"owner_session_id", "owner_index", "row_digest"} & set(row))
+
     def test_metadata_warm_load_omits_revision_without_canonical_history(self):
         payload = self.request("messages=0")
         self.assertEqual(payload["messages"], [])
