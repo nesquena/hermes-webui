@@ -164,6 +164,18 @@ class TestEscapedPipeStaysInOneCell:
         html = _render(driver_path, md)
         assert _row_cell_counts(html) == [2, 2], f"got: {html!r}"
 
+    def test_odd_backslash_run_collapses_remaining_pair_in_plain_text(self, driver_path):
+        """Three backslashes plus an escaped pipe display one backslash."""
+        md = "| h1 | h2 |\n|---|---|\n| C:" + "\\" * 3 + "| next | ok |"
+        cells = _table_cells(_render(driver_path, md))
+        assert cells[2] == "C:" + "\\" + "| next", f"got: {cells!r}"
+
+    def test_odd_backslash_run_does_not_collapse_pair_inside_code_span(self, driver_path):
+        """The plain-text escape pass must leave stashed code spans alone."""
+        md = "| h1 | h2 |\n|---|---|\n| `C:" + "\\" * 3 + "| next` | ok |"
+        cells = _table_cells(_render(driver_path, md))
+        assert cells[2] == "<code>C:" + "\\" * 2 + "| next</code>", f"got: {cells!r}"
+
 
 class TestEscapedPipeInteractsWithExistingProtection:
     """The new rule must not disturb the bracket / code / comparison cases."""
