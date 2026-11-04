@@ -158,6 +158,12 @@ class TestEscapedPipeStaysInOneCell:
         counts = _row_cell_counts(html)
         assert counts == [2, 2, 2, 2], f"every row must have 2 cells. Got: {counts!r}"
 
+    def test_even_backslashes_leave_pipe_as_cell_delimiter(self, driver_path):
+        """An escaped backslash followed by a pipe must still split the cell."""
+        md = "| h1 | h2 |\n|---|---|\n| C:\\\\| next |"
+        html = _render(driver_path, md)
+        assert _row_cell_counts(html) == [2, 2], f"got: {html!r}"
+
 
 class TestEscapedPipeInteractsWithExistingProtection:
     """The new rule must not disturb the bracket / code / comparison cases."""
