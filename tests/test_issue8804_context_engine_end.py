@@ -45,8 +45,21 @@ class RecordingEngine:
 
 
 def _with_engine(agent, engine, messages=2):
+    """Attach ``engine`` and make the agent's own ``shutdown_memory_provider`` end it the
+    way every Agent release does (flag, memory end, then the engine's end), so a test
+    that a later close does NOT end the engine again is not vacuous (senior review)."""
     agent.context_compressor = engine
     agent._session_messages = [{"role": "user", "content": "x"}] * messages
+    own_shutdown = agent.shutdown_memory_provider
+
+    def agents_shutdown(messages=None):
+        if agent._memory_provider_shutdown:
+            return
+        own_shutdown(messages)
+        agent._memory_provider_shutdown = True
+        engine.on_session_end(agent.session_id or "", messages or [])
+
+    agent.shutdown_memory_provider = agents_shutdown
     return agent
 
 
@@ -110,14 +123,14 @@ def test_an_engine_whose_end_raises_does_not_break_the_eviction(hc, homes, holde
 
 
 def test_an_owned_eviction_leaves_the_engine_to_the_agents_own_shutdown(hc, homes, holder_registry, monkeypatch):
-    """With a resolvable owner the Agent's own ``shutdown_memory_provider`` runs (and ends
-    the engine itself on a real Agent); the WebUI must not end it a second time."""
+    """With a resolvable owner the Agent's own ``shutdown_memory_provider`` runs and ends
+    the engine itself; the WebUI must not end it a second time."""
     engine = RecordingEngine()
     agent = _with_engine(_shared_agent(homes["alpha"], SharedInstanceProvider(), "8804-ce-owned"), engine)
     monkeypatch.setattr(scope, "session_owner_profile_home", lambda sid: str(homes["alpha"]))
 
     assert streaming._close_evicted_agent_at_session_boundary("8804-ce-owned", agent) is True
-    assert engine.ends == []
+    assert len(engine.ends) == 1, engine.ends
 
 
 def test_a_refusal_at_hook_time_does_not_end_the_engine_twice(hc, homes, holder_registry, monkeypatch):
