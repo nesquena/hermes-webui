@@ -10701,17 +10701,55 @@ function renderMd(raw){
   s=s.replace(/\$\$([\s\S]+?)\$\$/g,(_,m)=>{math_stash.push({type:'display',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
   // Match a single literal backslash before the display delimiter (the common LLM form).
   s=s.replace(/\\\[([\s\S]+?)\\\]/g,(_,m)=>{math_stash.push({type:'display',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
-  // Numeric inline math needs a math signal; reject currency fragments such as $5-$10.
-  // Keep this helper local so renderMd can also run in standalone preview/test harnesses.
-  function isLikelyNumericInlineMath(body,followingChar){
-    if(/[+\-*/=<>^_,;:(]$/.test(body)||/\d/.test(followingChar))return false;
-    return /[+\-*/=<>^_{}]|\d[.,]\d|\\[A-Za-z]+/.test(body);
+  // Currency protection & numeric inline math handling:
+  // Ported from Hermes Desktop (apps/desktop/src/lib/markdown-preprocess.ts).
+  // Masks non-math currency openers ($5, $.99, $0.50–$.99) so they don't consume adjacent math delimiters (e.g. Costs $5 ($x$ per unit)).
+  function _isEscapedAt(text, idx){
+    let c=0;
+    for(let i=idx-1;i>=0&&text[i]==='\\';i--) c++;
+    return c%2===1;
   }
-  // Inline math: require non-space boundaries and keep currency prose literal.
-  s=s.replace(/\$([^\s$\n][^$\n]*?[^\s$\n]|[^\s$\n])\$/g,(match,m,offset,source)=>{if(m.includes(' | ')||(/^\d/.test(m)&&!isLikelyNumericInlineMath(m,source.charAt(offset+match.length))))return match;math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
+  function _isCurrencyOpenerAt(text, idx){
+    if(text[idx]!=='$'||_isEscapedAt(text,idx)||text[idx-1]==='$'||text[idx+1]==='$') return false;
+    if(/[\d.]/.test(text[idx+1]||'')) return true;
+    return /^[ \u00a0]\d/.test(text.slice(idx+1,idx+3))&&/^[A-Za-z]$/.test(text[idx-1]||'');
+  }
+  function _findClosingSingleDollar(text, start){
+    for(let i=start+1;i<text.length&&text[i]!=='\n';i++){
+      if(text[i]!=='$'||_isEscapedAt(text,i)) continue;
+      if(text[i-1]==='$'||text[i+1]==='$') continue;
+      return i;
+    }
+    return -1;
+  }
+  function isLikelyNumericInlineMath(body, followingChar){
+    const v=body.trim();
+    if(!/^\d/.test(v)) return false;
+    if(/[+\-*/=<>^_,;:(–—]$/.test(v)||/[\d.]/.test(followingChar)) return false;
+    if(/https?:\/\//i.test(v)) return false;
+    return /[+\-*/=<>^_{}]|\d[.,]\d|\\[A-Za-z]+/.test(v);
+  }
+  function _maskCurrencyDollars(text){
+    let out='', copied=0;
+    for(let i=0;i<text.length;i++){
+      if(!_isCurrencyOpenerAt(text,i)) continue;
+      const closer=_findClosingSingleDollar(text,i);
+      if(closer!==-1&&!_isCurrencyOpenerAt(text,closer)&&isLikelyNumericInlineMath(text.slice(i+1,closer),text[closer+1]||'')){
+        i=closer;
+        continue;
+      }
+      out+=text.slice(copied,i)+'\x00CURRENCY\x00';
+      copied=i+1;
+    }
+    return out+text.slice(copied);
+  }
+  s=_maskCurrencyDollars(s);
+  // Inline math: $...$ — require non-space boundaries and keep currency prose literal.
+  s=s.replace(/\$([^\s$\n][^$\n]*?[^\s$\n]|[^\s$\n])\$/g,(_,m)=>{if(m.includes(' | '))return '\$'+m+'\$';math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
   // Also stash \(...\) LaTeX delimiters.
   // Match a single literal backslash before the delimiter (the common LLM form).
   s=s.replace(/\\\((.+?)\\\)/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
+  s=s.replace(/\x00CURRENCY\x00/g,'$');
   // Safe tag → markdown equivalent (these produce the same output as **text** etc.)
   // Stash raw <pre> blocks so the inline <code> rewrite below does not run
   // inside them. Running that rewrite in <pre> content can introduce stray
