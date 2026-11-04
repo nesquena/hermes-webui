@@ -75,6 +75,8 @@ def refused():
     ['git', 'config', '--', 'core.guardprobe', '--get'],  # after `--` the read option is the value written
     ['git', 'tag', '--', '--list'],  # `--list` is a tag name here, not a listing
     ['git', 'stash', '--', 'list'],  # `stash push -- list`
+    ['git', 'stash', '-m', 'list'],  # `stash push -m list`
+    ['git', 'stash', '--message', 'show'],
 ])
 def test_mutating_or_opaque_git_on_real_checkout_is_refused(fake_git, argv):
     with refused():

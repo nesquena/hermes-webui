@@ -104,9 +104,10 @@ def is_read_only(verb_args) -> bool:
             positional[0] == 'show' and bool({'-n', '--no-query'} & flags))
     if verb == 'branch':  # listings read; `branch <name>` writes, even with -v/-a/-r
         return flags <= _BRANCH_LISTING_FLAGS and (not positional or bool(_BRANCH_FORCED_LISTING_FLAGS & flags))
-    if verb in ('stash', 'worktree'):  # the subcommand precedes `--`: `stash -- list` is `stash push -- list`
-        subcommand = next((a for a in options if not a.startswith('-')), None)
-        return subcommand in (('list', 'show') if verb == 'stash' else ('list',))
+    if verb == 'stash':  # the subcommand is the first word: `stash -m list` and `stash -- list` push
+        return rest[:1] in (['list'], ['show'])
+    if verb == 'worktree':
+        return rest[:1] == ['list']
     if verb == 'ls-remote':  # `--get-url` prints the configured URL without contacting it
         return '--get-url' in flags
     return False
