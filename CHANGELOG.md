@@ -83,6 +83,8 @@
 
 ### Fixed
 
+- **A cached agent's memory-provider worker shuts down once its last queued save lands.** When a cached agent whose session owner couldn't be resolved (for example, its session file was removed outside the WebUI) was evicted while a memory save was still queued, its memory-provider worker kept running until another agent of that profile reached a session boundary, or until a restart. The WebUI now releases the worker on its own after the save has landed, and only when no other agent still holds it. Salvage of #8651 by @happy5318. (#8793, #8613)
+
 - **The custom-provider probe-budget tests no longer fail under load.** Three end-to-end tests that run the deadline arithmetic on a fake clock still waited for each endpoint probe in real seconds, so a host busy enough to start the probe thread late ended the chain early. They now run the probe inline and are decided by the clock alone; a new test reproduces the late-start case, and the tests that check in-flight probes keep real threads. Tests only. (#8795, #8789)
 
 - **The updater tests pass without a git checkout and in any order.** The stash-recovery tests ran git against the repository they sat in, so they failed in an export without `.git`; they now build their own temporary repository. Tests that unloaded and re-imported `api.updates` restored `sys.modules` but left the `api` package pointing at the re-imported copy, so a later test's patch and the route it called could reach two different module objects; a shared helper now restores both. (#8788, #8784)
