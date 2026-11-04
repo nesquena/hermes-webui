@@ -14012,8 +14012,6 @@ def get_gateway_caps(base_url: str, api_key: str = "") -> dict:
                 for level in raw_efforts
                 if isinstance(level, str) and str(level).strip()
             ]
-        elif features.get("reasoning_streaming"):
-            caps["reasoning_efforts"] = ["none", *VALID_REASONING_EFFORTS, "ultra"]
     except urllib.error.HTTPError as exc:
         caps["capabilities_reachable"] = True
         caps["probe_error"] = f"{type(exc).__name__}: {exc}"

@@ -406,6 +406,38 @@ def test_gateway_run_model_options_degrades_to_advertised_intermediate(monkeypat
     }
 
 
+@pytest.mark.parametrize(
+    ("features", "expected"),
+    [
+        ({"reasoning_streaming": True}, None),
+        ({"reasoning_efforts": ["low", "max"]}, ["low", "max"]),
+    ],
+)
+def test_gateway_caps_only_trusts_explicit_reasoning_effort_list(monkeypatch, features, expected):
+    """Streaming support does not prove which effort names the receiver accepts."""
+    import api.config as config
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self, _limit=None):
+            return json.dumps({"features": features}).encode("utf-8")
+
+    monkeypatch.setattr(config, "_GATEWAY_CAPS_CACHE", {})
+    monkeypatch.setattr(
+        config.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: Response(),
+    )
+
+    caps = config.get_gateway_caps("http://gw:8642")
+    assert caps["reasoning_efforts"] == expected
+
+
 # ── Wire capture: real WebUI worker, faked network ──────────────────────────
 
 class _JsonResponse:
