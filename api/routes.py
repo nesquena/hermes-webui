@@ -3051,6 +3051,9 @@ def _build_session_list_cache_payload(
             )
         diag_stage("merge_cli_sessions")
         cli_by_id = {s["session_id"]: s for s in cli}
+        cli_by_profile_id = {
+            (_sidebar_profile_group_key(s.get("profile")), s["session_id"]): s for s in cli
+        }
         webui_sessions = _prune_orphaned_desktop_sidecar_sessions(
             webui_sessions,
             known_agent_ids=cli_by_id,
@@ -3179,6 +3182,27 @@ def _build_session_list_cache_payload(
                 for key in ("source_tag", "raw_source", "session_source", "source_label"):
                     if not s.get(key) and meta.get(key):
                         s[key] = meta[key]
+                # #8791: an opened delegated child's sidecar carries neither its
+                # relationship nor its parent's compression lineage until the
+                # lineage enrichment, which runs after the sidebar bucket is
+                # derived. Its own state.db row has both. Without them a child
+                # naming an intermediate compression segment of its parent
+                # resolved no parent, kept its WebUI bucket while its host sat
+                # in the CLI group, and rendered in neither. The row's OWN
+                # lineage ids are copied later, after the dedupe below, so the
+                # represented-id set stays exactly what it was.
+                twin = cli_by_profile_id.get(
+                    (_sidebar_profile_group_key(s.get("profile")), s.get("session_id"))
+                )
+                if twin is not None and _sidebar_subagent_copy_matches(s, twin):
+                    meta = twin
+                    for key in (
+                        "relationship_type",
+                        "_parent_lineage_root_id",
+                        "_parent_lineage_tip_id",
+                    ):
+                        if not s.get(key) and meta.get(key):
+                            s[key] = meta[key]
         webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
         # Apply the same CLI visibility semantics to imported local copies so
         # low-value imported artifacts do not leak into the sidebar.
@@ -3220,6 +3244,19 @@ def _build_session_list_cache_payload(
             show_kanban_sessions=show_kanban_sessions,
             source_filter=source_filter,
         )
+        # #8791: now that the dedupe has run on the same ids as before, give an
+        # opened delegated sidecar its own compression-lineage ids from its
+        # state.db row, so a child naming its pre-compression id finds it when
+        # the sidebar bucket is derived. Copying them earlier widened the
+        # profile-blind represented-id set and hid another profile's row.
+        for s in webui_sessions:
+            meta = cli_by_profile_id.get(
+                (_sidebar_profile_group_key(s.get("profile")), s.get("session_id"))
+            )
+            if meta and _sidebar_subagent_copy_matches(s, meta):
+                for key in ("_lineage_root_id", "_lineage_tip_id"):
+                    if not s.get(key) and meta.get(key):
+                        s[key] = meta[key]
     else:
         webui_sessions = _prune_orphaned_desktop_sidecar_sessions(
             webui_sessions,
@@ -3243,15 +3280,9 @@ def _build_session_list_cache_payload(
         # this child's view anyway, so its bucket says nothing about where the
         # child belongs — the same rule the parent_is_cli_session hint below
         # follows. None/''/renamed-root aliases collapse onto one root group,
-        # mirroring _profiles_match.
-        _cli_off_rows_by_profile: dict[str, dict[str, dict]] = {}
-        for _row in webui_sessions:
-            if not (isinstance(_row, dict) and _row.get("session_id")):
-                continue
-            _profile_group = _sidebar_profile_group_key(_row.get("profile"))
-            _cli_off_rows_by_profile.setdefault(_profile_group, {})[
-                str(_row.get("session_id"))
-            ] = _row
+        # mirroring _profiles_match. Compression-lineage aliases are indexed
+        # too (#8791): see _sidebar_rows_by_profile.
+        _cli_off_rows_by_profile = _sidebar_rows_by_profile(webui_sessions)
         webui_sessions = [
             s for s in webui_sessions
             if not _sidebar_display_is_cli(
@@ -3284,9 +3315,17 @@ def _build_session_list_cache_payload(
     # Stamp the parent's tab (the same classifier _filter_sidebar_source uses) on the child.
     # Only within one profile: a parent in another profile is filtered out of this child's
     # view, so its tab says nothing about where the child belongs — leave the hint unset.
-    _merged_by_id = {s.get("session_id"): s for s in merged if s.get("session_id")}
+    # Keyed by profile group + id: with All profiles on, two profiles can share a parent id,
+    # and a bare-id map kept only one of them, so the other profile's children lost the hint
+    # (#8791).
+    _merged_by_profile_id = {
+        (_sidebar_profile_group_key(s.get("profile")), s.get("session_id")): s
+        for s in merged if s.get("session_id")
+    }
     for s in merged:
-        _parent = _merged_by_id.get(s.get("parent_session_id"))
+        _parent = _merged_by_profile_id.get(
+            (_sidebar_profile_group_key(s.get("profile")), s.get("parent_session_id"))
+        )
         if _parent is not None and _profiles_match(_parent.get("profile"), s.get("profile")):
             s["parent_is_cli_session"] = _is_cli_session_for_settings(_parent)
     # ── Profile scoping (#1611) ────────────────────────────────────────
@@ -3345,13 +3384,11 @@ def _build_session_list_cache_payload(
     # All-profiles on, two profiles can hold the same session ids (a cloned
     # profile or a copied state.db), and one flat map let beta's child resolve
     # alpha's same-id parent and leave both tabs (#8245 release gate r1103).
-    _sidebar_scoped_rows_by_profile: dict[str, dict[str, dict]] = {}
-    for _row in [*archived_scoped, *visible_scoped]:
-        if not (isinstance(_row, dict) and _row.get("session_id")):
-            continue
-        _sidebar_scoped_rows_by_profile.setdefault(
-            _sidebar_profile_group_key(_row.get("profile")), {}
-        )[str(_row.get("session_id"))] = _row
+    # Compression-lineage aliases are indexed too, so a child naming its
+    # parent's pre-compression segment still finds the tip (#8791).
+    _sidebar_scoped_rows_by_profile = _sidebar_rows_by_profile(
+        [*archived_scoped, *visible_scoped]
+    )
     # One verdict per row object for this request. It is also published on the
     # response copies as ``sidebar_is_cli_session`` (below): the verdict is
     # derived from the full scoped payload BEFORE source filtering and archive
@@ -3379,6 +3416,10 @@ def _build_session_list_cache_payload(
         item = dict(row)
         if row.get("session_id"):
             item["sidebar_is_cli_session"] = bool(_sidebar_bucket_is_cli(row))
+            # #8791: the canonical profile group (renamed-root aliases folded),
+            # so the browser keeps one profile's rows together without the
+            # profile roster, which may not have loaded yet.
+            _stamp_sidebar_profile_group(item)
         return item
 
     archived_webui_count = sum(
@@ -12672,18 +12713,55 @@ def _is_delegated_subagent_child(row: dict) -> bool:
     Delegated subagents are recorded in state.db with ``source='subagent'`` and
     a non-continuation ``parent_session_id`` (``relationship_type``
     ``'child_session'``). They are view-only work owned by the delegate runner
-    (#5307). This predicate is display-only: it derives a sidebar bucket and
-    never mutates the row's source/read-only flags or ``is_cli_session_row``.
+    (#5307). A row whose relationship is not known yet (a persisted WebUI
+    sidecar, before lineage enrichment) counts when it is a subagent row that
+    names a parent: only ``delegate_task`` writes ``subagent`` rows, so its
+    parent chain always leads to the delegating host (#8791). This predicate is
+    display-only: it derives a sidebar bucket and never mutates the row's
+    source/read-only flags or ``is_cli_session_row``.
     """
     if not isinstance(row, dict):
         return False
-    if row.get("relationship_type") != "child_session":
-        return False
+    relationship = row.get("relationship_type")
+    if relationship != "child_session":
+        # #8791: a delegated child the user opened has a persisted WebUI
+        # sidecar that names its parent and the subagent source, but its
+        # relationship_type only arrives with the lineage enrichment, which
+        # runs after the sidebar bucket is derived. Without this the copy kept
+        # its own (WebUI) bucket while its Desktop/CLI parent sat in the CLI
+        # group, so it rendered in neither.
+        if relationship or not str(row.get("parent_session_id") or "").strip():
+            return False
     raw_source = str(
         row.get("raw_source") or row.get("source_tag")
         or row.get("session_source") or row.get("source") or ""
     ).strip().lower()
     return raw_source == "subagent"
+
+
+def _sidebar_subagent_copy_matches(row: dict, state_row: dict) -> bool:
+    """True when ``state_row`` is the state.db twin of a delegated (subagent) WebUI copy in the same profile.
+
+    Used to fill an opened delegated child's relationship and lineage ids from
+    its own state.db row before the sidebar bucket is derived (#8791). Never
+    for other rows, and never across profiles: two profiles can share an id.
+    """
+    if not (isinstance(row, dict) and isinstance(state_row, dict)):
+        return False
+    source = str(row.get("raw_source") or row.get("source_tag") or "").strip().lower()
+    return source == "subagent" and _profiles_match(state_row.get("profile"), row.get("profile"))
+
+
+def _stamp_sidebar_profile_group(item: dict) -> dict:
+    """Give a sidebar or search row its canonical profile group (``sidebar_profile_group``), in place (#8791).
+
+    The browser groups rows by it when ids collide across profiles. Search hits
+    merge into the sidebar list, so ``/api/sessions/search`` rows must carry the
+    same value as ``/api/sessions`` rows or a renamed root's rows split apart.
+    """
+    if isinstance(item, dict) and item.get("session_id"):
+        item["sidebar_profile_group"] = _sidebar_profile_group_key(item.get("profile"))
+    return item
 
 
 def _sidebar_profile_group_key(profile) -> str:
@@ -12714,29 +12792,68 @@ def _sidebar_display_is_cli(row: dict, rows_by_id: dict | None = None) -> bool:
     """
     if not isinstance(row, dict):
         return False
-    if _is_delegated_subagent_child(row):
-        seen: set[str] = set()
-        current: dict = row
-        while _is_delegated_subagent_child(current):
-            parent_id = str(current.get("parent_session_id") or "").strip()
-            if not parent_id or parent_id in seen:
-                break
-            seen.add(parent_id)
-            parent = (rows_by_id or {}).get(parent_id)
-            if parent is None:
-                break
-            current = parent
-        if current is not row:
-            return _is_cli_session_for_settings(current)
-        # Rotation/compression fallback: the direct parent row may be gone, but
-        # the lineage root/tip can still derive the child's bucket.
-        for key in ("_parent_lineage_root_id", "_parent_lineage_tip_id"):
-            lineage_id = str(row.get(key) or "").strip()
-            if lineage_id and lineage_id in (rows_by_id or {}):
-                ancestor = (rows_by_id or {})[lineage_id]
-                if ancestor is not row:
-                    return _is_cli_session_for_settings(ancestor)
-    return _is_cli_session_for_settings(row)
+    rows_by_id = rows_by_id or {}
+    current: dict = row
+    seen = {id(row)}
+    # Walk to the first ancestor that is not itself a delegated child: that is
+    # the host whose bucket every delegated row below it shares (#8791).
+    while _is_delegated_subagent_child(current):
+        parent = _sidebar_delegation_parent(current, rows_by_id)
+        if parent is None or id(parent) in seen:
+            break
+        seen.add(id(parent))
+        current = parent
+    return _is_cli_session_for_settings(current)
+
+
+def _sidebar_delegation_parent(row: dict, rows_by_id: dict) -> dict | None:
+    """The payload row a delegated child's sidebar bucket follows, or None.
+
+    Tries the direct parent, then the parent lineage's tip and root. A
+    compressed parent is in the payload only as its tip, so a child naming the
+    pre-compression segment resolves through the tip's lineage alias (see
+    ``_sidebar_rows_by_profile``). A compressed delegated row's own
+    ``parent_session_id`` can name its own lineage root, which aliases back to
+    the row itself; skip that self-reference and follow the lineage root's
+    parent (``_parent_lineage_root_id``) to the host instead (#8791).
+    """
+    for key in ("parent_session_id", "_parent_lineage_tip_id", "_parent_lineage_root_id"):
+        ref = str(row.get(key) or "").strip()
+        if not ref:
+            continue
+        parent = rows_by_id.get(ref)
+        if parent is not None and parent is not row:
+            return parent
+    return None
+
+
+def _sidebar_rows_by_profile(rows) -> dict[str, dict[str, dict]]:
+    """Per-profile id → row maps for the sidebar bucket derivation (#8141).
+
+    Built PER PROFILE: with All-profiles on, two profiles can hold the same
+    session ids (a cloned profile or a copied state.db), and one flat map let a
+    child resolve another profile's same-id parent (#8245 release gate r1103).
+
+    Each row is also indexed under its compression-lineage root and tip ids
+    when no payload row carries that id. Compression leaves only the tip in the
+    payload, while a delegated child still names the pre-compression parent it
+    was spawned from, so without the alias the child lost its parent and left
+    both sidebar groups (#8791). A real row always wins over an alias.
+    """
+    by_profile: dict[str, dict[str, dict]] = {}
+    indexed: list[tuple[dict, dict]] = []
+    for row in rows:
+        if not (isinstance(row, dict) and row.get("session_id")):
+            continue
+        group = by_profile.setdefault(_sidebar_profile_group_key(row.get("profile")), {})
+        group[str(row.get("session_id"))] = row
+        indexed.append((group, row))
+    for group, row in indexed:
+        for key in ("_lineage_root_id", "_lineage_tip_id"):
+            alias = str(row.get(key) or "").strip()
+            if alias and alias not in group:
+                group[alias] = row
+    return by_profile
 
 
 def _reconcile_session_detail_source_flags(session: dict, state_meta: dict) -> dict:
@@ -23062,6 +23179,7 @@ def _handle_sessions_search(handler, parsed):
             if isinstance(item.get("title"), str):
                 item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
             _redact_sidebar_title_fields(item, _search_redact_enabled)
+            _stamp_sidebar_profile_group(item)
             safe_sessions.append(item)
         return j(handler, {
             "sessions": safe_sessions,
@@ -23076,6 +23194,7 @@ def _handle_sessions_search(handler, parsed):
             if isinstance(item.get("title"), str):
                 item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
             _redact_sidebar_title_fields(item, _search_redact_enabled)
+            _stamp_sidebar_profile_group(item)
             results.append(item)
             continue
         if content_search:
@@ -23103,6 +23222,7 @@ def _handle_sessions_search(handler, parsed):
                         if isinstance(item.get("title"), str):
                             item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
                         _redact_sidebar_title_fields(item, _search_redact_enabled)
+                        _stamp_sidebar_profile_group(item)
                         results.append(item)
                         break
             except (KeyError, Exception):
