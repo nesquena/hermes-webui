@@ -715,6 +715,7 @@ def construct_profile_scoped_agent(
                     "again.",
                     list(refused), session_id,
                 )
+                _record_build_home(agent, profile_home)
                 register_provider_holders(agent, home_key=target_key or "")
                 return agent, False
             # #8613: fail closed if the build ended up holding an instance a teardown
@@ -737,6 +738,7 @@ def construct_profile_scoped_agent(
                 return agent, False
             # #8613: this agent now holds every provider instance its manager serves, so a
             # later session boundary can prove whether it is the last holder of them.
+            _record_build_home(agent, profile_home)
             register_provider_holders(agent, home_key=target_key or "")
             # #8517 (master): the guard refused a shared provider instance another
             # profile owns; the Agent dropped it and kept the rest. Holds until the
@@ -1605,6 +1607,49 @@ def _live_holders_entry(provider: Any) -> Optional[_InstanceHolders]:
     return entry
 
 
+_BUILD_HOME_ATTR = "_webui_memory_build_home"
+
+
+def _record_build_home(agent: Any, profile_home: str) -> None:
+    """Remember the profile home ``agent`` was built under (#8804).
+
+    An Agent from before 2026-10-17 does not report the home its memory provider
+    bound (no ``_bound_scope``). Its provider binds exactly the home the WebUI held
+    for the build: on such an Agent, an external provider only runs while the WebUI
+    serves a single profile (no ``claim_instance`` seam, #8585). The unowned-eviction
+    release needs that home to run the teardown in it."""
+    try:
+        setattr(agent, _BUILD_HOME_ATTR, str(profile_home or ""))
+    except Exception:
+        logger.debug("[webui] #8804: could not record the build home on the agent", exc_info=True)
+
+
+def _is_legacy_manager(manager: Any) -> bool:
+    """A MemoryManager from before 2026-10-19 (#8804): no ``release_soft`` and no
+    ``claim_teardown``, but the ``shutdown_all`` every Agent since 2026-04 has."""
+    return (
+        manager is not None
+        and not callable(getattr(manager, "release_soft", None))
+        and not callable(getattr(manager, "claim_teardown", None))
+        and callable(getattr(manager, "shutdown_all", None))
+    )
+
+
+def _mark_legacy_shut_down(holder: Any) -> None:
+    """After an old Agent's provider was released, make the agent's own
+    ``shutdown_memory_provider`` a no-op (#8804). On those Agents it runs
+    ``on_session_end`` unconditionally, so a later ``close()`` would commit under an
+    owner nobody could resolve, then shut the providers down a second time. Current
+    Agents get the same effect from the soft-release teardown claim. A
+    ``_ReleaseIntent`` (the agent already left) has nothing to mark."""
+    if isinstance(holder, _ReleaseIntent):
+        return
+    try:
+        holder._memory_provider_shutdown = True
+    except Exception:
+        logger.debug("[webui] #8804: could not mark the released agent shut down", exc_info=True)
+
+
 def register_provider_holders(agent: Any, *, home_key: str = "") -> int:
     """Record ``agent`` as a holder of every provider instance its memory manager
     serves (#8613). Idempotent per (agent, instance) — a turn that reuses a cached
@@ -2184,18 +2229,26 @@ def release_unowned_memory_provider(agent: Any, *, session_id: str, owner_home: 
     if owner and profile_home_key(owner):
         return False
     release = getattr(manager, "release_soft", None)
-    if not (callable(release) and callable(getattr(manager, "claim_teardown", None))):
+    legacy = _is_legacy_manager(manager)
+    if not legacy and not (callable(release) and callable(getattr(manager, "claim_teardown", None))):
         _log_once(
             "release-soft-missing",
-            "[webui] #8613: this Hermes Agent cannot release a memory provider without a "
-            "session end (no MemoryManager.release_soft/claim_teardown; older than "
-            "2026-10-19). An evicted agent whose session owner cannot be resolved keeps "
-            "its provider worker until the WebUI restarts.",
+            "[webui] #8613: this Hermes Agent's memory manager has only part of the soft "
+            "release (MemoryManager.release_soft/claim_teardown), so an evicted agent "
+            "whose session owner cannot be resolved keeps its provider worker until the "
+            "WebUI restarts.",
         )
         return False
     state, bound_key = _bound_memory_home_key(agent)
     bound = getattr(manager, "_bound_scope", None)
     bound_home = str(bound.get("hermes_home") or "") if isinstance(bound, dict) else ""
+    if legacy and not bound_home:
+        # #8804: an Agent from before 2026-10-17 reports no bound home. Its provider
+        # is bound to the home the WebUI built it under (one profile only, #8585).
+        build_home = str(getattr(agent, _BUILD_HOME_ATTR, "") or "")
+        build_key = profile_home_key(build_home) if build_home else None
+        if build_key and (state != "bound" or bound_key == build_key):
+            state, bound_home, bound_key = "bound", build_home, build_key
     if state != "bound" or not bound_home or profile_home_key(bound_home) != bound_key:
         _log_once(
             "release-unbound",
@@ -2288,7 +2341,8 @@ def _run_claimed_release(holder: Any, claimed: list, *, manager: Any, bound_home
         # #8613 (low): ``release_soft`` claims the teardown itself and does nothing
         # when another teardown of this manager already claimed it. Reporting that
         # as a release would retire the instance with its worker still alive.
-        if getattr(manager, "_teardown_claim", None):
+        legacy = _is_legacy_manager(manager)
+        if getattr(manager, "_teardown_claim", None) or (legacy and getattr(manager, "_shutting_down", False)):
             _log_once(
                 f"release-claimed:{session_id}",
                 "[webui] #8613: the memory provider of evicted session %s was NOT released: "
@@ -2298,7 +2352,16 @@ def _run_claimed_release(holder: Any, claimed: list, *, manager: Any, bound_home
                 session_id,
             )
             return False
-        manager.release_soft()
+        if legacy:
+            # #8804: an Agent from before 2026-10-19 has no soft release. Its
+            # ``shutdown_all`` is the teardown ``release_soft`` ends with (bounded
+            # drain, then each provider's ``shutdown()``). The releasing manager's
+            # queued work was drained before the claim, and nothing here runs
+            # ``on_session_end``.
+            manager.shutdown_all()
+            _mark_legacy_shut_down(holder)
+        else:
+            manager.release_soft()
         released = True
     finally:
         restore()
