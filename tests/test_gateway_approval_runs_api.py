@@ -144,7 +144,7 @@ def test_gateway_capability_detection():
     invalidate_gateway_caps()
 
 
-def test_gateway_capability_reasoning_streaming_implies_full_ladder():
+def test_gateway_capability_reasoning_streaming_does_not_imply_effort_ladder():
     from api.config import get_gateway_caps, invalidate_gateway_caps
 
     invalidate_gateway_caps()
@@ -160,9 +160,7 @@ def test_gateway_capability_reasoning_streaming_implies_full_ladder():
     with patch("urllib.request.urlopen", side_effect=fake_urlopen):
         caps = get_gateway_caps("http://streaming-agent:8642")
 
-    assert caps["reasoning_efforts"] == [
-        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
-    ]
+    assert caps["reasoning_efforts"] is None
     invalidate_gateway_caps()
 
 
