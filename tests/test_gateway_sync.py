@@ -1805,7 +1805,11 @@ def test_import_cli_named_profile_requires_explicit_all_profiles_opt_in(cleanup_
     """Unqualified import_cli should not read a named profile's state.db."""
     named_profile = 'issue1611-import'
     conn = _ensure_state_db(profile=named_profile)
-    sid = 'gw_named_profile_import_001'
+    # Own session id: the opt-in test below imports 'gw_named_profile_import_001'
+    # into WebUI under the named profile. Sharing that id made this test see a
+    # known other-profile session (409 session_profile_mismatch) whenever the
+    # opt-in test ran first (reversed/shuffled order).
+    sid = 'gw_named_profile_optout_001'
     cleanup_test_sessions.append(sid)
     try:
         _insert_gateway_session(
@@ -1818,6 +1822,52 @@ def test_import_cli_named_profile_requires_explicit_all_profiles_opt_in(cleanup_
         data, status = post('/api/session/import_cli', {'session_id': sid})
         assert status == 404, data
     finally:
+        try:
+            _remove_test_sessions(conn, sid)
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_import_cli_unqualified_known_other_profile_session_is_409_without_content(cleanup_test_sessions):
+    """An unqualified import of an id WebUI already holds under another profile is refused.
+
+    Explicit coverage for the 409 ``session_profile_mismatch`` branch of
+    /api/session/import_cli: the session was imported under a named profile
+    (all_profiles opt-in), and a later unqualified request from the default
+    profile must neither return nor refresh it.
+    """
+    named_profile = 'issue1611-import'
+    conn = _ensure_state_db(profile=named_profile)
+    sid = 'gw_named_profile_known_409_001'
+    cleanup_test_sessions.append(sid)
+    try:
+        _insert_gateway_session(
+            conn,
+            session_id=sid,
+            source='telegram',
+            title='Named Profile Telegram Session',
+        )
+        data, status = post('/api/session/import_cli', {
+            'session_id': sid,
+            'all_profiles': True,
+            'profile': named_profile,
+        })
+        assert status == 200, data
+
+        data, status = post('/api/session/import_cli', {'session_id': sid})
+        assert status == 409, data
+        assert data.get('code') == 'session_profile_mismatch', data
+        assert data.get('session_id') == sid
+        assert data.get('profile') == named_profile
+        # The refusal must not carry the other profile's session or messages.
+        assert 'session' not in data and 'messages' not in data, data
+        assert 'Hello from Telegram' not in str(data)
+    finally:
+        try:
+            post('/api/session/delete', {'session_id': sid}, profile=named_profile)
+        except Exception:
+            pass
         try:
             _remove_test_sessions(conn, sid)
             conn.close()
@@ -1854,6 +1904,14 @@ def test_import_cli_all_profiles_opt_in_reads_named_profile_state_db(cleanup_tes
         assert session.get('session_source') == 'messaging'
         assert [m.get('content') for m in messages] == ['Hello from Telegram', 'Hi there!']
     finally:
+        # The import created a WebUI session owned by the named profile. The
+        # cleanup_test_sessions fixture deletes from the default profile, which
+        # the profile boundary refuses (and the fixture swallows), so delete it
+        # under its own profile or it leaks into later tests in the shard.
+        try:
+            post('/api/session/delete', {'session_id': sid}, profile=named_profile)
+        except Exception:
+            pass
         try:
             _remove_test_sessions(conn, sid)
             conn.close()
