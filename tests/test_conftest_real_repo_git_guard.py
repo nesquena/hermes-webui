@@ -72,6 +72,8 @@ def refused():
     ['sh', '-c', 'cd /tmp && exec git reset --hard HEAD'],
     ['env', 'GIT_TERMINAL_PROMPT=0', '{git}', 'reset', '--hard', 'HEAD'],  # the fake, by absolute path
     ['git', 'remote', 'show', 'origin'],  # contacts the remote without -n
+    ['git', 'config', '--', 'core.guardprobe', '--get'],  # after `--` the read option is the value written
+    ['git', 'tag', '--', '--list'],  # creates a tag named `--list`
 ])
 def test_mutating_or_opaque_git_on_real_checkout_is_refused(fake_git, argv):
     with refused():
@@ -138,7 +140,7 @@ def test_git_dir_in_the_child_environment_is_a_target(fake_git, tmp_path, monkey
     with refused():
         subprocess.run(['git', 'reset', '--hard', 'HEAD'], cwd=tmp_path, env={**os.environ, 'GIT_DIR': str(REPO_ROOT / '.git')})
     with refused():
-        subprocess.run(['git', 'reset', '--hard', 'HEAD'], cwd=tmp_path, env={b'GIT_DIR': os.fsencode(REPO_ROOT / '.git')})
+        subprocess.run(['git', 'reset', '--hard', 'HEAD'], cwd=tmp_path, env={**os.environb, b'GIT_DIR': os.fsencode(REPO_ROOT / '.git')})
     monkeypatch.setenv('GIT_WORK_TREE', str(REPO_ROOT))
     with refused():
         subprocess.run(['git', 'clean', '-fd'], cwd=tmp_path)
@@ -242,6 +244,7 @@ def test_read_only_git_on_real_checkout_passes_through(fake_git):
     subprocess.run(['git', 'worktree', 'list', '--porcelain'], cwd=REPO_ROOT, check=True)
     subprocess.run(['git', 'tag', '--points-at', 'HEAD'], cwd=REPO_ROOT, check=True)
     subprocess.run(['git', 'ls-remote', '--get-url', 'origin'], cwd=REPO_ROOT, check=True)
+    subprocess.run(['git', 'config', '--get', '--', 'core.guardprobe'], cwd=REPO_ROOT, check=True)
     assert _lines(fake_git) == [
         'rev-parse --short HEAD',
         'tag --list v* --sort=-creatordate',
@@ -258,6 +261,7 @@ def test_read_only_git_on_real_checkout_passes_through(fake_git):
         'worktree list --porcelain',
         'tag --points-at HEAD',
         'ls-remote --get-url origin',
+        'config --get -- core.guardprobe',
     ]
 
 

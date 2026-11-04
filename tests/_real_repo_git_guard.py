@@ -84,10 +84,13 @@ def is_read_only(verb_args) -> bool:
     if not verb_args:
         return True  # bare `git` prints usage
     verb, rest = verb_args[0], verb_args[1:]
-    if any(a.startswith('--output') for a in rest):
+    # after `--` everything is an operand, so `config -- core.x --get` writes and `tag -- --list` creates
+    end_of_options = rest.index('--') if '--' in rest else len(rest)
+    options, operands = rest[:end_of_options], rest[end_of_options + 1:]
+    if any(a.startswith('--output') for a in options):
         return False  # `log --output=<file>` and friends write
-    flags = {a for a in rest if a.startswith('-')}
-    positional = [a for a in rest if not a.startswith('-')]
+    flags = {a for a in options if a.startswith('-')}
+    positional = [a for a in options if not a.startswith('-')] + operands
     if verb in _READ_ONLY_VERBS:
         return True
     if verb == 'symbolic-ref':  # `symbolic-ref <name> <ref>` and `--delete` write
@@ -95,7 +98,7 @@ def is_read_only(verb_args) -> bool:
     if verb == 'tag':  # listings read (`--list <glob>`, by ref, bare); `tag <name>` writes
         return bool(_TAG_LISTING_FLAGS & flags) or (not positional and not (_TAG_WRITING_FLAGS & flags))
     if verb == 'config':
-        return any(a.startswith('--get') or a in ('--list', '-l') for a in rest)
+        return any(a.startswith('--get') or a in ('--list', '-l') for a in options)
     if verb == 'remote':  # `remote show <name>` contacts the remote unless -n
         return not positional or positional[0] == 'get-url' or (
             positional[0] == 'show' and bool({'-n', '--no-query'} & flags))
