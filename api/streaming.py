@@ -4684,11 +4684,43 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
     image_count = 0
 
     for att in attachments or []:
-        if not isinstance(att, dict):
+        # A persisted user row records its uploads as bare FILENAME STRINGS in
+        # `attachments`, and `_normalize_chat_attachments` turns an older
+        # client's filename into {"name": <filename>, "path": ""}. Both shapes
+        # carry no usable path, so the dict-only guard dropped every one and a
+        # re-sent turn carried NO image part: the user's picture silently
+        # vanished after an edit, a cancel-and-resend, or a provider switch.
+        name = ''
+        raw_path = ''
+        if isinstance(att, dict):
+            raw_path = str(att.get('path') or '').strip()
+            name = str(att.get('name') or att.get('filename') or '').strip()
+        elif isinstance(att, str):
+            value = att.strip()
+            # An absolute path is used as-is; anything else is a filename.
+            if value and Path(value).expanduser().is_absolute():
+                raw_path = value
+            else:
+                name = value
+        else:
             continue
-        raw_path = str(att.get('path') or '').strip()
+        if not raw_path and not name:
+            continue
         if not raw_path:
-            continue
+            # Resolve the filename inside the session attachment inbox. Bare
+            # names are stored under a per-session subdirectory, so search the
+            # inbox rather than assuming the file sits at its root. Containment
+            # is re-checked below for whatever this resolves to.
+            try:
+                from api.upload import _attachment_root
+                inbox = _attachment_root()
+            except Exception:
+                continue
+            candidate = inbox / name
+            if not candidate.is_file():
+                matches = sorted(inbox.glob(f"*/{name}"))
+                candidate = matches[0] if matches else candidate
+            raw_path = str(candidate)
         try:
             path = Path(raw_path).expanduser().resolve()
             # Uploads should live inside the selected workspace OR the
@@ -4701,7 +4733,12 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
             size = path.stat().st_size
             if size <= 0 or size > _NATIVE_IMAGE_MAX_BYTES:
                 continue
-            mime = str(att.get('mime') or '').strip() or (mimetypes.guess_type(path.name)[0] or '')
+            # `att` may be a plain string, so never attribute-access it here: the
+            # bare `except Exception: continue` below would turn an AttributeError
+            # into a silently DROPPED attachment, which is exactly how a string
+            # entry used to vanish even once it reached this point.
+            declared_mime = str(att.get('mime') or '').strip() if isinstance(att, dict) else ''
+            mime = declared_mime or (mimetypes.guess_type(path.name)[0] or '')
             if not mime.startswith('image/') or not _is_valid_image(path, mime):
                 continue
             data = base64.b64encode(path.read_bytes()).decode('ascii')

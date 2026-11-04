@@ -12,7 +12,7 @@ silently vanished from the request.
 from __future__ import annotations
 
 import base64
-import json
+
 
 import pytest
 
@@ -97,3 +97,15 @@ def test_text_mode_still_returns_plain_string(attachment):
     )
     assert isinstance(out, str)
     assert "look" in out
+
+
+def test_name_only_dict_attachment_rebuilds_image_part(attachment):
+    """`_normalize_chat_attachments` turns an older client's filename into
+    {"name": <filename>, "path": ""}. That empty path is the shape the resend
+    path actually receives, and it must resolve too.
+    """
+    image, name = attachment
+    out = _build_native_multimodal_message(
+        "", "look", [{"name": name, "path": "", "mime": ""}], str(image.parent.parent)
+    )
+    assert _image_parts(out), "name-only attachment was dropped on resubmit"
