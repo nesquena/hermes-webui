@@ -2470,12 +2470,14 @@ class Session:
         # during the parse (TOCTOU guard against an atomic replace mid-read).
         _pre_read_sig = _sidecar_stat_signature(p)
         data = json.loads(p.read_text(encoding='utf-8'))
-        if isinstance(data, dict) and _sidecar_keys_after_body(data, _SHARE_FIELD_KEYS):
-            # #8830: exp-v0.52.621..630 left a shared legacy sidecar's share
-            # fields after ``messages``; move them where the prefix reader
-            # (metadata reloads, the sidebar) sees them. The parsed values are
-            # the same either way, so this load continues with ``data``.
-            _repair_misplaced_share_fields(sid)
+        # #8830: exp-v0.52.621..630 left a shared legacy sidecar's share fields
+        # after ``messages``, where the metadata prefix reader never sees them.
+        # Only note it here: a load runs before (or without) any ownership
+        # decision, and a refused request must never write (#8094). The detail
+        # route repairs it once the request owns the session.
+        _share_fields_misplaced = isinstance(data, dict) and bool(
+            _sidecar_keys_after_body(data, _SHARE_FIELD_KEYS)
+        )
         # The writer (`save`) already validated the eager-checkpoint fact
         # against the transcript it persisted, so a full load restores it as
         # written and keeps only the turn-identity check (fact vs
@@ -2486,6 +2488,7 @@ class Session:
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         data = _apply_session_draft_overlay(data, sid)
         session = cls(**data)
+        session._share_fields_misplaced = _share_fields_misplaced
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
@@ -8353,16 +8356,18 @@ def _patch_session_sidecar(sid: str, fields_for) -> bool | None:
     return True
 
 
-def _repair_misplaced_share_fields(sid: str) -> None:
+def _repair_misplaced_share_fields(sid: str) -> bool:
     """#8830: move share fields an exp-v0.52.621..630 build left after the body.
 
     Those builds appended ``share_token``/``share_created_at`` after
-    ``messages`` when sharing a legacy sidecar (#8815), so metadata reloads and
-    the sidebar saw the conversation as unshared while its link stayed live.
-    A full load that finds them there rewrites only those keys into the
-    prefix, re-checking under the persistence lock so a writer that repaired
-    or replaced the sidecar in the meantime wins. Best effort: a failed repair
-    is logged and the load continues with the values it parsed.
+    ``messages`` when sharing a legacy sidecar (#8815), so metadata reloads saw
+    the conversation as unshared while its link stayed live. This rewrites only
+    those keys into the prefix, re-checking under the persistence lock so a
+    writer that repaired or replaced the sidecar in the meantime wins. Best
+    effort: a failure is logged. Returns True only after a write.
+
+    Callers must already own the session for the current request: see
+    ``repair_session_share_field_order``.
     """
     def fields_for(payload):
         misplaced = _sidecar_keys_after_body(payload, _SHARE_FIELD_KEYS)
@@ -8371,13 +8376,32 @@ def _repair_misplaced_share_fields(sid: str) -> None:
         return {key: payload[key] for key in _SHARE_FIELD_KEYS if key in payload}
 
     try:
-        _patch_session_sidecar(sid, fields_for)
+        return _patch_session_sidecar(sid, fields_for) is True
     except Exception:
         logger.warning(
             "session %s: could not move its share fields before the message body",
             sid,
             exc_info=True,
         )
+        return False
+
+
+def repair_session_share_field_order(session) -> bool:
+    """Repair a loaded session's sidecar if ``Session.load`` found its share
+    fields after the message body (#8830).
+
+    Call this only AFTER the request's ownership decision has allowed the
+    session: a refused or profile-mismatched request must never write
+    (#8094). The mark is cleared first, so a cached session is repaired at
+    most once per load; a later full load marks it again if the repair failed.
+    """
+    if not getattr(session, "_share_fields_misplaced", False):
+        return False
+    session._share_fields_misplaced = False
+    sid = getattr(session, "session_id", None)
+    if not sid:
+        return False
+    return _repair_misplaced_share_fields(sid)
 
 
 def persist_recovered_workspace_binding(

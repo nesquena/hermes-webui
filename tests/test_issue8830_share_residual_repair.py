@@ -4,7 +4,9 @@
 write, but a legacy conversation those builds already shared kept its token after the
 message body, past the metadata prefix, until something wrote it again: metadata reloads
 and the sidebar showed it unshared (no Stop sharing) while its public link stayed live.
-``Session.load`` now moves only those keys into the prefix, under the persistence lock.
+``Session.load`` only notes it (a load runs before or without any ownership decision, and a
+refused request must never write, #8094); the detail route moves those keys into the prefix,
+under the persistence lock, once the request owns the session.
 
 (The #8815 tests' notes follow.)
 
@@ -76,11 +78,11 @@ def isolated_state(tmp_path, monkeypatch):
     yield tmp_path
 
 
-def _save_session(*, legacy):
+def _save_session(*, legacy, profile=None):
     """Save a session; ``legacy`` strips the share keys, as a pre-share sidecar has none."""
     from api import models
 
-    session = models.Session(session_id=SID, title="Legacy history")
+    session = models.Session(session_id=SID, title="Legacy history", profile=profile)
     session.messages = [
         {"role": "user", "content": "hello", "timestamp": 100},
         {"role": "assistant", "content": "world", "timestamp": 101},
@@ -140,18 +142,33 @@ def _full_load():
     return models.Session.load(SID)
 
 
+def _open(messages=1):
+    """Open the conversation the way the page does: ``GET /api/session`` (cold cache)."""
+    from api import models
+    from api.routes import handle_get
+    models.SESSIONS.clear()
+    handler = _FakeHandler()
+    handle_get(handler, urllib.parse.urlparse(f"/api/session?session_id={SID}&messages={messages}"))
+    return handler
+
+
+def _index_rows():
+    from api import models
+    if not models.SESSION_INDEX_FILE.exists():
+        return []
+    return json.loads(models.SESSION_INDEX_FILE.read_text(encoding="utf-8"))
+
+
 def _index_tokens():
     """The share token the sidebar index row carries (``/api/sessions/search`` reads it)."""
-    from api import models
-    rows = json.loads(models.SESSION_INDEX_FILE.read_text(encoding="utf-8"))
-    return [row.get("share_token") for row in rows if row.get("session_id") == SID]
+    return [row.get("share_token") for row in _index_rows() if row.get("session_id") == SID]
 
 
-def _shared_then_damaged(**kwargs):
+def _shared_then_damaged(profile=None, **kwargs):
     from api import models
-    path = _save_session(legacy=True)
+    path = _save_session(legacy=True, profile=profile)
     status, reply = _post("/api/share/create", {"session_id": SID})
-    assert status == 200
+    assert status == 200, reply
     _damage_like_621(path, **kwargs)
     models.SESSIONS.clear()
     return path, reply["share"]["token"]
@@ -162,63 +179,115 @@ def _before_body(path, key):
     return order.index(key) < order.index("messages") and order.count(key) == 1
 
 
-def test_a_full_load_repairs_a_sidecar_an_earlier_build_left_damaged(isolated_state):
+@pytest.fixture(autouse=True)
+def _own_index(isolated_state, monkeypatch):
+    """Keep the sidebar index inside this test's session dir, and the list cache cold."""
+    import api.config as config
+    import api.models as models
+    import api.routes as routes
+    index = isolated_state / "sessions" / "_index.json"
+    for module in (config, models, routes):
+        if hasattr(module, "SESSION_INDEX_FILE"):
+            monkeypatch.setattr(module, "SESSION_INDEX_FILE", index)
+    routes._session_list_cache_clear()
+    yield
+    routes._session_list_cache_clear()
+
+
+@pytest.fixture
+def active_profile(monkeypatch):
+    """Pin the request's active profile (detail/guard and sidebar lookups); returns a setter."""
+    import api.profiles as profiles
+    import api.routes as routes
+    current = {"name": "default"}
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: current["name"])
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: current["name"])
+
+    def set_active(name):
+        current["name"] = name
+    return set_active
+
+
+def _snapshot(path):
+    from api import models
+    index = models.SESSION_INDEX_FILE
+    return {
+        "bytes": path.read_bytes(),
+        "mtime": path.stat().st_mtime_ns,
+        "bak": path.with_suffix(".json.bak").exists(),
+        "index": index.read_bytes() if index.exists() else None,
+    }
+
+
+# --- the owner opening the conversation repairs it ---------------------------------------
+
+
+def test_opening_the_conversation_repairs_a_sidecar_an_earlier_build_left_damaged(isolated_state, active_profile):
     from api import shares
     path, token = _shared_then_damaged()
     before = json.loads(path.read_text(encoding="utf-8"))
     assert _metadata_reload() == (None, None)  # the residual #8830 describes
 
-    session = _full_load()
-    assert session.share_token == token
+    handler = _open()
+    assert handler.status == 200
+    assert handler.json_body()["session"]["share_token"] == token
     assert _before_body(path, "share_token") and _before_body(path, "share_created_at")
     assert json.loads(path.read_text(encoding="utf-8")) == before  # only the key order changed
+    assert not path.with_suffix(".json.bak").exists()
     assert _metadata_reload() == (token, token)
     assert _index_tokens() == [token]
     assert shares.load_share(token) is not None
 
 
-def test_stop_sharing_works_after_the_repair(isolated_state):
+def test_a_load_alone_never_writes(isolated_state):
+    """``Session.load`` runs before (or without) an ownership decision, so it only notes the damage."""
+    path, token = _shared_then_damaged()
+    before = _snapshot(path)
+    session = _full_load()
+    assert session.share_token == token
+    assert session._share_fields_misplaced is True
+    assert _snapshot(path) == before
+
+
+def test_stop_sharing_works_after_the_repair(isolated_state, active_profile):
     from api import shares
     _path, token = _shared_then_damaged()
-    _full_load()
+    assert _open().status == 200
     status, _payload = _post("/api/share/revoke", {"session_id": SID})
     assert status == 200
     assert shares.load_share(token) is None
     assert _metadata_reload() == (None, None)
 
 
-def test_a_full_load_does_not_rewrite_a_repaired_sidecar(isolated_state):
+def test_opening_again_does_not_rewrite_a_repaired_sidecar(isolated_state, active_profile):
     path, _token = _shared_then_damaged()
-    _full_load()
-    repaired = path.read_bytes()
-    mtime = path.stat().st_mtime_ns
-    _full_load()
-    assert path.read_bytes() == repaired
-    assert path.stat().st_mtime_ns == mtime
+    assert _open().status == 200
+    before = _snapshot(path)
+    assert _open().status == 200
+    assert _open(messages=0).status == 200
+    assert _snapshot(path) == before
 
 
 @pytest.mark.parametrize("legacy", [True, False])
-def test_a_full_load_leaves_an_undamaged_sidecar_untouched(isolated_state, legacy):
+def test_opening_leaves_an_undamaged_sidecar_untouched(isolated_state, active_profile, legacy):
     path = _save_session(legacy=legacy)
     if not legacy:
         status, _reply = _post("/api/share/create", {"session_id": SID})
         assert status == 200
-    original = path.read_bytes()
-    mtime = path.stat().st_mtime_ns
-    _full_load()
-    assert path.read_bytes() == original
-    assert path.stat().st_mtime_ns == mtime
+    before = _snapshot(path)
+    assert _open().status == 200
+    assert _snapshot(path) == before
 
 
-def test_a_partly_damaged_sidecar_is_repaired(isolated_state):
+def test_a_partly_damaged_sidecar_is_repaired(isolated_state, active_profile):
     path, token = _shared_then_damaged(keys=("share_created_at",))
     assert _before_body(path, "share_token")
-    _full_load()
+    assert _open().status == 200
     assert _before_body(path, "share_token") and _before_body(path, "share_created_at")
     assert _metadata_reload() == (token, token)
 
 
-def test_a_revoked_share_left_after_the_body_is_moved_too(isolated_state):
+def test_a_revoked_share_left_after_the_body_is_moved_too(isolated_state, active_profile):
     """A .621..630 revoke on a legacy sidecar wrote ``share_token: null`` after ``messages``."""
     from api import models
     path = _save_session(legacy=True)
@@ -226,13 +295,14 @@ def test_a_revoked_share_left_after_the_body_is_moved_too(isolated_state):
     raw.update({"share_token": None, "share_created_at": None})
     path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
     models.SESSIONS.clear()
-    session = _full_load()
-    assert session.share_token is None
+    handler = _open()
+    assert handler.status == 200
+    assert handler.json_body()["session"].get("share_token") is None
     assert _before_body(path, "share_token") and _before_body(path, "share_created_at")
     assert _metadata_reload() == (None, None)
 
 
-def test_a_failed_repair_does_not_break_the_load(isolated_state, monkeypatch, caplog):
+def test_a_failed_repair_does_not_break_opening(isolated_state, active_profile, monkeypatch, caplog):
     from api import models
     path, token = _shared_then_damaged()
     damaged = path.read_bytes()
@@ -241,24 +311,25 @@ def test_a_failed_repair_does_not_break_the_load(isolated_state, monkeypatch, ca
         raise OSError("disk full")
 
     monkeypatch.setattr(models, "_patch_session_sidecar", boom)
-    session = _full_load()
-    assert session is not None and session.share_token == token
+    handler = _open()
+    assert handler.status == 200
+    assert handler.json_body()["session"]["share_token"] == token
     assert path.read_bytes() == damaged
     assert "could not move its share fields" in caplog.text
 
 
-def test_the_repair_rechecks_under_the_lock(isolated_state):
+def test_the_repair_rechecks_under_the_lock(isolated_state, active_profile):
     """A writer that fixed the sidecar between the parse and the repair wins: nothing is rewritten."""
     from api import models
     path, _token = _shared_then_damaged()
-    _full_load()
+    session = _full_load()  # notes the damage
+    assert _open().status == 200  # repairs it
     repaired = path.read_bytes()
-    assert models._patch_session_sidecar is not None
-    models._repair_misplaced_share_fields(SID)
+    assert models.repair_session_share_field_order(session) is False  # stale note, file already fixed
     assert path.read_bytes() == repaired
 
 
-def test_a_revoke_during_the_repair_waits_and_wins(isolated_state, monkeypatch):
+def test_a_revoke_during_the_repair_waits_and_wins(isolated_state, active_profile, monkeypatch):
     """The repair writes under the session persistence lock. A revoke that arrives while the
     repair is mid-write waits for it and then wins: the repair can never write a revoked token
     back into the sidecar."""
@@ -284,9 +355,9 @@ def test_a_revoke_during_the_repair_waits_and_wins(isolated_state, monkeypatch):
 
     monkeypatch.setattr(models.os, "fsync", _pause_repair_fsync)
     results = {}
-    repair = threading.Thread(target=lambda: results.update(load=_full_load()), name="repair")
+    repair = threading.Thread(target=lambda: results.update(open=_open()), name="repair")
     repair.start()
-    assert paused.wait(10), "the full load never reached the repair write"
+    assert paused.wait(10), "opening the conversation never reached the repair write"
     revoke = threading.Thread(
         target=lambda: results.update(revoke=_post("/api/share/revoke", {"session_id": SID})),
         name="revoke",
@@ -298,8 +369,114 @@ def test_a_revoke_during_the_repair_waits_and_wins(isolated_state, monkeypatch):
     repair.join(10)
     revoke.join(10)
     assert not repair.is_alive() and not revoke.is_alive(), "a writer deadlocked"
+    assert results["open"].status == 200
     assert results["revoke"][0] == 200
     assert revoke_waited, "the revoke ran while the repair held the sidecar mid-write"
     assert shares.load_share(token) is None
     assert json.loads(path.read_text(encoding="utf-8")).get("share_token") is None
     assert _metadata_reload() == (None, None)
+
+
+# --- another profile's damaged sidecar: a refused request never writes (#8094) ----------
+
+
+def _foreign_damaged(active_profile):
+    """A share-damaged sidecar owned by ``work``, requested while ``default`` is active."""
+    active_profile("work")
+    path, token = _shared_then_damaged(profile="work")
+    active_profile("default")
+    return path, token
+
+
+def test_the_visibility_guards_do_not_repair_a_foreign_damaged_sidecar(isolated_state, active_profile):
+    from api import models, routes
+    path, _token = _foreign_damaged(active_profile)
+    before = _snapshot(path)
+    assert not routes._session_id_visible_to_request_profile(object(), SID, emit_error=False)
+    for method, url, body in [
+        ("GET", f"/api/session/status?session_id={SID}", None),
+        ("POST", "/api/share/create", {"session_id": SID}),
+        ("PATCH", "/api/session", {"session_id": SID}),
+        ("DELETE", "/api/session", {"session_id": SID}),
+        ("PUT", "/api/session", {"session_id": SID}),
+    ]:
+        handler = _FakeHandler()
+        assert not routes._guard_request_session_visibility(
+            handler, urllib.parse.urlparse(url), body=body, method=method
+        ), (method, url)
+        assert handler.status == 409, (method, url, handler.status)
+    assert _snapshot(path) == before
+    assert SID not in models.SESSIONS
+
+
+REFUSED_ROUTES = [
+    # exempt from the generic guard: the handler owns its profile boundary
+    ("GET", f"/api/session?session_id={SID}&messages=1", None),
+    ("GET", f"/api/session?session_id={SID}&messages=0", None),
+    ("POST", "/api/session/archive", {"session_id": SID}),
+    ("POST", "/api/chat/start", {"session_id": SID, "message": "hello"}),
+    # refused by the generic request guard
+    ("GET", f"/api/session/status?session_id={SID}", None),
+    ("POST", "/api/share/create", {"session_id": SID}),
+    ("POST", "/api/share/revoke", {"session_id": SID}),
+    ("POST", "/api/session/rename", {"session_id": SID, "title": "renamed"}),
+]
+
+
+@pytest.mark.parametrize("method,url,body", REFUSED_ROUTES, ids=[f"{m} {u.split('?')[0]}{'?messages=' + u[-1] if 'messages=' in u else ''}" for m, u, _b in REFUSED_ROUTES])
+def test_a_refused_route_never_writes_a_foreign_damaged_sidecar(isolated_state, active_profile, method, url, body):
+    from api import models
+    from api.routes import handle_get, handle_post
+    path, _token = _foreign_damaged(active_profile)
+    before = _snapshot(path)
+    models.SESSIONS.clear()
+    handler = _FakeHandler(json.dumps(body).encode() if body is not None else b"")
+    (handle_get if method == "GET" else handle_post)(handler, urllib.parse.urlparse(url))
+    assert handler.status in (404, 409), (url, handler.status, bytes(handler.body)[:200])
+    assert _snapshot(path) == before
+    cached = models.SESSIONS.get(SID)
+    # A refused detail/chat load may still cache the foreign session (pre-existing, outside
+    # #8830); it must not have consumed the note, i.e. no repair was attempted.
+    assert cached is None or getattr(cached, "_share_fields_misplaced", True) is True
+
+
+def test_the_owner_opening_it_later_still_repairs(isolated_state, active_profile):
+    path, token = _foreign_damaged(active_profile)
+    assert _open().status == 409  # refused under ``default``: nothing written
+    active_profile("work")
+    handler = _open()
+    assert handler.status == 200
+    assert _before_body(path, "share_token")
+    assert _metadata_reload() == (token, token)
+
+
+# --- the index refresh stays in the session's own profile -----------------------------
+
+
+def test_a_repair_under_another_active_profile_keeps_the_session_in_its_own_profile(isolated_state, active_profile):
+    """Even if a repair ran while profile B is active, the index row is built from the sidecar
+    itself: it keeps the owner's profile, and B's sidebar never lists the session."""
+    from api import models
+    from api.routes import handle_get
+    path, token = _foreign_damaged(active_profile)  # owner ``work``, active ``default``
+    rows_before = _index_rows()
+    assert models._repair_misplaced_share_fields(SID) is True
+    assert _before_body(path, "share_token")
+    rows_after = _index_rows()
+    mine = [row for row in rows_after if row.get("session_id") == SID]
+    assert len(mine) == 1 and mine[0]["profile"] == "work" and mine[0]["share_token"] == token
+    assert sorted(r["session_id"] for r in rows_after) == sorted(r["session_id"] for r in rows_before)
+    assert not any(r.get("profile") == "default" for r in rows_after if r.get("session_id") == SID)
+
+    def sidebar_ids(profile):
+        from api import routes
+        active_profile(profile)
+        models.SESSIONS.clear()
+        routes._session_list_cache_clear()
+        handler = _FakeHandler()
+        handle_get(handler, urllib.parse.urlparse("/api/sessions"))
+        assert handler.status == 200
+        return {s.get("session_id") for s in handler.json_body().get("sessions", [])}
+
+    assert SID not in sidebar_ids("default")
+    assert SID in sidebar_ids("work")
