@@ -8257,8 +8257,16 @@ def update_session_share_fields(
         payload = json.loads(original.decode("utf-8"))
         if not isinstance(payload, dict):
             raise ValueError(f"Session sidecar {sid!r} is not a JSON object")
-        payload["share_token"] = share_token
-        payload["share_created_at"] = share_created_at
+        # #8815: a sidecar last saved before shares existed has no share keys.
+        # Plain assignment would append them after ``messages``, past the prefix
+        # that ``load_metadata_only`` reads, so every metadata reload would lose
+        # the token (and the UI its Stop sharing control) while the link stays
+        # live. The helper places a missing key before the message body and
+        # keeps an existing key where it is.
+        payload = _set_sidecar_metadata_fields(
+            payload,
+            {"share_token": share_token, "share_created_at": share_created_at},
+        )
         tmp = path.with_suffix(
             f".tmp.{os.getpid()}.{threading.current_thread().ident}"
         )
