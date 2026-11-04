@@ -211,6 +211,14 @@ Only deduplicate a saved prefix also represented in the selected display/context
 view. Newer visible history does not authorize dropping rows from older
 model-facing context. Content-only similarity at different timestamps cannot
 prove a mirror: a legitimate new identical turn has the same legacy shape.
+The synchronous `POST /api/chat` settle persists the identity-deduped model
+context, applying the same ownership rules as the streaming settle: before the
+dedup, each content group's distinct occurrences are identified across its whole
+ownership group, rows that already carry a valid ownership id included, and a
+distinct unowned occurrence receives its own collision-free id, while an unowned
+replay of an already-owned exact key reconciles onto that owner's id instead of
+being split into a second survivor. The display transcript and the model context
+therefore retain one ownership set on both chat surfaces.
 Consume each saved successor only with shared valid message/positive row identity
 or an exact non-null timestamp, plus compatible provider content. Cancelled
 consumers opt into private SQLite row IDs so newly accepted successors retain
