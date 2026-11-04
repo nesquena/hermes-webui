@@ -1311,4 +1311,204 @@ def test_sync_chat_still_collapses_a_real_replay(tmp_path, monkeypatch):
     assert _contents(reloaded.context_messages).count("status?") == 1, (
         "the same-id replay must still collapse to one row; got "
         f"{_contents(reloaded.context_messages)}"
+    )# ────────────────────────────────────────────────────────────────────────
+# #8574 review P2-3 (nesquena-hermes 2026-11-03): a content group with ONE
+# already-owned occurrence + ONE distinct UNOWNED occurrence must still be
+# reconciled. `_reconcile_prefix_occurrence_ownership` skipped valid-ID rows
+# before counting distinct exact keys, so the mixed group looked like a
+# singleton and the identity dedup collapsed a genuine user turn.
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_sync_chat_keeps_a_repeated_turn_when_the_first_exchange_owns_ids(tmp_path, monkeypatch):
+    """Arm A: only the first historical exchange already owns ids."""
+    history = copy.deepcopy(_P2_2_LEGACY_HISTORY)
+    history[0]["id"], history[1]["id"] = 1, 2
+    reloaded = _sync_http_send(
+        tmp_path,
+        monkeypatch,
+        "i8574-p2-3-mixed-first",
+        history,
+        "lower",
+        "guess 90",
+    )
+    assert reloaded is not None
+    expected = ["higher", "guess 50", "higher", "guess 75", "lower", "guess 90"]
+    assert _contents(reloaded.messages) == expected
+    assert _contents(reloaded.context_messages) == expected
+
+    # A cold follow-up on the PERSISTED result, no re-seed: request 1 minted
+    # ownership for the distinct unowned occurrence, and that ownership must
+    # survive as independently owned rows through the next real request.
+    follow_up = _sync_http_send(
+        tmp_path,
+        monkeypatch,
+        "i8574-p2-3-mixed-first",
+        reloaded.context_messages,
+        "even lower",
+        "guess 95",
+        reseed=False,
+    )
+    assert follow_up is not None
+    expected_follow_up = expected + ["even lower", "guess 95"]
+    assert _contents(follow_up.messages) == expected_follow_up
+    assert _contents(follow_up.context_messages) == expected_follow_up
+
+
+def test_sync_chat_keeps_a_repeated_turn_when_the_second_exchange_owns_ids(tmp_path, monkeypatch):
+    """Arm B: only the second historical exchange already owns ids."""
+    history = copy.deepcopy(_P2_2_LEGACY_HISTORY)
+    history[2]["id"], history[3]["id"] = 3, 4
+    reloaded = _sync_http_send(
+        tmp_path,
+        monkeypatch,
+        "i8574-p2-3-mixed-second",
+        history,
+        "lower",
+        "guess 90",
+    )
+    assert reloaded is not None
+    expected = ["higher", "guess 50", "higher", "guess 75", "lower", "guess 90"]
+    assert _contents(reloaded.messages) == expected
+    assert _contents(reloaded.context_messages) == expected
+
+    # The cold follow-up (no re-seed) must keep the ownership minted for the
+    # distinct unowned occurrence alongside the durable ids of exchange 2.
+    follow_up = _sync_http_send(
+        tmp_path,
+        monkeypatch,
+        "i8574-p2-3-mixed-second",
+        reloaded.context_messages,
+        "even lower",
+        "guess 95",
+        reseed=False,
+    )
+    assert follow_up is not None
+    expected_follow_up = expected + ["even lower", "guess 95"]
+    assert _contents(follow_up.messages) == expected_follow_up
+    assert _contents(follow_up.context_messages) == expected_follow_up
+
+# ────────────────────────────────────────────────────────────────────────
+# #8574 review P2-3 helper-boundary pins: the distinct-occurrence count must
+# span owned rows too, and an unowned replay of an owned exact key must
+# reconcile onto its owner instead of being over-split.
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_reconcile_counts_owned_rows_when_identifying_distinct_occurrences():
+    """A mixed group is TWO distinct occurrences, not a singleton."""
+    from api.streaming import _deduplicate_context_messages
+    from api.streaming import _reconcile_prefix_occurrence_ownership
+
+    rows = [
+        {"role": "user", "content": "higher", "timestamp": 100.0, "id": 1},
+        {"role": "assistant", "content": "guess 50", "timestamp": 101.0, "id": 2},
+        {"role": "user", "content": "higher", "timestamp": 102.0},
+        {"role": "assistant", "content": "guess 75", "timestamp": 103.0},
+    ]
+    out = _reconcile_prefix_occurrence_ownership(copy.deepcopy(rows), [])
+    assert [r.get("id") for r in out] == [1, 2, 3, None], (
+        "the owned rows must keep their ids and the distinct unowned occurrence "
+        "must be minted an id above every real id in play; got "
+        f"{[r.get('id') for r in out]}"
+    )
+    deduped = _deduplicate_context_messages(out)
+    assert _contents(deduped) == [
+        "higher", "guess 50", "higher", "guess 75",
+    ], (
+        "with its own ownership the unowned occurrence must survive the dedup; "
+        f"got {_contents(deduped)}"
+    )
+
+
+def test_reconcile_reconciles_an_unowned_replay_onto_its_owner():
+    """An unowned replay of an owned exact key is NOT over-split."""
+    from api.streaming import _deduplicate_context_messages
+    from api.streaming import _reconcile_prefix_occurrence_ownership
+
+    rows = [
+        {"role": "user", "content": "status?", "timestamp": 100.0, "id": 11},
+        {"role": "assistant", "content": "all green", "timestamp": 101.0, "id": 12},
+        # an unowned REPLAY of the first exact key ...
+        {"role": "user", "content": "status?", "timestamp": 100.0},
+        # ... beside a genuinely distinct unowned occurrence
+        {"role": "user", "content": "status?", "timestamp": 102.0},
+    ]
+    out = _reconcile_prefix_occurrence_ownership(copy.deepcopy(rows), [])
+    assert [r.get("id") for r in out] == [11, 12, 11, 13], (
+        "the unowned replay must reconcile onto owner 11 and only the distinct "
+        "occurrence may mint a fresh id; got "
+        f"{[r.get('id') for r in out]}"
+    )
+    deduped = _deduplicate_context_messages(copy.deepcopy(out))
+    assert _contents(deduped) == ["status?", "all green", "status?"], (
+        "the same-exact-key replay must still collapse while the distinct "
+        f"occurrence survives; got {_contents(deduped)}"
+    )
+
+
+def test_reconcile_leaves_a_single_exact_key_group_untouched():
+    """One exact key is a replay, owned or not: the group stays untouched."""
+    from api.streaming import _deduplicate_context_messages
+    from api.streaming import _reconcile_prefix_occurrence_ownership
+
+    rows = [
+        {"role": "user", "content": "status?", "timestamp": 100.0, "id": 11},
+        {"role": "user", "content": "status?", "timestamp": 100.0},
+    ]
+    out = _reconcile_prefix_occurrence_ownership(copy.deepcopy(rows), [])
+    assert out == rows, (
+        "a group whose rows share ONE exact key must be left untouched so the "
+        f"legacy collapse still collapses it; got {out}"
+    )
+    deduped = _deduplicate_context_messages(copy.deepcopy(out))
+    assert _contents(deduped) == ["status?"], (
+        "the owned-plus-unowned same-exact-key pair must still collapse to one "
+        f"row; got {_contents(deduped)}"
+    )
+
+
+def test_reconcile_never_touches_a_current_turn_row():
+    """A row the CURRENT turn owns is never re-identified."""
+    from api.streaming import _reconcile_prefix_occurrence_ownership
+
+    rows = [
+        {"role": "user", "content": "higher", "timestamp": 100.0, "id": 1},
+        {
+            "role": "user",
+            "content": "higher",
+            "timestamp": 102.0,
+            "_active_turn_token": "s:102",
+        },
+    ]
+    out = _reconcile_prefix_occurrence_ownership(copy.deepcopy(rows), [])
+    assert out[1].get("id") is None, (
+        "the current-turn row must not be stamped with ownership; got "
+        f"{out[1]}"
+    )
+    assert out[1].get("_active_turn_token") == "s:102", (
+        "the current-turn token must survive untouched; got {out[1]}"
+    )
+
+
+def test_reconcile_shares_one_synthetic_id_per_unowned_exact_key():
+    """Duplicates of one unowned exact key share an id so they collapse."""
+    from api.streaming import _deduplicate_context_messages
+    from api.streaming import _reconcile_prefix_occurrence_ownership
+
+    rows = [
+        {"role": "user", "content": "higher", "timestamp": 100.0},
+        {"role": "user", "content": "higher", "timestamp": 102.0},
+        {"role": "user", "content": "higher", "timestamp": 102.0},
+    ]
+    out = _reconcile_prefix_occurrence_ownership(copy.deepcopy(rows), [])
+    assert [r.get("id") for r in out] == [1, 2, 2], (
+        "duplicates of one unowned exact key must share a single synthetic id; "
+        "got "
+        f"{[r.get('id') for r in out]}"
+    )
+    deduped = _deduplicate_context_messages(copy.deepcopy(out))
+    assert _contents(deduped) == ["higher", "higher"], (
+        "the shared-id duplicates must still collapse while the distinct "
+        f"occurrence survives; got {_contents(deduped)}"
     )
