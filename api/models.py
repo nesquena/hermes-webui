@@ -2056,10 +2056,14 @@ class Session:
                 existing = None
                 existing_guarded_messages = None
                 existing_exact_replay_rows_removed = 0
+                existing_bytes = None
                 existing_msg_count = _prefix_message_count(self.path)
                 if existing_msg_count is None:
-                    existing_text = self.path.read_text(encoding='utf-8')
                     try:
+                        # A sidecar cut inside a multi-byte character is
+                        # handled like malformed JSON (#8798), so it cannot
+                        # stop the valid in-memory snapshot from saving.
+                        existing_text = self.path.read_text(encoding='utf-8')
                         existing = json.loads(existing_text)
                         existing_messages = existing.get('messages') or []
                         existing_msg_count = len(existing_messages)
@@ -2068,7 +2072,7 @@ class Session:
                                 existing_guarded_messages,
                                 existing_exact_replay_rows_removed,
                             ) = _deduplicate_exact_stable_messages(existing_messages)
-                    except (json.JSONDecodeError, ValueError, AttributeError):
+                    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, AttributeError):
                         existing_msg_count = -1  # corrupt → always back up
                 incoming_msg_count = len(guarded_messages or [])
                 if (
@@ -2090,8 +2094,14 @@ class Session:
                     if existing_text is None:
                         # The .bak body is the one thing that needs the full text,
                         # and a shrink is the one time it is needed.
-                        existing_text = self.path.read_text(encoding='utf-8')
-                    if existing is None:
+                        try:
+                            existing_text = self.path.read_text(encoding='utf-8')
+                        except UnicodeDecodeError:
+                            # The prefix count was readable but the body is
+                            # cut mid-character (#8798). Back up the exact
+                            # bytes below instead of aborting the save.
+                            existing_bytes = self.path.read_bytes()
+                    if existing is None and existing_text is not None:
                         try:
                             existing = json.loads(existing_text)
                             existing_messages = existing.get('messages') or []
@@ -2113,7 +2123,8 @@ class Session:
                     try:
                         backup_text = existing_text
                         if (
-                            existing_exact_replay_rows_removed
+                            backup_text is not None
+                            and existing_exact_replay_rows_removed
                             and isinstance(existing, dict)
                             and isinstance(existing_guarded_messages, list)
                         ):
@@ -2136,10 +2147,16 @@ class Session:
                         bak_tmp = bak_path.with_suffix(
                             f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
                         )
-                        with open(bak_tmp, 'w', encoding='utf-8') as bf:
-                            bf.write(backup_text)
-                            bf.flush()
-                            os.fsync(bf.fileno())
+                        if backup_text is None:
+                            with open(bak_tmp, 'wb') as bf:
+                                bf.write(existing_bytes)
+                                bf.flush()
+                                os.fsync(bf.fileno())
+                        else:
+                            with open(bak_tmp, 'w', encoding='utf-8') as bf:
+                                bf.write(backup_text)
+                                bf.flush()
+                                os.fsync(bf.fileno())
                         _safe_replace(bak_tmp, bak_path)
                     except OSError:
                         # Backup is best-effort; main save proceeds regardless.

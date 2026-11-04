@@ -1,0 +1,114 @@
+"""#8798: a sidecar cut inside a multi-byte UTF-8 character must not stop a
+valid in-memory session from saving.
+
+Two shapes reach the shrink-backup read in Session.save():
+  * the 64 KiB prefix still holds a readable message_count, but the body is
+    cut mid-character: the shrink backup reads the whole file;
+  * the prefix itself is unreadable, so save() falls back to a full read.
+Before the fix both raised UnicodeDecodeError and the valid snapshot was never
+written.
+"""
+import json
+from collections import OrderedDict
+
+import pytest
+
+
+@pytest.fixture
+def session_dir(tmp_path, monkeypatch):
+    import api.models as models
+
+    sd = tmp_path / "sessions"
+    sd.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", sd)
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    return sd
+
+
+def _messages(n, word="héllo ✓"):
+    return [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"{word} {i}"}
+        for i in range(n)
+    ]
+
+
+def _session(sid, messages):
+    from api.models import Session
+
+    return Session(
+        session_id=sid,
+        title="UTF-8 session",
+        workspace="",
+        model="test-model",
+        created_at=1.0,
+        updated_at=2.0,
+        messages=messages,
+    )
+
+
+def _cut_mid_character(path):
+    """Truncate the sidecar inside the last multi-byte character."""
+    raw = path.read_bytes()
+    marker = "✓".encode("utf-8")  # 3 bytes
+    at = raw.rfind(marker)
+    assert at > 0
+    path.write_bytes(raw[: at + 1])
+    with pytest.raises(UnicodeDecodeError):
+        path.read_text(encoding="utf-8")
+    return raw[: at + 1]
+
+
+def _reload(path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_shrink_save_with_readable_prefix_saves_and_backs_up_exact_bytes(session_dir):
+    from api.models import _prefix_message_count
+
+    sid = "s_8798_prefix"
+    _session(sid, _messages(8)).save(skip_index=True)
+    path = session_dir / f"{sid}.json"
+    cut = _cut_mid_character(path)
+    assert _prefix_message_count(path) == 8, "fixture must keep the prefix count readable"
+
+    valid = _session(sid, _messages(3, word="kept"))
+    valid.save(skip_index=True)
+
+    data = _reload(path)
+    assert [m["content"] for m in data["messages"]] == ["kept 0", "kept 1", "kept 2"]
+    assert data["title"] == "UTF-8 session"
+    # The shrink backup still happens and keeps the prior bytes exactly.
+    assert path.with_suffix(".json.bak").read_bytes() == cut
+
+
+def test_full_read_fallback_treats_undecodable_sidecar_like_malformed_json(session_dir):
+    sid = "s_8798_full"
+    _session(sid, _messages(4)).save(skip_index=True)
+    path = session_dir / f"{sid}.json"
+    # No usable prefix count: the whole file is one cut multi-byte run.
+    path.write_bytes("{\"title\": \"✓".encode("utf-8")[:-1])
+    bak = path.with_suffix(".json.bak")
+    bak.write_text("{\"messages\": [], \"note\": \"older backup\"}", encoding="utf-8")
+
+    _session(sid, _messages(2, word="kept")).save(skip_index=True)
+
+    assert [m["content"] for m in _reload(path)["messages"]] == ["kept 0", "kept 1"]
+    # Same as malformed JSON: no shrink is proven, so an existing backup is left alone.
+    assert json.loads(bak.read_text(encoding="utf-8"))["note"] == "older backup"
+
+
+def test_malformed_json_and_valid_utf8_controls_unchanged(session_dir):
+    sid = "s_8798_ctrl"
+    _session(sid, _messages(6)).save(skip_index=True)
+    path = session_dir / f"{sid}.json"
+
+    # Ordinary UTF-8 shrink: backup is the old text.
+    old_text = path.read_text(encoding="utf-8")
+    _session(sid, _messages(2)).save(skip_index=True)
+    assert path.with_suffix(".json.bak").read_text(encoding="utf-8") == old_text
+    assert len(_reload(path)["messages"]) == 2
+
+    # Malformed (but decodable) JSON still saves.
+    path.write_text("{not json", encoding="utf-8")
+    _session(sid, _messages(1)).save(skip_index=True)
+    assert len(_reload(path)["messages"]) == 1
