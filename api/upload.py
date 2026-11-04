@@ -210,6 +210,30 @@ def _attachment_root() -> Path:
     return (STATE_DIR / 'attachments').resolve()
 
 
+_SHARE_ATTACHMENT_ROOTS: dict[str, Path | None] = {}
+
+
+def _share_attachment_root() -> Path | None:
+    """The attachment root as trusted by public shares, or None (#8590).
+
+    Resolved once per configured spelling -- at import, i.e. server startup,
+    since STATE_DIR and HERMES_WEBUI_ATTACHMENT_DIR are process-wide -- and
+    never by name again: shares walk it no-follow, so a symlink planted later
+    (e.g. inside a workspace that contains it) cannot move it.  A root that
+    cannot be resolved is None (fail closed).  Uploads keep _attachment_root().
+    """
+    key = os.getenv('HERMES_WEBUI_ATTACHMENT_DIR', '').strip() or str(STATE_DIR / 'attachments')
+    if key not in _SHARE_ATTACHMENT_ROOTS:
+        try:
+            _SHARE_ATTACHMENT_ROOTS[key] = Path(key).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            _SHARE_ATTACHMENT_ROOTS[key] = None
+    return _SHARE_ATTACHMENT_ROOTS[key]
+
+
+_share_attachment_root()
+
+
 def _upload_destination(session_id: str, safe_name: str, dest_dir: Path | None = None) -> Path:
     dest_dir = dest_dir if dest_dir is not None else _session_attachment_dir(session_id)
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -510,6 +534,30 @@ def handle_upload_extract(handler):
         return j(handler, {'error': 'Archive extraction failed'}, status=500)
 
 
+# The only outcome that means "the provider ran cleanly and returned nothing to
+# transcribe" is the message transcription_tools raises *after* the exit code has
+# been checked:
+#   Command STT provider wrote no output file at <path> and produced no stdout
+# Match that complete message form and nothing else. A crash-shaped error embeds
+# the child's stderr, which can quote the same words ("produced no stdout"), so a
+# substring match would turn real failures into a successful silent clip. This is
+# also not proof the audio was decoded and found silent: it is only proof the
+# provider exited cleanly without producing a transcript.
+_NO_SPEECH_ERROR_RE = _re.compile(
+    r"^command stt provider wrote no output file at \S(?:.*\S)? and produced no stdout\.?$",
+    _re.IGNORECASE,
+)
+
+
+def _is_no_speech_error(message):
+    # A trailing/leading newline in a wrapped diagnostic would turn the form match
+    # into a miss, so compare the stripped single-line message only.
+    text = (message or "").strip()
+    if not text:
+        return False
+    return _NO_SPEECH_ERROR_RE.match(text) is not None
+
+
 def handle_transcribe(handler):
     import traceback as _tb
     temp_path = None
@@ -535,6 +583,12 @@ def handle_transcribe(handler):
         result = transcribe_audio(temp_path)
         if not result.get('success'):
             msg = str(result.get('error') or 'Transcription failed')
+            if _is_no_speech_error(msg):
+                # The provider ran cleanly and produced no transcript — a normal
+                # outcome when the mic opens before the user speaks or auto-stop
+                # fires on an empty room. Answering 400 here made the client report
+                # a failure for a clip that never had anything to transcribe.
+                return j(handler, {'ok': True, 'transcript': '', 'no_speech': True})
             status = 503 if 'unavailable' in msg.lower() or 'not configured' in msg.lower() else 400
             return j(handler, {'error': msg}, status=status)
         transcript = str(result.get('transcript') or '').strip()

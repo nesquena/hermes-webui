@@ -499,6 +499,105 @@ def is_oidc_auth_enabled() -> bool:
         return False
 
 
+def _safe_subnet_of(net, other) -> bool:
+    """net.subnet_of(other) with family-mismatch hardening.
+
+    IPv4Network.subnet_of(IPv6Network) raises TypeError instead of returning
+    False; callers that filter a mixed-family network list need the mismatch
+    to simply mean "not a subnet".
+    """
+    try:
+        return bool(net.subnet_of(other))
+    except TypeError:
+        return False
+
+
+def get_forwarded_for_startup_warning() -> str | None:
+    """Warn when HERMES_WEBUI_TRUST_FORWARDED_FOR=1 but no non-loopback proxy
+    is allowlisted (#7864 round 2).
+
+    TRUST_FORWARDED_FOR only has an effect once the raw socket peer is a
+    trusted proxy. The request log trusts loopback implicitly, but the login
+    rate limiter (#7850) only uses the forwarded client from a proxy listed in
+    HERMES_WEBUI_TRUSTED_PROXY_CIDRS, so a same-host proxy must be listed
+    explicitly (127.0.0.1/32). An opt-in with no non-loopback entry means a
+    LAN/Docker-bridge proxy's forwarded headers, and the request log's
+    forwarded_for field for its requests, are silently ignored. The text must
+    stay true for the same-host case too, which is why it names both settings.
+    """
+    from api.routes import _trusted_proxy_networks, _truthy_env
+
+    if not _truthy_env("HERMES_WEBUI_TRUST_FORWARDED_FOR"):
+        return None
+
+    import ipaddress
+
+    try:
+        # The implicit trust defaults, family-matched, so an allowlist entry
+        # that merely restates them does not read as "non-loopback" (an
+        # ::ffff:127.0.0.0/104 entry is the IPv4-mapped loopback form).
+        loopback = [
+            ipaddress.ip_network("127.0.0.0/8"),
+            ipaddress.ip_network("::1/128"),
+            ipaddress.ip_network("::ffff:127.0.0.0/104"),
+        ]
+        # Keep only networks that are not a sub-net of the implicit loopback
+        # trust defaults (family mismatch raises TypeError → treated as
+        # outside loopback, which is correct: an IPv6 proxy CIDR is not a
+        # loopback trust).
+        extra = [
+            net
+            for net in _trusted_proxy_networks()
+            if not any(_safe_subnet_of(net, lb) for lb in loopback)
+        ]
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Failed to inspect trusted-proxy networks: %s", exc)
+        return None
+    if extra:
+        return None
+    return (
+        "HERMES_WEBUI_TRUST_FORWARDED_FOR=1 is set but "
+        "HERMES_WEBUI_TRUSTED_PROXY_CIDRS lists no proxy outside this host. "
+        "That is fine for a proxy on this host as long as it is listed "
+        "(HERMES_WEBUI_TRUSTED_PROXY_CIDRS=127.0.0.1/32): login rate limiting "
+        "only uses the forwarded client address from a listed proxy. If your "
+        "proxy is on another host or a Docker bridge, add its address instead "
+        "(e.g. HERMES_WEBUI_TRUSTED_PROXY_CIDRS=172.17.0.1); until then its "
+        "forwarded headers are ignored and the request log records no "
+        "forwarded_for field for its requests."
+    )
+
+
+def get_startup_warnings() -> list[str]:
+    """Every non-OIDC startup warning, in display order.
+
+    #7864 round 2: TRUST_FORWARDED_FOR is a no-op without a non-loopback
+    allowlist entry — surface the silent-field-loss risk at startup while
+    keeping server.py's call sites short (the 750-line guard in
+    tests/test_sprint10.py covers this module).
+    """
+    warnings = [
+        w
+        for w in (
+            get_forwarded_for_startup_warning(),
+        )
+        if w
+    ]
+    return warnings
+
+
+def print_startup_warnings() -> None:
+    """Print every non-OIDC startup warning (#7864 round 2).
+
+    #7864 round 2: TRUST_FORWARDED_FOR is a no-op without a non-loopback
+    allowlist entry — surface the silent-field-loss risk at startup. The
+    printing lives here so server.py stays a one-line call (its 750-line
+    guard is enforced by tests/test_sprint10.py).
+    """
+    for warning in get_startup_warnings():
+        print(f'[!!] WARNING: {warning}', flush=True)
+
+
 def get_oidc_startup_warning() -> str | None:
     """Return a startup warning when OIDC auth is only partially configured,
     or when allow_values uses whitespace that is no longer a separator."""
