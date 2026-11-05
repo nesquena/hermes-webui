@@ -14593,7 +14593,9 @@ def _loose_session_message_content(value: str) -> str:
     return " ".join(re.findall(r"\w+", str(value or "").casefold()))
 
 
-def _session_message_occurrence_for_key(msg: dict) -> str:
+def _session_message_occurrence_for_key(
+    msg: dict, *, include_private_identity: bool = True
+) -> str:
     """Occurrence discriminator shared by the visible/content keys (#7587).
 
     ``_session_message_merge_key()`` already carries the second-truncated
@@ -14621,17 +14623,28 @@ def _session_message_occurrence_for_key(msg: dict) -> str:
     worst shows a duplicate row.  Only a row with neither a usable clock nor
     any identity at all stays indistinguishable, and those key together
     because the information to tell them apart simply is not there.
+
+    ``include_private_identity`` is True for the VISIBLE key: a clocked row
+    may still carry a durable id, and two conflicting ids are evidence of two
+    distinct rows even when only one side has a clock (Greptile r4).  The
+    CONTENT key keeps the historical clock-only form unless the clock itself
+    is missing, because its callers (cancelled-journal owner probes) pair the
+    same logical row across stores where the id is legitimately one-sided and
+    they already require an exact clock match.
     """
     if not isinstance(msg, dict):
         return ""
     stamp = _normalized_message_timestamp_for_key(msg.get("timestamp"))
+    identity = ""
+    if include_private_identity or not stamp:
+        for field in ("id", "message_id", "_state_db_row_id"):
+            value = msg.get(field)
+            if value not in (None, ""):
+                identity = f"id:{field}:{value}"
+                break
     if stamp:
-        return stamp
-    for field in ("id", "message_id", "_state_db_row_id"):
-        identity = msg.get(field)
-        if identity not in (None, ""):
-            return f"id:{field}:{identity}"
-    return ""
+        return f"{stamp}|{identity}" if identity else stamp
+    return identity
 
 
 def _session_message_content_key(
@@ -14672,8 +14685,18 @@ def _session_message_content_key(
         # Occurrence discriminator (#7587): two independent turns carrying the
         # same content must not collapse into one identity.  Callers that
         # deliberately align a mirrored prefix across restamped timestamps
-        # (state_db_delta_after_context) opt out explicitly.
-        _session_message_occurrence_for_key(msg) if include_occurrence else "",
+        # (state_db_delta_after_context) opt out explicitly.  The content key
+        # keeps the clock-only form (see
+        # _session_message_occurrence_for_key): cancelled-journal owner probes
+        # pair the same logical row across stores where the durable id is
+        # legitimately one-sided and already require an exact clock match.
+        (
+            _session_message_occurrence_for_key(
+                msg, include_private_identity=False
+            )
+            if include_occurrence
+            else ""
+        ),
     ), msg)
 
 
@@ -14745,8 +14768,9 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
             {
                 "any": key,
                 "clockless": None,
-                "clock": None,
-                "identity": None,
+                "by_clock": {},
+                "by_identity": {},
+                "identity_values": set(),
                 "by_occurrence": {},
             },
         )
@@ -14758,12 +14782,16 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
                 group["clockless"] = key
         else:
             group["by_occurrence"].setdefault(occurrence, key)
-            # Keep one representative per KIND.  A clock and a private-identity
-            # fallback are not comparable (#8672 gate r3 D2), so the probe needs
-            # to know whether the group can establish a real clock difference.
-            bucket = "identity" if _occurrence_kind(occurrence) == "identity" else "clock"
-            if group[bucket] is None:
-                group[bucket] = key
+            # Index the two dimensions separately.  A clock and a private id
+            # are not interchangeable, and a conflicting id must stay visible
+            # to the probe even when one side also carries a clock
+            # (Greptile r4).
+            clock, identity = _occurrence_parts(occurrence)
+            if clock:
+                group["by_clock"].setdefault(clock, {}).setdefault(identity, key)
+            if identity:
+                group["by_identity"].setdefault(identity, key)
+                group["identity_values"].add(identity)
     # Keep loose_by_key lazy.  Some transcripts contain multi-megabyte tool
     # outputs; eagerly casefolding + regex-tokenizing every visible key on every
     # duplicate probe made /api/session take 10s+ and blocked /api/sessions.
@@ -14886,23 +14914,30 @@ def _session_message_replay_visible_key(msg, *, normalize_workspace_prefix: bool
     )
 
 
-def _occurrence_kind(value) -> str:
-    """Classify an occurrence discriminator: clock, private identity, or none.
+def _occurrence_parts(value) -> tuple[str, str]:
+    """Split an occurrence discriminator into ``(clock, private_identity)``.
 
-    ``_session_message_occurrence_for_key`` yields a second-truncated clock when
-    the row has one, and falls back to ``id:<field>:<value>`` only when it does
-    not.  Those two kinds are not comparable: a clock on one side and a private
-    id on the other cannot establish that the rows are DIFFERENT occurrences
-    (#8672 gate r3 D2).  Two identities, however, ARE comparable -- different
-    ids are genuine contradictory identity, not clock absence.
+    ``_session_message_occurrence_for_key`` emits ``"<clock>|<identity>"`` when
+    both are available, ``"<clock>"`` for a clock-only row, and
+    ``"id:<field>:<value>"`` when the clock is missing.  Keeping the two
+    dimensions separable lets the comparison distinguish a contradictory
+    private identity from a merely one-sided clock (Greptile r4).
     """
-    if value is None or value == "":
-        return "unestablished"
-    return "identity" if str(value).startswith("id:") else "clock"
+    if value is None:
+        return "", ""
+    text = str(value)
+    if not text:
+        return "", ""
+    clock, separator, identity = text.partition("|")
+    if separator:
+        return clock, identity
+    if text.startswith("id:"):
+        return "", text
+    return text, ""
 
 
 def _visible_keys_share_occurrence(left, right) -> bool:
-    """True when two occurrences are the same, or one cannot be established.
+    """True when two occurrences are the same, or neither proves difference.
 
     A row with no usable timestamp cannot prove it is a DIFFERENT occurrence,
     so it must not be distinguished from a row that has one.  Without this rule
@@ -14913,17 +14948,19 @@ def _visible_keys_share_occurrence(left, right) -> bool:
     A one-sided private-identity fallback is likewise NOT a second clock: the
     real SQLite reader can return the same payload with a NULL timestamp while
     the sidecar copy carries the clock, and comparing those as two known clocks
-    appended the replay as a duplicate (#8672 gate r3 D2).  Two rows that both
-    carry private identity remain comparable, so genuinely contradictory ids
-    still stay distinct.
+    appended the replay as a duplicate (#8672 gate r3 D2).
+
+    Conflicting private ids, however, ARE evidence of distinct rows even when
+    only one side carries a clock (Greptile r4): a sidecar row with durable id
+    7 must not swallow a clockless durable row with id 8.
     """
-    left_kind = _occurrence_kind(left)
-    right_kind = _occurrence_kind(right)
-    if left_kind == "unestablished" or right_kind == "unestablished":
-        return True
-    if left_kind != right_kind:
-        return True
-    return left == right
+    left_clock, left_identity = _occurrence_parts(left)
+    right_clock, right_identity = _occurrence_parts(right)
+    if left_identity and right_identity and left_identity != right_identity:
+        return False
+    if left_clock and right_clock:
+        return left_clock == right_clock
+    return True
 
 
 def _clockfree_duplicate_candidate(group: dict, occurrence):
@@ -14932,21 +14969,40 @@ def _clockfree_duplicate_candidate(group: dict, occurrence):
     Exact occurrence equality is authoritative.  Beyond that, a one-sided
     private-identity fallback must not be read as a contradictory clock: it
     cannot establish difference, so it collapses onto the other store's row
-    (#8672 gate r3 D2).  Two established clocks, or two contradictory private
-    identities, remain genuinely distinct and return ``None``.
+    (#8672 gate r3 D2).  Two established different clocks remain genuinely
+    distinct, and so do two conflicting private identities even when only one
+    side also carries a clock (Greptile r4).
     """
-    if occurrence is None or occurrence == "":
-        return group.get("clockless") or group.get("any")
     exact = group.get("by_occurrence", {}).get(occurrence)
     if exact is not None:
         return exact
-    if _occurrence_kind(occurrence) == "identity":
-        if group.get("identity") is not None:
-            return None
-        return group.get("clock") or group.get("clockless")
-    if group.get("clock") is not None:
+    clock, identity = _occurrence_parts(occurrence)
+    identity_values = group.get("identity_values") or set()
+    if identity and identity_values and identity not in identity_values:
+        # A conflicting private id is contradictory identity, not a missing
+        # clock: keep the rows distinct.
         return None
-    return group.get("identity") or group.get("clockless")
+    if clock:
+        clock_mates = group.get("by_clock", {}).get(clock)
+        if clock_mates is not None:
+            if identity:
+                match = clock_mates.get(identity)
+                if match is not None:
+                    return match
+                # Same clock but a DIFFERENT private id: contradictory identity,
+                # not clock absence.  Only an identity-less twin is one-sided
+                # enough to collapse.
+                return clock_mates.get("")
+            return next(iter(clock_mates.values()))
+        if group.get("by_clock"):
+            return None
+        return group.get("any")
+    if identity:
+        match = group.get("by_identity", {}).get(identity)
+        if match is not None:
+            return match
+        return group.get("any") if not identity_values else None
+    return group.get("clockless") or group.get("any")
 
 
 def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lookup: dict | None = None):
@@ -16509,19 +16565,23 @@ def _merge_session_messages_append_only_impl(
             )
         )
         message_key_seen = key in seen_message_keys
-        # Truncation authority is about CONTENT presence in the sidecar, not
-        # about which occurrence of that content is visible (#8672 gate r3 D1).
-        # Using the #7587 occurrence-sensitive content key here dropped an
-        # authorized distinct tool call: the sidecar's empty assistant row
-        # carries call_1 at second 1000 while the durable row carries call_2 at
-        # 1001, so the content key never matched and the truncation guard
-        # swallowed the row before the in-window distinct-tool-call exception
-        # could preserve it.  The occurrence-free membership set is seeded from
-        # every row, so this restores master's truncation behaviour exactly.
-        content_key_seen = (
-            content_key in seen_content_keys
-            or _content_key_without_occurrence(content_key) in seen_content_only_keys
-        )
+        content_key_seen = content_key in seen_content_keys
+        if (
+            not content_key_seen
+            and msg.get("tool_calls")
+            and _content_key_without_occurrence(content_key) in seen_content_only_keys
+        ):
+            # Occurrence-free exemption, LIMITED to the tool-call recovery case
+            # (#8672 gate r3 D1 + Greptile r4).  A distinct authorized tool call
+            # legitimately shares the empty assistant content identity with the
+            # sidecar anchor, and the later in-window exception must get the
+            # chance to preserve it.  User turns get no exemption: after a
+            # retry/edit advances the truncation watermark, a removed prompt
+            # whose text also exists earlier must stay removed, otherwise the
+            # occurrence-sensitive user path re-inserts it into display and the
+            # next model conversation.  Non-tool assistant rows likewise keep
+            # the occurrence-sensitive behaviour.
+            content_key_seen = True
         if retained_native_image_row is not None:
             # A marked image mirror needs durable row proof; an equal scalar
             # projection from another row cannot exempt it from the watermark.
