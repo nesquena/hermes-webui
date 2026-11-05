@@ -5864,14 +5864,41 @@ function invalidateLiveModelCache(providerId){
       const provider=(typeof window!=='undefined'&&window._activeProvider)
         ? String(window._activeProvider)
         : (providerId?String(providerId):'');
-      if(provider) Promise.resolve(_fetchLiveModels(provider,sel)).catch(()=>{});
+      if(provider) Promise.resolve(_fetchLiveModels(provider,sel,null,{reconcile:true})).catch(()=>{});
     }
   }catch(_e){}
 }
 
-function _addLiveModelsToSelect(provider, models, sel){
+// #6919 (Greptile follow-up): _addLiveModelsToSelect() only appends, so a model
+// the provider has since removed stays selectable forever — "Refresh Models"
+// reports success while the Settings picker still offers the dead entry. Drop
+// the live options that are absent from the fresh payload, but never the
+// current selection and never a static catalog row: the user's persisted or
+// unsaved choice has to survive the reconciliation.
+function _dropStaleLiveModelOptions(provider, freshValues, sel){
+  let removed=0;
+  try{
+    if(!sel||!sel.querySelectorAll) return 0;
+    const selected=(sel.options&&sel.selectedIndex>=0)?sel.options[sel.selectedIndex]:null;
+    for(const og of sel.querySelectorAll('optgroup')){
+      if(String((og.dataset||{}).provider||'')!==String(provider)) continue;
+      for(const opt of [...(og.children||[])]){
+        const isLive=(opt.dataset&&opt.dataset.live==='1')
+          || opt.title==='Live model — fetched from provider';
+        if(!isLive||opt===selected) continue;
+        if(freshValues.has(String(opt.value))) continue;
+        og.removeChild(opt);
+        removed++;
+      }
+    }
+  }catch(_e){}
+  return removed;
+}
+
+function _addLiveModelsToSelect(provider, models, sel, opts){
   if(!provider||!models||!models.length||!sel) return 0;
   const currentVal=sel.value;
+  const reconcile=!!(opts&&opts.reconcile);
   let providerGroup=null;
   for(const og of sel.querySelectorAll('optgroup')){
     if(og.dataset.provider&&og.dataset.provider===provider){
@@ -5897,12 +5924,15 @@ function _addLiveModelsToSelect(provider, models, sel){
   // Keep existingNorm.has( within the #907 source slice.
   const optionIdentity=_modelPickerOptionIdentity;
   const existingNorm=new Set([...sel.options].map(o=>optionIdentity(o.value,_getOptionProviderId(o))));
+  // #6919: every mid present in the fresh payload is retained by reconcile.
+  const refreshed=reconcile?new Set():null;
   let added=0;
   for(const m of models){
     let mid=m.id;
     if(_isPortalFetch && !mid.startsWith('@')){
       mid=`@${provider}:${mid}`;
     }
+    if(refreshed) refreshed.add(String(mid));
     if(existingIds.has(mid)) continue;
     const identity=optionIdentity(mid,provider);
     let twin=null;
@@ -5920,6 +5950,7 @@ function _addLiveModelsToSelect(provider, models, sel){
     opt.textContent=m.label||m.id;
     opt.title='Live model — fetched from provider';
     opt.dataset.provider=provider;
+    opt.dataset.live='1';
     if(m && (m.supports_fast_tier === true || String(m.supports_fast_tier).toLowerCase()==='true')){
       opt.dataset.fast='1';
     }else if(m && (m.supports_fast_tier === false || String(m.supports_fast_tier).toLowerCase()==='false')){
@@ -5943,6 +5974,9 @@ function _addLiveModelsToSelect(provider, models, sel){
     _dynamicModelLabels[mid]=m.label||m.id;
     added++;
   }
+  // #6919: reconcile AFTER the append so the fresh payload's own options are
+  // already in `refreshed` and cannot be dropped as stale.
+  if(reconcile&&refreshed) _dropStaleLiveModelOptions(provider,refreshed,sel);
   if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,currentVal);
   if(typeof _sortModelPickerOptions==='function') _sortModelPickerOptions(providerGroup);
   const currentState=(currentVal&&typeof _modelStateForSelect==='function')
@@ -5965,7 +5999,7 @@ function _addLiveModelsToSelect(provider, models, sel){
   return added;
 }
 
-async function _fetchLiveModels(provider, sel, requestSeq=null){
+async function _fetchLiveModels(provider, sel, requestSeq=null, opts=null){
   if(!provider||!sel) return;
   if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
   // #6919: capture the invalidation epoch BEFORE dispatch. A response that
@@ -5976,7 +6010,7 @@ async function _fetchLiveModels(provider, sel, requestSeq=null){
   // Already fetched — apply cached models to this select element (#872)
   if(_liveModelCache[provider]){
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
-    const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel);
+    const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel,opts);
     if(added>0 && typeof syncModelChip==='function') syncModelChip();
     return;
   }
@@ -5997,7 +6031,7 @@ async function _fetchLiveModels(provider, sel, requestSeq=null){
     if(invalidationEpoch!==_liveModelInvalidationEpoch) return;
     _liveModelCache[provider]=data.models;
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
-    const added=_addLiveModelsToSelect(provider,data.models,sel);
+    const added=_addLiveModelsToSelect(provider,data.models,sel,opts);
     if(added>0){
       if(typeof syncModelChip==='function') syncModelChip();
       console.debug('[hermes] Live models loaded for',provider+':',added,'new models added');

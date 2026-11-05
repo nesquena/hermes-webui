@@ -1,5 +1,6 @@
 """Regression tests for /api/models/live backend TTL caching."""
 
+import ast
 import http.client
 import io
 import json
@@ -251,20 +252,48 @@ def test_models_refresh_evicts_alias_normalized_key(monkeypatch):
 
 
 def _routes_function_source(src: str, signature: str) -> str:
-    """Return the full source of a (possibly nested) function via brace balance."""
-    idx = src.find(signature)
-    assert idx != -1, f"signature {signature!r} not found in api/routes.py"
-    open_idx = src.find("{", idx)
-    assert open_idx != -1, f"no opening brace after {signature!r}"
-    depth = 0
-    for i in range(open_idx, len(src)):
-        if src[i] == "{":
-            depth += 1
-        elif src[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return src[idx : i + 1]
-    raise AssertionError(f"unbalanced braces in {signature!r}")
+    """Return the exact source of a function in api/routes.py via ast.
+
+    Brace counting cannot delimit Python functions — Python has no braces, so
+    the scanner runs past the end of the ``def`` into the next dict literal or
+    JS template string and the assertions inspect unrelated code. ast gives the
+    real node range, including nested defs.
+    """
+    name = signature.strip()
+    if name.startswith("def "):
+        name = name[4:]
+    name = name.split("(")[0].strip()
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            segment = ast.get_source_segment(src, node)
+            assert segment, f"could not extract source for {name!r}"
+            return segment
+    raise AssertionError(f"function {name!r} not found in api/routes.py")
+
+
+def test_routes_function_extraction_stops_at_the_def_boundary():
+    """Greptile follow-up: brace counting ran past the end of a Python def and
+    pulled in unrelated functions (plus _ROUTE_SESSION_LIST_CACHE_DYNAMIC_EXPORTS),
+    so the shape assertions could pass or fail on code they never claimed to
+    check. The ast slice must stop at the real function boundary."""
+    src = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
+    publish = _routes_function_source(src, "def _publish_live_models(")
+    assert publish.rstrip().endswith("return True"), (
+        f"_publish_live_models extraction ran past its def:\n{publish[-300:]}"
+    )
+    for leaked in ("_ROUTE_SESSION_LIST_CACHE_DYNAMIC_EXPORTS", "def _clear_live_models_cache"):
+        assert leaked not in publish, (
+            f"_publish_live_models extraction leaked {leaked!r} — it inspected "
+            "code outside the function it claims to check"
+        )
+    finish = _routes_function_source(src, "def _finish(payload: dict):")
+    assert "_publish_live_models(" in finish, (
+        "_finish extraction must cover the real call site"
+    )
+    assert finish.count("\n") < 20, (
+        f"_finish extraction ran past its def:\n{finish}"
+    )
 
 
 def test_live_models_finish_fences_stale_generation():

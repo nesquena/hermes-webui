@@ -189,7 +189,7 @@ class TestLiveModelInvalidationEpoch:
         src = _read_static("ui.js")
         body = _extract_function_body(src, "async function _fetchLiveModels(")
         publish = body.find("_liveModelCache[provider]=data.models")
-        dom = body.find("_addLiveModelsToSelect(provider,data.models,sel)")
+        dom = body.find("_addLiveModelsToSelect(provider,data.models,sel")
         assert publish != -1 and dom != -1, (
             "_fetchLiveModels must still publish the cache and enrich the DOM "
             "for fresh responses (#6919)."
@@ -488,6 +488,133 @@ def test_pending_cleanup_is_successor_aware():
     )
 
 
+_DROP_STALE_PREAMBLE = """
+function _el(tag,attrs){
+  const e={tagName:tag,dataset:{},children:[],title:'',value:'',textContent:'',
+    appendChild(c){this.children.push(c);c.parentNode=this;return c;},
+    removeChild(c){const i=this.children.indexOf(c);if(i>=0)this.children.splice(i,1);c.parentNode=null;return c;}};
+  if(attrs){for(const k in attrs){if(k!=='dataset') e[k]=attrs[k];}}
+  if(attrs&&attrs.dataset) e.dataset=attrs.dataset;
+  return e;
+}
+function _makeSelect(groups,selectedValue){
+  const sel={selectedIndex:0,querySelectorAll(t){return t==='optgroup'?groups:[];}};
+  sel.options=[];
+  for(const g of groups){for(const o of g.children) sel.options.push(o);}
+  // null means "no option selected" (selectedIndex -1), which is what an
+  // untouched picker looks like; a string means that option is selected.
+  if(selectedValue===null){sel.selectedIndex=-1;return sel;}
+  const idx=sel.options.findIndex(o=>o.value===selectedValue);
+  sel.selectedIndex=idx>=0?idx:0;
+  return sel;
+}
+const _LIVE_TITLE='Live model — fetched from provider';
+function _mk(value,title,dataset){return _el('option',{value:value,title:title||'',dataset:dataset||{}});}
+"""
+
+
+def _replay_drop_stale(scenario: str) -> dict:
+    ui = _read_static("ui.js")
+    fn = _extract_function_body(ui, "function _dropStaleLiveModelOptions(")
+    return _run_node(f"""
+{_DROP_STALE_PREAMBLE}
+{fn}
+(async()=>{{
+{scenario}
+}})().catch(e=>{{process.stderr.write(String(e&&e.stack||e));process.exit(1);}});
+""")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_removed_live_models_are_dropped_from_the_settings_picker():
+    """#6919 (Greptile follow-up): Refresh Models must also remove live options
+    the provider has since dropped, otherwise they stay selectable forever and
+    the refresh looks successful while the picker still offers dead entries."""
+    result = _replay_drop_stale("""
+  const group=_el('optgroup',{dataset:{provider:'openai'}});
+  group.appendChild(_mk('static-model',''));
+  group.appendChild(_mk('openai/live-a',_LIVE_TITLE,{provider:'openai',live:'1'}));
+  group.appendChild(_mk('openai/gone',_LIVE_TITLE,{provider:'openai',live:'1'}));
+  const other=_el('optgroup',{dataset:{provider:'zai'}});
+  other.appendChild(_mk('zai/gone',_LIVE_TITLE,{provider:'zai',live:'1'}));
+  const sel=_makeSelect([group,other],'static-model');
+  const removed=_dropStaleLiveModelOptions('openai',new Set(['openai/live-a']),sel);
+  process.stdout.write(JSON.stringify({
+    removed:removed,
+    openai:group.children.map(o=>o.value),
+    zai:other.children.map(o=>o.value),
+  }));
+""")
+    assert result["removed"] == 1, f"expected exactly one stale drop, got {result}"
+    assert result["openai"] == ["static-model", "openai/live-a"], (
+        "the dropped live model must go and the still-advertised one must stay; "
+        f"static catalog rows must never be touched — got {result['openai']}"
+    )
+    assert result["zai"] == ["zai/gone"], (
+        "reconciliation is provider-scoped; another provider's live options must survive"
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_stale_live_model_that_is_selected_survives_reconciliation():
+    """#6919: removing the user's current selection would silently change what
+    the next save submits. Keep it selectable; only stop advertising the others."""
+    result = _replay_drop_stale("""
+  const group=_el('optgroup',{dataset:{provider:'openai'}});
+  group.appendChild(_mk('openai/live-a',_LIVE_TITLE,{provider:'openai',live:'1'}));
+  group.appendChild(_mk('openai/gone',_LIVE_TITLE,{provider:'openai',live:'1'}));
+  const sel=_makeSelect([group],'openai/gone');
+  const removed=_dropStaleLiveModelOptions('openai',new Set(['openai/live-a']),sel);
+  process.stdout.write(JSON.stringify({removed:removed,values:group.children.map(o=>o.value)}));
+""")
+    assert result["removed"] == 0, "the selected option must never be dropped"
+    assert result["values"] == ["openai/live-a", "openai/gone"], (
+        f"the current selection must survive reconciliation — got {result['values']}"
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_legacy_live_options_without_the_data_marker_are_still_reconciled():
+    """#6919: options created before the data-live marker existed are identified
+    by their title, so a refresh in an already-open page still prunes them."""
+    result = _replay_drop_stale("""
+  const group=_el('optgroup',{dataset:{provider:'openai'}});
+  group.appendChild(_mk('openai/legacy-gone',_LIVE_TITLE,{provider:'openai'}));
+  const sel=_makeSelect([group],null);
+  const removed=_dropStaleLiveModelOptions('openai',new Set([]),sel);
+  process.stdout.write(JSON.stringify({removed:removed,values:group.children.map(o=>o.value)}));
+""")
+    assert result["removed"] == 1 and result["values"] == [], (
+        f"a live option without data-live must still be pruned — got {result}"
+    )
+
+
+def test_settings_reconcile_is_wired_and_additive():
+    """#6919 (Greptile follow-up): the Settings receiver must reconcile against
+    the fresh payload, and the append path must tag its options so reconcile can
+    tell live rows from static catalog rows."""
+    ui = _read_static("ui.js")
+    add = _extract_function_body(ui, "function _addLiveModelsToSelect(")
+    assert "opts.reconcile" in add, "the append path must accept the reconcile mode"
+    assert "_dropStaleLiveModelOptions(provider,refreshed,sel)" in add, (
+        "the append path must reconcile after adding the fresh payload"
+    )
+    assert "opt.dataset.live='1'" in add, (
+        "live options must be tagged so static catalog rows are never pruned"
+    )
+    invalidate = _extract_function_body(ui, "function invalidateLiveModelCache(")
+    assert "{reconcile:true}" in invalidate, (
+        "the Settings re-arm must ask for reconciliation, not a plain append"
+    )
+    fetch_live = _extract_function_body(ui, "async function _fetchLiveModels(")
+    assert "_addLiveModelsToSelect(provider,data.models,sel,opts)" in fetch_live, (
+        "the fresh-response path must forward the reconcile mode"
+    )
+    assert "_addLiveModelsToSelect(provider,_liveModelCache[provider],sel,opts)" in fetch_live, (
+        "the cached-response path must forward the reconcile mode too"
+    )
+
+
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_invalidation_rearms_settings_receiver_when_it_revokes_a_pending_fetch():
     """#6919 (gate follow-up): Settings → Conversation keeps its own live-model
@@ -638,7 +765,7 @@ def test_settings_rearm_never_reloads_the_settings_form():
             f"the replacement must not reset the Settings form (found {forbidden!r})"
         )
     assert invalidate.index("delete _liveModelCache") < invalidate.index(
-        "_fetchLiveModels(provider,sel)"
+        "_fetchLiveModels(provider,sel,null,{reconcile:true})"
     ), (
         "the replacement must be dispatched AFTER eviction; before it, "
         "_fetchLiveModels() would hit the surviving cache entry and never re-fetch"
