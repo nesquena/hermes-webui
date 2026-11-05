@@ -33,3 +33,9 @@ def test_css_title_ellipsizes_and_time_never_shrinks():
     assert "text-overflow:ellipsis" in rule(".session-child-label") and "min-width:0" in rule(".session-child-label")
     assert "flex:none" in rule(".session-child-time")
     assert "display:flex" in rule(".session-child-session:not(.session-child-session-fork),.session-child-session-main")
+
+
+def test_every_child_row_renders_label_spans():
+    # plain row, fork row, and fork rename restore must all mount the spans (master used textContent=).
+    assert len(re.findall(r"\.replaceChildren\(\.\.\.childLabelFor\(child\)\)", JS)) == 3
+    assert "textContent=childLabelFor" not in JS
