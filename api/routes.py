@@ -30270,6 +30270,10 @@ def start_session_turn(
         s = get_session(session_id)
     except KeyError:
         return {"error": "Session not found", "_status": 404}
+    if getattr(s, "_sidecar_names_other_session", None):
+        # #8852: as in chat/start, every write of the turn would land in the
+        # session this file's body names. The wakeup callers drop a 404.
+        return {"error": "Session not found", "_status": 404}
 
     try:
         workspace = _resolve_chat_workspace_with_recovery(s, None)

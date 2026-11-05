@@ -450,6 +450,39 @@ def test_gateway_reattach_at_startup_skips_a_copy(store, monkeypatch):
     assert _files(store) == before
 
 
+@pytest.mark.parametrize("partials", [True, False])
+def test_a_background_wakeup_for_a_copy_is_dropped_cleanly(store, monkeypatch, caplog, partials):
+    """``start_session_turn`` (process and delegation wakeups) is the server-side twin of chat/start.
+    On a copy it raised from the save guard, which its contract says never happens, and left the
+    cached copy mid-turn; the process-wakeup runner re-queued the wakeup and logged a traceback on
+    every drain (senior review, round 3). It now answers the 404 its callers drop, before anything
+    is mutated, and the owner's own wakeup still starts."""
+    import api.routes as routes
+    from api import models
+
+    ran = []
+    monkeypatch.setattr(routes, "_run_agent_streaming", lambda *a, **k: ran.append("agent"))
+    _victim(store)
+    _copy(store, partials=partials)
+    before = _files(store)
+
+    with caplog.at_level(logging.WARNING):
+        resp = routes.start_session_turn(COPY, "wake up")
+
+    assert (resp.get("_status"), resp.get("error")) == (404, "Session not found")
+    assert ran == []
+    _unchanged_victim(store, before)
+    assert _files(store) == before
+    cached = models.SESSIONS.get(COPY)
+    if cached is not None:
+        assert not cached.active_stream_id and not cached.pending_user_message
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+    owner = routes.start_session_turn(VICTIM, "owner wake")
+    assert owner.get("_status", 200) == 200, owner
+    assert ran == ["agent"]
+
+
 def test_a_sidecar_without_a_session_id_never_spawns_files(store):
     """``Session(**data)`` gives a body without ``session_id`` a random id; each collapse load,
     index rebuilds included, used to write a new stray file under it."""
