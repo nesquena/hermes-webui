@@ -426,11 +426,11 @@ def test_control_deleting_an_unshared_conversation_still_works(state):
     assert not path.exists()
 
 
-def _external_session(monkeypatch, *, source="cli"):
+def _external_session(monkeypatch, *, source="cli", title="External chat"):
     """An external session that lives only in state.db: no WebUI sidecar at all."""
     from api import models, routes
 
-    meta = {"session_id": EXTERNAL_SID, "title": "External chat", "source_tag": source, "raw_source": source}
+    meta = {"session_id": EXTERNAL_SID, "title": title, "source_tag": source, "raw_source": source}
     monkeypatch.setattr(
         routes,
         "_lookup_cli_session_metadata",
@@ -442,7 +442,7 @@ def _external_session(monkeypatch, *, source="cli"):
             return None, "no_foreign_state"
         session = models.Session(
             session_id=sid,
-            title="External chat",
+            title=title,
             messages=[
                 {"role": "user", "content": "from elsewhere", "timestamp": 200},
                 {"role": "assistant", "content": "answered there", "timestamp": 201},
@@ -497,3 +497,63 @@ def test_messaging_session_delete_ends_its_link_and_sharing_again_works(state, m
     assert second != first
     _assert_served(second)
     _assert_not_served(first)
+
+
+# ── Codex round 1, F1: cleanup of empty sessions keeps an external share link ──
+
+CLEANUP_ROUTES = ["/api/sessions/cleanup", "/api/sessions/cleanup_zero_message"]
+
+
+@pytest.mark.parametrize("route", CLEANUP_ROUTES)
+def test_cleanup_keeps_a_shared_external_conversation_serving_and_revocable(state, monkeypatch, route):
+    """Sharing an external conversation writes a metadata-only sidecar: no
+    messages, an untitled CLI session keeps "Untitled", and the transcript stays
+    in state.db. Cleaning up empty sessions must not remove it, or the link of a
+    conversation that still exists stops serving (and on master, where it kept
+    serving, revoke lost the token)."""
+    path = _external_session(monkeypatch, title="Untitled")
+    token = _share(EXTERNAL_SID)
+    sidecar = json.loads(path.read_text(encoding="utf-8"))
+    assert sidecar["messages"] == [] and sidecar["title"] == "Untitled"
+    assert EXTERNAL_SID in _index_ids()
+    status, reply = _post(route, {})
+    assert status == 200, reply
+    assert path.exists()
+    assert json.loads(path.read_text(encoding="utf-8"))["share_token"] == token
+    assert EXTERNAL_SID in _index_ids()  # the index sweep keeps it too
+    share = _assert_served(token)
+    assert [m["content"] for m in share["messages"]] == ["from elsewhere", "answered there"]
+    assert _post("/api/share/revoke", {"session_id": EXTERNAL_SID})[0] == 200
+    _assert_not_served(token)
+
+
+@pytest.mark.parametrize("route", CLEANUP_ROUTES)
+def test_control_cleanup_still_removes_a_never_shared_empty_native_session(state, route):
+    """Unchanged from master: an empty native session cannot be shared, so it
+    carries no token, and cleanup removes it."""
+    from api import models
+
+    sid = "s_8837_empty_native"
+    empty = models.Session(session_id=sid, title="Untitled")
+    empty.save(touch_updated_at=False)
+    models.SESSIONS.clear()
+    status, reply = _post("/api/share/create", {"session_id": sid})
+    assert status == 400, reply
+    assert json.loads(empty.path.read_text(encoding="utf-8")).get("share_token") is None
+    status, reply = _post(route, {})
+    assert status == 200, reply
+    assert reply["cleaned"] >= 1
+    assert not empty.path.exists()
+
+
+@pytest.mark.parametrize("route", CLEANUP_ROUTES)
+def test_control_cleanup_removes_an_unshared_external_metadata_sidecar(state, monkeypatch, route):
+    """Unchanged from master: an external conversation's metadata-only sidecar
+    with no link behind it is still cleaned up (no link is lost)."""
+    path = _external_session(monkeypatch, title="Untitled")
+    _share(EXTERNAL_SID)
+    assert _post("/api/share/revoke", {"session_id": EXTERNAL_SID})[0] == 200
+    assert json.loads(path.read_text(encoding="utf-8")).get("share_token") is None
+    status, reply = _post(route, {})
+    assert status == 200, reply
+    assert not path.exists()

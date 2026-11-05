@@ -27771,6 +27771,14 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                     should_delete = s and len(s.messages) == 0
                 else:
                     should_delete = s and s.title == "Untitled" and len(s.messages) == 0
+                if should_delete and getattr(s, "share_token", None):
+                    # #8837: a published link is served only while this sidecar
+                    # exists, and revoke finds its token here. Sharing an
+                    # external (CLI/messaging) conversation writes a
+                    # metadata-only sidecar with no messages while the
+                    # transcript stays in state.db, so "empty" does not mean
+                    # gone. Only a deliberate delete ends a live link.
+                    should_delete = False
                 if should_delete:
                     with LOCK:
                         SESSIONS.pop(p.stem, None)
