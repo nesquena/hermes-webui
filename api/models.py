@@ -7495,6 +7495,11 @@ def get_sidecar_session_profile_readonly(sid):
             data = json.loads(path.read_bytes())
     except FileNotFoundError:
         raise KeyError(sid) from None
+    except RecursionError:
+        # Nested deeper than the JSON parser's recursion limit. The server can't
+        # write such a file (encoding fails at the same depth), so only an
+        # outside writer can: ownership unverifiable, like any unparseable file.
+        raise ValueError('Invalid session ownership metadata') from None
     if not isinstance(data, dict) or data.get('session_id') != sid:
         raise ValueError('Invalid session ownership metadata')
     profile = data.get('profile')
