@@ -67,12 +67,29 @@ def real_registry():
         pytest.skip("installed agent.redact has no runtime pattern registry")
     if helpers._redact_fn_uncached.__name__ != "_combined_redact":
         pytest.skip("api.helpers was built without the agent redactor")
+    bound = _bound_agent_redactor()
+    if getattr(bound, "__globals__", None) is not vars(redact):
+        # A stubbed-agent test reloaded api.helpers under a stub (#8845); the
+        # production objects no longer redact through this registry.
+        pytest.skip("api.helpers is bound to a different agent.redact than the installed one")
     reset = getattr(redact, "_reset_plugin_redaction_patterns", None)
     if reset is None:
         pytest.skip("installed agent.redact has no registry reset seam")
     reset()
     yield redact
     reset()
+
+
+def _bound_agent_redactor():
+    """The ``redact_sensitive_text`` captured by ``_combined_redact``, if any."""
+    for cell in getattr(helpers._redact_fn_uncached, "__closure__", None) or ():
+        try:
+            value = cell.cell_contents
+        except ValueError:
+            continue
+        if callable(value) and getattr(value, "__name__", "") == "redact_sensitive_text":
+            return value
+    return None
 
 
 def _register_through_plugin_api(redact, patterns):
