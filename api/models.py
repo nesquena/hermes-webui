@@ -2147,7 +2147,15 @@ class Session:
                         bak_tmp = bak_path.with_suffix(
                             f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
                         )
-                        if backup_text is None:
+                        if backup_text is None and _usable_backup(bak_path, incoming_msg_count):
+                            # Torn bytes are only for manual salvage. They
+                            # must not replace a backup that recovery can
+                            # still use (#8798 review).
+                            logger.warning(
+                                "Kept existing backup for session %s; old sidecar is not valid UTF-8",
+                                self.session_id,
+                            )
+                        elif backup_text is None:
                             with open(bak_tmp, 'wb') as bf:
                                 bf.write(existing_bytes)
                                 bf.flush()
@@ -5914,6 +5922,19 @@ def _sidecar_stat_signature(path):
 
 
 _MESSAGE_COUNT_MARKER = 1
+
+
+def _usable_backup(bak_path, live_count) -> bool:
+    """True when ``bak_path`` is a readable session that recovery could
+    still restore over a live file of ``live_count`` messages (#8798)."""
+    try:
+        data = json.loads(bak_path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    messages = data.get('messages')
+    return isinstance(messages, list) and len(messages) > live_count
 
 
 def _prefix_message_count(path):

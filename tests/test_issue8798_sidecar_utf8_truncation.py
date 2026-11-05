@@ -112,3 +112,30 @@ def test_malformed_json_and_valid_utf8_controls_unchanged(session_dir):
     path.write_text("{not json", encoding="utf-8")
     _session(sid, _messages(1)).save(skip_index=True)
     assert len(_reload(path)["messages"]) == 1
+
+
+def test_torn_shrink_keeps_an_existing_usable_backup(session_dir):
+    from api.models import _prefix_message_count
+    from api.session_recovery import inspect_session_recovery_status
+
+    sid = "s_8798_keep_bak"
+    _session(sid, _messages(10)).save(skip_index=True)
+    _session(sid, _messages(8)).save(skip_index=True)  # normal 10 -> 8 shrink
+    path = session_dir / f"{sid}.json"
+    bak = path.with_suffix(".json.bak")
+    good_bak = bak.read_bytes()
+    assert len(json.loads(good_bak)["messages"]) == 10
+
+    _cut_mid_character(path)
+    assert _prefix_message_count(path) == 8, "fixture must keep the prefix count readable"
+    _session(sid, _messages(3, word="kept")).save(skip_index=True)
+
+    data = _reload(path)
+    assert [m["content"] for m in data["messages"]] == ["kept 0", "kept 1", "kept 2"]
+    assert data["title"] == "UTF-8 session"
+    # The 10-message backup is still there and still restorable.
+    assert bak.read_bytes() == good_bak
+    status = inspect_session_recovery_status(path)
+    assert status["live_messages"] == 3
+    assert status["bak_messages"] == 10
+    assert status["recommend"] == "restore"
