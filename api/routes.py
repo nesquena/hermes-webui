@@ -16489,8 +16489,17 @@ def _handle_session_get(handler, parsed) -> bool:
         # #8830: only now that this request owns the session, move share fields
         # an exp-v0.52.621..630 build left after ``messages`` (no-op unless the
         # load found them there). A refused request returned above and never
-        # writes (#8094).
-        _repair_session_share_field_order(s)
+        # writes (#8094). The repair runs under the session lock that
+        # /api/session/delete holds while it removes the sidecar, so a delete
+        # that lands mid-repair is not undone; it never waits for a busy
+        # session (a live turn), whose note stays for the next open.
+        if getattr(s, "_share_fields_misplaced", False):
+            _repair_lock = _get_session_agent_lock(sid)
+            if _repair_lock.acquire(blocking=False):
+                try:
+                    _repair_session_share_field_order(s)
+                finally:
+                    _repair_lock.release()
         original_stream_id = getattr(s, "active_stream_id", None)
         _clear_stale_stream_state(s)
         cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}

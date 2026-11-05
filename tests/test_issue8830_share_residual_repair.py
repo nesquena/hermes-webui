@@ -417,6 +417,54 @@ def test_a_revoke_during_the_repair_waits_and_wins(isolated_state, active_profil
     assert _metadata_reload() == (None, None)
 
 
+def test_a_delete_during_the_repair_waits_and_wins(isolated_state, active_profile, monkeypatch):
+    """``/api/session/delete`` removes the sidecar under the session lock. A delete that arrives
+    while the repair is mid-write waits for it and then wins: the repair can never put a deleted
+    sidecar, or its index row, back."""
+    import sys
+    import threading
+
+    from api import models, routes
+
+    monkeypatch.setattr(routes, "SESSION_DIR", models.SESSION_DIR)
+    path, _token = _shared_then_damaged()
+    paused = threading.Event()
+    resume = threading.Event()
+    real_fsync = models.os.fsync
+
+    def _pause_repair_fsync(fd):
+        if (
+            threading.current_thread().name == "repair"
+            and sys._getframe(1).f_code.co_name == "_patch_session_sidecar"
+            and not paused.is_set()
+        ):
+            paused.set()  # repaired bytes written, sidecar not yet replaced
+            assert resume.wait(10), "test never resumed the repair"
+        return real_fsync(fd)
+
+    monkeypatch.setattr(models.os, "fsync", _pause_repair_fsync)
+    results = {}
+    repair = threading.Thread(target=lambda: results.update(open=_open()), name="repair")
+    repair.start()
+    assert paused.wait(10), "opening the conversation never reached the repair write"
+    delete = threading.Thread(
+        target=lambda: results.update(delete=_post("/api/session/delete", {"session_id": SID})),
+        name="delete",
+    )
+    delete.start()
+    delete.join(0.5)
+    delete_waited = delete.is_alive()
+    resume.set()
+    repair.join(10)
+    delete.join(10)
+    assert not repair.is_alive() and not delete.is_alive(), "a writer deadlocked"
+    assert results["open"].status == 200
+    assert results["delete"][0] == 200, results["delete"]
+    assert delete_waited, "the delete ran while the repair held the sidecar mid-write"
+    assert not path.exists(), "the repair put the deleted sidecar back"
+    assert SID not in {row.get("session_id") for row in _index_rows()}
+
+
 # --- another profile's damaged sidecar: a refused request never writes (#8094) ----------
 
 
