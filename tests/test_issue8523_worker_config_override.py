@@ -42,7 +42,7 @@ def _enable_runs_api_in(path, monkeypatch):
 
 
 def test_root_runs_api_from_external_config_survives_named_active_profile(
-    external_root_with_named_active, tmp_path, monkeypatch
+    external_root_with_named_active, tmp_path, monkeypatch  # noqa: F811 (pytest fixture imported above)
 ):
     _root, _work, external = external_root_with_named_active
     _enable_runs_api_in(external, monkeypatch)
@@ -54,7 +54,7 @@ def test_root_runs_api_from_external_config_survives_named_active_profile(
 
 
 @pytest.mark.parametrize("profile", ["", "default"], ids=["empty-profile", "default-alias"])
-def test_root_aliases_resolve_like_root(external_root_with_named_active, tmp_path, monkeypatch, profile):
+def test_root_aliases_resolve_like_root(external_root_with_named_active, tmp_path, monkeypatch, profile):  # noqa: F811 (pytest fixture imported above)
     _root, _work, external = external_root_with_named_active
     _enable_runs_api_in(external, monkeypatch)
     session = models.Session(
@@ -66,7 +66,7 @@ def test_root_aliases_resolve_like_root(external_root_with_named_active, tmp_pat
 
 @pytest.mark.parametrize("opt_in_where", ["external", "work-file"])
 def test_named_profile_keeps_the_earlier_resolver(
-    external_root_with_named_active, tmp_path, monkeypatch, opt_in_where
+    external_root_with_named_active, tmp_path, monkeypatch, opt_in_where  # noqa: F811 (pytest fixture imported above)
 ):
     _root, work, external = external_root_with_named_active
     target = external if opt_in_where == "external" else (work / "config.yaml")
