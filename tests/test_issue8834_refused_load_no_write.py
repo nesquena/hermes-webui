@@ -889,3 +889,57 @@ def test_profile_before_messages_and_id_after_is_refused_for_another_profile(iso
     assert (handler.status, handler.payload().get("code"), handler.payload().get("profile")) == (
         409, "session_profile_mismatch", "work")
     assert path.read_bytes() == before and not path.with_suffix(".json.bak").exists()
+
+
+
+# --- round 4 (senior r3 findings 3 and 4) -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("route", ["get_full", "chat_start"])
+def test_a_visible_resident_copy_skips_the_sidecar_read(isolated_sessions, monkeypatch, route):
+    """The owner's usual request (its session resident) must not parse the sidecar: one visible copy already means
+    the load decides. Senior r3 finding 3 measured 3-13 ms per request for that parse."""
+    directory, cache, _ = isolated_sessions
+    _sidecar(directory, profile="default", messages=_rows(2))
+    cache[SID] = _resident("default", 2)
+
+    def _no_sidecar_read(_sid):
+        raise AssertionError("sidecar read although the resident copy is visible")
+
+    monkeypatch.setattr(models, "get_sidecar_session_profile_readonly", _no_sidecar_read)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    for name in ("_refuse_cross_profile_before_load", "_refuse_cross_profile_chat_start_before_load"):
+        handler = _Handler()
+        if name == "_refuse_cross_profile_before_load":
+            assert routes._refuse_cross_profile_before_load(handler, SID, full_load=True) is False
+        elif route == "chat_start":
+            assert routes._refuse_cross_profile_chat_start_before_load(handler, {"session_id": SID}) is False
+        assert handler.status is None
+
+
+def test_an_invisible_resident_copy_still_reads_the_sidecar(isolated_sessions, monkeypatch):
+    """The skip is only for a visible resident copy: a foreign one must still be weighed against the sidecar."""
+    directory, cache, _ = isolated_sessions
+    _sidecar(directory, profile="default", messages=_rows(2))
+    cache[SID] = _resident("work", 1)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    readings = routes._readings_for(_Handler(), SID, full_load=True)
+    assert readings == ["work", "default"]
+    handler = _Handler()
+    assert routes._refuse_cross_profile_before_load(handler, SID, full_load=True) is False
+
+
+@pytest.mark.parametrize("route", ["get_full", "chat_start"])
+def test_empty_string_and_none_owners_agree(isolated_sessions, monkeypatch, route):
+    """Senior r3 finding 4: a resident copy with profile "" and a sidecar with no profile are the same legacy owner
+    to every route's answer, so the request is refused before the load (404, master's answer) and nothing is
+    written. Compared literally they "disagreed", the load ran, and the refusal collapse-wrote the sidecar."""
+    directory, cache, _ = isolated_sessions
+    path = _sidecar(directory, profile=None)  # [user, partial, partial]
+    cache[SID] = _resident("", 1)
+    before = path.read_bytes()
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "personal")
+    handler = _call(route, active="personal")
+    assert handler.status == 404, (handler.status, handler.payload())
+    assert path.read_bytes() == before
+    assert not path.with_suffix(".json.bak").exists()

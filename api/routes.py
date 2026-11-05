@@ -1055,13 +1055,25 @@ def _owner_refusal_before_load(readings, handler):
     """
     if not readings or _owner_readings_visible(readings, handler):
         return _DEFER_TO_LOAD
-    first = readings[0]
-    if any(reading is not first and reading != first for reading in readings[1:]):
+    # "" and None are the same legacy no-profile owner to every route's answer
+    # (GET uses ``or None``, chat/start tests truthiness, the retag ``or "default"``).
+    owners = [r if r is UNVERIFIABLE_SESSION_OWNER else (r or None) for r in readings]
+    first = owners[0]
+    if any(owner is not first and owner != first for owner in owners[1:]):
         return _DEFER_TO_LOAD
     return first
 
 
+
 _DEFER_TO_LOAD = object()
+
+
+def _readings_for(handler, sid, *, full_load):
+    """The readings for a pre-check, skipping the sidecar read when the resident copy is already visible."""
+    return session_owner_readings_readonly(
+        sid, full_load=full_load,
+        visible=lambda reading: _session_visible_to_active_profile(reading, handler),
+    )
 
 
 def _refuse_cross_profile_before_load(handler, sid, *, full_load, not_found="Session not found") -> bool:
@@ -1076,7 +1088,7 @@ def _refuse_cross_profile_before_load(handler, sid, *, full_load, not_found="Ses
     """
     if not isinstance(sid, str):
         return False
-    owner = _owner_refusal_before_load(session_owner_readings_readonly(sid, full_load=full_load), handler)
+    owner = _owner_refusal_before_load(_readings_for(handler, sid, full_load=full_load), handler)
     if owner is _DEFER_TO_LOAD:
         return False
     _send_owner_refusal(handler, sid, owner, not_found)
@@ -1116,7 +1128,7 @@ def _refuse_cross_profile_chat_start_before_load(handler, body) -> bool:
         # and crashed (500) on a list in the loader.
         bad(handler, "Session not found", 404)
         return True
-    owner = _owner_refusal_before_load(session_owner_readings_readonly(sid, full_load=True), handler)
+    owner = _owner_refusal_before_load(_readings_for(handler, sid, full_load=True), handler)
     if owner is _DEFER_TO_LOAD:
         return False
     requested_profile, invalid = _chat_start_requested_profile(body)

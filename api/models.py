@@ -7507,7 +7507,7 @@ def get_sidecar_session_profile_readonly(sid):
 UNVERIFIABLE_SESSION_OWNER = object()
 
 
-def session_owner_readings_readonly(sid, *, full_load):
+def session_owner_readings_readonly(sid, *, full_load, visible=None):
     """The owner of every stored object a load of ``sid`` could serve, read without loading it.
 
     #8834: a route that owns its profile boundary must decide on the object its
@@ -7525,6 +7525,11 @@ def session_owner_readings_readonly(sid, *, full_load):
     only on a miss, so it reports one reading, as ``get_session_profile_readonly``
     does. A resident entry whose ``session_id`` differs is evicted by the
     resolver, so it is skipped.
+
+    ``visible``, when given, is the caller's visibility test. If the resident
+    reading passes it, the sidecar isn't read: one visible copy already means
+    the load decides, so the result can't change, and the owner's usual request
+    (its session resident) skips a parse of the file.
 
     Returns the readings, resident first: a profile (``str`` or ``None``) or
     ``UNVERIFIABLE_SESSION_OWNER``. An empty list means no stored session
@@ -7545,6 +7550,13 @@ def session_owner_readings_readonly(sid, *, full_load):
                 profile if profile is None or isinstance(profile, str) else UNVERIFIABLE_SESSION_OWNER
             )
     if readings and not full_load:
+        return readings
+    if (
+        readings
+        and visible is not None
+        and readings[0] is not UNVERIFIABLE_SESSION_OWNER
+        and visible(readings[0])
+    ):
         return readings
     try:
         readings.append(get_sidecar_session_profile_readonly(sid))
