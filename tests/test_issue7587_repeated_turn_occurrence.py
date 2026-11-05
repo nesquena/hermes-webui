@@ -663,3 +663,124 @@ def test_clockless_oversized_scalar_replay_collapses_on_a_misaligned_transcript(
         f"{[len(m['content']) if isinstance(m.get('content'), str) else None for m in merged]}"
     )
 
+
+def test_conflicting_private_ids_do_not_collapse_a_one_sided_clock():
+    """Greptile r4: a clocked id-7 sidecar row must not swallow a clockless id-8 row.
+
+    A one-sided clock is not evidence of a replay when the private ids that ARE
+    available contradict each other; the later turn has to survive recovery.
+    """
+    from api.models import (
+        _matching_visible_duplicate,
+        _session_message_visible_key,
+    )
+
+    clocked = {
+        "role": "user",
+        "content": SAME_TEXT,
+        "timestamp": 1000.0,
+        "_state_db_row_id": 7,
+    }
+    clockless = {"role": "user", "content": SAME_TEXT, "_state_db_row_id": 8}
+
+    assert _session_message_visible_key(clocked) != _session_message_visible_key(
+        clockless
+    )
+    assert _matching_visible_duplicate(
+        _session_message_visible_key(clockless),
+        {_session_message_visible_key(clocked)},
+    ) is None
+
+
+def test_conflicting_private_ids_preserve_the_later_turn_on_restore():
+    """Greptile r4 merge level: the conflicting-id turn is not skipped."""
+    from api.models import merge_session_messages_append_only
+
+    sidecar = [
+        {"role": "assistant", "content": "earlier answer", "timestamp": 500.0},
+        {
+            "role": "user",
+            "content": SAME_TEXT,
+            "timestamp": 1000.0,
+            "_state_db_row_id": 7,
+        },
+        {"role": "assistant", "content": "final answer", "timestamp": 1001.0},
+    ]
+    state = [
+        {"role": "user", "content": SAME_TEXT, "_state_db_row_id": 8},
+    ]
+
+    merged = merge_session_messages_append_only(sidecar, state)
+
+    occurrences = [
+        message
+        for message in merged
+        if message.get("role") == "user" and message.get("content") == SAME_TEXT
+    ]
+    assert len(occurrences) == 2, (
+        "the conflicting-id turn disappeared during recovery: "
+        f"{[(m.get('role'), m.get('content'), m.get('_state_db_row_id')) for m in merged]}"
+    )
+
+
+def test_same_clock_conflicting_private_ids_stay_distinct_over_the_probe_bound():
+    """Greptile r4 variant: the clock-free index must compare ids per clock.
+
+    The group carries id 7 at clock 1000 and id 8 at clock 2000; an incoming
+    row with id 8 at clock 1000 is a contradiction, not a replay.  Forcing the
+    over-bound probe path makes this exercise the index rather than the fuzzy
+    loop.
+    """
+    from api.models import (
+        _build_visible_duplicate_lookup,
+        _matching_visible_duplicate,
+    )
+
+    filler = {
+        ("user", f"filler {i}", "", str(i))
+        for i in range(1001)
+    }
+    key_at_1000_id7 = ("user", SAME_TEXT, "", "1000|id:_state_db_row_id:7")
+    key_at_2000_id8 = ("user", SAME_TEXT, "", "2000|id:_state_db_row_id:8")
+    visible_keys = filler | {key_at_1000_id7, key_at_2000_id8}
+    lookup = _build_visible_duplicate_lookup(visible_keys)
+
+    incoming = ("user", SAME_TEXT, "", "1000|id:_state_db_row_id:8")
+
+    assert _matching_visible_duplicate(incoming, visible_keys, lookup) is None
+
+
+def test_truncation_guard_does_not_resurrect_a_removed_user_prompt_with_an_earlier_copy():
+    """Greptile r4: the occurrence-free truncation exemption is tool-call only.
+
+    After a retry/edit advances the watermark, a removed prompt below the cutoff
+    must stay removed even when an earlier copy of its text survives in the
+    sidecar.  Otherwise the occurrence-sensitive user path re-inserts it into
+    both display and the next model conversation.
+    """
+    from api.models import merge_session_messages_append_only
+
+    sidecar = [
+        {"role": "assistant", "content": "earlier answer", "timestamp": 800.0},
+        {"role": "user", "content": "repeat prompt", "timestamp": 900.0},
+        {"role": "user", "content": "kept prompt", "timestamp": 1000.0},
+        {"role": "assistant", "content": "final answer", "timestamp": 1002.0},
+    ]
+    state = [
+        {"role": "user", "content": "repeat prompt", "timestamp": 1001.0},
+    ]
+
+    merged = merge_session_messages_append_only(
+        sidecar,
+        state,
+        truncation_watermark=1002.0,
+        truncation_boundary=1002.0,
+    )
+
+    assert [message["content"] for message in merged] == [
+        "earlier answer",
+        "repeat prompt",
+        "kept prompt",
+        "final answer",
+    ]
+

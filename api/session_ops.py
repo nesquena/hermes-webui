@@ -296,6 +296,7 @@ def _bounded_tail_snapshot_if_safe(session, read_floor):
         return None
     profile = getattr(session, "profile", None)
     from api.models import (
+        _occurrence_parts,
         _session_message_visible_key,
         _visible_key_field,
         _visible_key_without_occurrence,
@@ -369,8 +370,10 @@ def _bounded_tail_snapshot_if_safe(session, read_floor):
     # prove only that the bounded proof cannot establish parity -- it cannot
     # tell a restamp from a genuinely new repeated row.  Conservatively fall
     # back to the full read (master behaviour for these shapes).  A clockless
-    # row on either side is a wildcard and proves nothing.
-    sidecar_tail_occurrences = {}
+    # row on either side is a wildcard and proves nothing; a private id is
+    # deliberately ignored here (the id may be one-sided and cannot establish
+    # a clock disagreement).
+    sidecar_tail_clocks = {}
     for message in getattr(session, "messages", None) or []:
         if not isinstance(message, dict):
             continue
@@ -383,20 +386,24 @@ def _bounded_tail_snapshot_if_safe(session, read_floor):
         key = _session_message_visible_key(
             message, normalize_workspace_prefix=True
         )
-        sidecar_tail_occurrences.setdefault(
-            _visible_key_without_occurrence(key), set()
-        ).add(_visible_key_field(key, _VISIBLE_KEY_OCCURRENCE_INDEX, ""))
-    for key in snap["tail_keys"]:
-        occurrence = _visible_key_field(key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
-        if occurrence == "":
+        clock, _identity = _occurrence_parts(
+            _visible_key_field(key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
+        )
+        if not clock:
             continue
-        established = sidecar_tail_occurrences.get(
+        sidecar_tail_clocks.setdefault(
+            _visible_key_without_occurrence(key), set()
+        ).add(clock)
+    for key in snap["tail_keys"]:
+        clock, _identity = _occurrence_parts(
+            _visible_key_field(key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
+        )
+        if not clock:
+            continue
+        established = sidecar_tail_clocks.get(
             _visible_key_without_occurrence(key)
         )
-        if not established:
-            continue
-        established.discard("")
-        if established and occurrence not in established:
+        if established and clock not in established:
             return None
     return snap["tail"]
 
