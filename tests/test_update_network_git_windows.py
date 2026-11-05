@@ -1125,19 +1125,27 @@ class WindowsJobRunnerTests(unittest.TestCase):
                 self.assertIsInstance(error, subprocess.TimeoutExpired)
                 self.assertEqual(error.cmd, fixture)
                 self.assertEqual(error.timeout, 12.0)
-                self.assertIn('partial output', str(error.output))
+                # Four independent postconditions, each in its own subTest:
+                # a missing partial output is a distinct defect from an
+                # unreaped tree, and one failing must not hide the others.
+                with self.subTest(oracle='partial-output'):
+                    self.assertIn('partial output', str(error.output))
                 # Same handles, after cancellation: the whole tree is gone.
-                self.assertTrue(
-                    _wait_handles_signaled([child_handle, grand_handle], 10.0),
-                    'job cancellation must signal the exact root and grandchild handles',
-                )
-                self.assertEqual(len(bootstrap_handles), 1, 'expected exactly one real bootstrap')
-                self.assertTrue(
-                    _wait_handle_signaled(bootstrap_handles[0], 10.0),
-                    'the real bootstrap must be reaped too',
-                )
-                # The unrelated sentinel must be untouched by the job cleanup.
-                self.assertIsNone(unrelated.poll(), 'unrelated sentinel was killed')
+                with self.subTest(oracle='tree-reaped'):
+                    self.assertTrue(
+                        _wait_handles_signaled([child_handle, grand_handle], 10.0),
+                        'job cancellation must signal the exact root and grandchild handles',
+                    )
+                with self.subTest(oracle='bootstrap-reaped'):
+                    self.assertEqual(len(bootstrap_handles), 1,
+                                     'expected exactly one real bootstrap')
+                    self.assertTrue(
+                        _wait_handle_signaled(bootstrap_handles[0], 10.0),
+                        'the real bootstrap must be reaped too',
+                    )
+                with self.subTest(oracle='unrelated-alive'):
+                    # The unrelated sentinel must be untouched by the job cleanup.
+                    self.assertIsNone(unrelated.poll(), 'unrelated sentinel was killed')
             finally:
                 _run_cleanups(
                     lambda: _cleanup_handle(child_handle),
