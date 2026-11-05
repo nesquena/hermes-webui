@@ -2591,6 +2591,9 @@ class Session:
             needed = {'session_id', 'title', 'created_at', 'updated_at'}
             if not needed.issubset(parsed.keys()):
                 return cls.load(sid)
+            # #8852: mark a stub whose body names another session, as
+            # Session.load does, so writers that bypass save() refuse it too.
+            _names_other_session = parsed.get('session_id') != sid
             parsed['messages'] = []
             parsed['tool_calls'] = []
             parsed = _apply_session_draft_overlay(parsed, sid)
@@ -2636,6 +2639,8 @@ class Session:
                     session = cls(**parsed)
                     session._metadata_message_count = _parse_nonnegative_int(_facts.get('message_count'))
                     session._loaded_metadata_only = True
+                    if _names_other_session:
+                        session._sidecar_names_other_session = sid
                     return session
                 # Cache miss → full-load. cls.load() itself populates the legacy
                 # facts cache with a TOCTOU-guarded write (expected_sig), so we
@@ -2665,6 +2670,8 @@ class Session:
             # session must reload it with metadata_only=False first.
             # See #1558 — v0.50.279 _clear_stale_stream_state() data-loss bug.
             session._loaded_metadata_only = True
+            if _names_other_session:
+                session._sidecar_names_other_session = sid
             return session
         except Exception:
             # Corrupt prefix or decode error — fall back to full load
@@ -5708,6 +5715,10 @@ def _repair_stale_pending(session) -> bool:
     Returns True if repair was applied, False otherwise.
     Must never raise — all errors are caught and logged.
     """
+    if getattr(session, '_sidecar_names_other_session', None):
+        # #8852: the repair saves, and save() refuses a session whose file's
+        # body names another session. Nothing to repair in this file's name.
+        return False
     # Capture the stream id seen at pre-check time; the under-lock re-check in
     # _apply_core_sync_or_error_marker uses this to detect a rotated active_stream_id
     # (e.g. context compression) or a stream that came back alive.
@@ -8477,6 +8488,13 @@ def persist_recovered_workspace_binding(
     per-session mutation lock keeps compare-and-replace ordered with other
     compliant session writers.
     """
+    if getattr(session, "_sidecar_names_other_session", None):
+        # #8852: this writer patches SESSION_DIR/<session_id>.json directly,
+        # not through save(), so it needs the same refusal: the id came from
+        # a file whose body names another session.
+        raise WorkspaceBindingPersistenceError(
+            "Failed to persist recovered workspace: the session file names a different session"
+        )
     sid = str(getattr(session, "session_id", "") or "").strip()
     if not sid or not is_safe_session_id(sid):
         raise WorkspaceBindingPersistenceError(

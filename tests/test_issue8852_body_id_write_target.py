@@ -12,16 +12,20 @@ therefore overwrote that other session:
 A sidecar with no ``session_id`` at all got a random id, and each collapse load wrote a new
 stray file under it.
 
-``Session.load`` now marks a session whose body doesn't name the file it was read from, keeps the
-collapse in memory only, and ``save()`` refuses to write a marked session. What a load returns and
+``Session.load`` (and the metadata-only loader) now marks a session whose body doesn't name the
+file it was read from, keeps the collapse in memory only, and ``save()`` refuses to write a marked
+session; so does the one writer that patches a sidecar without ``save()`` (workspace recovery).
+``POST /api/chat/start`` answers a marked session 404 before mutating anything. What a load returns and
 what the session list shows are unchanged. The server never writes such a file itself: every
 sidecar it saves carries its own id.
 """
 
 import io
 import json
+import logging
 import urllib.parse
 from collections import OrderedDict
+from pathlib import Path
 
 import pytest
 
@@ -53,11 +57,13 @@ def store(tmp_path, monkeypatch):
     routes._session_list_cache_clear()
 
 
-def _victim(directory):
+def _victim(directory, workspace=None):
     """A real 5-turn session owned by `work`."""
     from api import models
 
     session = models.Session(session_id=VICTIM, title="Victim", profile="work")
+    if workspace is not None:
+        session.workspace = str(workspace)
     for i in range(5):
         session.messages += [
             {"role": "user", "content": f"q{i}", "timestamp": 100 + 2 * i},
@@ -195,11 +201,13 @@ def test_opening_a_copy_over_http_never_writes_the_session_it_names(store, messa
 def test_sending_to_a_copy_never_takes_over_the_session_it_names(store, monkeypatch, partials):
     """On master, ``POST /api/chat/start`` with the copy's id started a turn (200), overwrote the
     victim with the copy's transcript, profile and title, and the victim's owner then got 409
-    "Session belongs to a different profile" on their own conversation. Now the turn's first save
-    is refused: no turn starts, nothing is written, and the owner carries on. (#8853 additionally
+    "Session belongs to a different profile" on their own conversation. Now it answers 404 (the
+    generic ownership guard's answer) before anything is mutated: no turn starts, nothing is
+    written, the cached copy isn't left mid-turn, and the owner carries on. (#8853 additionally
     refuses this request before the load, because the copy's ownership can't be verified.)"""
     import api.profiles as profiles
     import api.routes as routes
+    from api import models
 
     ran = []
     monkeypatch.setattr(routes, "_run_agent_streaming", lambda *a, **k: ran.append("agent"))
@@ -208,11 +216,14 @@ def test_sending_to_a_copy_never_takes_over_the_session_it_names(store, monkeypa
     before = _files(store)
 
     handler = _Handler()
-    with pytest.raises(RuntimeError, match="8852"):
-        routes._handle_chat_start(handler, {"session_id": COPY, "message": "hi", "profile": "default"})
+    routes._handle_chat_start(handler, {"session_id": COPY, "message": "hi", "profile": "default"})
+    assert handler.status == 404, bytes(handler.body)
     assert ran == []
     _unchanged_victim(store, before)
     assert _files(store) == before
+    for cached in (models.SESSIONS.get(COPY), models.SESSIONS.get(VICTIM)):
+        if cached is not None:
+            assert not cached.active_stream_id and not cached.pending_user_message
 
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "work")
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "work")
@@ -222,6 +233,120 @@ def test_sending_to_a_copy_never_takes_over_the_session_it_names(store, monkeypa
     assert ran == ["agent"]
     victim = json.loads((store / f"{VICTIM}.json").read_text(encoding="utf-8"))
     assert (len(victim["messages"]), victim["profile"], victim["pending_user_message"]) == (10, "work", "owner turn")
+
+
+# --- writers that don't go through save() -----------------------------------------------
+
+
+@pytest.fixture
+def deleted_workspace(store, tmp_path, monkeypatch):
+    """The victim's (and so the copy's) workspace folder has been deleted; workspace recovery
+    rebinds it to a fallback folder by patching the sidecar directly, without ``save()``."""
+    import api.routes as routes
+    import api.workspace as workspace
+
+    gone = tmp_path / "deleted-workspace"
+    fallback = tmp_path / "fallback-workspace"
+    fallback.mkdir()
+
+    def resolver(candidate, fallback_getter, profile=None):
+        if str(candidate or "") == str(gone):
+            return fallback.resolve(), True
+        return Path(candidate or fallback).resolve(), False
+
+    monkeypatch.setattr(routes, "resolve_implicit_workspace_with_recovery", resolver)
+    monkeypatch.setattr(workspace, "resolve_implicit_workspace_with_recovery", resolver)
+    return gone
+
+
+def test_sending_to_a_copy_whose_workspace_was_deleted_writes_nothing(store, monkeypatch, deleted_workspace):
+    """The workspace-recovery writer took its target from the copy's (body) id, so before the save
+    guard was ever reached it rebound the victim to the requester's fallback folder and rewrote the
+    victim's index row from the copy (senior review, round 1)."""
+    import api.routes as routes
+
+    monkeypatch.setattr(routes, "_run_agent_streaming", lambda *a, **k: None)
+    _victim(store, workspace=deleted_workspace)
+    _copy(store, partials=False)
+    before = _files(store)
+
+    handler = _Handler()
+    routes._handle_chat_start(handler, {"session_id": COPY, "message": "hi", "profile": "default"})
+
+    assert handler.status == 404, bytes(handler.body)
+    _unchanged_victim(store, before)
+    assert json.loads(_files(store)[f"{VICTIM}.json"])["workspace"] == str(deleted_workspace)
+    assert _files(store) == before
+
+
+@pytest.mark.parametrize("layout", ["modern", "legacy"])
+def test_file_operations_on_a_copy_never_write_the_session_it_names(store, monkeypatch, deleted_workspace, layout):
+    """``get_session_for_file_ops`` loads metadata only and runs the same workspace recovery. Over
+    HTTP the generic ownership guard 404s the copy first; this covers a direct caller."""
+    from api import models
+
+    _victim(store, workspace=deleted_workspace)
+    path = _copy(store, partials=False)
+    if layout == "legacy":
+        # A pre-#5854 layout: no message_count in the prefix, so the stub comes from the
+        # legacy-facts cache branch.
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw.pop("message_count", None)
+        raw.pop("anchor_scene_index", None)
+        path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+        monkeypatch.setattr(models, "_legacy_sidecar_facts_get", lambda sid: {"message_count": 2, "scene_index": {}})
+    before = _files(store)
+
+    stub = models.Session.load_metadata_only(COPY)
+    assert getattr(stub, "_loaded_metadata_only", False) and stub.session_id == VICTIM
+    assert getattr(stub, "_sidecar_names_other_session", None) == COPY
+    models.SESSIONS.clear()
+    with pytest.raises(models.WorkspaceBindingPersistenceError):
+        models.get_session_for_file_ops(COPY)
+
+    _unchanged_victim(store, before)
+    assert _files(store) == before
+
+
+def test_the_workspace_writer_refuses_a_session_loaded_from_a_copy(store, tmp_path):
+    from api import models
+
+    _victim(store)
+    _copy(store, partials=False)
+    before = _files(store)
+    session = models.Session.load(COPY)
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+
+    with pytest.raises(models.WorkspaceBindingPersistenceError, match="different session"):
+        models.persist_recovered_workspace_binding(session, target, expected_workspace=session.workspace)
+
+    _unchanged_victim(store, before)
+    assert _files(store) == before
+
+
+def test_a_copy_taken_mid_turn_loads_quietly(store, caplog):
+    """A copy of a session caught mid-turn (empty transcript, stale pending turn) used to run the
+    stale-pending repair on every cold load; the repair's save is refused, which logged an ERROR
+    traceback each time. The repair is skipped for a marked session."""
+    from api import models
+
+    _victim(store)
+    path = _copy(store, partials=False)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw.update(messages=[], message_count=0, pending_user_message="half-sent", active_stream_id="dead-stream")
+    raw.pop("pending_started_at", None)
+    path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    before = _files(store)
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(2):
+            models.SESSIONS.clear()
+            session = models.get_session(COPY)
+
+    assert _files(store) == before
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
+    assert (session.pending_user_message, session.active_stream_id) == ("half-sent", "dead-stream")
 
 
 def test_a_sidecar_without_a_session_id_never_spawns_files(store):
