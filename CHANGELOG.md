@@ -95,6 +95,8 @@
 
 ### Fixed
 
+- **The model picker's Configured section lists each configured model once, with its badge.** Since #8730 a typed custom id for a configured model (for example `openrouter/anthropic/claude-sonnet-4.6` for an OpenRouter fallback) listed that fallback twice, a row that live model enrichment had replaced (such as `@openai:openai/gpt-6.1-sol`) lost its Primary badge and the Configured section disappeared, and a badge saved without a provider showed on no live row. The Configured section now keeps one row per configured entry, preferring the row that sends the configured id, and the badge lookup strips the provider's own routing prefixes. A typed alias stays in the list below the provider groups with its badge, the Configured row stays selected after you pick it, and the Settings default-model picker gets the same fix. (#8767, fixes #8756)
+
 - **A sidebar swipe or Ctrl/Cmd+B no longer fires while you are typing.** On a phone, an edge swipe that starts on the composer or the message field no longer opens the sidebar, and Ctrl/Cmd+B no longer toggles the sidebar while a text field has focus, even when the key event reaches another element. A swipe from the edge anywhere else still opens the sidebar. Thanks @solarmaster961 (#8630).
 
 - **The orphaned-session sidebar test no longer fails when the index rebuild finishes first.** Its fixture wrote the pending-message fields after the message list, where the metadata reader never looks, so a pending session was pruned whenever the rebuild thread won its race. The fixture now uses the same field order as a saved session, and a new test pins both sides of the race (#8814).
