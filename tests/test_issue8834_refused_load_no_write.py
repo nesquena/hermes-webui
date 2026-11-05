@@ -716,3 +716,115 @@ def test_malformed_ownership_probe_never_500s_or_writes(
         assert status in (404, 500), body
         return
     assert status == 404, body
+
+
+# --- the readings helpers every refusal rests on are side-effect free -------------------------------------------
+
+_SIDE_EFFECT_SHAPES = {
+    "legacy_partials_messages_first": dict(layout="messages_first"),
+    "legacy_partials_scenes_first": dict(layout="scenes_first"),
+    "no_profile": dict(profile=None),
+    "empty_placeholder": dict(messages=[]),
+    "empty_stream_id": dict(messages=[], active_stream_id="dead-stream-8834"),
+    "empty_cli": dict(messages=[], is_cli_session=True),
+    "non_string_profile": dict(profile=123),
+    "body_names_another_session": dict(sid="someone-else"),
+    "malformed": None,
+    "missing": "missing",
+}
+
+
+def _store_snapshot(directory, cache):
+    files = sorted(
+        (p.name, p.read_bytes(), p.stat().st_mtime_ns) for p in directory.iterdir() if p.is_file()
+    )
+    return files, [(k, id(v)) for k, v in cache.items()]
+
+
+@pytest.mark.parametrize("cached", ["cold", "resident_full", "resident_stub"])
+@pytest.mark.parametrize("shape", list(_SIDE_EFFECT_SHAPES))
+def test_readings_helpers_never_load_save_cache_or_reorder(isolated_sessions, monkeypatch, shape, cached):
+    """Every refusal before the load rests on these helpers: none may load, save, write, index or touch the cache."""
+    directory, cache, _ = isolated_sessions
+    spec = _SIDE_EFFECT_SHAPES[shape]
+    if spec == "missing":
+        pass
+    elif spec is None:
+        (directory / f"{SID}.json").write_text('{"session_id": "legacy-8834", "profile": "work", "messages": [')
+    else:
+        _sidecar(directory, **spec)
+    other = models.Session(session_id="other-8834", profile="default", messages=[{"role": "user", "content": "x"}])
+    cache["other-8834"] = other
+    if cached == "resident_full":
+        cache[SID] = models.Session(session_id=SID, profile="work", messages=[])
+    elif cached == "resident_stub" and spec not in (None, "missing") and "sid" not in (spec or {}):
+        try:
+            cache[SID] = models.Session.load_metadata_only(SID)
+        except Exception:
+            pass
+    before = _store_snapshot(directory, cache)
+
+    def _forbidden(name):
+        def _raise(*_a, **_k):
+            raise AssertionError(f"readings helper reached {name}")
+        return _raise
+
+    for owner, name in (
+        (models.Session, "save"), (models.Session, "load"), (models.Session, "load_metadata_only"),
+        (models, "_write_session_index"), (models, "_rebuild_session_index_background"),
+        (models, "_sync_sidecar_from_state_db_if_newer"), (models, "_try_retry_journal_recovery_in_place"),
+        (models, "_repair_stale_pending"), (models, "get_session"), (routes, "get_session"),
+    ):
+        monkeypatch.setattr(owner, name, _forbidden(name))
+    for full_load in (True, False):
+        models.session_owner_readings_readonly(SID, full_load=full_load)
+    for helper in (models.get_sidecar_session_profile_readonly, models.get_session_profile_readonly):
+        try:
+            helper(SID)
+        except (KeyError, ValueError):
+            pass
+    models.session_is_unclaimed_placeholder_readonly(SID)
+    routes._is_subagent_child_session_id(SID)
+    assert _store_snapshot(directory, cache) == before
+
+
+def _modern_sidecar(directory, *, profile, messages):
+    """Metadata before messages, so ``load_metadata_only`` stays a stub (a legacy layout full-loads)."""
+    path = directory / f"{SID}.json"
+    path.write_text(json.dumps({
+        "session_id": SID, "title": "Legacy", "created_at": 1.0, "updated_at": 2.0, "profile": profile,
+        "message_count": len(messages), "anchor_scene_index": {}, "messages": messages,
+    }))
+    return path
+
+
+def test_a_metadata_stub_never_vouches_for_a_full_load(isolated_sessions, monkeypatch):
+    """A stub read while the sidecar was the active profile's, after which the sidecar moved to another profile.
+    A full load replaces the stub from disk, so only the sidecar's owner counts: refused before the load, with no
+    collapse write and the stub left as it was."""
+    directory, cache, _ = isolated_sessions
+    rows = [{"role": "user", "content": "hello"}, PARTIAL, dict(PARTIAL)]
+    _modern_sidecar(directory, profile="default", messages=rows)
+    stub = models.Session.load_metadata_only(SID)
+    assert getattr(stub, "_loaded_metadata_only", False) and stub.profile == "default"
+    cache[SID] = stub
+    path = _modern_sidecar(directory, profile="work", messages=rows)  # moved on disk
+    before = path.read_bytes()
+    assert models.session_owner_readings_readonly(SID, full_load=True) == ["work"]
+    assert models.session_owner_readings_readonly(SID, full_load=False) == ["default"]
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    handler = _call("get_full", active="default")
+    assert (handler.status, handler.payload().get("code")) == (409, "session_profile_mismatch")
+    assert path.read_bytes() == before
+    assert not path.with_suffix(".json.bak").exists()
+    assert cache[SID] is stub
+
+
+def test_a_metadata_stub_is_never_a_claimable_placeholder_even_without_a_sidecar(isolated_sessions):
+    directory, cache, _ = isolated_sessions
+    path = _modern_sidecar(directory, profile="work", messages=[])
+    stub = models.Session.load_metadata_only(SID)
+    assert getattr(stub, "_loaded_metadata_only", False)
+    cache[SID] = stub
+    path.unlink()
+    assert models.session_is_unclaimed_placeholder_readonly(SID) is False
