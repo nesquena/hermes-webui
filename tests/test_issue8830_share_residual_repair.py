@@ -465,6 +465,124 @@ def test_a_delete_during_the_repair_waits_and_wins(isolated_state, active_profil
     assert SID not in {row.get("session_id") for row in _index_rows()}
 
 
+def _recoverable_damaged_sidecar():
+    """A share-damaged sidecar that ALSO has a real shrink backup with more messages.
+
+    ``Session.save`` writes the backup itself (no hand-written fixture), so
+    ``/api/session/recovery/repair-safe`` restores four messages over the live two.
+    """
+    from api import models
+
+    path, token = _shared_then_damaged()
+    session = models.Session.load(SID)
+    assert session is not None
+    session.messages.extend([
+        {"role": "user", "content": "recover this question", "timestamp": 200},
+        {"role": "assistant", "content": "recover this answer", "timestamp": 201},
+    ])
+    session.save(touch_updated_at=False)
+    session.messages = session.messages[:2]
+    session.save(touch_updated_at=False)
+    assert len(json.loads(path.with_suffix(".json.bak").read_text())["messages"]) == 4
+    _damage_like_621(path)
+    models.SESSIONS.clear()
+    return path, token
+
+
+def _pause_fsync(monkeypatch, thread_name, caller):
+    """Pause the first fsync ``thread_name`` makes from ``caller`` until ``resume`` is set."""
+    import sys
+    import threading
+
+    from api import models
+
+    paused, resume = threading.Event(), threading.Event()
+    real_fsync = models.os.fsync
+
+    def _fsync(fd):
+        if (
+            threading.current_thread().name == thread_name
+            and sys._getframe(1).f_code.co_name == caller
+            and not paused.is_set()
+        ):
+            paused.set()
+            assert resume.wait(10), "test never resumed the paused writer"
+        return real_fsync(fd)
+
+    monkeypatch.setattr(models.os, "fsync", _fsync)
+    return paused, resume
+
+
+def test_a_backup_recovery_during_the_repair_waits_and_is_not_undone(isolated_state, active_profile, monkeypatch):
+    """Backup recovery (``/api/session/recovery/repair-safe``) holds the same persist lock as
+    the repair, from its inspection through its replace. A recovery that arrives while the
+    repair is mid-write waits; it then restores over the repaired copy, so the repair can
+    never overwrite restored messages with the copy it read earlier (gate finding on #8833)."""
+    import threading
+
+    from api import models, routes
+
+    monkeypatch.setattr(routes, "SESSION_DIR", models.SESSION_DIR)
+    path, token = _recoverable_damaged_sidecar()
+    paused, resume = _pause_fsync(monkeypatch, "repair", "_patch_session_sidecar")
+    results = {}
+    repair = threading.Thread(target=lambda: results.update(open=_open()), name="repair")
+    repair.start()
+    assert paused.wait(10), "opening the conversation never reached the repair write"
+    recovery = threading.Thread(
+        target=lambda: results.update(recovery=_post("/api/session/recovery/repair-safe", {})),
+        name="recovery",
+    )
+    recovery.start()
+    recovery.join(0.5)
+    recovery_waited = recovery.is_alive()
+    resume.set()
+    repair.join(10)
+    recovery.join(10)
+    assert not repair.is_alive() and not recovery.is_alive(), "a writer deadlocked"
+    assert results["open"].status == 200
+    status, result = results["recovery"]
+    assert status == 200 and result["backup_repair"]["restored"] == 1, result
+    assert recovery_waited, "the recovery ran while the repair held the sidecar mid-write"
+    assert len(json.loads(path.read_text())["messages"]) == 4, "the repair undid the recovery"
+    assert _before_body(path, "share_token") and _before_body(path, "share_created_at")
+    assert _metadata_reload() == (token, token)
+
+
+def test_a_repair_during_a_backup_recovery_waits_for_it(isolated_state, active_profile, monkeypatch):
+    """The other order: the repair waits for a recovery already mid-write, then re-checks the
+    restored file under the lock and finds nothing to move."""
+    import threading
+
+    from api import models, routes
+
+    monkeypatch.setattr(routes, "SESSION_DIR", models.SESSION_DIR)
+    path, token = _recoverable_damaged_sidecar()
+    paused, resume = _pause_fsync(monkeypatch, "recovery", "_recover_session_locked")
+    results = {}
+    recovery = threading.Thread(
+        target=lambda: results.update(recovery=_post("/api/session/recovery/repair-safe", {})),
+        name="recovery",
+    )
+    recovery.start()
+    assert paused.wait(10), "the recovery never reached its write"
+    repair = threading.Thread(target=lambda: results.update(open=_open()), name="repair")
+    repair.start()
+    repair.join(0.5)
+    repair_waited = repair.is_alive()
+    resume.set()
+    recovery.join(10)
+    repair.join(10)
+    assert not repair.is_alive() and not recovery.is_alive(), "a writer deadlocked"
+    status, result = results["recovery"]
+    assert status == 200 and result["backup_repair"]["restored"] == 1, result
+    assert results["open"].status == 200
+    assert repair_waited, "the repair ran while the recovery held the sidecar mid-write"
+    assert len(json.loads(path.read_text())["messages"]) == 4
+    assert _before_body(path, "share_token") and _before_body(path, "share_created_at")
+    assert _metadata_reload() == (token, token)
+
+
 # --- another profile's damaged sidecar: a refused request never writes (#8094) ----------
 
 
