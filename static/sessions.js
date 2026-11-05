@@ -625,7 +625,10 @@ function _saveComposerDraftNow(sid, text, files, goalContinuationId, options) {
   const normalizedDraft = { text: normalizedText, files: normalizedFiles };
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
     _clearComposerDraftRestoreSuppression(sid);
-    _bumpComposerDraftRevision(sid, normalizedText, normalizedFiles);
+    // A hand-off flush re-persists what the composer already holds; it is not a
+    // newer user draft, so it must not bump the revision the steer/retire paths
+    // compare against (#5484/#5488 keep-newer semantics).
+    if (!opts.syncOnly) _bumpComposerDraftRevision(sid, normalizedText, normalizedFiles);
   } else {
     _noteComposerDraftPayload(sid, '', []);
   }
@@ -2899,14 +2902,19 @@ async function newSession(flash, options={}){
       if(sourceComposerFiles.length&&typeof _composerAddFiles==='function')_composerAddFiles(sourceComposerFiles);
     }
     try{
+      // An EMPTY departing composer carries nothing the server does not already
+      // have: posting it would clear a draft the user typed or saved while this
+      // hand-off was in flight (upstream #5484/#5488 keep-newer rule). Master
+      // never flushed on New Chat, so only flush real payload.
       if(previousSid&&sourceDraftServerWritable&&!sourceDraftAlreadySaved
+         &&(sourceComposerText||sourceComposerFiles.length)
          &&typeof _saveComposerDraftNow==='function'){
         await _saveComposerDraftNow(
           previousSid,
           sourceComposerText,
           sourceComposerFiles,
           '',
-          {rejectOnError:true, ownerProfile:previousProfile}
+          {rejectOnError:true, ownerProfile:previousProfile, syncOnly:true}
         );
       }
     }catch(error){
