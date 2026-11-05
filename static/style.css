@@ -6582,13 +6582,49 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
   transform: translateY(-1px);
   outline: none;
 }
+/* Landing cue for every jump to a message (search hit, jump-to-question, outline): the row tint the outline
+   panel used, held briefly and faded, plus the ring on the bubble. One idiom for every jump path. */
+.msg-question-highlight {
+  animation: message-landing-tint 1.6s ease-out;
+}
 .msg-question-highlight .msg-body {
   animation: question-highlight-pulse 1.6s ease-out;
 }
+/* Own tokens for the landing cue, derived from each skin's --accent so the tint and ring always share one hue, at
+   strengths that read in both themes: tint about 1.4:1 against the page, ring about 3:1 or more (the hover-grade
+   --accent-bg-strong was 1.17:1 in light, and --focus-ring is undefined in several skins). Fallbacks first. */
+:root { --message-landing-tint: var(--accent-bg-strong); --message-landing-ring: var(--focus-ring); }
+@supports (color: color-mix(in srgb, red 50%, transparent)) {
+  :root {
+    --message-landing-tint: color-mix(in srgb, var(--accent) 30%, transparent);
+    --message-landing-ring: var(--accent);
+  }
+  :root.dark {
+    --message-landing-tint: color-mix(in srgb, var(--accent) 16%, transparent);
+    --message-landing-ring: color-mix(in srgb, var(--accent) 70%, transparent);
+  }
+}
+/* A jump lands an assistant segment at the top edge; leave room for the ring. */
+#messages [data-msg-idx] { scroll-margin-top: 12px; }
+@keyframes message-landing-tint {
+  0%, 30% { background-color: var(--message-landing-tint); }
+  100% { background-color: transparent; }
+}
 @keyframes question-highlight-pulse {
-  0% { box-shadow: 0 0 0 0 var(--focus-ring); }
-  35% { box-shadow: 0 0 0 5px var(--focus-ring); }
+  0% { box-shadow: 0 0 0 0 var(--message-landing-ring); }
+  35% { box-shadow: 0 0 0 5px var(--message-landing-ring); }
   100% { box-shadow: 0 0 0 0 rgba(0,0,0,0); }
+}
+/* Reduced motion: keep the "you landed here" ring, without the pulse, for as long as the class is set. */
+@media (prefers-reduced-motion: reduce) {
+  .msg-question-highlight {
+    animation: none;
+    background-color: var(--message-landing-tint);
+  }
+  .msg-question-highlight .msg-body {
+    animation: none;
+    box-shadow: 0 0 0 3px var(--message-landing-ring);
+  }
 }
 @media (max-width: 600px) {
   .msg-question-jump-btn {

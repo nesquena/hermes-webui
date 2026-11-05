@@ -5,6 +5,8 @@
 
 ### Added
 
+- **Clicking a session-search result that matched on message content jumps to that message and flashes it.** Before, the click opened the session at the bottom and left you to scroll for the match. The search response now carries the index of the matching message, and the jump also lands when the message is outside the transcript's mounted window. Changing the search, opening another result or switching sessions before the jump lands cancels it. Title-only matches open the session as before. Salvage of #4224 by @Sanjays2402. (#5106, #4159)
+
 - **The test suite refuses git commands that would change the real checkout.** A test that runs a mutating git command (fetch, checkout, stash, reset and so on) against the WebUI or Agent checkout (including from a linked worktree of it) now fails with the command and directory, instead of changing the clone, as a broken mock once did with a real `git fetch`. Read-only git, temporary repositories, `git config` writes to other repositories and non-git commands are unaffected, and a test can opt out explicitly. Tests only. (#8801)
 
 - **Tasks has a read-only Scripts tab.** Next to Jobs, a Scripts tab lists the active profile's `scripts/` folder (the scripts cron jobs can run) with each file's size, age and the description from its leading comment. The tab only lists (there is no viewer yet; to view or edit a script, open the file on the server); a read-only `GET /api/scripts/raw` returns one file's text for a later viewer. Reads stay inside that folder (no symlinks out, size-capped), a platform that cannot open the folder safely says so instead of showing an empty list, and the tab hides "New job" since it cannot create anything. Thanks @happy5318. (#7685, for #2316)
@@ -90,6 +92,8 @@
 ### Fixed
 
 - **The model picker's Configured section lists each configured model once, with its badge.** Since #8730 a typed custom id for a configured model (for example `openrouter/anthropic/claude-sonnet-4.6` for an OpenRouter fallback) listed that fallback twice, a row that live model enrichment had replaced (such as `@openai:openai/gpt-6.1-sol`) lost its Primary badge and the Configured section disappeared, and a badge saved without a provider showed on no live row. The Configured section now keeps one row per configured entry, preferring the row that sends the configured id, and the badge lookup strips the provider's own routing prefixes. A typed alias stays in the list below the provider groups with its badge, the Configured row stays selected after you pick it, and the Settings default-model picker gets the same fix. (#8767, fixes #8756)
+
+- **A sidebar swipe or Ctrl/Cmd+B no longer fires while you are typing.** On a phone, an edge swipe that starts on the composer or the message field no longer opens the sidebar, and Ctrl/Cmd+B no longer toggles the sidebar while a text field has focus, even when the key event reaches another element. A swipe from the edge anywhere else still opens the sidebar. Thanks @solarmaster961 (#8630).
 
 - **The orphaned-session sidebar test no longer fails when the index rebuild finishes first.** Its fixture wrote the pending-message fields after the message list, where the metadata reader never looks, so a pending session was pruned whenever the rebuild thread won its race. The fixture now uses the same field order as a saved session, and a new test pins both sides of the race (#8814).
 
