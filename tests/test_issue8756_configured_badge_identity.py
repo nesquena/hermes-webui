@@ -715,6 +715,34 @@ def test_show_all_counts_only_hidden_rows_configured_does_not_send(tmp_path, ext
     assert data["more"] == more
 
 
+def test_show_all_still_counts_another_providers_hidden_twin(tmp_path):
+    """A hidden overflow row that only shares its bare id with a Configured row
+    of another provider sends that id to a different provider, so it is not the
+    configured route and "Show all" must still count it (as on master)."""
+    data = _render(
+        tmp_path,
+        {
+            "groups": [
+                {"provider": "OpenAI", "provider_id": "openai", "models": [{"id": "gpt-other"}, {"id": "gpt-5.5"}]},
+                {
+                    "provider": "Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-c-other"}],
+                    "extra_models": [{"id": "gpt-5.5"}],
+                },
+            ],
+            "selectedValue": "gpt-other",
+            "configuredBadges": {
+                "gpt-5.5": _badge("openai", "primary", "Primary"),
+                "@openai:gpt-5.5": _badge("openai", "primary", "Primary"),
+            },
+        },
+    )
+
+    assert [(row["id"], row["role"]) for row in data["configured"]] == [("gpt-5.5", "primary")]
+    assert data["more"] == ["groups"]
+
+
 @pytest.mark.parametrize("clicks", [1, 2], ids=["first-click", "second-click"])
 @pytest.mark.parametrize(
     "payload, configured_id",

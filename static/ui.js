@@ -7081,11 +7081,10 @@ function renderModelDropdown(){
         return a.name.localeCompare(b.name);
       });
     const configuredIds=new Set(configuredModels.map(m=>m.value));
-    // Every configured row's own key, including rows merged into another row
-    // by configured entry above.
     // A hidden row stays out of the Show-more count only when a Configured row
-    // already sends its wire id (value less `@provider:`, dash-folded); a row
-    // that sends `<provider>/<model>` is a different wire id and stays reachable.
+    // already sends its wire id (provider plus value less `@provider:`,
+    // dash-folded); a row that sends `<provider>/<model>`, or the same bare id
+    // to another provider, is a different route and stays reachable.
     const _configuredWireKey=(m)=>{
       const p=_configuredProviderKey(m);
       const s=String(m&&m.value||'').trim().toLowerCase();
@@ -7096,7 +7095,6 @@ function renderModelDropdown(){
     const _effectiveHiddenCount=(groupKey)=>_modelData.filter(m=>
       m.groupKey===groupKey
       && m.hiddenByDefault
-      && !configuredIds.has(m.value)
       && !configuredWireKeys.has(_configuredWireKey(m))
     ).length;
     dd.innerHTML='';
