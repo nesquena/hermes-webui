@@ -187,7 +187,12 @@ def run_network_command_windows(argv, *, cwd, env, timeout):
     The job is created and configured BEFORE the gate bootstrap
     (``_WINDOWS_GATE_CODE``) is spawned, so a binder or kernel failure can
     never leak a started child; the bootstrap is then assigned to the job
-    before the gate byte, so no Git process can exist outside the job. Every
+    before the gate byte, so no Git process can exist outside the job. The
+    bootstrap interpreter is ``sys._base_executable`` — on a Windows venv
+    ``sys.executable`` is ``venvlauncher.exe``, whose real-interpreter child
+    would be spawned before the assignment — and a frozen runtime or an
+    unusable base path fails closed with OSError before any kernel or spawn
+    work. Every
     failure fails closed before the gate: the tree is terminated and the job
     handle closed BEFORE the pipes are touched, a stuck unassigned bootstrap is
     killed and reaped, and the original error propagates. Cleanup steps are
@@ -201,6 +206,27 @@ def run_network_command_windows(argv, *, cwd, env, timeout):
     output, stderr)`` shape and the partial output are preserved.
     """
     started = time.monotonic()
+    # sys.executable on a Windows venv is venvlauncher.exe, which spawns the
+    # real interpreter before AssignProcessToJobObject can run, leaving Git
+    # outside the job; bootstrap with the base interpreter, never a fallback
+    # that would reintroduce the race.
+    bootstrap = getattr(sys, "_base_executable", None)
+    if getattr(sys, "frozen", False):
+        raise OSError(
+            "Windows job runner needs a standard CPython runtime; frozen "
+            "executables do not provide a usable gate bootstrap interpreter"
+        )
+    if not isinstance(bootstrap, str) or not bootstrap:
+        raise OSError(
+            "Windows job runner needs sys._base_executable to name the gate "
+            "bootstrap interpreter"
+        )
+    base_interpreter = Path(bootstrap)
+    if not base_interpreter.is_absolute() or not base_interpreter.is_file():
+        raise OSError(
+            "sys._base_executable is not an absolute path to an existing "
+            f"interpreter: {bootstrap!r}"
+        )
     kernel32 = _windows_kernel32()
     job = None
     process = None
@@ -219,7 +245,7 @@ def run_network_command_windows(argv, *, cwd, env, timeout):
         # The bootstrap is owned only from here: a kernel failure above never
         # leaves one behind.
         process = subprocess.Popen(
-            [sys.executable, "-I", "-c", _WINDOWS_GATE_CODE, *argv],
+            [bootstrap, "-I", "-c", _WINDOWS_GATE_CODE, *argv],
             cwd=str(cwd), env=env,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace",

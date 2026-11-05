@@ -774,6 +774,123 @@ class JobCleanupOrderingTests(unittest.TestCase):
         self.assertEqual(process.stdout.close_calls, 0)
         self.assertEqual(process.stderr.close_calls, 0)
 
+    def test_bootstrap_uses_base_interpreter_not_venv_launcher(self):
+        """The spawned bootstrap is the base interpreter, never ``sys.executable``.
+
+        On a Windows venv ``sys.executable`` is ``venvlauncher.exe``, which
+        starts the real interpreter in a child process before the assignment
+        can run, so the job would never cover Git. The oracle fakes that shape:
+        ``sys.executable`` is a plausible launcher path while
+        ``sys._base_executable`` names this host's real interpreter, and the
+        argv the runner builds must start with the base path.
+        """
+        fake = _FakeKernel32()
+        process = _FakeProcess([('base out', 'base err')])
+        fake.events = process.events
+        argv = ['git', 'fetch', 'origin']
+        env = {'PATH': '/usr/bin'}
+        launcher = os.path.join(os.sep, 'fake', 'venv', 'venvlauncher.exe')
+        # Capture before patching: mock applies entries left to right, so
+        # reading sys.executable inside the block would read the launcher.
+        real_base = sys.executable
+
+        with mock.patch.object(subprocess_utils.sys, 'executable', launcher), \
+             mock.patch.object(subprocess_utils.sys, '_base_executable',
+                               real_base, create=True), \
+             mock.patch.object(subprocess_utils.sys, 'frozen', False, create=True), \
+             mock.patch.object(subprocess_utils, '_windows_kernel32', lambda: fake), \
+             mock.patch.object(subprocess_utils.subprocess, 'Popen',
+                               mock.Mock(return_value=process)) as popen, \
+             mock.patch.object(ctypes, 'get_last_error', lambda: 0, create=True):
+            result = subprocess_utils.run_network_command_windows(
+                argv, cwd='/tmp', env=env, timeout=2.5)
+
+        popen.assert_called_once()
+        spawned = popen.call_args
+        command = spawned.args[0] if spawned.args else spawned.kwargs['args']
+        self.assertIsInstance(command, list)
+        self.assertEqual(command[0], real_base,
+                         'the bootstrap must be the base interpreter')
+        self.assertNotEqual(command[0], launcher,
+                            'sys.executable is the venv launcher and must not be spawned')
+        self.assertEqual(
+            command[1:],
+            ['-I', '-c', subprocess_utils._WINDOWS_GATE_CODE, *argv],
+            'the interpreter flags, gate program and command must be unchanged',
+        )
+        self.assertEqual(spawned.kwargs['cwd'], '/tmp')
+        self.assertIs(spawned.kwargs['env'], env)
+        self.assertIsInstance(result, subprocess.CompletedProcess)
+        self.assertEqual(result.args, argv)
+        self.assertEqual(result.stdout, 'base out')
+        self.assertEqual(result.stderr, 'base err')
+        self.assertEqual(fake.events.count('assign'), 1, 'the bootstrap is bound exactly once')
+        self.assertEqual(fake.events.count('create'), 1)
+        self.assertIn("communicate(input='1'", ' '.join(fake.events),
+                      'the gate protocol byte must be delivered')
+
+    def test_unusable_base_interpreter_fails_before_kernel_and_spawn(self):
+        """A frozen runtime or unusable base path fails closed, before any work.
+
+        Every case must raise OSError with neither the binder nor ``Popen``
+        called: falling back to ``sys.executable`` would reintroduce the venv
+        launcher race this guard exists to prevent, so the check has to happen
+        first rather than after the job exists.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = os.path.join(tmp, 'no-such-interpreter')
+            cases = [
+                ('frozen', dict(frozen=True, base=sys.executable)),
+                ('base-missing-attr', dict(base=None, drop_attr=True)),
+                ('base-none', dict(base=None)),
+                ('base-empty', dict(base='')),
+                ('base-nonstring', dict(base=123)),
+                ('base-relative', dict(base=os.path.join('rel', 'python.exe'))),
+                ('base-nonexistent', dict(base=missing)),
+                ('base-directory', dict(base=tmp)),
+            ]
+            for label, knobs in cases:
+                with self.subTest(case=label):
+                    fake = _FakeKernel32()
+                    process = _FakeProcess([('unused', 'unused')])
+                    fake.events = process.events
+                    binder = mock.Mock(return_value=fake)
+                    popen = mock.Mock(return_value=process)
+                    with contextlib.ExitStack() as stack:
+                        stack.enter_context(mock.patch.object(
+                            subprocess_utils.sys, 'frozen',
+                            knobs.get('frozen', False), create=True))
+                        stack.enter_context(mock.patch.object(
+                            subprocess_utils, '_windows_kernel32', binder))
+                        stack.enter_context(mock.patch.object(
+                            subprocess_utils.subprocess, 'Popen', popen))
+                        stack.enter_context(mock.patch.object(
+                            ctypes, 'get_last_error', lambda: 0, create=True))
+                        if knobs.get('drop_attr'):
+                            # patch.object cannot remove an attribute, and a
+                            # bare ``del`` outside a finally would leave the
+                            # interpreter without its base path for every later
+                            # test, so save and restore it here.
+                            saved = getattr(sys, '_base_executable', _ABSENT)
+                            del subprocess_utils.sys._base_executable
+                            stack.callback(_restore_attribute,
+                                           subprocess_utils.sys,
+                                           '_base_executable', saved)
+                        else:
+                            stack.enter_context(mock.patch.object(
+                                subprocess_utils.sys, '_base_executable',
+                                knobs['base'], create=True))
+                        with self.assertRaises(OSError) as raised:
+                            subprocess_utils.run_network_command_windows(
+                                ARGV, cwd=tmp, env={}, timeout=2.5)
+
+                    self.assertTrue(str(raised.exception).strip(),
+                                    f'{label}: the failure must carry a diagnostic')
+                    binder.assert_not_called()
+                    popen.assert_not_called()
+                    self.assertEqual(fake.events, [],
+                                     f'{label}: no job work may start before validation')
+
     @staticmethod
     def events_close(events):
         return events.index('close_job')
@@ -787,6 +904,21 @@ def _as_handle(value):
     reason.
     """
     return getattr(value, 'value', value)
+
+
+#: Distinguishes "the attribute was absent" from "the attribute was None".
+_ABSENT = object()
+
+
+def _restore_attribute(owner, name, saved):
+    """Put ``owner.name`` back the way it was, absent included."""
+    if saved is _ABSENT:
+        try:
+            delattr(owner, name)
+        except AttributeError:
+            pass
+    else:
+        setattr(owner, name, saved)
 
 
 class FallbackPidGuardTests(unittest.TestCase):
