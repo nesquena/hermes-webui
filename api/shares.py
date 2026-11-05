@@ -1153,7 +1153,8 @@ def create_or_refresh_share(session) -> dict:
     )
 
 
-def load_share(token: str) -> dict | None:
+def _read_unrevoked_snapshot(token: str) -> dict | None:
+    """The stored snapshot for ``token`` while it is not revoked, else ``None``."""
     try:
         path = _share_path(token)
     except ValueError:
@@ -1169,11 +1170,74 @@ def load_share(token: str) -> dict | None:
         return None
     if payload.get("revoked_at"):
         return None
+    return payload
+
+
+def share_snapshot_is_live(token: str) -> bool:
+    """True while an unrevoked snapshot is stored under ``token``.
+
+    This is the snapshot store's own state, whoever owns the snapshot. Share
+    create and revoke use it to decide whether a token is still published
+    (reuse it, or report a revoke that did not land). The public route must use
+    :func:`load_share`, which also requires a live owner (#8837).
+    """
+    return _read_unrevoked_snapshot(token) is not None
+
+
+def _share_owner_holds_token(payload: dict, token: str) -> bool:
+    """True when the session that published ``payload`` still exists and still
+    names ``token`` as its share (#8837).
+
+    The session's sidecar is the only durable record of which token a session
+    publishes, for WebUI and external sessions alike: every share create since
+    shares exist persists the token there, and an external (CLI/messaging)
+    session gets a metadata-only sidecar for it. state.db keeps no share field.
+    A sidecar that is gone (the conversation was deleted) or that names another
+    token or none (revoked, re-shared, or a stale write) means the link is no
+    longer the session's. One bounded metadata read of one sidecar, no scans.
+    """
+    sid = str(payload.get("source_session_id") or "").strip()
+    if not sid:
+        return False
+    try:
+        from api import models
+
+        if not models.is_safe_session_id(sid):
+            return False
+        persisted = models._persisted_share_fields(models.SESSION_DIR / f"{sid}.json")
+    except Exception:
+        logger.debug("Failed to read the owner of share snapshot for %s", sid, exc_info=True)
+        return False
+    if not isinstance(persisted, tuple):
+        return False
+    owner_token = str(persisted[0] or "")
+    return bool(owner_token) and secrets.compare_digest(owner_token, str(token))
+
+
+def load_share(token: str) -> dict | None:
+    """The public view of a share, or ``None`` (the caller answers 404).
+
+    Only a snapshot whose session still exists and still carries this token is
+    served. Deleting a conversation used to leave its link live, and links that
+    earlier deletes orphaned are refused here too (#8837). A refused snapshot
+    gives the same ``None`` as an unknown token.
+    """
+    payload = _read_unrevoked_snapshot(token)
+    if payload is None:
+        return None
+    if not _share_owner_holds_token(payload, token):
+        return None
     return _public_share_payload(payload)
 
 
 def revoke_share(session) -> bool:
-    token = str(getattr(session, "share_token", "") or "").strip()
+    return revoke_share_token(str(getattr(session, "share_token", "") or ""))
+
+
+def revoke_share_token(token: str) -> bool:
+    """Mark the snapshot stored under ``token`` revoked (a tombstone that keeps
+    the token from ever being republished)."""
+    token = str(token or "").strip()
     if not token:
         return False
     with _SHARE_LOCK:

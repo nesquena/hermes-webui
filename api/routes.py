@@ -76,6 +76,7 @@ from api.shares import (
     build_share_snapshot,
     load_share,
     revoke_share,
+    share_snapshot_is_live,
     write_share_snapshot,
 )
 
@@ -19148,7 +19149,9 @@ def handle_post(handler, parsed) -> bool:
             # one after a revoke whose write was lost, or when this request
             # resolved a copy that predates the revoke, so the token has to prove
             # it is live before the snapshot writer may keep it.
-            if durable_token and load_share(durable_token) is None:
+            # The snapshot store answers that, not the public route: a token the
+            # sidecar lost to a checkpoint is still published (#8837).
+            if durable_token and not share_snapshot_is_live(durable_token):
                 durable_token = ""
             share_meta = write_share_snapshot(
                 snapshot,
@@ -19246,7 +19249,7 @@ def handle_post(handler, parsed) -> bool:
                 # session's token field, so hand it the resolved authority.
                 target_session.share_token = token
                 revoke_share(target_session)
-                if load_share(token) is not None:
+                if share_snapshot_is_live(token):
                     return bad(handler, "Share link could not be revoked", 500)
             # A writer may have saved while the revoke was reading the snapshot
             # store. Re-read so the state we persist is the newest one, not the
