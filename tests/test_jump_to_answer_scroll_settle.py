@@ -108,6 +108,7 @@ eval(extractFunc('_scheduleMessageJumpScrollReconcile'));
 eval(extractFunc('_beginMessageJumpScroll'));
 eval(extractFunc('_finishMessageJumpScroll'));
 eval(extractFunc('_cancelMessageJumpScroll'));
+eval(extractFunc('_messageJumpScrollBehavior'));
 eval(extractFunc('jumpToTurnQuestion'));
 
 (async () => {
@@ -217,6 +218,7 @@ eval(extractFunc('_scheduleMessageJumpScrollReconcile'));
 eval(extractFunc('_beginMessageJumpScroll'));
 eval(extractFunc('_finishMessageJumpScroll'));
 eval(extractFunc('_cancelMessageJumpScroll'));
+eval(extractFunc('_messageJumpScrollBehavior'));
 eval(extractFunc('jumpToTurnQuestion'));
 eval(extractFunc('refreshActiveSessionIfExternallyUpdated'));
 
@@ -392,6 +394,7 @@ eval(extractFunc('_beginMessageJumpScroll'));
 eval(extractFunc('_finishMessageJumpScroll'));
 eval(extractFunc('_cancelMessageJumpScroll'));
 eval(extractFunc('_highlightQuestionRow'));
+eval(extractFunc('_messageJumpScrollBehavior'));
 eval(extractFunc('jumpToTurnQuestion'));
 eval(extractFunc('refreshActiveSessionIfExternallyUpdated'));
 eval(messageScrollListenerIife);

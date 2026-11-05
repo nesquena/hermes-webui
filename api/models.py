@@ -2111,15 +2111,23 @@ class Session:
         # #8399: the share pair carries the same stale-snapshot class, and a
         # writer that resolved its copy before a share create/revoke and saves
         # after it puts its own older pair back -- orphaning a live snapshot on
-        # create, or restoring a revoked token on revoke. Adopt the on-disk pair
-        # when this object has not changed it since its baseline.
-        if (
-            self.share_token == getattr(self, '_share_token_saved', self.share_token)
-            and self.share_created_at
-            == getattr(self, '_share_created_at_saved', self.share_created_at)
-        ):
-            on_disk_share = _persisted_share_fields(self.path)
-            if on_disk_share is not _SHARE_FIELDS_ABSENT:
+        # create, or restoring a revoked token on revoke. The durable pair is
+        # owned by the share lifecycle (update_session_share_fields, under this
+        # same lock), so adopt it unless this object changed the pair itself
+        # AND the durable pair is still the one it last loaded or saved. A pair
+        # the lifecycle moved since that baseline always wins: a stale copy (a
+        # paused rename, an evicted resident) can never put a revoked token
+        # back over a newer link that a later revoke then cannot reach.
+        on_disk_share = _persisted_share_fields(self.path)
+        if on_disk_share is not _SHARE_FIELDS_ABSENT:
+            share_baseline = (
+                getattr(self, '_share_token_saved', self.share_token),
+                getattr(self, '_share_created_at_saved', self.share_created_at),
+            )
+            if (
+                (self.share_token, self.share_created_at) == share_baseline
+                or tuple(on_disk_share) != share_baseline
+            ):
                 self.share_token, self.share_created_at = on_disk_share
                 self._share_token_saved = self.share_token
                 self._share_created_at_saved = self.share_created_at
@@ -6405,15 +6413,26 @@ _SIDECAR_BODY_KEYS = frozenset({'messages', 'tool_calls', 'anchor_activity_scene
 def _set_sidecar_metadata_fields(data: dict, fields: dict) -> dict:
     """Return ``data`` with ``fields`` set; a key the sidecar lacks is placed
     before the message body, where save() and the bounded prefix reader keep
-    metadata. Existing keys keep their position."""
-    missing = {k: v for k, v in fields.items() if k not in data}
+    metadata. An existing key keeps its position, unless it sits after the
+    body (exp-v0.52.621..630 appended share fields there, #8815): it is moved
+    before the body, so the prefix reader sees it again."""
+    misplaced = set()
+    body_seen = False
+    for key in data:
+        if key in _SIDECAR_BODY_KEYS:
+            body_seen = True
+        elif body_seen and key in fields:
+            misplaced.add(key)
+    missing = {k: v for k, v in fields.items() if k not in data or k in misplaced}
     for key, value in fields.items():
-        if key in data:
+        if key in data and key not in misplaced:
             data[key] = value
     if not missing:
         return data
     rebuilt = {}
     for key, item in data.items():
+        if key in misplaced:
+            continue
         if missing and key in _SIDECAR_BODY_KEYS:
             rebuilt.update(missing)
             missing = {}
@@ -8257,8 +8276,17 @@ def update_session_share_fields(
         payload = json.loads(original.decode("utf-8"))
         if not isinstance(payload, dict):
             raise ValueError(f"Session sidecar {sid!r} is not a JSON object")
-        payload["share_token"] = share_token
-        payload["share_created_at"] = share_created_at
+        # #8815: a sidecar last saved before shares existed has no share keys.
+        # Plain assignment would append them after ``messages``, past the prefix
+        # that ``load_metadata_only`` reads, so every metadata reload would lose
+        # the token (and the UI its Stop sharing control) while the link stays
+        # live. The helper places a missing key before the message body, moves
+        # one an exp-v0.52.621..630 build left after the body back before it,
+        # and keeps a key already in the metadata prefix where it is.
+        payload = _set_sidecar_metadata_fields(
+            payload,
+            {"share_token": share_token, "share_created_at": share_created_at},
+        )
         tmp = path.with_suffix(
             f".tmp.{os.getpid()}.{threading.current_thread().ident}"
         )
