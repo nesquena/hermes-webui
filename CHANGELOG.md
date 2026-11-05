@@ -5,6 +5,8 @@
 
 ### Added
 
+- **Clicking a session-search result that matched on message content jumps to that message and flashes it.** Before, the click opened the session at the bottom and left you to scroll for the match. The search response now carries the index of the matching message, and the jump also lands when the message is outside the transcript's mounted window. Changing the search, opening another result or switching sessions before the jump lands cancels it. Title-only matches open the session as before. Salvage of #4224 by @Sanjays2402. (#5106, #4159)
+
 - **The test suite refuses git commands that would change the real checkout.** A test that runs a mutating git command (fetch, checkout, stash, reset and so on) against the WebUI or Agent checkout (including from a linked worktree of it) now fails with the command and directory, instead of changing the clone, as a broken mock once did with a real `git fetch`. Read-only git, temporary repositories, `git config` writes to other repositories and non-git commands are unaffected, and a test can opt out explicitly. Tests only. (#8801)
 
 - **Tasks has a read-only Scripts tab.** Next to Jobs, a Scripts tab lists the active profile's `scripts/` folder (the scripts cron jobs can run) with each file's size, age and the description from its leading comment. The tab only lists (there is no viewer yet; to view or edit a script, open the file on the server); a read-only `GET /api/scripts/raw` returns one file's text for a later viewer. Reads stay inside that folder (no symlinks out, size-capped), a platform that cannot open the folder safely says so instead of showing an empty list, and the tab hides "New job" since it cannot create anything. Thanks @happy5318. (#7685, for #2316)
