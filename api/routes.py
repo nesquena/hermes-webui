@@ -30869,15 +30869,18 @@ def _handle_chat_start(handler, body, diag=None):
         # session detail load's stored branch), which only a crafted or stale request can name, takes master's path
         # here: master's loader and refusals, then master's profile check, never a retag. Read-only reasons,
         # native-transport exemptions and transport checks apply only to sessions the profile can open.
+        # The owner is read without loading the session: a full load runs journal recovery, which spends retry budget,
+        # so this request must load it once, as master does. Unreadable ownership metadata takes master's path, whose
+        # loader and checks judge it as master does; no stored session keeps the no-sidecar path.
         _hidden_session = False
         try:
-            _visibility_probe = get_session(body["session_id"])
-        except Exception:
-            _visibility_probe = None
-        if _visibility_probe is not None and not _session_visible_to_active_profile(
-            getattr(_visibility_probe, "profile", None), handler
-        ):
+            _stored_owner = get_session_profile_readonly(body["session_id"])
+        except KeyError:
+            pass
+        except (OSError, ValueError, TypeError):
             _hidden_session = True
+        else:
+            _hidden_session = not _session_visible_to_active_profile(_stored_owner, handler)
         try:
             s = _get_or_materialize_session(
                 body["session_id"],
