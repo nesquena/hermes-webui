@@ -297,7 +297,9 @@ def _bounded_tail_snapshot_if_safe(session, read_floor):
     profile = getattr(session, "profile", None)
     from api.models import (
         _session_message_visible_key,
+        _visible_key_field,
         _visible_key_without_occurrence,
+        _VISIBLE_KEY_OCCURRENCE_INDEX,
         get_state_db_regeneration_tail_snapshot,
     )
 
@@ -353,6 +355,49 @@ def _bounded_tail_snapshot_if_safe(session, read_floor):
             return None
     if len(snap["tail_keys"]) != len({_visible_key_without_occurrence(k) for k in snap["tail_keys"]}):
         return None
+    # Restamped-twin proof (#8672 gate r3 D5).  The bounded snapshot feeds a
+    # POSITIONAL, clock-tolerant replay probe that starts at the sidecar head
+    # while the bounded tail starts at the read floor.  When state.db has
+    # restamped one row by a second relative to its sidecar twin, that
+    # misalignment means the bounded merge cannot recognise the replay and
+    # appends a duplicate; the full read aligns from index 0 and collapses it.
+    # Both stores then disagree on display/context counts and the revisions
+    # differ, so plan_regeneration raises stale_regeneration_revision with no
+    # intervening write.
+    #
+    # Two ESTABLISHED, different clocks for the same clock-free row identity
+    # prove only that the bounded proof cannot establish parity -- it cannot
+    # tell a restamp from a genuinely new repeated row.  Conservatively fall
+    # back to the full read (master behaviour for these shapes).  A clockless
+    # row on either side is a wildcard and proves nothing.
+    sidecar_tail_occurrences = {}
+    for message in getattr(session, "messages", None) or []:
+        if not isinstance(message, dict):
+            continue
+        try:
+            message_ts = float(message.get("timestamp"))
+        except (TypeError, ValueError):
+            message_ts = None
+        if message_ts is None or message_ts < read_floor:
+            continue
+        key = _session_message_visible_key(
+            message, normalize_workspace_prefix=True
+        )
+        sidecar_tail_occurrences.setdefault(
+            _visible_key_without_occurrence(key), set()
+        ).add(_visible_key_field(key, _VISIBLE_KEY_OCCURRENCE_INDEX, ""))
+    for key in snap["tail_keys"]:
+        occurrence = _visible_key_field(key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
+        if occurrence == "":
+            continue
+        established = sidecar_tail_occurrences.get(
+            _visible_key_without_occurrence(key)
+        )
+        if not established:
+            continue
+        established.discard("")
+        if established and occurrence not in established:
+            return None
     return snap["tail"]
 
 
