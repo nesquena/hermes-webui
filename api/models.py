@@ -2086,6 +2086,17 @@ class Session:
                 f"Reload with metadata_only=False before mutating state. "
                 f"See #1558."
             )
+        # ── #8852 guard ─────────────────────────────────────────────────
+        # Refuse to save a session loaded from a sidecar whose body names a
+        # different session, or none: save() writes the body's id, so it would
+        # overwrite that other conversation (or create a stray file).
+        loaded_from = getattr(self, '_sidecar_names_other_session', None)
+        if loaded_from:
+            raise RuntimeError(
+                f"Refusing to save session {self.session_id!r}: it was loaded from "
+                f"{loaded_from}.json, whose body names a different session. "
+                f"See #8852."
+            )
         if not isinstance(self.messages, list):
             raise ValueError(
                 f"Refusing to save session {self.session_id!r}: messages must be a list, "
@@ -2494,10 +2505,26 @@ class Session:
         # vouched for.
         data['_pending_hidden_wakeup_from_writer'] = True
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+        # #8852: a sidecar is named after its session. One whose body names a
+        # different session (a manual copy, a backup restored under another
+        # name) or none (Session() then makes up an id) would write that id's
+        # file on any save, overwriting another conversation or adding a stray
+        # file. The server never writes such a file itself.
+        _names_other_session = data.get('session_id') != sid
         data = _apply_session_draft_overlay(data, sid)
         session = cls(**data)
         session._share_fields_misplaced = _share_fields_misplaced
-        if _collapsed_partials:
+        if _names_other_session:
+            # Mark it so save() refuses. Loads still return it as before.
+            session._sidecar_names_other_session = sid
+        if _collapsed_partials and _names_other_session:
+            # Keep the collapse in memory only (see above), and skip the legacy
+            # facts cache: the file still holds the uncollapsed transcript.
+            logger.info(
+                "Not persisting collapsed duplicate partials for %s: its body names session %r (#8852)",
+                sid, data.get('session_id'),
+            )
+        elif _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
                 # recency/index ordering; save() creates a .bak because this
