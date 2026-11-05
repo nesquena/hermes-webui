@@ -8303,6 +8303,8 @@ def _patch_session_sidecar(sid: str, fields_for) -> bool | None:
     does not exist, None when ``fields_for`` declined, True after a write.
     Unreadable sidecars and I/O errors raise.
     """
+    if not sid or not is_safe_session_id(sid):
+        return False
     path = SESSION_DIR / f"{sid}.json"
     with _session_persist_lock(sid):
         try:
@@ -8386,20 +8388,23 @@ def _repair_misplaced_share_fields(sid: str) -> bool:
         return False
 
 
-def repair_session_share_field_order(session) -> bool:
+def repair_session_share_field_order(session, session_id) -> bool:
     """Repair a loaded session's sidecar if ``Session.load`` found its share
     fields after the message body (#8830).
 
     Call this only AFTER the request's ownership decision has allowed the
     session: a refused or profile-mismatched request must never write
-    (#8094). The mark is cleared first, so a cached session is repaired at
-    most once per load; a later full load marks it again if the repair failed.
+    (#8094). ``session_id`` is the request's validated id, the file that
+    decision covered; a loaded object whose own ``session_id`` differs (a
+    copied or edited sidecar) names another file, so nothing is written. The
+    mark is cleared first, so a cached session is repaired at most once per
+    load; a later full load marks it again if the repair failed.
     """
     if not getattr(session, "_share_fields_misplaced", False):
         return False
     session._share_fields_misplaced = False
-    sid = getattr(session, "session_id", None)
-    if not sid:
+    sid = str(session_id or "").strip()
+    if not sid or str(getattr(session, "session_id", "") or "") != sid:
         return False
     return _repair_misplaced_share_fields(sid)
 

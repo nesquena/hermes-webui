@@ -16497,7 +16497,7 @@ def _handle_session_get(handler, parsed) -> bool:
             _repair_lock = _get_session_agent_lock(sid)
             if _repair_lock.acquire(blocking=False):
                 try:
-                    _repair_session_share_field_order(s)
+                    _repair_session_share_field_order(s, sid)
                 finally:
                     _repair_lock.release()
         original_stream_id = getattr(s, "active_stream_id", None)

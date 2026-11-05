@@ -365,7 +365,7 @@ def test_the_repair_rechecks_under_the_lock(isolated_state, active_profile):
     session = _full_load()  # notes the damage
     assert _open().status == 200  # repairs it
     repaired = path.read_bytes()
-    assert models.repair_session_share_field_order(session) is False  # stale note, file already fixed
+    assert models.repair_session_share_field_order(session, SID) is False  # stale note, file already fixed
     assert path.read_bytes() == repaired
 
 
@@ -538,6 +538,46 @@ def test_the_owner_opening_it_later_still_repairs(isolated_state, active_profile
     assert handler.status == 200
     assert _before_body(path, "share_token")
     assert _metadata_reload() == (token, token)
+
+
+def test_the_repair_writes_only_the_sidecar_the_request_was_allowed(isolated_state, active_profile):
+    """A sidecar whose body carries another session's id (a copied file) must not make the
+    owner's open rewrite that other session's sidecar: the repair uses the request's id and
+    refuses a mismatch."""
+    from api import models
+    from api.routes import handle_get
+    active_profile("work")
+    other, _token = _shared_then_damaged(profile="work")
+    active_profile("default")
+    raw = json.loads(other.read_text(encoding="utf-8"))
+    raw["profile"] = "default"
+    (other.parent / "s_8830_copy.json").write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    models.SESSIONS.clear()
+    before = (other.read_bytes(), other.stat().st_mtime_ns)
+    handler = _FakeHandler()
+    handle_get(handler, urllib.parse.urlparse("/api/session?session_id=s_8830_copy&messages=1"))
+    assert handler.status == 200
+    assert (other.read_bytes(), other.stat().st_mtime_ns) == before
+    assert not other.with_suffix(".json.bak").exists()
+
+
+def test_the_repair_never_writes_outside_the_session_dir(isolated_state, active_profile):
+    """A body ``session_id`` is data, not a path: the repair writes only the validated id's file."""
+    from api import models
+    from api.routes import handle_get
+    path, _token = _shared_then_damaged()
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    evil = models.SESSION_DIR.parent / "evil.json"
+    evil.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    raw["session_id"] = "../evil"
+    (models.SESSION_DIR / "s_8830_traversal.json").write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    models.SESSIONS.clear()
+    before = evil.read_bytes()
+    handler = _FakeHandler()
+    handle_get(handler, urllib.parse.urlparse("/api/session?session_id=s_8830_traversal&messages=1"))
+    assert handler.status == 200
+    assert evil.read_bytes() == before
+    assert sorted(p.name for p in models.SESSION_DIR.parent.iterdir() if p.name.startswith("evil")) == ["evil.json"]
 
 
 # --- the index refresh stays in the session's own profile -----------------------------
