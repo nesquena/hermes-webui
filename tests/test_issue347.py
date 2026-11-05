@@ -518,6 +518,19 @@ def test_escaped_dollars_inside_math_are_restored(sample, body):
     assert "\x00" not in html
 
 
+@pytest.mark.parametrize("sample,expected_math,expected_text", [
+    ("Repeat $x$ 2 times.", "x", "2 times."),
+    ("Repeat $x+y$ 2 times.", "x+y", "2 times."),
+    ("R$ 5 and $x$", "x", "R$ 5"),
+    ("US$ 50 for $n$ users", "n", "US$ 50"),
+])
+def test_inline_math_closers_before_numbers_preserve_currency(sample, expected_math, expected_text):
+    html = _run_renderers(sample)["assistant"]
+    assert f'<span class="katex-inline" data-katex="inline">{expected_math}</span>' in html
+    assert expected_text in html
+    assert html.count('data-katex="inline"') == 1
+
+
 def test_display_math_stashed_before_inline():
     """$$...$$ display math must be stashed before $...$ inline math.
 

@@ -10750,7 +10750,7 @@ function renderMd(raw){
     if(text[idx]!=='$'||_isEscapedAt(text,idx)||text[idx-1]==='$'||text[idx+1]==='$') return false;
     if(/\d/.test(text[idx+1]||'')) return true;
     if(/^\.\d/.test(text.slice(idx+1,idx+3))) return true;
-    return /^[ \u00a0]\d/.test(text.slice(idx+1,idx+3))&&/^[A-Za-z]$/.test(text[idx-1]||'');
+    return /^[ \u00a0]\d/.test(text.slice(idx+1,idx+3))&&/(?:^|[\s(–—])[A-Za-z]+$/.test(text.slice(0,idx));
   }
   function _findClosingSingleDollar(text, start){
     for(let i=start+1;i<text.length&&text[i]!=='\n';i++){
@@ -10771,8 +10771,13 @@ function renderMd(raw){
   function _maskCurrencyDollars(text){
     let out='', copied=0;
     for(let i=0;i<text.length;i++){
-      if(!_isCurrencyOpenerAt(text,i)) continue;
+      if(text[i]!=='$'||_isEscapedAt(text,i)) continue;
       const closer=_findClosingSingleDollar(text,i);
+      if(!_isCurrencyOpenerAt(text,i)){
+        // Preserve a complete math span before its closer can be mistaken for currency.
+        if(closer!==-1&&!_isCurrencyOpenerAt(text,closer)&&/^[^\s$\n](?:[^$\n]*[^\s$\n])?$/.test(text.slice(i+1,closer))) i=closer;
+        continue;
+      }
       if(closer!==-1&&!_isCurrencyOpenerAt(text,closer)&&isLikelyNumericInlineMath(text.slice(i+1,closer),text.slice(closer+1,closer+3))){
         i=closer;
         continue;
