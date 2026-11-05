@@ -7496,9 +7496,10 @@ def get_sidecar_session_profile_readonly(sid):
     except FileNotFoundError:
         raise KeyError(sid) from None
     except RecursionError:
-        # Nested deeper than the JSON parser's recursion limit. The server can't
-        # write such a file (encoding fails at the same depth), so only an
-        # outside writer can: ownership unverifiable, like any unparseable file.
+        # Nested deeper than the JSON parser's recursion limit (the limit varies by
+        # Python version). The server's own writer hits a similar limit when it
+        # encodes, so in practice only an outside writer produces such a file:
+        # ownership unverifiable, like any unparseable file.
         raise ValueError('Invalid session ownership metadata') from None
     if not isinstance(data, dict) or data.get('session_id') != sid:
         raise ValueError('Invalid session ownership metadata')
@@ -7641,7 +7642,9 @@ def session_is_unclaimed_placeholder_readonly(sid):
         data = json.loads((SESSION_DIR / f'{sid}.json').read_bytes())
     except FileNotFoundError:
         return resident
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
+        # RecursionError: nested past the parser's limit, unreadable like any
+        # other unparseable file (see get_sidecar_session_profile_readonly).
         return False
     if not isinstance(data, dict) or data.get('session_id') != sid:
         return False

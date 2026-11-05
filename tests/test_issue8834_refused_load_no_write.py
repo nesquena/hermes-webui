@@ -950,11 +950,19 @@ def test_empty_string_and_none_owners_agree(isolated_sessions, monkeypatch, rout
 # --- round 5 (senior r4 finding 4) ------------------------------------------------------------------------------
 
 
+# The JSON parser's nesting limit differs by Python version: 3,000 levels overflow 3.11 but parse on 3.12 and 3.13
+# (CI runs all three), and 3.14 parses 10,000. 200,000 overflows every version CI and this host run.
+_TOO_DEEP = 200_000
+
+
 def _deep_sidecar(directory, *, profile="work"):
-    deep = "[" * 3000 + "]" * 3000
+    deep = "[" * _TOO_DEEP + "]" * _TOO_DEEP
     path = directory / f"{SID}.json"
     path.write_text('{"messages": [' + deep + '], "session_id": "%s", "title": "t", "created_at": 1.0, '
                     '"updated_at": 2.0, "profile": "%s"}' % (SID, profile))
+    # Non-vacuity on the running interpreter: the fixture must really be too deep to parse.
+    with pytest.raises(RecursionError):
+        json.loads(path.read_bytes())
     return path
 
 
@@ -964,6 +972,23 @@ def test_a_sidecar_too_deep_to_parse_is_unverifiable(isolated_sessions):
     with pytest.raises(ValueError):
         models.get_sidecar_session_profile_readonly(SID)
     assert models.session_owner_readings_readonly(SID, full_load=True) == [models.UNVERIFIABLE_SESSION_OWNER]
+
+
+@pytest.mark.parametrize("profile", ["work", "default"])
+def test_chat_start_naming_the_active_profile_on_a_too_deep_sidecar_is_refused_not_a_500(isolated_sessions,
+                                                                                        monkeypatch, profile):
+    """Senior r5: the real client always sends `profile`, so chat/start reaches the placeholder check, which parsed
+    the sidecar itself and let RecursionError through (a 500, as on master). The sidecar is unreadable, so it isn't
+    a claimable placeholder: refused (404, ownership unverifiable), nothing written, nothing cached."""
+    directory, cache, _ = isolated_sessions
+    path = _deep_sidecar(directory, profile=profile)
+    before = path.read_bytes()
+    assert models.session_is_unclaimed_placeholder_readonly(SID) is False
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    handler = _call("chat_start", active="default", profile="default")
+    assert handler.status == 404, (handler.status, handler.payload())
+    assert path.read_bytes() == before
+    assert SID not in cache
 
 
 @pytest.mark.parametrize("route", ["get_full", "chat_start"])
