@@ -325,28 +325,129 @@ def test_the_workspace_writer_refuses_a_session_loaded_from_a_copy(store, tmp_pa
     assert _files(store) == before
 
 
-def test_a_copy_taken_mid_turn_loads_quietly(store, caplog):
-    """A copy of a session caught mid-turn (empty transcript, stale pending turn) used to run the
-    stale-pending repair on every cold load; the repair's save is refused, which logged an ERROR
-    traceback each time. The repair is skipped for a marked session."""
-    from api import models
-
+def _mid_turn_copy(store, *, gateway=False):
+    """A copy of a session caught mid-turn: empty transcript, a pending message and a stream id
+    that no longer exists (optionally a Gateway run that would be reattached at startup)."""
     _victim(store)
     path = _copy(store, partials=False)
     raw = json.loads(path.read_text(encoding="utf-8"))
     raw.update(messages=[], message_count=0, pending_user_message="half-sent", active_stream_id="dead-stream")
     raw.pop("pending_started_at", None)
+    if gateway:
+        raw["gateway_run"] = {"run_id": "run-8852", "stream_id": "dead-stream", "regeneration": False, "goal_related": False}
+    # Keep the header layout the server writes: active_stream_id must sit in the prefix the
+    # startup scan reads.
     path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("entry", ["get_session", "clear_stale_stream_state", "detail_get"])
+def test_a_copy_taken_mid_turn_loads_quietly(store, caplog, entry):
+    """A copy of a session caught mid-turn runs a stale-state repair on load: the cold-load
+    repair (``_repair_stale_pending``) and the detail GET's ``_clear_stale_stream_state``. On master
+    both saved the copy over the other session; with the save refused, each logged an ERROR
+    traceback naming the other session. Now neither persists anything for a marked session.
+    ``_clear_stale_stream_state`` still clears the dead stream from the in-memory view, so the
+    client doesn't keep reconnecting to it. (With #8853 the detail GET refuses a copy with 404
+    before the load; the direct case covers the clear either way.)"""
+    import api.routes as routes
+    from api import models
+
+    _mid_turn_copy(store)
     before = _files(store)
 
     with caplog.at_level(logging.WARNING):
         for _ in range(2):
             models.SESSIONS.clear()
-            session = models.get_session(COPY)
+            if entry == "get_session":
+                session = models.get_session(COPY)
+                state = (session.pending_user_message, session.active_stream_id)
+                expected = ("half-sent", "dead-stream")
+            elif entry == "clear_stale_stream_state":
+                session = models.get_session(COPY)
+                assert routes._clear_stale_stream_state(session) is False
+                state = (session.pending_user_message, session.active_stream_id)
+                expected = (None, None)
+            else:
+                handler = _Handler()
+                routes.handle_get(handler, urllib.parse.urlparse(f"/api/session?session_id={COPY}&messages=1"))
+                assert handler.status in (200, 404), bytes(handler.body)
+                if handler.status == 200:
+                    body = json.loads(bytes(handler.body))["session"]
+                    state = (body.get("pending_user_message"), body.get("active_stream_id"))
+                else:
+                    state = None
+                expected = (None, None) if handler.status == 200 else None
 
     assert _files(store) == before
     assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
-    assert (session.pending_user_message, session.active_stream_id) == ("half-sent", "dead-stream")
+    assert state == expected
+
+
+def test_a_copy_of_a_turn_that_is_still_running_keeps_showing_it(store):
+    """If the stream the copy names is live (the other session's turn is running), the view is
+    left alone, as on master: only a dead stream is cleared from the view."""
+    import api.config as config
+    import api.routes as routes
+    from api import models
+
+    _mid_turn_copy(store)
+    before = _files(store)
+    with config.STREAMS_LOCK:
+        config.STREAMS["dead-stream"] = object()
+    try:
+        session = models.get_session(COPY)
+        assert routes._clear_stale_stream_state(session) is False
+        state = (session.pending_user_message, session.active_stream_id)
+    finally:
+        with config.STREAMS_LOCK:
+            config.STREAMS.pop("dead-stream", None)
+
+    assert state == ("half-sent", "dead-stream")
+    assert _files(store) == before
+
+
+def test_the_reasoning_writer_refuses_a_session_loaded_from_a_copy(store):
+    """``set_session_reasoning_effort`` given a session object patches that object's sidecar
+    directly, without ``save()``. Over HTTP the generic ownership guard 404s the copy first
+    (``/api/reasoning``); this covers a direct caller."""
+    from api import models
+
+    _victim(store)
+    _copy(store, partials=False)
+    before = _files(store)
+
+    with pytest.raises(RuntimeError, match="8852"):
+        models.set_session_reasoning_effort(models.get_session(COPY), "high")
+
+    _unchanged_victim(store, before)
+    assert _files(store) == before
+
+
+def test_gateway_reattach_at_startup_skips_a_copy(store, monkeypatch):
+    """At startup every sidecar with an active stream and a saved Gateway run is reattached under
+    its session's id. A copy's id is the other session's, so its stale run would be resumed, and
+    its answer written back, there."""
+    import api.config as config
+    import api.gateway_chat as gateway_chat
+
+    launched = []
+    monkeypatch.setattr(gateway_chat, "_run_gateway_chat_streaming", lambda *a, **k: launched.append((a, k)))
+    monkeypatch.setattr(gateway_chat, "_gateway_endpoint_for_profile", lambda profile: "http://127.0.0.1:9")
+    _mid_turn_copy(store, gateway=True)
+    before = _files(store)
+    try:
+        resumed = gateway_chat.resume_gateway_runs_after_restart()
+        with config.STREAMS_LOCK:
+            registered = "dead-stream" in config.STREAMS
+    finally:
+        with config.STREAMS_LOCK:
+            config.STREAMS.pop("dead-stream", None)
+        config.CANCEL_FLAGS.pop("dead-stream", None)
+
+    assert (resumed, registered, launched) == ([], False, [])
+    _unchanged_victim(store, before)
+    assert _files(store) == before
 
 
 def test_a_sidecar_without_a_session_id_never_spawns_files(store):

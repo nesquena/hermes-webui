@@ -6621,6 +6621,16 @@ def set_session_reasoning_effort(session_id_or_session, value, *, profile=_KEEP_
         session = None
     else:
         session = session_id_or_session
+        loaded_from = getattr(session, '_sidecar_names_other_session', None)
+        if loaded_from:
+            # #8852: this writer patches SESSION_DIR/<session_id>.json directly,
+            # not through save(); the id came from a file whose body names
+            # another session.
+            raise RuntimeError(
+                f"Refusing to write reasoning_effort for session {session.session_id!r}: "
+                f"it was loaded from {loaded_from}.json, whose body names a different "
+                f"session. See #8852."
+            )
         sid = str(getattr(session, 'session_id', '') or '')
     normalized = _normalize_persisted_reasoning_effort(value)
     with _session_persist_lock(sid):
