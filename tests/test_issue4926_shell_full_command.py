@@ -199,17 +199,21 @@ def test_command_label_separates_preview_from_real_command(driver_path, tc, labe
     ("curl \\\n  -u alice:s3cretPW https://x", "curl \\\n  -u alice:[redacted] https://x"),
     ("curl -u alice:first https://a --next -u bob:second https://b", "curl -u alice:[redacted] https://a --next -u bob:[redacted] https://b"),
     ("curl -sS \\\n  --user alice:s3cretPW \\\n  https://x", "curl -sS \\\n  --user alice:[redacted] \\\n  https://x"),
+    # Quoted separators must not end the curl segment (URL query / password containing & ; |).
+    ("curl 'https://x/?a=1&b=2' -u alice:s3cretPW", "curl 'https://x/?a=1&b=2' -u alice:[redacted]"),
+    ('curl "https://x/?a=1;b=2|c" --user alice:s3cretPW', 'curl "https://x/?a=1;b=2|c" --user alice:[redacted]'),
+    ("curl -u 'alice:pa&ss' https://x", "curl -u 'alice:[redacted]' https://x"),
 ])
 def test_curl_basic_auth_password_redacted_username_kept(driver_path, cmd, kept):
     out = _run(driver_path, {"args": {"command": cmd}})
     assert out["lead"] == "$ " + kept
-    assert "s3cretPW" not in out["header"] and "pa ss" not in out["header"]
+    assert "s3cretPW" not in out["header"] and "pa ss" not in out["header"] and "pa&ss" not in out["header"]
 
 
 @pytest.mark.parametrize("cmd", [
     "curl -u alice https://x", "sort -u file", "curl --username alice:bob",
     "docker run --user=1000:1000 alpine id", "docker run -u 1000:1000 alpine id",
-    "sudo -u postgres:postgres psql", "curl https://x\nsort -u a:b",
+    "sudo -u postgres:postgres psql", "curl https://x\nsort -u a:b", "curl https://x && sort -u a:b",
 ])
 def test_curl_basic_auth_redaction_leaves_non_credentials(driver_path, cmd):
     assert _run(driver_path, {"args": {"command": cmd}})["lead"] == "$ " + cmd

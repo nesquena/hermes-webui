@@ -24120,8 +24120,9 @@ function _redactToolTargetLabel(value){
     .replace(/(--password(?:=|\s+))(?:"[^"]*"|'[^']*'|\S+)/gi,'$1[redacted]')
     .replace(/(password(?:=|\s+))(?:"[^"]*"|'[^']*'|\S+)/gi,'$1[redacted]')
     // curl basic auth `-u user:pass` / `--user[=]user:pass`: mask the password (whole shell word,
-    // continuations included), keep the user, and only inside a curl segment.
-    .replace(/\bcurl\b(?:[^\n;|&\\]|\\[^])*/gi,seg=>seg.replace(/(\s)(-u\s*|--user(?:=|\s+))((?:[^\s"'\\]|\\.|"(?:[^"\\]|\\.)*"|'[^']*')+)/g,(m,pre,flag,word)=>{
+    // continuations included), keep the user, and only inside a curl segment. Quoted words are
+    // consumed whole so a quoted `&`/`;`/`|` (URL query, password) does not end the segment.
+    .replace(/\bcurl\b(?:[^\n;|&\\"']|\\[^]|"(?:[^"\\]|\\[^])*"|'[^']*'|["'])*/gi,seg=>seg.replace(/(\s)(-u\s*|--user(?:=|\s+))((?:[^\s"'\\]|\\.|"(?:[^"\\]|\\.)*"|'[^']*')+)/g,(m,pre,flag,word)=>{
       const i=word.indexOf(':'); if(i<0) return m;
       const q=(word[0]==='"'||word[0]==="'")&&word.length>1&&word.endsWith(word[0])?word[0]:'';
       return pre+flag+word.slice(0,i)+':[redacted]'+q;
