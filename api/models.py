@@ -7469,6 +7469,19 @@ def get_session_profile_readonly(sid):
             if profile is not None and not isinstance(profile, str):
                 raise ValueError('Invalid session profile')
             return profile
+    return get_sidecar_session_profile_readonly(sid)
+
+
+def get_sidecar_session_profile_readonly(sid):
+    """Read the owner recorded in ``sid``'s sidecar on disk, ignoring the cache.
+
+    Never repairs, saves or caches. Raises ``KeyError`` when there is no
+    sidecar (or the id is unsafe) and ``ValueError`` when the ownership can't
+    be verified: unparseable JSON, a body that names another session, or a
+    non-string profile.
+    """
+    if not is_safe_session_id(sid):
+        raise KeyError(sid)
     path = SESSION_DIR / f'{sid}.json'
     try:
         prefix = _read_metadata_json_prefix(path)
@@ -7487,29 +7500,109 @@ def get_session_profile_readonly(sid):
     return profile
 
 
+# A reading from ``session_owner_readings_readonly`` whose ownership can't be verified.
+UNVERIFIABLE_SESSION_OWNER = object()
+
+
+def session_owner_readings_readonly(sid, *, full_load):
+    """The owner of every stored object a load of ``sid`` could serve, read without loading it.
+
+    #8834: a route that owns its profile boundary must decide on the object its
+    loader will use. A full load keeps the resident session or reloads the
+    sidecar, and which one depends on the transcript itself
+    (``_cached_session_lags_disk``, the stale user-tail check), so it can't be
+    predicted without loading. A full load therefore reports both, when each
+    exists: a resident full session and the sidecar. A metadata-only stub
+    doesn't count, because a full load replaces it from the sidecar. A
+    metadata-only load serves any resident entry as is and reads the sidecar
+    only on a miss, so it reports one reading, as ``get_session_profile_readonly``
+    does. A resident entry whose ``session_id`` differs is evicted by the
+    resolver, so it is skipped.
+
+    Returns the readings, resident first: a profile (``str`` or ``None``) or
+    ``UNVERIFIABLE_SESSION_OWNER``. An empty list means no stored session
+    (an unsafe id included). Never repairs, saves or caches.
+    """
+    if not is_safe_session_id(sid):
+        return []
+    readings = []
+    with LOCK:
+        cached = SESSIONS.get(sid)
+        if cached is not None and str(getattr(cached, 'session_id', '') or '') != sid:
+            cached = None
+        if cached is not None and full_load and getattr(cached, '_loaded_metadata_only', False):
+            cached = None
+        if cached is not None:
+            profile = getattr(cached, 'profile', None)
+            readings.append(
+                profile if profile is None or isinstance(profile, str) else UNVERIFIABLE_SESSION_OWNER
+            )
+    if readings and not full_load:
+        return readings
+    try:
+        readings.append(get_sidecar_session_profile_readonly(sid))
+    except KeyError:
+        pass
+    except (OSError, ValueError, TypeError):
+        readings.append(UNVERIFIABLE_SESSION_OWNER)
+    return readings
+
+
+def _is_unclaimed_placeholder(get) -> bool:
+    """The placeholder test behind ``session_is_unclaimed_placeholder_readonly``.
+
+    ``get(key)`` reads one field from a resident session or a parsed sidecar.
+    It covers the retag's own test (no messages, context messages or pending
+    message, not pinned), plus markers that make the chat/start load itself
+    refuse the request or write: ``read_only`` and a subagent source (403
+    from ``_get_or_materialize_session``), ``is_cli_session`` (the load
+    refreshes the transcript from the CLI store, after which the retag
+    refuses), and an ``active_stream_id`` (an unfinished-turn marker the full
+    load may sync from state.db, writing the sidecar).
+    """
+    context_messages = get('context_messages')
+    source = str(get('source_tag') or get('raw_source') or '').strip().lower()
+    return not (
+        get('messages')
+        or (context_messages if isinstance(context_messages, list) else None)
+        or get('pending_user_message')
+        or get('pinned')
+        or get('read_only')
+        or get('is_cli_session')
+        or source == 'subagent'
+        or get('active_stream_id')
+    )
+
+
 def session_is_unclaimed_placeholder_readonly(sid):
     """Whether chat/start's empty-placeholder retag could claim ``sid``, without loading it.
 
     #8834: ``/api/chat/start`` may retag an empty, unpinned session that another
     profile owns (``_retag_empty_session_profile``). Every other cross-profile
-    chat/start is refused, so it must be refused before ``Session.load`` runs:
-    that load can collapse duplicate partials and save, and ``get_session``
-    caches what it loads, and a refused request must do neither (#8094).
+    chat/start is refused, so it must be refused before the full load runs.
+    That load can save (the duplicate-partial collapse, the state.db sync of an
+    unfinished turn) and ``get_session`` caches what it loads, and a refused
+    request must do neither (#8094).
 
-    This answers the retag's own question from what ``Session.load`` would
-    build: no messages, no context messages, no pending user message, not
-    pinned. ``Session.__init__`` keeps ``messages`` and ``pending_user_message``
-    as given, drops a non-list ``context_messages`` and coerces ``pinned`` to a
-    bool. The duplicate-partial collapse never empties a non-empty list, and an
-    empty transcript has nothing to collapse, so loading a session this
-    returns True for cannot write. A resident full session answers from
-    memory. A metadata-only stub does not, because its empty ``messages`` says
-    nothing about the transcript on disk. Never repairs, saves or caches; a
+    This returns True only when the retag would claim the session AND the load
+    can neither refuse the request nor write (``_is_unclaimed_placeholder``).
+    Like ``session_owner_readings_readonly``, it can't tell whether the load
+    will keep a resident full session or reload the sidecar, so the test must
+    hold on each one that exists. A brand-new session lives only in memory
+    until its first message (``new_session``), so a resident full session with
+    no sidecar is answered from memory. A metadata-only stub doesn't count,
+    because its empty ``messages`` says nothing about the transcript on disk
+    and a full load replaces it. The duplicate-partial collapse never empties
+    a non-empty list, and an empty transcript has nothing to collapse.
+    ``Session.__init__`` keeps ``messages`` and ``pending_user_message`` as
+    given, drops a non-list ``context_messages`` and coerces ``pinned`` to a
+    bool, which the sidecar reading mirrors. Never repairs, saves or caches; a
     sidecar it can't read, or whose body names another session, is not
     claimable.
     """
     if not is_safe_session_id(sid):
         return False
+    resident = False
     with LOCK:
         cached = SESSIONS.get(sid)
         if (
@@ -7517,25 +7610,18 @@ def session_is_unclaimed_placeholder_readonly(sid):
             and str(getattr(cached, 'session_id', '') or '') == sid
             and not getattr(cached, '_loaded_metadata_only', False)
         ):
-            return not (
-                getattr(cached, 'messages', None)
-                or getattr(cached, 'context_messages', None)
-                or getattr(cached, 'pending_user_message', None)
-                or getattr(cached, 'pinned', False)
-            )
+            if not _is_unclaimed_placeholder(lambda key: getattr(cached, key, None)):
+                return False
+            resident = True
     try:
         data = json.loads((SESSION_DIR / f'{sid}.json').read_bytes())
+    except FileNotFoundError:
+        return resident
     except (OSError, ValueError):
         return False
     if not isinstance(data, dict) or data.get('session_id') != sid:
         return False
-    context_messages = data.get('context_messages')
-    return not (
-        data.get('messages')
-        or (context_messages if isinstance(context_messages, list) else None)
-        or data.get('pending_user_message')
-        or data.get('pinned')
-    )
+    return _is_unclaimed_placeholder(data.get)
 
 
 _COMPRESSION_RECOVERY_PROFILE_UNSET = object()

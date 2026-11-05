@@ -1025,39 +1025,78 @@ def _chat_start_requested_profile(body):
     return requested_profile, False
 
 
+def _owner_readings_visible(readings, handler) -> bool:
+    """Whether any of ``session_owner_readings_readonly``'s readings is visible to the request."""
+    return any(
+        reading is not UNVERIFIABLE_SESSION_OWNER and _session_visible_to_active_profile(reading, handler)
+        for reading in readings
+    )
+
+
+def _send_owner_refusal(handler, sid, reading, not_found="Session not found"):
+    """The refusal for a stored session the request can't see, from the reading the loader would serve first.
+
+    409 ``session_profile_mismatch`` for a known other profile; 404 for the legacy None-profile case (so the
+    client's self-heal fires) and for ownership that can't be verified (#8094's fail-closed rule).
+    """
+    if reading is not UNVERIFIABLE_SESSION_OWNER and reading:
+        return _session_profile_mismatch_response(handler, sid, reading)
+    return bad(handler, not_found, 404)
+
+
+def _refuse_cross_profile_before_load(handler, sid, *, full_load, not_found="Session not found") -> bool:
+    """#8834: refuse a request for another profile's session before its load runs. True when a refusal was sent.
+
+    The load (``get_session``) can save (the duplicate-partial collapse, the state.db sync of an unfinished turn) and
+    caches what it loads, and a refused request must do neither (#8094). The readings cover every stored object the
+    load could serve (``session_owner_readings_readonly``). The request is refused here only when none of them is
+    visible, so this never refuses a request the load-then-check path would serve. When they disagree (a resident
+    copy the disk has moved past, or the reverse), the load decides, as before, and the check after it is still the
+    backstop. No stored session (or an unsafe id) isn't decided here.
+    """
+    if not isinstance(sid, str):
+        return False
+    readings = session_owner_readings_readonly(sid, full_load=full_load)
+    if not readings or _owner_readings_visible(readings, handler):
+        return False
+    _send_owner_refusal(handler, sid, readings[0], not_found)
+    return True
+
+
 def _refuse_cross_profile_chat_start_before_load(handler, body) -> bool:
     """#8834: answer a refused cross-profile /api/chat/start before any full load.
 
     Returns True when a response was sent. ``_get_or_materialize_session``
-    runs ``Session.load``, which can collapse duplicate partials and save, and
-    caches the session, so the ownership check after it let a refused request
-    rewrite and cache another profile's session. This decides the same
-    question from read-only reads first:
+    runs a full ``get_session``, which can save (the duplicate-partial
+    collapse, the state.db sync of an unfinished turn) and caches the session,
+    so the ownership check after it let a refused request write and cache
+    another profile's session. This decides the same question from read-only
+    reads first, the way ``_refuse_cross_profile_before_load`` does:
 
-    - no sidecar (KeyError) or an unsafe id: not decided here; the
+    - a non-string id: 404 (it can't name a sidecar);
+    - no stored session or an unsafe id: not decided here; the
       materialize/claim path handles it as before;
-    - ownership it can't verify: 404, fail closed like #8094's guard;
-    - visible to the active profile: load as before;
+    - any object the load could serve is visible: load as before;
     - otherwise the session can only be claimed by the empty-placeholder
-      retag (request names the active profile, and the session has no
-      messages, context messages or pending message and isn't pinned). Loading
-      such a session can't write, so it goes on to the existing retag; every
-      other case answers the same 409/404 the retag refusal gives, with the
-      invalid-profile 400 kept ahead of it.
+      retag: the request names the active profile and
+      ``session_is_unclaimed_placeholder_readonly`` says the retag would claim
+      it and the load can neither refuse nor write (no messages, context
+      messages or pending message; not pinned, read-only, a CLI import, a
+      subagent child or carrying a stream id, on every stored copy). Such a
+      session goes on to the existing retag; every other case answers the
+      409/404 the retag refusal gives, with the invalid-profile 400 kept ahead
+      of it, and 404 for ownership it can't verify.
 
     The ownership check after the load stays as the backstop.
     """
     sid = body.get("session_id")
-    if not isinstance(sid, str) or not is_safe_session_id(sid):
-        return False
-    try:
-        session_profile = get_session_profile_readonly(sid) or None
-    except KeyError:
-        return False
-    except (OSError, ValueError, TypeError):
+    if not isinstance(sid, str):
+        # A non-string id can't name a sidecar: master answered 404 for an int
+        # and crashed (500) on a list in the loader.
         bad(handler, "Session not found", 404)
         return True
-    if _session_visible_to_active_profile(session_profile, handler):
+    readings = session_owner_readings_readonly(sid, full_load=True)
+    if not readings or _owner_readings_visible(readings, handler):
         return False
     requested_profile, invalid = _chat_start_requested_profile(body)
     if invalid:
@@ -1066,10 +1105,11 @@ def _refuse_cross_profile_chat_start_before_load(handler, body) -> bool:
     if (
         requested_profile
         and _profiles_match(requested_profile, _get_active_profile_name())
+        and not _is_subagent_child_session_id(sid)
         and session_is_unclaimed_placeholder_readonly(sid)
     ):
         return False
-    _session_profile_mismatch_response(handler, sid, session_profile)
+    _send_owner_refusal(handler, sid, readings[0])
     return True
 
 
@@ -13442,6 +13482,9 @@ from api.models import (
     get_cli_session_by_id,
     get_session,
     get_session_profile_readonly,
+    get_sidecar_session_profile_readonly,
+    session_owner_readings_readonly,
+    UNVERIFIABLE_SESSION_OWNER,
     session_is_unclaimed_placeholder_readonly,
     get_session_for_scan,
     find_compression_recovery_session,
@@ -16587,17 +16630,20 @@ def _handle_session_get(handler, parsed) -> bool:
     try:
         _t1 = _time.monotonic()
         if _diag: _diag.stage("t1_after_get_session_check")
-        # #8834: decide ownership BEFORE the full load. get_session runs
+        # #8834: decide ownership BEFORE the load. get_session runs
         # Session.load, which can collapse duplicate partials and save (a .bak
-        # too) and caches what it loads, so a request refused below would
+        # too), and caches what it loads, so a request refused below would
         # still rewrite and cache another profile's session. The read-only
-        # check keeps this route's contract: 409 session_profile_mismatch for a
-        # known other profile, 404 for the legacy None-profile case so the
-        # client's self-heal fires, and fail-closed 404 for ownership it can't
-        # verify (#8094). A missing sidecar answers True and still reaches the
-        # foreign-session branch through get_session's KeyError. The check
-        # after the load below stays as the backstop.
-        if not _session_id_visible_to_request_profile(handler, sid):
+        # readings cover every object this load could serve (the resident
+        # session and, for a full load, the sidecar it may reload), and the
+        # request is refused only when none is visible, with this route's
+        # contract: 409 session_profile_mismatch for a known other profile, 404
+        # for the legacy None-profile case so the client's self-heal fires, and
+        # fail-closed 404 for ownership it can't verify (#8094). A missing
+        # sidecar still reaches the foreign-session branch through
+        # get_session's KeyError. The check after the load stays as the
+        # backstop.
+        if _refuse_cross_profile_before_load(handler, sid, full_load=load_messages):
             if _diag: _diag.finish()
             return True
         s = get_session(sid, metadata_only=(not load_messages))
@@ -35853,6 +35899,30 @@ def _import_cli_existing_session_refusal(
     return True
 
 
+def _refuse_cross_profile_import_cli_before_load(handler, sid, *, allow_all_profiles, requested_profile) -> bool:
+    """#8834: answer a refused /api/session/import_cli before ``Session.load`` runs.
+
+    Returns True when a response was sent. Decides both import_cli refusals
+    from the owner recorded on disk (``_import_cli_existing_session_refusal``),
+    because ``Session.load`` reads only the sidecar: a resident copy, even one
+    retagged in memory, never decides this route. The same check runs again on
+    the loaded session as the backstop. No sidecar (or an unsafe id) is not
+    decided here: ``Session.load`` returns None and the import path runs.
+    Ownership it can't verify answers 404, fail closed like #8094's guard.
+    """
+    try:
+        session_profile = get_sidecar_session_profile_readonly(sid) or None
+    except KeyError:
+        return False
+    except (OSError, ValueError, TypeError):
+        bad(handler, "Session not found in CLI store", 404)
+        return True
+    return _import_cli_existing_session_refusal(
+        handler, sid, session_profile,
+        allow_all_profiles=allow_all_profiles, requested_profile=requested_profile,
+    )
+
+
 def _handle_session_import_cli(handler, body):
     """Import a single CLI session into the WebUI store."""
     try:
@@ -35872,24 +35942,11 @@ def _handle_session_import_cli(handler, body):
 
     # #8834: decide ownership BEFORE loading. Session.load can collapse
     # duplicate partials and save (a .bak too), so the refusals below, decided
-    # on the loaded object, still rewrote another profile's sidecar. Decide
-    # them first from the read-only owner; the same checks run again on the
-    # loaded session as the backstop. No sidecar (or an unsafe id) is not
-    # decided here: Session.load returns None and the import path runs.
-    try:
-        _readonly_owner = get_session_profile_readonly(sid) or None
-    except KeyError:
-        pass
-    except (OSError, ValueError, TypeError):
-        # Ownership metadata it can't verify: fail closed like #8094's guard.
-        return bad(handler, "Session not found in CLI store", 404)
-    else:
-        if _import_cli_existing_session_refusal(
-            handler, sid, _readonly_owner,
-            allow_all_profiles=allow_all_profiles,
-            requested_profile=requested_profile,
-        ):
-            return None
+    # on the loaded object, still rewrote another profile's sidecar.
+    if _refuse_cross_profile_import_cli_before_load(
+        handler, sid, allow_all_profiles=allow_all_profiles, requested_profile=requested_profile,
+    ):
+        return None
 
     # Check if already imported — refresh messages from CLI store if new ones arrived
     existing = Session.load(sid)
