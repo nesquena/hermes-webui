@@ -7487,6 +7487,57 @@ def get_session_profile_readonly(sid):
     return profile
 
 
+def session_is_unclaimed_placeholder_readonly(sid):
+    """Whether chat/start's empty-placeholder retag could claim ``sid``, without loading it.
+
+    #8834: ``/api/chat/start`` may retag an empty, unpinned session that another
+    profile owns (``_retag_empty_session_profile``). Every other cross-profile
+    chat/start is refused, so it must be refused before ``Session.load`` runs:
+    that load can collapse duplicate partials and save, and ``get_session``
+    caches what it loads, and a refused request must do neither (#8094).
+
+    This answers the retag's own question from what ``Session.load`` would
+    build: no messages, no context messages, no pending user message, not
+    pinned. ``Session.__init__`` keeps ``messages`` and ``pending_user_message``
+    as given, drops a non-list ``context_messages`` and coerces ``pinned`` to a
+    bool. The duplicate-partial collapse never empties a non-empty list, and an
+    empty transcript has nothing to collapse, so loading a session this
+    returns True for cannot write. A resident full session answers from
+    memory. A metadata-only stub does not, because its empty ``messages`` says
+    nothing about the transcript on disk. Never repairs, saves or caches; a
+    sidecar it can't read, or whose body names another session, is not
+    claimable.
+    """
+    if not is_safe_session_id(sid):
+        return False
+    with LOCK:
+        cached = SESSIONS.get(sid)
+        if (
+            cached is not None
+            and str(getattr(cached, 'session_id', '') or '') == sid
+            and not getattr(cached, '_loaded_metadata_only', False)
+        ):
+            return not (
+                getattr(cached, 'messages', None)
+                or getattr(cached, 'context_messages', None)
+                or getattr(cached, 'pending_user_message', None)
+                or getattr(cached, 'pinned', False)
+            )
+    try:
+        data = json.loads((SESSION_DIR / f'{sid}.json').read_bytes())
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict) or data.get('session_id') != sid:
+        return False
+    context_messages = data.get('context_messages')
+    return not (
+        data.get('messages')
+        or (context_messages if isinstance(context_messages, list) else None)
+        or data.get('pending_user_message')
+        or data.get('pinned')
+    )
+
+
 _COMPRESSION_RECOVERY_PROFILE_UNSET = object()
 
 

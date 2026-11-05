@@ -1006,6 +1006,73 @@ def _session_profile_mismatch_response(handler, session_id, session_profile):
     return bad(handler, "Session not found", 404)
 
 
+def _chat_start_requested_profile(body):
+    """Parse /api/chat/start's optional ``profile``: ``(value, invalid)``.
+
+    An id that isn't ``default`` and doesn't match the profile-id pattern is
+    invalid (the route answers 400). Without the pattern (ImportError) the
+    value is ignored, as before.
+    """
+    requested_profile = str(body.get("profile") or "").strip()
+    if requested_profile:
+        try:
+            from api.profiles import _PROFILE_ID_RE
+
+            if requested_profile != "default" and not _PROFILE_ID_RE.fullmatch(requested_profile):
+                return requested_profile, True
+        except ImportError:
+            return "", False
+    return requested_profile, False
+
+
+def _refuse_cross_profile_chat_start_before_load(handler, body) -> bool:
+    """#8834: answer a refused cross-profile /api/chat/start before any full load.
+
+    Returns True when a response was sent. ``_get_or_materialize_session``
+    runs ``Session.load``, which can collapse duplicate partials and save, and
+    caches the session, so the ownership check after it let a refused request
+    rewrite and cache another profile's session. This decides the same
+    question from read-only reads first:
+
+    - no sidecar (KeyError) or an unsafe id: not decided here; the
+      materialize/claim path handles it as before;
+    - ownership it can't verify: 404, fail closed like #8094's guard;
+    - visible to the active profile: load as before;
+    - otherwise the session can only be claimed by the empty-placeholder
+      retag (request names the active profile, and the session has no
+      messages, context messages or pending message and isn't pinned). Loading
+      such a session can't write, so it goes on to the existing retag; every
+      other case answers the same 409/404 the retag refusal gives, with the
+      invalid-profile 400 kept ahead of it.
+
+    The ownership check after the load stays as the backstop.
+    """
+    sid = body.get("session_id")
+    if not isinstance(sid, str) or not is_safe_session_id(sid):
+        return False
+    try:
+        session_profile = get_session_profile_readonly(sid) or None
+    except KeyError:
+        return False
+    except (OSError, ValueError, TypeError):
+        bad(handler, "Session not found", 404)
+        return True
+    if _session_visible_to_active_profile(session_profile, handler):
+        return False
+    requested_profile, invalid = _chat_start_requested_profile(body)
+    if invalid:
+        bad(handler, "invalid profile", 400)
+        return True
+    if (
+        requested_profile
+        and _profiles_match(requested_profile, _get_active_profile_name())
+        and session_is_unclaimed_placeholder_readonly(sid)
+    ):
+        return False
+    _session_profile_mismatch_response(handler, sid, session_profile)
+    return True
+
+
 def _is_profile_agnostic_foreign_session(cli_meta) -> bool:
     """Return whether a foreign-session row lives outside the Hermes profile tree.
 
@@ -13375,6 +13442,7 @@ from api.models import (
     get_cli_session_by_id,
     get_session,
     get_session_profile_readonly,
+    session_is_unclaimed_placeholder_readonly,
     get_session_for_scan,
     find_compression_recovery_session,
     get_session_for_file_ops,
@@ -16519,6 +16587,19 @@ def _handle_session_get(handler, parsed) -> bool:
     try:
         _t1 = _time.monotonic()
         if _diag: _diag.stage("t1_after_get_session_check")
+        # #8834: decide ownership BEFORE the full load. get_session runs
+        # Session.load, which can collapse duplicate partials and save (a .bak
+        # too) and caches what it loads, so a request refused below would
+        # still rewrite and cache another profile's session. The read-only
+        # check keeps this route's contract: 409 session_profile_mismatch for a
+        # known other profile, 404 for the legacy None-profile case so the
+        # client's self-heal fires, and fail-closed 404 for ownership it can't
+        # verify (#8094). A missing sidecar answers True and still reaches the
+        # foreign-session branch through get_session's KeyError. The check
+        # after the load below stays as the backstop.
+        if not _session_id_visible_to_request_profile(handler, sid):
+            if _diag: _diag.finish()
+            return True
         s = get_session(sid, metadata_only=(not load_messages))
         _session_profile = getattr(s, 'profile', None) or None
         if not _session_visible_to_active_profile(_session_profile, handler):
@@ -30892,6 +30973,9 @@ def _handle_chat_start(handler, body, diag=None):
         stale_response = _agent_runtime_barrier_response(runner_local_owned=True)
         if stale_response is not None:
             return j(handler, stale_response, status=409)
+        diag.stage("ownership_preflight") if diag else None
+        if _refuse_cross_profile_chat_start_before_load(handler, body):
+            return None
         diag.stage("get_session") if diag else None
         try:
             s = _get_or_materialize_session(
@@ -30962,16 +31046,10 @@ def _handle_chat_start(handler, body, diag=None):
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
         diag.stage("validate_profile") if diag else None
-        requested_profile = str(body.get("profile") or "").strip()
+        requested_profile, _requested_profile_invalid = _chat_start_requested_profile(body)
         active_profile = _get_active_profile_name()
-        if requested_profile:
-            try:
-                from api.profiles import _PROFILE_ID_RE
-
-                if requested_profile != "default" and not _PROFILE_ID_RE.fullmatch(requested_profile):
-                    return bad(handler, "invalid profile", 400)
-            except ImportError:
-                requested_profile = ""
+        if _requested_profile_invalid:
+            return bad(handler, "invalid profile", 400)
         session_profile = getattr(s, "profile", None)
         if not _session_visible_to_active_profile(session_profile, handler):
             if (
@@ -35744,6 +35822,37 @@ def _is_messages_refresh_prefix_match(existing_messages: list, fresh_messages: l
     return True
 
 
+def _import_cli_existing_session_refusal(
+    handler, sid, session_profile, *, allow_all_profiles, requested_profile,
+) -> bool:
+    """Refuse /api/session/import_cli for a stored session the request doesn't own.
+
+    Returns True when a refusal was sent. An explicit all_profiles import may
+    only touch a session whose profile matches the requested one (404
+    otherwise). An unqualified import follows the detail-load contract (#7710):
+    409 ``session_profile_mismatch`` for a known other profile, 404 only for
+    the None-profile self-heal path. #8834 calls this with the read-only owner
+    before ``Session.load`` and again with the loaded profile after it.
+    """
+    if allow_all_profiles:
+        if requested_profile and not _profiles_match(session_profile, requested_profile):
+            bad(handler, "Session not found in CLI store", 404)
+            return True
+        return False
+    if _session_visible_to_active_profile(session_profile, handler):
+        return False
+    if session_profile:
+        j(handler, {
+            "error": "Session belongs to a different profile",
+            "code": "session_profile_mismatch",
+            "session_id": sid,
+            "profile": session_profile,
+        }, status=409)
+    else:
+        bad(handler, "Session not found in CLI store", 404)
+    return True
+
+
 def _handle_session_import_cli(handler, body):
     """Import a single CLI session into the WebUI store."""
     try:
@@ -35761,6 +35870,27 @@ def _handle_session_import_cli(handler, body):
     if allow_all_profiles and not requested_profile:
         return bad(handler, "profile is required for all_profiles import", 400)
 
+    # #8834: decide ownership BEFORE loading. Session.load can collapse
+    # duplicate partials and save (a .bak too), so the refusals below, decided
+    # on the loaded object, still rewrote another profile's sidecar. Decide
+    # them first from the read-only owner; the same checks run again on the
+    # loaded session as the backstop. No sidecar (or an unsafe id) is not
+    # decided here: Session.load returns None and the import path runs.
+    try:
+        _readonly_owner = get_session_profile_readonly(sid) or None
+    except KeyError:
+        pass
+    except (OSError, ValueError, TypeError):
+        # Ownership metadata it can't verify: fail closed like #8094's guard.
+        return bad(handler, "Session not found in CLI store", 404)
+    else:
+        if _import_cli_existing_session_refusal(
+            handler, sid, _readonly_owner,
+            allow_all_profiles=allow_all_profiles,
+            requested_profile=requested_profile,
+        ):
+            return None
+
     # Check if already imported — refresh messages from CLI store if new ones arrived
     existing = Session.load(sid)
     if existing:
@@ -35771,21 +35901,12 @@ def _handle_session_import_cli(handler, body):
         # An explicit all_profiles import is still allowed, but only when the request's
         # profile matches the stored session's profile.
         existing_profile = getattr(existing, "profile", None)
-        if allow_all_profiles:
-            if requested_profile and not _profiles_match(existing_profile, requested_profile):
-                return bad(handler, "Session not found in CLI store", 404)
-        elif not _session_visible_to_active_profile(existing_profile, handler):
-            # #7710: same contract as the detail-load endpoint —
-            # 409 ``session_profile_mismatch`` for a known other
-            # profile, 404 only for the None-profile self-heal path.
-            if existing_profile:
-                return j(handler, {
-                    "error": "Session belongs to a different profile",
-                    "code": "session_profile_mismatch",
-                    "session_id": sid,
-                    "profile": existing_profile,
-                }, status=409)
-            return bad(handler, "Session not found in CLI store", 404)
+        if _import_cli_existing_session_refusal(
+            handler, sid, existing_profile,
+            allow_all_profiles=allow_all_profiles,
+            requested_profile=requested_profile,
+        ):
+            return None
         refresh_profile = requested_profile or existing_profile
         cli_meta = _resolve_cli_import_metadata(
             sid,
