@@ -699,14 +699,50 @@ def test_the_repair_writes_only_the_sidecar_the_request_was_allowed(isolated_sta
     active_profile("default")
     raw = json.loads(other.read_text(encoding="utf-8"))
     raw["profile"] = "default"
+    raw["title"] = "COPY"
     (other.parent / "s_8830_copy.json").write_text(json.dumps(raw, indent=2), encoding="utf-8")
     models.SESSIONS.clear()
     before = (other.read_bytes(), other.stat().st_mtime_ns)
+    row_before = [(r.get("profile"), r.get("title")) for r in _index_rows() if r.get("session_id") == SID]
+    assert row_before == [("work", "Legacy history")]
     handler = _FakeHandler()
     handle_get(handler, urllib.parse.urlparse("/api/session?session_id=s_8830_copy&messages=1"))
     assert handler.status == 200
     assert (other.read_bytes(), other.stat().st_mtime_ns) == before
     assert not other.with_suffix(".json.bak").exists()
+    # The index row is rebuilt from the body, keyed by the body's id: without the refusal the
+    # copy would move the work session's row into this profile, retitled.
+    row_after = [(r.get("profile"), r.get("title")) for r in _index_rows() if r.get("session_id") == SID]
+    assert row_after == row_before
+
+
+def test_a_file_swapped_in_after_the_load_is_not_repaired(isolated_state, active_profile):
+    """The repair re-checks, on the bytes read under the lock, that they still name the file
+    it writes. A file whose body names another session, swapped in after the load, is left
+    alone, and that session's index row is untouched."""
+    from api import models
+
+    active_profile("work")
+    _shared_then_damaged(profile="work")
+    active_profile("default")
+    target = "s_8830_swap"
+    raw = json.loads((models.SESSION_DIR / f"{SID}.json").read_text(encoding="utf-8"))
+    raw["session_id"] = target
+    raw["profile"] = "default"
+    swap_path = models.SESSION_DIR / f"{target}.json"
+    swap_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    models.SESSIONS.clear()
+    session = models.Session.load(target)
+    assert session is not None and session._share_fields_misplaced is True
+    raw["session_id"] = SID
+    raw["title"] = "SWAPPED"
+    swap_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    before = swap_path.read_bytes()
+    row_before = [(r.get("profile"), r.get("title")) for r in _index_rows() if r.get("session_id") == SID]
+    assert row_before == [("work", "Legacy history")]
+    assert models.repair_session_share_field_order(session, target) is False
+    assert swap_path.read_bytes() == before
+    assert [(r.get("profile"), r.get("title")) for r in _index_rows() if r.get("session_id") == SID] == row_before
 
 
 def test_the_repair_never_writes_outside_the_session_dir(isolated_state, active_profile):

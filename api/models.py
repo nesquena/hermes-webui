@@ -8372,6 +8372,12 @@ def _repair_misplaced_share_fields(sid: str) -> bool:
     ``repair_session_share_field_order``.
     """
     def fields_for(payload):
+        # The index row is rebuilt from these bytes, keyed by their own
+        # ``session_id``. Re-check that they still name this file, as read under
+        # the lock: a file swapped in after the load must not move another
+        # session's index row (#8833 review).
+        if str(payload.get("session_id") or "") != sid:
+            return None
         misplaced = _sidecar_keys_after_body(payload, _SHARE_FIELD_KEYS)
         if not misplaced:
             return None

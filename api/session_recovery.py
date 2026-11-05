@@ -498,10 +498,11 @@ def _recovery_persist_lock(session_path: Path):
 
     Holding it from the inspection through ``os.replace`` keeps a concurrent
     writer (a save, a share write, the #8830 share-field repair) from replacing
-    a restored sidecar with the copy it read before the restore (#8833). Only a
-    process that has loaded ``api.models`` has such writers, so the standalone
-    CLI gets a no-op context. The lock is reentrant, so a caller that already
-    holds it for this session cannot deadlock here.
+    a restored sidecar with the copy it read before the restore (#8833). Those
+    writers only exist in a process that has loaded ``api.models``; until then
+    the standalone CLI gets a no-op context, and once a later step imports it
+    the CLI takes an uncontended lock. The lock is reentrant, so a caller that
+    already holds it for this session cannot deadlock here.
     """
     models = sys.modules.get('api.models')
     if models is None:
