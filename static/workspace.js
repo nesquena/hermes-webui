@@ -1084,9 +1084,6 @@ async function loadDir(path, opts={}){
       `/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(requestedPath)}`
     );
     if(!isCurrentNavigation())return false;
-    // This response owns the tree from here on; any older request still in
-    // flight is now stale even if it shares the navigation generation.
-    try{ _wsAppliedRequestSeq=requestSeq; }catch(e){ /* isolated harness scope */ }
     if(data.workspace_recovered&&data.workspace){
       S.session.workspace=String(data.workspace);
       S._dirCache={};
@@ -1143,6 +1140,10 @@ async function loadDir(path, opts={}){
     }
     // Fetch git info for workspace root (non-blocking)
     if(requestedPath==='.') _refreshGitBadge();
+    // This request finished painting; only a request that STARTS after it may
+    // replace its listing. An older reply still in flight is dropped instead of
+    // restoring files a newer listing already removed.
+    try{ _wsAppliedRequestSeq=requestSeq; }catch(e){ /* isolated harness scope */ }
     return true;
   }catch(e){
     if(!isCurrentNavigation())return false;
