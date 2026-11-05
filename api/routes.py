@@ -1135,8 +1135,11 @@ def _refuse_cross_profile_chat_start_before_load(handler, body) -> bool:
     if invalid:
         bad(handler, "invalid profile", 400)
         return True
+    # The retag may claim a placeholder another profile verifiably owns; it
+    # never claims one whose ownership can't be read (fail closed, #8094).
     if (
-        requested_profile
+        owner is not UNVERIFIABLE_SESSION_OWNER
+        and requested_profile
         and _profiles_match(requested_profile, _get_active_profile_name())
         and not _is_subagent_child_session_id(sid)
         and session_is_unclaimed_placeholder_readonly(sid)

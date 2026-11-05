@@ -381,6 +381,34 @@ def test_unverifiable_ownership_fails_closed_and_writes_nothing(isolated_session
     assert SID not in cache
 
 
+@pytest.mark.parametrize("profile_value", [123, True, ["default"]], ids=["int", "bool", "list"])
+@pytest.mark.parametrize("cached", [False, True], ids=["sidecar", "resident"])
+def test_chat_start_naming_the_active_profile_never_claims_an_unverifiable_owner(
+    isolated_sessions, monkeypatch, stop_past_ownership, cached, profile_value,
+):
+    """An empty session whose stored ``profile`` isn't a string has unverifiable ownership, so chat/start answers
+    404 before any load even when the request names the active profile (the client always sends it): the
+    placeholder exception is for a session another profile verifiably owns, not for one nobody can vouch for."""
+    directory, cache, _ = isolated_sessions
+    path = _sidecar(directory, profile=profile_value, messages=[])
+    before = path.read_bytes()
+    if cached:
+        session = models.Session(session_id=SID, title="Legacy")
+        session.messages = []
+        session.profile = profile_value
+        cache[SID] = session
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    assert models.session_is_unclaimed_placeholder_readonly(SID) is False
+    handler = _call("chat_start", active="default", profile="default")
+    assert handler.status == 404
+    assert path.read_bytes() == before
+    assert not path.with_suffix(".json.bak").exists()
+    if cached:
+        assert cache[SID].profile == profile_value  # not retagged, not replaced
+    else:
+        assert SID not in cache
+
+
 @pytest.mark.parametrize("route,counter", [("get_full", "cli_lookup"), ("chat_start", "claim"), ("import_cli", "cli_lookup")])
 def test_missing_sidecar_still_reaches_the_foreign_session_path(isolated_sessions, monkeypatch, route, counter):
     directory, cache, calls = isolated_sessions

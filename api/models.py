@@ -7622,8 +7622,10 @@ def session_is_unclaimed_placeholder_readonly(sid):
     ``Session.__init__`` keeps ``messages`` and ``pending_user_message`` as
     given, drops a non-list ``context_messages`` and coerces ``pinned`` to a
     bool, which the sidecar reading mirrors. Never repairs, saves or caches; a
-    sidecar it can't read, or whose body names another session, is not
-    claimable.
+    sidecar it can't read, whose body names another session, or whose
+    ``profile`` isn't a string (ownership unverifiable, like
+    ``get_sidecar_session_profile_readonly``), is not claimable, and neither is
+    a resident copy with such a profile.
     """
     if not is_safe_session_id(sid):
         return False
@@ -7635,6 +7637,9 @@ def session_is_unclaimed_placeholder_readonly(sid):
             and str(getattr(cached, 'session_id', '') or '') == sid
             and not getattr(cached, '_loaded_metadata_only', False)
         ):
+            cached_profile = getattr(cached, 'profile', None)
+            if cached_profile is not None and not isinstance(cached_profile, str):
+                return False
             if not _is_unclaimed_placeholder(lambda key: getattr(cached, key, None)):
                 return False
             resident = True
@@ -7647,6 +7652,9 @@ def session_is_unclaimed_placeholder_readonly(sid):
         # other unparseable file (see get_sidecar_session_profile_readonly).
         return False
     if not isinstance(data, dict) or data.get('session_id') != sid:
+        return False
+    profile = data.get('profile')
+    if profile is not None and not isinstance(profile, str):
         return False
     return _is_unclaimed_placeholder(data.get)
 
