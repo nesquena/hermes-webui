@@ -424,6 +424,27 @@ def test_the_reasoning_writer_refuses_a_session_loaded_from_a_copy(store):
     assert _files(store) == before
 
 
+def test_the_title_writer_refuses_a_session_loaded_from_a_copy(store):
+    """``_persist_generated_session_title`` reloads the session the object's id names and saves
+    it, so a copy object would retitle the session its body names. Over HTTP the generic
+    ownership guard 404s the copy first (``/api/session/title/regenerate``), and the import
+    title thread loads the imported session by its own id; this covers a direct caller."""
+    from api import models, routes
+
+    _victim(store)
+    _copy(store, partials=False)
+    before = _files(store)
+
+    with pytest.raises(RuntimeError, match="8852"):
+        routes._persist_generated_session_title(
+            models.get_session(COPY), "Hijacked by copy", event_reason="test"
+        )
+
+    _unchanged_victim(store, before)
+    assert _files(store) == before
+    assert json.loads(before[f"{VICTIM}.json"])["title"] == "Victim"
+
+
 def test_gateway_reattach_at_startup_skips_a_copy(store, monkeypatch):
     """At startup every sidecar with an active stream and a saved Gateway run is reattached under
     its session's id. A copy's id is the other session's, so its stale run would be resumed, and

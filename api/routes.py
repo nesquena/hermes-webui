@@ -140,6 +140,14 @@ def _persist_generated_session_title(
 ) -> str:
     normalized_title = str(next_title or "").strip()[:80] or "Untitled"
     sid = str(getattr(session, "session_id", "") or "")
+    loaded_from = getattr(session, "_sidecar_names_other_session", None)
+    if loaded_from:
+        # #8852: this writer reloads and saves the session the object's id
+        # names; the id came from a file whose body names another session.
+        raise RuntimeError(
+            f"Refusing to write a title for session {sid!r}: it was loaded from "
+            f"{loaded_from}.json, whose body names a different session. See #8852."
+        )
     original_session = session
     with _get_session_agent_lock(sid):
         with LOCK:
