@@ -985,6 +985,11 @@ let _wsTreeGen = 0;
 let _wsNavigationGen = 0;
 // The directory the generation above belongs to; same-path refreshes share it.
 let _wsNavigationPath = null;
+// Last request sequence that actually painted the tree. A response older than
+// that must never overwrite a newer listing (e.g. a refresh that started
+// before a delete and lands after it).
+let _wsRequestSeq = 0;
+let _wsAppliedRequestSeq = 0;
 function bumpWorkspaceTreeGen(){
   _wsTreeGen = (typeof _wsTreeGen === 'number' ? _wsTreeGen : 0) + 1;
   return _wsTreeGen;
@@ -1040,6 +1045,8 @@ async function loadDir(path, opts={}){
   if(!S.session)return false;
   const requestedPath=String(path||'.');
   const sessionId=S.session.session_id;
+  const requestSeq=(typeof _wsRequestSeq==='number'?_wsRequestSeq:0)+1;
+  try{ _wsRequestSeq=requestSeq; }catch(e){ /* isolated harness scope */ }
   const treeGen=_wsTreeGen;  // #4671: capture the workspace-tree generation. A profile
                              // switch bumps it (bumpWorkspaceTreeGen), so a stale response
                              // from the previous workspace — which would pass the session_id
@@ -1060,7 +1067,8 @@ async function loadDir(path, opts={}){
     &&S.session.session_id===sessionId
     &&treeGen===_wsTreeGen
     &&navigationGen===_wsNavigationGen
-    &&String(S.currentDir||'.')===requestedPath;
+    &&String(S.currentDir||'.')===requestedPath
+    &&requestSeq>=(typeof _wsAppliedRequestSeq==='number'?_wsAppliedRequestSeq:0);
   // A root refresh renders twice (partial, then complete). This object owns
   // the keyboard position carried between the two; every exit drops it.
   let refill=null;
@@ -1076,6 +1084,9 @@ async function loadDir(path, opts={}){
       `/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(requestedPath)}`
     );
     if(!isCurrentNavigation())return false;
+    // This response owns the tree from here on; any older request still in
+    // flight is now stale even if it shares the navigation generation.
+    try{ _wsAppliedRequestSeq=requestSeq; }catch(e){ /* isolated harness scope */ }
     if(data.workspace_recovered&&data.workspace){
       S.session.workspace=String(data.workspace);
       S._dirCache={};
