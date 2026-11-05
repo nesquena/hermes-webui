@@ -91,6 +91,8 @@
 
 ### Fixed
 
+- **Samsung photos no longer stall a session or come back corrupted (#8805).** Photos from Samsung phones carry a Samsung Extended Format (SEF) trailer after the JPEG data, so they failed the check that lets a complete image skip credential redaction. Every load of a session holding them ran the redaction patterns over megabytes of base64: a 52 MB session took 67-79 s per load, and the redaction pass also altered the photo in the response so it no longer decoded (the saved session was untouched). A trailer that is exactly one well-formed SEF block set, fully accounted for with nothing after it, is now accepted; a malformed or partial trailer is still redacted. Thanks @jan-demsar. (#8809)
+
 - **A sidebar swipe or Ctrl/Cmd+B no longer fires while you are typing.** On a phone, an edge swipe that starts on the composer or the message field no longer opens the sidebar, and Ctrl/Cmd+B no longer toggles the sidebar while a text field has focus, even when the key event reaches another element. A swipe from the edge anywhere else still opens the sidebar. Thanks @solarmaster961 (#8630).
 
 - **The orphaned-session sidebar test no longer fails when the index rebuild finishes first.** Its fixture wrote the pending-message fields after the message list, where the metadata reader never looks, so a pending session was pruned whenever the rebuild thread won its race. The fixture now uses the same field order as a saved session, and a new test pins both sides of the race (#8814).
