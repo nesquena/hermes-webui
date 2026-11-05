@@ -3292,28 +3292,15 @@
   .composer-footer.cf-icons .saved-prompts-popup{display:none!important;}
   .composer-footer.cf-icons .composer-divider{display:none;}
 
-  /* Hidden tooltips must not occupy the footer strip's scroll region. The
-     global .has-tooltip::after is an absolutely-positioned pseudo-element
-     parked at left:calc(100% + 8px) with opacity:0 — inside .composer-left
-     (overflow-x:auto) that idle pseudo-element extended the measured
-     scrollWidth far past the visible controls, so the fit ladder below
-     collapsed the footer while plenty of real space remained. Remove idle
-     tooltips from the strip entirely and restore them on hover/focus with
-     the same delay+fade as the global tooltip (animation fill:both keeps the
-     .15s hover-intent delay and .14s fade). */
-  .composer-left .has-tooltip::after{content:none;}
-  /* During the fit measurement itself, suppress tooltips unconditionally: the
-     hover/focus restore above recreates the box before the fade finishes, and
-     a refit running inside that window would count it (adversarial review). */
-  .composer-footer.cf-measuring .has-tooltip::after{content:none!important;}
-  .composer-left .has-tooltip:hover::after,
-  .composer-left .has-tooltip:focus-visible::after{content:attr(data-tooltip);animation:composer-tooltip-in .14s ease .15s both;}
-  .composer-left .has-tooltip[aria-haspopup][aria-expanded="true"]::after{content:none;}
-  @keyframes composer-tooltip-in{from{opacity:0;}to{opacity:1;}}
-  @media(prefers-reduced-motion:reduce){
-    .composer-left .has-tooltip:hover::after,
-    .composer-left .has-tooltip:focus-visible::after{animation:none;}
-  }
+  /* Keep generated tooltip boxes out of the fit measurement without deleting
+     their content. `content:none` made an idle icon-only control lose its CSS-
+     generated accessible name; removing/recreating the pseudo-element during a
+     refit also restarted an already-visible tooltip's reveal. Fixed-position
+     boxes do not contribute to .composer-left's scrollable overflow, so the
+     synchronous, visibility-hidden fit pass measures only the real controls.
+     Generated content, the global hover/focus delay and opacity continuity all
+     stay intact, including while the fit guard is active. */
+  .composer-footer.cf-measuring .has-tooltip::after{position:fixed!important;}
 
   /* Intermediate shrink stage (between full labels and .cf-icons): the fit
      ladder in ui.js caps the widest labeled chips so their labels ellipsize
