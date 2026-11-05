@@ -49,6 +49,11 @@ def _max_extracted_bytes() -> int:
 # authoritative value is _max_extracted_bytes(), read at extraction time.
 _MAX_EXTRACTED_BYTES = 10 * MAX_UPLOAD_BYTES
 
+# Member-count cap: a tiny archive with millions of (possibly empty) members
+# slips under the byte cap but can exhaust inodes / file descriptors. Bound it.
+# Module-level (read at call time) so tests can lower it.
+_MAX_ARCHIVE_MEMBERS = 10000
+
 
 def _reject_before_read(handler, message, status):
     """Reject without reading the body; close so unread bytes can't poison HTTP/1.1 reuse.
@@ -208,6 +213,30 @@ def _attachment_root() -> Path:
     if override:
         return Path(override).expanduser().resolve()
     return (STATE_DIR / 'attachments').resolve()
+
+
+_SHARE_ATTACHMENT_ROOTS: dict[str, Path | None] = {}
+
+
+def _share_attachment_root() -> Path | None:
+    """The attachment root as trusted by public shares, or None (#8590).
+
+    Resolved once per configured spelling -- at import, i.e. server startup,
+    since STATE_DIR and HERMES_WEBUI_ATTACHMENT_DIR are process-wide -- and
+    never by name again: shares walk it no-follow, so a symlink planted later
+    (e.g. inside a workspace that contains it) cannot move it.  A root that
+    cannot be resolved is None (fail closed).  Uploads keep _attachment_root().
+    """
+    key = os.getenv('HERMES_WEBUI_ATTACHMENT_DIR', '').strip() or str(STATE_DIR / 'attachments')
+    if key not in _SHARE_ATTACHMENT_ROOTS:
+        try:
+            _SHARE_ATTACHMENT_ROOTS[key] = Path(key).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            _SHARE_ATTACHMENT_ROOTS[key] = None
+    return _SHARE_ATTACHMENT_ROOTS[key]
+
+
+_share_attachment_root()
 
 
 def _upload_destination(session_id: str, safe_name: str, dest_dir: Path | None = None) -> Path:
@@ -375,17 +404,24 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
     # #3398: create the extraction root race-safely under the true workspace root.
     make_anchored_dir(workspace, dest_dir)
 
-    # Member-count cap: a tiny archive with millions of (possibly empty) members
-    # slips under the byte cap but can exhaust inodes / file descriptors. Bound it.
-    _MAX_ARCHIVE_MEMBERS = 10000
-
     extracted_files = []
     total_extracted = 0
 
     try:
         if _mode == 'zip':
             with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
-                for member in zf.infolist():
+                members = zf.infolist()
+                # #8823: the central directory is already fully parsed, so count
+                # the file members the loop below would extract and reject an
+                # over-cap archive BEFORE creating a single member file (the
+                # in-loop check stays as defence in depth). Inside the try, so
+                # the cleanup below still removes the empty dest_dir.
+                if sum(1 for m in members if not m.is_dir()) > _MAX_ARCHIVE_MEMBERS:
+                    raise ValueError(
+                        f'Archive has too many files (> {_MAX_ARCHIVE_MEMBERS}). '
+                        f'Possible archive bomb.'
+                    )
+                for member in members:
                     # Skip directories
                     if member.is_dir():
                         continue
@@ -428,7 +464,15 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
 
         elif _mode == 'tar':
             with tarfile.open(fileobj=io.BytesIO(file_bytes)) as tf:
-                for member in tf.getmembers():
+                members = tf.getmembers()
+                # #8823: same up-front member-count precheck as the zip branch,
+                # counting exactly what the loop extracts (regular files).
+                if sum(1 for m in members if m.isfile()) > _MAX_ARCHIVE_MEMBERS:
+                    raise ValueError(
+                        f'Archive has too many files (> {_MAX_ARCHIVE_MEMBERS}). '
+                        f'Possible archive bomb.'
+                    )
+                for member in members:
                     if not member.isfile():
                         continue
                     if len(extracted_files) >= _MAX_ARCHIVE_MEMBERS:

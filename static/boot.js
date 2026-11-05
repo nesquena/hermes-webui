@@ -3091,6 +3091,19 @@ function _isNumpadEnter(e){
 // falls through to the `else { send() }` branch — sending the message instead
 // of inserting a newline (issue: mobile Enter sends on fresh page load).
 try{ window._sendKey=localStorage.getItem('hermes-pref-send_key')||'enter'; }catch(_){ window._sendKey='enter'; }
+// hwc: send-key — clarify and inline edit share this Enter decision.
+// The composer listener below keeps its own branches, including _mobileDefault.
+function _composerShouldSendOnKey(e){
+  if(!e||e.key!=='Enter') return false;
+  if(typeof _isImeEnter==='function'?_isImeEnter(e):(e.isComposing||e.keyCode===229)) return false;
+  const isNumpadEnter=typeof _isNumpadEnter==='function'&&_isNumpadEnter(e);
+  const _mobileDefault=_isTouchOnlyDevice()
+    &&(window._sendKey==='enter'||typeof window._sendKey==='undefined');
+  if(window._sendKey==='shift+enter') return !!e.shiftKey;
+  if(window._sendKey==='ctrl+enter'||_mobileDefault) return !!(isNumpadEnter||e.ctrlKey||e.metaKey);
+  return !e.shiftKey;
+}
+window._composerShouldSendOnKey=_composerShouldSendOnKey;
 $('msg').addEventListener('keydown',e=>{
   // Autocomplete navigation when dropdown is open
   const dd=$('cmdDropdown');

@@ -298,6 +298,8 @@ def test_every_fallback_is_the_plain_install_it_replaced(tmp_path, case):
         failing.write_text(FAILING_HELPER, encoding="utf-8")
         kwargs["helper"] = failing
     elif case == "no-writable-temp-dir":
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            pytest.skip("root bypasses DAC permission bits, so the unwritable temp dir cannot be unwritable")
         kwargs["tmpdir"] = tmp_path / "does-not-exist"
         kwargs["app_writable"] = False
     rc, stdout, log = _install(tmp_path, text, **kwargs)
