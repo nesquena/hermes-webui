@@ -230,6 +230,89 @@ class _FakeClock:
 
 
 
+class _InlineProbeThread(threading.Thread):
+    """``models-endpoint-probe`` threads run to completion inside ``start()``.
+
+    The bounded probe path hands each HTTP attempt to a daemon thread and waits
+    for it with a real ``threading.Event.wait(timeout)``, which ``_FakeClock``
+    cannot virtualise: a probe thread the host schedules late spends the
+    caller's slice in real seconds, and under load the chain is cut off before
+    the endpoints this file orders (#8789). Running the probe inline sets the
+    event before the wait, so a fake-clock test is decided by the schedule's
+    arithmetic alone. Every other thread stays real.
+    """
+
+    inline_runs = 0  # how many probes ran inline, so a test can prove the stand-in engaged
+
+    def start(self):
+        if self.name == "models-endpoint-probe":
+            type(self).inline_runs += 1
+            self.run()
+        else:
+            super().start()
+
+
+class _ThreadingWithInlineProbes:
+    """``threading`` as ``api.config`` sees it, with probe threads run inline."""
+
+    Thread = _InlineProbeThread
+
+    def __getattr__(self, name):
+        return getattr(threading, name)
+
+
+def _install_fake_clock(monkeypatch, request) -> _FakeClock:
+    """The fake clock plus inline probes: the pairing that makes a chain deterministic.
+
+    At teardown, checks that at least one probe ran inline, so a renamed
+    production thread fails these tests loudly instead of quietly handing them
+    back to real scheduling.
+    """
+    clock = _FakeClock()
+    monkeypatch.setattr(cfg, "time", clock, raising=False)
+    monkeypatch.setattr(cfg, "threading", _ThreadingWithInlineProbes())
+    inline_runs_before = _InlineProbeThread.inline_runs
+
+    def probes_ran_inline():
+        assert _InlineProbeThread.inline_runs > inline_runs_before, (
+            "no models-endpoint-probe thread ran inline: either the production thread was "
+            "renamed, or this test never reached the bounded probe path it means to exercise"
+        )
+
+    request.addfinalizer(probes_ran_inline)
+    return clock
+
+
+def _assert_dead_chain_let_the_live_one_through(observed, clock, catalog):
+    """Every endpoint was attempted, in config order, inside the window, and the
+    live provider behind the dead ones was probed in-band and published."""
+    # The active endpoint first, then the named entries. The LM Studio
+    # provider-group fallback resolves to the active endpoint's URL here and
+    # reuses that probe's outcome (same URL, same credential) rather than
+    # repeating it, so it adds no third probe of the dead host.
+    probed_hosts = [urlparse(url).netloc for url, _ in observed["dead"]]
+    assert probed_hosts == [
+        "lan-dead.example:1234",
+        "dead-one.example",
+        "dead-two.example",
+    ], probed_hosts
+    assert clock.now < _BUDGET, clock.now
+    assert _models_by_provider(catalog).get("custom:my-gateway") == _GATEWAY_MODELS
+
+
+def _configure_dead_chain(monkeypatch):
+    """The active endpoint and two named providers dead, a reachable one behind them."""
+    _configure(
+        monkeypatch,
+        active_base_url="http://lan-dead.example:1234/v1",
+        custom_providers=[
+            {"name": "Dead One", "base_url": "https://dead-one.example/v1", "api_key": "k1"},
+            {"name": "Dead Two", "base_url": "https://dead-two.example/v1", "api_key": "k2"},
+            {"name": "My Gateway", "base_url": "https://gw-live.example/v1", "api_key": "k3"},
+        ],
+    )
+
+
 def _catalog(name: str) -> dict:
     """A minimal catalog tagged so a test can tell which build produced it."""
     return {
@@ -242,7 +325,7 @@ def _catalog(name: str) -> dict:
 
 
 def test_unreachable_lan_active_endpoint_does_not_starve_the_gateway_behind_it(
-    monkeypatch, isolate_models_catalog_state
+    monkeypatch, request, isolate_models_catalog_state
 ):
     """The #7481 repro, using the issue's own config shape.
 
@@ -263,7 +346,9 @@ def test_unreachable_lan_active_endpoint_does_not_starve_the_gateway_behind_it(
     asserts the probe/scheduling invariants that the fake clock makes exact,
     and takes the one end-to-end "lands in the caller's catalog" assertion under
     a deliberately widened budget/cap pair (see ``_WIDE_BUDGET`` / ``_WIDE_CAP``)
-    whose real work finishes with a large margin.
+    whose real work finishes with a large margin. The other real wait, each
+    probe's ``threading.Event.wait(timeout)`` on its daemon thread, is removed
+    by running probes inline (``_install_fake_clock``, #8789).
 
     The in-band publication itself is also covered, machine-independently, by
     ``test_every_dead_endpoint_in_the_chain_still_lets_the_live_one_through``
@@ -290,8 +375,7 @@ def test_unreachable_lan_active_endpoint_does_not_starve_the_gateway_behind_it(
     # ≥8x real-time margin instead of racing the 4s deadline.
     monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", _WIDE_BUDGET, raising=False)
     monkeypatch.setattr(cfg, "CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS", _WIDE_CAP, raising=False)
-    clock = _FakeClock()
-    monkeypatch.setattr(cfg, "time", clock, raising=False)
+    clock = _install_fake_clock(monkeypatch, request)
     observed = _install_urlopen(
         monkeypatch,
         dead_hosts=["lan-dead.example"],
@@ -331,7 +415,7 @@ def test_unreachable_lan_active_endpoint_does_not_starve_the_gateway_behind_it(
 
 
 def test_every_dead_endpoint_in_the_chain_still_lets_the_live_one_through(
-    monkeypatch, isolate_models_catalog_state
+    monkeypatch, request, isolate_models_catalog_state
 ):
     """Two dead named providers in front of a reachable one must not starve it.
 
@@ -340,17 +424,8 @@ def test_every_dead_endpoint_in_the_chain_still_lets_the_live_one_through(
     ``dead-two`` were reached on a slower box, so the ordering assertion this test
     exists for was decided by the runner's speed.
     """
-    _configure(
-        monkeypatch,
-        active_base_url="http://lan-dead.example:1234/v1",
-        custom_providers=[
-            {"name": "Dead One", "base_url": "https://dead-one.example/v1", "api_key": "k1"},
-            {"name": "Dead Two", "base_url": "https://dead-two.example/v1", "api_key": "k2"},
-            {"name": "My Gateway", "base_url": "https://gw-live.example/v1", "api_key": "k3"},
-        ],
-    )
-    clock = _FakeClock()
-    monkeypatch.setattr(cfg, "time", clock, raising=False)
+    _configure_dead_chain(monkeypatch)
+    clock = _install_fake_clock(monkeypatch, request)
     observed = _install_urlopen(
         monkeypatch,
         dead_hosts=["lan-dead.example", "dead-one.example", "dead-two.example"],
@@ -360,25 +435,45 @@ def test_every_dead_endpoint_in_the_chain_still_lets_the_live_one_through(
 
     catalog = cfg.get_available_models()
 
-    # Every endpoint was attempted, in config order, before the budget ran out:
-    # the active endpoint first, then the named entries. The LM Studio
-    # provider-group fallback resolves to the active endpoint's URL here and
-    # reuses that probe's outcome (same URL, same credential) rather than
-    # repeating it, so it adds no third probe of the dead host.
-    probed_hosts = [url.split("://", 1)[1].split("/", 1)[0] for url, _ in observed["dead"]]
-    assert probed_hosts == [
-        "lan-dead.example:1234",
-        "dead-one.example",
-        "dead-two.example",
-    ], probed_hosts
-    # …and the chain still finished inside the window, so the live provider behind
-    # the dead ones was probed in-band and published.
-    assert clock.now < _BUDGET, clock.now
-    assert _models_by_provider(catalog).get("custom:my-gateway") == _GATEWAY_MODELS
+    _assert_dead_chain_let_the_live_one_through(observed, clock, catalog)
+
+
+def test_dead_endpoint_chain_is_decided_by_the_fake_clock_not_by_thread_scheduling(
+    monkeypatch, request, isolate_models_catalog_state
+):
+    """#8789: a probe thread the host schedules late must not spend the slice.
+
+    The issue's reproduction: every ``models-endpoint-probe`` thread starts 1.5 s
+    late, longer than any fair-share slice of the 4 s window. Under real thread
+    scheduling that exhausts each slice in real seconds and the chain stops after
+    ``dead-one``; with probes run inline the late start is never reached and the
+    chain is decided by the fake clock, as the test above intends. The helper's
+    teardown check proves the stand-in engaged.
+    """
+    real_start = threading.Thread.start
+
+    def late_start(thread):
+        if thread.name == "models-endpoint-probe":
+            time.sleep(1.5)
+        real_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", late_start)
+    _configure_dead_chain(monkeypatch)
+    clock = _install_fake_clock(monkeypatch, request)
+    observed = _install_urlopen(
+        monkeypatch,
+        dead_hosts=["lan-dead.example", "dead-one.example", "dead-two.example"],
+        live_hosts=["gw-live.example"],
+        clock=clock,
+    )
+
+    catalog = cfg.get_available_models()
+
+    _assert_dead_chain_let_the_live_one_through(observed, clock, catalog)
 
 
 def test_static_allowlist_provider_is_never_probed_and_does_not_dilute_the_schedule(
-    monkeypatch, isolate_models_catalog_state
+    monkeypatch, request, isolate_models_catalog_state
 ):
     """A provider with a static ``models:`` allowlist consumes no probe slot."""
     _configure(
@@ -394,10 +489,12 @@ def test_static_allowlist_provider_is_never_probed_and_does_not_dilute_the_sched
             {"name": "My Gateway", "base_url": "https://gw-live.example/v1", "api_key": "k"},
         ],
     )
+    clock = _install_fake_clock(monkeypatch, request)
     observed = _install_urlopen(
         monkeypatch,
         dead_hosts=["lan-dead.example"],
         live_hosts=["gw-live.example", "static-never-probed.example"],
+        clock=clock,
     )
 
     catalog = cfg.get_available_models()
@@ -409,7 +506,9 @@ def test_static_allowlist_provider_is_never_probed_and_does_not_dilute_the_sched
         for url, _ in observed["live"] + observed["dead"]
         if "static-never-probed.example" in url
     ]
-    # …while the live provider behind the dead endpoint still made it in-band.
+    # …while the chain stayed inside the window (the fake clock's arithmetic) and
+    # the live provider behind the dead endpoint still made it in-band.
+    assert clock.now < _BUDGET, clock.now
     assert _models_by_provider(catalog).get("custom:my-gateway") == _GATEWAY_MODELS
 
 

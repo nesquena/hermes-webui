@@ -17,6 +17,9 @@ on:
   pull_request:
     paths:
       - 'start.ps1'
+      - 'api/updates.py'
+      - 'api/subprocess_utils.py'
+      - 'tests/test_update_network_git_windows.py'
       - '.github/workflows/native-windows-startup.yml'
   workflow_dispatch:
 
@@ -24,6 +27,16 @@ on:
 # start.ps1 against fixtures it creates itself. Nothing here needs write access.
 permissions:
   contents: read
+
+# One run per pull request per workflow: a new push to a PR cancels this workflow's run for
+# the superseded head, queued or in progress, so a burst of PR updates does not hold every
+# later run in the shared runner queue. Only a PR run's FIRST attempt joins the PR group: a
+# re-run keeps its original (possibly superseded) head and must never cancel or replace the
+# latest head's run. Re-runs, pushes to master, tag pushes and manual dispatches get a unique
+# group (the run id), so they are never cancelled or held back.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.run_attempt == '1' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == '1' }}
 
 jobs:
   native-windows-startup:
@@ -622,3 +635,29 @@ jobs:
           if (Test-Path server.py.bak-ci) {
             Move-Item -Force server.py.bak-ci server.py
           }
+
+  # Native oracles for the updater's Windows network-command cleanup: the
+  # per-call Job Object runner must reap the whole tree on timeout, even
+  # when the direct child already exited. stdlib-only unittest, no pytest,
+  # no server, no Agent install, no secrets. fetch-depth: 0 so the pinned
+  # legacy baseline commit stays available to the leak oracle.
+  windows-update-network-git:
+    name: updater Job Object cleanup (CPython ${{ matrix.python-version }})
+    runs-on: windows-latest
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.13']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run updater network cleanup unittests
+        shell: pwsh
+        run: python -m unittest discover -s tests -p test_update_network_git_windows.py -v
