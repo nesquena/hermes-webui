@@ -549,3 +549,116 @@ def test_lock_busy_disk_fallback_is_epoch_fenced(monkeypatch):
     ] != ["invalidated-disk-provider"], (
         "the invalidated disk default leaked into the display answer"
     )
+
+
+def test_lock_busy_recheck_falls_back_when_queued_builder_starts(monkeypatch):
+    """P1: a short holder can hand the lock to a queued builder, not the reader.
+
+    The reader's non-blocking acquire fails while no rebuild is in flight. If it
+    then makes one unbounded blocking acquire, a queued builder can win the lock,
+    set ``_cache_build_in_progress`` and hold it for the whole rebuild. The
+    no-wait display caller must recheck the flag after a bounded acquire and
+    serve the lock-free fallback instead of waiting for that builder.
+    """
+    _warm_catalog(monkeypatch, provider_ids=["anthropic"])
+    monkeypatch.setattr(cfg, "_cache_build_in_progress", False, raising=False)
+
+    raw_lock = cfg._available_models_cache_lock
+    reader_blocking = threading.Event()
+    builder_queued = threading.Event()
+    builder_holding = threading.Event()
+    release_builder = threading.Event()
+    observed = {}
+    errors = []
+
+    class _QueuedBuilderSchedulingLock:
+        """Force the exact reader → queued-builder interleaving on a real RLock."""
+
+        def __init__(self, target):
+            self._target = target
+            self._reader_first_blocking = True
+
+        def acquire(self, blocking=True, *args, **kwargs):
+            name = threading.current_thread().name
+            if name == "display-reader" and blocking and self._reader_first_blocking:
+                self._reader_first_blocking = False
+                reader_blocking.set()
+                if not builder_queued.wait(2):
+                    raise RuntimeError("builder did not queue")
+                if not builder_holding.wait(2):
+                    raise RuntimeError("builder did not start its rebuild")
+                return self._target.acquire(blocking, *args, **kwargs)
+            if name == "queued-builder":
+                builder_queued.set()
+            return self._target.acquire(blocking, *args, **kwargs)
+
+        def release(self):
+            return self._target.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *exc_info):
+            self.release()
+
+    wrapper = _QueuedBuilderSchedulingLock(raw_lock)
+    monkeypatch.setattr(cfg, "_available_models_cache_lock", wrapper, raising=False)
+
+    def _builder():
+        try:
+            wrapper.acquire()
+            try:
+                cfg._cache_build_in_progress = True
+                builder_holding.set()
+                release_builder.wait(3)
+                cfg._cache_build_in_progress = False
+            finally:
+                wrapper.release()
+        except BaseException as exc:  # surface thread failures in the test thread
+            errors.append(exc)
+
+    def _reader():
+        try:
+            observed["result"] = cfg.get_available_models(
+                prefer_cache=True, wait_for_inflight_rebuild=False
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    raw_lock.acquire()
+    holder_owned = True
+    reader = threading.Thread(target=_reader, name="display-reader", daemon=True)
+    builder = threading.Thread(target=_builder, name="queued-builder", daemon=True)
+    try:
+        reader.start()
+        assert reader_blocking.wait(2), "reader never reached blocking admission"
+        builder.start()
+        assert builder_queued.wait(2), "builder never queued for the lock"
+        raw_lock.release()
+        holder_owned = False
+        assert builder_holding.wait(2), "builder never acquired the lock"
+
+        # Let the fixed reader's bounded acquire expire. The buggy reader stays
+        # blocked here; releasing the builder afterwards lets the test finish
+        # and exposes its incorrect authoritative answer instead of hanging.
+        time.sleep(0.2)
+        release_builder.set()
+        reader.join(3)
+        builder.join(3)
+    finally:
+        release_builder.set()
+        if holder_owned:
+            raw_lock.release()
+        reader.join(3)
+        builder.join(3)
+
+    assert not errors, errors
+    assert not reader.is_alive(), "display reader remained blocked on the builder"
+    assert not builder.is_alive(), "builder did not finish"
+    result = observed["result"]
+    assert result.get("_non_authoritative") is True, (
+        "the reader waited for the queued builder and returned the warm "
+        "authoritative catalog instead of taking the no-wait fallback"
+    )
+    assert result.get("_non_authoritative_reason") == "no_wait_minimal_static_catalog"
