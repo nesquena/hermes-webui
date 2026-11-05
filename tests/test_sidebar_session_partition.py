@@ -76,7 +76,10 @@ def test_partition_helper_keeps_raw_source_counts_while_render_owns_visible_coun
     assert "? _renderSidebarRowsFromRawSessions(cliSessionsRaw, [...cliReferenceRaw, ..._scopedSidebarReferenceRows(true, projectIdFor)], rowsById).length" in render_body
     assert "function _countRenderedSidebarRowsFromRawSessions" not in SESSIONS_JS
     assert "function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw, payloadRowsById){" in SESSIONS_JS
-    assert "_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows, payloadRowsById)" in SESSIONS_JS
+    # #8791: the projection (lineage collapse, then child attachment over the raw, reference and payload rows) runs
+    # once, or once per profile when ids are shared across profiles; both go through the same helper.
+    assert "_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(raw), raw, refs, payload)" in SESSIONS_JS
+    assert "if(!shared) return project(sessionsRaw, referenceRows, payloadRowsById);" in SESSIONS_JS
     projection = _function_block("_renderSidebarRowsFromPartition")
     assert "partition.cliReferenceRaw:partition.webuiReferenceRaw" in projection
     assert "_scopedSidebarReferenceRows(isCliView, partition.projectIdFor)" in projection

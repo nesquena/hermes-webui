@@ -430,6 +430,7 @@ function _providerFromModelValue(v) {
   return '';
 }
 function _normalizeConfiguredModelKey(v) { return String(v || '').toLowerCase(); }
+function _configuredModelIdentity(v) { return _normalizeConfiguredModelKey(v); }
 function _getConfiguredModelBadge(value, badgeMap) { return badgeMap[value] || null; }
 let _lastSelected = null;
 function selectModelFromDropdown(value, provider) {
