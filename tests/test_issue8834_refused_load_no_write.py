@@ -409,6 +409,46 @@ def test_chat_start_naming_the_active_profile_never_claims_an_unverifiable_owner
         assert SID not in cache
 
 
+@pytest.mark.parametrize("profile_value", [123, True, ["default"]], ids=["int", "bool", "list"])
+def test_chat_start_never_claims_a_resident_only_session_whose_owner_is_unverifiable(
+    isolated_sessions, monkeypatch, stop_past_ownership, profile_value,
+):
+    """A cached session with no sidecar and a non-string ``profile``: ``POST /api/session/new`` creates one
+    from ``{"profile": 123}``, since it passes the value through unchecked. The placeholder reader has to call
+    it unclaimable from the resident copy alone, and chat/start naming the active profile answers 404
+    without retagging it, replacing it or creating a sidecar."""
+    directory, cache, _ = isolated_sessions
+    session = models.Session(session_id=SID, title="Legacy")
+    session.messages = []
+    session.profile = profile_value
+    cache[SID] = session
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    assert models.session_is_unclaimed_placeholder_readonly(SID) is False
+    handler = _call("chat_start", active="default", profile="default")
+    assert handler.status == 404
+    assert cache[SID] is session
+    assert session.profile == profile_value
+    assert not (directory / f"{SID}.json").exists()
+
+
+def test_chat_start_placeholder_exception_itself_requires_a_verifiable_owner(
+    isolated_sessions, monkeypatch, stop_past_ownership,
+):
+    """The route's own check, independent of the placeholder reader: when the reader says claimable but the
+    ownership readings say unverifiable (duplicate ``profile`` keys whose first bytes and full parse
+    disagree can do that), chat/start still answers 404 and writes nothing."""
+    directory, cache, _ = isolated_sessions
+    path = _sidecar(directory, profile=123, messages=[])
+    before = path.read_bytes()
+    monkeypatch.setattr(routes, "session_is_unclaimed_placeholder_readonly", lambda *_a, **_k: True)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    handler = _call("chat_start", active="default", profile="default")
+    assert handler.status == 404
+    assert path.read_bytes() == before
+    assert not path.with_suffix(".json.bak").exists()
+    assert SID not in cache
+
+
 @pytest.mark.parametrize("route,counter", [("get_full", "cli_lookup"), ("chat_start", "claim"), ("import_cli", "cli_lookup")])
 def test_missing_sidecar_still_reaches_the_foreign_session_path(isolated_sessions, monkeypatch, route, counter):
     directory, cache, calls = isolated_sessions
