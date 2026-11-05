@@ -595,6 +595,7 @@ def _project_default_workspace(proj) -> str | None:
 # same object. Reentrant so a mutation may call helpers that take it again.
 from api.models import PROJECTS_CATALOG_LOCK as _PROJECTS_CATALOG_LOCK
 from api.models import update_session_share_fields as _update_session_share_fields
+from api.models import repair_session_share_field_order as _repair_session_share_field_order
 
 
 # Bounded wait for a session lock while /api/projects/delete clears cached
@@ -1669,7 +1670,38 @@ def _skill_view_from_active_dir(name: str) -> dict:
 # Trivial; many production SSE deployments run 5-15s heartbeats specifically
 # to handle proxies and mobile NAT.
 _SSE_HEARTBEAT_INTERVAL_SECONDS = 5
+# A proxy can keep ACKing server heartbeats after the downstream browser has
+# disappeared, so socket keepalive and write deadlines alone cannot prove the
+# subscriber is still alive (#7105). Rotate the three indefinite subscription
+# streams after five minutes. A live EventSource renews the lease by reconnecting;
+# a dead browser does not, which bounds the handler thread and subscriber queue.
+# This is an internal correctness bound, not a user-facing tuning surface.
+_SSE_SUBSCRIBER_LEASE_SECONDS = 300.0
 _SESSION_SSE_SENT_EVENT_ID_LIMIT = 4096
+
+
+def _sse_subscriber_lease_deadline() -> float:
+    return time.monotonic() + max(0.0, float(_SSE_SUBSCRIBER_LEASE_SECONDS))
+
+
+def _sse_subscriber_lease_expired(handler, deadline: float) -> bool:
+    if time.monotonic() < deadline:
+        return False
+    # Do not emit `Connection: close` in the response headers: #3103 proved that
+    # header creates reconnect storms. Setting the BaseHTTPRequestHandler flag
+    # only when the bounded response finishes makes this generation reach EOF.
+    handler.close_connection = True
+    return True
+
+
+def _sse_subscriber_wait_seconds(deadline: float) -> float:
+    return max(
+        0.0,
+        min(
+            float(_SSE_HEARTBEAT_INTERVAL_SECONDS),
+            deadline - time.monotonic(),
+        ),
+    )
 
 
 def _normalize_messaging_source(raw_source) -> str:
@@ -3051,6 +3083,9 @@ def _build_session_list_cache_payload(
             )
         diag_stage("merge_cli_sessions")
         cli_by_id = {s["session_id"]: s for s in cli}
+        cli_by_profile_id = {
+            (_sidebar_profile_group_key(s.get("profile")), s["session_id"]): s for s in cli
+        }
         webui_sessions = _prune_orphaned_desktop_sidecar_sessions(
             webui_sessions,
             known_agent_ids=cli_by_id,
@@ -3179,6 +3214,27 @@ def _build_session_list_cache_payload(
                 for key in ("source_tag", "raw_source", "session_source", "source_label"):
                     if not s.get(key) and meta.get(key):
                         s[key] = meta[key]
+                # #8791: an opened delegated child's sidecar carries neither its
+                # relationship nor its parent's compression lineage until the
+                # lineage enrichment, which runs after the sidebar bucket is
+                # derived. Its own state.db row has both. Without them a child
+                # naming an intermediate compression segment of its parent
+                # resolved no parent, kept its WebUI bucket while its host sat
+                # in the CLI group, and rendered in neither. The row's OWN
+                # lineage ids are copied later, after the dedupe below, so the
+                # represented-id set stays exactly what it was.
+                twin = cli_by_profile_id.get(
+                    (_sidebar_profile_group_key(s.get("profile")), s.get("session_id"))
+                )
+                if twin is not None and _sidebar_subagent_copy_matches(s, twin):
+                    meta = twin
+                    for key in (
+                        "relationship_type",
+                        "_parent_lineage_root_id",
+                        "_parent_lineage_tip_id",
+                    ):
+                        if not s.get(key) and meta.get(key):
+                            s[key] = meta[key]
         webui_sessions = [_normalize_sidebar_source_flags(s) for s in webui_sessions]
         # Apply the same CLI visibility semantics to imported local copies so
         # low-value imported artifacts do not leak into the sidebar.
@@ -3220,6 +3276,19 @@ def _build_session_list_cache_payload(
             show_kanban_sessions=show_kanban_sessions,
             source_filter=source_filter,
         )
+        # #8791: now that the dedupe has run on the same ids as before, give an
+        # opened delegated sidecar its own compression-lineage ids from its
+        # state.db row, so a child naming its pre-compression id finds it when
+        # the sidebar bucket is derived. Copying them earlier widened the
+        # profile-blind represented-id set and hid another profile's row.
+        for s in webui_sessions:
+            meta = cli_by_profile_id.get(
+                (_sidebar_profile_group_key(s.get("profile")), s.get("session_id"))
+            )
+            if meta and _sidebar_subagent_copy_matches(s, meta):
+                for key in ("_lineage_root_id", "_lineage_tip_id"):
+                    if not s.get(key) and meta.get(key):
+                        s[key] = meta[key]
     else:
         webui_sessions = _prune_orphaned_desktop_sidecar_sessions(
             webui_sessions,
@@ -3243,15 +3312,9 @@ def _build_session_list_cache_payload(
         # this child's view anyway, so its bucket says nothing about where the
         # child belongs — the same rule the parent_is_cli_session hint below
         # follows. None/''/renamed-root aliases collapse onto one root group,
-        # mirroring _profiles_match.
-        _cli_off_rows_by_profile: dict[str, dict[str, dict]] = {}
-        for _row in webui_sessions:
-            if not (isinstance(_row, dict) and _row.get("session_id")):
-                continue
-            _profile_group = _sidebar_profile_group_key(_row.get("profile"))
-            _cli_off_rows_by_profile.setdefault(_profile_group, {})[
-                str(_row.get("session_id"))
-            ] = _row
+        # mirroring _profiles_match. Compression-lineage aliases are indexed
+        # too (#8791): see _sidebar_rows_by_profile.
+        _cli_off_rows_by_profile = _sidebar_rows_by_profile(webui_sessions)
         webui_sessions = [
             s for s in webui_sessions
             if not _sidebar_display_is_cli(
@@ -3284,9 +3347,17 @@ def _build_session_list_cache_payload(
     # Stamp the parent's tab (the same classifier _filter_sidebar_source uses) on the child.
     # Only within one profile: a parent in another profile is filtered out of this child's
     # view, so its tab says nothing about where the child belongs — leave the hint unset.
-    _merged_by_id = {s.get("session_id"): s for s in merged if s.get("session_id")}
+    # Keyed by profile group + id: with All profiles on, two profiles can share a parent id,
+    # and a bare-id map kept only one of them, so the other profile's children lost the hint
+    # (#8791).
+    _merged_by_profile_id = {
+        (_sidebar_profile_group_key(s.get("profile")), s.get("session_id")): s
+        for s in merged if s.get("session_id")
+    }
     for s in merged:
-        _parent = _merged_by_id.get(s.get("parent_session_id"))
+        _parent = _merged_by_profile_id.get(
+            (_sidebar_profile_group_key(s.get("profile")), s.get("parent_session_id"))
+        )
         if _parent is not None and _profiles_match(_parent.get("profile"), s.get("profile")):
             s["parent_is_cli_session"] = _is_cli_session_for_settings(_parent)
     # ── Profile scoping (#1611) ────────────────────────────────────────
@@ -3345,13 +3416,11 @@ def _build_session_list_cache_payload(
     # All-profiles on, two profiles can hold the same session ids (a cloned
     # profile or a copied state.db), and one flat map let beta's child resolve
     # alpha's same-id parent and leave both tabs (#8245 release gate r1103).
-    _sidebar_scoped_rows_by_profile: dict[str, dict[str, dict]] = {}
-    for _row in [*archived_scoped, *visible_scoped]:
-        if not (isinstance(_row, dict) and _row.get("session_id")):
-            continue
-        _sidebar_scoped_rows_by_profile.setdefault(
-            _sidebar_profile_group_key(_row.get("profile")), {}
-        )[str(_row.get("session_id"))] = _row
+    # Compression-lineage aliases are indexed too, so a child naming its
+    # parent's pre-compression segment still finds the tip (#8791).
+    _sidebar_scoped_rows_by_profile = _sidebar_rows_by_profile(
+        [*archived_scoped, *visible_scoped]
+    )
     # One verdict per row object for this request. It is also published on the
     # response copies as ``sidebar_is_cli_session`` (below): the verdict is
     # derived from the full scoped payload BEFORE source filtering and archive
@@ -3379,6 +3448,10 @@ def _build_session_list_cache_payload(
         item = dict(row)
         if row.get("session_id"):
             item["sidebar_is_cli_session"] = bool(_sidebar_bucket_is_cli(row))
+            # #8791: the canonical profile group (renamed-root aliases folded),
+            # so the browser keeps one profile's rows together without the
+            # profile roster, which may not have loaded yet.
+            _stamp_sidebar_profile_group(item)
         return item
 
     archived_webui_count = sum(
@@ -7075,7 +7148,7 @@ def _reload_session_for_share(sid: str):
         return None
 
 
-def _mirror_share_fields_to_cached_session(sid: str, source) -> None:
+def _mirror_share_fields_to_cached_session(sid: str, source):
     """Copy share fields onto the resident cached session before it is persisted.
 
     The cache's freshness check compares message/scene state and not share fields,
@@ -7087,16 +7160,34 @@ def _mirror_share_fields_to_cached_session(sid: str, source) -> None:
     the live copy after the save, a checkpoint landing in that window would write
     ``share_token: None`` back over the sidecar and the published link would stay
     live with nothing left for revoke to find.
+
+    The mirrored pair is the share lifecycle's, never the resident's own change,
+    so its stale-save baseline moves with it. Moving only the fields made the
+    pair look like the resident's own edit: a writer already holding that object
+    (a paused rename) whose object was evicted before
+    ``_commit_share_fields_to_cached_session`` ran later saved the mirrored token
+    over the durable pair -- putting a revoked token back, or orphaning a newer
+    link that revoke could then no longer reach. With the baseline moved, every
+    later save of the object adopts the durable pair instead.
+
+    Returns the object written to (``None`` when nothing was mirrored). The
+    caller hands it to ``_persist_share_fields`` so a failed persist can return
+    the pair to exactly that object, wherever it is by then.
     """
+    mirrored = None
     try:
         with LOCK:
             cached = SESSIONS.get(sid)
             if cached is None or cached is source:
-                return
+                return None
+            mirrored = cached
             cached.share_token = getattr(source, "share_token", None)
             cached.share_created_at = getattr(source, "share_created_at", None)
+            cached._share_token_saved = cached.share_token
+            cached._share_created_at_saved = cached.share_created_at
     except Exception:
         logger.debug("Failed to mirror share fields for session %s", sid, exc_info=True)
+    return mirrored
 
 
 def _resident_share_token(sid: str) -> str:
@@ -7126,7 +7217,7 @@ def _resident_share_token(sid: str) -> str:
     return str(getattr(cached, "share_token", "") or "").strip()
 
 
-def _persist_share_fields(sid: str, session, *, share_token, share_created_at) -> None:
+def _persist_share_fields(sid: str, session, *, share_token, share_created_at, mirrored=None) -> None:
     """Persist only the two share fields of ``sid``.
 
     Saving the copy the handler resolved writes its conversation fields back over
@@ -7142,14 +7233,20 @@ def _persist_share_fields(sid: str, session, *, share_token, share_created_at) -
     and ``save()`` re-entering it is expected.
     """
     with _session_persist_lock(sid):
-        if not _update_session_share_fields(
-            sid,
-            share_token=share_token,
-            share_created_at=share_created_at,
-        ):
-            session.share_token = share_token
-            session.share_created_at = share_created_at
-            session.save(touch_updated_at=False)
+        try:
+            if not _update_session_share_fields(
+                sid,
+                share_token=share_token,
+                share_created_at=share_created_at,
+            ):
+                session.share_token = share_token
+                session.share_created_at = share_created_at
+                session.save(touch_updated_at=False)
+        except Exception:
+            _return_mirrored_share_pair_to_resident(
+                sid, mirrored, session, share_token=share_token, share_created_at=share_created_at,
+            )
+            raise
         # Still under the persistence lock, so no save can land between the
         # patch and this step (#8399 review, release fold).
         _commit_share_fields_to_cached_session(
@@ -7157,11 +7254,40 @@ def _persist_share_fields(sid: str, session, *, share_token, share_created_at) -
         )
 
 
+def _return_mirrored_share_pair_to_resident(sid: str, mirrored, session, *, share_token, share_created_at) -> None:
+    """Undo the mirror's baseline move when the share pair never reached disk.
+
+    The pre-save mirror moves the resident's stale-save baseline with the pair,
+    so the pair is never the resident's own change. When the persist then fails,
+    that object would adopt the old durable pair on its next save and drop a
+    snapshot that is already published (or put back a token revoke already
+    tombstoned). Hand the pair back to the exact object the mirror wrote to, as
+    its own change against the durable pair the handler read, so its next save
+    still writes it.
+
+    The target is that object, not whatever ``SESSIONS`` holds now: between the
+    mirror and the failure a checkpoint can save it (adopting the old durable
+    pair), the LRU can evict it, or a reload can replace it, while a writer
+    still holds it and saves it later. The caller holds
+    ``_session_persist_lock(sid)``, so no save of the session runs in between.
+    """
+    if mirrored is None or mirrored is session:
+        return
+    try:
+        with LOCK:
+            mirrored.share_token = share_token
+            mirrored.share_created_at = share_created_at
+            mirrored._share_token_saved = getattr(session, "_share_token_saved", None)
+            mirrored._share_created_at_saved = getattr(session, "_share_created_at_saved", None)
+    except Exception:
+        logger.debug("Failed to restore the share baseline of session %s", sid, exc_info=True)
+
+
 def _commit_share_fields_to_cached_session(sid: str, *, share_token, share_created_at) -> None:
     """Set the resident session's share pair AND its stale-save baseline to the
     pair that was just persisted. The caller holds ``_session_persist_lock(sid)``.
 
-    The pre-save mirror moves only the fields. A resident save in the
+    The pre-save mirror moved only the fields at first. A resident save in the
     mirror/patch window is then back at its baseline and adopts the pre-patch
     pair from disk, so the cached copy kept serving a revoked token. Moving the
     fields again without the baseline is worse: a copy that a writer reloaded
@@ -12672,18 +12798,55 @@ def _is_delegated_subagent_child(row: dict) -> bool:
     Delegated subagents are recorded in state.db with ``source='subagent'`` and
     a non-continuation ``parent_session_id`` (``relationship_type``
     ``'child_session'``). They are view-only work owned by the delegate runner
-    (#5307). This predicate is display-only: it derives a sidebar bucket and
-    never mutates the row's source/read-only flags or ``is_cli_session_row``.
+    (#5307). A row whose relationship is not known yet (a persisted WebUI
+    sidecar, before lineage enrichment) counts when it is a subagent row that
+    names a parent: only ``delegate_task`` writes ``subagent`` rows, so its
+    parent chain always leads to the delegating host (#8791). This predicate is
+    display-only: it derives a sidebar bucket and never mutates the row's
+    source/read-only flags or ``is_cli_session_row``.
     """
     if not isinstance(row, dict):
         return False
-    if row.get("relationship_type") != "child_session":
-        return False
+    relationship = row.get("relationship_type")
+    if relationship != "child_session":
+        # #8791: a delegated child the user opened has a persisted WebUI
+        # sidecar that names its parent and the subagent source, but its
+        # relationship_type only arrives with the lineage enrichment, which
+        # runs after the sidebar bucket is derived. Without this the copy kept
+        # its own (WebUI) bucket while its Desktop/CLI parent sat in the CLI
+        # group, so it rendered in neither.
+        if relationship or not str(row.get("parent_session_id") or "").strip():
+            return False
     raw_source = str(
         row.get("raw_source") or row.get("source_tag")
         or row.get("session_source") or row.get("source") or ""
     ).strip().lower()
     return raw_source == "subagent"
+
+
+def _sidebar_subagent_copy_matches(row: dict, state_row: dict) -> bool:
+    """True when ``state_row`` is the state.db twin of a delegated (subagent) WebUI copy in the same profile.
+
+    Used to fill an opened delegated child's relationship and lineage ids from
+    its own state.db row before the sidebar bucket is derived (#8791). Never
+    for other rows, and never across profiles: two profiles can share an id.
+    """
+    if not (isinstance(row, dict) and isinstance(state_row, dict)):
+        return False
+    source = str(row.get("raw_source") or row.get("source_tag") or "").strip().lower()
+    return source == "subagent" and _profiles_match(state_row.get("profile"), row.get("profile"))
+
+
+def _stamp_sidebar_profile_group(item: dict) -> dict:
+    """Give a sidebar or search row its canonical profile group (``sidebar_profile_group``), in place (#8791).
+
+    The browser groups rows by it when ids collide across profiles. Search hits
+    merge into the sidebar list, so ``/api/sessions/search`` rows must carry the
+    same value as ``/api/sessions`` rows or a renamed root's rows split apart.
+    """
+    if isinstance(item, dict) and item.get("session_id"):
+        item["sidebar_profile_group"] = _sidebar_profile_group_key(item.get("profile"))
+    return item
 
 
 def _sidebar_profile_group_key(profile) -> str:
@@ -12714,29 +12877,68 @@ def _sidebar_display_is_cli(row: dict, rows_by_id: dict | None = None) -> bool:
     """
     if not isinstance(row, dict):
         return False
-    if _is_delegated_subagent_child(row):
-        seen: set[str] = set()
-        current: dict = row
-        while _is_delegated_subagent_child(current):
-            parent_id = str(current.get("parent_session_id") or "").strip()
-            if not parent_id or parent_id in seen:
-                break
-            seen.add(parent_id)
-            parent = (rows_by_id or {}).get(parent_id)
-            if parent is None:
-                break
-            current = parent
-        if current is not row:
-            return _is_cli_session_for_settings(current)
-        # Rotation/compression fallback: the direct parent row may be gone, but
-        # the lineage root/tip can still derive the child's bucket.
-        for key in ("_parent_lineage_root_id", "_parent_lineage_tip_id"):
-            lineage_id = str(row.get(key) or "").strip()
-            if lineage_id and lineage_id in (rows_by_id or {}):
-                ancestor = (rows_by_id or {})[lineage_id]
-                if ancestor is not row:
-                    return _is_cli_session_for_settings(ancestor)
-    return _is_cli_session_for_settings(row)
+    rows_by_id = rows_by_id or {}
+    current: dict = row
+    seen = {id(row)}
+    # Walk to the first ancestor that is not itself a delegated child: that is
+    # the host whose bucket every delegated row below it shares (#8791).
+    while _is_delegated_subagent_child(current):
+        parent = _sidebar_delegation_parent(current, rows_by_id)
+        if parent is None or id(parent) in seen:
+            break
+        seen.add(id(parent))
+        current = parent
+    return _is_cli_session_for_settings(current)
+
+
+def _sidebar_delegation_parent(row: dict, rows_by_id: dict) -> dict | None:
+    """The payload row a delegated child's sidebar bucket follows, or None.
+
+    Tries the direct parent, then the parent lineage's tip and root. A
+    compressed parent is in the payload only as its tip, so a child naming the
+    pre-compression segment resolves through the tip's lineage alias (see
+    ``_sidebar_rows_by_profile``). A compressed delegated row's own
+    ``parent_session_id`` can name its own lineage root, which aliases back to
+    the row itself; skip that self-reference and follow the lineage root's
+    parent (``_parent_lineage_root_id``) to the host instead (#8791).
+    """
+    for key in ("parent_session_id", "_parent_lineage_tip_id", "_parent_lineage_root_id"):
+        ref = str(row.get(key) or "").strip()
+        if not ref:
+            continue
+        parent = rows_by_id.get(ref)
+        if parent is not None and parent is not row:
+            return parent
+    return None
+
+
+def _sidebar_rows_by_profile(rows) -> dict[str, dict[str, dict]]:
+    """Per-profile id → row maps for the sidebar bucket derivation (#8141).
+
+    Built PER PROFILE: with All-profiles on, two profiles can hold the same
+    session ids (a cloned profile or a copied state.db), and one flat map let a
+    child resolve another profile's same-id parent (#8245 release gate r1103).
+
+    Each row is also indexed under its compression-lineage root and tip ids
+    when no payload row carries that id. Compression leaves only the tip in the
+    payload, while a delegated child still names the pre-compression parent it
+    was spawned from, so without the alias the child lost its parent and left
+    both sidebar groups (#8791). A real row always wins over an alias.
+    """
+    by_profile: dict[str, dict[str, dict]] = {}
+    indexed: list[tuple[dict, dict]] = []
+    for row in rows:
+        if not (isinstance(row, dict) and row.get("session_id")):
+            continue
+        group = by_profile.setdefault(_sidebar_profile_group_key(row.get("profile")), {})
+        group[str(row.get("session_id"))] = row
+        indexed.append((group, row))
+    for group, row in indexed:
+        for key in ("_lineage_root_id", "_lineage_tip_id"):
+            alias = str(row.get(key) or "").strip()
+            if alias and alias not in group:
+                group[alias] = row
+    return by_profile
 
 
 def _reconcile_session_detail_source_flags(session: dict, state_meta: dict) -> dict:
@@ -16368,6 +16570,13 @@ def _handle_session_get(handler, parsed) -> bool:
             # otherwise emit a useless 409 with profile=null.
             if _diag: _diag.finish()
             return bad(handler, "Session not found", 404)
+        # #8830: only now that this request owns the session, move share fields
+        # an exp-v0.52.621..630 build left after ``messages`` (no-op unless the
+        # load found them there). A refused request returned above and never
+        # writes (#8094). The repair takes this session's agent lock itself
+        # (without waiting), the lock /api/session/delete holds while it removes
+        # the sidecar, so a delete that lands mid-repair is not undone.
+        _repair_session_share_field_order(s, sid)
         original_stream_id = getattr(s, "active_stream_id", None)
         _clear_stale_stream_state(s)
         cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
@@ -19045,7 +19254,7 @@ def handle_post(handler, parsed) -> bool:
             # session between the save and the mirror would write
             # ``share_token: None`` back over the sidecar, leaving a published
             # link that revoke can no longer reach.
-            _mirror_share_fields_to_cached_session(sid, persisted_session)
+            mirrored = _mirror_share_fields_to_cached_session(sid, persisted_session)
             # Persist only the two share fields: saving this detached copy would
             # restore the title and transcript it was built from, reverting a
             # writer that finished while the snapshot was built (#8255 review,
@@ -19055,6 +19264,7 @@ def handle_post(handler, parsed) -> bool:
                 persisted_session,
                 share_token=share_meta["share_token"],
                 share_created_at=share_meta["share_created_at"],
+                mirrored=mirrored,
             )
         finally:
             share_lock.release()
@@ -19143,7 +19353,7 @@ def handle_post(handler, parsed) -> bool:
             # Mirror before the durable save (#8255 review, second round): a
             # streaming checkpoint in the save/mirror window would otherwise write
             # the live session's stale share fields back over the sidecar.
-            _mirror_share_fields_to_cached_session(sid, target_session)
+            mirrored = _mirror_share_fields_to_cached_session(sid, target_session)
             # Clear only the share fields, so a conversation write that landed
             # after the final re-read above is not reverted (#8255 review, third
             # round).
@@ -19152,6 +19362,7 @@ def handle_post(handler, parsed) -> bool:
                 target_session,
                 share_token=None,
                 share_created_at=None,
+                mirrored=mirrored,
             )
         finally:
             share_lock.release()
@@ -23062,6 +23273,7 @@ def _handle_sessions_search(handler, parsed):
             if isinstance(item.get("title"), str):
                 item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
             _redact_sidebar_title_fields(item, _search_redact_enabled)
+            _stamp_sidebar_profile_group(item)
             safe_sessions.append(item)
         return j(handler, {
             "sessions": safe_sessions,
@@ -23076,6 +23288,7 @@ def _handle_sessions_search(handler, parsed):
             if isinstance(item.get("title"), str):
                 item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
             _redact_sidebar_title_fields(item, _search_redact_enabled)
+            _stamp_sidebar_profile_group(item)
             results.append(item)
             continue
         if content_search:
@@ -23087,22 +23300,29 @@ def _handle_sessions_search(handler, parsed):
                 if sess is None:
                     continue
                 # Hidden internal rows neither match nor consume the search
-                # depth budget (#quiet-delegation gate review).
+                # depth budget (#quiet-delegation gate review). Each row keeps
+                # its RAW index into the full sess.messages list (hidden rows
+                # included, as they are in the /api/session payload) so a
+                # content hit can tell the frontend where it matched (#4159).
                 scan_pool = [
-                    m for m in (sess.messages or [])
+                    (raw_idx, m) for raw_idx, m in enumerate(sess.messages or [])
                     if not is_hidden_transcript_row(m)
                 ]
                 msgs = scan_pool[:depth] if depth else scan_pool
-                for m in msgs:
+                for raw_idx, m in msgs:
                     c = _session_search_message_text(m)
                     if q in str(c).lower():
-                        item = dict(s, match_type="content")
+                        # match_message_idx is a FULL-session index, not an
+                        # index into a paged tail window; the frontend
+                        # translates it before jumping (#5106).
+                        item = dict(s, match_type="content", match_message_idx=raw_idx)
                         preview = _session_search_preview(c, q)
                         if preview:
                             item["match_preview"] = _redact_text(preview, _enabled=_search_redact_enabled)
                         if isinstance(item.get("title"), str):
                             item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
                         _redact_sidebar_title_fields(item, _search_redact_enabled)
+                        _stamp_sidebar_profile_group(item)
                         results.append(item)
                         break
             except (KeyError, Exception):
@@ -24480,6 +24700,7 @@ def _handle_gateway_sse_stream(handler, parsed):
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     q = watcher.subscribe()
+    lease_deadline = _sse_subscriber_lease_deadline()
     try:
         # Send initial snapshot immediately
         from api.models import get_cli_sessions
@@ -24487,9 +24708,13 @@ def _handle_gateway_sse_stream(handler, parsed):
         _sse(handler, 'sessions_changed', {'sessions': initial})
 
         while True:
+            if _sse_subscriber_lease_expired(handler, lease_deadline):
+                break
             try:
-                event_data = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
+                event_data = q.get(timeout=_sse_subscriber_wait_seconds(lease_deadline))
             except queue.Empty:
+                if _sse_subscriber_lease_expired(handler, lease_deadline):
+                    break
                 _sse_keepalive(handler)
                 continue
             if event_data is None:
@@ -24514,11 +24739,16 @@ def _handle_session_events_stream(handler):
     _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     q = subscribe_session_events()
+    lease_deadline = _sse_subscriber_lease_deadline()
     try:
         while True:
+            if _sse_subscriber_lease_expired(handler, lease_deadline):
+                break
             try:
-                event_data = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
+                event_data = q.get(timeout=_sse_subscriber_wait_seconds(lease_deadline))
             except queue.Empty:
+                if _sse_subscriber_lease_expired(handler, lease_deadline):
+                    break
                 _sse_keepalive(handler)
                 continue
             _sse(handler, event_data.get('type', 'sessions_changed'), event_data)
@@ -26485,8 +26715,10 @@ def _handle_session_sse_stream(handler, parsed):
 
     Lifecycle: opened by the frontend at session mount, closed at unmount or
     on tab close. Multiple tabs share one SessionChannel (refcounted via
-    subscribe/unsubscribe). 30s SSE keepalive comments keep the proxy alive.
-    Reaper-driven idle TTL (default 4h) prevents zombie channels.
+    subscribe/unsubscribe). Five-second SSE comments keep proxies alive, and
+    each subscription generation is capped at five minutes so a proxy-ACKed
+    dead browser cannot pin the thread/channel forever. A live EventSource
+    reconnects and gets a fresh generation; the reaper can collect the old one.
     """
     sid = parse_qs(parsed.query).get("session_id", [""])[0]
     if not sid:
@@ -26518,7 +26750,13 @@ def _handle_session_sse_stream(handler, parsed):
     # orphaning this subscriber on a channel no longer in SESSION_CHANNELS.
     # bg_task_complete emits would then never reach this queue. See
     # subscribe_to_session_channel for the full rationale (PR #2971 Greptile P1).
-    ch, q = subscribe_to_session_channel(sid, maxsize=64)
+    last_event_id = str(handler.headers.get("Last-Event-ID", "") or "").strip()
+    ch, q = subscribe_to_session_channel(
+        sid,
+        maxsize=64,
+        after_event_id=last_event_id or None,
+    )
+    lease_deadline = _sse_subscriber_lease_deadline()
 
     # NOTE: ``subscribe_to_session_channel`` above acquires a subscriber slot
     # that MUST be released on every exit path. Header setup
@@ -26552,7 +26790,59 @@ def _handle_session_sse_stream(handler, parsed):
         # live (mirrors approval/clarify which send an 'initial' frame). No
         # snapshot data is needed — this channel only carries forward-looking
         # events, not pending state.
-        _sse(handler, 'initial', {"session_id": sid})
+        initial_event_id = str(
+            getattr(q, "_session_channel_initial_event_id", "") or ""
+        ).strip()
+        if initial_event_id:
+            _sse_with_id(
+                handler,
+                'initial',
+                {"session_id": sid},
+                initial_event_id,
+            )
+        else:
+            _sse(handler, 'initial', {"session_id": sid})
+
+        def emit_channel_payload(payload) -> bool:
+            if payload is None:
+                # Close sentinel (#7302) reached while draining the replay
+                # prefix: end the response exactly like the live loop's
+                # end-of-stream branch below, so EventSource sees EOF.
+                handler.close_connection = True
+                return False
+            event_name, data = payload
+            # The wire ``id:`` is the channel's per-frame replay cursor
+            # (``SessionChannel`` stamps it on each delivered frame), NOT the
+            # payload ``event_id``: the dual-name completion emit repeats one
+            # ``event_id`` across two frames, so ``Last-Event-ID: <event_id>``
+            # cannot name a unique replay position. The payload keeps its
+            # ``event_id`` for the browser's ``(session_id, event_id)`` dedupe.
+            wire_id = str(getattr(payload, "cursor", "") or "").strip()
+            if wire_id:
+                _sse_with_id(handler, event_name, data, wire_id)
+            else:
+                _sse(handler, event_name, data)
+            # Delivered: that write completed, so this subscriber is alive right
+            # now (re-gate finding 1). A write that raises instead never reaches
+            # this line, and its handler path unsubscribes in the finally below.
+            ch.note_subscriber_write_ok(q)
+            return True
+
+        # Cursor replay was queued atomically before this handler registered as
+        # a live subscriber. Deliver it before `server_turn_started` recovery:
+        # that frontend event hands the pane to /api/chat/stream and suspends
+        # this EventSource, which would otherwise drop the completion toast/ack.
+        replay_count = max(
+            0,
+            int(getattr(q, "_session_channel_replay_count", 0) or 0),
+        )
+        for _ in range(replay_count):
+            try:
+                replay_payload = q.get_nowait()
+            except queue.Empty:
+                break
+            if not emit_channel_payload(replay_payload):
+                return True
 
         # ── Open-tab live-view self-heal (root cause: lost server_turn_started) ──
         # The `server_turn_started` fan-out (routes.start_session_turn) is a
@@ -26632,9 +26922,13 @@ def _handle_session_sse_stream(handler, parsed):
             )
 
         while True:
+            if _sse_subscriber_lease_expired(handler, lease_deadline):
+                break
             try:
-                payload = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
+                payload = q.get(timeout=_sse_subscriber_wait_seconds(lease_deadline))
             except queue.Empty:
+                if _sse_subscriber_lease_expired(handler, lease_deadline):
+                    break
                 _sse_keepalive(handler)
                 # A completed keepalive is proof of life for an idle subscriber
                 # (re-gate finding 1): without this mark the reaper cannot tell a
@@ -26663,12 +26957,7 @@ def _handle_session_sse_stream(handler, parsed):
                         exc_info=True,
                     )
                 break
-            event_name, data = payload
-            _sse(handler, event_name, data)
-            # Delivered: that write completed, so this subscriber is alive right
-            # now (re-gate finding 1). A write that raises instead never reaches
-            # this line, and its handler path unsubscribes in the finally below.
-            ch.note_subscriber_write_ok(q)
+            emit_channel_payload(payload)
     except _CLIENT_DISCONNECT_ERRORS:
         pass  # client went away — normal for long-lived connections
     finally:
