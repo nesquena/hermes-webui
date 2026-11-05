@@ -54,6 +54,7 @@ from api.config import (
     merge_custom_provider_runtime_bundle,
     CustomProviderRouteError,
     MODEL_ALIAS_ROUTE_UNRESOLVED,
+    PROVIDER_NAME_AMBIGUOUS,
     raise_for_unresolved_model_alias_route,
     CUSTOM_ROUTE_NO_CREDENTIAL,
     CUSTOM_ROUTE_NO_ENDPOINT,
@@ -2208,6 +2209,8 @@ def _custom_provider_route_classification(error) -> dict:
         label = 'Provider credential unavailable'
     elif reason == CUSTOM_ROUTE_NO_ENDPOINT:
         label = 'Provider endpoint unavailable'
+    elif reason == PROVIDER_NAME_AMBIGUOUS:
+        label = 'Provider name conflict'
     else:
         label = 'Provider not configured'
     return {
@@ -6747,6 +6750,46 @@ def _extract_title_response(resp, *, aux: bool = False) -> tuple[str, str]:
         return '', f'llm_empty{suffix}'
 
 
+def _title_provider_name_ambiguous(provider: str, base_url: str) -> bool:
+    """True when the title route's provider name has two claimants (#8690).
+
+    ``call_llm`` hands the name to the Agent, which answers it with the first
+    record that claims it, so the endpoint and key could come from different
+    records. ``auto`` / unset without a URL is the Agent's main provider. The
+    title then falls back to the local (non-LLM) one; the warning carries the
+    verdict message, which names records and never a URL or credential.
+
+    Both inputs are read the way ``call_llm`` will read them (Codex r4): the
+    config file the Agent's ``get_config_path()`` names, unexpanded (a title
+    worker binds the session profile's env for the Agent, not WebUI's profile
+    view), and the Agent's current ``_read_main_provider()`` (re-expanded from
+    the profile .env, unlike WebUI's cache). WebUI's own view is the fallback
+    only when the Agent's readers are unavailable.
+    """
+    from api.config import _load_yaml_config_file_raw, get_config, provider_name_ambiguity_verdict
+
+    try:
+        from hermes_cli.config import get_config_path as agent_config_path
+
+        source = _load_yaml_config_file_raw(Path(agent_config_path()))
+    except Exception:
+        source = None
+    name = provider
+    if not name and not base_url:
+        try:
+            from agent.auxiliary_client import _read_main_provider
+
+            name = str(_read_main_provider() or '')
+        except Exception:
+            main = get_config().get('model')
+            name = main.get('provider', '') if isinstance(main, dict) else ''
+    verdict = provider_name_ambiguity_verdict(name, config=source) if name else None
+    if verdict is None:
+        return False
+    logger.warning("skipping LLM title generation: %s", verdict['message'])
+    return True
+
+
 def generate_title_raw_via_aux(
     user_text: str,
     assistant_text: str,
@@ -6778,6 +6821,8 @@ def generate_title_raw_via_aux(
         provider = normalized_provider or ''
     except ValueError:
         pass
+    if _title_provider_name_ambiguous(provider, base_url):
+        return None, 'provider_name_ambiguous_aux'
     api_key = ''
     if not caller_supplied_route:
         api_key = str(configured.get('api_key', '') or '').strip()
@@ -7160,6 +7205,7 @@ _TITLE_FAILURE_HUMAN_REASONS = {
     'empty_user_message': 'this session has no user message to title yet',
     'empty_title': 'no title could be produced for this session',
     'title_generation_disabled': 'title generation is disabled for this profile',
+    'provider_name_ambiguous_aux': "two providers claim the title model's provider name",
 }
 
 
