@@ -239,12 +239,29 @@ function _addLiveModelsToSelect(provider,models,sel){
 }
 function _redirectIfUnauth(){return false;}
 function syncModelChip(){}
-const document={baseURI:'http://localhost/'};
+const document={baseURI:'http://localhost/',getElementById(id){return id==='settingsModel'?_settingsSel:null;}};
+const window={};
 const location={href:'http://localhost/'};
 const fetchUrls=[];
+// #6919: each distinct deferred serves exactly one fetch() call, so a
+// replacement dispatch (the Settings re-arm) gets its own resolvable promise
+// while the existing single-fetch tests keep resolving the one they planted.
+const fetchDeferreds=[];
+const _usedFetchDeferreds=new WeakSet();
 let _fetchDeferred=null;
-function fetch(url){fetchUrls.push(url);return _fetchDeferred.promise;}
+function fetch(url){
+  fetchUrls.push(url);
+  if(_fetchDeferred&&!_usedFetchDeferreds.has(_fetchDeferred)){
+    _usedFetchDeferreds.add(_fetchDeferred);
+    fetchDeferreds.push(_fetchDeferred);
+    return _fetchDeferred.promise;
+  }
+  const d=_deferred();fetchDeferreds.push(d);return d.promise;
+}
 function _deferred(){let resolve;const promise=new Promise(r=>{resolve=r});return {promise,resolve};}
+// Mirrors the Settings model picker that loadSettingsPanel() hydrates. Only
+// present when a Settings receiver test plants it.
+let _settingsSel=null;
 const _tick=()=>new Promise(r=>setTimeout(r,0));
 // Production console.debug() writes to stdout in node; keep the replay's
 // JSON channel clean.
@@ -468,4 +485,161 @@ def test_pending_cleanup_is_successor_aware():
     )
     assert result["pending"] == [] and result["ownerCount"] == 0, (
         "the successor's cleanup must run once it completes"
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_invalidation_rearms_settings_receiver_when_it_revokes_a_pending_fetch():
+    """#6919 (gate follow-up): Settings → Conversation keeps its own live-model
+    receiver. A Refresh Models round revokes its in-flight fetch through the
+    epoch fence, so the same invalidation must dispatch a replacement for the
+    still-active provider instead of leaving the picker unenriched until the
+    whole Settings panel is reopened."""
+    result = _replay("""
+  _settingsSel={value:'openai/model-0',options:[1]};
+  window._activeProvider='openai';
+  _fetchDeferred=_deferred();
+  const settingsFetch=_fetchLiveModels('openai',_settingsSel);
+  await _tick();
+  // Refresh Models: epoch advance revokes the Settings fetch above.
+  invalidateLiveModelCache();
+  await _tick();
+  const dispatched=fetchUrls.length;
+  // The revoked response lands first: it must neither publish nor enrich.
+  fetchDeferreds[0].resolve({json:async()=>({models:[{id:'openai/stale',label:'Stale'}]})});
+  await settingsFetch;
+  await _tick();
+  const afterRevoked={cache:Object.assign({},_liveModelCache),added:addedCalls.slice()};
+  // The replacement (same still-valid identifier, gate's shape) lands: it must
+  // enrich the Settings receiver.
+  fetchDeferreds[1].resolve({json:async()=>({models:[{id:'openai/live-only',label:'Live Only'}]})});
+  await _tick();
+  process.stdout.write(JSON.stringify({
+    dispatched:dispatched,
+    afterRevoked:afterRevoked,
+    cache:_liveModelCache,
+    added:addedCalls,
+    pending:[..._liveModelFetchPending],
+    ownerCount:_liveModelFetchOwners.size,
+  }));
+""")
+    assert result["dispatched"] == 2, (
+        "#6919: invalidating a pending Settings fetch must dispatch a replacement "
+        f"for the active provider, got {result['dispatched']} fetch(es)"
+    )
+    assert result["afterRevoked"]["cache"] == {} and result["afterRevoked"]["added"] == [], (
+        "the revoked Settings response must not publish or enrich"
+    )
+    assert result["cache"] == {"openai": [{"id": "openai/live-only", "label": "Live Only"}]}, (
+        "the replacement response must publish to the live-model cache"
+    )
+    assert result["added"] == [{"provider": "openai", "ids": ["openai/live-only"]}], (
+        "the replacement response must enrich the Settings receiver"
+    )
+    assert result["pending"] == [] and result["ownerCount"] == 0, (
+        "the replacement fetch's cleanup must leave no pending marker"
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_invalidation_rearms_settings_receiver_after_completed_enrichment():
+    """#6919 (gate follow-up, second completion order): when the Settings fetch
+    already published before Refresh Models ran, the eviction still has to be
+    followed by a replacement — the picker must end up enriched from the fresh
+    response, not merely lose the entry the eviction deleted."""
+    result = _replay("""
+  _settingsSel={value:'openai/live-only',options:[1]};
+  window._activeProvider='openai';
+  _fetchDeferred=_deferred();
+  const settingsFetch=_fetchLiveModels('openai',_settingsSel);
+  await _tick();
+  fetchDeferreds[0].resolve({json:async()=>({models:[{id:'openai/live-only',label:'Live Only'}]})});
+  await settingsFetch;
+  await _tick();
+  const beforeInvalidate={cache:Object.assign({},_liveModelCache),added:addedCalls.slice()};
+  invalidateLiveModelCache();
+  await _tick();
+  const afterInvalidate={cache:Object.assign({},_liveModelCache),dispatched:fetchUrls.length};
+  // Same still-valid identifier: the replacement is accepted on scheduling,
+  // not on the payload looking different.
+  fetchDeferreds[1].resolve({json:async()=>({models:[{id:'openai/live-only',label:'Live Only'}]})});
+  await _tick();
+  process.stdout.write(JSON.stringify({
+    beforeInvalidate:beforeInvalidate,
+    afterInvalidate:afterInvalidate,
+    cache:_liveModelCache,
+    added:addedCalls,
+    pending:[..._liveModelFetchPending],
+  }));
+""")
+    assert result["beforeInvalidate"]["added"] == [
+        {"provider": "openai", "ids": ["openai/live-only"]}
+    ], "the initial Settings fetch must enrich before the invalidation"
+    assert result["afterInvalidate"]["cache"] == {}, (
+        "the invalidation must evict the completed Settings entry"
+    )
+    assert result["afterInvalidate"]["dispatched"] == 2, (
+        "an invalidation after the response settled must still dispatch a "
+        f"replacement, got {result['afterInvalidate']['dispatched']} fetch(es)"
+    )
+    assert result["cache"] == {"openai": [{"id": "openai/live-only", "label": "Live Only"}]}, (
+        "the replacement must republish the live-only model for the Settings receiver"
+    )
+    assert len(result["added"]) == 2 and result["added"][1]["ids"] == ["openai/live-only"], (
+        "the Settings receiver must be enriched again from the replacement response"
+    )
+    assert result["pending"] == [], "no pending marker may leak from the replacement"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_settings_rearm_skips_unhydrated_picker():
+    """#6919: a Settings pane that never ran loadSettingsPanel() has no static
+    catalog to enrich — opening it repaints from /api/models anyway. The re-arm
+    must not fire a stray live fetch for it (control for the replacement)."""
+    result = _replay("""
+  window._activeProvider='openai';
+  _settingsSel={value:'',options:[]};
+  invalidateLiveModelCache();
+  await _tick();
+  const emptyPickerFetchCount=fetchUrls.length;
+  _settingsSel=null;
+  invalidateLiveModelCache();
+  await _tick();
+  process.stdout.write(JSON.stringify({
+    emptyPickerFetchCount:emptyPickerFetchCount,
+    noPickerFetchCount:fetchUrls.length,
+  }));
+""")
+    assert result["emptyPickerFetchCount"] == 0, (
+        "an unhydrated Settings picker (no options) must not trigger a live fetch"
+    )
+    assert result["noPickerFetchCount"] == 0, (
+        "a page without the Settings picker must not trigger a live fetch"
+    )
+
+
+def test_settings_rearm_never_reloads_the_settings_form():
+    """#6919: the replacement must be additive. Re-running the Settings loader
+    would paint /api/settings over unsaved edits and reset the selection, so the
+    invalidation may only dispatch _fetchLiveModels() for the Settings receiver
+    and must do so after eviction."""
+    ui = _read_static("ui.js")
+    invalidate = _extract_function_body(ui, "function invalidateLiveModelCache(")
+    assert "_fetchLiveModels" in invalidate, (
+        "the invalidation revokes the Settings fetch, so it must also dispatch "
+        "the replacement for that receiver"
+    )
+    assert "'settingsModel'" in invalidate, (
+        "the replacement must target the Settings model picker, not only the "
+        "composer dropdown"
+    )
+    for forbidden in ("loadSettingsPanel()", "innerHTML", "replaceChildren"):
+        assert forbidden not in invalidate, (
+            f"the replacement must not reset the Settings form (found {forbidden!r})"
+        )
+    assert invalidate.index("delete _liveModelCache") < invalidate.index(
+        "_fetchLiveModels(provider,sel)"
+    ), (
+        "the replacement must be dispatched AFTER eviction; before it, "
+        "_fetchLiveModels() would hit the surviving cache entry and never re-fetch"
     )
