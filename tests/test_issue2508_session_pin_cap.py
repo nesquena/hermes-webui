@@ -106,6 +106,16 @@ def _configure_placeholder_routes(monkeypatch, routes, target):
 
     monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_: None)
     monkeypatch.setattr(routes, "_get_or_materialize_session", lambda sid, **_: target)
+    # #8834: chat/start asks this read-only check before it loads a session another
+    # profile owns. Answer it from the same stub the materialize patch returns, live and
+    # with the retag's own predicates, so the real retag (and its LOCK) still decides.
+    monkeypatch.setattr(
+        routes,
+        "session_is_unclaimed_placeholder_readonly",
+        lambda sid: sid == target.session_id and not (
+            target.messages or target.context_messages or target.pending_user_message or target.pinned
+        ),
+    )
     monkeypatch.setattr(compression_continuation, "durable_compression_continuation", lambda _: (False, None))
     monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda _: None)
     monkeypatch.setattr(goals, "goal_command_payload", lambda *_args, **_kwargs: {"ok": True, "action": "status"})
