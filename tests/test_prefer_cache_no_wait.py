@@ -568,6 +568,7 @@ def test_lock_busy_recheck_falls_back_when_queued_builder_starts(monkeypatch):
     builder_queued = threading.Event()
     builder_holding = threading.Event()
     release_builder = threading.Event()
+    reader_done = threading.Event()
     observed = {}
     errors = []
 
@@ -611,7 +612,7 @@ def test_lock_busy_recheck_falls_back_when_queued_builder_starts(monkeypatch):
             try:
                 cfg._cache_build_in_progress = True
                 builder_holding.set()
-                release_builder.wait(3)
+                release_builder.wait(10)
                 cfg._cache_build_in_progress = False
             finally:
                 wrapper.release()
@@ -625,6 +626,8 @@ def test_lock_busy_recheck_falls_back_when_queued_builder_starts(monkeypatch):
             )
         except BaseException as exc:
             errors.append(exc)
+        finally:
+            reader_done.set()
 
     raw_lock.acquire()
     holder_owned = True
@@ -639,10 +642,13 @@ def test_lock_busy_recheck_falls_back_when_queued_builder_starts(monkeypatch):
         holder_owned = False
         assert builder_holding.wait(2), "builder never acquired the lock"
 
-        # Let the fixed reader's bounded acquire expire. The buggy reader stays
-        # blocked here; releasing the builder afterwards lets the test finish
-        # and exposes its incorrect authoritative answer instead of hanging.
-        time.sleep(0.2)
+        # The fixed reader must finish while the builder still owns the lock
+        # and keeps the rebuild flag set. Waiting on its completion (rather than
+        # sleeping a fixed interval) also lets a busy CI worker schedule the
+        # reader late without changing the expected result. On the old code the
+        # wait expires; releasing the builder then cleans up and preserves the
+        # discriminating assertion instead of hanging the suite.
+        completed_before_release = reader_done.wait(timeout=5.0)
         release_builder.set()
         reader.join(3)
         builder.join(3)
@@ -656,6 +662,10 @@ def test_lock_busy_recheck_falls_back_when_queued_builder_starts(monkeypatch):
     assert not errors, errors
     assert not reader.is_alive(), "display reader remained blocked on the builder"
     assert not builder.is_alive(), "builder did not finish"
+    assert completed_before_release, (
+        "display reader did not finish while the queued builder still held "
+        "the lock with the rebuild flag set"
+    )
     result = observed["result"]
     assert result.get("_non_authoritative") is True, (
         "the reader waited for the queued builder and returned the warm "
