@@ -63,6 +63,8 @@
 
 ### Security
 
+- **Revoking a share link always takes effect (security).** A save of a session that had started before a share link was created or revoked could write the older share token back to the session file, so a revoked link could stay public while the revoke still returned 200. A save now writes the share token only when that save changed it and the file still holds the token it last saw; otherwise the file's token wins. If persisting a share change fails, the session gets its intended share state back so the link stays revocable. (#8794)
+
 - **A conversation saved before shares existed keeps its Stop sharing control after a reload.** Since exp-v0.52.621 the share write put the token after the message list on such a conversation, where the metadata reader never looks, so after any reload the session showed no share and the Stop sharing control was gone while the public link stayed live. The token is now written before the message list. A conversation an affected build already shared gets its control back the next time it is shared again or saved, for example after a new message; sharing again reuses the same link (#8818, #8815).
 
 - **An archive with more than 10,000 files is rejected before any of it is extracted.** The member-count cap was checked inside the extraction loop, so an over-cap upload wrote 10,000 files into the workspace before it was refused and cleaned up. The count is now checked first, for zip and tar; the error message, the cleanup and the responses are unchanged, except that an archive that is both over the cap and contains an unsafe path now reports the count error. The archive-cap upload test no longer times out under load either (#8825, #8823).
