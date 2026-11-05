@@ -91,6 +91,8 @@
 
 ### Fixed
 
+- **Abandoned live-update connections no longer pile up behind a reverse proxy.** A proxy can keep acknowledging WebUI's live-update streams after the browser behind it is gone, so each abandoned stream kept a server thread and its event queue forever, and enough of them could run the server out of memory. The session, sidebar and Gateway-session streams now end after five minutes; an open tab reconnects on its own and receives anything sent in the gap exactly once, and a dead one is released. Known: each open tab now logs one harmless `sse_error` every five minutes when the Gateway-session stream rotates, and in opt-in chunked mode (`HERMES_WEBUI_SSE_CHUNKED=1`) a rotation ends the response without its final zero-length chunk, which strict proxies may report as truncated; both are tracked in #8842. Thanks @Aris-qin for the report and the socket-level evidence, and @Tomsik01 for confirming it in the field (#7139, closes #7105).
+
 - **A sidebar swipe or Ctrl/Cmd+B no longer fires while you are typing.** On a phone, an edge swipe that starts on the composer or the message field no longer opens the sidebar, and Ctrl/Cmd+B no longer toggles the sidebar while a text field has focus, even when the key event reaches another element. A swipe from the edge anywhere else still opens the sidebar. Thanks @solarmaster961 (#8630).
 
 - **The orphaned-session sidebar test no longer fails when the index rebuild finishes first.** Its fixture wrote the pending-message fields after the message list, where the metadata reader never looks, so a pending session was pruned whenever the rebuild thread won its race. The fixture now uses the same field order as a saved session, and a new test pins both sides of the race (#8814).
