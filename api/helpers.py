@@ -1288,6 +1288,7 @@ def _mpf_image_ranges(data: bytes, base: int) -> list[tuple[int, int]] | None:
 
 
 _SEF_MAX_ENTRIES = 64
+_SEF_BLOCK_NAME = _re.compile(rb"[\x21-\x7e]+")
 
 
 def _is_samsung_sef_trailer(data: bytes) -> bool:
@@ -1300,6 +1301,11 @@ def _is_samsung_sef_trailer(data: bytes) -> bool:
     name``. Like MPF, the bytes must be fully accounted for: the blocks tile the
     whole region from EOI up to SEFH with no gaps or overlaps, every header
     matches its entry, and nothing follows SEFT.
+
+    The tiling is proven from the directory alone before any block is read, so
+    each block byte is looked at most once: overlapping entries that all point
+    at one huge block are rejected without scanning it (projections run this on
+    every GET).
     """
     if len(data) < 20 or data[-4:] != b"SEFT":
         return False
@@ -1315,25 +1321,28 @@ def _is_samsung_sef_trailer(data: bytes) -> bool:
         entry = dir_pos + 12 + 12 * index
         if data[entry:entry + 2] != b"\0\0":
             return False
-        kind = data[entry + 2:entry + 4]
         offset = int.from_bytes(data[entry + 4:entry + 8], "little")
         size = int.from_bytes(data[entry + 8:entry + 12], "little")
         start = dir_pos - offset
         if offset > dir_pos or size < 8 or start + size > dir_pos:
             return False
+        blocks.append((start, size, data[entry + 2:entry + 4]))
+    end = 0
+    for start, size, _kind in sorted(blocks):
+        if start != end:
+            return False
+        end = start + size
+    if end != dir_pos:
+        return False
+    for start, size, kind in blocks:
         if data[start:start + 2] != b"\0\0" or data[start + 2:start + 4] != kind:
             return False
         name_len = int.from_bytes(data[start + 4:start + 8], "little")
-        name = data[start + 8:start + 8 + name_len]
-        if 8 + name_len > size or not name or not all(0x21 <= c <= 0x7E for c in name):
+        if name_len < 1 or 8 + name_len > size:
             return False
-        blocks.append((start, start + size))
-    end = 0
-    for start, stop in sorted(blocks):
-        if start != end:
+        if _SEF_BLOCK_NAME.fullmatch(data, start + 8, start + 8 + name_len) is None:
             return False
-        end = stop
-    return end == dir_pos
+    return True
 
 
 def _is_complete_jpeg(raw: bytes, *, _allow_mpf: bool = True) -> bool:

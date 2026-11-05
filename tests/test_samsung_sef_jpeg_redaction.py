@@ -8,6 +8,7 @@ its APP2 MPF segment removed, so no private photographs are used.
 import base64
 from pathlib import Path
 import struct
+import time
 
 import pytest
 
@@ -121,3 +122,17 @@ def test_samsung_trailer_rejects_unaccounted_or_invalid_bytes(attack):
 
 def test_samsung_trailer_is_not_accepted_inside_an_mpf_picture():
     assert not helpers._is_complete_jpeg(JPEG + sef(), _allow_mpf=False)
+
+
+def test_overlapping_entries_on_one_huge_block_are_rejected_without_scanning_it():
+    """64 directory entries that all point at one block with a 1 MB name: the tiling check must reject them before
+    the name is read, or a GET re-scans the name once per entry (r1105l: real HTTP GET 3.7 s on master, 74.9 s)."""
+    name = b'A' * (1 << 20)
+    block = struct.pack('<HHI', 0, 0x0A01, len(name)) + name + b'1'
+    directory = b'SEFH' + struct.pack('<II', 107, 64)
+    directory += struct.pack('<HHII', 0, 0x0A01, len(block), len(block)) * 64
+    raw = JPEG + block + directory + struct.pack('<I', len(directory)) + b'SEFT'
+    started = time.perf_counter()
+    assert not helpers._is_complete_jpeg(raw)
+    assert time.perf_counter() - started < 0.5
+
