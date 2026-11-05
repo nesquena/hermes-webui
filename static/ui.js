@@ -25156,6 +25156,9 @@ function autoResizeTextarea(ta) {
 let _submitEditInFlight = false;
 async function submitEdit(msgIdx, newText) {
   if(!S.session || S.busy || _submitEditInFlight) return;
+  // #8523: a session another client owns is read-only here. send() refuses it, so stop before the
+  // truncate: the edit must not cut the transcript and then end with no message.
+  if(S.session.chat_read_only_reason){ setStatus(S.session.chat_read_only_reason); return; }
   _submitEditInFlight = true;
   try {
     const initialSid = S.session.session_id;
