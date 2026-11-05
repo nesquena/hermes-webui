@@ -78,6 +78,19 @@ def _reset_registries():
     gateway_chat._STREAM_ENDPOINTS.clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_registries_after_each_test():
+    """Leave no stream rows behind for whatever test runs next, in any order.
+
+    Several tests here end with a stream still registered in STREAMS (the
+    blocking arms assert exactly that) and relied on the next test in this file
+    resetting it. Run in another order, the last one leaked that row into later
+    files, where api.models._active_stream_ids() reports a live stream.
+    """
+    yield
+    _reset_registries()
+
+
 def _seed_stream_owned_state(stream_id, *, session_id, writeback=True):
     """Seed every registry a stream can own: the full set, no hand-picked subset.
 
