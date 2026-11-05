@@ -14430,7 +14430,11 @@ async function refreshSession() {
     _mergePendingSessionMessage(data.session, S.messages);
     S.activeStreamId = data.session.active_stream_id || null;
 
-    syncTopbar(); _renderMessagesWithScrollSnapshot();
+    syncTopbar();
+    // #8523: the refreshed session can have turned read-only (or writable); redraw the composer's lock, notice
+    // and placeholder from it.
+    if(typeof updateSendBtn==='function') updateSendBtn();
+    _renderMessagesWithScrollSnapshot();
     showToast('Conversation refreshed');
   } catch(e) { setStatus('Refresh failed: ' + e.message); }
 }

@@ -30865,11 +30865,24 @@ def _handle_chat_start(handler, body, diag=None):
         if stale_response is not None:
             return j(handler, stale_response, status=409)
         diag.stage("get_session") if diag else None
+        # #8523: a stored session the active profile cannot see (the same test as this route's profile check and the
+        # session detail load's stored branch), which only a crafted or stale request can name, takes master's path
+        # here: master's loader and refusals, then master's profile check, never a retag. Read-only reasons,
+        # native-transport exemptions and transport checks apply only to sessions the profile can open.
+        _hidden_session = False
+        try:
+            _visibility_probe = get_session(body["session_id"])
+        except Exception:
+            _visibility_probe = None
+        if _visibility_probe is not None and not _session_visible_to_active_profile(
+            getattr(_visibility_probe, "profile", None), handler
+        ):
+            _hidden_session = True
         try:
             s = _get_or_materialize_session(
                 body["session_id"],
                 refresh_cli_messages=body.get("regenerate") is not True,
-                for_chat=True,
+                for_chat=not _hidden_session,
             )
         except KeyError:
             # No WebUI sidecar. If this is a foreign-origin session (CLI,
@@ -30946,7 +30959,7 @@ def _handle_chat_start(handler, body, diag=None):
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
         from api.gateway_sessions import configured as gateway_session_configured, model_change_requested
-        if webui_gateway_chat_enabled(get_config()) and gateway_session_configured(vars(s)):
+        if not _hidden_session and webui_gateway_chat_enabled(get_config()) and gateway_session_configured(vars(s)):
             if body.get("regenerate") or body.get("attachments"):
                 return bad(handler, "Gateway session continuation currently supports text messages. Use the original client for attachments or regeneration.", 400)
             if model_change_requested(s, body):
@@ -30965,8 +30978,12 @@ def _handle_chat_start(handler, body, diag=None):
         session_profile = getattr(s, "profile", None)
         if not _session_visible_to_active_profile(session_profile, handler):
             from api.gateway_sessions import external_session
-            if external_session(vars(s)):
-                return bad(handler, "External session belongs to a different profile", 403)
+            if external_session(vars(s)) or (_hidden_session and gateway_session_chat_read_only_reason(vars(s))):
+                # #8523: another client's session in another profile is refused exactly as master refuses a
+                # session of another profile, and is never retagged to the requesting profile.
+                return _session_profile_mismatch_response(
+                    handler, body.get("session_id", ""), session_profile
+                )
             if (
                 requested_profile
                 and _profiles_match(requested_profile, active_profile)
@@ -30982,6 +30999,13 @@ def _handle_chat_start(handler, body, diag=None):
                 return _session_profile_mismatch_response(
                     handler, body.get("session_id", ""), session_profile
                 )
+        if _hidden_session:
+            # Fail closed: a session reached from another profile is never continued while it is read-only here.
+            _hidden_reason = gateway_session_chat_read_only_reason(vars(s))
+            if _hidden_reason:
+                return j(handler, {
+                    "error": _hidden_reason, "code": "gateway_external_session_read_only",
+                }, status=409)
         # Resolve durable rotations before any workspace/model/pending mutation.
         # GET navigation adopts the tip; POST never silently replays a user turn.
         from api.compression_continuation import durable_compression_continuation

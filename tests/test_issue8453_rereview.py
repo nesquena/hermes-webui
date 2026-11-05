@@ -60,7 +60,9 @@ def test_foreign_native_chat_preserves_owner(native_home, monkeypatch, owner, ac
     monkeypatch.setattr(routes, "bad", lambda h, text, status=400: replies.append((status, text)) or True)
     try:
         routes.handle_post(MagicMock(), urlparse("/api/chat/start"))
-        assert replies[-1][0] == 403
+        # #8523 fold 8: refused exactly as master refuses it: this read-only imported session of another profile gets
+        # master's 403 before the profile check, with no source and no retag.
+        assert replies[-1] == (403, "Read-only imported sessions cannot be continued from WebUI")
         assert session.profile == owner
         assert models.get_session(sid).profile == owner
         assert session.path.read_bytes() == original
