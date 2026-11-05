@@ -557,3 +557,70 @@ def test_control_cleanup_removes_an_unshared_external_metadata_sidecar(state, mo
     status, reply = _post(route, {})
     assert status == 200, reply
     assert not path.exists()
+
+
+# ── Codex round 3: cleanup racing a share create keeps the new link ──
+
+
+@pytest.mark.parametrize("route", CLEANUP_ROUTES)
+def test_cleanup_racing_a_share_create_keeps_the_new_link(state, monkeypatch, route):
+    """Cleanup loads an empty, unshared external sidecar; a share of that
+    conversation then completes before cleanup decides. Judging the stale
+    tokenless copy removed the sidecar the share had just written, so a link
+    published for a conversation that still exists stopped serving. Cleanup now
+    holds the share lock from the load through the unlink: the share waits for
+    it and lands afterwards."""
+    import threading
+
+    from api import models
+
+    path = _external_session(monkeypatch, title="Untitled")
+    _share(EXTERNAL_SID)
+    assert _post("/api/share/revoke", {"session_id": EXTERNAL_SID})[0] == 200
+    assert json.loads(path.read_text(encoding="utf-8")).get("share_token") is None
+    models.SESSIONS.clear()
+
+    # With a metadata sidecar on disk, a share reads the transcript from
+    # state.db; serve the same two rows the fixture synthesizes.
+    from api import routes
+
+    original_snapshot = routes._share_snapshot_messages_for_session
+
+    def snapshot_messages(session, *args, **kwargs):
+        if getattr(session, "session_id", None) == EXTERNAL_SID:
+            return [
+                {"role": "user", "content": "from elsewhere", "timestamp": 200},
+                {"role": "assistant", "content": "answered there", "timestamp": 201},
+            ]
+        return original_snapshot(session, *args, **kwargs)
+
+    monkeypatch.setattr(routes, "_share_snapshot_messages_for_session", snapshot_messages)
+
+    cleanup_thread = threading.current_thread()
+    original_load = models.Session.load.__func__
+    racer = {}
+
+    def share_now():
+        racer["reply"] = _post("/api/share/create", {"session_id": EXTERNAL_SID})
+
+    def load(cls, sid):
+        loaded = original_load(cls, sid)
+        if sid == EXTERNAL_SID and threading.current_thread() is cleanup_thread and "thread" not in racer:
+            racer["thread"] = threading.Thread(target=share_now, daemon=True)
+            racer["thread"].start()
+            # Without the share lock the create finishes inside this wait.
+            racer["thread"].join(timeout=2.0)
+        return loaded
+
+    monkeypatch.setattr(models.Session, "load", classmethod(load))
+    status, reply = _post(route, {})
+    assert status == 200, reply
+    assert "thread" in racer, "cleanup never loaded the external sidecar"
+    racer["thread"].join(timeout=15)
+    assert not racer["thread"].is_alive()
+    share_status, share_reply = racer["reply"]
+    assert share_status == 200, share_reply
+    token = share_reply["share"]["token"]
+    assert path.exists(), "cleanup removed the sidecar of a link it raced"
+    assert json.loads(path.read_text(encoding="utf-8"))["share_token"] == token
+    _assert_served(token)

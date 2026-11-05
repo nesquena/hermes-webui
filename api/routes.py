@@ -27765,7 +27765,19 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
             if not session_lock.acquire(timeout=5):
                 logger.debug("Session %s is busy; leaving it for later cleanup", p.stem)
                 continue
+            # #8837: share create and revoke serialize on the per-session share
+            # lock, not the agent lock. Hold it from the load through the unlink,
+            # or a share created after the load would be judged on the stale
+            # tokenless copy and its sidecar removed, ending a link that was just
+            # published for a conversation that still exists. Order agent ->
+            # share, as nothing takes the agent lock while holding the share lock.
+            share_lock = None
             try:
+                candidate_share_lock = _get_session_share_lock(p.stem)
+                if not candidate_share_lock.acquire(timeout=SHARE_SESSION_LOCK_TIMEOUT_SECONDS):
+                    logger.debug("Session %s has a share operation in flight; leaving it for later cleanup", p.stem)
+                    continue
+                share_lock = candidate_share_lock
                 s = Session.load(p.stem)
                 if zero_only:
                     should_delete = s and len(s.messages) == 0
@@ -27797,6 +27809,8 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                     if session_deleted:
                         cleaned += 1
             finally:
+                if share_lock is not None:
+                    share_lock.release()
                 session_lock.release()
         except Exception:
             logger.debug("Failed to clean up session file %s", p)
