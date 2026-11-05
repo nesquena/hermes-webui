@@ -983,6 +983,8 @@ const _WS_SKELETON_ROWS = [
 // loadDir('.') still runs then), so the stale response is rejected.
 let _wsTreeGen = 0;
 let _wsNavigationGen = 0;
+// The directory the generation above belongs to; same-path refreshes share it.
+let _wsNavigationPath = null;
 function bumpWorkspaceTreeGen(){
   _wsTreeGen = (typeof _wsTreeGen === 'number' ? _wsTreeGen : 0) + 1;
   return _wsTreeGen;
@@ -1038,12 +1040,22 @@ async function loadDir(path, opts={}){
   if(!S.session)return false;
   const requestedPath=String(path||'.');
   const sessionId=S.session.session_id;
-  const navigationGen=++_wsNavigationGen;
   const treeGen=_wsTreeGen;  // #4671: capture the workspace-tree generation. A profile
                              // switch bumps it (bumpWorkspaceTreeGen), so a stale response
                              // from the previous workspace — which would pass the session_id
                              // guard because an empty-session switch reuses the same id — is
                              // rejected here instead of painting the wrong profile's files.
+  // A later loadDir for the SAME path does not supersede an earlier one: the
+  // root refresh renders twice (partial, then complete) and two overlapping
+  // refreshes must both be able to show the carried keyboard position — the
+  // first to arrive restores it, the second joins it without moving focus.
+  // Only a real navigation (another directory, session or workspace tree)
+  // makes an in-flight load stale.
+  if(typeof _wsNavigationPath==='undefined'||_wsNavigationPath!==requestedPath){
+    try{ _wsNavigationPath=requestedPath; }catch(e){ /* isolated harness scope */ }
+    ++_wsNavigationGen;
+  }
+  const navigationGen=_wsNavigationGen;
   const isCurrentNavigation=()=>!!S.session
     &&S.session.session_id===sessionId
     &&treeGen===_wsTreeGen
