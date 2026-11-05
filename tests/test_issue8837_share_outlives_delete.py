@@ -15,6 +15,7 @@ Three parts, each driven through the real share, delete and public-share handler
 import io
 import json
 import secrets
+import threading
 import urllib.parse
 from collections import OrderedDict
 
@@ -265,3 +266,235 @@ def test_control_an_external_session_share_is_served(state, monkeypatch):
     ]
     assert _post("/api/share/revoke", {"session_id": EXTERNAL_SID})[0] == 200
     _assert_not_served(token)
+
+
+# ── Part 2: deleting a conversation revokes its share ────────────────────────
+
+
+def test_delete_revokes_the_share(state):
+    _save_session()
+    token = _share()
+    status, reply = _post("/api/session/delete", {"session_id": SID})
+    assert status == 200, reply
+    assert _snapshot_file(token).get("revoked_at")  # the store itself no longer publishes it
+    _assert_not_served(token)
+
+
+def test_delete_of_an_external_session_revokes_its_share(state, monkeypatch):
+    path = _external_session(monkeypatch)
+    token = _share(EXTERNAL_SID)
+    status, reply = _post("/api/session/delete", {"session_id": EXTERNAL_SID})
+    assert status == 200, reply
+    assert not path.exists()
+    assert _snapshot_file(token).get("revoked_at")
+    _assert_not_served(token)
+
+
+def test_a_refused_delete_keeps_the_session_but_not_its_link(state, monkeypatch):
+    """Revoke comes first; a delete refused after it leaves a whole session that no longer names the dead link."""
+    from api import models
+
+    path = _save_session()
+    token = _share()
+
+    def refuse(sid):
+        raise models.SessionDeleteRefused("session_busy")
+
+    monkeypatch.setattr(models, "delete_cli_session", refuse)
+    status, reply = _post("/api/session/delete", {"session_id": SID})
+    assert status == 409, reply
+    assert path.exists() and SID in _index_ids()
+    assert len(json.loads(path.read_text(encoding="utf-8"))["messages"]) == 2
+    assert _snapshot_file(token).get("revoked_at")
+    assert json.loads(path.read_text(encoding="utf-8"))["share_token"] is None
+    _assert_not_served(token)
+
+
+def test_a_revoke_that_does_not_land_refuses_the_delete_before_removing_anything(state, monkeypatch):
+    from api import routes
+
+    path = _save_session()
+    token = _share()
+    monkeypatch.setattr(routes, "revoke_share_token", lambda token: False, raising=False)
+    status, reply = _post("/api/session/delete", {"session_id": SID})
+    assert status == 500, reply
+    assert reply.get("error") == "share_revoke_failed"
+    # Not half-deleted: sidecar, index row and link are all still there.
+    assert path.exists() and SID in _index_ids()
+    assert _public(token)[0] == 200
+
+
+# ── Part 3: share create/revoke racing a delete never bring it back ──────────
+
+
+def _published_tokens():
+    """Tokens the snapshot store still publishes (unrevoked snapshot files)."""
+    from api import shares
+
+    if not shares.SHARES_DIR.exists():
+        return set()
+    return {
+        path.stem
+        for path in shares.SHARES_DIR.glob("*.json")
+        if not json.loads(path.read_text(encoding="utf-8")).get("revoked_at")
+    }
+
+
+def _run(name, results, path, body):
+    def target():
+        try:
+            results[name] = _post(path, body)
+        except BaseException as exc:  # surfaced by the assertions below
+            results[name] = ("raised", repr(exc))
+
+    thread = threading.Thread(target=target, name=name)
+    thread.start()
+    return thread
+
+
+def _pause_after_resolve(monkeypatch, thread_name):
+    """Pause ``thread_name``'s share request right after it resolved the session,
+    before it takes any lock (it asks for its share lock next)."""
+    from api import routes
+
+    entered, go = threading.Event(), threading.Event()
+    real = routes._get_session_share_lock
+
+    def paused(sid):
+        if threading.current_thread().name == thread_name:
+            entered.set()
+            assert go.wait(WAIT)
+        return real(sid)
+
+    monkeypatch.setattr(routes, "_get_session_share_lock", paused)
+    return entered, go
+
+
+def _assert_deleted_for_good(path, results):
+    assert results["delete"][0] == 200, results
+    assert not path.exists(), "the deleted conversation's sidecar came back"
+    assert SID not in _index_ids(), "the deleted conversation's index row came back"
+    assert _published_tokens() == set(), "a link of the deleted conversation is still published"
+
+
+def test_share_create_that_resolved_before_a_delete_does_not_bring_it_back(state, monkeypatch):
+    path = _save_session()
+    entered, go = _pause_after_resolve(monkeypatch, "share")
+    results = {}
+    share = _run("share", results, "/api/share/create", {"session_id": SID})
+    assert entered.wait(WAIT)
+    results["delete"] = _post("/api/session/delete", {"session_id": SID})
+    assert not path.exists()
+    go.set()
+    share.join(WAIT)
+    assert not share.is_alive()
+    _assert_deleted_for_good(path, results)
+    assert results["share"][0] == 404, results
+
+
+def test_share_create_waiting_on_a_running_delete_does_not_bring_it_back(state, monkeypatch):
+    """The other order: the delete holds the session first, the share arrives mid-delete."""
+    from api import models, routes
+
+    path = _save_session()
+    delete_entered, delete_go = threading.Event(), threading.Event()
+    share_progressed = threading.Event()
+
+    def paused_state_db_delete(sid):
+        delete_entered.set()
+        assert delete_go.wait(WAIT)
+        return True
+
+    monkeypatch.setattr(models, "delete_cli_session", paused_state_db_delete)
+    real_lock = routes._get_session_agent_lock
+
+    class _Spy:
+        """The real session lock; notes when the share request starts waiting on it."""
+
+        def __init__(self, lock):
+            self._lock = lock
+
+        def acquire(self, *args, **kwargs):
+            if threading.current_thread().name == "share":
+                share_progressed.set()
+            return self._lock.acquire(*args, **kwargs)
+
+        def release(self):
+            return self._lock.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self.release()
+
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda sid: _Spy(real_lock(sid)))
+    results = {}
+    delete = _run("delete", results, "/api/session/delete", {"session_id": SID})
+    assert delete_entered.wait(WAIT)
+
+    def share_target():
+        try:
+            results["share"] = _post("/api/share/create", {"session_id": SID})
+        finally:
+            share_progressed.set()
+
+    share = threading.Thread(target=share_target, name="share")
+    share.start()
+    # Either the share finished while the delete was paused (it never waited on the
+    # session lock), or it is now waiting on the lock the delete holds.
+    assert share_progressed.wait(WAIT)
+    delete_go.set()
+    delete.join(WAIT)
+    share.join(WAIT)
+    assert not delete.is_alive() and not share.is_alive()
+    _assert_deleted_for_good(path, results)
+    assert results["share"][0] == 404, results
+
+
+def test_share_revoke_that_resolved_before_a_delete_does_not_bring_it_back(state, monkeypatch):
+    path = _save_session()
+    token = _share()
+    entered, go = _pause_after_resolve(monkeypatch, "revoke")
+    results = {}
+    revoke = _run("revoke", results, "/api/share/revoke", {"session_id": SID})
+    assert entered.wait(WAIT)
+    results["delete"] = _post("/api/session/delete", {"session_id": SID})
+    assert not path.exists()
+    go.set()
+    revoke.join(WAIT)
+    assert not revoke.is_alive()
+    _assert_deleted_for_good(path, results)
+    _assert_not_served(token)
+    assert results["revoke"][0] == 404, results
+
+
+def test_external_share_that_resolved_before_a_delete_writes_no_sidecar(state, monkeypatch):
+    """An external session has no sidecar to go missing; the delete record refuses it."""
+    path = _external_session(monkeypatch)
+    entered, go = _pause_after_resolve(monkeypatch, "share")
+    results = {}
+    share = _run("share", results, "/api/share/create", {"session_id": EXTERNAL_SID})
+    assert entered.wait(WAIT)
+    results["delete"] = _post("/api/session/delete", {"session_id": EXTERNAL_SID})
+    assert results["delete"][0] == 200, results
+    go.set()
+    share.join(WAIT)
+    assert not share.is_alive()
+    assert not path.exists(), "the share wrote a sidecar for the deleted session"
+    assert EXTERNAL_SID not in _index_ids()
+    assert _published_tokens() == set()
+    assert results["share"][0] == 404, results
+
+def test_control_a_session_still_resolvable_after_an_earlier_delete_shares_again(state, monkeypatch):
+    """Only a delete during the request refuses it: a session still resolvable after an
+    earlier delete (a messaging session keeps its state.db rows) shares as before."""
+    path = _external_session(monkeypatch)
+    first = _share(EXTERNAL_SID)
+    assert _post("/api/session/delete", {"session_id": EXTERNAL_SID})[0] == 200
+    assert not path.exists()
+    second = _share(EXTERNAL_SID)
+    assert second != first
+    assert _public(second)[0] == 200
+    assert json.loads(path.read_text(encoding="utf-8"))["share_token"] == second

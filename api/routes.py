@@ -76,6 +76,7 @@ from api.shares import (
     build_share_snapshot,
     load_share,
     revoke_share,
+    revoke_share_token,
     share_snapshot_is_live,
     write_share_snapshot,
 )
@@ -5207,6 +5208,95 @@ def _ensure_full_session_before_mutation(sid: str, session):
 # session lock so a writer that was waiting on that lock cannot save the
 # empty-shell fallback back to disk.
 _DELETED_SESSION_IDS: set[str] = set()
+
+# Per-id count of those deletes, bumped at the same point (#8837). Share create
+# and revoke read it before they resolve the session and again under the session
+# lock before they write, so a delete that completed in between is seen even for
+# an id an earlier delete already recorded: a messaging session keeps its state.db
+# rows after a WebUI delete and may legitimately be shared again.
+_SESSION_DELETE_GENERATIONS: dict[str, int] = {}
+
+
+def _session_delete_generation(sid: str) -> int:
+    return _SESSION_DELETE_GENERATIONS.get(str(sid or ""), 0)
+
+
+def _session_sidecar_exists(sid: str) -> bool:
+    """Whether ``sid`` has a WebUI sidecar (the store share writes patch)."""
+    import api.models as _models
+
+    try:
+        return bool(is_safe_session_id(sid)) and (_models.SESSION_DIR / f"{sid}.json").exists()
+    except Exception:
+        return False
+
+
+def _share_target_still_present(sid: str, *, delete_generation: int, had_sidecar: bool) -> bool:
+    """Whether a share create/revoke may still write for ``sid`` (#8837).
+
+    The caller holds ``_get_session_agent_lock(sid)``, which /api/session/delete
+    holds from its first step to its last, so the answer cannot change before
+    the caller writes. No when a delete completed since the request began: the
+    write would bring the deleted conversation back (sidecar and index row, with
+    a live token). No as well when the sidecar the request resolved is gone: only
+    a session that had no sidecar then (a genuine external session, which gets a
+    metadata-only one) may get a new sidecar from the share write.
+    """
+    if _session_delete_generation(sid) != delete_generation:
+        return False
+    if _session_sidecar_exists(sid):
+        return True
+    return not had_sidecar
+
+
+def _revoke_shares_before_session_delete(sid: str, sidecar_path):
+    """Revoke every share link ``sid`` still names, before its delete removes anything (#8837).
+
+    The caller holds ``_get_session_agent_lock(sid)``; share create/revoke take
+    it before they publish or persist a token, so no link can appear for this
+    session between this read and the delete. The sidecar's token is the link
+    the session publishes; the resident copy's token covers a checkpoint that
+    wrote the sidecar without it while that link was still live.
+
+    Returns the revoked tokens, or ``None`` when a link is still published after
+    its revoke: the caller then refuses the delete with nothing removed yet.
+    """
+    from api.models import _persisted_share_fields
+
+    tokens = []
+    try:
+        persisted = _persisted_share_fields(sidecar_path)
+    except OSError:
+        # Unreadable: load_share() cannot read it either, so it serves no link.
+        logger.warning("Could not read the share token of session %s before deleting it", sid, exc_info=True)
+        persisted = None
+    if isinstance(persisted, tuple) and persisted[0]:
+        tokens.append(str(persisted[0]))
+    resident = _resident_share_token(sid)
+    if resident and resident not in tokens:
+        tokens.append(resident)
+    for token in tokens:
+        try:
+            revoke_share_token(token)
+        except Exception:
+            logger.warning("Failed to revoke a share link of session %s before deleting it", sid, exc_info=True)
+        if share_snapshot_is_live(token):
+            return None
+    return tokens
+
+
+def _clear_share_fields_after_refused_delete(sid: str, revoked_tokens) -> None:
+    """A delete refused after its share revoke keeps the session: stop it naming
+    the link that is now dead, so the UI does not offer it (#8837). The caller
+    holds the session's agent lock."""
+    if not revoked_tokens:
+        return
+    try:
+        with _session_persist_lock(sid):
+            _update_session_share_fields(sid, share_token=None, share_created_at=None)
+            _commit_share_fields_to_cached_session(sid, share_token=None, share_created_at=None)
+    except Exception:
+        logger.warning("Failed to clear the revoked share of session %s after a refused delete", sid, exc_info=True)
 
 
 def _resolve_session_under_lock(sid: str, outside=None):
@@ -19081,10 +19171,14 @@ def handle_post(handler, parsed) -> bool:
         sid = str(body.get("session_id") or "").strip()
         if not sid:
             return bad(handler, "session_id is required", 400)
+        # #8837: read before the resolve, so a delete that completes after it is
+        # seen when this request takes the session lock to publish.
+        delete_generation = _session_delete_generation(sid)
         try:
             snapshot_session, stored_session, cli_meta = _resolve_share_session_pair(sid, handler)
         except KeyError:
             return bad(handler, "Session not found", 404)
+        had_sidecar = _session_sidecar_exists(sid)
         # #8255 review (second round): build the snapshot from the session as it
         # is INSIDE the lock. A writer that saves while the snapshot is being
         # built used to be reverted, because the snapshot was taken before the
@@ -19094,6 +19188,7 @@ def handle_post(handler, parsed) -> bool:
         share_lock = _get_session_share_lock(sid)
         if not share_lock.acquire(timeout=SHARE_SESSION_LOCK_TIMEOUT_SECONDS):
             return bad(handler, "Session busy, try again", 503)
+        agent_lock = None
         try:
             # Re-read inside the lock: saving the object resolved before the wait
             # would revert a title rename or an appended message that landed while
@@ -19160,6 +19255,24 @@ def handle_post(handler, parsed) -> bool:
             )
             persisted_session.share_token = share_meta["share_token"]
             persisted_session.share_created_at = share_meta["share_created_at"]
+            # #8837: persist under the session lock /api/session/delete holds
+            # throughout, and only for a session that is still there. A delete
+            # used to land between this request's resolve and its persist; the
+            # persist then saved the deleted conversation back (sidecar and index
+            # row) with a live token. Only the persist is under this lock (the
+            # snapshot build can take seconds), so a link this request published
+            # for a session it may no longer write is revoked again.
+            agent_lock = _get_session_agent_lock(sid)
+            if not agent_lock.acquire(timeout=SHARE_SESSION_LOCK_TIMEOUT_SECONDS):
+                agent_lock = None
+                if share_meta["share_token"] != durable_token:
+                    revoke_share_token(share_meta["share_token"])
+                return bad(handler, "Session busy, try again", 503)
+            if not _share_target_still_present(
+                sid, delete_generation=delete_generation, had_sidecar=had_sidecar,
+            ):
+                revoke_share_token(share_meta["share_token"])
+                return bad(handler, "Session not found", 404)
             # Update the live cached copy BEFORE the durable save (#8255 review,
             # second round): a streaming checkpoint that serializes the live
             # session between the save and the mirror would write
@@ -19177,6 +19290,8 @@ def handle_post(handler, parsed) -> bool:
                 share_created_at=share_meta["share_created_at"],
             )
         finally:
+            if agent_lock is not None:
+                agent_lock.release()
             share_lock.release()
         _publish_session_list_changed(
             "session_share_create",
@@ -19207,10 +19322,12 @@ def handle_post(handler, parsed) -> bool:
         sid = str(body.get("session_id") or "").strip()
         if not sid:
             return bad(handler, "session_id is required", 400)
+        delete_generation = _session_delete_generation(sid)  # #8837, as in create
         try:
             snapshot_session, stored_session, cli_meta = _resolve_share_session_pair(sid, handler)
         except KeyError:
             return bad(handler, "Session not found", 404)
+        had_sidecar = _session_sidecar_exists(sid)
         # #8255: the LRU-cached session is not the share-token authority. The
         # cache-freshness check compares message/scene state and not share
         # fields, so a cached copy loaded during a create's save window (or any
@@ -19225,6 +19342,7 @@ def handle_post(handler, parsed) -> bool:
         share_lock = _get_session_share_lock(sid)
         if not share_lock.acquire(timeout=SHARE_SESSION_LOCK_TIMEOUT_SECONDS):
             return bad(handler, "Session busy, try again", 503)
+        agent_lock = None
         try:
             target_session = _reload_session_for_share(sid) or stored_session
             if target_session is None:
@@ -19260,6 +19378,19 @@ def handle_post(handler, parsed) -> bool:
                 target_session = refreshed
             target_session.share_token = None
             target_session.share_created_at = None
+            # #8837: as in create, clear the fields under the session lock delete
+            # holds, and only for a session that is still there. A revoke that
+            # resolved the session before a delete removed it used to save the
+            # resolved copy back, recreating the deleted conversation unshared.
+            # The link itself is already revoked above.
+            agent_lock = _get_session_agent_lock(sid)
+            if not agent_lock.acquire(timeout=SHARE_SESSION_LOCK_TIMEOUT_SECONDS):
+                agent_lock = None
+                return bad(handler, "Session busy, try again", 503)
+            if not _share_target_still_present(
+                sid, delete_generation=delete_generation, had_sidecar=had_sidecar,
+            ):
+                return bad(handler, "Session not found", 404)
             # Mirror before the durable save (#8255 review, second round): a
             # streaming checkpoint in the save/mirror window would otherwise write
             # the live session's stale share fields back over the sidecar.
@@ -19274,6 +19405,8 @@ def handle_post(handler, parsed) -> bool:
                 share_created_at=None,
             )
         finally:
+            if agent_lock is not None:
+                agent_lock.release()
             share_lock.release()
         _publish_session_list_changed(
             "session_share_revoke",
@@ -20440,6 +20573,19 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session busy, try again", 503)
         draft_delete_failed = False
         try:
+            # #8837: revoke the session's public link first. Revoking before
+            # anything is removed keeps the link from outliving a delete that a
+            # later step fails or refuses; a revoke that does not land refuses
+            # the delete while the session is still whole, so the user can retry.
+            # load_share() also refuses a session-less snapshot, so this is the
+            # snapshot store catching up, not the only guard.
+            revoked_share_tokens = _revoke_shares_before_session_delete(sid, p)
+            if revoked_share_tokens is None:
+                return j(
+                    handler,
+                    {"ok": False, "error": "share_revoke_failed", "action": "session_delete"},
+                    status=500,
+                )
             # Delete state.db rows BEFORE any user-visible file. A refusal (live
             # gateway work, unfenceable ledger) or a failed commit must leave the
             # whole session intact instead of stranding an unrecoverable
@@ -20453,6 +20599,7 @@ def handle_post(handler, parsed) -> bool:
 
                     state_db_cleanup_failed = not delete_cli_session(sid)
                 except SessionDeleteRefused as exc:
+                    _clear_share_fields_after_refused_delete(sid, revoked_share_tokens)
                     return j(
                         handler,
                         {"ok": False, "error": exc.code, "action": "session_delete"},
@@ -20474,6 +20621,7 @@ def handle_post(handler, parsed) -> bool:
                     from api.models import state_db_session_presence
 
                     if delete_raised or state_db_session_presence(sid) is not False:
+                        _clear_share_fields_after_refused_delete(sid, revoked_share_tokens)
                         return j(
                             handler,
                             {
@@ -20519,6 +20667,7 @@ def handle_post(handler, parsed) -> bool:
                 # #7738: recorded with the eviction, so a writer waiting on the
                 # session lock cannot save the empty-shell fallback back to disk.
                 _DELETED_SESSION_IDS.add(sid)
+                _SESSION_DELETE_GENERATIONS[sid] = _session_delete_generation(sid) + 1
                 try:
                     p.unlink(missing_ok=True)
                 except Exception:
