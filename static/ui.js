@@ -5847,6 +5847,26 @@ function invalidateLiveModelCache(providerId){
   }else{
     for(const k in _liveModelCache) delete _liveModelCache[k];
   }
+  // #6919: the Settings → Conversation picker is a second live-model receiver,
+  // distinct from the composer dropdown. The epoch advance above revokes its
+  // in-flight fetch, and switchSettingsSection() only toggles panes — it never
+  // re-runs the Settings loader — so without a successor the picker stays
+  // unenriched until the whole Settings panel is reopened. Re-arm it here,
+  // AFTER the eviction: before it, _fetchLiveModels() would hit the surviving
+  // cache entry and never re-fetch. The re-fetch only appends options and
+  // re-applies the current selection, so no unsaved Settings state is reset.
+  try{
+    const sel=(typeof document!=='undefined'&&document.getElementById)
+      ? document.getElementById('settingsModel') : null;
+    // Only a picker hydrated by the Settings loader has the static catalog to
+    // enrich; a never-opened Settings pane is repainted on entry anyway.
+    if(sel&&sel.options&&sel.options.length){
+      const provider=(typeof window!=='undefined'&&window._activeProvider)
+        ? String(window._activeProvider)
+        : (providerId?String(providerId):'');
+      if(provider) Promise.resolve(_fetchLiveModels(provider,sel)).catch(()=>{});
+    }
+  }catch(_e){}
 }
 
 function _addLiveModelsToSelect(provider, models, sel){
