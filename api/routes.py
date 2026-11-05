@@ -595,6 +595,7 @@ def _project_default_workspace(proj) -> str | None:
 # same object. Reentrant so a mutation may call helpers that take it again.
 from api.models import PROJECTS_CATALOG_LOCK as _PROJECTS_CATALOG_LOCK
 from api.models import update_session_share_fields as _update_session_share_fields
+from api.models import repair_session_share_field_order as _repair_session_share_field_order
 
 
 # Bounded wait for a session lock while /api/projects/delete clears cached
@@ -16538,6 +16539,13 @@ def _handle_session_get(handler, parsed) -> bool:
             # otherwise emit a useless 409 with profile=null.
             if _diag: _diag.finish()
             return bad(handler, "Session not found", 404)
+        # #8830: only now that this request owns the session, move share fields
+        # an exp-v0.52.621..630 build left after ``messages`` (no-op unless the
+        # load found them there). A refused request returned above and never
+        # writes (#8094). The repair takes this session's agent lock itself
+        # (without waiting), the lock /api/session/delete holds while it removes
+        # the sidecar, so a delete that lands mid-repair is not undone.
+        _repair_session_share_field_order(s, sid)
         original_stream_id = getattr(s, "active_stream_id", None)
         _clear_stale_stream_state(s)
         cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
