@@ -10,13 +10,17 @@ Verifies that credentials (GitHub PATs, API keys, etc.) are masked in:
 Tests run against the isolated test test_server on port 8788.
 """
 
+import contextlib
+import functools
+import inspect
 import json
-import importlib
 import pathlib
 import sys
 import types
 import urllib.request
 import urllib.error
+from unittest import mock
+
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent.parent))
@@ -239,26 +243,43 @@ def test_redact_text_prefilter_admits_plain_text_without_url_or_credentials():
     assert helpers._might_contain_sensitive_text(None) is False  # type: ignore[arg-type]
 
 
-def test_redact_value_works_with_legacy_agent_redact_signature(monkeypatch):
+@contextlib.contextmanager
+def _helpers_with_stub_agent_redact(fake_redact):
+    """Yield ``api.helpers`` redacting through a stub ``agent.redact``.
+
+    Builds the redactor exactly as module import does (``_build_redact_fn``)
+    while the stub is installed, then swaps it in with patchers that restore
+    the original objects on exit. It never reloads ``api.helpers``: a
+    "restoring" ``importlib.reload`` in ``finally`` runs while a monkeypatched
+    stub is still in ``sys.modules`` (monkeypatch undoes only after the test
+    body), so the module stayed bound to the stub for the rest of the session
+    and tests/test_redact_large_string_cache.py's runtime-registration
+    regression failed whenever this file ran before it.
+    """
+    import api.helpers as helpers
+
+    stub_modules = {"agent": types.ModuleType("agent"), "agent.redact": fake_redact}
+    with mock.patch.dict(sys.modules, stub_modules):
+        redact_fn = helpers._build_redact_fn()
+    with mock.patch.object(helpers, "_redact_fn_uncached", redact_fn), mock.patch.object(
+        helpers, "_redact_fn_lru", functools.lru_cache(maxsize=64)(redact_fn)
+    ):
+        yield helpers
+
+
+def test_redact_value_works_with_legacy_agent_redact_signature():
     """_redact_text must tolerate older redact_sensitive_text(text) signatures."""
-    fake_agent = types.ModuleType("agent")
     fake_redact = types.ModuleType("agent.redact")
 
     def _legacy_redact_sensitive_text(text):
         return text
 
     fake_redact.redact_sensitive_text = _legacy_redact_sensitive_text
-    monkeypatch.setitem(sys.modules, "agent", fake_agent)
-    monkeypatch.setitem(sys.modules, "agent.redact", fake_redact)
-
-    import api.helpers as helpers
-    helpers = importlib.reload(helpers)
-    try:
+    with _helpers_with_stub_agent_redact(fake_redact) as helpers:
+        assert helpers._redact_fn_uncached.__name__ == "_combined_redact"
         result = helpers._redact_value(f"token={_FAKE_GITHUB_PAT}")
         assert _FAKE_GITHUB_PAT not in result
         assert "ghp_Te" in result
-    finally:
-        importlib.reload(helpers)
 
 
 def test_redaction_preserves_secret_key_literals_in_code_without_values():
@@ -292,32 +313,21 @@ def test_redaction_masks_authorization_bot_value_without_breaking_code_structure
     ast.parse(redacted)
 
 
-def _reload_helpers_with_fallback_redactor(monkeypatch):
-    fake_agent = types.ModuleType("agent")
-    fake_redact = types.ModuleType("agent.redact")
-    monkeypatch.setitem(sys.modules, "agent", fake_agent)
-    monkeypatch.setitem(sys.modules, "agent.redact", fake_redact)
-
-    import api.helpers as helpers
-    return importlib.reload(helpers)
-
-
 @pytest.mark.parametrize("text,leaked", [
     ("API_KEY=val,with,commas", "val,with,commas"),
     ('TOKEN="quoted"', "quoted"),
     ("PASSWORD=ends)", "ends)"),
 ])
-def test_fallback_env_redaction_masks_values_with_delimiters(monkeypatch, text, leaked):
-    helpers = _reload_helpers_with_fallback_redactor(monkeypatch)
-    try:
+def test_fallback_env_redaction_masks_values_with_delimiters(text, leaked):
+    # A stub agent.redact without redact_sensitive_text: local fallback only.
+    with _helpers_with_stub_agent_redact(types.ModuleType("agent.redact")) as helpers:
+        assert helpers._redact_fn_uncached.__name__ == "_fallback_redact"
         redacted = helpers._redact_value(text)
         assert leaked not in redacted
         assert "..." in redacted or "***" in redacted
-    finally:
-        importlib.reload(helpers)
 
 
-def test_agent_redaction_restore_is_occurrence_aware_for_code_key_literals(monkeypatch):
+def test_agent_redaction_restore_is_occurrence_aware_for_code_key_literals():
     key = "DISCORD" + "_BOT" + "_TOKEN"
     secret = "real-secret-value-123456789"
     mask = "real-s...6789"
@@ -327,7 +337,6 @@ def test_agent_redaction_restore_is_occurrence_aware_for_code_key_literals(monke
         "    return True"
     )
 
-    fake_agent = types.ModuleType("agent")
     fake_redact = types.ModuleType("agent.redact")
 
     def _fake_redact_sensitive_text(text, force=True):
@@ -339,18 +348,51 @@ def test_agent_redaction_restore_is_occurrence_aware_for_code_key_literals(monke
         )
 
     fake_redact.redact_sensitive_text = _fake_redact_sensitive_text
-    monkeypatch.setitem(sys.modules, "agent", fake_agent)
-    monkeypatch.setitem(sys.modules, "agent.redact", fake_redact)
-
-    import api.helpers as helpers
-    helpers = importlib.reload(helpers)
-    try:
+    with _helpers_with_stub_agent_redact(fake_redact) as helpers:
         redacted = helpers._redact_value(original)
         assert secret not in redacted
         assert f'if line.startswith("{key}="):' in redacted
         assert f"env line: {key}=\"):" not in redacted
-    finally:
-        importlib.reload(helpers)
+
+
+@pytest.mark.parametrize("stub_shape", ["legacy_signature", "no_agent_redactor", "force_kwarg"])
+def test_stub_agent_redactor_does_not_leak_into_later_tests(stub_shape):
+    """Regression: the stubbed-agent tests above leave ``api.helpers`` as found.
+
+    They used to reload ``api.helpers`` under a stub ``agent.redact`` and
+    "restore" it with a second reload that still ran under the stub. Every
+    later test then redacted through the stub, and the production-registry
+    regression in tests/test_redact_large_string_cache.py failed when this
+    file ran first: a runtime-registered pattern reached the live
+    ``agent.redact`` while ``api.helpers`` kept calling the stub.
+    """
+    import api.helpers as helpers
+
+    watched = ("_redact_fn_uncached", "_redact_fn_lru", "_redact_fn_cached", "_redact_text")
+    before = {name: getattr(helpers, name) for name in watched}
+    modules_before = {name: sys.modules.get(name) for name in ("agent", "agent.redact")}
+
+    fake_redact = types.ModuleType("agent.redact")
+    if stub_shape == "legacy_signature":
+        fake_redact.redact_sensitive_text = lambda text: text
+    elif stub_shape == "force_kwarg":
+        fake_redact.redact_sensitive_text = lambda text, force=True: text
+    with _helpers_with_stub_agent_redact(fake_redact) as stubbed:
+        assert stubbed._redact_fn_uncached is not before["_redact_fn_uncached"]
+
+    for name, value in before.items():
+        assert getattr(helpers, name) is value, f"api.helpers.{name} leaked from the stub"
+    for name, module in modules_before.items():
+        assert sys.modules.get(name) is module, f"sys.modules[{name!r}] leaked from the stub"
+
+    live = sys.modules.get("agent.redact")
+    if live is not None and hasattr(live, "redact_sensitive_text"):
+        bound = inspect.getclosurevars(helpers._redact_fn_uncached).nonlocals.get(
+            "redact_sensitive_text"
+        )
+        assert bound is live.redact_sensitive_text, (
+            "api.helpers no longer redacts through the live agent.redact module"
+        )
 
 
 def test_redact_session_data_messages():
