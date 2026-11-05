@@ -139,3 +139,27 @@ def test_torn_shrink_keeps_an_existing_usable_backup(session_dir):
     assert status["live_messages"] == 3
     assert status["bak_messages"] == 10
     assert status["recommend"] == "restore"
+
+
+def test_keeping_a_backup_never_renames_a_stale_backup_temp(session_dir):
+    """A temp left by an earlier failed backup (rename and cleanup both
+    denied) must not replace the usable backup this save says it kept."""
+    import os
+    import threading
+
+    sid = "s_8798_stale_tmp"
+    _session(sid, _messages(10)).save(skip_index=True)
+    _session(sid, _messages(8)).save(skip_index=True)  # backup now has 10
+    path = session_dir / f"{sid}.json"
+    bak = path.with_suffix(".json.bak")
+    good_bak = bak.read_bytes()
+
+    # Valid 8-message leftover under this process/thread's temp name.
+    stale = bak.with_suffix(f".bak.tmp.{os.getpid()}.{threading.current_thread().ident}")
+    stale.write_bytes(path.read_bytes())
+
+    _cut_mid_character(path)
+    _session(sid, _messages(3, word="kept")).save(skip_index=True)
+
+    assert [m["content"] for m in _reload(path)["messages"]] == ["kept 0", "kept 1", "kept 2"]
+    assert bak.read_bytes() == good_bak, "stale temp must not demote the 10-message backup"

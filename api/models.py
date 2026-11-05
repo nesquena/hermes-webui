@@ -2160,12 +2160,16 @@ class Session:
                                 bf.write(existing_bytes)
                                 bf.flush()
                                 os.fsync(bf.fileno())
+                            _safe_replace(bak_tmp, bak_path)
                         else:
                             with open(bak_tmp, 'w', encoding='utf-8') as bf:
                                 bf.write(backup_text)
                                 bf.flush()
                                 os.fsync(bf.fileno())
-                        _safe_replace(bak_tmp, bak_path)
+                            # Only rename a temp this save just wrote; a stale
+                            # one left by an earlier failed save must never
+                            # land on the backup (#8807 gate).
+                            _safe_replace(bak_tmp, bak_path)
                     except OSError:
                         # Backup is best-effort; main save proceeds regardless.
                         try:
