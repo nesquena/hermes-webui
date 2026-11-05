@@ -89,6 +89,8 @@
 
 ### Fixed
 
+- **A sidebar swipe or Ctrl/Cmd+B no longer fires while you are typing.** On a phone, an edge swipe that starts on the composer or the message field no longer opens the sidebar, and Ctrl/Cmd+B no longer toggles the sidebar while a text field has focus, even when the key event reaches another element. A swipe from the edge anywhere else still opens the sidebar. Thanks @solarmaster961 (#8630).
+
 - **The orphaned-session sidebar test no longer fails when the index rebuild finishes first.** Its fixture wrote the pending-message fields after the message list, where the metadata reader never looks, so a pending session was pruned whenever the rebuild thread won its race. The fixture now uses the same field order as a saved session, and a new test pins both sides of the race (#8814).
 
 - **The named-profile import test no longer depends on test order.** The opt-in test left its imported session behind under the named profile (the cleanup deleted from the default profile, which the profile guard refuses), so the opt-out test got the correct 409 profile mismatch instead of the 404 it expected whenever it ran second. Each test now uses its own session and deletes it under its own profile, and a new test pins the 409 for importing a session another profile already owns (#8831).
