@@ -13972,7 +13972,11 @@ from api.streaming import (
     _compact_for_echo_compare,
     _CompactEchoIndex,
 )
-from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
+from api.gateway_chat import (
+    _run_gateway_chat_streaming,
+    refuse_on_gateway_backend,
+    webui_gateway_chat_enabled,
+)
 from api.run_drain import (  # #7293
     RunAdmissionClosed,
     assert_run_admission_open_locked,
@@ -22904,6 +22908,12 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/updates/summary":
         from api.updates import summarize_update_payload
 
+        # One-shot model call resolved by the WebUI process; in gateway mode
+        # there is no route for it.
+        if refuse_on_gateway_backend(
+            handler, "/api/updates/summary", get_config_snapshot()
+        ):
+            return
         updates = body.get("updates") if isinstance(body, dict) else {}
         target = body.get("target") if isinstance(body, dict) else None
 
@@ -28275,6 +28285,10 @@ def _handle_btw(handler, body):
         require(body, "question")
     except ValueError as e:
         return bad(handler, str(e))
+    # Runs the in-process agent by design; refuse before creating the hidden
+    # session while the backend is the gateway.
+    if refuse_on_gateway_backend(handler, "/btw", get_config_snapshot()):
+        return
     # #7293: refuse before any session mutation while a restart/update or
     # shutdown drain has closed run admission (503, code server_draining).
     _admission_refusal = run_admission_closed_response()
@@ -28368,6 +28382,10 @@ def _handle_background(handler, body):
         require(body, "prompt")
     except ValueError as e:
         return bad(handler, str(e))
+    # Runs the in-process agent by design; refuse before creating the hidden
+    # session while the backend is the gateway.
+    if refuse_on_gateway_backend(handler, "/background", get_config_snapshot()):
+        return
     # #7293: refuse before any session mutation while a restart/update or
     # shutdown drain has closed run admission (503, code server_draining).
     _admission_refusal = run_admission_closed_response()
@@ -31660,6 +31678,10 @@ def _current_cwd_sync_target(sid):
 
 def _handle_chat_sync(handler, body):
     """Fallback synchronous chat endpoint (POST /api/chat). Not used by frontend."""
+    # Builds an in-process agent; a gateway-backed WebUI must not execute a
+    # turn outside the gateway (it also usually has no model credentials).
+    if refuse_on_gateway_backend(handler, "/api/chat", get_config_snapshot()):
+        return
     # #7293: refuse before any session mutation while a restart/update or
     # shutdown drain has closed run admission (503, code server_draining).
     _admission_refusal = run_admission_closed_response()
@@ -32699,6 +32721,12 @@ def _llm_git_commit_message(system_prompt: str, user_prompt: str, session=None) 
 
 
 def _handle_git_commit_message(handler, body):
+    # One-shot model call resolved by the WebUI process; in gateway mode there
+    # is no route for it.
+    if refuse_on_gateway_backend(
+        handler, "/api/git/commit-message", get_config_snapshot()
+    ):
+        return
     from api.workspace_git import (
         GitWorkspaceError,
         clean_generated_commit_message,
@@ -32731,6 +32759,12 @@ def _handle_git_commit_message(handler, body):
 
 
 def _handle_git_commit_message_selected(handler, body):
+    # One-shot model call resolved by the WebUI process; in gateway mode there
+    # is no route for it.
+    if refuse_on_gateway_backend(
+        handler, "/api/git/commit-message-selected", get_config_snapshot()
+    ):
+        return
     from api.workspace_git import (
         GitWorkspaceError,
         clean_generated_commit_message,
@@ -34609,6 +34643,10 @@ def _handle_session_compress_start(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
 
+    # Compression runs an in-process agent and would act on the WebUI's copy of
+    # the transcript, not the gateway's; refuse before starting a job.
+    if refuse_on_gateway_backend(handler, "/compress", get_config_snapshot()):
+        return
     sid = str(body.get("session_id") or "").strip()
     if not sid:
         return bad(handler, "session_id is required")
@@ -34762,6 +34800,10 @@ def _handle_session_compress(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
 
+    # Same in-process/gateway mismatch as /compress/start: refuse before
+    # touching the session.
+    if refuse_on_gateway_backend(handler, "/compress", get_config_snapshot()):
+        return
     sid = str(body.get("session_id") or "").strip()
     if not sid:
         return bad(handler, "session_id is required")
