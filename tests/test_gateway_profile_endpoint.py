@@ -104,6 +104,54 @@ def test_nested_worker_scopes_restore_the_process_environ_view(work_profile):
     assert profiles._WORKER_ENV_BASELINE == {}
 
 
+def test_worker_cleanup_restores_os_environ_before_dropping_the_baseline_under_the_reader_lock(work_profile, monkeypatch):
+    """Greptile 4483823738: a reader between baseline removal and os.environ restore saw alpha's URL as the
+    process's own. The baseline is now dropped only after restore, inside the lock the reader takes."""
+    alpha = work_profile.parent / "alpha"
+    alpha.mkdir()
+    (alpha / ".env").write_text("HERMES_WEBUI_GATEWAY_BASE_URL=http://alpha-gw:9000\n")
+    seen = []
+    real_exit = profiles._worker_env_overlay_exit
+
+    def checked_exit(keys):
+        seen.append((gateway_chat.os.environ["HERMES_WEBUI_GATEWAY_BASE_URL"],
+                     profiles._WORKER_ENV_BASELINE_LOCK._is_owned()))
+        real_exit(keys)
+
+    monkeypatch.setattr(profiles, "_worker_env_overlay_exit", checked_exit)
+    with profiles.profile_env_for_background_worker("alpha"):
+        pass
+    assert seen == [(SHARED, True)]
+    assert profiles._WORKER_ENV_BASELINE == {}
+
+
+def test_a_config_url_cached_while_a_worker_mirror_is_open_is_expanded_from_the_clean_environ(
+        work_profile, monkeypatch):
+    """Greptile 4483823744: get_config() expands ${VAR} from live os.environ, so a reload inside alpha's worker
+    cached alpha's host; the resolver re-expands the shared config URL against the clean process view."""
+    from api import config
+
+    alpha = work_profile.parent / "alpha"
+    alpha.mkdir()
+    (alpha / ".env").write_text("GW_HOST=alpha-gw:9000\n")
+    (work_profile.parent.parent / "config.yaml").write_text("webui_gateway_base_url: http://${GW_HOST}\n")
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_GATEWAY_BASE_URL", raising=False)
+    monkeypatch.setenv("GW_HOST", "127.0.0.1:8642")
+    try:
+        config.reload_config()
+        expected = gateway_chat._gateway_endpoint_for_profile("work")
+        assert expected[0].startswith(SHARED)
+        with profiles.profile_env_for_background_worker("alpha"):
+            assert gateway_chat.os.environ["GW_HOST"] == "alpha-gw:9000"  # the mirror is open
+            config.reload_config()
+            assert config.get_config()["webui_gateway_base_url"] == "http://alpha-gw:9000"  # the poisoned cache
+            assert gateway_chat._gateway_endpoint_for_profile("work") == expected
+    finally:
+        monkeypatch.undo()
+        config.reload_config()
+
+
 def test_a_profile_with_only_a_webui_alias_is_not_routed_and_keeps_the_unprefixed_listener(work_profile):
     """Pinned (#7877): the alias is the shared URL's own key, so /p/<name> would be a 401; the profile's own
     credential goes to the trusted shared listener, exactly as before routing."""

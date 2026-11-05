@@ -587,11 +587,15 @@ def test_gateway_worker_resolves_reasoning_from_session_profile(
     assert payload["reasoning_effort"] == expected
     if http_error:
         error = next(data for event, data, *_ in emitted if event == "apperror")
-        if runs_api:
+        if not work_key:
+            # #7877: a keyless named profile's 401 is the Gateway's refusal and names the key fix, on both paths.
+            assert error["type"] == "gateway_auth_error"
+            assert error["hint"].startswith("No Gateway API key was sent: set API_SERVER_KEY")
+        elif runs_api:
             assert error["type"] == "auth_mismatch"
         else:
             assert error["type"] == "gateway_auth_error"
-            assert error["hint"].startswith("Check that" if work_key else "Set ")
+            assert error["hint"].startswith("Check that")
 
 
 @pytest.fixture
