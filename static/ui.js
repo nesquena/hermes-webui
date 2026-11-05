@@ -5886,6 +5886,9 @@ function _dropStaleLiveModelOptions(provider, freshValues, sel){
         const isLive=(opt.dataset&&opt.dataset.live==='1')
           || opt.title==='Live model — fetched from provider';
         if(!isLive||opt===selected) continue;
+        // A live replacement that stands in for a static catalog row (the bare
+        // twin was deduped away) must survive: the catalog still offers it.
+        if(opt.dataset&&opt.dataset.catalogOrigin==='1') continue;
         if(freshValues.has(String(opt.value))) continue;
         og.removeChild(opt);
         removed++;
@@ -5961,6 +5964,13 @@ function _addLiveModelsToSelect(provider, models, sel, opts){
       // curated/extra status (#7528 option B): dedup then drops the bare twin,
       // so a built-in group keeps its curated order instead of the replacement
       // being sorted into the extras block.
+      //
+      // #6919: remember that the replacement stands in for a STATIC catalog row.
+      // Dedup removed the bare option, so dropping the replacement on a later
+      // refresh (a capped live list can change order) would silently remove a
+      // model the static catalog still offers. Reconciliation only prunes
+      // live-ONLY choices.
+      opt.dataset.catalogOrigin='1';
       if(twin.dataset&&twin.dataset.extra) opt.dataset.extra='1';
       providerGroup.insertBefore(opt,twin);
     }else{

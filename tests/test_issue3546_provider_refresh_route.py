@@ -525,6 +525,110 @@ def _replay_drop_stale(scenario: str) -> dict:
 """)
 
 
+_ADD_LIVE_PREAMBLE = """
+function _el(tag,attrs){
+  const e={tagName:String(tag).toUpperCase(),dataset:{},children:[],title:'',value:'',textContent:'',
+    appendChild(c){this.children.push(c);c.parentNode=this;c.parentElement=this;return c;},
+    insertBefore(node,ref){const i=this.children.indexOf(ref);if(i<0){this.children.push(node);}else{this.children.splice(i,0,node);}node.parentNode=this;node.parentElement=this;return node;},
+    removeChild(c){const i=this.children.indexOf(c);if(i>=0)this.children.splice(i,1);c.parentNode=null;c.parentElement=null;return c;}};
+  if(attrs){for(const k in attrs){if(k!=='dataset') e[k]=attrs[k];}}
+  if(attrs&&attrs.dataset) e.dataset=attrs.dataset;
+  return e;
+}
+function _mk(value,title,dataset){return _el('option',{value:value,title:title||'',dataset:dataset||{}});}
+function _makeSelect(groups,selectedValue){
+  const sel={selectedIndex:-1,querySelectorAll(t){return t==='optgroup'?groups:[];}};
+  Object.defineProperty(sel,'options',{get(){const out=[];for(const g of groups){for(const o of g.children) out.push(o);}return out;}});
+  sel.value=selectedValue===null?'':String(selectedValue||'');
+  return sel;
+}
+let _dynamicModelLabels={};
+const S={session:{}};
+const window={_activeProvider:'custom:cpa'};
+const document={createElement(tag){return _el(tag);}};
+function _sortModelPickerOptions(){}
+function _modelStateForSelect(){return null;}
+function _applyModelToDropdown(){return true;}
+function syncModelChip(){}
+function _getOptionProviderId(opt){
+  if(!opt) return '';
+  if(opt.dataset&&opt.dataset.provider) return opt.dataset.provider;
+  const g=opt.parentElement;
+  if(g&&g.dataset&&g.dataset.provider) return g.dataset.provider;
+  return '';
+}
+"""
+
+
+def _replay_add_live(scenario: str) -> dict:
+    ui = _read_static("ui.js")
+    parts = [
+        _extract_function_body(ui, "function _modelPickerOptionIdentity("),
+        _extract_function_body(ui, "function _deduplicateModelPickerOptions("),
+        _extract_function_body(ui, "function _dropStaleLiveModelOptions("),
+        _extract_function_body(ui, "function _addLiveModelsToSelect("),
+    ]
+    return _run_node(f"""
+{_ADD_LIVE_PREAMBLE}
+{"".join(parts)}
+(async()=>{{
+{scenario}
+}})().catch(e=>{{process.stderr.write(String(e&&e.stack||e));process.exit(1);}});
+""")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_reconcile_preserves_a_static_choice_replaced_by_a_live_twin():
+    """Greptile follow-up: a routed live replacement stands in for a bare static
+    catalog row and dedup removes the bare one. If a later refresh omits that
+    model (a capped live list can change order), reconciliation must not delete
+    the replacement — the static catalog still offers the model."""
+    result = _replay_add_live("""
+  const group=_el('optgroup',{dataset:{provider:'custom:cpa'}});
+  group.appendChild(_mk('model-x',''));
+  const sel=_makeSelect([group],null);
+  // First refresh: live advertises model-x -> routed replacement replaces the
+  // bare catalog row, and dedup drops the bare one.
+  _addLiveModelsToSelect('custom:cpa',[{id:'model-x',label:'Model X'}],sel,{reconcile:true});
+  const afterFirst=group.children.map(o=>o.value);
+  // Second refresh: the live list no longer advertises model-x, but the static
+  // catalog still does. The picker must keep offering it.
+  _addLiveModelsToSelect('custom:cpa',[{id:'model-y',label:'Model Y'}],sel,{reconcile:true});
+  const afterSecond=group.children.map(o=>o.value);
+  process.stdout.write(JSON.stringify({afterFirst:afterFirst,afterSecond:afterSecond}));
+""")
+    assert result["afterFirst"] == ["@custom:cpa:model-x"], (
+        "the routed replacement must take the bare catalog row's place — "
+        f"got {result['afterFirst']}"
+    )
+    assert result["afterSecond"] == ["@custom:cpa:model-x", "@custom:cpa:model-y"], (
+        "a model the static catalog still offers must survive a refresh that "
+        f"omits it from the live list — got {result['afterSecond']}"
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_reconcile_still_drops_a_live_only_option():
+    """Control for the fix above: a live-only option (no static twin) must still
+    be removed when the provider stops advertising it."""
+    result = _replay_add_live("""
+  const group=_el('optgroup',{dataset:{provider:'custom:cpa'}});
+  const sel=_makeSelect([group],null);
+  _addLiveModelsToSelect('custom:cpa',[{id:'live-only',label:'Live Only'}],sel,{reconcile:true});
+  const afterFirst=group.children.map(o=>o.value);
+  _addLiveModelsToSelect('custom:cpa',[{id:'other',label:'Other'}],sel,{reconcile:true});
+  const afterSecond=group.children.map(o=>o.value);
+  process.stdout.write(JSON.stringify({afterFirst:afterFirst,afterSecond:afterSecond}));
+""")
+    assert result["afterFirst"] == ["@custom:cpa:live-only"], (
+        f"unexpected first-refresh shape: {result['afterFirst']}"
+    )
+    assert result["afterSecond"] == ["@custom:cpa:other"], (
+        "a live-only option the provider no longer advertises must be dropped — "
+        f"got {result['afterSecond']}"
+    )
+
+
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_removed_live_models_are_dropped_from_the_settings_picker():
     """#6919 (Greptile follow-up): Refresh Models must also remove live options
@@ -601,6 +705,14 @@ def test_settings_reconcile_is_wired_and_additive():
     )
     assert "opt.dataset.live='1'" in add, (
         "live options must be tagged so static catalog rows are never pruned"
+    )
+    assert "opt.dataset.catalogOrigin='1'" in add, (
+        "a routed replacement for a static catalog twin must record its catalog "
+        "origin, or a refresh that omits it deletes a still-valid catalog choice"
+    )
+    drop = _extract_function_body(ui, "function _dropStaleLiveModelOptions(")
+    assert "catalogOrigin==='1'" in drop, (
+        "reconciliation must skip options whose model the static catalog still offers"
     )
     invalidate = _extract_function_body(ui, "function invalidateLiveModelCache(")
     assert "{reconcile:true}" in invalidate, (
