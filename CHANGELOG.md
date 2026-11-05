@@ -63,6 +63,8 @@
 
 ### Security
 
+- **Revoking a share link always takes effect (security).** A save of a session that had started before a share link was created or revoked could write the older share token back to the session file, so a revoked link could stay public while the revoke still returned 200. A save now writes the share token only when that save changed it and the file still holds the token it last saw; otherwise the file's token wins. If persisting a share change fails, the session gets its intended share state back so the link stays revocable. (#8794)
+
 - **A conversation saved before shares existed keeps its Stop sharing control after a reload.** Since exp-v0.52.621 the share write put the token after the message list on such a conversation, where the metadata reader never looks, so after any reload the session showed no share and the Stop sharing control was gone while the public link stayed live. The token is now written before the message list. A conversation an affected build already shared gets its control back the next time it is shared again or saved, for example after a new message; sharing again reuses the same link (#8818, #8815).
 
 - **An archive with more than 10,000 files is rejected before any of it is extracted.** The member-count cap was checked inside the extraction loop, so an over-cap upload wrote 10,000 files into the workspace before it was refused and cleaned up. The count is now checked first, for zip and tar; the error message, the cleanup and the responses are unchanged, except that an archive that is both over the cap and contains an unsafe path now reports the count error. The archive-cap upload test no longer times out under load either (#8825, #8823).
@@ -90,6 +92,8 @@
   exactly as before. Thanks @ybai08. (#8138, fixes #8126)
 
 ### Fixed
+
+- **The model picker's Configured section lists each configured model once, with its badge.** Since #8730 a typed custom id for a configured model (for example `openrouter/anthropic/claude-sonnet-4.6` for an OpenRouter fallback) listed that fallback twice, a row that live model enrichment had replaced (such as `@openai:openai/gpt-6.1-sol`) lost its Primary badge and the Configured section disappeared, and a badge saved without a provider showed on no live row. The Configured section now keeps one row per configured entry, preferring the row that sends the configured id, and the badge lookup strips the provider's own routing prefixes. A typed alias stays in the list below the provider groups with its badge, the Configured row stays selected after you pick it, and the Settings default-model picker gets the same fix. (#8767, fixes #8756)
 
 - **A sidebar swipe or Ctrl/Cmd+B no longer fires while you are typing.** On a phone, an edge swipe that starts on the composer or the message field no longer opens the sidebar, and Ctrl/Cmd+B no longer toggles the sidebar while a text field has focus, even when the key event reaches another element. A swipe from the edge anywhere else still opens the sidebar. Thanks @solarmaster961 (#8630).
 

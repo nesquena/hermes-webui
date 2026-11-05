@@ -6055,15 +6055,22 @@ function _normalizeConfiguredModelKey(modelId){
   return s.replace(/-/g,'.');
 }
 
+// The one identity the configured badge lookup, the configured-row dedup and
+// the Configured section key share, so they cannot disagree (#8756).
 function _configuredModelIdentity(modelId,providerId){
-  let s=String(modelId||'').trim().toLowerCase();
   const provider=String(providerId||'').trim().toLowerCase();
-  if(provider){
-    const atPrefix=`@${provider}:`;
-    const slashPrefix=`${provider}/`;
-    if(s.startsWith(atPrefix)) s=s.slice(atPrefix.length)||s;
-    else if(s.startsWith(slashPrefix)) s=s.slice(slashPrefix.length)||s;
-  }
+  // Callers pass the provider owning the row or badge. With none, nothing
+  // marks a leading segment as routing syntax: keep the legacy key.
+  if(!provider) return _normalizeConfiguredModelKey(modelId);
+  let s=String(modelId||'').trim().toLowerCase();
+  // Strip only this provider's routing wrappers. Live enrichment composes
+  // them (`@openai:` + `openai/gpt-x`), so peel `@provider:` and then
+  // `provider/`. Any other leading segment is a vendor namespace and stays
+  // part of the identity (#8725).
+  const atPrefix=`@${provider}:`;
+  const slashPrefix=`${provider}/`;
+  if(s.startsWith(atPrefix)) s=s.slice(atPrefix.length)||s;
+  if(s.startsWith(slashPrefix)) s=s.slice(slashPrefix.length)||s;
   return s.replace(/-/g,'.');
 }
 
@@ -7051,8 +7058,17 @@ function renderModelDropdown(){
     const configuredCandidates=_modelData
       .filter(m=>m.badge&&matches(m));
     const configuredBySemanticKey=new Map();
+    const semanticKeyByEntry=new Map();
     const _configuredProviderKey=(m)=>String((m&&m.badge&&m.badge.provider)||_providerFromModelValue(m&&m.value)||'').toLowerCase();
-    const _configuredModelKey=(m)=>_normalizeConfiguredModelKey(m&&m.value||'');
+    const _configuredModelKey=(m)=>_configuredModelIdentity(m&&m.value||'',_configuredProviderKey(m));
+    const _sendsProviderAlias=(m)=>{
+      const p=_configuredProviderKey(m);
+      if(!p) return false;
+      const s=String(m&&m.value||'').trim().toLowerCase();
+      const at=`@${p}:`;
+      const w=(s.startsWith(at)?s.slice(at.length):s).replace(/-/g,'.');
+      return w.startsWith(`${p.replace(/-/g,'.')}/`);
+    };
     const _configuredDisplayPriority=(m)=>{
       // Prefer plain IDs over provider-qualified aliases for readability.
       const v=String((m&&m.value)||'');
@@ -7061,15 +7077,36 @@ function renderModelDropdown(){
       return 2;
     };
     for(const candidate of configuredCandidates){
-      const semanticKey=`${_configuredProviderKey(candidate)}::${_configuredModelKey(candidate)}`;
+      // One configured entry (Primary, Fallback N) is one Configured row. The
+      // backend also badges spellings it linked across a vendor namespace
+      // (`qwen3` and `Qwen/qwen3`, via _norm_model_id), which the identity
+      // keeps apart, so a later row showing an entry already placed joins
+      // that row's key (#8756). The badge names the entry, so its own provider
+      // (none for a providerless badge) keys it, not the row's routing prefix.
+      const entryKey=candidate.badge.label?`${String(candidate.badge.provider||'').toLowerCase()}::${candidate.badge.role||''}::${candidate.badge.label}`:'';
+      const semanticKey=(entryKey&&semanticKeyByEntry.get(entryKey))||`${_configuredProviderKey(candidate)}::${_configuredModelKey(candidate)}`;
+      if(entryKey&&!semanticKeyByEntry.has(entryKey)) semanticKeyByEntry.set(entryKey,semanticKey);
       const existing=configuredBySemanticKey.get(semanticKey);
       if(!existing){
         configuredBySemanticKey.set(semanticKey,candidate);
         continue;
       }
+      // A row that sends `<provider>/<model>` is an alias of the configured id;
+      // a row that sends the configured id itself always wins the Configured slot.
+      const candidateAlias=_sendsProviderAlias(candidate);
+      const existingAlias=_sendsProviderAlias(existing);
+      if(candidateAlias!==existingAlias){
+        if(!candidateAlias) configuredBySemanticKey.set(semanticKey,candidate);
+        continue;
+      }
       const candidatePriority=_configuredDisplayPriority(candidate);
       const existingPriority=_configuredDisplayPriority(existing);
-      if(candidatePriority>existingPriority){
+      // Same model, same priority: the shorter spelling carries fewer routing
+      // wrappers, so it is the native configured id rather than a typed alias.
+      const sameIdentityShorter=candidatePriority===existingPriority
+        &&_configuredModelKey(candidate)===_configuredModelKey(existing)
+        &&String(candidate.value||'').length<String(existing.value||'').length;
+      if(candidatePriority>existingPriority||sameIdentityShorter){
         configuredBySemanticKey.set(semanticKey,candidate);
       }
     }
@@ -7081,11 +7118,21 @@ function renderModelDropdown(){
         return a.name.localeCompare(b.name);
       });
     const configuredIds=new Set(configuredModels.map(m=>m.value));
-    const configuredSemanticKeys=new Set(configuredModels.map(m=>`${_configuredProviderKey(m)}::${_configuredModelKey(m)}`));
+    // A hidden row stays out of the Show-more count only when a Configured row
+    // already sends its wire id (provider plus value less `@provider:`,
+    // dash-folded); a row that sends `<provider>/<model>`, or the same bare id
+    // to another provider, is a different route and stays reachable.
+    const _configuredWireKey=(m)=>{
+      const p=_configuredProviderKey(m);
+      const s=String(m&&m.value||'').trim().toLowerCase();
+      const at=`@${p}:`;
+      return `${p}::${(p&&s.startsWith(at)?s.slice(at.length):s).replace(/-/g,'.')}`;
+    };
+    const configuredWireKeys=new Set(configuredModels.map(_configuredWireKey));
     const _effectiveHiddenCount=(groupKey)=>_modelData.filter(m=>
       m.groupKey===groupKey
       && m.hiddenByDefault
-      && !configuredSemanticKeys.has(`${_configuredProviderKey(m)}::${_configuredModelKey(m)}`)
+      && !configuredWireKeys.has(_configuredWireKey(m))
     ).length;
     dd.innerHTML='';
     dd.appendChild(_scopeNote);
