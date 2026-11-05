@@ -465,6 +465,36 @@ def test_a_delete_during_the_repair_waits_and_wins(isolated_state, active_profil
     assert SID not in {row.get("session_id") for row in _index_rows()}
 
 
+def test_a_session_caught_mid_save_keeps_its_note_and_is_repaired_on_the_next_open(isolated_state, active_profile):
+    """The repair never waits for the session's agent lock. While another thread holds it (a
+    turn's save), opening the conversation succeeds and writes nothing, and the cached object
+    keeps its note; the next open, warm cache, repairs it. A direct call honours the same lock,
+    so no caller can repair without it."""
+    from api import models
+    from api.config import _get_session_agent_lock
+    from api.routes import handle_get
+
+    path, token = _shared_then_damaged()
+    before = path.read_bytes()
+    lock = _get_session_agent_lock(SID)
+    assert lock.acquire(timeout=5)
+    try:
+        assert _open().status == 200
+        assert path.read_bytes() == before, "the repair wrote while the session lock was held"
+        assert not path.with_suffix(".json.bak").exists()
+        cached = models.SESSIONS.get(SID)
+        assert cached is not None and cached._share_fields_misplaced is True, "the note was lost"
+        assert models.repair_session_share_field_order(cached, SID) is False
+        assert path.read_bytes() == before and cached._share_fields_misplaced is True
+    finally:
+        lock.release()
+    handler = _FakeHandler()
+    handle_get(handler, urllib.parse.urlparse(f"/api/session?session_id={SID}&messages=1"))
+    assert handler.status == 200
+    assert _before_body(path, "share_token") and _before_body(path, "share_created_at")
+    assert _metadata_reload() == (token, token)
+
+
 def _recoverable_damaged_sidecar():
     """A share-damaged sidecar that ALSO has a real shrink backup with more messages.
 

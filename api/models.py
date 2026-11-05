@@ -8396,17 +8396,30 @@ def repair_session_share_field_order(session, session_id) -> bool:
     session: a refused or profile-mismatched request must never write
     (#8094). ``session_id`` is the request's validated id, the file that
     decision covered; a loaded object whose own ``session_id`` differs (a
-    copied or edited sidecar) names another file, so nothing is written. The
-    mark is cleared first, so a cached session is repaired at most once per
+    copied or edited sidecar) names another file, so nothing is written.
+
+    The repair takes this session's agent lock itself, without waiting: that is
+    the lock ``/api/session/delete`` holds while it removes the sidecar, so a
+    delete that lands mid-repair is never undone, and no caller can skip it.
+    The lock is held around a turn's saves, not the turn itself, so a session
+    caught mid-save keeps its mark for the next open. Otherwise the mark is
+    cleared before the repair, so a cached session is repaired at most once per
     load; a later full load marks it again if the repair failed.
     """
     if not getattr(session, "_share_fields_misplaced", False):
         return False
-    session._share_fields_misplaced = False
     sid = str(session_id or "").strip()
     if not sid or str(getattr(session, "session_id", "") or "") != sid:
+        session._share_fields_misplaced = False
         return False
-    return _repair_misplaced_share_fields(sid)
+    lock = _get_session_agent_lock(sid)
+    if not lock.acquire(blocking=False):
+        return False
+    try:
+        session._share_fields_misplaced = False
+        return _repair_misplaced_share_fields(sid)
+    finally:
+        lock.release()
 
 
 def persist_recovered_workspace_binding(
