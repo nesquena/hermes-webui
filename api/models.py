@@ -14742,7 +14742,13 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
             continue
         group = by_clockfree.setdefault(
             _visible_key_without_occurrence(key),
-            {"any": key, "clockless": None, "by_occurrence": {}},
+            {
+                "any": key,
+                "clockless": None,
+                "clock": None,
+                "identity": None,
+                "by_occurrence": {},
+            },
         )
         occurrence = _visible_key_field(key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
         if occurrence == "":
@@ -14752,6 +14758,12 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
                 group["clockless"] = key
         else:
             group["by_occurrence"].setdefault(occurrence, key)
+            # Keep one representative per KIND.  A clock and a private-identity
+            # fallback are not comparable (#8672 gate r3 D2), so the probe needs
+            # to know whether the group can establish a real clock difference.
+            bucket = "identity" if _occurrence_kind(occurrence) == "identity" else "clock"
+            if group[bucket] is None:
+                group[bucket] = key
     # Keep loose_by_key lazy.  Some transcripts contain multi-megabyte tool
     # outputs; eagerly casefolding + regex-tokenizing every visible key on every
     # duplicate probe made /api/session take 10s+ and blocked /api/sessions.
@@ -14874,6 +14886,21 @@ def _session_message_replay_visible_key(msg, *, normalize_workspace_prefix: bool
     )
 
 
+def _occurrence_kind(value) -> str:
+    """Classify an occurrence discriminator: clock, private identity, or none.
+
+    ``_session_message_occurrence_for_key`` yields a second-truncated clock when
+    the row has one, and falls back to ``id:<field>:<value>`` only when it does
+    not.  Those two kinds are not comparable: a clock on one side and a private
+    id on the other cannot establish that the rows are DIFFERENT occurrences
+    (#8672 gate r3 D2).  Two identities, however, ARE comparable -- different
+    ids are genuine contradictory identity, not clock absence.
+    """
+    if value is None or value == "":
+        return "unestablished"
+    return "identity" if str(value).startswith("id:") else "clock"
+
+
 def _visible_keys_share_occurrence(left, right) -> bool:
     """True when two occurrences are the same, or one cannot be established.
 
@@ -14882,8 +14909,44 @@ def _visible_keys_share_occurrence(left, right) -> bool:
     the model-facing context (which legitimately carries no timestamps) would
     stop matching its state.db mirrors and become permanently unmatchable --
     the exact failure mode #7587 must not introduce.
+
+    A one-sided private-identity fallback is likewise NOT a second clock: the
+    real SQLite reader can return the same payload with a NULL timestamp while
+    the sidecar copy carries the clock, and comparing those as two known clocks
+    appended the replay as a duplicate (#8672 gate r3 D2).  Two rows that both
+    carry private identity remain comparable, so genuinely contradictory ids
+    still stay distinct.
     """
-    return left == right or left == "" or right == ""
+    left_kind = _occurrence_kind(left)
+    right_kind = _occurrence_kind(right)
+    if left_kind == "unestablished" or right_kind == "unestablished":
+        return True
+    if left_kind != right_kind:
+        return True
+    return left == right
+
+
+def _clockfree_duplicate_candidate(group: dict, occurrence):
+    """Pick a clock-free duplicate representative consistent with ``occurrence``.
+
+    Exact occurrence equality is authoritative.  Beyond that, a one-sided
+    private-identity fallback must not be read as a contradictory clock: it
+    cannot establish difference, so it collapses onto the other store's row
+    (#8672 gate r3 D2).  Two established clocks, or two contradictory private
+    identities, remain genuinely distinct and return ``None``.
+    """
+    if occurrence is None or occurrence == "":
+        return group.get("clockless") or group.get("any")
+    exact = group.get("by_occurrence", {}).get(occurrence)
+    if exact is not None:
+        return exact
+    if _occurrence_kind(occurrence) == "identity":
+        if group.get("identity") is not None:
+            return None
+        return group.get("clock") or group.get("clockless")
+    if group.get("clock") is not None:
+        return None
+    return group.get("identity") or group.get("clockless")
 
 
 def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lookup: dict | None = None):
@@ -14893,58 +14956,63 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
     content = visible_key[1] if len(visible_key) > 1 else ""
     sidecar = _visible_key_field(visible_key, _VISIBLE_KEY_SIDECAR_INDEX, None)
     occurrence = _visible_key_field(visible_key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
-    if not content:
-        return None
-    # Clock-optional EXACT replay match (#8672 gate r2).  The #7587
-    # occurrence discriminator separates two distinct-clock occurrences, but
-    # a row whose clock is missing cannot prove it is a different occurrence
-    # (see _visible_keys_share_occurrence): it must still collapse onto an
-    # exact identity replay.  The fuzzy loop below carries that rule, but on
-    # transcripts over the fuzzy bound it short-circuits BEFORE reaching it,
-    # and the in-window user path then appends the replay as a second row.
-    # This index probe (constant time, fed by the prebuilt clock-free index
-    # in _build_visible_duplicate_lookup) restores the collapse at every size
-    # without removing the fuzzy work bound and without merging two
-    # established different occurrences: both sides must be established AND
-    # different to be treated as distinct.  Runs only when a prebuilt lookup
-    # is available (the reconciliation merge path), and only in the two cases
-    # where nothing else can collapse the replay: over the fuzzy bound (the
-    # fallback below short-circuits before reaching its wildcard rule) and for
-    # structural content (which has no fuzzy fallback at all and used to
-    # return None below the bound, duplicating image turns).  Scalar text
-    # under the bound still goes through the existing fuzzy loop below, which
-    # already applies the same wildcard rule, keeping its first-match
-    # bookkeeping (metadata-merge target /
-    # skipped-count bucket) byte-identical.
-    # Exact identity remains authoritative at every size, and structural
-    # (non-string) content has NO fuzzy fallback at all -- it returns None
-    # below, so an image turn whose sidecar row carries a clock and whose
-    # state.db row does not was appended as a second row on small transcripts
-    # (Greptile: "Image turns appear twice").  Probe the clock-free index in
-    # both of those cases.  For scalar text below the bound the existing fuzzy
-    # loop keeps its first-match bookkeeping (metadata-merge target /
-    # skipped-count bucket) byte-identical.
-    if lookup is not None and (
-        not isinstance(content, str)
+    # Clock-optional EXACT replay match (#8672 gate r2/r3).  The #7587
+    # occurrence discriminator separates two distinct-clock occurrences, but a
+    # row whose clock is missing cannot prove it is a different occurrence (see
+    # _visible_keys_share_occurrence): it must still collapse onto an exact
+    # identity replay.  The fuzzy loop below carries that rule, but it cannot
+    # reach several shapes: transcripts over the fuzzy bound short-circuit
+    # before the loop; structural content has no fuzzy fallback at all; empty
+    # content returns before the loop; and payloads over the 200k exact-only
+    # cutoff are skipped inside the loop.  Each of those appended a replay as a
+    # second row (#8672 gate r3 D3/D4).  This index probe (constant time, fed
+    # by the prebuilt clock-free index in _build_visible_duplicate_lookup)
+    # restores the collapse at every size without removing the fuzzy work
+    # bound, and without merging two established different occurrences.
+    #
+    # Scalar text under the bound still goes through the existing fuzzy loop
+    # below, which applies the same wildcard rule, keeping its first-match
+    # bookkeeping (metadata-merge target / skipped-count bucket)
+    # byte-identical.
+    oversized = isinstance(content, str) and len(content) > 200_000
+    if (
+        not content
+        or not isinstance(content, str)
+        or oversized
         or len(visible_keys) > _VISIBLE_DUPLICATE_FUZZY_MAX_KEYS
     ):
-        by_clockfree = lookup.get("by_clockfree")
+        by_clockfree = (lookup or {}).get("by_clockfree")
         if by_clockfree:
             group = by_clockfree.get(_visible_key_without_occurrence(visible_key))
             if group:
                 # Constant work per incoming row: the group pre-buckets its
                 # occurrences, so a repeated prompt with thousands of
                 # occurrences never rescans the whole list (Greptile: "Repeated
-                # prompts slow loading").  A clock-less row is a wildcard, so a
-                # single representative serves every incoming occurrence.
-                if occurrence == "":
-                    return group["clockless"] or group["any"]
-                cand = group["by_occurrence"].get(occurrence)
-                if cand is not None:
-                    return cand
-                clockless = group["clockless"]
-                if clockless is not None:
-                    return clockless
+                # prompts slow loading").  A clock-less row is a wildcard.
+                candidate = _clockfree_duplicate_candidate(group, occurrence)
+                if candidate is not None:
+                    return candidate
+        elif lookup is None and len(visible_keys) <= _VISIBLE_DUPLICATE_FUZZY_MAX_KEYS:
+            # No prebuilt index on a small set: exact clock-free comparison
+            # only (never fuzzy).  This is the same set the fuzzy loop would
+            # scan below for text, and the only path for empty/structural rows
+            # when callers pass the key set without a lookup.
+            stripped = _visible_key_without_occurrence(visible_key)
+            for existing_key in visible_keys:
+                if _visible_key_without_occurrence(existing_key) != stripped:
+                    continue
+                if _visible_keys_share_occurrence(
+                    occurrence,
+                    _visible_key_field(
+                        existing_key, _VISIBLE_KEY_OCCURRENCE_INDEX, ""
+                    ),
+                ):
+                    return existing_key
+    # Empty content has no fuzzy identity: the probes above are the only safe
+    # way to match it (an empty string is a substring of EVERY text, so the
+    # fuzzy loop would pair it with an arbitrary final answer).
+    if not content:
+        return None
     # Structured content is matched by exact identity only (checked above).
     # Substring/token matching would otherwise compare a canonical list
     # serialisation against arbitrary text and pair a rich row with a scalar.
@@ -16441,7 +16509,19 @@ def _merge_session_messages_append_only_impl(
             )
         )
         message_key_seen = key in seen_message_keys
-        content_key_seen = content_key in seen_content_keys
+        # Truncation authority is about CONTENT presence in the sidecar, not
+        # about which occurrence of that content is visible (#8672 gate r3 D1).
+        # Using the #7587 occurrence-sensitive content key here dropped an
+        # authorized distinct tool call: the sidecar's empty assistant row
+        # carries call_1 at second 1000 while the durable row carries call_2 at
+        # 1001, so the content key never matched and the truncation guard
+        # swallowed the row before the in-window distinct-tool-call exception
+        # could preserve it.  The occurrence-free membership set is seeded from
+        # every row, so this restores master's truncation behaviour exactly.
+        content_key_seen = (
+            content_key in seen_content_keys
+            or _content_key_without_occurrence(content_key) in seen_content_only_keys
+        )
         if retained_native_image_row is not None:
             # A marked image mirror needs durable row proof; an equal scalar
             # projection from another row cannot exempt it from the watermark.

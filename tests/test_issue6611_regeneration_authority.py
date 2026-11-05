@@ -1026,3 +1026,106 @@ def test_in_tail_distinct_clock_repeated_exchange_keeps_full_bounded_parity(monk
     plan = plan_regeneration(session, expected_revision=full_rev, lock_held=True)
     assert plan is not None and plan.revision == full_rev
 
+
+def _restamped_tail_fixture(tmp_path, *, restamp_final, monkeypatch):
+    """202-row transcript; optionally move only the durable final clock by 1s."""
+    import sqlite3
+
+    from api import models
+
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, "
+        "content TEXT, timestamp REAL, tool_calls TEXT, active INTEGER)"
+    )
+    sidecar = []
+    for i in range(202):
+        role = "user" if i % 2 == 0 else "assistant"
+        content = f"m{i:04d}"
+        timestamp = 100.0 + i
+        sidecar.append({"role": role, "content": content, "timestamp": timestamp})
+        durable_timestamp = 302.0 if (restamp_final and i == 201) else timestamp
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp, active) "
+            "VALUES (?,?,?,?,1)",
+            ("s1", role, content, durable_timestamp),
+        )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
+    return Session(
+        session_id="s1",
+        messages=list(sidecar),
+        context_messages=[dict(m) for m in sidecar],
+    )
+
+
+def test_bounded_guard_restamped_tail_clock_falls_back_for_full_read_parity(
+    monkeypatch, tmp_path
+):
+    """#8672 gate r3 D5: a one-second restamp of the durable final row must
+    refuse the bounded path, so bounded and full reads agree.
+
+    The bounded snapshot feeds a POSITIONAL, clock-tolerant replay whose index
+    starts at the sidecar head while the tail starts at the floor.  A restamped
+    durable row therefore cannot be recognised as a replay: the bounded read
+    appended it (203 display rows) while the full read collapsed it (202/202),
+    the revisions differed, and plan_regeneration raised
+    stale_regeneration_revision with no intervening write.
+    """
+    from api.session_ops import (
+        _bounded_tail_snapshot_if_safe,
+        _sidecar_regeneration_read_floor,
+        plan_regeneration,
+        regeneration_revision_for,
+        regeneration_state,
+    )
+
+    session = _restamped_tail_fixture(
+        tmp_path, restamp_final=True, monkeypatch=monkeypatch
+    )
+    floor = _sidecar_regeneration_read_floor(session)
+    assert floor == 102.0
+
+    assert _bounded_tail_snapshot_if_safe(session, floor) is None, (
+        "a restamped durable tail row must refuse the bounded path"
+    )
+
+    full_rows, full_context = regeneration_state(session, use_sidecar=False)
+    bounded_rows, bounded_context = regeneration_state(session, use_sidecar=True)
+    assert (len(full_rows), len(full_context)) == (202, 202)
+    assert (len(bounded_rows), len(bounded_context)) == (202, 202), (
+        "bounded read appended the restamped replay: "
+        f"{len(bounded_rows)}/{len(bounded_context)}"
+    )
+
+    full_rev = regeneration_revision_for(
+        full_rows, session=session, context=full_context
+    )
+    bounded_rev = regeneration_revision_for(
+        bounded_rows, session=session, context=bounded_context
+    )
+    assert full_rev == bounded_rev
+    plan = plan_regeneration(session, expected_revision=full_rev, lock_held=True)
+    assert plan is not None and plan.revision == full_rev
+
+
+def test_bounded_guard_matching_tail_clocks_still_takes_the_bounded_path(
+    monkeypatch, tmp_path
+):
+    """Control for D5: identical tail clocks keep the bounded fast path."""
+    from api.session_ops import (
+        _bounded_tail_snapshot_if_safe,
+        _sidecar_regeneration_read_floor,
+    )
+
+    session = _restamped_tail_fixture(
+        tmp_path, restamp_final=False, monkeypatch=monkeypatch
+    )
+    floor = _sidecar_regeneration_read_floor(session)
+    bounded_tail = _bounded_tail_snapshot_if_safe(session, floor)
+
+    assert bounded_tail is not None, "matching tail clocks must keep the bounded path"
+    assert len(bounded_tail) == 200
+

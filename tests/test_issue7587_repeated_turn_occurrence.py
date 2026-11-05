@@ -465,3 +465,201 @@ def test_occurrence_without_clock_or_identity_still_collapses():
     second = {"role": "user", "content": SAME_TEXT}
 
     assert _session_message_visible_key(first) == _session_message_visible_key(second)
+
+
+# ---------------------------------------------------------------------------
+# Gate r3: truncation authority, clock-vs-private-identity, exact replays.
+# ---------------------------------------------------------------------------
+
+CALL_1 = [
+    {"id": "call_1", "type": "function", "function": {"name": "shell", "arguments": "{}"}}
+]
+CALL_2 = [
+    {"id": "call_2", "type": "function", "function": {"name": "shell", "arguments": "{}"}}
+]
+
+
+def test_truncation_guard_preserves_a_distinct_tool_call():
+    """D1: a distinct authorized tool call must survive the truncation guard.
+
+    The sidecar keeps an EMPTY assistant row carrying call_1 at second 1000 and
+    the final answer at 1002; state.db recovers call_2 at 1001.  Truncation
+    authority is content presence, so the occurrence-sensitive content key must
+    not swallow call_2 before the in-window distinct-tool-call exception runs.
+    """
+    from api.models import merge_session_messages_append_only
+
+    sidecar = [
+        {"role": "assistant", "content": "", "timestamp": 1000.0, "tool_calls": CALL_1},
+        {"role": "assistant", "content": "final answer", "timestamp": 1002.0},
+    ]
+    state = [
+        {"role": "assistant", "content": "", "timestamp": 1001.0, "tool_calls": CALL_2},
+    ]
+
+    merged = merge_session_messages_append_only(
+        sidecar,
+        state,
+        truncation_watermark=1002.0,
+        truncation_boundary=1002.0,
+    )
+
+    tool_ids = [
+        message["tool_calls"][0]["id"]
+        for message in merged
+        if message.get("tool_calls")
+    ]
+    assert tool_ids == ["call_1", "call_2"], (
+        "the distinct tool call was swallowed by the truncation guard: "
+        f"{tool_ids}"
+    )
+    assert merged[-1]["content"] == "final answer"
+
+
+def test_truncation_guard_still_drops_an_edited_away_row_with_unseen_content():
+    """Negative control for D1: deleted content must not be resurrected."""
+    from api.models import merge_session_messages_append_only
+
+    sidecar = [
+        {"role": "user", "content": "kept prompt", "timestamp": 1000.0},
+        {"role": "assistant", "content": "final answer", "timestamp": 1002.0},
+    ]
+    state = [
+        {"role": "user", "content": "deleted prompt", "timestamp": 1001.0},
+    ]
+
+    merged = merge_session_messages_append_only(
+        sidecar,
+        state,
+        truncation_watermark=1002.0,
+        truncation_boundary=1002.0,
+    )
+
+    assert [message["content"] for message in merged] == [
+        "kept prompt",
+        "final answer",
+    ]
+
+
+def test_one_sided_private_identity_is_not_a_contradictory_clock():
+    """D2: a clockless durable row must collapse onto its clocked sidecar twin.
+
+    The real SQLite reader returns the same provider payload with a NULL
+    timestamp and a durable row id while the sidecar copy carries second
+    1000.  Treating the row-id fallback and the timestamp as two established
+    clocks appended the replay after the final answer.
+    """
+    from api.models import (
+        _matching_visible_duplicate,
+        _session_message_visible_key,
+    )
+
+    clocked = {"role": "user", "content": SAME_TEXT, "timestamp": 1000.0}
+    clockless = {"role": "user", "content": SAME_TEXT, "_state_db_row_id": 7}
+
+    assert _matching_visible_duplicate(
+        _session_message_visible_key(clockless),
+        {_session_message_visible_key(clocked)},
+    ) == _session_message_visible_key(clocked)
+
+
+def test_clockless_durable_replay_does_not_append_after_the_final_answer():
+    """D2 merge level: a misaligned clockless replay is not a second user row."""
+    from api.models import merge_session_messages_append_only
+
+    sidecar = [
+        {"role": "assistant", "content": "earlier answer", "timestamp": 500.0},
+        {
+            "role": "user",
+            "content": SAME_TEXT,
+            "timestamp": 1000.0,
+            "api_content": "provider-bytes",
+        },
+        {"role": "assistant", "content": "final answer", "timestamp": 1001.0},
+    ]
+    state = [
+        {
+            "role": "user",
+            "content": SAME_TEXT,
+            "timestamp": None,
+            "_state_db_row_id": 7,
+            "api_content": "provider-bytes",
+        },
+    ]
+
+    merged = merge_session_messages_append_only(sidecar, state)
+
+    assert [message["content"] for message in merged] == [
+        "earlier answer",
+        SAME_TEXT,
+        "final answer",
+    ]
+
+
+def test_contradictory_private_identities_stay_distinct():
+    """Negative control for D2: two different durable ids are not a replay."""
+    from api.models import (
+        _matching_visible_duplicate,
+        _session_message_visible_key,
+    )
+
+    first = {"role": "user", "content": SAME_TEXT, "_state_db_row_id": 7}
+    second = {"role": "user", "content": SAME_TEXT, "_state_db_row_id": 8}
+
+    assert _matching_visible_duplicate(
+        _session_message_visible_key(second),
+        {_session_message_visible_key(first)},
+    ) is None
+
+
+def test_clockless_empty_tool_row_replay_collapses_on_a_misaligned_transcript():
+    """D3a: an identical empty tool-call row without a clock must collapse.
+
+    The state row is positionally misaligned with the sidecar prefix, so the
+    positional replay probe cannot vouch for it; the empty-content early return
+    used to run before the clock-free index probe and appended a duplicate.
+    """
+    from api.models import merge_session_messages_append_only
+
+    sidecar = [
+        {"role": "assistant", "content": "earlier answer", "timestamp": 500.0},
+        {"role": "assistant", "content": "", "timestamp": 1000.0, "tool_calls": CALL_1},
+        {"role": "assistant", "content": "final answer", "timestamp": 1001.0},
+    ]
+    state = [
+        {"role": "assistant", "content": "", "tool_calls": CALL_1},
+    ]
+
+    merged = merge_session_messages_append_only(sidecar, state)
+
+    assert len(merged) == 3, (
+        "the empty tool row replay was appended as a duplicate: "
+        f"{[(m.get('role'), bool(m.get('tool_calls'))) for m in merged]}"
+    )
+
+
+def test_clockless_oversized_scalar_replay_collapses_on_a_misaligned_transcript():
+    """D3b/D4: an identical 200,001-char row without a clock must collapse.
+
+    Scalar payloads above the exact-only cutoff are skipped inside the fuzzy
+    loop, so the clock-free index probe has to run before that cutoff.
+    """
+    from api.models import merge_session_messages_append_only
+
+    oversized = "x" * 200_001
+    sidecar = [
+        {"role": "assistant", "content": "earlier answer", "timestamp": 500.0},
+        {"role": "user", "content": oversized, "timestamp": 1000.0},
+        {"role": "assistant", "content": "final answer", "timestamp": 1001.0},
+    ]
+    state = [
+        {"role": "user", "content": oversized},
+    ]
+
+    merged = merge_session_messages_append_only(sidecar, state)
+
+    assert len(merged) == 3, (
+        "the oversized scalar replay was appended as a duplicate: "
+        f"{[len(m['content']) if isinstance(m.get('content'), str) else None for m in merged]}"
+    )
+
