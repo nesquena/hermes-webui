@@ -448,16 +448,25 @@ def test_resident_placeholder_with_a_sidecar_that_moved_ahead_is_refused_before_
     assert cache[SID] is resident and resident.profile == "work"
 
 
-@pytest.mark.parametrize("extra", [{"pinned": True}, {"context_messages": [{"role": "user", "content": "c"}]},
-                                   {"pending_user_message": "queued"}])
+@pytest.mark.parametrize("extra", [
+    {"pinned": True}, {"context_messages": [{"role": "user", "content": "c"}]}, {"pending_user_message": "queued"},
+    {"read_only": True}, {"source_tag": "subagent"}, {"is_cli_session": True}, {"active_stream_id": "dead-stream"},
+])
 def test_resident_retag_refusals_are_decided_before_the_load(isolated_sessions, monkeypatch, extra):
+    """A foreign session that lives only in memory (no sidecar). The resident half of the placeholder test must
+    refuse it before the load: read-only and subagent sessions would otherwise be loaded and get the loader's 403, and
+    any load moves the session in the LRU order (the newer entry pins that down)."""
     directory, cache, _ = isolated_sessions
     resident = _resident("work", 0, **extra)
     cache[SID] = resident
+    cache["newer-8834"] = models.Session(session_id="newer-8834", profile="default")
+    order = list(cache)
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     handler = _call("chat_start", active="default", profile="default")
-    assert (handler.status, handler.payload().get("code")) == (409, "session_profile_mismatch")
+    assert (handler.status, handler.payload().get("code"), handler.payload().get("profile")) == (
+        409, "session_profile_mismatch", "work")
     assert cache[SID] is resident and resident.profile == "work"
+    assert list(cache) == order
     assert list(directory.iterdir()) == []
 
 
@@ -477,13 +486,13 @@ _RESIDENTS = ["none", "work", "default", "legacy", "stub"]
 _SIDECARS = ["none", "work", "default", "legacy"]
 
 
-def _outcome(route, monkeypatch, *, precheck):
+def _outcome(route, monkeypatch, *, precheck, active):
     if not precheck:
         for name in ("_refuse_cross_profile_before_load", "_refuse_cross_profile_chat_start_before_load",
                      "_refuse_cross_profile_import_cli_before_load"):
             monkeypatch.setattr(routes, name, lambda *_a, **_k: False)
     try:
-        handler = _call(route, active="default")
+        handler = _call(route, active=active)
     except _PastOwnership:
         return ("served",)
     finally:
@@ -498,11 +507,13 @@ def _outcome(route, monkeypatch, *, precheck):
 @pytest.mark.parametrize("resident", _RESIDENTS)
 @pytest.mark.parametrize("sidecar", _SIDECARS)
 @pytest.mark.parametrize("disk_ahead", [True, False])
+@pytest.mark.parametrize("active", ["default", "personal"])
 def test_precheck_never_refuses_what_the_load_then_check_path_serves(
-    tmp_path, monkeypatch, route, resident, sidecar, disk_ahead,
+    tmp_path, monkeypatch, route, resident, sidecar, disk_ahead, active,
 ):
     """Differential: the same stored state is requested with the pre-checks and without them (the load-then-check
-    path). Whatever that path serves, the pre-check must serve; every refusal must be the same refusal."""
+    path). Whatever that path serves, the pre-check must serve; every refusal must be the same refusal. ``personal``
+    is a named profile that can see neither ``work``, ``default`` nor a legacy no-profile session."""
     if sidecar == "none" and resident in ("none", "stub"):
         pytest.skip("nothing stored")
     results = []
@@ -521,7 +532,7 @@ def test_precheck_never_refuses_what_the_load_then_check_path_serves(
         monkeypatch.setattr(routes, "_claim_or_synthesize_cli_session", lambda *_a, **_k: (None, "no_foreign_state"))
         monkeypatch.setattr(routes, "run_admission_closed_response", lambda *_a, **_k: None)
         monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda *_a, **_k: None)
-        monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+        monkeypatch.setattr(routes, "_get_active_profile_name", lambda: active)
         import api.compression_continuation as continuation
 
         def _stop(*_a, **_k):
@@ -537,7 +548,7 @@ def test_precheck_never_refuses_what_the_load_then_check_path_serves(
         elif resident in owner:
             cache[SID] = _resident(owner[resident], cache_n)
         # _outcome undoes monkeypatch after the call, so the fixture state above is re-applied per run.
-        results.append(_outcome(route, monkeypatch, precheck=precheck))
+        results.append(_outcome(route, monkeypatch, precheck=precheck, active=active))
     without, with_precheck = results
     if without == ("served",):
         assert with_precheck == ("served",), (without, with_precheck)
@@ -828,3 +839,53 @@ def test_a_metadata_stub_is_never_a_claimable_placeholder_even_without_a_sidecar
     cache[SID] = stub
     path.unlink()
     assert models.session_is_unclaimed_placeholder_readonly(SID) is False
+
+
+
+# --- round 3 (Codex r2): never a different refusal; key order never hides ownership ----------------------------
+
+
+@pytest.mark.parametrize("route", ["get_full", "chat_start"])
+def test_disagreeing_foreign_copies_get_masters_refusal_from_the_load(isolated_sessions, monkeypatch, route):
+    """Codex r2: active ``personal``; the resident copy is a legacy no-profile session with one message, the newer
+    sidecar is ``work``'s with two. The load reloads the sidecar, so master answers 409 naming ``work``. Refusing
+    early from the resident copy gave 404, which on chat/start clears the view and drops the message."""
+    directory, cache, _ = isolated_sessions
+    _sidecar(directory, profile="work", messages=_rows(2))
+    cache[SID] = _resident(None, 1)
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "personal")
+    handler = _call(route, active="personal")
+    assert (handler.status, handler.payload().get("code"), handler.payload().get("profile")) == (
+        409, "session_profile_mismatch", "work")
+
+
+@pytest.mark.parametrize("route", ["get_full", "get_meta", "chat_start", "import_cli"])
+def test_profile_before_messages_and_id_after_is_still_read(isolated_sessions, monkeypatch, stop_past_ownership, route):
+    """Codex r2: the metadata prefix holds ``profile`` but not ``session_id``. The whole object must be read; a
+    valid session must not become unverifiable (404) for its owner."""
+    directory, cache, _ = isolated_sessions
+    path = directory / f"{SID}.json"
+    path.write_text(json.dumps({"profile": "default", "title": "t", "created_at": 1.0, "updated_at": 2.0,
+                                "messages": _rows(2), "session_id": SID}))
+    assert models.get_sidecar_session_profile_readonly(SID) == "default"
+    assert models.session_owner_readings_readonly(SID, full_load=True) == ["default"]
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    try:
+        handler = _call(route, active="default")
+    except _PastOwnership:
+        return
+    assert handler.status in (None, 200), (handler.status, handler.payload())
+
+
+def test_profile_before_messages_and_id_after_is_refused_for_another_profile(isolated_sessions, monkeypatch):
+    directory, cache, _ = isolated_sessions
+    path = directory / f"{SID}.json"
+    path.write_text(json.dumps({"profile": "work", "title": "t", "created_at": 1.0, "updated_at": 2.0,
+                                "messages": [{"role": "user", "content": "hello"}, PARTIAL, dict(PARTIAL)],
+                                "session_id": SID}))
+    before = path.read_bytes()
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
+    handler = _call("get_full", active="default")
+    assert (handler.status, handler.payload().get("code"), handler.payload().get("profile")) == (
+        409, "session_profile_mismatch", "work")
+    assert path.read_bytes() == before and not path.with_suffix(".json.bak").exists()

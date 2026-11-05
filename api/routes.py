@@ -1034,7 +1034,7 @@ def _owner_readings_visible(readings, handler) -> bool:
 
 
 def _send_owner_refusal(handler, sid, reading, not_found="Session not found"):
-    """The refusal for a stored session the request can't see, from the reading the loader would serve first.
+    """The refusal for a stored session the request can't see, given the one owner every servable copy agrees on.
 
     409 ``session_profile_mismatch`` for a known other profile; 404 for the legacy None-profile case (so the
     client's self-heal fires) and for ownership that can't be verified (#8094's fail-closed rule).
@@ -1044,22 +1044,42 @@ def _send_owner_refusal(handler, sid, reading, not_found="Session not found"):
     return bad(handler, not_found, 404)
 
 
+def _owner_refusal_before_load(readings, handler):
+    """The owner to refuse with before the load, or ``_DEFER_TO_LOAD`` when only the load can decide.
+
+    Refuse early only when the request can see none of the copies the load could serve AND they all record the same
+    owner: then whichever copy the load serves, master's answer is this refusal, with this owner in it. When the
+    copies disagree (a resident copy the disk has moved past, or the reverse), which one the load serves depends on
+    the transcript itself (``_cached_session_lags_disk``, the stale user-tail check), and some of those checks load.
+    So the load decides, exactly as before #8834, and so does the check after it.
+    """
+    if not readings or _owner_readings_visible(readings, handler):
+        return _DEFER_TO_LOAD
+    first = readings[0]
+    if any(reading is not first and reading != first for reading in readings[1:]):
+        return _DEFER_TO_LOAD
+    return first
+
+
+_DEFER_TO_LOAD = object()
+
+
 def _refuse_cross_profile_before_load(handler, sid, *, full_load, not_found="Session not found") -> bool:
     """#8834: refuse a request for another profile's session before its load runs. True when a refusal was sent.
 
     The load (``get_session``) can save (the duplicate-partial collapse, the state.db sync of an unfinished turn) and
     caches what it loads, and a refused request must do neither (#8094). The readings cover every stored object the
     load could serve (``session_owner_readings_readonly``). The request is refused here only when none of them is
-    visible, so this never refuses a request the load-then-check path would serve. When they disagree (a resident
-    copy the disk has moved past, or the reverse), the load decides, as before, and the check after it is still the
-    backstop. No stored session (or an unsafe id) isn't decided here.
+    visible and they all record the same owner (``_owner_refusal_before_load``), so this never refuses a request
+    the load-then-check path would serve, nor refuses it differently. Otherwise the load decides, as before, and the
+    check after it is still the backstop. No stored session (or an unsafe id) isn't decided here.
     """
     if not isinstance(sid, str):
         return False
-    readings = session_owner_readings_readonly(sid, full_load=full_load)
-    if not readings or _owner_readings_visible(readings, handler):
+    owner = _owner_refusal_before_load(session_owner_readings_readonly(sid, full_load=full_load), handler)
+    if owner is _DEFER_TO_LOAD:
         return False
-    _send_owner_refusal(handler, sid, readings[0], not_found)
+    _send_owner_refusal(handler, sid, owner, not_found)
     return True
 
 
@@ -1076,7 +1096,8 @@ def _refuse_cross_profile_chat_start_before_load(handler, body) -> bool:
     - a non-string id: 404 (it can't name a sidecar);
     - no stored session or an unsafe id: not decided here; the
       materialize/claim path handles it as before;
-    - any object the load could serve is visible: load as before;
+    - any object the load could serve is visible, or those objects record
+      different owners: load as before (``_owner_refusal_before_load``);
     - otherwise the session can only be claimed by the empty-placeholder
       retag: the request names the active profile and
       ``session_is_unclaimed_placeholder_readonly`` says the retag would claim
@@ -1095,8 +1116,8 @@ def _refuse_cross_profile_chat_start_before_load(handler, body) -> bool:
         # and crashed (500) on a list in the loader.
         bad(handler, "Session not found", 404)
         return True
-    readings = session_owner_readings_readonly(sid, full_load=True)
-    if not readings or _owner_readings_visible(readings, handler):
+    owner = _owner_refusal_before_load(session_owner_readings_readonly(sid, full_load=True), handler)
+    if owner is _DEFER_TO_LOAD:
         return False
     requested_profile, invalid = _chat_start_requested_profile(body)
     if invalid:
@@ -1109,7 +1130,7 @@ def _refuse_cross_profile_chat_start_before_load(handler, body) -> bool:
         and session_is_unclaimed_placeholder_readonly(sid)
     ):
         return False
-    _send_owner_refusal(handler, sid, readings[0])
+    _send_owner_refusal(handler, sid, owner)
     return True
 
 

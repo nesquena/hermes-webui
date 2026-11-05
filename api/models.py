@@ -7488,7 +7488,10 @@ def get_sidecar_session_profile_readonly(sid):
         data = json.loads(prefix) if prefix else None
         # Legacy layouts may put profile after messages/scenes. Read the JSON
         # directly: Session.load() can collapse partials and save a shrink backup.
-        if not isinstance(data, dict) or 'profile' not in data:
+        # The prefix can also hold one ownership field and not the other (e.g.
+        # profile before messages, session_id after them), so read the whole
+        # object unless the prefix carries both.
+        if not isinstance(data, dict) or 'profile' not in data or 'session_id' not in data:
             data = json.loads(path.read_bytes())
     except FileNotFoundError:
         raise KeyError(sid) from None
@@ -7513,7 +7516,11 @@ def session_owner_readings_readonly(sid, *, full_load):
     (``_cached_session_lags_disk``, the stale user-tail check), so it can't be
     predicted without loading. A full load therefore reports both, when each
     exists: a resident full session and the sidecar. A metadata-only stub
-    doesn't count, because a full load replaces it from the sidecar. A
+    doesn't count: a full load replaces it whenever the sidecar holds more
+    messages than the stub's empty list (``_cached_session_lags_disk``). For an
+    empty transcript the load could serve the stub itself; that state isn't
+    expected outside tests, because the metadata-only resolve returns stubs
+    without caching them. A
     metadata-only load serves any resident entry as is and reads the sidecar
     only on a miss, so it reports one reading, as ``get_session_profile_readonly``
     does. A resident entry whose ``session_id`` differs is evicted by the
