@@ -139,8 +139,11 @@ BACKGROUND_CLI_SOURCES = ("cron", "webhook", "kanban")
 # Desktop/TUI/CLI conversations out of the window (#8265). Unlike the background
 # sources they keep normal project chips, so a project-assigned one-shot run is
 # still recovered by the assigned pass, and an explicitly requested one resolves
-# through get_cli_session_by_id().
-INTERACTIVE_WINDOW_EXCLUDED_CLI_SOURCES = BACKGROUND_CLI_SOURCES + ("oneshot",)
+# through get_cli_session_by_id(). `--source tool` sessions get the same
+# treatment: Hermes Agent tags third-party integration runs that way so they stay
+# out of user session lists, and a script driving one per batch can create
+# thousands of them.
+INTERACTIVE_WINDOW_EXCLUDED_CLI_SOURCES = BACKGROUND_CLI_SOURCES + ("oneshot", "tool")
 _CLI_SESSIONS_CACHE_TTL_SECONDS = 5.0
 # While a turn is actively streaming, hold the CLI/cron projection longer than
 # one poll interval (mirrors the route-level #4808 hold-down). The frontend
@@ -163,7 +166,6 @@ _CLI_SESSIONS_CACHE_INVALIDATION_VERSION = 0
 # _CLAUDE_CODE_PARSE_CACHE / _SIDECAR_METADATA_CACHE LRU pattern.
 _CLI_SESSIONS_CACHE: "collections.OrderedDict[tuple, tuple]" = collections.OrderedDict()
 _CLI_SESSIONS_CACHE_MAX_ENTRIES = 8
-# Complete projections retained under an identity that excludes the volatile
 # state.db fingerprint. This store is independently bounded because the stable
 # identity still contains external Claude/session-index stat revisions.
 _CLI_SESSIONS_LAST_KNOWN_GOOD: "collections.OrderedDict[tuple, tuple]" = collections.OrderedDict()
@@ -2005,6 +2007,10 @@ class Session:
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
         self.share_token = str(share_token).strip() if share_token else None
         self.share_created_at = share_created_at
+        # The share pair this object last loaded or saved; save() uses it to
+        # tell an own change from a stale snapshot (#8399).
+        self._share_token_saved = self.share_token
+        self._share_created_at_saved = self.share_created_at
         self.skill_provenance_generation = max(
             0,
             _parse_nonnegative_int(kwargs.get('skill_provenance_generation')) or 0,
@@ -2102,6 +2108,29 @@ class Session:
                 # return) or failed (raise) save below cannot leave the
                 # adopted value looking like this object's own change.
                 self._reasoning_effort_saved = on_disk
+        # #8399: the share pair carries the same stale-snapshot class, and a
+        # writer that resolved its copy before a share create/revoke and saves
+        # after it puts its own older pair back -- orphaning a live snapshot on
+        # create, or restoring a revoked token on revoke. The durable pair is
+        # owned by the share lifecycle (update_session_share_fields, under this
+        # same lock), so adopt it unless this object changed the pair itself
+        # AND the durable pair is still the one it last loaded or saved. A pair
+        # the lifecycle moved since that baseline always wins: a stale copy (a
+        # paused rename, an evicted resident) can never put a revoked token
+        # back over a newer link that a later revoke then cannot reach.
+        on_disk_share = _persisted_share_fields(self.path)
+        if on_disk_share is not _SHARE_FIELDS_ABSENT:
+            share_baseline = (
+                getattr(self, '_share_token_saved', self.share_token),
+                getattr(self, '_share_created_at_saved', self.share_created_at),
+            )
+            if (
+                (self.share_token, self.share_created_at) == share_baseline
+                or tuple(on_disk_share) != share_baseline
+            ):
+                self.share_token, self.share_created_at = on_disk_share
+                self._share_token_saved = self.share_token
+                self._share_created_at_saved = self.share_created_at
         self._webui_pending_user_timestamp_identity = (
             _validated_webui_pending_user_timestamp_identity(
                 self, getattr(self, '_webui_pending_user_timestamp_identity', None)
@@ -2407,6 +2436,8 @@ class Session:
         # The value this save actually wrote, not one set on the live object
         # after the payload was built.
         self._reasoning_effort_saved = written_reasoning_effort
+        self._share_token_saved = self.share_token
+        self._share_created_at_saved = self.share_created_at
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
@@ -2447,6 +2478,14 @@ class Session:
         # during the parse (TOCTOU guard against an atomic replace mid-read).
         _pre_read_sig = _sidecar_stat_signature(p)
         data = json.loads(p.read_text(encoding='utf-8'))
+        # #8830: exp-v0.52.621..630 left a shared legacy sidecar's share fields
+        # after ``messages``, where the metadata prefix reader never sees them.
+        # Only note it here: a load runs before (or without) any ownership
+        # decision, and a refused request must never write (#8094). The detail
+        # route repairs it once the request owns the session.
+        _share_fields_misplaced = isinstance(data, dict) and bool(
+            _sidecar_keys_after_body(data, _SHARE_FIELD_KEYS)
+        )
         # The writer (`save`) already validated the eager-checkpoint fact
         # against the transcript it persisted, so a full load restores it as
         # written and keeps only the turn-identity check (fact vs
@@ -2457,6 +2496,7 @@ class Session:
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         data = _apply_session_draft_overlay(data, sid)
         session = cls(**data)
+        session._share_fields_misplaced = _share_fields_misplaced
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
@@ -6290,6 +6330,61 @@ def _persisted_reasoning_effort(path):
     return _normalize_persisted_reasoning_effort(data['reasoning_effort'])
 
 
+_SHARE_FIELDS_ABSENT = object()
+
+
+def _normalize_persisted_share_token(value):
+    text = str(value).strip() if value else ''
+    return text or None
+
+
+def _persisted_share_fields(path):
+    """The sidecar's persisted ``(share_token, share_created_at)`` (#8399).
+
+    Mirrors ``_persisted_reasoning_effort``: the bounded metadata prefix answers
+    the common case, a prefix miss parses the whole sidecar, and only a missing
+    file or a parsed sidecar without the key reports absence. A sidecar that
+    exists but cannot be read raises OSError, so save() fails closed instead of
+    writing a share pair it could not compare.
+    """
+    parsed = None
+    try:
+        raw = _read_metadata_json_prefix(path)
+        parsed = json.loads(raw) if raw else None
+    except FileNotFoundError:
+        return _SHARE_FIELDS_ABSENT
+    except (OSError, ValueError):
+        parsed = None
+    if isinstance(parsed, dict) and 'share_token' in parsed:
+        return (
+            _normalize_persisted_share_token(parsed.get('share_token')),
+            parsed.get('share_created_at'),
+        )
+    try:
+        text = Path(path).read_text(encoding='utf-8')
+    except FileNotFoundError:
+        return _SHARE_FIELDS_ABSENT
+    except UnicodeDecodeError:
+        text = None
+    data = None
+    if text is not None:
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+    if not isinstance(data, dict):
+        logger.warning(
+            "session sidecar %s is not a JSON object; no persisted share fields to keep", path,
+        )
+        return _SHARE_FIELDS_ABSENT
+    if 'share_token' not in data:
+        return _SHARE_FIELDS_ABSENT
+    return (
+        _normalize_persisted_share_token(data.get('share_token')),
+        data.get('share_created_at'),
+    )
+
+
 # #7881: per-session reentrant persistence locks. Every Session.save() of one
 # session id -- skip_index=True included -- holds the same lock across its
 # persisted-effort read, payload construction and atomic replacement; the
@@ -6324,18 +6419,40 @@ _CLI_SOURCE_IDENTITY_MARKERS = ("is_cli_session", "source_tag", "raw_source", "s
 _SIDECAR_BODY_KEYS = frozenset({'messages', 'tool_calls', 'anchor_activity_scenes'})
 
 
+# The share fields exp-v0.52.621..630 appended after the body of a legacy sidecar (#8815, #8830).
+_SHARE_FIELD_KEYS = ('share_token', 'share_created_at')
+
+
+def _sidecar_keys_after_body(data: dict, keys) -> set:
+    """The ``keys`` that sit after the message body in ``data``'s key order,
+    where the bounded metadata prefix reader never sees them."""
+    after = set()
+    body_seen = False
+    for key in data:
+        if key in _SIDECAR_BODY_KEYS:
+            body_seen = True
+        elif body_seen and key in keys:
+            after.add(key)
+    return after
+
+
 def _set_sidecar_metadata_fields(data: dict, fields: dict) -> dict:
     """Return ``data`` with ``fields`` set; a key the sidecar lacks is placed
     before the message body, where save() and the bounded prefix reader keep
-    metadata. Existing keys keep their position."""
-    missing = {k: v for k, v in fields.items() if k not in data}
+    metadata. An existing key keeps its position, unless it sits after the
+    body (exp-v0.52.621..630 appended share fields there, #8815): it is moved
+    before the body, so the prefix reader sees it again."""
+    misplaced = _sidecar_keys_after_body(data, fields)
+    missing = {k: v for k, v in fields.items() if k not in data or k in misplaced}
     for key, value in fields.items():
-        if key in data:
+        if key in data and key not in misplaced:
             data[key] = value
     if not missing:
         return data
     rebuilt = {}
     for key, item in data.items():
+        if key in misplaced:
+            continue
         if missing and key in _SIDECAR_BODY_KEYS:
             rebuilt.update(missing)
             missing = {}
@@ -8134,6 +8251,189 @@ class WorkspaceBindingPersistenceError(ValueError):
 
 
 _EXPECTED_WORKSPACE_UNSET = object()
+
+def update_session_share_fields(
+    session_id: str,
+    *,
+    share_token,
+    share_created_at,
+) -> bool:
+    """Atomically replace only the share fields of a session sidecar.
+
+    A share create/revoke must never persist conversation state. Saving a
+    detached Session object -- the copy a handler resolved, or one it reloaded
+    earlier in the request -- writes back the title and the transcript that copy
+    was built from, so a writer that finished while the share handler waited, or
+    between its last read and its save, is reverted (#8255 review, third round).
+
+    The patch runs under ``_session_persist_lock(sid)``, the same reentrant lock
+    every ``Session.save()`` of this session holds across its own
+    read-construct-replace, and which ``_write_persisted_reasoning_effort``
+    already uses as its precedent (#8253). Holding it across this
+    read-patch-replace is what makes a concurrent save either land before the
+    read (and be carried into the patched bytes) or after the replace (and win);
+    without it a save could slip between the final read and the replace and be
+    silently reverted (#8399 review).
+
+    The sidebar index is refreshed from the patched payload the way ``save()``
+    documents: a sidecar share token the index does not carry leaves
+    ``/api/sessions/search`` returning the previous state, so the UI either
+    loses the copy/revoke controls or keeps a dead link (#8399 review).
+
+    Returns False only when the sidecar does not exist, so the caller can
+    materialize one from its own copy. Unreadable sidecars and I/O errors raise,
+    as they do for ``Session.save``.
+    """
+    sid = str(session_id or "").strip()
+    if not sid or not is_safe_session_id(sid):
+        return False
+    # #8815: a sidecar last saved before shares existed has no share keys.
+    # Plain assignment would append them after ``messages``, past the prefix
+    # that ``load_metadata_only`` reads, so every metadata reload would lose
+    # the token (and the UI its Stop sharing control) while the link stays
+    # live. The helper places a missing key before the message body, moves
+    # one an exp-v0.52.621..630 build left after the body back before it,
+    # and keeps a key already in the metadata prefix where it is.
+    return _patch_session_sidecar(
+        sid,
+        lambda _payload: {"share_token": share_token, "share_created_at": share_created_at},
+    ) is not False
+
+
+def _patch_session_sidecar(sid: str, fields_for) -> bool | None:
+    """Read-patch-replace ``sid``'s sidecar under ``_session_persist_lock(sid)``.
+
+    ``fields_for(payload)`` returns the metadata fields to set on the sidecar
+    as read inside the lock, or None to leave the file untouched. The fields
+    go through ``_set_sidecar_metadata_fields``, the payload is replaced
+    atomically and the sidebar index is refreshed from it, the way
+    ``update_session_share_fields`` documents. Returns False when the sidecar
+    does not exist, None when ``fields_for`` declined, True after a write.
+    Unreadable sidecars and I/O errors raise.
+    """
+    if not sid or not is_safe_session_id(sid):
+        return False
+    path = SESSION_DIR / f"{sid}.json"
+    with _session_persist_lock(sid):
+        try:
+            original = path.read_bytes()
+        except FileNotFoundError:
+            return False
+        payload = json.loads(original.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"Session sidecar {sid!r} is not a JSON object")
+        fields = fields_for(payload)
+        if fields is None:
+            return None
+        payload = _set_sidecar_metadata_fields(payload, fields)
+        tmp = path.with_suffix(
+            f".tmp.{os.getpid()}.{threading.current_thread().ident}"
+        )
+        try:
+            try:
+                body = json.dumps(payload, ensure_ascii=False, indent=2)
+                body.encode("utf-8")
+            except UnicodeEncodeError:
+                # Journal recovery can preserve a lone provider surrogate;
+                # escape it losslessly instead of failing the share write.
+                body = json.dumps(payload, ensure_ascii=True, indent=2)
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(body)
+                handle.flush()
+                os.fsync(handle.fileno())
+            with _INDEX_WRITE_LOCK:
+                _replace_session_sidecar(tmp, path, sid)
+                try:
+                    # Built from the sidecar just written, never from a possibly
+                    # stale live object (same ordered publish as save()).
+                    index_session = Session(**dict(payload))
+                    index_session._metadata_message_count = len(
+                        index_session.messages or []
+                    )
+                    _write_session_index(updates=[index_session])
+                except Exception:
+                    logger.warning(
+                        "session %s: share fields persisted but the sidebar index "
+                        "write failed; the index will be rebuilt on the next save",
+                        sid,
+                        exc_info=True,
+                    )
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+    return True
+
+
+def _repair_misplaced_share_fields(sid: str) -> bool:
+    """#8830: move share fields an exp-v0.52.621..630 build left after the body.
+
+    Those builds appended ``share_token``/``share_created_at`` after
+    ``messages`` when sharing a legacy sidecar (#8815), so metadata reloads saw
+    the conversation as unshared while its link stayed live. This rewrites only
+    those keys into the prefix, re-checking under the persistence lock so a
+    writer that repaired or replaced the sidecar in the meantime wins. Best
+    effort: a failure is logged. Returns True only after a write.
+
+    Callers must already own the session for the current request: see
+    ``repair_session_share_field_order``.
+    """
+    def fields_for(payload):
+        # The index row is rebuilt from these bytes, keyed by their own
+        # ``session_id``. Re-check that they still name this file, as read under
+        # the lock: a file swapped in after the load must not move another
+        # session's index row (#8833 review).
+        if str(payload.get("session_id") or "") != sid:
+            return None
+        misplaced = _sidecar_keys_after_body(payload, _SHARE_FIELD_KEYS)
+        if not misplaced:
+            return None
+        return {key: payload[key] for key in _SHARE_FIELD_KEYS if key in payload}
+
+    try:
+        return _patch_session_sidecar(sid, fields_for) is True
+    except Exception:
+        logger.warning(
+            "session %s: could not move its share fields before the message body",
+            sid,
+            exc_info=True,
+        )
+        return False
+
+
+def repair_session_share_field_order(session, session_id) -> bool:
+    """Repair a loaded session's sidecar if ``Session.load`` found its share
+    fields after the message body (#8830).
+
+    Call this only AFTER the request's ownership decision has allowed the
+    session: a refused or profile-mismatched request must never write
+    (#8094). ``session_id`` is the request's validated id, the file that
+    decision covered; a loaded object whose own ``session_id`` differs (a
+    copied or edited sidecar) names another file, so nothing is written.
+
+    The repair takes this session's agent lock itself, without waiting: that is
+    the lock ``/api/session/delete`` holds while it removes the sidecar, so a
+    delete that lands mid-repair is never undone, and no caller can skip it.
+    The lock is held around a turn's saves, not the turn itself, so a session
+    caught mid-save keeps its mark for the next open. Otherwise the mark is
+    cleared before the repair, so a cached session is repaired at most once per
+    load; a later full load marks it again if the repair failed.
+    """
+    if not getattr(session, "_share_fields_misplaced", False):
+        return False
+    sid = str(session_id or "").strip()
+    if not sid or str(getattr(session, "session_id", "") or "") != sid:
+        session._share_fields_misplaced = False
+        return False
+    lock = _get_session_agent_lock(sid)
+    if not lock.acquire(blocking=False):
+        return False
+    try:
+        session._share_fields_misplaced = False
+        return _repair_misplaced_share_fields(sid)
+    finally:
+        lock.release()
 
 
 def persist_recovered_workspace_binding(
@@ -10101,6 +10401,10 @@ def _cli_sessions_stable_cache_identity(cache_key: tuple) -> tuple:
     return (*cache_key[:4], *cache_key[5:]) if len(cache_key) > 4 else cache_key
 
 
+
+
+
+
 def _copy_last_known_good_cli_sessions(stable_key: tuple, invalidation_stamp: int):
     with _CLI_SESSIONS_CACHE_LOCK:
         entry = _CLI_SESSIONS_LAST_KNOWN_GOOD.get(stable_key)
@@ -10298,6 +10602,135 @@ def _cli_sessions_cache_ttl_seconds() -> float:
         return max(0.0, float(_CLI_SESSIONS_CACHE_TTL_SECONDS))
     except (TypeError, ValueError):
         return 5.0
+
+
+# ── Single-session metadata fast path ───────────────────────────────────────
+# ``get_cli_sessions()`` projects the WHOLE agent state.db into sidebar rows.
+# On a long-lived install state.db reaches multiple GB, so a projection costs
+# seconds, and the cache key embeds a live state.db fingerprint — so an agent
+# write makes the snapshot unreachable and the next lookup pays again.
+#
+# Hot paths that need ONE session's metadata (``/api/session/import_cli``,
+# ``/api/git-info``) must not pay that. The fast path is a *probe* of the
+# producer's own cache: it answers only when the snapshot it finds is exactly
+# what a current enumeration would return, and returns ``{}`` otherwise so the
+# caller falls back to ``get_cli_sessions()``. It never enumerates itself, and
+# it never answers from a snapshot it cannot vouch for.
+#
+# "Vouched for" means the snapshot was taken at the *current* state.db
+# revision: the primary cache key embeds that revision, so an exact key hit
+# proves the rows are unchanged. Two things can defeat that proof, and both
+# are checked:
+#   * the streaming freeze (#4842) replaces the volatile key component with a
+#     marker, so matching it says only "same frozen mode", not "same catalog"
+#     — such an entry is trusted only while it is still fresh;
+#   * a disabled cache (TTL 0) makes the producer re-project every call.
+def _all_profiles_cli_cache_key(contexts, context_cache_key, source_filter, include_claude_code: bool) -> tuple:
+    """Build the all-profiles CLI cache key from already-resolved contexts.
+
+    Single source of truth for this key shape: ``get_cli_sessions()`` (the
+    producer) and the fast path must agree exactly, or a snapshot stored under
+    one shape becomes unreachable under the other.
+    """
+    stable_context_cache_key = tuple(
+        (_path_cache_key(ctx_home), str(ctx_profile or 'default'))
+        for ctx_home, _ctx_db_path, ctx_profile in contexts
+    )
+    # #4842: freeze the volatile per-profile state.db component while streaming
+    # so a streamed message row in one profile doesn't bust the all-profiles CLI
+    # cache and re-run every profile's heavy projection.
+    _streaming_marker = _cli_sessions_streaming_freeze_marker()
+    if _streaming_marker is not None:
+        context_cache_key = ('streaming-frozen', _streaming_marker)
+    return (
+        'all_profiles',
+        source_filter or '',
+        bool(include_claude_code),
+        context_cache_key,
+        stable_context_cache_key,
+        _path_cache_key(_default_claude_code_projects_dir()),
+        _path_stat_cache_key(_default_claude_code_projects_dir()),
+        _path_stat_cache_key(SESSION_INDEX_FILE),
+    )
+
+
+def _cli_sessions_current_cache_key(*, all_profiles: bool):
+    """Return the key ``get_cli_sessions()`` would use right now, or None."""
+    if all_profiles:
+        contexts, context_cache_key = _all_profiles_cli_contexts()
+        return _all_profiles_cli_cache_key(contexts, context_cache_key, None, True)
+    _home, _db, _profile, cache_key = _resolve_cli_sessions_context(
+        None, include_claude_code=True,
+    )
+    return cache_key
+
+
+
+
+
+
+def _cli_sessions_live_snapshot(*, all_profiles: bool):
+    """Return the rows the producer itself would serve right now, or ``None``.
+
+    The rule is deliberately narrow: answer only where ``get_cli_sessions()``
+    would hit its own cache. That makes the answer equal to the enumeration's
+    **by definition** — the producer returns exactly this entry's rows — rather
+    than by argument about what the key does and does not capture.
+
+    An *expired* entry is not good enough: the producer would rebuild, and the
+    rebuild can disagree with the snapshot through inputs the key never sees
+    (sidecar contents, in-place row UPDATEs, another session entering the
+    window). Two independent adversarial reviews reproduced exactly that, so an
+    expired snapshot defers to the caller's enumeration.
+    """
+    try:
+        if _cli_sessions_cache_ttl_seconds() <= 0:
+            return None
+        key = _cli_sessions_current_cache_key(all_profiles=all_profiles)
+        if key is None:
+            return None
+    except Exception:
+        logger.debug("CLI sessions lookup identity failed", exc_info=True)
+        return None
+    now = time.monotonic()
+    with _CLI_SESSIONS_CACHE_LOCK:
+        entry = _CLI_SESSIONS_CACHE.get(key)
+        if entry is None:
+            return None
+        if len(entry) == 3:
+            expires_at, stamp, rows = entry
+        else:
+            expires_at, rows = entry
+            stamp = _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
+        if stamp != _CLI_SESSIONS_CACHE_INVALIDATION_VERSION:
+            return None
+        if expires_at <= now:
+            return None
+        return rows
+
+
+
+
+def lookup_cli_session_row(
+    session_id: str,
+    *,
+    all_profiles: bool = False,
+) -> dict:
+    """Resolve ONE CLI session's row from the producer's own snapshot.
+
+    Answers only when the cached snapshot is provably what a current
+    enumeration would return; otherwise returns ``{}`` so the caller falls
+    back to ``get_cli_sessions()``. Returns a defensive copy.
+    """
+    if not session_id:
+        return {}
+    rows = _cli_sessions_live_snapshot(all_profiles=all_profiles)
+    if not rows:
+        return {}
+    # First match, exactly as the enumeration scans, and a defensive copy.
+    row = next((r for r in rows if r.get('session_id') == session_id), None)
+    return _copy_cli_sessions([row])[0] if row is not None else {}
+
 
 
 def _path_cache_key(path) -> str | None:
@@ -10864,7 +11297,7 @@ def _load_cli_sessions_uncached(
         # reads this line as source text. Must stay equal to
         # INTERACTIVE_WINDOW_EXCLUDED_CLI_SOURCES (pinned by
         # test_background_source_exclusion_literal_matches_the_constant).
-        exclude_sources=("cron", "webhook", "kanban", "oneshot") if source_filter is None else None,
+        exclude_sources=("cron", "webhook", "kanban", "oneshot", "tool") if source_filter is None else None,
         include_sources=None if source_filter is None else (source_filter,),
         **({'session_ids': session_ids} if session_ids is not None else {}),
     )
@@ -10880,8 +11313,8 @@ def _load_cli_sessions_uncached(
         # raw row, so compression segments cannot consume either budget.
         # The assigned recovery pass skips only the true background sources, so
         # a one-shot run filed under a project stays reachable from its chip.
-        # The unassigned refill skips one-shot runs too: refilling the window
-        # with them would undo #8265.
+        # The unassigned refill skips one-shot and tool runs too: refilling the
+        # window with them would undo #8265.
         interactive_excluded = BACKGROUND_CLI_SOURCES
         unassigned_refill_excluded = INTERACTIVE_WINDOW_EXCLUDED_CLI_SOURCES
         first_pass_count = len(state_rows)
@@ -11772,26 +12205,9 @@ def get_cli_sessions(
     contexts = []
     if all_profiles:
         contexts, context_cache_key = _all_profiles_cli_contexts()
-        stable_context_cache_key = tuple(
-            (_path_cache_key(ctx_home), str(ctx_profile or 'default'))
-            for ctx_home, _ctx_db_path, ctx_profile in contexts
-        )
         db_path = "all profiles"
-        # #4842: freeze the volatile per-profile state.db component while
-        # streaming so a streamed message row in one profile doesn't bust the
-        # all-profiles CLI cache and re-run every profile's heavy projection.
-        _streaming_marker = _cli_sessions_streaming_freeze_marker()
-        if _streaming_marker is not None:
-            context_cache_key = ('streaming-frozen', _streaming_marker)
-        cache_key = (
-            'all_profiles',
-            source_filter or '',
-            bool(include_claude_code),
-            context_cache_key,
-            stable_context_cache_key,
-            _path_cache_key(_default_claude_code_projects_dir()),
-            _path_stat_cache_key(_default_claude_code_projects_dir()),
-            _path_stat_cache_key(SESSION_INDEX_FILE),
+        cache_key = _all_profiles_cli_cache_key(
+            contexts, context_cache_key, source_filter, include_claude_code,
         )
     else:
         resolve_kwargs = {}
