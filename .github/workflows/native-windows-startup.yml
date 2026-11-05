@@ -639,8 +639,8 @@ jobs:
   # Native oracles for the updater's Windows network-command cleanup: the
   # per-call Job Object runner must reap the whole tree on timeout, even
   # when the direct child already exited. stdlib-only unittest, no pytest,
-  # no server, no Agent install, no secrets. fetch-depth: 0 so the pinned
-  # legacy baseline commit stays available to the leak oracle.
+  # no server, no Agent install, no secrets, and no repository history: the
+  # suite is self-contained, so the default shallow checkout is enough.
   windows-update-network-git:
     name: updater Job Object cleanup (CPython ${{ matrix.python-version }})
     runs-on: windows-latest
@@ -652,8 +652,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - name: Setup Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
@@ -661,3 +659,9 @@ jobs:
       - name: Run updater network cleanup unittests
         shell: pwsh
         run: python -m unittest discover -s tests -p test_update_network_git_windows.py -v
+      - name: Create real updater virtual environment
+        shell: pwsh
+        run: python -m venv "$env:RUNNER_TEMP\hermes-updater-venv"
+      - name: Run updater cleanup unittests through virtual environment
+        shell: pwsh
+        run: '& "$env:RUNNER_TEMP\hermes-updater-venv\Scripts\python.exe" -m unittest discover -s tests -p test_update_network_git_windows.py -v'

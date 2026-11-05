@@ -8,24 +8,21 @@ Windows) and run natively on Windows CI with:
 No mock stands in for the process tree: fixtures are real Python children and
 grandchildren with a ready/allow-exit file handshake, and reaping is proven
 with persistent ``WaitForSingleObject`` handles opened while both processes
-are alive, never by reopening a PID after it may have exited. The one mocked
-regression is cross-platform and deterministic: it pins the failure-path
+are alive, never by reopening a PID after it may have exited. The mocked
+regressions are cross-platform and deterministic: they pin the failure-path
 ordering (terminate, confirmed job close, and only then the pipe drain) with
-reader-end sentinels that must never be closed. The legacy
-``taskkill`` runner is loaded unchanged from its pinned commit via AST
-extraction, so the leak oracle exercises real history rather than a rewritten
-copy; its probe runs in a separate watchdog-owned process because the legacy
-runner can hang on the very leak it is proving.
-"""
-from __future__ import annotations
+reader-end sentinels that must never be closed, and they pin the guarded PID
+fallback's access rights so identity is always read from the very handle that
+would terminate.
 
-import ast
+These tests are self-contained: they exercise only the shipped runner and real
+fixture processes. Nothing here reads repository history, shells out to ``git``,
+or depends on an external command being installed.
+"""
 import contextlib
 import ctypes
 import json
-import multiprocessing
 import os
-import signal
 import subprocess
 import sys
 import tempfile
@@ -33,7 +30,6 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from queue import Empty
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,8 +39,6 @@ if str(ROOT) not in sys.path:
 # api/__init__.py is a docstring-only package marker, so this import stays
 # stdlib-only and works in the no-install CI job.
 from api import subprocess_utils  # noqa: E402  (after the sys.path insert above)
-
-LEGACY_COMMIT_SHA = 'b1ad09594068236fc0e47f80050b8a06a5406efb'
 
 PROCESS_TERMINATE = 0x0001
 PROCESS_SYNCHRONIZE = 0x00100000
@@ -418,29 +412,6 @@ def _stop_thread(thread):
         thread.join(timeout=30)
 
 
-def _stop_multiprocessing_process(process):
-    """Bounded teardown for a watchdog-owned process: terminate, kill, close."""
-    if process.is_alive():
-        process.terminate()
-        process.join(timeout=10)
-    if process.is_alive():
-        process.kill()
-        process.join(timeout=5)
-    if process.is_alive():
-        raise AssertionError('the watchdog probe did not exit after kill')
-    try:
-        process.close()
-    except ValueError:
-        pass
-
-
-def _close_queue(queue):
-    try:
-        queue.close()
-    except (OSError, ValueError):
-        pass
-
-
 def _wait_popen_exit(process, deadline_s=10.0):
     end = time.monotonic() + deadline_s
     while time.monotonic() < end:
@@ -479,55 +450,6 @@ def _hang_fixture_argv(markers, child_mode, hang='150'):
 def _normalized_path(value):
     """Canonical, case-folded form so 8.3 names and casing cannot mismatch."""
     return os.path.normcase(os.path.realpath(str(value)))
-
-
-def _load_legacy_run_network_git():
-    """AST-extract the original single _run_network_git from the pinned commit.
-
-    ROOT is the final source of truth: on the native Windows job this is the
-    real PR checkout. The copied review directory is not a Git repository, so
-    it never fabricates a path; the Windows-only baseline test skips off
-    Windows instead of reading a hardcoded local directory.
-    """
-    probe = subprocess.run(
-        ['git', 'show', f'{LEGACY_COMMIT_SHA}:api/updates.py'],
-        cwd=str(ROOT), capture_output=True, text=True, timeout=60,
-    )
-    if probe.returncode != 0:
-        raise RuntimeError((probe.stderr or '').strip()[:300])
-    tree = ast.parse(probe.stdout)
-    function = next(
-        node for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == '_run_network_git'
-    )
-    module = ast.Module(body=[function], type_ignores=[])
-    namespace = {
-        'os': os,
-        'subprocess': subprocess,
-        'signal': signal,
-        'windows_hide_flags': subprocess_utils.windows_hide_flags,
-    }
-    exec(compile(module, '<legacy _run_network_git>', 'exec'), namespace)
-    return namespace['_run_network_git']
-
-
-def _legacy_probe(marker_dir, queue):
-    """Watchdog-owned probe: run the pinned legacy runner against the fixture."""
-    try:
-        legacy = _load_legacy_run_network_git()
-    except BaseException as exc:  # noqa: BLE001 - a setup error is a test failure
-        queue.put({
-            'status': 'error',
-            'reason': f'{type(exc).__name__}: {exc}',
-        })
-        return
-    fixture = _hang_fixture_argv(marker_dir, 'exit-root')
-    try:
-        legacy(fixture, cwd=marker_dir, env=dict(os.environ, FIXTURE_VAR='x'), timeout=4.0)
-        outcome = {'status': 'returned'}
-    except BaseException as exc:  # noqa: BLE001 - the probe reports the kind
-        outcome = {'status': 'raised', 'kind': type(exc).__name__}
-    queue.put(outcome)
 
 
 class _FakeKernel32:
@@ -993,6 +915,80 @@ class ImportHygieneTests(unittest.TestCase):
         self.assertTrue(callable(subprocess_utils._windows_kernel32))
 
 
+#: Bytes the startup marker holds once the gate interpreter has begun running.
+#: Content, not mere existence, is asserted so the oracle cannot be satisfied by
+#: a stray empty file.
+GATE_STARTED_BYTES = b'gate-ready'
+
+
+def _gate_code_with_startup_marker(marker):
+    """Prepend a one-statement startup marker to the production gate program.
+
+    The write runs *before* the original program's gate-byte read, so the file
+    appearing proves the interpreter that executes the gate is already running.
+    The original program is kept byte-for-byte as the suffix, so the gate-byte
+    protocol is untouched: only the moment we can observe startup changes.
+
+    ``repr`` embeds the path as a safe Python literal, which matters on Windows
+    where the separator is a backslash and temporary paths may contain spaces.
+    """
+    original = subprocess_utils._WINDOWS_GATE_CODE
+    prefix = (
+        'import pathlib as _gate_startup_path\n'
+        f'_gate_startup_path.Path({str(marker)!r}).write_bytes({GATE_STARTED_BYTES!r})\n'
+    )
+    return prefix + original
+
+
+class _StartupGateKernel32:
+    """Real kernel32 with one bounded wait in front of the job assignment.
+
+    Every other entry point is delegated to the *same* bound DLL object, so the
+    job, handle, terminate and close calls are the production calls, not stand-
+    ins. ``AssignProcessToJobObject`` waits for the startup marker and then
+    invokes the real API with the arguments it was given.
+
+    Waiting here is what makes the ordering deterministic. If the launcher runs
+    the gate in the process that was started, the marker is written by that same
+    process and the assignment still covers the whole tree. If the launcher
+    creates a real child first, the child (and everything it later spawns) is
+    already outside the job by the time the assignment lands, so the reused
+    reaping oracle must fail. Neither outcome is assumed; both are observable.
+    """
+
+    POLL_S = 0.01
+
+    def __init__(self, real_kernel32, marker, deadline_s=10.0):
+        self._real = real_kernel32
+        self._marker = Path(marker)
+        self._deadline_s = deadline_s
+        self.assignment_calls = 0
+        self.marker_wait_s = None
+        self.marker_seen_before_assignment = False
+
+    def __getattr__(self, name):
+        # Only reached for names this proxy does not define, so the job,
+        # terminate and close entry points are the real bound functions.
+        return getattr(self._real, name)
+
+    def AssignProcessToJobObject(self, job, process_handle):
+        self.assignment_calls += 1
+        started = time.monotonic()
+        deadline = started + self._deadline_s
+        while not self._marker.exists():
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    'the gate interpreter never started within '
+                    f'{self._deadline_s}s: no startup marker at {self._marker}. '
+                    'A silent pass here would make this oracle vacuous, so the '
+                    'missing startup is reported instead of assigning anyway.'
+                )
+            time.sleep(self.POLL_S)
+        self.marker_wait_s = time.monotonic() - started
+        self.marker_seen_before_assignment = True
+        return self._real.AssignProcessToJobObject(job, process_handle)
+
+
 @unittest.skipUnless(os.name == 'nt', 'Windows Job Object oracles are native-only')
 class WindowsJobRunnerTests(unittest.TestCase):
 
@@ -1033,6 +1029,53 @@ class WindowsJobRunnerTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 127)
             self.assertTrue(result.stderr.strip(), 'spawn failure must keep a diagnostic')
+
+    def test_timeout_reaps_tree_when_gate_interpreter_starts_before_assignment(self):
+        """The reaping oracle with the job assignment moved behind gate startup.
+
+        The ordinary venv run only fails if the launcher happens to spawn a
+        real child before the parent assigns the job, so on its own it can pass
+        by luck. Here the assignment is held until the gate interpreter has
+        written its first-instruction marker: for a launcher that redirects to
+        a real child, that child is running and outside the job before the
+        assignment lands, which is precisely the regression.
+
+        The whole body is the existing reaping test invoked unchanged inside
+        the patches, so the fixtures, held handles, timeout, partial output,
+        bootstrap and unrelated-sentinel assertions cannot drift away from it.
+        No new process, cleanup or reaping mechanism is introduced.
+        """
+        real_binder = subprocess_utils._windows_kernel32
+        bound = []
+        with tempfile.TemporaryDirectory() as tmp:
+            startup_marker = Path(tmp) / 'gate-started'
+
+            def binding_proxy():
+                proxy = _StartupGateKernel32(real_binder(), startup_marker)
+                bound.append(proxy)
+                return proxy
+
+            with mock.patch.object(
+                    subprocess_utils, '_WINDOWS_GATE_CODE',
+                    _gate_code_with_startup_marker(startup_marker)), \
+                 mock.patch.object(
+                     subprocess_utils, '_windows_kernel32', binding_proxy):
+                # The reused oracle's own assertions are the payload: if the
+                # startup ordering lets the tree escape, it fails here.
+                self.test_timeout_stops_living_root_tree_keeps_output_and_spares_unrelated()
+
+            # Prove the ordering was actually forced rather than assumed: the
+            # marker existed before the real assignment ran, and the assignment
+            # happened exactly once through this proxy.
+            self.assertEqual(len(bound), 1, 'the runner must bind kernel32 exactly once')
+            self.assertEqual(bound[0].assignment_calls, 1,
+                             'the job assignment must run exactly once')
+            self.assertTrue(bound[0].marker_seen_before_assignment,
+                            'the assignment was never held behind gate startup')
+            self.assertIsNotNone(bound[0].marker_wait_s,
+                                 'no bounded wait was performed for the startup marker')
+            self.assertTrue(startup_marker.exists(),
+                            'the gate interpreter never wrote its startup marker')
 
     def test_timeout_stops_living_root_tree_keeps_output_and_spares_unrelated(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1318,98 +1361,6 @@ class WindowsJobRunnerTests(unittest.TestCase):
                       for process in bootstrap_procs],
                     lambda: _stop_thread(thread),
                     lambda: _stop_popen(unrelated),
-                )
-
-
-@unittest.skipUnless(os.name == 'nt', 'The baseline leak oracle needs native Windows')
-class LegacyBaselineLeakTests(unittest.TestCase):
-    """Temporary pinned-baseline oracle: it proves the pre-fix leak once."""
-
-    def test_legacy_taskkill_runner_leaks_the_exited_parent_orphan(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            markers = Path(tmp)
-            queue = multiprocessing.Queue()
-            probe = multiprocessing.Process(
-                target=_legacy_probe, args=(str(markers), queue), daemon=True,
-            )
-            handles = []
-            covered = set()
-            try:
-                probe.start()
-                try:
-                    child = _wait_for_child_fixture(markers, deadline_s=15.0)
-                except AssertionError:
-                    if probe.is_alive():
-                        self.fail(
-                            'the legacy baseline never started the fixture; the probe is '
-                            'still running (baseline setup is stuck or too slow)'
-                        )
-                    probe.join(timeout=5)
-                    try:
-                        outcome = queue.get(timeout=5)
-                    except Empty:
-                        outcome = None
-                    self.fail(
-                        'legacy baseline setup failed before the fixture started: '
-                        f'{outcome!r}'
-                    )
-                    return
-                # The outer watchdog owns persistent handles opened while both
-                # fixture processes are still gated.
-                child_handle = _open_process_handle(child['child_pid'])
-                handles.append(child_handle)
-                covered.add(child['child_pid'])
-                grand_handle = _open_process_handle(child['grand_pid'])
-                handles.append(grand_handle)
-                covered.add(child['grand_pid'])
-                self.assertFalse(_wait_for_handle(child_handle, 0),
-                                 'fixture root must be gated before opening its handle')
-                self.assertFalse(_wait_for_handle(grand_handle, 0),
-                                 'fixture grandchild must be alive before cancellation')
-                (markers / 'allow-exit').write_text('1')
-                self.assertTrue(
-                    _wait_handle_signaled(child_handle, 5.0),
-                    'fixture root must exit after the watchdog releases it',
-                )
-                self.assertFalse(
-                    _wait_for_handle(grand_handle, 0),
-                    'the pipe-holding grandchild must stay alive before cancellation',
-                )
-                # The legacy runner's deadline is 4s and its cleanup is bounded;
-                # this watchdog sample is 15s, not the old 90s join, and the
-                # fixture grandchild sleeps 150s instead of 30s.
-                probe.join(timeout=15)
-                probe_hung = probe.is_alive()
-                if probe_hung:
-                    probe.terminate()
-                    probe.join(timeout=10)
-                self.assertTrue((markers / 'ran').exists(),
-                                'the legacy runner never invoked the fixture')
-                self.assertFalse(
-                    _wait_for_handle(grand_handle, 0),
-                    'expected the legacy taskkill runner to leak the pipe-holding '
-                    'grandchild; if this fails the baseline no longer demonstrates '
-                    'the A3 gap',
-                )
-                self.assertTrue(
-                    _wait_handle_signaled(child_handle, 5.0),
-                    'the exited fixture root must remain signaled',
-                )
-                if not probe_hung:
-                    self.assertEqual(probe.exitcode, 0, 'legacy probe crashed (harness failure)')
-                    try:
-                        outcome = queue.get(timeout=5)
-                    except Empty:
-                        self.fail('legacy probe exited without reporting an outcome')
-                    self.assertNotEqual(outcome.get('status'), 'error', outcome)
-                    self.assertIn(outcome.get('status'), ('returned', 'raised'), outcome)
-            finally:
-                _run_cleanups(
-                    *[lambda handle=handle: _cleanup_handle(handle)
-                      for handle in handles],
-                    lambda: _cleanup_fixture_pids(markers, covered),
-                    lambda: _stop_multiprocessing_process(probe),
-                    lambda: _close_queue(queue),
                 )
 
 
