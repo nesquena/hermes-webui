@@ -546,6 +546,7 @@ function _providerFromModelValue(v) {
   return '';
 }
 function _normalizeConfiguredModelKey(v) { return String(v || '').toLowerCase(); }
+function _configuredModelIdentity(v) { return _normalizeConfiguredModelKey(v); }
 function _getConfiguredModelBadge(value, badgeMap) { return badgeMap[value] || null; }
 function closeModelDropdown() {}
 function syncModelChip() {}
@@ -888,6 +889,7 @@ function _providerFromModelValue(v) {
   return '';
 }
 function _normalizeConfiguredModelKey(v) { return String(v || '').toLowerCase(); }
+function _configuredModelIdentity(v) { return _normalizeConfiguredModelKey(v); }
 function _getConfiguredModelBadge(value, badgeMap) { return badgeMap[value] || null; }
 function closeModelDropdown() {}
 function syncModelChip() {}
@@ -1033,6 +1035,7 @@ function extractFunction(source, name) {
 
 eval([
   '_normalizeConfiguredModelKey',
+  '_configuredModelIdentity',
   '_getOptionProviderId',
   '_isEquivalentConfiguredModelEntry',
 ].map(name => extractFunction(ui, name)).join('\n'));
@@ -1219,6 +1222,7 @@ function t(key,...args) { if(key==='model_show_all_models') return `Show all ${a
 function li() { return 'x'; }
 function getModelLabel(v) { return String(v || ''); }
 function _normalizeConfiguredModelKey(v) { return String(v||'').toLowerCase(); }
+function _configuredModelIdentity(v) { return _normalizeConfiguredModelKey(v); }
 function _getConfiguredModelBadge(value, badgeMap) { return (badgeMap||{})[value] || null; }
 function closeModelDropdown() {}
 function syncModelChip() {}

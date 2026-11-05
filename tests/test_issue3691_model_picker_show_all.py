@@ -436,6 +436,7 @@ function getModelLabel(v) {
   return value;
 }
 function _normalizeConfiguredModelKey(v) { return String(v || '').toLowerCase(); }
+function _configuredModelIdentity(v) { return _normalizeConfiguredModelKey(v); }
 function _getConfiguredModelBadge(value, badgeMap) { return badgeMap[value] || null; }
 function closeModelDropdown() {}
 function selectModelFromDropdown() {}
@@ -844,6 +845,7 @@ function _providerFromModelValue(v) {
   return '';
 }
 function _normalizeConfiguredModelKey(v) { return String(v || '').toLowerCase(); }
+function _configuredModelIdentity(v) { return _normalizeConfiguredModelKey(v); }
 function _getConfiguredModelBadge(value, badgeMap) { return badgeMap[value] || null; }
 function closeModelDropdown() {}
 function selectModelFromDropdown() {}
@@ -1070,6 +1072,7 @@ function _providerFromModelValue(v) {
   return '';
 }
 function _normalizeConfiguredModelKey(v) { return String(v || '').toLowerCase(); }
+function _configuredModelIdentity(v) { return _normalizeConfiguredModelKey(v); }
 function _getConfiguredModelBadge(value, badgeMap) { return badgeMap[value] || null; }
 function closeModelDropdown() {}
 function selectModelFromDropdown() {}
@@ -1443,6 +1446,7 @@ function _providerFromModelValue(v) {
   return '';
 }
 function _normalizeConfiguredModelKey(v) { return String(v || '').toLowerCase(); }
+function _configuredModelIdentity(v) { return _normalizeConfiguredModelKey(v); }
 function _getConfiguredModelBadge(value, badgeMap) { return badgeMap[value] || null; }
 function closeModelDropdown() {}
 function selectModelFromDropdown() {}
@@ -1803,6 +1807,7 @@ function _providerFromModelValue(v) {
   return '';
 }
 function _normalizeConfiguredModelKey(v) { return String(v || '').toLowerCase(); }
+function _configuredModelIdentity(v) { return _normalizeConfiguredModelKey(v); }
 function _getConfiguredModelBadge(value, badgeMap) { return badgeMap[value] || null; }
 function closeModelDropdown() {}
 function selectModelFromDropdown() {}
@@ -2996,6 +3001,7 @@ function _providerFromModelValue(v) {
   return '';
 }
 function _normalizeConfiguredModelKey(v) { return String(v || '').toLowerCase(); }
+function _configuredModelIdentity(v) { return _normalizeConfiguredModelKey(v); }
 function _getConfiguredModelBadge(value, badgeMap) { return null; }
 function closeModelDropdown() {}
 function selectModelFromDropdown() {}
