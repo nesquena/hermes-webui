@@ -89,6 +89,8 @@
 
 ### Fixed
 
+- **The model picker's Configured section lists each configured model once, with its badge.** Since #8730 a typed custom id for a configured model (for example `openrouter/anthropic/claude-sonnet-4.6` for an OpenRouter fallback) listed that fallback twice, a row that live model enrichment had replaced (such as `@openai:openai/gpt-6.1-sol`) lost its Primary badge and the Configured section disappeared, and a badge saved without a provider showed on no live row. The Configured section now keeps one row per configured entry, preferring the row that sends the configured id, and the badge lookup strips the provider's own routing prefixes. A typed alias stays in the list below the provider groups with its badge, the Configured row stays selected after you pick it, and the Settings default-model picker gets the same fix. (#8767, fixes #8756)
+
 - **The orphaned-session sidebar test no longer fails when the index rebuild finishes first.** Its fixture wrote the pending-message fields after the message list, where the metadata reader never looks, so a pending session was pruned whenever the rebuild thread won its race. The fixture now uses the same field order as a saved session, and a new test pins both sides of the race (#8814).
 
 - **The named-profile import test no longer depends on test order.** The opt-in test left its imported session behind under the named profile (the cleanup deleted from the default profile, which the profile guard refuses), so the opt-out test got the correct 409 profile mismatch instead of the 404 it expected whenever it ran second. Each test now uses its own session and deletes it under its own profile, and a new test pins the 409 for importing a session another profile already owns (#8831).
