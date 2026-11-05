@@ -89,6 +89,12 @@
 
 ### Fixed
 
+- **The session actions menu stays inside the visible screen on phones.** A long-press on a session low in the list could open the menu past the visible bottom, cutting off the lower actions, when the on-screen keyboard was up or when the Android WebView reported a stale menu height. The menu is now placed against the visible viewport and measured by its content, and it caps and scrolls when it can't fit. Thanks @zellenal (#8720).
+
+- **Long-pressing the sidebar rename field keeps the rename and the text toolbar.** On Android, a long-press inside the rename field never raised the cut/copy/paste toolbar: the field inherited the row's `user-select: none`, and the row's context-menu handler swallowed the event, opening the session actions menu and ending the rename. The field now allows text selection and the row handlers leave events from it alone, so a right-click on desktop also keeps the rename. Thanks @zellenal (#8661).
+
+- **The update status in Settings > System names the unit once.** After **Check now**, the status line read `Agent (main): 1 update update(s) available`, because the per-target parts already carry their unit and the message template added its own; in other languages the list landed where a number belonged. The line now reads `Agent (main): 1 update available`, and every language uses a heading form for the list. Thanks @Thanatos9404 (#8334, closes #8283).
+
 - **A sidebar swipe or Ctrl/Cmd+B no longer fires while you are typing.** On a phone, an edge swipe that starts on the composer or the message field no longer opens the sidebar, and Ctrl/Cmd+B no longer toggles the sidebar while a text field has focus, even when the key event reaches another element. A swipe from the edge anywhere else still opens the sidebar. Thanks @solarmaster961 (#8630).
 
 - **The orphaned-session sidebar test no longer fails when the index rebuild finishes first.** Its fixture wrote the pending-message fields after the message list, where the metadata reader never looks, so a pending session was pruned whenever the rebuild thread won its race. The fixture now uses the same field order as a saved session, and a new test pins both sides of the race (#8814).
