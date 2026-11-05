@@ -861,3 +861,83 @@ def test_channel_frames_carry_per_frame_replay_cursor():
     except BaseException:
         channel.unsubscribe(reconnect)
         raise
+
+
+def test_closed_channel_late_subscriber_gets_close_sentinel_not_replay():
+    """#7302 x #7105: a late subscriber on a closed channel gets the close
+    sentinel, never a replay prefix that could crowd the sentinel out of its
+    queue and leave the handler hanging on keepalives."""
+    sid = "s-closed-late"
+    channel = background_process.SessionChannel(sid)
+    baseline = channel.subscribe(maxsize=64)
+    cursor = baseline._session_channel_initial_event_id
+    channel.unsubscribe(baseline)
+    channel.emit("bg_task_complete", {"event_id": "gap-a", "session_id": sid})
+    channel.emit("bg_task_complete", {"event_id": "gap-b", "session_id": sid})
+    channel.close("test")
+
+    # The queue is sized to the pending replay exactly: if a closed channel
+    # replayed, the two frames would fill it and the sentinel put would fail.
+    late = channel.subscribe(maxsize=2, after_event_id=cursor)
+    try:
+        assert late._session_channel_replay_count == 0
+        assert late.get_nowait() is None
+        assert late.empty()
+    finally:
+        channel.unsubscribe(late)
+
+
+def test_close_sentinel_inside_replay_prefix_ends_the_response(monkeypatch):
+    """A close that lands inside the replay prefix (``close()`` evicts one
+    queued frame to fit its sentinel) must end the HTTP response exactly like
+    the live loop's end-of-stream branch (#7302), and a replayed frame's
+    completed write still counts as writer-side liveness."""
+    _short_lease(monkeypatch)
+    # Long lease: only the sentinel may end this generation.
+    monkeypatch.setattr(routes, "_SSE_SUBSCRIBER_LEASE_SECONDS", 30.0, raising=False)
+    sid = "s-replay-close"
+    q: queue.Queue = queue.Queue()
+    q.put_nowait(
+        background_process._SessionChannelFrame(
+            "bg_task_complete",
+            {"event_id": "replayed", "session_id": sid},
+            "session-channel:tok@1",
+        )
+    )
+    q.put_nowait(None)
+    q._session_channel_replay_count = 2
+
+    class Channel:
+        def __init__(self) -> None:
+            self.unsubscribed: list[queue.Queue] = []
+            self.writes_ok = 0
+
+        def unsubscribe(self, sub: queue.Queue) -> None:
+            self.unsubscribed.append(sub)
+
+        def note_subscriber_write_ok(self, _q: queue.Queue) -> None:
+            self.writes_ok += 1
+
+    channel = Channel()
+    monkeypatch.setattr(
+        background_process,
+        "subscribe_to_session_channel",
+        lambda _sid, maxsize=64, after_event_id=None: (channel, q),
+    )
+    monkeypatch.setattr(background_process, "active_stream_id_for_session", lambda _sid: None)
+    monkeypatch.setattr(background_process, "persisted_message_count_for_session", lambda _sid: None)
+    monkeypatch.setattr(background_process, "should_emit_session_updated", lambda known, current: False)
+
+    handler = _FakeHandler()
+    _run_bounded(
+        lambda: routes._handle_session_sse_stream(
+            handler,
+            urlparse(f"http://example.test/api/session/stream?session_id={sid}"),
+        )
+    )
+
+    assert handler.close_connection is True
+    assert ("Connection", "close") not in handler.sent_headers
+    assert channel.unsubscribed == [q]
+    assert b"id: session-channel:tok@1" in bytes(handler.wfile.body)
+    assert channel.writes_ok == 1

@@ -107,7 +107,7 @@ generation. `_SSE_SUBSCRIBER_LEASE_SECONDS = 300` caps each generation for:
 
 - `GET /api/session/stream` (per-session background-completion/live-turn bridge),
 - `GET /api/sessions/events` (global session-list invalidation), and
-- `GET /api/gateway/sessions/stream` (gateway session snapshots).
+- `GET /api/sessions/gateway/stream` (gateway session snapshots).
 
 At the lease boundary the handler sets `BaseHTTPRequestHandler.close_connection`
 and returns; it does **not** emit a `Connection: close` response header. A live
@@ -135,6 +135,15 @@ cursor replays no old completion toast and falls back to the existing
 active-turn and persisted-message-count recovery. The channel's
 subscriber-drop grace is preserved for the full reconnect interval even when the
 channel itself is older than its idle TTL.
+
+A channel that has been explicitly closed (`SessionChannel.close()`, the #7302
+end-of-channel protocol) never replays: a late subscriber receives only the
+`None` close sentinel, so the sentinel always fits its queue, the response ends,
+and the browser reconnects onto the replacement channel, where the old
+channel's cursor is a foreign incarnation and fails closed. A sentinel met
+while the handler is still draining the replay prefix ends the response the same
+way. Every completed frame write, replayed or live, also counts as writer-side
+subscriber liveness for the reaper.
 
 This lifecycle applies only to the three endpoints above. Approval/clarify SSE,
 run-journal observers, the proposed `GET /api/sessions/{session_id}/events`, and
