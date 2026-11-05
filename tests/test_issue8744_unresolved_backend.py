@@ -1,9 +1,10 @@
 """An unresolved ``${VAR}`` terminal backend is not a remote backend (#8744).
 
-#8737 expands a profile's ``config.yaml`` under that profile's OWN ``.env``
-binding, and a reference the binding cannot resolve stays the literal
-``${VAR}``. The binding rule also requires downstream consumers to treat such a
-literal as ABSENT. ``api/workspace.py::_is_remote_terminal_backend`` used to
+#8737 expands a profile's ``config.yaml`` with that profile's OWN ``.env`` laid
+over the normal resolution (decision A): the profile's ``.env`` wins for the
+names it defines, other names resolve as on master, and a name nothing defines
+stays the literal ``${VAR}``. Downstream consumers must treat such a literal as
+ABSENT. ``api/workspace.py::_is_remote_terminal_backend`` used to
 classify any non-empty value other than ``local`` as remote, so the kept
 placeholder switched on remote-workspace behavior: ``get_last_workspace()``
 dropped the profile's saved local workspace and returned ``terminal.cwd``.
@@ -38,11 +39,13 @@ terminal:
 
 @pytest.fixture
 def gate_profile(tmp_path, monkeypatch):
-    """A named profile whose ``terminal.backend`` its own ``.env`` cannot resolve.
+    """A named profile whose ``terminal.backend`` names a variable nothing defines.
 
-    The process env defines ``GATE_BACKEND=local``. That value must NOT be used
-    to expand the profile's config (no ambient fallback), so the backend stays
-    the literal ``${GATE_BACKEND}``.
+    Under the #8737 overlay (decision A) the profile's own ``.env`` wins for the
+    names it defines and every other name resolves as on master, process env
+    included. So the backend stays the literal ``${GATE_BACKEND}`` only when
+    neither the profile's ``.env`` nor the process env defines it, which is
+    the case these tests pin.
     """
     import api.paths as paths
     import api.profiles as profiles
@@ -66,8 +69,8 @@ def gate_profile(tmp_path, monkeypatch):
     profiles._invalidate_root_profile_cache()
     profiles._tls.profile = None
 
-    # Process-only value: present in os.environ, absent from the profile's .env.
-    monkeypatch.setenv("GATE_BACKEND", "local")
+    # Defined nowhere: absent from the profile's .env and from the process env.
+    monkeypatch.delenv("GATE_BACKEND", raising=False)
 
     yield home
 
@@ -138,7 +141,7 @@ def test_unresolved_backend_keeps_saved_local_workspace(gate_profile, tmp_path):
     saved.mkdir()
     _save_last_workspace(saved)
 
-    # The #8737 contract: the placeholder is kept, the process value is not used.
+    # The overlay contract: a name nothing defines stays the literal placeholder.
     terminal_cfg = get_config_for_profile_home(gate_profile)["terminal"]
     assert terminal_cfg["backend"] == "${GATE_BACKEND}"
 
@@ -207,8 +210,13 @@ def test_workspace_recovery_refuses_unresolved_backend(gate_profile, tmp_path, m
 
 
 def test_workspace_recovery_control_local_backend_recovers(gate_profile, tmp_path, monkeypatch):
-    """Control: the same setup with a RESOLVED local backend does recover."""
-    (gate_profile / ".env").write_text("GATE_BACKEND=local\n", encoding="utf-8")
+    """Control: the same setup with a RESOLVED local backend does recover.
+
+    The workspace path reads the profile config with master's resolution (the
+    #8737 overlay applies to the Gateway config read only), so the name is
+    resolved the way master resolves it here: from the process env.
+    """
+    monkeypatch.setenv("GATE_BACKEND", "local")
     calls, fallback, recover = _recover_missing_workspace(tmp_path, monkeypatch)
 
     resolved, recovered = recover()
