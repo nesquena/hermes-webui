@@ -1287,6 +1287,64 @@ def _mpf_image_ranges(data: bytes, base: int) -> list[tuple[int, int]] | None:
     return ranges
 
 
+_SEF_MAX_ENTRIES = 64
+_SEF_BLOCK_NAME = _re.compile(rb"[\x21-\x7e]+")
+
+
+def _is_samsung_sef_trailer(data: bytes) -> bool:
+    """Return whether *data* is exactly one Samsung SEF trailer.
+
+    Samsung cameras append a Samsung Extended Format trailer after the JPEG EOI:
+    data blocks, then an ``SEFH`` directory, then ``<directory length> SEFT``.
+    Each directory entry is ``u16 0, u16 type, u32 offset back from SEFH,
+    u32 size``, and each block starts with ``u16 0, u16 type, u32 name length,
+    name``. Like MPF, the bytes must be fully accounted for: the blocks tile the
+    whole region from EOI up to SEFH with no gaps or overlaps, every header
+    matches its entry, and nothing follows SEFT.
+
+    The tiling is proven from the directory alone before any block is read, so
+    each block byte is looked at most once: overlapping entries that all point
+    at one huge block are rejected without scanning it (projections run this on
+    every GET).
+    """
+    if len(data) < 20 or data[-4:] != b"SEFT":
+        return False
+    dir_len = int.from_bytes(data[-8:-4], "little")
+    dir_pos = len(data) - 8 - dir_len
+    if dir_pos <= 0 or data[dir_pos:dir_pos + 4] != b"SEFH":
+        return False
+    count = int.from_bytes(data[dir_pos + 8:dir_pos + 12], "little")
+    if not 1 <= count <= _SEF_MAX_ENTRIES or dir_len != 12 + 12 * count:
+        return False
+    blocks = []
+    for index in range(count):
+        entry = dir_pos + 12 + 12 * index
+        if data[entry:entry + 2] != b"\0\0":
+            return False
+        offset = int.from_bytes(data[entry + 4:entry + 8], "little")
+        size = int.from_bytes(data[entry + 8:entry + 12], "little")
+        start = dir_pos - offset
+        if offset > dir_pos or size < 8 or start + size > dir_pos:
+            return False
+        blocks.append((start, size, data[entry + 2:entry + 4]))
+    end = 0
+    for start, size, _kind in sorted(blocks):
+        if start != end:
+            return False
+        end = start + size
+    if end != dir_pos:
+        return False
+    for start, size, kind in blocks:
+        if data[start:start + 2] != b"\0\0" or data[start + 2:start + 4] != kind:
+            return False
+        name_len = int.from_bytes(data[start + 4:start + 8], "little")
+        if name_len < 1 or 8 + name_len > size:
+            return False
+        if _SEF_BLOCK_NAME.fullmatch(data, start + 8, start + 8 + name_len) is None:
+            return False
+    return True
+
+
 def _is_complete_jpeg(raw: bytes, *, _allow_mpf: bool = True) -> bool:
     if len(raw) < 4 or raw[:2] != b"\xff\xd8":
         return False
@@ -1308,7 +1366,7 @@ def _is_complete_jpeg(raw: bytes, *, _allow_mpf: bool = True) -> bool:
             if not saw_sof or not saw_scan:
                 return False
             if mpf_ranges is None:
-                return pos == len(raw)
+                return pos == len(raw) or (_allow_mpf and _is_samsung_sef_trailer(raw[pos:]))
             if mpf_ranges[0] != (0, pos):
                 return False
             # No gaps, overlaps, undeclared pictures or post-EOI payloads.
@@ -1318,7 +1376,7 @@ def _is_complete_jpeg(raw: bytes, *, _allow_mpf: bool = True) -> bool:
                 if not _is_complete_jpeg(raw[start:end], _allow_mpf=False):
                     return False
                 pos = end
-            return pos == len(raw)
+            return pos == len(raw) or _is_samsung_sef_trailer(raw[pos:])
         if marker in {0x00, 0x01, 0xD8} or 0xD0 <= marker <= 0xD7:
             return False
         if pos + 2 > len(raw):
