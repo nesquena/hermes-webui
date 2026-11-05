@@ -28195,7 +28195,7 @@ function addFiles(files){
   // A New Chat / profile handoff owns this transition: stage the accepted
   // batch through the composer ownership layer instead of mutating the visible
   // tray that may already belong to a different session.
-  if(_composerOwnershipTransition){
+  if(typeof _composerOwnershipTransition!=='undefined'&&_composerOwnershipTransition){
     _composerAddFiles(accepted);
     return;
   }

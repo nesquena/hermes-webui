@@ -222,7 +222,7 @@ const _clearRestoredGoalContinuationDraft=()=>{};
 const files=[{name:'drawing.png',path:'/uploads/drawing.png'}];
 _restoreComposerDraftAfterFailedSend('retained',files,'continuation',Promise.resolve());
 await Promise.resolve();
-assert.deepEqual(calls,[['continuation','retained',files]]);
+assert.deepEqual(calls,[['continuation','retained',files,'',{ownerProfile:null}]]);
 })().catch(e=>{console.error(e);process.exit(1)});
 '''
     subprocess.run(['node','-e',helper+script], check=True, timeout=15)

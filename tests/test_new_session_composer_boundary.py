@@ -1,9 +1,11 @@
 """Behavioral regression coverage for the New Session composer boundary."""
 
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 import textwrap
 
 import pytest
@@ -17,6 +19,33 @@ MESSAGES_JS = ROOT.joinpath("static", "messages.js").read_text(encoding="utf-8")
 PANELS_JS = ROOT.joinpath("static", "panels.js").read_text(encoding="utf-8")
 WORKSPACE_JS = ROOT.joinpath("static", "workspace.js").read_text(encoding="utf-8")
 I18N_JS = ROOT.joinpath("static", "i18n.js").read_text(encoding="utf-8")
+
+
+def _run_node_script(script: str, *, timeout: int = 30):
+    """Run a generated harness from a temp file instead of ``node -e``.
+
+    Each harness carries the whole module prelude, which no longer fits in a
+    single argv entry: Linux rejects it with E2BIG (MAX_ARG_STRLEN) and Windows
+    with WinError 206. A ``.cjs`` file has no such limit and runs identically.
+    """
+    handle = tempfile.NamedTemporaryFile(
+        "w", suffix=".cjs", delete=False, encoding="utf-8", newline=chr(10)
+    )
+    try:
+        handle.write(script)
+        handle.close()
+        return subprocess.run(
+            [shutil.which("node"), handle.name],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+    finally:
+        try:
+            os.unlink(handle.name)
+        except OSError:
+            pass
 
 
 def _function(source: str, name: str, next_marker: str) -> str:
@@ -321,9 +350,7 @@ def _run_review_race_harness(schedule: str) -> dict:
         }})().catch(error=>{{console.error(error);process.exit(1);}});
         """
     )
-    proc = subprocess.run(
-        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
-    )
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr or proc.stdout
     return json.loads(proc.stdout)
 
@@ -425,9 +452,7 @@ def _run_pending_file_ownership_harness() -> dict:
         }})().catch(err => {{console.error(err); process.exit(1);}});
         """
     )
-    proc = subprocess.run(
-        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
-    )
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout)
 
@@ -580,13 +605,7 @@ def _run_new_session_harness(
         }})().catch(err => {{ console.error(err); process.exit(1); }});
         """
     )
-    proc = subprocess.run(
-        [node, "-e", script],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        timeout=30,
-    )
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout)
 
@@ -685,9 +704,7 @@ def _run_blank_page_settlement_harness(entry: str, *, reject_pending: bool) -> d
         }})().catch(error=>{{console.error(error);process.exit(1);}});
         """
     )
-    proc = subprocess.run(
-        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
-    )
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr or proc.stdout
     return json.loads(proc.stdout)
 
@@ -862,9 +879,7 @@ def _run_existing_session_workspace_interleave_harness(*, reject_create: bool) -
         }})().catch(error=>{{console.error(error);process.exit(1);}});
         """
     )
-    proc = subprocess.run(
-        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
-    )
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr or proc.stdout
     return json.loads(proc.stdout)
 
@@ -928,7 +943,7 @@ def _run_workspace_opt_in_new_chat_harness() -> dict:
         }})().catch(error=>{{console.error(error);process.exit(1);}});
         """
     )
-    proc=subprocess.run([node,"-e",script],cwd=ROOT,text=True,capture_output=True,timeout=30)
+    proc=_run_node_script(script, timeout=30)
     assert proc.returncode==0,proc.stderr or proc.stdout
     return json.loads(proc.stdout)
 
@@ -977,7 +992,7 @@ def _run_queued_workspace_supersession_harness() -> dict:
         }})().catch(error=>{{console.error(error);process.exit(1);}});
         """
     )
-    proc = subprocess.run([node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr or proc.stdout
     return json.loads(proc.stdout)
 
@@ -1028,7 +1043,7 @@ def _run_double_workspace_context_harness() -> dict:
         }})().catch(error=>{{console.error(error);process.exit(1);}});
         """
     )
-    proc=subprocess.run([node,"-e",script],cwd=ROOT,text=True,capture_output=True,timeout=30)
+    proc=_run_node_script(script, timeout=30)
     assert proc.returncode==0,proc.stderr or proc.stdout
     return json.loads(proc.stdout)
 
@@ -1097,7 +1112,7 @@ def _run_profile_double_context_harness(*, reject_second: bool = False) -> dict:
         }})().catch(error=>{{console.error(error);process.exit(1);}});
         """
     )
-    proc=subprocess.run([node,"-e",script],cwd=ROOT,text=True,capture_output=True,timeout=30)
+    proc=_run_node_script(script, timeout=30)
     assert proc.returncode==0,proc.stderr or proc.stdout
     return json.loads(proc.stdout)
 
@@ -1166,7 +1181,7 @@ def _run_stale_context_repaint_harness(
         }})().catch(error=>{{console.error(error);process.exit(1);}});
         """
     )
-    proc=subprocess.run([node,"-e",script],cwd=ROOT,text=True,capture_output=True,timeout=30)
+    proc=_run_node_script(script, timeout=30)
     assert proc.returncode==0,proc.stderr or proc.stdout
     return json.loads(proc.stdout)
 
@@ -1267,9 +1282,7 @@ def _run_held_directory_reload_harness(entry: str, response_order: str) -> dict:
         }})().catch(error=>{{console.error(error);process.exit(1);}});
         """
     )
-    proc = subprocess.run(
-        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
-    )
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr or proc.stdout
     return json.loads(proc.stdout)
 
@@ -1440,9 +1453,7 @@ def test_profile_owned_new_chat_cannot_deadlock_with_a_queued_new_chat():
         }})().catch(error=>{{console.error(error);process.exit(1);}});
         """
     )
-    proc = subprocess.run(
-        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
-    )
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr or proc.stdout
     result = json.loads(proc.stdout)
     assert result["createStartedBeforeProfileSettled"] is False
@@ -1594,9 +1605,7 @@ def test_profile_owned_new_chat_takeover_forwards_explicit_worktree_opt_out():
         }})().catch(error=>{{console.error(error);process.exit(1);}});
         """
     )
-    proc = subprocess.run(
-        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
-    )
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr or proc.stdout
     result = json.loads(proc.stdout)
     assert result["createStartedBeforeProfileSettled"] is False
@@ -1735,9 +1744,7 @@ def test_voice_mode_send_preserves_buffered_transcript_across_new_session_handof
         }})().catch(error=>{{console.error(error);process.exit(1);}});
         """
     )
-    proc = subprocess.run(
-        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
-    )
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr or proc.stdout
     result = json.loads(proc.stdout)
 
@@ -1927,9 +1934,7 @@ def _run_profile_switch_settlement_harness(
         }})().catch(error=>{{console.error(error);process.exit(1);}});
         """
     )
-    proc = subprocess.run(
-        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
-    )
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr or proc.stdout
     return json.loads(proc.stdout)
 
@@ -2469,9 +2474,7 @@ def test_new_session_pending_freezes_and_restores_composer_controls():
         process.stdout.write(JSON.stringify({{during, after}}));
         """
     )
-    proc = subprocess.run(
-        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
-    )
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
 
@@ -2515,9 +2518,7 @@ def test_files_dropped_while_new_session_is_pending_are_replayed_after_settlemen
         }}));
         """
     )
-    proc = subprocess.run(
-        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
-    )
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
 
@@ -2568,9 +2569,7 @@ def test_hidden_owner_callback_cannot_cancel_visible_owner_pending_draft_save():
         }}, _DRAFT_SAVE_DELAY_MS + 100);
         """
     )
-    proc = subprocess.run(
-        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
-    )
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr or proc.stdout
     posts = json.loads(proc.stdout)
     assert [(post["session_id"], post["text"]) for post in posts] == [
@@ -2608,9 +2607,7 @@ def test_draft_debounce_is_scoped_by_profile_and_session_id():
         }}, _DRAFT_SAVE_DELAY_MS + 100);
         """
     )
-    proc = subprocess.run(
-        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
-    )
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr or proc.stdout
     assert [post["text"] for post in json.loads(proc.stdout)] == [
         "alpha-draft",
@@ -2649,9 +2646,7 @@ def test_clearing_hidden_owner_draft_cannot_cancel_visible_owner_pending_save():
         }}, _DRAFT_SAVE_DELAY_MS + 100);
         """
     )
-    proc = subprocess.run(
-        [node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30
-    )
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr or proc.stdout
     assert [
         (post["session_id"], post.get("text")) for post in json.loads(proc.stdout)
@@ -2695,9 +2690,7 @@ def test_draft_writes_for_one_session_are_serialized():
         }})().catch(error => {{ console.error(error); process.exit(1); }});
         """
     )
-    proc = subprocess.run(
-        [node, "-e", script], capture_output=True, text=True, timeout=30, check=False
-    )
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr or proc.stdout
     result = json.loads(proc.stdout)
     assert result["beforeRelease"] == ["first-start"]
@@ -2738,9 +2731,7 @@ def test_draft_write_queue_recovers_after_rejection_and_cleans_up():
         }})().catch(error => {{ console.error(error); process.exit(1); }});
         """
     )
-    proc = subprocess.run(
-        [node, "-e", script], capture_output=True, text=True, timeout=30, check=False
-    )
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr or proc.stdout
     result = json.loads(proc.stdout)
     assert result == {
@@ -2794,9 +2785,7 @@ def test_immediate_draft_save_can_fail_closed_at_owner_boundary():
         }})().catch(error => {{ console.error(error); process.exit(1); }});
         """
     )
-    proc = subprocess.run(
-        [node, "-e", script], capture_output=True, text=True, timeout=30, check=False
-    )
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr or proc.stdout
     assert json.loads(proc.stdout) == {"strictRejected": True, "softResolved": True}
 
@@ -2853,7 +2842,7 @@ def test_ordered_programmatic_callbacks_preserve_latest_replacement_and_raw_file
         process.stdout.write(JSON.stringify({{text:msg.value,files:S.pendingFiles.map(f=>f.name)}}));
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == {"text": "Hello", "files": ["voice-input.webm"]}
 
@@ -2992,7 +2981,7 @@ def test_clarify_409_after_owner_swap_keeps_captured_old_session_owner():
         }}).catch(error=>{{console.error(error);process.exit(1);}});
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
     assert result["text"] == ""
@@ -3088,7 +3077,7 @@ def test_abort_after_owner_change_persists_source_without_mutating_visible_compo
         }});
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr or proc.stdout
     assert json.loads(proc.stdout) == {
         "restoredVisible": False,
@@ -3125,7 +3114,7 @@ def test_failed_handoff_replays_full_source_form_not_destination_delta():
         process.stdout.write(msg.value);
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "source draft voice addition"
 
@@ -3148,7 +3137,7 @@ def test_new_session_and_clarify_disabled_reasons_do_not_unlock_each_other():
         process.stdout.write(JSON.stringify({{afterNewSession,afterClarify}}));
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == {"afterNewSession": True, "afterClarify": False}
 
@@ -3228,7 +3217,7 @@ def test_superseded_media_callbacks_drop_payload_before_composer_mutation():
         }})().catch(error=>{{console.error(error);process.exit(1);}});
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
     assert result["beforeLateA"] == result["afterLateA"]
@@ -3325,7 +3314,7 @@ def test_superseded_get_user_media_completion_cannot_clear_new_recording_state()
         }})().catch(error=>{{console.error(error);process.exit(1);}});
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == {
         "beforeLateA": {"isRecording": True, "micActive": True},
@@ -3395,7 +3384,7 @@ def test_superseded_recorder_callbacks_drop_payload_before_buffer_mutation():
         }})().catch(error=>{{console.error(error);process.exit(1);}});
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == {
         "buffered": 0,
@@ -3479,7 +3468,7 @@ def test_voice_mode_lifecycle_b_text_survives_late_a_callback():
         }}));
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
     assert result["beforeLateA"] == result["afterLateA"]
@@ -3569,7 +3558,7 @@ def test_late_dictation_lifecycle_a_callbacks_are_dropped_after_b_starts():
         }}));
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
     assert result["beforeLateA"] == result["afterLateA"]
@@ -3632,7 +3621,7 @@ def test_immediate_draft_save_refreshes_owner_authority_with_profile_and_revisio
         }});
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     remembered = json.loads(proc.stdout)
     assert remembered == [{
@@ -3722,7 +3711,7 @@ def test_ordinary_switch_save_r2_invalidates_deferred_failed_send_r1_snapshot():
         }}).catch(error=>{{console.error(error);process.exit(1);}});
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
     assert result["writes"][-1]["text"] == "r2"
@@ -3754,7 +3743,7 @@ def test_owner_snapshot_fails_closed_when_authority_is_missing_or_revision_chang
         process.stdout.write(JSON.stringify({{missing,exact,newer}}));
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == {"missing": False, "exact": True, "newer": False}
 
@@ -3793,7 +3782,7 @@ def test_foreign_owner_cannot_join_null_source_transition():
         }});
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
     assert result["text"] == ""
@@ -3830,7 +3819,7 @@ def test_non_visible_owner_uses_full_remembered_baseline_for_late_file():
         }});
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
     assert result["text"] == "B text"
@@ -3871,7 +3860,7 @@ def test_non_visible_owner_without_authoritative_baseline_fails_closed():
         }}));
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == {
         "visibleText": "visible draft",
@@ -3907,7 +3896,7 @@ def test_same_session_id_different_profile_is_non_visible_owner():
         }});
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
     assert result["text"] == "beta text"
@@ -3935,7 +3924,7 @@ def test_unresolved_generation_callback_is_dropped_instead_of_using_visible_owne
         process.stdout.write(msg.value);
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "visible"
 
@@ -3964,7 +3953,7 @@ def test_owner_file_references_release_on_clear_and_forget_on_delete():
         }}));
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == {
         "releasedFiles": 0, "ownerExists": False, "generationExists": False
@@ -4029,7 +4018,7 @@ def test_late_lifecycle_a_callback_cannot_join_transition_b():
         }});
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
     assert result["text"] == "late B"
@@ -4208,7 +4197,7 @@ def test_late_server_transcription_updates_source_owner_not_visible_destination(
         }}));
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
     assert result["visible"] == "destination private draft"
@@ -4254,7 +4243,7 @@ def test_late_raw_audio_attaches_to_owner_without_sending_visible_draft():
         }});
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == {
         "sends": 0, "attachments": 1, "toasts": 0,
@@ -4297,7 +4286,7 @@ def test_late_voice_mode_completion_retires_before_reading_destination_draft():
         process.stdout.write(JSON.stringify({{sends,restarts,state:_voiceModeState}}));
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == {
         "sends": 0, "restarts": 1, "state": "listening"
@@ -4340,7 +4329,7 @@ def test_voice_mode_retires_pending_send_when_new_session_rejects():
         }})),0);
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == {
         "sends": 0, "restarts": 1, "state": "listening", "thinking": None,
@@ -4383,7 +4372,7 @@ def test_queue_drain_does_not_replace_a_restored_unsent_composer():
         process.stdout.write(JSON.stringify({{shifts,text:msg.value,drainSid:_queueDrainSid}}));
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == {
         "shifts": 0, "text": "restored source draft", "drainSid": None,
@@ -4428,7 +4417,7 @@ def test_queue_drain_resumes_once_after_restored_composer_is_cleared():
         process.stdout.write(JSON.stringify({{shifts,sends,scheduled,text:msg.value}}));
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == {
         "shifts": 1, "sends": 1, "scheduled": 1, "text": "queued turn",
@@ -4482,7 +4471,7 @@ def test_queue_drain_requeues_if_user_types_during_settle_window():
         process.stdout.write(JSON.stringify({{sends,text:msg.value,queue:queued.map(x=>x.text)}}));
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == {
         "sends": 0, "text": "newer draft", "queue": ["queued turn"],
@@ -4522,7 +4511,7 @@ def test_queue_resume_stays_paused_for_unsent_context_cards():
         process.stdout.write(JSON.stringify({{shifts,sends,timers:timers.length,queue:queued.length}}));
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == {
         "shifts": 0, "sends": 0, "timers": 0, "queue": 1,
@@ -4561,7 +4550,7 @@ def test_queue_drain_requeues_if_file_upload_starts_during_settle_window():
         process.stdout.write(JSON.stringify({{sends,queue:queued.map(x=>x.text)}}));
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == {
         "sends": 0, "queue": ["queued turn", "second turn"],
@@ -4599,7 +4588,7 @@ def test_removing_last_context_card_rechecks_paused_queue():
         }}));
         """
     )
-    proc = subprocess.run([node, "-e", script], text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == {
         "remaining": 0, "counter": 0, "renders": 1, "resumes": 1,
@@ -4702,7 +4691,7 @@ def test_superseded_append_transcript_still_updates_its_own_owner():
         }}));
         """
     )
-    proc = subprocess.run([node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr or proc.stdout
     result = json.loads(proc.stdout)
 
@@ -4781,7 +4770,7 @@ def test_dictation_end_without_final_text_keeps_the_owner_snapshot():
         }}));
         """
     )
-    proc = subprocess.run([node, "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=30)
+    proc = _run_node_script(script, timeout=30)
     assert proc.returncode == 0, proc.stderr or proc.stdout
     result = json.loads(proc.stdout)
 

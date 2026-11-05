@@ -270,6 +270,7 @@ def test_switch_hook_is_wired_into_switchprofile() -> None:
         "clearScriptsList", "loadScriptsList", "switchToProfile",
         "showToast", "_wsTreeGen",
         "_invalidateScriptsForProfileSwitch", "_refreshScriptsAfterProfileSwitch",
+        "_runContextTransition", "_claimPaneNavigation", "_paneNavigationClaimIsCurrent",
         "_scriptsReplyIsCurrent",
     }
     keep_real = {
@@ -349,6 +350,15 @@ def test_switch_hook_is_wired_into_switchprofile() -> None:
         + f"""
         let _profileSwitchGeneration = 0;
         {stub_block}
+        // The real switch body runs inside the serialized context-transition
+        // coordinator; run its callback so the body under test actually executes.
+        function _runContextTransition(kind,intent,fn){{ return fn(intent); }}
+        // Pane-navigation state: the real switch refuses to publish for a claim
+        // that is no longer current, so the harness owns the claim it issues.
+        let _paneNavigationGeneration = 0;
+        const _claimedPaneGeneration = ++_paneNavigationGeneration;
+        function _claimPaneNavigation(){{ return _claimedPaneGeneration; }}
+        function _paneNavigationClaimIsCurrent(){{ return true; }}
         """
         + switch_body.replace(
             "const data = await api('/api/profile/switch'",
