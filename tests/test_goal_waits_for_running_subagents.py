@@ -10,7 +10,7 @@ def _db(home, rows):
     conn = sqlite3.connect(home / "state.db")
     conn.execute(
         "CREATE TABLE async_delegations (delegation_id TEXT PRIMARY KEY, origin_session TEXT,"
-        " parent_session_id TEXT, origin_session_id TEXT, state TEXT)"
+        " parent_session_id TEXT, origin_ui_session_id TEXT, state TEXT)"
     )
     conn.executemany("INSERT INTO async_delegations VALUES (?,?,?,?,?)", rows)
     conn.commit()
@@ -70,3 +70,19 @@ def test_gather_background_state_falls_through_to_state_db_without_agent_cli(tmp
     bg, active = goals._gather_goal_turn_background_state("sid", profile_home=tmp_path)
     assert bg is None
     assert active == 1
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        ("d1", "sid", None, None, "running"),  # origin_session only
+        ("d1", None, None, "sid", "running"),  # origin_ui_session_id only
+        ("d1", None, "sid", None, "running"),  # parent_session_id only
+    ],
+    ids=["origin_session", "origin_ui_session_id", "parent_session_id"],
+)
+def test_every_ledger_session_selector_holds_the_continuation(tmp_path, row):
+    """Same selectors as api.delegation_status: any one matching column is a live subagent."""
+    _db(tmp_path, [row])
+    assert goals._state_db_live_delegations("sid", tmp_path) == 1
+    assert goals._hold_while_delegations_run(dict(CONTINUE), "sid", tmp_path)["verdict"] == "wait"

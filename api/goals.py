@@ -783,10 +783,15 @@ def _state_db_live_delegations(session_id: str, profile_home: str | Path | None)
             return 0
         conn = open_state_db_readonly(db)
         try:
+            # Same session selectors as api.delegation_status (origin_session /
+            # origin_ui_session_id records carry no matching parent_session_id).
+            from api.delegation_status import _SELECTOR_COLUMNS
+
+            where = " OR ".join(f"{col} = ?" for col in _SELECTOR_COLUMNS)
             row = conn.execute(
-                "SELECT COUNT(*) FROM async_delegations WHERE state IN (?,?,?) "
-                "AND (parent_session_id = ? OR origin_session_id = ?)",
-                (*_LIVE_DELEGATION_STATES, session_id, session_id),
+                "SELECT COUNT(*) FROM async_delegations WHERE state IN (?,?,?) AND "
+                f"({where})",
+                (*_LIVE_DELEGATION_STATES, *([session_id] * len(_SELECTOR_COLUMNS))),
             ).fetchone()
         finally:
             conn.close()

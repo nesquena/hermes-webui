@@ -359,6 +359,54 @@ def test_gateway_worker_adopts_in_turn_gateway_goal_evaluation_without_double_ju
     assert any("1/100" in memo for memo in goal_messages), goal_messages
 
 
+def test_reattached_gateway_run_adopts_goal_evaluated_before_the_restart(
+    tmp_path, monkeypatch
+):
+    """A run reattached after a WebUI restart keeps its original turn start, so the
+    Gateway's pre-restart in-turn evaluation is adopted, not judged (and counted) again."""
+    stream_id = "stream-gateway-reattach-goal"
+    s, channel, fake_mgr, eval_calls = _gateway_in_turn_goal_env(
+        tmp_path, monkeypatch, stream_id=stream_id
+    )
+    import time as _time
+
+    original_start = _time.time() - 600.0
+    fake_mgr.state.last_turn_at = original_start + 30.0  # evaluated while WebUI was down
+    monkeypatch.setattr(
+        gateway_chat, "_await_gateway_run_result", lambda *_a, **_kw: ("turn done", {})
+    )
+    monkeypatch.setattr(gateway_chat, "_restore_relayed_gateway_state", lambda *_a: 0)
+    subscriber = channel.subscribe()
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "continue - subagents have finished",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+        goal_related=True,
+        reattach_run={"run_id": "run-1", "stream_id": stream_id, "turn_started_at": original_start},
+        reattach_endpoint=("http://gateway.local", "key"),
+    )
+
+    events = []
+    while not subscriber.empty():
+        events.append(subscriber.get_nowait())
+    assert eval_calls == []
+    assert fake_mgr.state.turns_used == 1
+    assert "goal" in [item[0] for item in events]
+
+
+def test_reattached_turn_start_falls_back_to_pending_started_at():
+    assert gateway_chat._reattached_turn_started_at(None) is None
+    assert gateway_chat._reattached_turn_started_at({"run_id": "r"}) is None
+    assert gateway_chat._reattached_turn_started_at({"pending_started_at": 123}) == 123.0
+    assert gateway_chat._reattached_turn_started_at(
+        {"turn_started_at": 456.5, "pending_started_at": 123}
+    ) == 456.5
+
+
 def test_gateway_turn_with_native_hook_and_goal_related_false_launches_nothing(
     tmp_path, monkeypatch
 ):

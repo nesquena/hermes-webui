@@ -2330,7 +2330,7 @@ def _resume_gateway_run_for_session(session) -> bool:
                 "model_provider": session.model_provider,
                 "goal_related": bool(run.get("goal_related")),
                 "regeneration": bool(run.get("regeneration")),
-                "reattach_run": run,
+                "reattach_run": {**run, "pending_started_at": getattr(session, "pending_started_at", None)},
                 "reattach_endpoint": endpoint,
                 "reattach_claim_token": claim_token,
             },
@@ -2990,6 +2990,19 @@ def _submit_stream_approval_mirror(session_id: str, approval_data: dict, cancel_
     return head, total
 
 
+def _reattached_turn_started_at(reattach_run) -> float | None:
+    """Original turn start of a reattached run (saved record, else the pending turn's start)."""
+    if not reattach_run:
+        return None
+    for value in (reattach_run.get("turn_started_at"), reattach_run.get("pending_started_at")):
+        try:
+            if value and float(value) > 0:
+                return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _run_gateway_chat_streaming(
     session_id,
     msg_text,
@@ -3016,7 +3029,10 @@ def _run_gateway_chat_streaming(
     final user/assistant turn back into the WebUI session.
     """
     cancel_event = threading.Event()
-    _turn_started_at = time.time()
+    # A reattached run keeps the ORIGINAL turn's start: a fresh timestamp would
+    # make an in-turn Gateway goal evaluation saved before the restart look stale
+    # and get the turn judged (and counted) a second time.
+    _turn_started_at = _reattached_turn_started_at(reattach_run) or time.time()
     _detached_goal_continuation_prompt = ""
     _detached_goal_continuation_id = ""
     q = peek_stream(stream_id)
@@ -3224,6 +3240,7 @@ def _run_gateway_chat_streaming(
                 _record_gateway_run(
                     session_id, stream_id, run_id, request=request,
                     regeneration=bool(regeneration), goal_related=bool(goal_related),
+                    turn_started_at=_turn_started_at,
                 )
                 if run_id:  # the Gateway accepted the run: its delegation lease is delivered
                     _settle_delegation_reservation(session_id, stream_id, accepted=True)
