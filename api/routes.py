@@ -21280,9 +21280,10 @@ def handle_post(handler, parsed) -> bool:
         command = str(body.get("command", "") or "").strip()
         if not command:
             return bad(handler, "command is required")
-        if command.split()[0].lower() in ("/loop", "loop", "/proactive", "proactive"):
+        name, *rest = command.split(maxsplit=1)  # any whitespace, like _parse_slash_command()
+        if name.lower() in ("/loop", "loop", "/proactive", "proactive"):
             from api.loops import run_loop_command  # session_id ownership: the generic POST guard above
-            return j(handler, {"output": run_loop_command(str(body.get("session_id") or ""), command.partition(" ")[2],
+            return j(handler, {"output": run_loop_command(str(body.get("session_id") or ""), "".join(rest),
                                                           request_profile=_get_active_profile_name())})
 
         try:
