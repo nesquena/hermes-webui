@@ -234,3 +234,151 @@ def test_no_fault_primary_publishes_and_keeps_readable_bak(session_dir, incoming
     status = inspect_session_recovery_status(path)
     assert status["live_messages"] == incoming_count
     assert status["bak_messages"] == 10
+
+
+def test_session_delete_removes_primary_bak_and_torn_created_by_save(
+    session_dir, monkeypatch
+):
+    """#8807: /api/session/delete must remove the exact .json.torn salvage
+    Session.save() parks beside a kept readable backup. Avoid prefix globs;
+    only the known sibling suffix is cleaned under the session mutation lock.
+    """
+    from types import SimpleNamespace
+
+    import api.models as models
+    import api.routes as routes
+
+    sid = "s_8798_delete_torn"
+    path, bak, good_bak, cut = _grow_cut_with_bak10(session_dir, sid)
+    _session(sid, _messages(9, word="kept")).save(skip_index=True)
+
+    torn = path.with_suffix(".json.torn")
+    assert path.exists()
+    assert bak.read_bytes() == good_bak
+    assert torn.read_bytes() == cut
+
+    # Ordinary-delete control sibling that must survive.
+    other = session_dir / "s_8798_keep.json"
+    other.write_text('{"messages": []}', encoding="utf-8")
+    other_bak = other.with_suffix(".json.bak")
+    other_bak.write_text("keep-bak", encoding="utf-8")
+
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda handler: {"session_id": sid})
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda value: {})
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda value: False)
+    monkeypatch.setattr(routes, "_is_messaging_session_id", lambda value: False)
+    monkeypatch.setattr(
+        routes, "_worktree_retained_payload_for_session_id", lambda value: {}
+    )
+    monkeypatch.setattr(routes, "prune_session_from_index", lambda value: None)
+    monkeypatch.setattr(
+        routes, "_record_webui_deleted_session_tombstone", lambda value: None
+    )
+    monkeypatch.setattr(
+        routes, "_publish_session_list_changed", lambda *a, **k: None
+    )
+    monkeypatch.setattr(models, "delete_cli_session", lambda value: True)
+
+    captured = {}
+
+    def _capture(handler, payload, status=200, extra_headers=None):
+        captured.update(payload=payload, status=status)
+        return True
+
+    monkeypatch.setattr(routes, "j", _capture)
+    # Eviction / journal / attachment cleanup must not depend on real dirs.
+    import api.config as config_module
+    import api.upload as upload_module
+    import api.turn_journal as turn_journal_module
+    import api.run_journal as run_journal_module
+    import api.background_process as background_module
+
+    monkeypatch.setattr(config_module, "_evict_session_agent", lambda value: None)
+    monkeypatch.setattr(
+        upload_module, "_session_attachment_dir", lambda value: session_dir / "att" / value
+    )
+    monkeypatch.setattr(turn_journal_module, "delete_turn_journal", lambda value: None)
+    monkeypatch.setattr(run_journal_module, "delete_run_journal", lambda value: None)
+    monkeypatch.setattr(
+        background_module, "forget_bg_task_completion_dedup", lambda value: None
+    )
+
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
+    assert captured["status"] == 200
+    assert captured["payload"]["ok"] is True
+
+    assert not path.exists()
+    assert not bak.exists()
+    assert not torn.exists(), "save-created .json.torn must leave with the session"
+    assert other.exists() and other_bak.exists()
+
+
+def test_ordinary_session_delete_without_torn_still_clears_primary_and_bak(
+    session_dir, monkeypatch
+):
+    """Ordinary-delete control: no torn sibling, primary + bak still removed."""
+    from types import SimpleNamespace
+
+    import api.models as models
+    import api.routes as routes
+
+    sid = "s_8798_delete_ordinary"
+    _session(sid, _messages(6)).save(skip_index=True)
+    _session(sid, _messages(2)).save(skip_index=True)
+    path = session_dir / f"{sid}.json"
+    bak = path.with_suffix(".json.bak")
+    assert path.exists() and bak.exists()
+    assert not path.with_suffix(".json.torn").exists()
+
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda handler: {"session_id": sid})
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda value: {})
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda value: False)
+    monkeypatch.setattr(routes, "_is_messaging_session_id", lambda value: False)
+    monkeypatch.setattr(
+        routes, "_worktree_retained_payload_for_session_id", lambda value: {}
+    )
+    monkeypatch.setattr(routes, "prune_session_from_index", lambda value: None)
+    monkeypatch.setattr(
+        routes, "_record_webui_deleted_session_tombstone", lambda value: None
+    )
+    monkeypatch.setattr(
+        routes, "_publish_session_list_changed", lambda *a, **k: None
+    )
+    monkeypatch.setattr(models, "delete_cli_session", lambda value: True)
+
+    captured = {}
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200, extra_headers=None: captured.update(
+            payload=payload, status=status
+        )
+        or True,
+    )
+    import api.config as config_module
+    import api.upload as upload_module
+    import api.turn_journal as turn_journal_module
+    import api.run_journal as run_journal_module
+    import api.background_process as background_module
+
+    monkeypatch.setattr(config_module, "_evict_session_agent", lambda value: None)
+    monkeypatch.setattr(
+        upload_module, "_session_attachment_dir", lambda value: session_dir / "att" / value
+    )
+    monkeypatch.setattr(turn_journal_module, "delete_turn_journal", lambda value: None)
+    monkeypatch.setattr(run_journal_module, "delete_run_journal", lambda value: None)
+    monkeypatch.setattr(
+        background_module, "forget_bg_task_completion_dedup", lambda value: None
+    )
+
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
+    assert captured["status"] == 200
+    assert captured["payload"]["ok"] is True
+    assert not path.exists()
+    assert not bak.exists()
