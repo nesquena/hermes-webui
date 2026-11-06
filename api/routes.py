@@ -24177,8 +24177,11 @@ def _content_search_worker(job, sessions, redact_enabled):
                 if item is not None:
                     job.publish(item)
                 scanned += 1
-                if scanned % 10 == 0:
-                    job.advance(scanned=scanned)
+                # Publish progress for every session, not every tenth one: a
+                # partial response that lists matches but reports `scanned: 0`
+                # is worse than useless. A lock plus an event set is nothing
+                # next to resolving a transcript.
+                job.advance(scanned=scanned)
             job.advance(scanned=scanned)
         finally:
             _CONTENT_SEARCH_SLOTS.release()

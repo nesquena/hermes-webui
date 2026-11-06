@@ -9122,6 +9122,10 @@ function filterSessions(){
     // repainted them away.
     _contentSearchResults=[];
     _stopContentSearchSSE();
+    // Move the identity with the input, not with the 350ms debounce: an
+    // in-flight fallback for the previous query must fail its staleness check
+    // the moment the box changes, not once the timer starts the next stream.
+    _contentSearchQuery=q;
   }
   renderSessionListFromCache();
   clearTimeout(_searchDebounceTimer);
