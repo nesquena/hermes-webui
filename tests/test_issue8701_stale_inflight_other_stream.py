@@ -28,6 +28,7 @@ NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 PROMPT = "pending wording"
+_ABSENT = object()
 
 _UI_PRODUCER = (
     "_pendingCurrentTailUserMessage",
@@ -164,21 +165,25 @@ def _load_passes(
     fail_after: int = 1,
     offset: int = 0,
     message_count: int = 2,
+    pending=PROMPT,
 ) -> dict:
     """Run `loadSession('s1',{force:true})` `passes` times over a running `stream-1` turn with no journal snapshot.
 
     `stream_id` is the INFLIGHT snapshot's own stream (None: the snapshot names none). The message fetch fails after
     `fail_after` reads, so later passes keep and re-merge the cached transcript, as `loadSession()` does in the field.
+    `pending` is the server's `pending_user_message` (`_ABSENT`: the field is not sent).
     """
     session = {
         "session_id": "s1",
         "active_stream_id": "stream-1",
         "pending_started_at": 100,
-        "pending_user_message": PROMPT,
+        "pending_user_message": pending,
         "tool_calls": [],
         "last_usage": {},
         "message_count": message_count,
     }
+    if pending is _ABSENT:
+        del session["pending_user_message"]
     snapshot = {"messages": inflight_messages, "toolCalls": []}
     if stream_id is not None:
         snapshot["streamId"] = stream_id
@@ -246,6 +251,19 @@ def test_stale_inflight_from_another_stream_does_not_show_its_older_prompt():
     assert result["counts"] == [1, 1, 1], result
     users = [r for r in result["rows"] if r["role"] == "user"]
     assert [(u["content"], u["owner"]) for u in users] == [(PROMPT, 100)], result
+
+
+@pytest.mark.parametrize("pending", [_ABSENT, None, "", "   "], ids=["absent", "null", "empty", "blank"])
+def test_stale_inflight_from_another_stream_without_a_server_prompt_still_shows_it_once(pending):
+    """When the server names another stream but supplies no `pending_user_message`, the pending merge adds nothing,
+    so skipping the snapshot's prompt would leave the running turn with no prompt at all. The snapshot's row stays,
+    as on master and v0.52.544: exactly one copy per pass (display-only, at its client `_ts`)."""
+    result = _load_passes(_ACTIVITY, [_u(PROMPT, 99.9, _pending=True), _LIVE], "stream-0", pending=pending)
+    assert result["counts"] == [1, 1, 1], result
+    assert result["inflightRowShown"] is True, result
+    first = _load_passes(_ACTIVITY, [_u(PROMPT, 99.9, _pending=True), _LIVE], "stream-0", passes=1, pending=pending)
+    users = [r for r in first["rows"] if r["role"] == "user"]
+    assert [(u["content"], u["ts"], u["displayOnly"]) for u in users] == [(PROMPT, 99.9, True)], first
 
 
 def test_proven_turn_still_shows_one_prompt_at_the_turn_start():

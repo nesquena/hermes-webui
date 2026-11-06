@@ -3317,7 +3317,8 @@ async function loadSession(sid){
     }
     S.messages=_mergeInflightTailMessages(S.messages,inflightMessages,
       _inflightTurnOwnerStart(S.session,INFLIGHT[sid],activeStreamId),
-      _inflightNamesOtherStream(INFLIGHT[sid],activeStreamId));
+      _inflightNamesOtherStream(INFLIGHT[sid],activeStreamId)
+        &&!!String((S.session&&S.session.pending_user_message)||'').trim());
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
     if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
       INFLIGHT[sid].messages=S.messages;
@@ -5160,10 +5161,13 @@ function _inflightNamesOtherStream(inflight,activeStreamId){
 // prompt instead of the prompt's client-clock `_ts`, which can trail the
 // server start by latency or skew and so claim a previous turn's rows, and it
 // stamps the copy so the pending merge reuses it rather than adding a second
-// one (`_recoveredPromptCopyForTurn`). `promptFromOtherStream` (optional,
-// _inflightNamesOtherStream): the snapshot's prompt is not this turn's, so it
-// is not placed; the pending merge supplies the running turn's prompt, and
-// placing both showed it twice (#8701).
+// one (`_recoveredPromptCopyForTurn`). `promptFromOtherStream` (optional;
+// loadSession sets it when _inflightNamesOtherStream AND the server sends a
+// non-blank pending_user_message, the field getPendingSessionMessage reads):
+// the snapshot's prompt is not this turn's, so it is not placed; the pending
+// merge supplies the running turn's prompt, and placing both showed it twice
+// (#8701). Without a server prompt the snapshot's row stays, or the turn
+// would show none.
 function _mergeInflightTailMessages(baseMessages, inflightMessages, turnOwnerStart, promptFromOtherStream){
   const base=Array.isArray(baseMessages)?baseMessages:[];
   const inflight=Array.isArray(inflightMessages)?inflightMessages:[];
