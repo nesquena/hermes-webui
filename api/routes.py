@@ -13997,6 +13997,7 @@ from api.workspace import (
     _is_within,
     _strip_surrounding_quotes,
     _is_remote_terminal_backend,
+    _terminal_backend_is_unresolved,
     _workspace_blocked_roots,
 )
 from api.upload import (
@@ -24760,7 +24761,10 @@ _REMOTE_TERMINAL_BACKEND_UNSUPPORTED_MESSAGE = (
 
 def _terminal_remote_backend_enabled() -> bool:
     terminal_cfg = get_config().get("terminal", {})
-    return _is_remote_terminal_backend(terminal_cfg)
+    # The embedded terminal is a local-host shell, so it needs a backend that is
+    # KNOWN to be local. An unresolved ${VAR} backend is not classified as remote
+    # (#8744), but it is not known to be local either: keep refusing it here.
+    return _is_remote_terminal_backend(terminal_cfg) or _terminal_backend_is_unresolved(terminal_cfg)
 
 
 def _handle_terminal_start(handler, body):
