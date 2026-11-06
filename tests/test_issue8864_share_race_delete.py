@@ -76,6 +76,7 @@ def state(tmp_path, monkeypatch):
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
     monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda sid, **kw: {})
     monkeypatch.setattr(routes, "_DELETED_SESSION_IDS", set())
+    monkeypatch.setattr(routes, "_DELETED_SESSION_GENERATION", {}, raising=False)
     # These sessions have no state.db rows; the delete's state.db step succeeds.
     monkeypatch.setattr(models, "delete_cli_session", lambda sid: True)
     routes._session_list_cache_clear()
@@ -275,6 +276,70 @@ def test_share_create_of_an_external_session_deleted_mid_request_fails_closed(st
     assert reply["share"]["token"] != raced
     _assert_served(reply["share"]["token"])
     _assert_not_served(raced)
+
+
+# ── A messaging session deleted a second time in the same process ────────────
+
+
+def _messaging_session_deleted_and_shared_again(monkeypatch):
+    """A messaging session keeps its state.db rows, so it can be shared, deleted
+    and shared again. Returns its sidecar path and the token of the second share."""
+    from api import routes
+
+    path = _external_session(monkeypatch, source="telegram")
+    monkeypatch.setattr(routes, "_is_messaging_session_id", lambda sid: sid == EXTERNAL_SID)
+    # The transcript stays in state.db; the sidecar a share writes holds metadata only.
+    transcript = [
+        {"role": "user", "content": "from elsewhere", "timestamp": 200},
+        {"role": "assistant", "content": "answered there", "timestamp": 201},
+    ]
+    monkeypatch.setattr(
+        routes,
+        "get_cli_session_messages",
+        lambda sid, **kw: [dict(m) for m in transcript] if sid == EXTERNAL_SID else [],
+    )
+    assert _post("/api/share/create", {"session_id": EXTERNAL_SID})[0] == 200
+    assert _post("/api/session/delete", {"session_id": EXTERNAL_SID})[0] == 200
+    assert not path.exists()
+    status, reply = _post("/api/share/create", {"session_id": EXTERNAL_SID})
+    assert status == 200, reply
+    assert path.exists()
+    token = reply["share"]["token"]
+    _assert_served(token)
+    return path, token
+
+
+@pytest.mark.parametrize("step", [PUBLISHED, MIRRORED])
+def test_share_create_racing_a_second_delete_of_a_messaging_session(state, monkeypatch, step):
+    """The id is already in the delete record from the first delete, so whether
+    it is in that record cannot tell this request that a delete landed during it."""
+    path, earlier = _messaging_session_deleted_and_shared_again(monkeypatch)
+    # Revoke the second share first, so the racing create mints a link the
+    # delete cannot find (it reuses a live token otherwise).
+    assert _post("/api/share/revoke", {"session_id": EXTERNAL_SID})[0] == 200
+    assert path.exists()
+    before = _snapshot_tokens()
+    race = _delete_right_after(monkeypatch, step, EXTERNAL_SID)
+    status, reply = _post("/api/share/create", {"session_id": EXTERNAL_SID})
+    assert "reply" in race, "the delete never ran inside the share request"
+    assert (status, reply.get("error")) == (404, "Session not found"), reply
+    _assert_stays_deleted(path, EXTERNAL_SID, race)
+    (raced,) = _snapshot_tokens() - before  # the link this create published
+    # Revoked in the snapshot itself: this session keeps its state.db rows, so a
+    # later share writes a sidecar for this id again.
+    assert _snapshot_file(raced).get("revoked_at")
+    _assert_not_served(raced)
+    _assert_not_served(earlier)
+
+
+def test_share_revoke_racing_a_second_delete_of_a_messaging_session(state, monkeypatch):
+    path, token = _messaging_session_deleted_and_shared_again(monkeypatch)
+    race = _delete_right_after(monkeypatch, MIRRORED, EXTERNAL_SID)
+    status, reply = _post("/api/share/revoke", {"session_id": EXTERNAL_SID})
+    assert "reply" in race, "the delete never ran inside the revoke request"
+    assert (status, reply.get("error")) == (404, "Session not found"), reply
+    _assert_stays_deleted(path, EXTERNAL_SID, race)
+    _assert_not_served(token)
 
 
 # ── The delete lands while the share request is patching the sidecar ─────────

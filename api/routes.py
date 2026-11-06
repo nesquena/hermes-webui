@@ -5382,6 +5382,11 @@ def _ensure_full_session_before_mutation(sid: str, session):
 # session lock so a writer that was waiting on that lock cannot save the
 # empty-shell fallback back to disk.
 _DELETED_SESSION_IDS: set[str] = set()
+# How many times /api/session/delete removed each id in this process (#8864),
+# bumped with the set add above. A share request compares it with the value at
+# its start: membership alone cannot show a second delete of a messaging session,
+# which keeps its state.db rows and can be shared again. Never pruned, like the set.
+_DELETED_SESSION_GENERATION: dict[str, int] = {}
 
 
 def _resolve_session_under_lock(sid: str, outside=None):
@@ -7362,7 +7367,7 @@ def _resident_share_token(sid: str) -> str:
 
 
 def _persist_share_fields(
-    sid: str, session, *, share_token, share_created_at, deleted_before: bool, mirrored=None,
+    sid: str, session, *, share_token, share_created_at, delete_generation: int, mirrored=None,
 ) -> None:
     """Persist only the two share fields of ``sid``.
 
@@ -7380,11 +7385,11 @@ def _persist_share_fields(
 
     #8864: the fallback is for a session without a sidecar, not for one that
     /api/session/delete removed while the request ran: saving it would bring the
-    deleted conversation and its index row back. ``deleted_before`` is whether the
-    id was already in ``_DELETED_SESSION_IDS`` when the request began (a messaging
-    session keeps its state.db rows and can be shared again after a delete). If
-    the id was recorded since, raise KeyError instead. Delete records the id and
-    unlinks under this lock, so the check cannot go stale.
+    deleted conversation and its index row back. ``delete_generation`` is the
+    id's ``_DELETED_SESSION_GENERATION`` when the request began (a messaging
+    session keeps its state.db rows and can be shared again after a delete, even
+    twice). If a delete bumped it since, raise KeyError instead. Delete bumps it
+    and unlinks under this lock, so the check cannot go stale.
     """
     with _session_persist_lock(sid):
         try:
@@ -7393,7 +7398,7 @@ def _persist_share_fields(
                 share_token=share_token,
                 share_created_at=share_created_at,
             ):
-                if sid in _DELETED_SESSION_IDS and not deleted_before:
+                if _DELETED_SESSION_GENERATION.get(sid, 0) != delete_generation:
                     raise KeyError(sid)
                 session.share_token = share_token
                 session.share_created_at = share_created_at
@@ -19390,7 +19395,7 @@ def handle_post(handler, parsed) -> bool:
         sid = str(body.get("session_id") or "").strip()
         if not sid:
             return bad(handler, "session_id is required", 400)
-        deleted_before = sid in _DELETED_SESSION_IDS  # #8864, see _persist_share_fields
+        delete_generation = _DELETED_SESSION_GENERATION.get(sid, 0)  # #8864, see _persist_share_fields
         try:
             snapshot_session, stored_session, cli_meta = _resolve_share_session_pair(sid, handler)
         except KeyError:
@@ -19485,7 +19490,7 @@ def handle_post(handler, parsed) -> bool:
                     share_token=share_meta["share_token"],
                     share_created_at=share_meta["share_created_at"],
                     mirrored=mirrored,
-                    deleted_before=deleted_before,
+                    delete_generation=delete_generation,
                 )
             except KeyError:
                 # #8864: deleted during this request. Take down the link it just
@@ -19523,7 +19528,7 @@ def handle_post(handler, parsed) -> bool:
         sid = str(body.get("session_id") or "").strip()
         if not sid:
             return bad(handler, "session_id is required", 400)
-        deleted_before = sid in _DELETED_SESSION_IDS  # #8864, see _persist_share_fields
+        delete_generation = _DELETED_SESSION_GENERATION.get(sid, 0)  # #8864, see _persist_share_fields
         try:
             snapshot_session, stored_session, cli_meta = _resolve_share_session_pair(sid, handler)
         except KeyError:
@@ -19591,7 +19596,7 @@ def handle_post(handler, parsed) -> bool:
                     share_token=None,
                     share_created_at=None,
                     mirrored=mirrored,
-                    deleted_before=deleted_before,
+                    delete_generation=delete_generation,
                 )
             except KeyError:
                 return bad(handler, "Session not found", 404)  # #8864: deleted during this request
@@ -20840,13 +20845,14 @@ def handle_post(handler, parsed) -> bool:
                 logger.debug("Failed to close workspace terminal for deleted session %s", sid)
             sidecar_deleted = False
             # #8864: under the persist lock too, so a share request that finds no
-            # sidecar under it also finds this id recorded, and a patch that read
-            # the sidecar replaces it before the unlink, not after.
+            # sidecar under it also finds this delete counted, and a patch that
+            # read the sidecar replaces it before the unlink, not after.
             with _session_persist_lock(sid), LOCK:
                 SESSIONS.pop(sid, None)
                 # #7738: recorded with the eviction, so a writer waiting on the
                 # session lock cannot save the empty-shell fallback back to disk.
                 _DELETED_SESSION_IDS.add(sid)
+                _DELETED_SESSION_GENERATION[sid] = _DELETED_SESSION_GENERATION.get(sid, 0) + 1  # #8864
                 try:
                     p.unlink(missing_ok=True)
                 except Exception:
