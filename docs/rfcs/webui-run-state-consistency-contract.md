@@ -219,6 +219,22 @@ distinct unowned occurrence receives its own collision-free id, while an unowned
 replay of an already-owned exact key reconciles onto that owner's id instead of
 being split into a second survivor. The display transcript and the model context
 therefore retain one ownership set on both chat surfaces.
+The current-turn protection is explicit, never inferred from the presence of any
+`_active_turn_token`: a historical token is not necessarily the current-turn
+token, because a previous turn's user row keeps its own token forever. Only a
+row the settle can PROVE it owns is protected - the row whose token equals the
+token this settle minted, or the row whose content is this turn's submitted
+prompt. Every other token-bearing row is a historical owner: it is counted in
+its occurrence group and keeps its own id and token, and a token-bearing row
+never has a synthetic id minted for it nor reconciles onto another owner's id.
+With no current-turn authority in hand no row can be proven, so the conservative
+behaviour keeps every token-bearing row protected. Occurrence identity combines
+the exact content+clock+source+attachments key with the turn token, so two
+independently owned turns repeating one prompt inside a single timestamp bucket
+stay distinct owners. When an incoming owner already holds a retained slot, that
+slot is resolved and updated in place before any exact-key replacement may
+overwrite a different invalid or id-less occupant; with no retained owner the
+legacy exact-key replacement is preserved unchanged.
 Consume each saved successor only with shared valid message/positive row identity
 or an exact non-null timestamp, plus compatible provider content. Cancelled
 consumers opt into private SQLite row IDs so newly accepted successors retain
