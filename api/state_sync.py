@@ -19,9 +19,13 @@ any double-counting risk.
 import logging
 import ntpath
 import os
+import sqlite3
 import threading
+from contextlib import closing
 from pathlib import Path
 from typing import Optional
+
+from api.agent_sessions import open_state_db_readonly, state_db_file_uri
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +58,19 @@ def _get_state_db(profile: Optional[str] = None):
     except ImportError:
         return None
 
+    db_path = _resolve_state_db_path(profile)
+    if db_path is None:
+        return None
+
+    try:
+        return SessionDB(db_path)
+    except Exception:
+        logger.debug("Failed to open state.db")
+        return None
+
+
+def _resolve_state_db_path(profile: Optional[str] = None) -> Optional[Path]:
+    """Path of *profile*'s existing state.db, or None (see ``_get_state_db``)."""
     if profile is not None:
         # Explicit-profile path — a resolution failure here MUST NOT
         # silently fall back to HERMES_HOME or the caller's "write to
@@ -102,12 +119,7 @@ def _get_state_db(profile: Optional[str] = None):
     db_path = hermes_home / 'state.db'
     if not db_path.exists():
         return None
-
-    try:
-        return SessionDB(db_path)
-    except Exception:
-        logger.debug("Failed to open state.db")
-        return None
+    return db_path
 
 
 def sync_session_start(session_id: str, model=None, profile: Optional[str] = None) -> None:
@@ -382,3 +394,102 @@ def sync_session_title(session_id: str, title: str, profile: Optional[str] = Non
             db.close()
         except Exception:
             logger.debug("Failed to close state.db")
+
+
+# Desktop or the CLI can hold the state.db write lock, so a mirror waits at most ~0.5 s.
+PIN_MIRROR_TIMEOUT_S = 0.5
+
+# Compression lineage, as the Agent's ``_LINEAGE_CTE_SQL`` walks it (ancestors + descendants).
+# Like the Agent, a branch/delegate/reset fork or a tool child is NOT a continuation: the
+# exclusions bind each marker to the parent id (continuations inherit ``model_config``).
+def _lineage_sql(columns: set) -> str:
+    skip = ""
+    if "model_config" in columns:
+        for marker in ("_branched_from", "_delegate_from", "_reset_from"):
+            skip += (
+                " AND COALESCE(json_extract(CASE WHEN json_valid(c.model_config)"
+                f" THEN c.model_config ELSE json_object() END, '$.{marker}'), '') != p.id"
+            )
+    if "source" in columns:
+        skip += " AND COALESCE(c.source, '') != 'tool'"
+    return (
+        "WITH RECURSIVE anc(id) AS (SELECT ? UNION SELECT p.id FROM anc a"
+        " JOIN sessions c ON c.id = a.id JOIN sessions p ON p.id = c.parent_session_id"
+        f" WHERE p.end_reason = 'compression'{skip}),"
+        " des(id) AS (SELECT ? UNION SELECT c.id FROM des d JOIN sessions p ON p.id = d.id"
+        f" JOIN sessions c ON c.parent_session_id = p.id WHERE p.end_reason = 'compression'{skip})"
+    )
+
+
+# field -> (columns -> UPDATE statement, params for (session_id, value))
+_MIRROR_UPDATES = {
+    "pinned": (
+        lambda cols: _lineage_sql(cols)
+        + " UPDATE sessions SET pinned = ? WHERE id IN (SELECT id FROM anc UNION SELECT id FROM des)",
+        lambda sid, v: (sid, sid, int(bool(v))),
+    ),
+    "archived": (
+        lambda cols: _lineage_sql(cols) + " UPDATE sessions SET archived = ?, auto_archived = 0"
+        " WHERE id IN (SELECT id FROM anc UNION SELECT id FROM des)",
+        lambda sid, v: (sid, sid, int(bool(v))),
+    ),
+    "title": (
+        lambda cols: "UPDATE sessions SET title = ?, title_source = 'user' WHERE id = ?",
+        lambda sid, v: (str(v), sid),
+    ),
+}
+
+
+def sync_session_field(session_id: str, field: str, value, profile: Optional[str] = None) -> bool:
+    """Mirror a pin, archive or manual title into *profile*'s state.db row; True when it landed.
+
+    Best-effort and never raises: the sidecar is the authority and is already saved, so a
+    missing row or column, a title clash, or a lock held elsewhere only costs the other app
+    this update.
+    """
+    build_sql, params = _MIRROR_UPDATES[field]
+    try:
+        db_path = _resolve_state_db_path(profile)
+        if db_path is None:
+            return False
+        with closing(sqlite3.connect(
+            state_db_file_uri(Path(db_path).resolve()),
+            uri=True,
+            timeout=PIN_MIRROR_TIMEOUT_S,
+            isolation_level=None,
+        )) as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+            sql = build_sql(columns)
+            before = conn.total_changes  # cursor.rowcount is -1 for a WITH ... UPDATE
+            conn.execute(sql, params(session_id, value))
+            conn.commit()
+            return conn.total_changes > before
+    except Exception:
+        logger.debug("Failed to mirror %s for %s into state.db", field, session_id, exc_info=True)
+        return False
+
+
+def read_state_db_flags(profile: Optional[str] = None) -> dict[str, dict]:
+    """``{id: {pinned, archived}}`` from *profile*'s own state.db; ``{}`` when unreadable.
+
+    Read-only, and never another profile's database: a missing state.db contributes
+    nothing instead of falling back to the active profile (#2762). Columns an older
+    Agent lacks are left out of each row.
+    """
+    try:
+        db_path = _resolve_state_db_path(profile)
+        if db_path is None:
+            return {}
+        with closing(open_state_db_readonly(db_path)) as conn:
+            have = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+            cols = [c for c in ("pinned", "archived") if c in have]
+            if not cols:
+                return {}
+            return {
+                str(row[0]).strip(): {c: bool(row[i + 1]) for i, c in enumerate(cols)}
+                for row in conn.execute(f"SELECT id, {', '.join(cols)} FROM sessions")
+                if row[0]
+            }
+    except Exception:
+        logger.debug("Failed to read session flags from %s", profile, exc_info=True)
+        return {}
