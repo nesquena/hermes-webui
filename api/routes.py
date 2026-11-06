@@ -141,6 +141,14 @@ def _persist_generated_session_title(
 ) -> str:
     normalized_title = str(next_title or "").strip()[:80] or "Untitled"
     sid = str(getattr(session, "session_id", "") or "")
+    loaded_from = getattr(session, "_sidecar_names_other_session", None)
+    if loaded_from:
+        # #8852: this writer reloads and saves the session the object's id
+        # names; the id came from a file whose body names another session.
+        raise RuntimeError(
+            f"Refusing to write a title for session {sid!r}: it was loaded from "
+            f"{loaded_from}.json, whose body names a different session. See #8852."
+        )
     original_session = session
     with _get_session_agent_lock(sid):
         with LOCK:
@@ -4227,6 +4235,29 @@ def _clear_stale_stream_state(session, *, wait_for_writer: bool = False) -> bool
     case we re-load the full session before mutating, so the persisted
     write carries the real messages forward.
     """
+    if getattr(session, "_sidecar_names_other_session", None):
+        # #8852: clearing persists through save(), which refuses a session whose
+        # file's body names another session, so leave that file as it is. Clear
+        # a dead stream from this in-memory view only (the fields the stub patch
+        # below clears), so the client doesn't keep reconnecting to it.
+        stale_id = getattr(session, "active_stream_id", None)
+        if stale_id:
+            with STREAMS_LOCK:
+                stale_alive = stale_id in STREAMS
+            if not stale_alive:
+                try:
+                    session.active_stream_id = None
+                    if hasattr(session, "pending_user_message"):
+                        session.pending_user_message = None
+                    if hasattr(session, "pending_attachments"):
+                        session.pending_attachments = []
+                    if hasattr(session, "pending_started_at"):
+                        session.pending_started_at = None
+                    if hasattr(session, "pending_user_source"):
+                        session.pending_user_source = None
+                except Exception:
+                    pass
+        return False
     stream_id = getattr(session, "active_stream_id", None)
     if not stream_id:
         return False
@@ -30496,6 +30527,10 @@ def start_session_turn(
         s = get_session(session_id)
     except KeyError:
         return {"error": "Session not found", "_status": 404}
+    if getattr(s, "_sidecar_names_other_session", None):
+        # #8852: as in chat/start, every write of the turn would land in the
+        # session this file's body names. The wakeup callers drop a 404.
+        return {"error": "Session not found", "_status": 404}
 
     try:
         workspace = _resolve_chat_workspace_with_recovery(s, None)
@@ -31250,6 +31285,11 @@ def _handle_chat_start(handler, body, diag=None):
                 body["session_id"],
                 refresh_cli_messages=body.get("regenerate") is not True,
             )
+            if getattr(s, "_sidecar_names_other_session", None):
+                # #8852: this file's body names another session, so every
+                # write of the turn would land there. Refuse before anything
+                # is mutated, with the generic ownership guard's answer.
+                return bad(handler, "Session not found", 404)
         except KeyError:
             # No WebUI sidecar. If this is a foreign-origin session (CLI,
             # TUI, Desktop) with recoverable state.db messages, claim it by
