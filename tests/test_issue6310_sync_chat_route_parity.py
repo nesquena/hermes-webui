@@ -1837,3 +1837,160 @@ def test_sync_chat_cold_route_retains_the_replacement_under_the_extended_replay(
             f"the retained replacement in the {label} must keep its id-less "
             f"shape; got {kept[0]}"
         )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# #8574 review P2 (nesquena-hermes 2026-11-06, head 216b49ee6): a tokenless
+# MIRROR of a historical token owner, and the cold follow-up that follows a
+# retained replacement.
+#
+# The occurrence identity added on 2026-11-04 counts the token-bearing owner
+# and its tokenless exact mirror as different occurrences, and the owner was
+# excluded from the exact-key registry — so the mirror received a FRESH id and
+# the identity dedup retained BOTH copies of one turn.
+# ────────────────────────────────────────────────────────────────────────
+
+# The maintainer's route fixture: a historical token owner followed by its
+# tokenless exact mirror (identical content/timestamp/source/attachments).
+_P2_TOKENLESS_MIRROR_HISTORY = [
+    {
+        "role": "user",
+        "content": "higher",
+        "timestamp": 100.0,
+        "id": 1,
+        "_active_turn_token": "historical:100",
+    },
+    {"role": "assistant", "content": "guess 50", "timestamp": 101.0, "id": 2},
+    {"role": "user", "content": "higher", "timestamp": 100.0},
+    {"role": "assistant", "content": "guess 50", "timestamp": 101.0},
+]
+
+
+def test_reconcile_reconciles_a_tokenless_mirror_onto_its_owner():
+    """A tokenless exact mirror is NOT an independent owner."""
+    from api.streaming import _deduplicate_context_messages
+    from api.streaming import _reconcile_prefix_occurrence_ownership
+
+    out = _reconcile_prefix_occurrence_ownership(
+        copy.deepcopy(_P2_TOKENLESS_MIRROR_HISTORY),
+        [],
+        {"token": None, "text": "lower"},
+    )
+    assert [r.get("id") for r in out][:2] == [1, 2], (
+        "the historical token owner keeps its id; got "
+        f"{[r.get('id') for r in out]}"
+    )
+    assert out[2].get("id") == 1, (
+        "the tokenless exact mirror must reconcile onto its established "
+        "owner's id instead of being minted an independent one; got "
+        f"{out[2]}"
+    )
+    deduped = _deduplicate_context_messages(copy.deepcopy(out))
+    assert _contents(deduped) == ["higher", "guess 50"], (
+        "the mirror must collapse into its owner instead of surviving as a "
+        f"second copy; got {_contents(deduped)}"
+    )
+
+
+def test_sync_chat_keeps_a_tokenless_mirror_from_becoming_a_second_owner(
+    tmp_path, monkeypatch
+):
+    """Over the real route the mirror collapses; only one `higher` survives.
+
+    The display transcript keeps BOTH rows - the mirror is a real row of the
+    visible history - while the MODEL-facing context collapses the mirror
+    into its owner, so the model is not sent the same turn twice.
+    """
+    reloaded = _sync_http_send(
+        tmp_path,
+        monkeypatch,
+        "i8574-p2-tokenless-mirror",
+        _P2_TOKENLESS_MIRROR_HISTORY,
+        "lower",
+        "guess 90",
+    )
+    assert reloaded is not None
+    assert _contents(reloaded.context_messages) == [
+        "higher",
+        "guess 50",
+        "lower",
+        "guess 90",
+    ], (
+        "the tokenless exact mirror must not become a second owner: the "
+        "persisted context must carry one `higher`; got "
+        f"{_contents(reloaded.context_messages)}"
+    )
+    assert _contents(reloaded.messages) == [
+        "higher",
+        "guess 50",
+        "higher",
+        "guess 50",
+        "lower",
+        "guess 90",
+    ], (
+        "the display transcript keeps both rows of the visible history; got "
+        f"{_contents(reloaded.messages)}"
+    )
+
+
+def test_sync_chat_cold_follow_up_retains_the_replacement(tmp_path, monkeypatch):
+    """The second real request must keep the retained replacement.
+
+    The extended schedule retains ``s3:100`` on the first request. On the
+    NEXT real request (cold load, no re-seed) the replacement must still be
+    in the persisted context, together with the new exchange.
+    """
+    reloaded = _sync_http_send(
+        tmp_path,
+        monkeypatch,
+        "i8574-p2-cold-followup",
+        _p2_extended_schedule(),
+        "lower",
+        "guess 90",
+    )
+    assert reloaded is not None
+    first_kept = [
+        r
+        for r in reloaded.context_messages
+        if isinstance(r, dict) and r.get("_active_turn_token") == "s3:100"
+    ]
+    assert len(first_kept) == 1, (
+        "the first request must retain the id-less s3:100 replacement; got "
+        f"ids={_user_ids(reloaded.context_messages)}"
+    )
+
+    follow_up = _sync_http_send(
+        tmp_path,
+        monkeypatch,
+        "i8574-p2-cold-followup",
+        reloaded.context_messages,
+        "done",
+        "finished",
+        reseed=False,
+    )
+    assert follow_up is not None
+    for label, rows in (
+        ("model context", follow_up.context_messages),
+        ("display transcript", follow_up.messages),
+    ):
+        kept = [
+            r
+            for r in rows
+            if isinstance(r, dict) and r.get("_active_turn_token") == "s3:100"
+        ]
+        assert len(kept) == 1, (
+            f"the {label} of the cold follow-up must still retain the id-less "
+            "s3:100 replacement; got "
+            f"ids={_user_ids(rows)} contents={_contents(rows)}"
+        )
+    assert _contents(follow_up.context_messages)[-2:] == ["done", "finished"], (
+        "the new exchange must be persisted after the retained history; got "
+        f"{_contents(follow_up.context_messages)}"
+    )
+    # The display transcript keeps every visible row, including the replay
+    # rows the model-facing context collapses, so the two surfaces differ in
+    # ROW COUNT by design - what must not differ is the OWNERSHIP they carry.
+    assert "higher" in _contents(follow_up.context_messages), (
+        "the retained history must still reach the model context; got "
+        f"{_contents(follow_up.context_messages)}"
+    )
