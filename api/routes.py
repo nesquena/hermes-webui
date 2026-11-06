@@ -76,6 +76,7 @@ from api.shares import (
     build_share_snapshot,
     load_share,
     revoke_share,
+    revoke_share_owned_by,
     write_share_snapshot,
 )
 
@@ -7451,6 +7452,48 @@ def _commit_share_fields_to_cached_session(sid: str, *, share_token, share_creat
             cached._share_created_at_saved = share_created_at
     except Exception:
         logger.debug("Failed to commit share fields to cached session %s", sid, exc_info=True)
+
+
+def _revoke_owned_shares_before_delete(sid: str, sidecar_path) -> bool:
+    """Revoke the public link ``sid`` owns, before its delete removes anything (#8837).
+
+    The caller holds the session's agent lock. The tokens are the sidecar's
+    ``share_token`` (bounded metadata prefix; a legacy layout that keeps the share
+    keys after ``messages`` is parsed in full, once, on this authenticated path)
+    and the resident session's, which covers a checkpoint that wrote the sidecar
+    without the token while the link stayed live. Each is revoked only while its
+    snapshot still names ``sid``: a compression continuation that refreshed the
+    share owns that link now and keeps it.
+
+    ``load_share`` already refuses a snapshot whose owner has no sidecar; this
+    marks the snapshot itself revoked, so the link stays dead if a sidecar with
+    this id comes back (a messaging session keeps its state.db rows). Returns
+    False when a link could not be revoked: the caller refuses the delete while
+    the session is still whole, so the user can retry.
+    """
+    from api.models import _persisted_share_fields
+
+    tokens = []
+    try:
+        persisted = _persisted_share_fields(sidecar_path)
+    except OSError:
+        # Unreadable: no token to read. Removing the sidecar still ends the link,
+        # because load_share() requires the owner's sidecar.
+        logger.warning("Could not read the share token of session %s before deleting it", sid, exc_info=True)
+        persisted = None
+    if isinstance(persisted, tuple) and persisted[0]:
+        tokens.append(str(persisted[0]))
+    resident = _resident_share_token(sid)
+    if resident and resident not in tokens:
+        tokens.append(resident)
+    for token in tokens:
+        try:
+            if not revoke_share_owned_by(token, sid):
+                return False
+        except Exception:
+            logger.warning("Failed to revoke the share of session %s before deleting it", sid, exc_info=True)
+            return False
+    return True
 
 
 def _reconcile_stale_stream_state_for_session_rows(session_rows) -> bool:
@@ -20694,6 +20737,9 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session busy, try again", 503)
         draft_delete_failed = False
         try:
+            # #8837: revoke its link first; a revoke that fails refuses the delete.
+            if not _revoke_owned_shares_before_delete(sid, p):
+                return j(handler, {"ok": False, "error": "share_revoke_failed", "action": "session_delete"}, status=500)
             # Delete state.db rows BEFORE any user-visible file. A refusal (live
             # gateway work, unfenceable ledger) or a failed commit must leave the
             # whole session intact instead of stranding an unrecoverable
@@ -28045,12 +28091,32 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
             if not session_lock.acquire(timeout=5):
                 logger.debug("Session %s is busy; leaving it for later cleanup", p.stem)
                 continue
+            # #8837: share create and revoke serialize on the per-session share
+            # lock, not the agent lock. Hold it from the load through the unlink,
+            # or a share created after the load would be judged on the stale
+            # tokenless copy and its sidecar removed, ending a link that was just
+            # published for a conversation that still exists. Order agent ->
+            # share, as nothing takes the agent lock while holding the share lock.
+            share_lock = None
             try:
+                candidate_share_lock = _get_session_share_lock(p.stem)
+                if not candidate_share_lock.acquire(timeout=SHARE_SESSION_LOCK_TIMEOUT_SECONDS):
+                    logger.debug("Session %s has a share operation in flight; leaving it for later cleanup", p.stem)
+                    continue
+                share_lock = candidate_share_lock
                 s = Session.load(p.stem)
                 if zero_only:
                     should_delete = s and len(s.messages) == 0
                 else:
                     should_delete = s and s.title == "Untitled" and len(s.messages) == 0
+                if should_delete and getattr(s, "share_token", None):
+                    # #8837: a published link is served only while this sidecar
+                    # exists, and revoke finds its token here. Sharing an
+                    # external (CLI/messaging) conversation writes a
+                    # metadata-only sidecar with no messages while the
+                    # transcript stays in state.db, so "empty" does not mean
+                    # gone. Only a deliberate delete ends a live link.
+                    should_delete = False
                 if should_delete:
                     with LOCK:
                         SESSIONS.pop(p.stem, None)
@@ -28069,6 +28135,8 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                     if session_deleted:
                         cleaned += 1
             finally:
+                if share_lock is not None:
+                    share_lock.release()
                 session_lock.release()
         except Exception:
             logger.debug("Failed to clean up session file %s", p)
