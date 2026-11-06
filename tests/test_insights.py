@@ -486,11 +486,11 @@ def test_insights_refresh_restored_by_latest_request_runtime():
         // --- Scenario SUCCESS: animated A, then non-animated B supersedes ---
         curBox = { innerHTML: '' };
         curBtn = { style: {}, disabled: false };
-        const pa = loadInsights(true);           // A: 3 api() calls
+        const pa = loadInsights(true);           // A: 4 api() calls
         if (curBtn.disabled !== true) throw new Error('A should disable the button');
-        const aDeferreds = snapshotLatest(3);
-        const pb = loadInsights();               // B: 3 api() calls (supersedes A)
-        const bDeferreds = snapshotLatest(3);
+        const aDeferreds = snapshotLatest(4); // 4 api() calls since traffic panel landed
+        const pb = loadInsights();               // B: 4 api() calls (supersedes A)
+        const bDeferreds = snapshotLatest(4);
         // Resolve B (latest) FIRST...
         resolveAll(bDeferreds);
         await pb;
@@ -504,11 +504,11 @@ def test_insights_refresh_restored_by_latest_request_runtime():
         curBox = { innerHTML: '' };
         curBtn = { style: {}, disabled: false };
         global._insightsReqToken = 0;
-        const pa2 = loadInsights(true);          // A2 (animated): disables
+        const pa2 = loadInsights(true);          // A2 (animated): 4 api() calls, disables
         if (curBtn.disabled !== true) throw new Error('A2 should disable the button');
-        const a2d = snapshotLatest(3);
-        const pb2 = loadInsights();              // B2 (non-animated, latest)
-        const b2d = snapshotLatest(3);
+        const a2d = snapshotLatest(4);
+        const pb2 = loadInsights();              // B2 (non-animated, latest): 4 api() calls
+        const b2d = snapshotLatest(4);
         rejectAll(b2d);                          // latest errors first
         await pb2;
         if (curBtn.disabled) throw new Error('latest (non-animated, erroring) B must restore the button');
@@ -2860,9 +2860,11 @@ def test_insights_traffic_endpoint_returns_inbound_and_outbound(monkeypatch):
         def __getitem__(self, key):
             return self._data[key]
 
+    # _get_outbound_domains selects SUM(smu.api_call_count) AS calls, so the
+    # rows expose "calls" (not "api_call_count").
     fake_db_rows = [
-        FakeRow({"billing_base_url": "https://inference-api.nousresearch.com/v1/", "api_call_count": 100}),
-        FakeRow({"billing_base_url": "http://localhost:11434/v1/", "api_call_count": 50}),
+        FakeRow({"billing_base_url": "https://inference-api.nousresearch.com/v1/", "calls": 100}),
+        FakeRow({"billing_base_url": "http://localhost:11434/v1/", "calls": 50}),
     ]
 
     real_cursor = MagicMock()
