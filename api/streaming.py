@@ -7556,7 +7556,7 @@ def _disjoint_compression_parent_message_count(
 
 def _compression_disjoint_parent_boundary(s, old_sid: str) -> dict | None:
     """Build a durable child marker from the snapshot bytes just preserved."""
-    from api.models import Session
+    from api.models import Session, _last_message_timestamp
 
     try:
         snapshot = Session.load(old_sid)
@@ -7578,17 +7578,7 @@ def _compression_disjoint_parent_boundary(s, old_sid: str) -> dict | None:
     parent_updated_at = float(getattr(snapshot, 'updated_at', 0) or 0)
     if not math.isfinite(parent_updated_at) or parent_updated_at <= 0:
         return None
-    last_message_at = 0.0
-    for message in parent_messages:
-        if not isinstance(message, dict):
-            continue
-        raw_timestamp = message.get('timestamp', message.get('_ts'))
-        try:
-            timestamp = float(raw_timestamp or 0)
-        except (TypeError, ValueError):
-            continue
-        if math.isfinite(timestamp):
-            last_message_at = max(last_message_at, timestamp)
+    last_message_at = _last_message_timestamp(parent_messages) or parent_updated_at
     return {
         'parent_session_id': old_sid,
         'message_count': parent_count,

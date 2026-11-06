@@ -980,6 +980,94 @@ def test_msg_limit_compression_child_fast_path_preserves_pagination_cursor(
     ]
 
 
+def test_msg_limit_compression_child_with_tool_tail_keeps_fast_path(
+    monkeypatch,
+    tmp_path,
+):
+    import api.models as models
+    import api.routes as routes
+    import api.streaming as streaming
+
+    parent_sid = "parent_compression_snapshot_tool_tail"
+    child_sid = "continuation_child_tool_tail"
+    parent_messages = [
+        {"role": "assistant", "content": f"parent {idx}", "timestamp": float(idx + 1)}
+        for idx in range(120)
+    ] + [
+        {
+            "role": "tool",
+            "content": "newer tool result",
+            "timestamp": 500.0,
+            "tool_call_id": "tool-tail",
+            "tool_name": "tail_tool",
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "timestamp": 501.0,
+            "_partial": True,
+        },
+    ]
+    child_messages = [
+        {"role": "assistant", "content": f"child {idx}", "timestamp": 600.0 + idx}
+        for idx in range(500)
+    ]
+    parent = _install_test_session(monkeypatch, tmp_path, parent_sid, parent_messages)
+    parent.pre_compression_snapshot = True
+    parent.updated_at = 200.0
+    parent.save(touch_updated_at=False)
+    child = models.Session(
+        session_id=child_sid,
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=child_messages,
+        parent_session_id=parent_sid,
+        created_at=300.0,
+        updated_at=1200.0,
+    )
+    boundary = streaming._compression_disjoint_parent_boundary(child, parent_sid)
+    assert boundary is not None
+    assert boundary["last_message_at"] == 120.0
+    child.compression_disjoint_parent_boundary = boundary
+    child.save(touch_updated_at=False)
+    _make_state_db(tmp_path / "state.db", child_sid, child_messages)
+
+    real_lineage_loader = routes._webui_sidecar_lineage_messages_for_display
+    real_session_load = models.Session.load.__func__
+    captured = {"lineage_loads": 0, "parent_full_loads": 0}
+
+    def wrapped_lineage_loader(*args, **kwargs):
+        captured["lineage_loads"] += 1
+        return real_lineage_loader(*args, **kwargs)
+
+    def wrapped_session_load(cls, sid):
+        if sid == parent_sid:
+            captured["parent_full_loads"] += 1
+        return real_session_load(cls, sid)
+
+    monkeypatch.setattr(
+        routes,
+        "_webui_sidecar_lineage_messages_for_display",
+        wrapped_lineage_loader,
+    )
+    monkeypatch.setattr(models.Session, "load", classmethod(wrapped_session_load))
+
+    handler = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0&msg_limit=30"
+    )
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    assert captured == {"lineage_loads": 0, "parent_full_loads": 0}
+    payload = handler.response_json["session"]
+    assert payload["message_count"] == len(parent_messages) + len(child_messages)
+    assert payload["_messages_offset"] == len(parent_messages) + 470
+    assert [message["content"] for message in payload["messages"]] == [
+        f"child {idx}" for idx in range(470, 500)
+    ]
+
+
 def test_msg_limit_state_enrichment_does_not_mutate_cached_compression_child(
     monkeypatch,
     tmp_path,
