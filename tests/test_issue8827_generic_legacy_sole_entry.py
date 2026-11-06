@@ -5,6 +5,7 @@ import pytest
 
 import api.config as config
 import api.routes as routes
+from tests.conftest import requires_agent
 
 ENTRY_URL = "https://entry.invalid/v1"
 MODEL_URL = "https://model-block.invalid/v1"
@@ -20,7 +21,13 @@ def _lookup(monkeypatch, cfg, session, **kwargs):
     return (r.base_url or "").rstrip("/"), r.api_key or ""
 
 
-@pytest.mark.parametrize("session", ["custom", "local", "vllm", "ollama"])
+# vllm and ollama are generic sessions only through the Agent's provider tables; without an Agent (CI),
+# v0.52.544 also returns no URL or key for them, so those two need the Agent.
+@pytest.mark.parametrize(
+    "session",
+    ["custom", "local", pytest.param("vllm", marks=requires_agent),
+     pytest.param("ollama", marks=requires_agent)],
+)
 @pytest.mark.parametrize("name", ["local", "My LLM"])
 def test_generic_session_takes_the_sole_legacy_entry(monkeypatch, session, name):
     got = _lookup(monkeypatch, {"custom_providers": [dict(ENTRY, name=name)]}, session)

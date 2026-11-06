@@ -24,6 +24,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 
 from api import config, routes
+from tests.conftest import requires_agent
 
 
 def _config(pid, builtin_url="https://builtin.invalid/v1"):
@@ -112,6 +113,8 @@ def _family_config(active, record, builtin="fireworks"):
     }
 
 
+# Needs the Agent: Fireworks is a built-in only through the Agent's catalog (CI installs no Agent).
+@requires_agent
 @pytest.mark.parametrize("discovery", ["as-is", "empty"])
 @pytest.mark.parametrize(
     "active,record",
@@ -317,6 +320,8 @@ def _loopback_server(monkeypatch):
         thread.join(timeout=2)
 
 
+# Needs the Agent: the request is the Agent's own metadata resolver's (CI installs no Agent).
+@requires_agent
 @pytest.mark.parametrize("pid", ["openai", "deepseek-chat", "azure", "or"])
 def test_the_builtin_endpoint_never_receives_the_custom_key(monkeypatch, pid):
     """The real metadata lookup, against a loopback built-in endpoint that records Authorization.
