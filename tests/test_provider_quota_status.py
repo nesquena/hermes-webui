@@ -3103,3 +3103,18 @@ process.stdout.write(JSON.stringify(windows.map(window =>
 """
         rendered = subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
         assert json.loads(rendered.stdout) == ["Weekly limit", "5-hour limit"]
+
+
+def test_usage_api_windows_carry_durations_for_the_fixed_chip_modes():
+    """#8548 review: quota_chip_window shortest / longest order windows by limit_window_seconds,
+    which neither usage API reports; the sanitizers supply the documented lengths."""
+    from api.providers import _sanitize_commandcode_quota, _sanitize_opencode_go_quota
+
+    go = _sanitize_opencode_go_quota({"quota": {
+        "rolling": {"percent": 20}, "weekly": {"percent": 50}, "monthly": {"percent": 80}}})
+    assert [(w["label"], w["limit_window_seconds"]) for w in go["windows"]] == [
+        ("5-hour", 18000), ("Weekly", 604800), ("Monthly", 2592000)]
+    cc = _sanitize_commandcode_quota({"windowLimits": {
+        "fiveHour": {"used": 1, "limit": 10}, "weekly": {"used": 5, "limit": 10}}})
+    assert [(w["label"], w["limit_window_seconds"]) for w in cc["windows"]] == [
+        ("5-hour", 18000), ("Weekly", 604800)]

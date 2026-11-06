@@ -1747,10 +1747,12 @@ def _sanitize_opencode_go_quota(payload: Any) -> dict[str, Any] | None:
     quota = payload.get("quota", payload.get("data", payload.get("usage", payload)))
     if not isinstance(quota, dict):
         return None
-    # OpenCode documents the rolling window as five hours.
-    specs = (("rolling", "5-hour"), ("weekly", "Weekly"), ("monthly", "Monthly"))
+    # OpenCode documents the rolling window as five hours. The durations let the composer chip's
+    # fixed quota_chip_window choices (shortest / longest) order these windows; the API omits them.
+    # Monthly is nominal (30 days): it only has to sort after weekly.
+    specs = (("rolling", "5-hour", 5 * 3600), ("weekly", "Weekly", 7 * 86400), ("monthly", "Monthly", 30 * 86400))
     windows = []
-    for key, label in specs:
+    for key, label, seconds in specs:
         raw = quota.get(key)
         if not isinstance(raw, dict):
             continue
@@ -1763,6 +1765,7 @@ def _sanitize_opencode_go_quota(payload: Any) -> dict[str, Any] | None:
             "remaining_percent": 100.0 - used_percent,
             "reset_at": _usage_api_reset_at(raw.get("resetsAt")),
             "detail": _usage_api_status_detail(raw.get("status")),
+            "limit_window_seconds": seconds,
         })
     if not windows:
         return None
@@ -1779,9 +1782,11 @@ def _sanitize_commandcode_quota(payload: Any) -> dict[str, Any] | None:
     if not isinstance(payload, dict) or not isinstance(payload.get("windowLimits"), dict):
         return None
     windows = []
-    for key, label in (("fiveHour", "5-hour"), ("weekly", "Weekly")):
+    # Durations as for OpenCode Go: the API names the windows but omits their length.
+    for key, label, seconds in (("fiveHour", "5-hour", 5 * 3600), ("weekly", "Weekly", 7 * 86400)):
         window = _quota_window(payload["windowLimits"].get(key), label)
         if window:
+            window["limit_window_seconds"] = seconds
             windows.append(window)
     if not windows:
         return None
