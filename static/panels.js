@@ -7884,6 +7884,17 @@ async function switchToProfile(name) {
     // Apply the profile defaults returned by /api/profile/switch immediately.
     // Refreshing the full model/workspace catalogs is useful, but it should not
     // hold the visible switch animation open.
+    //
+    // #8576 catalog-owner fence: a /api/models reply started on the PREVIOUS
+    // profile may still be in flight — the canonical switch auto-creates its
+    // new session and awaits the sidebar render BEFORE the destination catalog
+    // hydration at the bottom of this function, and a reply landing in that
+    // window would publish the old profile's defaults/options and release the
+    // one-shot reset under the new profile. Invalidate the catalog generation
+    // FIRST, before ANY stale defaults/options/reset write below: the delayed
+    // reply's requestSeq is then stale by the time it arrives, and only the
+    // destination hydration that follows can publish.
+    if (typeof _invalidateModelDropdownRequests === 'function') _invalidateModelDropdownRequests();
     if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
     else localStorage.removeItem('hermes-webui-model');
     _skillsData = null;
