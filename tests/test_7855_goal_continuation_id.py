@@ -325,26 +325,34 @@ class TestWriterWiring:
         )
 
     def test_routes_consumer_admits_by_id(self):
-        """routes.py must admit via the helper using the continuation ID, not
-        the message text."""
+        """routes.py must admit via the match-gated store consume using the
+        continuation ID, not the message text alone."""
         src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
         # #7855 rebase compat (#7249): admission moved INSIDE the session lock
-        # (consume_continuation_markers), replacing the bare marker check, and
-        # keeps the popped record as a rollback receipt.
+        # (consume_continuation_markers), replacing the bare marker check; the
+        # #7862 merge wired the closure to api.goal_continuation_store's
+        # match-gated consume (msg + ID + attempt identity + the round-11
+        # explicit-continue flags), which keeps the popped record as a
+        # rollback receipt the attempt can claim.
         m = re.search(
             r"def consume_continuation_markers\(\).*?"
-            r"if not goal_related and goal_continuation_id:\s*\n\s*"
-            r"receipt = _consume_pending_goal_continuation\(",
+            r"consume_pending_goal_continuation\(\s*s\.session_id,\s*msg,\s*"
+            r"goal_continuation_id\s*,\s*goal_continuation_attempt_id",
             src,
             re.S,
         )
         assert m is not None, (
             "routes.py admission must use the continuation ID inside "
             "consume_continuation_markers(): "
-            "if not goal_related and goal_continuation_id: "
-            "receipt = _consume_pending_goal_continuation(...)"
+            "consume_pending_goal_continuation(s.session_id, msg, "
+            "goal_continuation_id, goal_continuation_attempt_id, ...)"
         )
-        assert "consumed_goal_continuation_receipt = receipt" in src, (
+        _next_def = src.find("\ndef ", m.start() + 1)
+        tail = src[m.start():(_next_def if _next_def > m.start() else m.start() + 6000)]
+        assert "goal_related = True" in tail, (
+            "a COMMITTED consume must classify the turn goal-related"
+        )
+        assert "reclaim_goal_continuation_receipt(" in tail, (
             "consume_continuation_markers() must keep the popped record as a "
             "rollback receipt so a rejected start can restore both halves"
         )
@@ -355,14 +363,14 @@ class TestWriterWiring:
         direct = re.findall(r"PENDING_GOAL_CONTINUATION\.discard", src)
         # master's consume_continuation_markers() closure still consumes the
         # legacy #1932 SET marker for the plain no-id path; that is a different
-        # object from the id-keyed record api.goals owns. Everything else must
-        # delegate to the helper.
+        # object from the id-keyed record the store owns. Everything else must
+        # delegate to the match-gated consume.
         allowed = re.findall(
             r"def consume_continuation_markers\(\)[^}]*?PENDING_GOAL_CONTINUATION\.discard", src, re.S
         )
         assert len(direct) == len(allowed), (
             f"PENDING_GOAL_CONTINUATION.discard must not appear in routes.py "
-            f"(record removal is owned by api.goals); found {len(direct)}, of "
+            f"(record removal is owned by the store); found {len(direct)}, of "
             f"which {len(allowed)} sit inside the legacy "
             f"consume_continuation_markers() closure"
         )
@@ -439,7 +447,13 @@ class TestFrontendWiring:
         # `||undefined` let JSON.stringify drop it, so a current client's
         # genuine turn and a pre-upgrade tab's turn were byte-identical and a
         # key-presence legacy path would admit every genuine turn (#6885).
-        assert "goal_continuation_id:_goalContinuationId||''" in src, (
+        # The fallback chain ends with `||''`; the resume-bound identity
+        # (round 3) sits between the drain's explicit ID and the restored
+        # draft's ID.
+        assert (
+            "goal_continuation_id:(options&&options.goalContinuationId)"
+            "||_resumeContinuationId||_goalContinuationId||''" in src
+        ), (
             "send() must post the invocation-bound ID in the /api/chat/start body"
         )
         assert "goal_continuation_id:_goalContinuationId||undefined" not in src, (
@@ -499,23 +513,27 @@ class TestFrontendWiring:
             "a restored continuation draft must be re-marked so a retry still carries the ID"
         )
         assert (
-            "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _goalContinuationId)"
+            "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _resumeContinuationId||_goalContinuationId)"
             in src
         ), "the send-error path must pass the invocation-bound continuation ID to the restore"
         # The compression-recovery path restores into a rotated session; it must
-        # carry the token the same way.
+        # carry the token the same way (effective identity = resume-bound ||
+        # restored-draft ID, round 3/13).
         assert (
-            "_recoverCompressedSend(e,activeSid,_failedSendDraftText,_failedSendFilesSnapshot,_composerDraftClearPromise,_goalContinuationId)"
+            "_recoverCompressedSend(e,activeSid,_failedSendDraftText,_failedSendFilesSnapshot,_composerDraftClearPromise,_resumeContinuationId||_goalContinuationId)"
             in src
         ), "the compression-recovery path must pass the continuation ID through to the restore"
 
     def test_busy_and_interrupt_queues_carry_the_id(self):
         # Round 6 item 3: both busy modes queue the identified continuation text.
+        # Round 13: the entry ID now also falls back to the resume-bound
+        # identity for a literal `continue` typed while busy (_interruptContId /
+        # _busyContId), so the shapes carry the effective identity.
         src = self._messages()
-        assert "if(_goalContinuationId) _interruptEntry.goal_continuation_id=_goalContinuationId;" in src, (
+        assert "if(_interruptContId) _interruptEntry.goal_continuation_id=_interruptContId;" in src, (
             "the busy interrupt-mode queue must carry the continuation ID"
         )
-        assert "if(_goalContinuationId) _busyEntry.goal_continuation_id=_goalContinuationId;" in src, (
+        assert "if(_busyContId) _busyEntry.goal_continuation_id=_busyContId;" in src, (
             "the busy queue-mode queue must carry the continuation ID"
         )
 
@@ -548,11 +566,13 @@ class TestFrontendWiring:
 
     def test_combine_path_keeps_the_first_id(self):
         src = self._ui()
-        assert "goal_continuation_id:_contId" in src, (
-            "the combine path must keep the first continuation ID"
-        )
-        assert "snapshot.find(e=>e&&String(e.goal_continuation_id||'').trim())" in src, (
+        # Round 3 reshaped the merge: the combined entry searches the merged
+        # snapshot for the first entry that still carries an ID and keeps it.
+        assert "snapshot.find(e=>e&&e.goal_continuation_id)" in src, (
             "the combine path must search the merged entries for an ID"
+        )
+        assert "_mergedEntry.goal_continuation_id=String(_mergedContinuationId)" in src, (
+            "the combine path must keep the first continuation ID"
         )
 
 
