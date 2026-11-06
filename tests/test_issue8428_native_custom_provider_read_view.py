@@ -385,8 +385,8 @@ def test_mixed_store_metadata_and_connection_use_legacy_winner(monkeypatch, nati
     assert config.resolve_model_provider(MODEL) == (MODEL, PID, legacy["base_url"])
     assert providers._get_provider_api_key(PID) is None
     assert custom_cards()[0]["has_key"] is False
-    # #8819 (option B): the context-length lookup is v0.52.544's again: in a mixed store it pairs the native
-    # record's key with the legacy entry's URL, as 544 did (#8822).
+    # #8819 (option B): the context-length lookup is v0.52.544's again, so in a mixed store it can pair
+    # one source's URL with the other source's key, as 544 did (#8822). This test no longer pins the lookup.
     bundle = config.resolve_custom_provider_bundle(PID)
     assert bundle["source"] == "custom_providers"
     assert bundle["record"] is legacy

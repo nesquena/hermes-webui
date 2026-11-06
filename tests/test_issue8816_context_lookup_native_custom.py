@@ -408,14 +408,49 @@ def test_shared_display_name_lookup_takes_the_url_owners_key(monkeypatch, order)
     assert got.api_key == "synthetic-A"
 
 
+@pytest.mark.parametrize(
+    "session, model_provider, native, legacy",
+    [
+        ("custom:foo-bar", "custom:foo_bar", "custom:foo-bar", "foo-bar"),
+        ("custom:foo_bar", "custom:foo-bar", "custom:foo_bar", "foo_bar"),
+    ],
+)
+def test_an_underscore_spelling_of_the_session_id_still_owns_the_model_url(
+    monkeypatch, session, model_provider, native, legacy
+):
+    """v0.52.544 compared ``custom:foo_bar`` and ``custom:foo-bar`` as one id when
+    deciding whether the model block owns the URL slot. Since 091c26592 the
+    canonicaliser keeps underscores, and without a local fold the native record's
+    URL filled the slot and the legacy entry's key went to it: a pairing neither
+    v0.52.544 nor exp-v0.52.650 makes (#8819 Codex round 10). The model URL is
+    544's choice; which key goes with it is #8822's question, not pinned here."""
+    model_url, native_url = "https://model.invalid/v1", "https://native.invalid/v1"
+    data = {
+        "model": {"provider": model_provider, "base_url": model_url},
+        "providers": {native: {"base_url": native_url, "api_key": "synthetic-native"}},
+        "custom_providers": [
+            {"name": legacy, "base_url": "https://legacy.invalid/v1", "api_key": "synthetic-legacy"}
+        ],
+    }
+    _use(monkeypatch, data)
+
+    got = routes._context_length_lookup_inputs_for_model("loopback-model", session, cfg=data)
+    assert (got.base_url, got.api_key) != (native_url, "synthetic-legacy")
+    assert got.base_url == model_url
+
+
 def test_streaming_context_lookups_pass_no_caller_key():
-    """The two streaming context-length lookups pass the Agent's URL but never its key.
+    """The two direct streaming calls to the lookup pass the Agent's URL but never its key.
 
     The runtime connection bundle can already pair one record's URL with another
     record's key (a shared-name credential pool). Passed in as the caller's key, it
     would override the lookup's own, correct choice; .644 kept 8,192 there, and
     passing the key fell back to 256,000 (#8816 round 7). Without a caller key the
     lookup takes the key of whichever config source owns the URL.
+
+    Three more streaming sites reach the lookup under an import alias and pass the
+    runtime key as ``api_key=``, as v0.52.544 does; that pairing is #8822's, and this
+    test covers only the direct calls.
     """
     import ast
     import pathlib

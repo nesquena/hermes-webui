@@ -9391,8 +9391,12 @@ def _context_length_lookup_inputs_for_model(
             try:
                 from api.config import _canonicalise_provider_id as _canon_provider_id
 
-                _owner_provider = _canon_provider_id(_owner_provider) or _owner_provider
-                _session_provider = _canon_provider_id(_session_provider) or _session_provider
+                # v0.52.544's canonicaliser folded "_" to "-" in custom:* ids;
+                # since 091c26592 it keeps them, so fold here to keep this
+                # ownership comparison 544's (#8819 Codex round 10). Routing
+                # elsewhere keeps the newer canonicalisation.
+                _owner_provider = _canon_provider_id(str(_owner_provider or "").replace("_", "-")) or _owner_provider
+                _session_provider = _canon_provider_id(str(_session_provider or "").replace("_", "-")) or _session_provider
             except Exception:
                 pass
             if (
