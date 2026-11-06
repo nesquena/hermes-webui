@@ -329,6 +329,23 @@ process.stdout.write(JSON.stringify({
     ], result
     assert result["omitted"] == result["off"], result
     assert [(r["role"], r["displayOnly"]) for r in result["off"]][0] == ("user", True), result
+    # Only the prompt (the tail's last user row) is skipped: every other tail row takes the unchanged path.
+    script = (
+        _prelude()
+        + """
+const base=()=>[{role:'assistant',content:'Saved activity before reload',_ts:101},
+  {role:'tool',content:'tool output',_ts:102}];
+const tail=()=>[{role:'user',content:'first ask',_ts:99.9,_pending:true},
+  {role:'assistant',content:'partial',_live:true},{role:'user',content:'follow-up',_ts:103}];
+process.stdout.write(JSON.stringify({
+  other:view(_mergeInflightTailMessages(base(),tail(),0,true)),
+  off:view(_mergeInflightTailMessages(base(),tail(),0,false)),
+}));
+"""
+    )
+    result = _node(script)
+    assert [r for r in result["off"] if r["content"] != "follow-up"] == result["other"], result
+    assert any(r["content"] == "first ask" for r in result["other"]), result
 
 
 def test_inflight_names_other_stream_truth_table():
