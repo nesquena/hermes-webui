@@ -23495,7 +23495,7 @@ def _search_env_int(name, default, minimum, maximum):
 
 # How many content scans may run at the same time. One is the right default on
 # a small host: the scan resolves every sidebar transcript, and two of them used
-# to push htpc into swap while the WebUI stopped accepting connections.
+# to push a 16 GB host into swap while the WebUI stopped accepting connections.
 CONTENT_SEARCH_SCAN_SLOTS = _search_env_int("HERMES_WEBUI_SEARCH_SCAN_SLOTS", 1, 1, 4)
 _CONTENT_SEARCH_SLOTS = threading.BoundedSemaphore(CONTENT_SEARCH_SCAN_SLOTS)
 # Rows per ``results`` event. Small enough to paint the first hits early, big
