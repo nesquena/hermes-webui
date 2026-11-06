@@ -6985,24 +6985,33 @@ def resolve_session_reasoning_effort(
     )
 
 
-def effective_session_reasoning_effort(session_effort, profile_home) -> str | None:
+def effective_session_reasoning_effort(
+    session_effort,
+    profile_home,
+    *,
+    model_id: str | None = None,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+) -> str | None:
     """Return the stored effort a session's next turn starts from.
 
-    ``session_effort`` wins when present (``""`` = provider default). Legacy
-    sessions (``None``) inherit ``agent.reasoning_effort`` from their own
-    profile's isolated config: the single source shared by the composer chip,
-    new-session defaults, and the local and Gateway workers. A profile that
+    A saved ``session_effort`` wins when present (``""`` = provider default).
+    Only a legacy session (``None``) inherits configuration, and that inherited
+    value resolves through the session model's ``agent.reasoning_overrides``
+    entry before the global ``agent.reasoning_effort`` (#7170). A profile that
     configures no effort at all yields ``None`` rather than ``""``: an absent
     key and an explicitly empty value are indistinguishable on disk, and
-    ``""`` must stay a session's own "provider default" pick — so returning
-    ``None`` lets the per-model override layer decide for the session's model
-    (#7170) instead of pinning the chat to the provider default.
+    ``""`` must stay a session's own "provider default" pick.
     """
     if session_effort is not None:
         return str(session_effort)
+    config_data = get_config_for_profile_home(profile_home, isolate_config_override=True)
     return (
-        _config_reasoning_effort(
-            get_config_for_profile_home(profile_home, isolate_config_override=True)
+        configured_reasoning_effort_for_model(
+            config_data,
+            model_id=model_id,
+            provider_id=provider_id,
+            base_url=base_url,
         )
         or None
     )

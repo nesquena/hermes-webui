@@ -3542,7 +3542,10 @@ def _run_gateway_chat_streaming(
                 from api.profiles import get_hermes_home_for_profile
 
                 session_effort = effective_session_reasoning_effort(
-                    session_effort, get_hermes_home_for_profile(getattr(s, "profile", None)),
+                    session_effort,
+                    get_hermes_home_for_profile(getattr(s, "profile", None)),
+                    model_id=model,
+                    provider_id=model_provider,
                 )
             except Exception:
                 logger.warning("isolated reasoning config read failed; using the session config", exc_info=True)

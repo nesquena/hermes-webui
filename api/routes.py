@@ -17253,6 +17253,9 @@ def handle_get(handler, parsed) -> bool:
                 effort_kwargs["effort_override"] = effective_session_reasoning_effort(
                     getattr(reasoning_session, "reasoning_effort", None),
                     get_hermes_home_for_profile(getattr(reasoning_session, "profile", None)),
+                    model_id=model_id,
+                    provider_id=provider_id,
+                    base_url=base_url,
                 )
         return j(
             handler,
