@@ -26032,10 +26032,25 @@ def _handle_live_models(handler, parsed):
                         elif isinstance(_body, list):
                             ids = [m.get("id", m) if isinstance(m, dict) else m for m in _body]
 
-                        # #6919: the endpoint answered, so an EMPTY list here is
-                        # the provider's real membership — not a discovery
-                        # failure. Mark the response authoritative.
-                        _discovery_succeeded = True
+                        # #6919: the endpoint answered, but an HTTP 200 alone
+                        # does not make the answer a MODEL LIST. A body like
+                        # {"error": "temporarily unavailable"}, {}, {"data":
+                        # null}, {"data": "unavailable"} or a bare JSON string
+                        # is a failed/wrong-shaped discovery, and treating it
+                        # as successful would publish an authoritative EMPTY
+                        # membership — the client would then prune live
+                        # choices on what is really an upstream failure.
+                        #
+                        # Only the two SUPPORTED model-list shapes count as a
+                        # successful discovery: {"data": [...]} (an empty list
+                        # included — that is genuine "no models") and a bare
+                        # [...]. Everything else leaves discovery unsuccessful.
+                        _valid_model_list_shape = (
+                            (isinstance(_body, dict) and isinstance(_body.get("data"), list))
+                            or isinstance(_body, list)
+                        )
+                        if _valid_model_list_shape:
+                            _discovery_succeeded = True
 
                         if ids:
                             logger.debug("Live-fetched %d models from custom provider %s", len(ids), _base_url)
@@ -26117,12 +26132,28 @@ def _handle_live_models(handler, parsed):
                         )
                         with urllib.request.urlopen(_req, timeout=8) as _resp:
                             _body = json.loads(_resp.read())
-                        ids = [m.get("id", "") for m in _body.get("data", []) if m.get("id")]
-                        # #6919: the endpoint answered, so an EMPTY list here is
-                        # the provider's real membership — not a discovery
-                        # failure. Mark the response authoritative.
-                        _discovery_succeeded = True
-                        logger.debug("Live-fetched %d models from %s /v1/models", len(ids), provider)
+                        # #6919: same shape contract as the custom-provider
+                        # probe — only {"data": [...]} or a bare [...] is a
+                        # successful model-list discovery. A 200 with the wrong
+                        # shape is a failed discovery, not an authoritative
+                        # empty membership.
+                        if isinstance(_body, dict) and isinstance(_body.get("data"), list):
+                            ids = [m.get("id", "") for m in _body.get("data", []) if m.get("id")]
+                            _discovery_succeeded = True
+                            logger.debug("Live-fetched %d models from %s /v1/models", len(ids), provider)
+                        elif isinstance(_body, list):
+                            ids = [m.get("id", m) if isinstance(m, dict) else m for m in _body]
+                            _discovery_succeeded = True
+                            logger.debug("Live-fetched %d models from %s /v1/models", len(ids), provider)
+                        else:
+                            # A 200 with an unsupported shape: not a model list.
+                            # Leave discovery unsuccessful so the empty answer
+                            # is published as a failure rather than as an
+                            # authoritative membership.
+                            logger.debug(
+                                "Live fetch from %s returned an unsupported model-list shape",
+                                provider,
+                            )
                 except Exception as _fetch_err:
                     logger.debug("Live fetch from %s failed: %s", provider, _fetch_err)
                     # Fall through to static list below

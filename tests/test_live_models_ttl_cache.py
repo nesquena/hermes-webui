@@ -11,6 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 
 
@@ -588,4 +590,141 @@ def test_live_models_completed_discovery_with_no_models_is_authoritative(monkeyp
     assert not payload.get("error"), (
         "#6919: a completed discovery that found no models is AUTHORITATIVE "
         "membership — it must not carry the failure marker: " f"{payload}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #6919 (discovery-authority remainder): an HTTP 200 is not a model list.
+# The upstream probe must be SHAPE-CHECKED before the discovery counts as
+# successful, otherwise a wrong-shaped body is published as an authoritative
+# EMPTY membership and the client prunes live choices on what is really an
+# upstream failure.
+#
+# The supported model-list shapes are {"data": [...]} and a bare [...]. Every
+# other 200 body is a failed discovery.
+# ---------------------------------------------------------------------------
+
+
+def _probe_custom_provider_with_body(monkeypatch, routes, body_bytes):
+    """Drive the real custom-provider probe with a canned upstream body."""
+    import api.config as config
+    import urllib.request
+
+    _install_provider_model_ids(monkeypatch, lambda provider: [])
+    _patch_live_models_basics(monkeypatch, routes)
+    monkeypatch.setattr(config, "_PROVIDER_MODELS", {})
+    monkeypatch.setattr(
+        config,
+        "get_config",
+        lambda: {
+            "model": {"provider": "custom:test-gateway"},
+            "custom_providers": [
+                {
+                    "name": "test-gateway",
+                    "base_url": "https://example.invalid/v1",
+                    "api_key": "test-key",
+                }
+            ],
+        },
+    )
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            self.close()
+            return False
+
+    def _fake_urlopen(req, timeout=None):
+        return _Resp(body_bytes)
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    parsed = urlparse("/api/models/live?provider=custom:test-gateway")
+    return routes._handle_live_models(object(), parsed)
+
+
+@pytest.mark.parametrize(
+    "label,body",
+    [
+        ("error-object", json.dumps({"error": "temporarily unavailable"}).encode()),
+        ("empty-object", json.dumps({}).encode()),
+        ("data-null", json.dumps({"data": None}).encode()),
+        ("data-wrong-type", json.dumps({"data": "unavailable"}).encode()),
+        ("json-string", json.dumps("unavailable").encode()),
+    ],
+)
+def test_live_models_wrong_shaped_discovery_is_not_authoritative(monkeypatch, label, body):
+    """A 200 whose body is not a model list must NOT count as a successful
+    discovery: the envelope has to carry the failure marker, otherwise the
+    client reads it as authoritative emptiness and prunes live choices."""
+    import api.routes as routes
+
+    payload = _probe_custom_provider_with_body(monkeypatch, routes, body)
+
+    assert payload["models"] == [], (
+        f"#6919: expected an empty model list for a {label} body, "
+        f"got {payload['models']}"
+    )
+    assert payload.get("error"), (
+        f"#6919: a {label} upstream body is a failed discovery — the envelope "
+        "must carry the failure marker so the client does not treat it as "
+        f"authoritative empty membership: {payload}"
+    )
+
+
+def test_live_models_valid_empty_model_list_is_still_authoritative(monkeypatch):
+    """The supported empty shape stays authoritative: {"data": []} means
+    "this provider really has no models" and must NOT carry the marker.
+
+    This is the control for the wrong-shape cases above — the repair must not
+    turn a genuine empty membership into a failure."""
+    import api.routes as routes
+
+    payload = _probe_custom_provider_with_body(
+        monkeypatch, routes, json.dumps({"data": []}).encode()
+    )
+
+    assert payload["models"] == [], (
+        f"#6919: expected an empty model list, got {payload['models']}"
+    )
+    assert not payload.get("error"), (
+        "#6919: a supported valid-empty model list is AUTHORITATIVE "
+        f"membership — it must not carry the failure marker: {payload}"
+    )
+
+
+def test_live_models_bare_list_model_list_is_authoritative(monkeypatch):
+    """The other supported shape — a bare [...] — is authoritative too."""
+    import api.routes as routes
+
+    payload = _probe_custom_provider_with_body(
+        monkeypatch, routes, json.dumps([]).encode()
+    )
+
+    assert payload["models"] == [], (
+        f"#6919: expected an empty model list, got {payload['models']}"
+    )
+    assert not payload.get("error"), (
+        "#6919: a bare-list model list is AUTHORITATIVE membership — it must "
+        f"not carry the failure marker: {payload}"
+    )
+
+
+def test_live_models_non_empty_model_list_is_authoritative(monkeypatch):
+    """A normal, non-empty catalog is unaffected by the shape check."""
+    import api.routes as routes
+
+    payload = _probe_custom_provider_with_body(
+        monkeypatch,
+        routes,
+        json.dumps({"data": [{"id": "chat-a", "label": "Chat A"}]}).encode(),
+    )
+
+    assert [m["id"] for m in payload["models"]] == ["chat-a"], (
+        f"#6919: the model list must be published unchanged, got {payload}"
+    )
+    assert not payload.get("error"), (
+        f"#6919: a successful discovery must not carry the failure marker: {payload}"
     )
