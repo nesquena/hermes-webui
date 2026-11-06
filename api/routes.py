@@ -24155,7 +24155,15 @@ def _content_search_worker(job, sessions, redact_enabled):
         # take the slot at all: the SQL/sidecar reads are the expensive part.
         if job.cancelled:
             return
-        with _CONTENT_SEARCH_SLOTS:
+        # Acquire in slices, not with a single blocking `with`. A plain
+        # `with _CONTENT_SEARCH_SLOTS:` parked a superseded job's thread until the
+        # running scan released the slot, so a burst of replaced queries (every
+        # debounced keystroke starts one) piled cancelled workers up behind a
+        # long transcript - each of them a thread outside the request cap.
+        while not _CONTENT_SEARCH_SLOTS.acquire(timeout=_CONTENT_SEARCH_POLL_SECONDS):
+            if job.cancelled:
+                return
+        try:
             for session in sessions:
                 if job.cancelled:
                     break
@@ -24172,6 +24180,8 @@ def _content_search_worker(job, sessions, redact_enabled):
                 if scanned % 10 == 0:
                     job.advance(scanned=scanned)
             job.advance(scanned=scanned)
+        finally:
+            _CONTENT_SEARCH_SLOTS.release()
     except Exception as exc:  # a scan must never take the UI down
         logger.warning("content search scan failed: %s", exc, exc_info=True)
         job.advance(scanned=scanned, error=str(exc))
@@ -24362,12 +24372,15 @@ def _handle_sessions_search_stream(handler, parsed):
             return bad(handler, "content search unavailable", status=503)
         if _diag:
             _diag.stage("scan_drain")
-        _content_search_sse_open(handler)
         cursor = 0
         first_batch_sent = False
         interrupted = False
         last_write = time.time()
         try:
+            # Inside the cancellation guard on purpose: a client that goes away
+            # while these headers are written must still cancel the job that was
+            # already started above, instead of leaving a full scan running.
+            _content_search_sse_open(handler)
             while True:
                 batch, hits, scanned, done, error = job.take(cursor)
                 now = time.time()
