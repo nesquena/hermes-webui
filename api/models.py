@@ -2086,6 +2086,17 @@ class Session:
                 f"Reload with metadata_only=False before mutating state. "
                 f"See #1558."
             )
+        # ── #8852 guard ─────────────────────────────────────────────────
+        # Refuse to save a session loaded from a sidecar whose body names a
+        # different session, or none: save() writes the body's id, so it would
+        # overwrite that other conversation (or create a stray file).
+        loaded_from = getattr(self, '_sidecar_names_other_session', None)
+        if loaded_from:
+            raise RuntimeError(
+                f"Refusing to save session {self.session_id!r}: it was loaded from "
+                f"{loaded_from}.json, whose body names a different session. "
+                f"See #8852."
+            )
         if not isinstance(self.messages, list):
             raise ValueError(
                 f"Refusing to save session {self.session_id!r}: messages must be a list, "
@@ -2494,10 +2505,26 @@ class Session:
         # vouched for.
         data['_pending_hidden_wakeup_from_writer'] = True
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+        # #8852: a sidecar is named after its session. One whose body names a
+        # different session (a manual copy, a backup restored under another
+        # name) or none (Session() then makes up an id) would write that id's
+        # file on any save, overwriting another conversation or adding a stray
+        # file. The server never writes such a file itself.
+        _names_other_session = data.get('session_id') != sid
         data = _apply_session_draft_overlay(data, sid)
         session = cls(**data)
         session._share_fields_misplaced = _share_fields_misplaced
-        if _collapsed_partials:
+        if _names_other_session:
+            # Mark it so save() refuses. Loads still return it as before.
+            session._sidecar_names_other_session = sid
+        if _collapsed_partials and _names_other_session:
+            # Keep the collapse in memory only (see above), and skip the legacy
+            # facts cache: the file still holds the uncollapsed transcript.
+            logger.info(
+                "Not persisting collapsed duplicate partials for %s: its body names session %r (#8852)",
+                sid, data.get('session_id'),
+            )
+        elif _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
                 # recency/index ordering; save() creates a .bak because this
@@ -2564,6 +2591,9 @@ class Session:
             needed = {'session_id', 'title', 'created_at', 'updated_at'}
             if not needed.issubset(parsed.keys()):
                 return cls.load(sid)
+            # #8852: mark a stub whose body names another session, as
+            # Session.load does, so writers that bypass save() refuse it too.
+            _names_other_session = parsed.get('session_id') != sid
             parsed['messages'] = []
             parsed['tool_calls'] = []
             parsed = _apply_session_draft_overlay(parsed, sid)
@@ -2609,6 +2639,8 @@ class Session:
                     session = cls(**parsed)
                     session._metadata_message_count = _parse_nonnegative_int(_facts.get('message_count'))
                     session._loaded_metadata_only = True
+                    if _names_other_session:
+                        session._sidecar_names_other_session = sid
                     return session
                 # Cache miss → full-load. cls.load() itself populates the legacy
                 # facts cache with a TOCTOU-guarded write (expected_sig), so we
@@ -2638,6 +2670,8 @@ class Session:
             # session must reload it with metadata_only=False first.
             # See #1558 — v0.50.279 _clear_stale_stream_state() data-loss bug.
             session._loaded_metadata_only = True
+            if _names_other_session:
+                session._sidecar_names_other_session = sid
             return session
         except Exception:
             # Corrupt prefix or decode error — fall back to full load
@@ -5681,6 +5715,10 @@ def _repair_stale_pending(session) -> bool:
     Returns True if repair was applied, False otherwise.
     Must never raise — all errors are caught and logged.
     """
+    if getattr(session, '_sidecar_names_other_session', None):
+        # #8852: the repair saves, and save() refuses a session whose file's
+        # body names another session. Nothing to repair in this file's name.
+        return False
     # Capture the stream id seen at pre-check time; the under-lock re-check in
     # _apply_core_sync_or_error_marker uses this to detect a rotated active_stream_id
     # (e.g. context compression) or a stream that came back alive.
@@ -6583,6 +6621,16 @@ def set_session_reasoning_effort(session_id_or_session, value, *, profile=_KEEP_
         session = None
     else:
         session = session_id_or_session
+        loaded_from = getattr(session, '_sidecar_names_other_session', None)
+        if loaded_from:
+            # #8852: this writer patches SESSION_DIR/<session_id>.json directly,
+            # not through save(); the id came from a file whose body names
+            # another session.
+            raise RuntimeError(
+                f"Refusing to write reasoning_effort for session {session.session_id!r}: "
+                f"it was loaded from {loaded_from}.json, whose body names a different "
+                f"session. See #8852."
+            )
         sid = str(getattr(session, 'session_id', '') or '')
     normalized = _normalize_persisted_reasoning_effort(value)
     with _session_persist_lock(sid):
@@ -8622,6 +8670,13 @@ def persist_recovered_workspace_binding(
     per-session mutation lock keeps compare-and-replace ordered with other
     compliant session writers.
     """
+    if getattr(session, "_sidecar_names_other_session", None):
+        # #8852: this writer patches SESSION_DIR/<session_id>.json directly,
+        # not through save(), so it needs the same refusal: the id came from
+        # a file whose body names another session.
+        raise WorkspaceBindingPersistenceError(
+            "Failed to persist recovered workspace: the session file names a different session"
+        )
     sid = str(getattr(session, "session_id", "") or "").strip()
     if not sid or not is_safe_session_id(sid):
         raise WorkspaceBindingPersistenceError(
