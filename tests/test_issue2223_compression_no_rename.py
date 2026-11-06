@@ -333,3 +333,76 @@ def test_cumulative_rotation_skips_disjoint_boundary_full_history_work(monkeypat
     assert rotating.parent_session_id == old_sid
     assert rotating.compression_disjoint_parent_boundary is None
     assert models.SESSIONS[new_sid] is rotating
+
+
+@pytest.mark.parametrize("persisted_count", [True, False, 1.5, "1"])
+def test_marked_prefix_count_rejects_non_exact_integers(tmp_path, persisted_count):
+    import api.models as models
+
+    path = tmp_path / "malformed-count.json"
+    path.write_text(
+        json.dumps(
+            {
+                "session_id": "malformed-count",
+                "title": "Malformed count",
+                "created_at": 1.0,
+                "updated_at": 2.0,
+                "_mc_v": models._MESSAGE_COUNT_MARKER,
+                "message_count": persisted_count,
+                "messages": [{"role": "user", "content": "one"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert models._prefix_message_count(path) is None
+
+
+@pytest.mark.parametrize("persisted_count", [True, False, 1.5, -1])
+def test_invalid_persisted_count_cannot_skip_compression_boundary(
+    persisted_count,
+):
+    import api.streaming as streaming
+
+    session = type(
+        "SessionStub",
+        (),
+        {
+            "messages": [
+                {"role": "assistant", "content": "parent", "timestamp": 1.0},
+                {"role": "user", "content": "next", "timestamp": 2.0},
+            ]
+        },
+    )()
+
+    assert streaming._compression_boundary_may_add_parent_rows(
+        session,
+        persisted_count,
+    ) is True
+
+
+@pytest.mark.parametrize(
+    ("persisted_count", "expected"),
+    [(0, False), (1, False), (2, True), (3, True)],
+)
+def test_exact_persisted_count_only_skips_for_a_strictly_longer_sequence(
+    persisted_count,
+    expected,
+):
+    import api.streaming as streaming
+
+    session = type(
+        "SessionStub",
+        (),
+        {
+            "messages": [
+                {"role": "assistant", "content": "parent", "timestamp": 1.0},
+                {"role": "user", "content": "next", "timestamp": 2.0},
+            ]
+        },
+    )()
+
+    assert streaming._compression_boundary_may_add_parent_rows(
+        session,
+        persisted_count,
+    ) is expected

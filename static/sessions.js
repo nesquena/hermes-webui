@@ -5502,8 +5502,37 @@ async function _loadOlderMessages() {
 //      ensure-all calls from rapid double-clicks on Start.
 //   2. Bump _messagesGeneration before mutating S.messages so any
 //      in-flight prefetch's post-await generation check bails out.
-async function _ensureAllMessagesLoaded() {
-  if (!_messagesTruncated || !S.session) return;
+// #5106: what the transcript looked like when a full-history request went out.
+// A send pushes onto S.messages in place (same array, longer), a finished turn
+// or a reload replaces it, and a stream keeps mutating its last row; any of
+// those means the response no longer describes what the user is looking at.
+function _transcriptFreshnessSnapshot() {
+  const msgs = Array.isArray(S.messages) ? S.messages : null;
+  return {
+    msgs: msgs,
+    len: msgs ? msgs.length : -1,
+    last: msgs && msgs.length ? msgs[msgs.length - 1] : null,
+    gen: _messagesGeneration,
+    busy: !!(S.busy || S.activeStreamId),
+  };
+}
+function _transcriptIsFresh(before) {
+  const now = _transcriptFreshnessSnapshot();
+  return !before.busy && !now.busy && now.msgs === before.msgs && now.len === before.len &&
+    now.last === before.last && now.gen === before.gen;
+}
+
+// Resolves true when the complete transcript is in S.messages (already, or
+// loaded by this call) and false when it is not: no session, a failed or
+// redirected fetch, a session switch, or, with {rejectIfStale:true}, a
+// transcript that changed while the request was out. Callers the user
+// triggers directly ignore the result; the automatic search-hit jump (#5106)
+// opts in to rejectIfStale, because a reply that lands after the user sent
+// (or finished) a turn would otherwise replace the transcript and hide it.
+async function _ensureAllMessagesLoaded(opts) {
+  const rejectIfStale = !!(opts && opts.rejectIfStale);
+  if (!S.session) return false;
+  if (!_messagesTruncated) return true;
   if (_loadingOlder) {
     // A prefetch is mid-flight (between the `_loadingOlder = true` line
     // and its post-await guards). Bumping the generation token now
@@ -5516,18 +5545,22 @@ async function _ensureAllMessagesLoaded() {
     while (_loadingOlder) {
       await new Promise(resolve => setTimeout(resolve, 16));
     }
-    if (!_messagesTruncated || !S.session) return;
+    if (!S.session) return false;
+    if (!_messagesTruncated) return true;
   }
   _loadingOlder = true;
   try {
     const sid = S.session.session_id;
+    const freshness = rejectIfStale ? _transcriptFreshnessSnapshot() : null;
     const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=all`, {timeoutMs:120000});
     // Guard: api() may have redirected (401) and returned undefined.
-    if (!data || !data.session) return;
+    if (!data || !data.session) return false;
     // Session may have been switched while we awaited. Bail rather than
     // overwrite the new session's messages.
-    if (!S.session || S.session.session_id !== sid) return;
-    if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
+    if (!S.session || S.session.session_id !== sid) return false;
+    if (_loadingSessionId !== null && _loadingSessionId !== sid) return false;
+    // Checked before ANY mutation below (messages, tool calls, paging, counts).
+    if (freshness && !_transcriptIsFresh(freshness)) return false;
     const msgs = (data.session.messages || []).filter(m => m && m.role);
     // Bump the generation BEFORE the wholesale replace so any racing
     // prefetch (whose snapshot was taken before this call's mutex
@@ -5596,6 +5629,7 @@ async function _ensureAllMessagesLoaded() {
         delete S.session.regeneration_revision;
       }
     }
+    return true;
   } finally {
     _loadingOlder = false;
   }
@@ -6476,21 +6510,39 @@ function _positionSessionActionMenu(anchorEl){
       rect=_projectPickerAnchorRect(anchorEl,_projectPickerVisibleBounds());
     }
   }
+  // Fixed coordinates and getBoundingClientRect use the layout viewport, but
+  // the visible part can be smaller AND offset (Android browser chrome,
+  // on-screen keyboard, pinch zoom). A low row's menu placed against
+  // window.innerHeight runs off the bottom of the screen. The project picker
+  // already reads the visible box via _projectPickerVisibleBounds, so the
+  // session menu places against the same box. typeof-guarded so
+  // extracted-function Node harnesses stay self-contained.
+  const _menuBounds=(typeof _projectPickerVisibleBounds==='function')
+    ?_projectPickerVisibleBounds()
+    :{top:0,left:0,bottom:window.innerHeight,right:window.innerWidth};
+  const _vTop=Number.isFinite(_menuBounds.top)?_menuBounds.top:0;
+  const _vLeft=Number.isFinite(_menuBounds.left)?_menuBounds.left:0;
+  const _vBottom=Number.isFinite(_menuBounds.bottom)?_menuBounds.bottom:window.innerHeight;
+  const _vRight=Number.isFinite(_menuBounds.right)?_menuBounds.right:window.innerWidth;
   const menuW=Math.min(280, Math.max(220, _sessionActionMenu.scrollWidth || 220));
   let left=rect.pointAnchored?rect.left:rect.right-menuW;
-  if(left<8) left=8;
-  if(left+menuW>window.innerWidth-8) left=window.innerWidth-menuW-8;
+  if(left<_vLeft+8) left=_vLeft+8;
+  if(left+menuW>_vRight-8) left=_vRight-menuW-8;
   _sessionActionMenu.style.left=left+'px';
-  _sessionActionMenu.style.top='8px';
+  _sessionActionMenu.style.top=(_vTop+8)+'px';
   // Reset any prior clamp so we measure the menu's natural height.
   _sessionActionMenu.style.maxHeight='';
-  const menuH=_sessionActionMenu.offsetHeight || 0;
+  // scrollHeight is the truthful content height when a CSS max-height cap is
+  // holding the box shorter (offsetHeight then reports the cap, not the
+  // content). A stale first layout (content missing/empty at measure time)
+  // is corrected by the rAF re-position in _mountSessionActionMenu below.
+  const menuH=Math.max(_sessionActionMenu.scrollHeight||0,_sessionActionMenu.offsetHeight||0);
   const margin=8;
-  const maxAvail=window.innerHeight-margin*2;
+  const maxAvail=Math.max(0,_vBottom-_vTop-margin*2);
   let top=rect.bottom+6;
   // Prefer flipping above the row when the menu would overflow the bottom and
   // there's room above.
-  if(top+menuH>window.innerHeight-margin && rect.top>menuH+12){
+  if(top+menuH>_vBottom-margin && rect.top>_vTop+menuH+12){
     top=rect.top-menuH-6;
   }
   // If the menu is taller than the viewport, or still overflows after the flip
@@ -6498,11 +6550,11 @@ function _positionSessionActionMenu(anchorEl){
   // its height to the viewport and let it scroll instead of clipping off-screen.
   if(menuH>maxAvail){
     _sessionActionMenu.style.maxHeight=maxAvail+'px';
-    top=margin;
+    top=_vTop+margin;
   } else {
     // Clamp vertically so the whole menu stays on-screen at both edges.
-    if(top+menuH>window.innerHeight-margin) top=window.innerHeight-margin-menuH;
-    if(top<margin) top=margin;
+    if(top+menuH>_vBottom-margin) top=_vBottom-margin-menuH;
+    if(top<_vTop+margin) top=_vTop+margin;
   }
   _sessionActionMenu.style.top=top+'px';
 }
@@ -6594,6 +6646,16 @@ function _mountSessionActionMenu(menu, session, anchorEl){
   const row=anchorEl.closest('.session-item,.session-child-session');
   if(row) row.classList.add('menu-open');
   _positionSessionActionMenu(anchorEl);
+  // The first measure can race late-arriving content (fonts, locale strings)
+  // and read a short menu that then grows past the viewport. Re-measure once
+  // layout settles; the second pass is idempotent when nothing changed.
+  if(typeof requestAnimationFrame==='function'){
+    const _settledMenu=menu;
+    requestAnimationFrame(()=>{
+      if(_sessionActionMenu!==_settledMenu||!_settledMenu.isConnected) return;
+      _positionSessionActionMenu(_sessionActionAnchor);
+    });
+  }
   _playSessionActionMenuEntrance(menu);
   const menuItems=()=>Array.from(menu.querySelectorAll('.session-action-opt:not([disabled])'));
   // True while a Tab pressed in the menu moves the focus.
@@ -8786,6 +8848,46 @@ function _sessionSearchContentPreview(session, query){
   return preview||'';
 }
 
+// #4159/#5106: once a content-search hit's session has opened, scroll to the
+// matched message and flash it. match_message_idx is a FULL-session index, so it
+// goes to outline.js's full-session jump (reached through window: that helper
+// lives in another script's IIFE) together with the clicked session id for the
+// session-switch guard. No/invalid index or a non-content hit: just the open.
+// The search-jump generation (#5106): every row open, a changed or cleared query
+// and an outline jump advance it, and outline.js drops a jump whose generation is
+// no longer current.
+function _nextSessionSearchJumpGen(){
+  if(typeof window==='undefined') return null;
+  return window._sessionSearchJumpGen=(Number(window._sessionSearchJumpGen)||0)+1;
+}
+
+function _jumpToSessionSearchHit(session, hitQuery, hitGen){
+  if(!session||session.match_type!=='content') return false;
+  const idx=session.match_message_idx;
+  const sid=session.session_id;
+  if(!sid||!Number.isSafeInteger(idx)||idx<0) return false;
+  if(typeof window==='undefined'||typeof window._jumpToFullSessionMessage!=='function') return false;
+  // The query that produced this hit, so the jump can confirm the target really
+  // contains it (merged/stitched transcripts can shift indices).
+  let query=typeof hitQuery==='string'?hitQuery.trim():'';
+  if(!query){ try{ query=((typeof $==='function'&&$('sessionSearch')&&$('sessionSearch').value)||'').trim(); }catch(_e){} }
+  // hitGen is minted when the row is clicked, BEFORE the session opens: a query
+  // changed (or another row opened) while it loaded has superseded this hit.
+  let gen=hitGen;
+  if(Number.isSafeInteger(gen)){
+    if(window._sessionSearchJumpGen!==gen) return false;
+  }else{
+    gen=_nextSessionSearchJumpGen();
+  }
+  window.setTimeout(()=>{
+    try{
+      const pending=window._jumpToFullSessionMessage(idx,sid,query,gen);
+      if(pending&&typeof pending.catch==='function') pending.catch(()=>{});
+    }catch(_e){}
+  },0);
+  return true;
+}
+
 function _sessionSearchAddIdCandidate(candidates, seen, value){
   const raw=String(value||'').trim();
   if(!raw) return;
@@ -8910,6 +9012,10 @@ function filterSessions(){
   if(q!==_lastSessionSearchQuery){
     _lastSessionSearchQuery=q;
     _hideSearchPreviewsAfterSelect=false;
+    // A changed or cleared query cancels a search-hit jump still in flight (#5106).
+    // Inline (not _nextSessionSearchJumpGen) so harnesses that extract
+    // filterSessions alone keep working.
+    if(typeof window!=='undefined') window._sessionSearchJumpGen=(Number(window._sessionSearchJumpGen)||0)+1;
   }
   renderSessionListFromCache();
   clearTimeout(_searchDebounceTimer);
@@ -9651,7 +9757,9 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
       // (the chain renders as an orphan) or an unresolvable link keeps the child an orphan.
       const subagentParentKnown=childIsDelegatedSubagent&&subagentHostHiddenByScope(child);
       const crossSurfaceChild=!!(child&&child._cross_surface_child_session&&_isChildSession(child));
-      if(!searchActive&&(subagentParentKnown||crossSurfaceChild)) continue;
+      // #8791: a row whose parent exists only in another profile is never hidden; it was a visible row before
+      // the per-profile projection (_renderSidebarRowsFromRawSessions) and stays one, top-level in its profile.
+      if(!searchActive&&!child._sidebar_parent_outside_profile&&(subagentParentKnown||crossSurfaceChild)) continue;
       orphans.push({...child,_orphan_child_session:true});
     }
   }
@@ -10082,15 +10190,34 @@ function _isDelegatedSubagentRow(s){
 // every other row keeps its own. Memoized per render, so each lineage resolves once.
 function _sidebarProjectResolver(rowsById){
   const memo=new Map();
+  // #8791: parents, lineage roots and memo entries are keyed by profile + id first, as in
+  // _sidebarDisplayBucketIsCli: with All profiles on, a bare id can name another profile's same-id
+  // parent and hand its project to this child. When the row's own profile has no such id, fall back to
+  // the bare id as before, so a legacy row tagged 'default' under a renamed root still finds its parent.
+  const scopedKey=(owner,id)=>String((owner&&(owner.profile||owner.profile_name))||'').trim()+'\u0000'+String(id||'');
+  const byProfileId=rowsById&&rowsById.byProfileId instanceof Map?rowsById.byProfileId:null;
   // Resolve the parent like the attach step does: a child of a compressed parent names its
   // pre-compression segment, which the payload carries only as the tip's _lineage_root_id.
   const byLineageRoot=new Map();
-  if(rowsById) rowsById.forEach(r=>{ if(r&&r._lineage_root_id&&!byLineageRoot.has(r._lineage_root_id)) byLineageRoot.set(r._lineage_root_id,r); });
+  const byLineageRootBare=new Map();
+  if(rowsById) (byProfileId||rowsById).forEach(r=>{
+    if(!r||!r._lineage_root_id) return;
+    const key=scopedKey(r,r._lineage_root_id);
+    if(!byLineageRoot.has(key)) byLineageRoot.set(key,r);
+    if(!byLineageRootBare.has(r._lineage_root_id)) byLineageRootBare.set(r._lineage_root_id,r);
+  });
   const parentOf=(s)=>{
     const pid=s.parent_session_id;
     if(!rowsById||!pid) return null;
-    return rowsById.get(pid)||rowsById.get(s._parent_lineage_tip_id)
-      ||byLineageRoot.get(pid)||byLineageRoot.get(s._parent_lineage_root_id)||null;
+    const refs=[pid,s._parent_lineage_tip_id];
+    const roots=[pid,s._parent_lineage_root_id];
+    if(byProfileId){
+      for(const id of refs){ const hit=id&&byProfileId.get(scopedKey(s,id)); if(hit) return hit; }
+      for(const id of roots){ const hit=id&&byLineageRoot.get(scopedKey(s,id)); if(hit) return hit; }
+    }
+    for(const id of refs){ const hit=id&&rowsById.get(id); if(hit) return hit; }
+    for(const id of roots){ const hit=id&&byLineageRootBare.get(id); if(hit) return hit; }
+    return null;
   };
   return function projectIdFor(s){
     if(!s) return null;
@@ -10098,14 +10225,14 @@ function _sidebarProjectResolver(rowsById){
     const onPath=new Set();
     let cur=s, result=null;
     while(cur){
-      const sid=cur.session_id;
-      if(memo.has(sid)){ result=memo.get(sid); break; }
-      if(cur.project_id||!_isDelegatedSubagentRow(cur)){ result=cur.project_id||null; if(sid) path.push(sid); break; }
-      if(onPath.has(sid)) break;
-      onPath.add(sid); path.push(sid);
+      const key=scopedKey(cur,cur.session_id);
+      if(memo.has(key)){ result=memo.get(key); break; }
+      if(cur.project_id||!_isDelegatedSubagentRow(cur)){ result=cur.project_id||null; if(cur.session_id) path.push(key); break; }
+      if(onPath.has(key)) break;
+      onPath.add(key); path.push(key);
       cur=parentOf(cur);
     }
-    for(const sid of path) memo.set(sid,result);
+    for(const key of path) memo.set(key,result);
     return result;
   };
 }
@@ -10349,7 +10476,89 @@ function _scopedSidebarReferenceRows(isCli, projectIdFor){
 
 function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw, payloadRowsById){
   const referenceRows=Array.isArray(referenceSessionsRaw)?referenceSessionsRaw:sessionsRaw;
-  return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows, payloadRowsById);
+  const project=(raw, refs, payload)=>_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(raw), raw, refs, payload);
+  // #8791: lineage collapse and child attachment key rows by bare session id and compression-lineage id.
+  // With All profiles on, two profiles can hold the same ids (a cloned profile or a copied state.db), and
+  // one pass attached a child under the OTHER profile's same-id parent, or collapsed two profiles'
+  // compressed conversations into one row. When any of those ids is shared across profiles, project each
+  // profile on its own; otherwise keep the single pass unchanged. Callers sort (_sessionSidebarSortCompare)
+  // or only count/search the result, so concatenating the groups changes nothing on screen.
+  // A row's profile group: the server publishes it (sidebar_profile_group, renamed-root aliases folded onto
+  // 'default'), so rows of one profile stay together even before the profile roster loads. For a row without
+  // it: ''/missing and 'default' are the root profile, and so is the root under its renamed name (the active
+  // profile when it is the root, or a roster entry flagged is_default) — mirroring
+  // routes._sidebar_profile_group_key, _profileMatchesActiveProfile and _cronProfileNameIsRootAlias.
+  const roster=(typeof _profilesCache!=='undefined'&&_profilesCache&&Array.isArray(_profilesCache.profiles))?_profilesCache.profiles:[];
+  const groupOf=(s)=>{
+    const published=s&&typeof s.sidebar_profile_group==='string'?s.sidebar_profile_group.trim():'';
+    if(published) return published;
+    const profile=String((s&&(s.profile||s.profile_name))||'').trim();
+    if(!profile||profile==='default') return 'default';
+    if(typeof S!=='undefined'&&S&&S.activeProfileIsDefault&&profile===String(S.activeProfile||'').trim()) return 'default';
+    if(roster.some(p=>p&&p.is_default&&p.name===profile)) return 'default';
+    return profile;
+  };
+  const payloadRows=payloadRowsById instanceof Map
+    ? [...((payloadRowsById.byProfileId instanceof Map)?payloadRowsById.byProfileId:payloadRowsById).values()]
+    : null;
+  // The groups present, and whether any session or lineage id appears under two groups (never in a
+  // single-profile view).
+  const groupById=new Map();
+  const groups=new Set();
+  let shared=false;
+  for(const list of [sessionsRaw, referenceRows, payloadRows]){
+    if(!Array.isArray(list)) continue;
+    for(const s of list){
+      if(!s||!s.session_id) continue;
+      const group=groupOf(s);
+      groups.add(group);
+      for(const id of [s.session_id,s._lineage_root_id,s._lineage_tip_id]){
+        if(!id) continue;
+        const seen=groupById.get(id);
+        if(seen===undefined) groupById.set(id,group);
+        else if(seen!==group) shared=true;
+      }
+    }
+  }
+  if(!shared) return project(sessionsRaw, referenceRows, payloadRowsById);
+  // Never hide a row master showed: a child whose parent exists in no row of its own profile (sessions,
+  // reference or payload rows), but is a visible row of another profile, attached there in one pass. The
+  // per-profile pass can't attach it, and the scope suppression in _attachChildSessionsToSidebarRows would
+  // drop it; flag it so it renders as a top-level row in its own profile instead.
+  const idsByGroup=new Map();
+  const visibleIdsByGroup=new Map();
+  const addIds=(map, group, s)=>{
+    if(!map.has(group)) map.set(group,new Set());
+    for(const id of [s.session_id,s._lineage_root_id,s._lineage_tip_id]) if(id) map.get(group).add(id);
+  };
+  for(const list of [sessionsRaw, referenceRows, payloadRows]){
+    if(!Array.isArray(list)) continue;
+    for(const s of list) if(s&&s.session_id) addIds(idsByGroup, groupOf(s), s);
+  }
+  for(const s of sessionsRaw||[]) if(s&&s.session_id) addIds(visibleIdsByGroup, groupOf(s), s);
+  const parentOutsideProfile=(s, group)=>{
+    const refs=[s.parent_session_id,s._parent_lineage_root_id,s._parent_lineage_tip_id].filter(Boolean);
+    if(!refs.length) return false;
+    const own=idsByGroup.get(group)||new Set();
+    if(refs.some(id=>own.has(id))) return false;
+    for(const [other, ids] of visibleIdsByGroup){
+      if(other!==group&&refs.some(id=>ids.has(id))) return true;
+    }
+    return false;
+  };
+  const rows=[];
+  const orphans=[];
+  for(const group of groups){
+    const inGroup=s=>!!s&&groupOf(s)===group;
+    const raw=(sessionsRaw||[]).filter(inGroup)
+      .map(s=>parentOutsideProfile(s, group)?{...s,_sidebar_parent_outside_profile:true}:s);
+    if(!raw.length) continue;
+    const payload=payloadRows?_sidebarRowsById([payloadRows.filter(inGroup)]):payloadRowsById;
+    for(const row of project(raw, referenceRows.filter(inGroup), payload)){
+      (row&&row._orphan_child_session?orphans:rows).push(row);
+    }
+  }
+  return [...rows,...orphans];
 }
 
 // Apply the renderer's complete source/reference/lineage projection to an
@@ -11607,6 +11816,9 @@ function renderSessionListFromCache(){
           }
           row.oncontextmenu=(e)=>{
             if(readOnlyChild) return;
+            // Same rename-input exemption as the main row handler below:
+            // never swallow the text toolbar inside an editable title.
+            if(e.target&&e.target.closest&&e.target.closest('.session-title-input')) return;
             e.preventDefault();
             if(e.pointerType==='touch'||e.pointerType==='pen') return;
             e.stopPropagation();
@@ -11694,6 +11906,9 @@ function renderSessionListFromCache(){
     }
     el.oncontextmenu=(e)=>{
       if(readOnly) return;
+      // Rename input keeps its default action: a long-press inside the
+      // editable title must still raise the Android cut/copy/paste toolbar.
+      if(e.target&&e.target.closest&&e.target.closest('.session-title-input')) return;
       e.preventDefault();
       if(e.pointerType==='touch'||e.pointerType==='pen') return;
       e.stopPropagation();
@@ -11976,8 +12191,13 @@ function renderSessionListFromCache(){
     const _openRowSession=async()=>{
       if(_renamingSid) return;
       try{
+        const _hitQuery=($('sessionSearch').value||'').trim();
+        // Minted before the open awaits, so a query changed while the session
+        // loads (or a later row click) cancels this hit's jump (#5106).
+        const _hitGen=_nextSessionSearchJumpGen();
         if(($('sessionSearch').value||'').trim()) _hideSearchPreviewsAfterSelect=true;
         await _openSidebarSession(s);
+        _jumpToSessionSearchHit(s,_hitQuery,_hitGen);
       }finally{
         el.classList.remove('loading');
       }
