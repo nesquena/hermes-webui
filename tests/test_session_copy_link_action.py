@@ -189,7 +189,15 @@ def test_conversation_filter_keeps_content_search_results_when_query_is_session_
     assert "const sidebarRows=_sessionRowsWithActiveEphemeralSession(_allSessions);" in SESSIONS_JS
     assert "const searchMatches=_sessionSearchMergeMatches(sidebarRows,searchQueryRaw,_contentSearchResults);" in SESSIONS_JS
     assert "const allMatched=_ensureActiveSessionRowPresent(searchMatches,sidebarRows);" in SESSIONS_JS
-    assert "const directAndTitleMatches=_sessionSearchDirectAndTitleMatches(_allSessions,currentQ);" in SESSIONS_JS
-    assert "const directOrTitleIds=new Set(directAndTitleMatches.map(s=>s.session_id));" in SESSIONS_JS
-    assert "!directOrTitleIds.has(s.session_id)" in SESSIONS_JS
-    assert "api(`/api/sessions/search?q=${encodeURIComponent(requestedQ)}&content=1&depth=5`)" in SESSIONS_JS
+    # The content rows now arrive through the incremental-search merge helper:
+    # the direct/title exclusion and the de-duplication that keeps a session-id
+    # query's own results must still live there (and the classic endpoint stays
+    # the no-EventSource fallback).
+    merge_start = SESSIONS_JS.index("function _mergeContentSearchResults(")
+    merge_end = SESSIONS_JS.index("\nfunction ", merge_start + 1)
+    merge_body = SESSIONS_JS[merge_start:merge_end]
+    assert "const directAndTitleMatches=_sessionSearchDirectAndTitleMatches(_allSessions,query);" in merge_body
+    assert "const directOrTitleIds=new Set(directAndTitleMatches.map(s=>s.session_id));" in merge_body
+    assert "directOrTitleIds.has(sid)" in merge_body
+    assert "seen.has(sid)" in merge_body
+    assert "api(`/api/sessions/search?q=${encodeURIComponent(query)}&content=1&depth=5`)" in SESSIONS_JS

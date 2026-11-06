@@ -2270,7 +2270,15 @@ def test_sidebar_search_and_rows_use_read_only_display_title():
     assert "function _sessionTitleTags" in js
     assert "function _sessionSearchDirectAndTitleMatches" in js
     assert "const titleMatches=(sessions||[]).filter(s=>_sessionDisplayTitle(s).toLowerCase().includes(q));" in js
-    assert "const directAndTitleMatches=_sessionSearchDirectAndTitleMatches(_allSessions,currentQ);" in js
+    # Sidebar search rows are built in _mergeContentSearchResults now (the scan
+    # moved into a background job); it must still route through the
+    # display-title matcher rather than the stale persisted title.
+    merge_start = js.index("function _mergeContentSearchResults(")
+    merge_end = js.index("\nfunction ", merge_start + 1)
+    assert (
+        "const directAndTitleMatches=_sessionSearchDirectAndTitleMatches(_allSessions,query);"
+        in js[merge_start:merge_end]
+    )
     assert "const rawTitle=_sessionDisplayTitle(s);" in js
     assert "const tags=_sessionTitleTags(rawTitle);" in js
     assert "const segTitle=_sessionDisplayTitle(seg)||t('session_lineage_segment_untitled');" in js
