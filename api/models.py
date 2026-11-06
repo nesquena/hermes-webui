@@ -14770,6 +14770,7 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
                 "clockless": None,
                 "by_clock": {},
                 "by_identity": {},
+                "by_namespace": {},
                 "identity_values": set(),
                 "by_occurrence": {},
             },
@@ -14792,6 +14793,13 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
             if identity:
                 group["by_identity"].setdefault(identity, key)
                 group["identity_values"].add(identity)
+                # Index the identities PER NAMESPACE as well (#8672 review P2):
+                # a stable WebUI id and a SQLite row id describe different
+                # things, so only ids inside ONE namespace can contradict each
+                # other.
+                group["by_namespace"].setdefault(
+                    _occurrence_identity_namespace(identity), {}
+                ).setdefault(identity, key)
     # Keep loose_by_key lazy.  Some transcripts contain multi-megabyte tool
     # outputs; eagerly casefolding + regex-tokenizing every visible key on every
     # duplicate probe made /api/session take 10s+ and blocked /api/sessions.
@@ -14855,6 +14863,38 @@ def _visible_key_without_occurrence(key) -> tuple:
         else None
     )
     return (role, content, tool_calls, "", sidecar)
+
+
+def _visible_key_without_private_identity(key) -> tuple:
+    """Return ``key`` with the PRIVATE identity removed from the occurrence slot.
+
+    The occurrence discriminator is ``"<clock>|<identity>"``.  The identity half
+    is PRIVATE to one store: the WebUI sidecar carries a stable message ``id``
+    while the SQLite projection carries a ``_state_db_row_id``.  They describe
+    DIFFERENT things about the SAME logical row, so the ordered prefix proof in
+    ``api.session_ops._bounded_tail_snapshot_if_safe`` must not compare them
+    (#8672 review P2).  Comparing them literally made the proof fail for every
+    settled row, which refused the bounded regeneration path and forced a
+    full-history read.
+
+    The CLOCK half is kept, so the representation stays clock-sensitive: a
+    repeated turn below and above the read floor remains distinguishable, and
+    the real clock-disagreement fallback keeps working.
+
+    The provider sidecar (slot 4) and the tool-call identity (slot 2) are
+    untouched -- tool/provider identity must keep separating rows.
+    """
+    role = key[0] if isinstance(key, tuple) and key else ""
+    content = key[1] if isinstance(key, tuple) and len(key) > 1 else ""
+    tool_calls = key[2] if isinstance(key, tuple) and len(key) > 2 else ""
+    occurrence = _visible_key_field(key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
+    clock, _identity = _occurrence_parts(occurrence)
+    sidecar = (
+        key[_VISIBLE_KEY_SIDECAR_INDEX]
+        if isinstance(key, tuple) and len(key) > _VISIBLE_KEY_SIDECAR_INDEX
+        else None
+    )
+    return (role, content, tool_calls, clock, sidecar)
 
 
 # Layout of a content key:
@@ -14936,6 +14976,58 @@ def _occurrence_parts(value) -> tuple[str, str]:
     return text, ""
 
 
+def _occurrence_identity_namespace(identity) -> str:
+    """Return the NAMESPACE a private identity belongs to.
+
+    ``_session_message_occurrence_for_key`` encodes a private identity as
+    ``"id:<field>:<value>"``.  The ``<field>`` part IS the namespace: a
+    stable WebUI ``id`` and a SQLite ``_state_db_row_id`` describe different
+    things and must never be compared against each other (#8672 review P2).
+
+    ``id`` and ``message_id`` are the SAME namespace -- they are two aliases of
+    one stable message identity, and ``_stable_message_identity_details``
+    already treats two different values across those aliases as contradictory
+    provenance.  Every SQLite row-id alias (``_row_id`` / ``_state_db_row_id``
+    / ``_db_row_id`` / ``state_db_row_id``) is likewise one namespace.
+
+    Anything that is not a recognised ``id:<field>:<value>`` shape falls back
+    to its own literal value, so two unrecognised identities only conflict when
+    they are literally equal.
+    """
+    if not identity:
+        return ""
+    text = str(identity)
+    if not text.startswith("id:"):
+        return text
+    _prefix, _separator, remainder = text.partition(":")
+    field, _separator, _value = remainder.partition(":")
+    if not field:
+        return text
+    if field in ("id", "message_id"):
+        return "stable"
+    if field in ("_row_id", "_state_db_row_id", "_db_row_id", "state_db_row_id"):
+        return "state_db_row"
+    return field
+
+
+def _occurrence_identity_conflict(left_identity, right_identity) -> bool:
+    """True when two private identities CONTRADICT each other.
+
+    Two identities contradict only when they live in the SAME namespace and
+    carry different values.  A stable WebUI id and a SQLite row id are
+    different namespaces, so they cannot contradict each other (#8672 review
+    P2) -- the reconciled replay of one logical row carries the stable id on
+    the sidecar side and the row id on the SQLite side.
+    """
+    if not left_identity or not right_identity:
+        return False
+    if left_identity == right_identity:
+        return False
+    return _occurrence_identity_namespace(left_identity) == _occurrence_identity_namespace(
+        right_identity
+    )
+
+
 def _visible_keys_share_occurrence(left, right) -> bool:
     """True when two occurrences are the same, or neither proves difference.
 
@@ -14952,11 +15044,14 @@ def _visible_keys_share_occurrence(left, right) -> bool:
 
     Conflicting private ids, however, ARE evidence of distinct rows even when
     only one side carries a clock (Greptile r4): a sidecar row with durable id
-    7 must not swallow a clockless durable row with id 8.
+    7 must not swallow a clockless durable row with id 8.  That conflict is
+    only meaningful WITHIN one identity namespace (#8672 review P2): the
+    stable WebUI ``id`` and the SQLite ``_state_db_row_id`` are different
+    namespaces, so they never contradict each other.
     """
     left_clock, left_identity = _occurrence_parts(left)
     right_clock, right_identity = _occurrence_parts(right)
-    if left_identity and right_identity and left_identity != right_identity:
+    if _occurrence_identity_conflict(left_identity, right_identity):
         return False
     if left_clock and right_clock:
         return left_clock == right_clock
@@ -14972,16 +15067,24 @@ def _clockfree_duplicate_candidate(group: dict, occurrence):
     (#8672 gate r3 D2).  Two established different clocks remain genuinely
     distinct, and so do two conflicting private identities even when only one
     side also carries a clock (Greptile r4).
+
+    A private identity only contradicts another one WITHIN its own namespace
+    (#8672 review P2): a stable WebUI ``id`` and a SQLite ``_state_db_row_id``
+    describe different things, so they never conflict and the reconciled
+    replay of one logical row still collapses.
     """
     exact = group.get("by_occurrence", {}).get(occurrence)
     if exact is not None:
         return exact
     clock, identity = _occurrence_parts(occurrence)
-    identity_values = group.get("identity_values") or set()
-    if identity and identity_values and identity not in identity_values:
-        # A conflicting private id is contradictory identity, not a missing
-        # clock: keep the rows distinct.
-        return None
+    by_namespace = group.get("by_namespace") or {}
+    if identity:
+        namespace = _occurrence_identity_namespace(identity)
+        namespace_values = by_namespace.get(namespace) or {}
+        if namespace_values and identity not in namespace_values:
+            # A conflicting private id in the SAME namespace is contradictory
+            # identity, not a missing clock: keep the rows distinct.
+            return None
     if clock:
         clock_mates = group.get("by_clock", {}).get(clock)
         if clock_mates is not None:
@@ -14989,10 +15092,16 @@ def _clockfree_duplicate_candidate(group: dict, occurrence):
                 match = clock_mates.get(identity)
                 if match is not None:
                     return match
-                # Same clock but a DIFFERENT private id: contradictory identity,
-                # not clock absence.  Only an identity-less twin is one-sided
-                # enough to collapse.
-                return clock_mates.get("")
+                # Same clock but a DIFFERENT private id.  That contradicts only
+                # inside one namespace; an id from another namespace (stable
+                # WebUI id vs SQLite row id) is merely one-sided and collapses
+                # onto the identity-less or otherwise compatible twin.
+                for candidate_identity, candidate in clock_mates.items():
+                    if not _occurrence_identity_conflict(
+                        identity, candidate_identity
+                    ):
+                        return candidate
+                return None
             return next(iter(clock_mates.values()))
         if group.get("by_clock"):
             return None
@@ -15001,7 +15110,16 @@ def _clockfree_duplicate_candidate(group: dict, occurrence):
         match = group.get("by_identity", {}).get(identity)
         if match is not None:
             return match
-        return group.get("any") if not identity_values else None
+        # No exact identity match.  Identities from a DIFFERENT namespace cannot
+        # contradict ours, so the row still collapses onto one of them.
+        for candidate_identity, candidate in (group.get("by_identity") or {}).items():
+            if not _occurrence_identity_conflict(identity, candidate_identity):
+                return candidate
+        if not (group.get("by_identity") or {}):
+            # The group carries no identity at all: ours cannot contradict
+            # anything, so the row collapses.
+            return group.get("any")
+        return None
     return group.get("clockless") or group.get("any")
 
 
