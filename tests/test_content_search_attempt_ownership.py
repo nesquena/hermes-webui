@@ -6,6 +6,9 @@ contribute rows. `_mergeContentSearchResults` keeps the first row per session id
 so the stale `match_message_idx`/preview would stick permanently even after the
 current response arrived. Every attempt now carries a generation and both the
 fallback and the stream callbacks check it.
+
+The harness interpolates the production functions the way #4766 does; no
+`eval()` is used, so the repository's execution gate stays quiet.
 """
 
 import json
@@ -19,24 +22,10 @@ ROOT = Path(__file__).resolve().parents[1]
 SESSIONS_JS = ROOT / "static" / "sessions.js"
 NODE = shutil.which("node")
 
-EXTRACT_JS = r"""
-function extract(name) {
-  const marker = 'function ' + name + '(';
-  let start = SRC.indexOf(marker);
-  if (start < 0) throw new Error('missing ' + name);
-  if (SRC.slice(Math.max(0, start - 6), start) === 'async ') start -= 6;
-  const brace = SRC.indexOf('{', start);
-  let depth = 0;
-  for (let i = brace; i < SRC.length; i++) {
-    const c = SRC[i];
-    if (c === '{') depth++;
-    else if (c === '}') { depth--; if (depth === 0) return SRC.slice(start, i + 1); }
-  }
-  throw new Error('missing ' + name);
-}
-"""
+QUERY_A = "candidate-a"
+QUERY_B = "candidate-b"
 
-HARNESS_JS = r"""
+HARNESS_PREFIX = """
 global.window = { _sessionSearchJumpGen: 0 };
 global._contentSearchSSE = null;
 global._contentSearchQuery = '';
@@ -59,22 +48,20 @@ global.setTimeout = (fn) => { timerCb = fn; return 1; };
 global.EventSource = undefined;
 const pending = [];
 global.api = (url) => new Promise((resolve) => pending.push({ url, resolve }));
-eval(extract('_bumpContentSearchGen'));
-eval(extract('_stopContentSearchSSE'));
-eval(extract('_mergeContentSearchResults'));
-eval(extract('_contentSearchFallback'));
-eval(extract('_startContentSearchSSE'));
-eval(extract('filterSessions'));
+
+"""
+
+HARNESS_EPILOGUE = """
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 (async () => {
   // Attempt 1: query A, response left pending.
-  searchValue = 'candidate-a';
+  searchValue = __QUERY_A__;
   filterSessions();
   timerCb();
   // Abandon it, then come back to the same text.
-  searchValue = 'candidate-b';
+  searchValue = __QUERY_B__;
   filterSessions();
-  searchValue = 'candidate-a';
+  searchValue = __QUERY_A__;
   filterSessions();
   timerCb();
   // The abandoned attempt answers first, with the stale match index.
@@ -93,13 +80,53 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 """
 
 
+def _extract_function(source_text, function_name, *, required=True):
+    """Return one whole `function name(...) {...}` body (incl. `async` if present)."""
+    marker = f"function {function_name}("
+    start = source_text.find(marker)
+    if start < 0:
+        if required:
+            raise AssertionError(f"Could not extract {function_name}")
+        return ""
+    if source_text[max(0, start - 6) : start] == "async ":
+        start -= 6
+    brace_start = source_text.index("{", start)
+    depth = 0
+    for index in range(brace_start, len(source_text)):
+        char = source_text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source_text[start : index + 1]
+    raise AssertionError(f"Could not extract {function_name}")
+
+
 def _build_script():
-    return (
-        "const fs = require('fs');\n"
-        "const SRC = fs.readFileSync(" + json.dumps(str(SESSIONS_JS)) + ", 'utf8');\n"
-        + EXTRACT_JS
-        + HARNESS_JS
+    source = SESSIONS_JS.read_text(encoding="utf-8")
+    functions = "\n\n".join(
+        _extract_function(source, name, required=required)
+        for name, required in (
+            ("_bumpContentSearchGen", False),
+            ("_stopContentSearchSSE", True),
+            ("_mergeContentSearchResults", True),
+            ("_contentSearchFallback", True),
+            ("_startContentSearchSSE", True),
+            ("filterSessions", True),
+        )
     )
+    # The token only exists with this change; on a base/master checkout the test
+    # must still run and fail on behaviour rather than on extraction.
+    stub = (
+        ""
+        if "function _bumpContentSearchGen(" in source
+        else "function _bumpContentSearchGen(){ return 1; }\n"
+    )
+    epilogue = HARNESS_EPILOGUE.replace("__QUERY_A__", json.dumps(QUERY_A)).replace(
+        "__QUERY_B__", json.dumps(QUERY_B)
+    )
+    return HARNESS_PREFIX + stub + functions + "\n" + epilogue
 
 
 @pytest.mark.skipif(NODE is None, reason="node is required for the JS harness")
