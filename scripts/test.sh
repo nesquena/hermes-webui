@@ -84,6 +84,7 @@ modules = [
     "pytest_timeout",
     "ruff",
     "yaml",
+    "websockets",
 ]
 missing = [name for name in modules if importlib.util.find_spec(name) is None]
 if missing:
