@@ -2594,4 +2594,8 @@ such as `$1,000`, `costs $5 and $10`, and `$5-$10` stay literal.
 
 For browser verification, check these examples in assistant replies and workspace
 Markdown previews at desktop and mobile widths. Numeric math should render with
-KaTeX, currency should remain prose, and examples inside code should stay literal.
+KaTeX, currency should remain prose, and examples inside code and raw `<pre>` blocks should stay literal. Link
+destinations such as `[rate](https://example.test/path/$0.5$)` must retain
+their exact URLs. Check `Repeat $x + y$ 2 times.` and
+`Repeat $x + y$ 2 ($z$)` for separate formulas without leaked placeholders.
+The Node regression also caps rendering 80 KiB of repeated `R$ 5 ` at 100 ms.

@@ -62,8 +62,11 @@ def _run_renderers(markdown: str) -> dict:
     js += textwrap.dedent(
         r'''
         const input=process.argv[1];
+        const start=performance.now();
+        const assistant=renderMd(input);
+        const elapsedMs=performance.now()-start;
         console.log(JSON.stringify({
-          assistant: renderMd(input),
+          assistant, elapsedMs,
           user: _renderUserFencedBlocks(input),
         }));
         '''
@@ -571,3 +574,36 @@ def test_math_stash_token_uses_single_backslash_null_byte():
     assert good_returns, (
         "Math stash return must use single-backslash '\x00M' (null byte convention)"
     )
+
+
+@pytest.mark.parametrize("sample,bodies", [
+    ("Repeat $x + y$ 2 times.", ["x + y"]),
+    ("Repeat $x + y$ 2 ($z$)", ["x + y", "z"]),
+])
+def test_gate_r1_delimiter_ownership(sample, bodies):
+    html = _run_renderers(sample)["assistant"]
+    for body in bodies:
+        assert f'<span class="katex-inline" data-katex="inline">{body}</span>' in html
+    assert html.count('data-katex="inline"') == len(bodies)
+    assert "2 times." in html if len(bodies) == 1 else "2 (" in html
+    assert "\x00" not in html
+
+
+def test_gate_r2_raw_pre_is_opaque():
+    html = _run_renderers("<pre>$0.5$</pre>")["assistant"]
+    assert "<pre>$0.5$</pre>" in html
+    assert "katex-inline" not in html
+
+
+def test_gate_r3_link_destination_is_opaque():
+    html = _run_renderers("[rate](https://example.test/path/$0.5$)")["assistant"]
+    assert 'href="https://example.test/path/$0.5$"' in html
+    assert "katex-inline" not in html
+    assert "\x00" not in html
+
+
+def test_gate_r4_currency_prefix_scan_is_bounded():
+    result = _run_renderers("R$ 5 " * 16384)
+    assert result["elapsedMs"] < 100
+    assert "katex-inline" not in result["assistant"]
+    assert "\x00" not in result["assistant"]
