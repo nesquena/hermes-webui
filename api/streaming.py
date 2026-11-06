@@ -15934,7 +15934,11 @@ def _run_agent_streaming(
                 _session_effort = getattr(s, 'reasoning_effort', None)
                 try:
                     _session_effort = effective_session_reasoning_effort(
-                        _session_effort, _profile_home,
+                        _session_effort,
+                        _profile_home,
+                        model_id=resolved_model,
+                        provider_id=resolved_provider,
+                        base_url=resolved_base_url,
                     )
                 except Exception:
                     logger.warning("isolated reasoning config read failed; using session config", exc_info=True)
