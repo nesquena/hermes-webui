@@ -486,11 +486,11 @@ def test_insights_refresh_restored_by_latest_request_runtime():
         // --- Scenario SUCCESS: animated A, then non-animated B supersedes ---
         curBox = { innerHTML: '' };
         curBtn = { style: {}, disabled: false };
-        const pa = loadInsights(true);           // A: 3 api() calls
+        const pa = loadInsights(true);           // A: 4 api() calls
         if (curBtn.disabled !== true) throw new Error('A should disable the button');
-        const aDeferreds = snapshotLatest(3);
-        const pb = loadInsights();               // B: 3 api() calls (supersedes A)
-        const bDeferreds = snapshotLatest(3);
+        const aDeferreds = snapshotLatest(4); // 4 api() calls since traffic panel landed
+        const pb = loadInsights();               // B: 4 api() calls (supersedes A)
+        const bDeferreds = snapshotLatest(4);
         // Resolve B (latest) FIRST...
         resolveAll(bDeferreds);
         await pb;
@@ -504,11 +504,11 @@ def test_insights_refresh_restored_by_latest_request_runtime():
         curBox = { innerHTML: '' };
         curBtn = { style: {}, disabled: false };
         global._insightsReqToken = 0;
-        const pa2 = loadInsights(true);          // A2 (animated): disables
+        const pa2 = loadInsights(true);          // A2 (animated): 4 api() calls, disables
         if (curBtn.disabled !== true) throw new Error('A2 should disable the button');
-        const a2d = snapshotLatest(3);
-        const pb2 = loadInsights();              // B2 (non-animated, latest)
-        const b2d = snapshotLatest(3);
+        const a2d = snapshotLatest(4);
+        const pb2 = loadInsights();              // B2 (non-animated, latest): 4 api() calls
+        const b2d = snapshotLatest(4);
         rejectAll(b2d);                          // latest errors first
         await pb2;
         if (curBtn.disabled) throw new Error('latest (non-animated, erroring) B must restore the button');
@@ -2838,3 +2838,89 @@ def test_insights_range_fallback_note_is_localized_at_runtime():
     for loc, rec in sorted(out.items()):
         assert rec["val"].count("{days}") == 1, \
             f"{loc} must carry exactly one {{days}} placeholder: {rec['val']!r}"
+
+
+def test_insights_traffic_endpoint_returns_inbound_and_outbound(monkeypatch):
+    """New /api/insights/traffic endpoint returns top 10 inbound IPs and outbound domains."""
+    import api.routes as routes
+    from unittest.mock import patch, MagicMock
+    import pathlib
+
+    fake_nginx_logs = (
+        "192.168.1.1 - - [28/Oct/2026:10:00:00 +0700] \"GET / HTTP/1.1\" 200 1234 \"-\" \"curl/7.68\"\n"
+        "192.168.1.1 - - [28/Oct/2026:11:00:00 +0700] \"GET /api/hello HTTP/1.1\" 200 567 \"-\" \"curl/7.68\"\n"
+        "10.0.0.5 - - [28/Oct/2026:12:00:00 +0700] \"POST /api/test HTTP/1.1\" 201 89 \"-\" \"python-requests/2.28\"\n"
+        "10.0.0.5 - - [28/Oct/2026:13:00:00 +0700] \"GET /api/test HTTP/1.1\" 200 45 \"-\" \"python-requests/2.28\"\n"
+        "172.16.0.1 - - [01/Oct/2026:08:00:00 +0700] \"GET /api/foo HTTP/1.1\" 200 12 \"-\" \"Mozilla/5.0\"\n"
+    )
+
+    class FakeRow:
+        def __init__(self, data):
+            self._data = data
+        def __getitem__(self, key):
+            return self._data[key]
+
+    # _get_outbound_domains selects SUM(smu.api_call_count) AS calls, so the
+    # rows expose "calls" (not "api_call_count").
+    fake_db_rows = [
+        FakeRow({"billing_base_url": "https://inference-api.nousresearch.com/v1/", "calls": 100}),
+        FakeRow({"billing_base_url": "http://localhost:11434/v1/", "calls": 50}),
+    ]
+
+    real_cursor = MagicMock()
+    real_cursor.fetchall.return_value = fake_db_rows
+    fake_conn = MagicMock()
+    fake_conn.row_factory = None
+    fake_conn.cursor.return_value = real_cursor
+    fake_conn.__enter__ = MagicMock(return_value=fake_conn)
+    fake_conn.__exit__ = MagicMock(return_value=False)
+    real_cursor.__enter__ = MagicMock(return_value=real_cursor)
+    real_cursor.__exit__ = MagicMock(return_value=False)
+
+    import api.models as models
+
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: pathlib.Path("/tmp/fake_state.db"))
+    monkeypatch.setattr(routes, "open_state_db_readonly", lambda db_path: fake_conn)
+    monkeypatch.setattr(pathlib.Path, "exists", lambda self: str(self) == "/tmp/fake_state.db" or pathlib.Path.__bases__[0].__name__ == 'PurePath' and True)
+
+    def mock_subprocess_run(cmd, **kwargs):
+        if cmd[0] == "sudo" and cmd[1] == "cat":
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = fake_nginx_logs
+            return result
+        return MagicMock(returncode=1)
+
+    monkeypatch.setattr(routes.subprocess, "run", mock_subprocess_run)
+
+    import time as _time
+    import types
+    now_ts = _time.mktime((2026, 10, 28, 14, 0, 0, 0, 0, -1))
+    monkeypatch.setattr(routes.time, "time", lambda: now_ts)
+
+    handler = _FakeHandler()
+    parsed = types.SimpleNamespace(query="days=30")
+    routes._handle_insights_traffic(handler, parsed)
+
+    assert handler.status == 200
+    data = handler.json_body()
+
+    # Inbound IPs (day)
+    assert "inbound_ips_day" in data
+    assert len(data["inbound_ips_day"]) <= 10
+    day_ips = {r["ip"] for r in data["inbound_ips_day"]}
+    assert "192.168.1.1" in day_ips or "10.0.0.5" in day_ips
+
+    # Inbound IPs (month) - includes the Oct 1 entry
+    assert "inbound_ips_month" in data
+    month_ips = {r["ip"] for r in data["inbound_ips_month"]}
+    assert "172.16.0.1" in month_ips
+
+    # Outbound domains
+    assert "outbound_domains_day" in data
+    assert "outbound_domains_month" in data
+    day_domains = {r["domain"] for r in data["outbound_domains_day"]}
+    assert "inference-api.nousresearch.com" in day_domains
+
+    day_nous = next(r for r in data["outbound_domains_day"] if r["domain"] == "inference-api.nousresearch.com")
+    assert day_nous["calls"] == 100
