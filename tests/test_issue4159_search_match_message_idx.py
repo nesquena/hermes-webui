@@ -1008,6 +1008,9 @@ global.renderSessionListFromCache=()=>{};
 global._searchDebounceTimer=null;
 global._contentSearchResults=[];
 global._contentSearchQuery='';
+// filterSessions also invalidates the in-flight search attempt token.
+global._contentSearchGen=0;
+global._bumpContentSearchGen=()=>1;
 // The debounce now opens the incremental search stream instead of issuing one
 // blocking /api/sessions/search call.
 global._startContentSearchSSE=()=>{};
