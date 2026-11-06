@@ -19205,8 +19205,20 @@ def handle_post(handler, parsed) -> bool:
                         try:
                             from api.profiles import get_hermes_home_for_profile
 
+                            # #7170 (droopanu, 2026-11-06): pass the request's
+                            # model context so the per-model
+                            # ``agent.reasoning_overrides`` entry is updated on
+                            # this path too. Without it a stale override (e.g.
+                            # ``gpt-5.4: low``) kept winning for later sessions
+                            # of that model, and "Default" did not clear it.
+                            # The model/provider arguments are POSITIONAL so a
+                            # test double of the shape ``lambda effort, *_a``
+                            # keeps working.
                             write_reasoning_effort(
-                                effort, get_hermes_home_for_profile(reasoning_profile)
+                                effort,
+                                get_hermes_home_for_profile(reasoning_profile),
+                                model_id,
+                                provider_id,
                             )
                         except Exception:
                             try:

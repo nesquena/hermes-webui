@@ -7208,6 +7208,78 @@ def normalize_reasoning_effort(effort) -> str:
     return raw
 
 
+def _apply_reasoning_effort(
+    agent_cfg: dict,
+    raw: str,
+    model: str = "",
+    provider_id: str | None = None,
+) -> None:
+    """Apply a reasoning-effort selection to an ``agent`` config block, in place.
+
+    The single mutation rule shared by BOTH writers (:func:`set_reasoning_effort`
+    for the profile-default path and :func:`write_reasoning_effort` for the
+    session path). #7170 (droopanu, 2026-11-06): master saves a writable
+    session's pick through ``write_reasoning_effort(effort, profile_home)``,
+    which only set or popped ``agent.reasoning_effort``. The per-model
+    ``agent.reasoning_overrides`` this PR writes were therefore never updated
+    on that path, so a stale override (e.g. ``gpt-5.4: low``) kept winning for
+    later sessions of that model, and "Default" did not clear it. Both writers
+    now mutate the agent block through this helper, so the two paths can never
+    disagree about what a selection means.
+
+    *raw* is the already-normalized effort (``""`` means "Default" / provider
+    default). *model* is the model context: when it is set the selection is
+    written as the per-model ``agent.reasoning_overrides`` entry (and
+    "Default" clears it) so the chip reads its own selection back instead of
+    snapping to the stale override (#7170 round-2 finding 3). The historical
+    global ``agent.reasoning_effort`` write is kept alongside for
+    master/CLI parity (the zai gating contract — an unscoped selection and a
+    model-context selection both persist ``agent.reasoning_effort``).
+    """
+    if model:
+        overrides = agent_cfg.get("reasoning_overrides")
+        if not isinstance(overrides, dict):
+            overrides = {}
+        # #7170 (droopanu, 2026-10-20): the read side matches several
+        # spellings of one model (bare id, lowercased id, ``@provider:id``
+        # tail, every slash-qualified form and the provider-prefixed
+        # variants — see configured_reasoning_effort_for_model), but the
+        # setter stored only ``model.lower()``. A config that already
+        # carried ``openai/gpt-5.4: low`` therefore kept that entry when
+        # the user picked ``high`` and then ``Default`` for ``gpt-5.4``:
+        # the bare key was removed, the qualified one survived, and the
+        # effective effort silently fell back to ``low``. Writing must
+        # supersede every spelling the reader would accept, and clearing
+        # must remove them all, so the write and the read agree on one
+        # identity.
+        override_key = model.lower()
+        if raw:
+            overrides[override_key] = raw
+            for stale in _reasoning_override_keys_for_model(
+                model, overrides, provider_id
+            ):
+                if stale != override_key:
+                    overrides.pop(stale, None)
+            agent_cfg["reasoning_effort"] = raw
+        else:
+            for stale in _reasoning_override_keys_for_model(
+                model, overrides, provider_id
+            ):
+                overrides.pop(stale, None)
+            # Default also clears the global key (historical empty-effort
+            # contract, #6219 round-3): the provider default applies.
+            agent_cfg.pop("reasoning_effort", None)
+        agent_cfg["reasoning_overrides"] = overrides
+    elif raw:
+        agent_cfg["reasoning_effort"] = raw
+    else:
+        # Clear the override so the provider default takes effect (the
+        # "Default"/"On" re-enable path for thinking-toggle-only models).
+        # Drop the key entirely rather than writing an empty string so the
+        # CLI's "is reasoning_effort configured?" check stays simple.
+        agent_cfg.pop("reasoning_effort", None)
+
+
 def set_reasoning_effort(
     effort: str,
     *,
@@ -7254,57 +7326,16 @@ def set_reasoning_effort(
     if config_path is None:
         raise ValueError("The active profile no longer exists.")
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load (#8032 write rule): a config write transaction must read
+        # config.yaml UNEXPANDED and save that raw document. Loading the
+        # env-expanded view and saving it back would write the RESOLVED
+        # secret in place of the file's ``${VAR}`` reference (#7170,
+        # droopanu 2026-11-06).
+        config_data = _load_yaml_config_file_raw(config_path)
         agent_cfg = config_data.get("agent")
         if not isinstance(agent_cfg, dict):
             agent_cfg = {}
-        if model:
-            # Model-context selection: write the per-model override (and
-            # "Default" clears it) so the chip reads its own selection back
-            # instead of snapping to the stale override (#7170 round-2
-            # finding 3). The historical global write is kept alongside for
-            # master/CLI parity (zai gating contract).
-            overrides = agent_cfg.get("reasoning_overrides")
-            if not isinstance(overrides, dict):
-                overrides = {}
-            # #7170 (droopanu, 2026-10-20): the read side matches several
-            # spellings of one model (bare id, lowercased id, ``@provider:id``
-            # tail, every slash-qualified form and the provider-prefixed
-            # variants — see configured_reasoning_effort_for_model), but the
-            # setter stored only ``model.lower()``. A config that already
-            # carried ``openai/gpt-5.4: low`` therefore kept that entry when
-            # the user picked ``high`` and then ``Default`` for ``gpt-5.4``:
-            # the bare key was removed, the qualified one survived, and the
-            # effective effort silently fell back to ``low``. Writing must
-            # supersede every spelling the reader would accept, and clearing
-            # must remove them all, so the write and the read agree on one
-            # identity.
-            override_key = model.lower()
-            if raw:
-                overrides[override_key] = raw
-                for stale in _reasoning_override_keys_for_model(
-                    model, overrides, provider_id
-                ):
-                    if stale != override_key:
-                        overrides.pop(stale, None)
-                agent_cfg["reasoning_effort"] = raw
-            else:
-                for stale in _reasoning_override_keys_for_model(
-                    model, overrides, provider_id
-                ):
-                    overrides.pop(stale, None)
-                # Default also clears the global key (historical empty-effort
-                # contract, #6219 round-3): the provider default applies.
-                agent_cfg.pop("reasoning_effort", None)
-            agent_cfg["reasoning_overrides"] = overrides
-        elif raw:
-            agent_cfg["reasoning_effort"] = raw
-        else:
-            # Clear the override so the provider default takes effect (the
-            # "Default"/"On" re-enable path for thinking-toggle-only models).
-            # Drop the key entirely rather than writing an empty string so the
-            # CLI's "is reasoning_effort configured?" check stays simple.
-            agent_cfg.pop("reasoning_effort", None)
+        _apply_reasoning_effort(agent_cfg, raw, model, provider_id)
         config_data["agent"] = agent_cfg
         _save_yaml_config_file(config_path, config_data)
     reload_config()
@@ -7321,7 +7352,12 @@ def _active_isolated_config_path() -> "Path | None":
     return isolated_profile_config_path(get_active_hermes_home())
 
 
-def write_reasoning_effort(effort: str, profile_home: "Path | str | None" = None) -> str:
+def write_reasoning_effort(
+    effort: str,
+    profile_home: "Path | str | None" = None,
+    model_id: str | None = None,
+    provider_id: str | None = None,
+) -> str:
     """Write ``agent.reasoning_effort`` to a profile's config.yaml.
 
     The local file write half of :func:`set_reasoning_effort`, without the
@@ -7334,8 +7370,23 @@ def write_reasoning_effort(effort: str, profile_home: "Path | str | None" = None
     readers see ``""``); for the active profile, where the profile default is
     the only thing saved, it raises ``ValueError``. Returns the normalized
     stored value.
+
+    ``model_id`` / ``provider_id`` are the request's model context. When a
+    model is given, the selection is ALSO written as that model's
+    ``agent.reasoning_overrides`` entry (and an empty effort clears it), so
+    the per-model override this PR maintains cannot go stale behind a session
+    pick. #7170 (droopanu, 2026-11-06): master saves a writable session's
+    pick through this function, which only set or popped
+    ``agent.reasoning_effort`` — the per-model override was never updated on
+    that path, so a stale override kept winning for later sessions of that
+    model and "Default" did not clear it. Both writers now share
+    :func:`_apply_reasoning_effort`, so the two paths cannot disagree.
+
+    Both parameters are POSITIONAL so that a caller-side test double of the
+    shape ``lambda effort, *_a`` keeps working unchanged.
     """
     raw = normalize_reasoning_effort(effort)
+    model = str(model_id or "").strip()
     if profile_home is None:
         config_path = _active_isolated_config_path()
         if config_path is None:
@@ -7349,18 +7400,12 @@ def write_reasoning_effort(effort: str, profile_home: "Path | str | None" = None
             )
             return raw
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load (#8032 write rule).
+        config_data = _load_yaml_config_file_raw(config_path)
         agent_cfg = config_data.get("agent")
         if not isinstance(agent_cfg, dict):
             agent_cfg = {}
-        if raw:
-            agent_cfg["reasoning_effort"] = raw
-        else:
-            # Clear the override so the provider default takes effect (the
-            # "Default"/"On" re-enable path for thinking-toggle-only models).
-            # Drop the key entirely rather than writing an empty string so the
-            # CLI's "is reasoning_effort configured?" check stays simple.
-            agent_cfg.pop("reasoning_effort", None)
+        _apply_reasoning_effort(agent_cfg, raw, model, provider_id)
         config_data["agent"] = agent_cfg
         _save_yaml_config_file(config_path, config_data)
     reload_config()
