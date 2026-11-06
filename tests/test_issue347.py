@@ -607,3 +607,19 @@ def test_gate_r4_currency_prefix_scan_is_bounded():
     assert result["elapsedMs"] < 100
     assert "katex-inline" not in result["assistant"]
     assert "\x00" not in result["assistant"]
+
+
+def test_link_shaped_inline_math_preserves_formula_source():
+    html = _run_renderers("$[A](t)$")["assistant"]
+    assert '<span class="katex-inline" data-katex="inline">[A](t)</span>' in html
+    assert "\x00" not in html
+
+
+def test_adjacent_numeric_formulas_keep_comma_outside_math():
+    html = _run_renderers("$0.5$,$0.8$")["assistant"]
+    assert (
+        '<span class="katex-inline" data-katex="inline">0.5</span>,'
+        '<span class="katex-inline" data-katex="inline">0.8</span>'
+    ) in html
+    assert html.count('<span class="katex-inline"') == 2
+    assert "\x00" not in html
