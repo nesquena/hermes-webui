@@ -30,6 +30,7 @@ from tests.test_issue8517_profile_scoped_memory import (  # noqa: F401 (fixtures
     homes,
 )
 from tests.test_issue8613_provider_instance_holders import (  # noqa: F401
+    _agent_home,
     _build,
     _fresh_instance,
     _shared_agent,
@@ -253,12 +254,12 @@ def test_a_release_deferred_for_a_construction_says_so(hc, homes, holder_registr
     assert released and released[0].endswith("once a construction of the same profile had finished"), released
 
 
-def test_a_retry_that_cannot_start_does_not_strand_its_intent(
+def test_a_retry_that_cannot_start_leaves_the_construction_unaffected(
     hc, homes, holder_registry, monkeypatch, caplog
 ):
     """``_end_acquisition`` takes the intent off the wait and then cannot start
-    its retry thread: the intent is retired instead of pinning its entries and
-    manager forever, and the construction itself is unaffected."""
+    its retry thread: the construction still returns its agent, nothing is
+    released, and the failure is logged."""
     provider = RecordingProvider()
     agent = _shared_agent(homes["alpha"], provider, "8817-nothread")
     build = _PausedBuild(homes["alpha"], _fresh_instance, "8817-nothread-builder")
@@ -278,8 +279,83 @@ def test_a_retry_that_cannot_start_does_not_strand_its_intent(
     monkeypatch.setattr(scope.threading, "Thread", real_thread)
 
     assert newcomer is not None, "the construction failed because the retry could not start"
-    assert not any(
-        entry.intent is not None for entry in scope._provider_holders.values()
-    ), "an intent nothing will ever start is still pinned"
     assert any("could not start" in line for line in _session_logs(caplog, "8817-nothread"))
-    assert provider.shutdowns == 0  # the same outcome as before #8817, now logged
+    assert provider.shutdowns == 0
+
+
+def test_a_failed_retry_start_never_cancels_a_started_sibling_retry(hc, homes, holder_registry, monkeypatch):
+    """Two agents' queued saves each arm a retry of the same kept release. The
+    first retry starts; the second cannot. The failed start must not retire the
+    intent the started retry is about to claim: the provider is still released
+    exactly once, after both saves landed (#8817 Codex r2)."""
+    provider = RecordingProvider()
+    markers = ["first save", "second save"]
+    entered = {key: threading.Event() for key in markers}
+    resume = {key: threading.Event() for key in markers}
+    remember = provider.remember
+
+    def paused_save(marker):
+        entered[marker].set()
+        assert resume[marker].wait(15)
+        remember(marker)
+
+    provider.remember = paused_save
+    agents = [_shared_agent(homes["alpha"], provider, f"8817-sibling-{i}") for i in range(2)]
+    for agent, marker in zip(agents, markers):
+        token = hc.set_hermes_home_override(_agent_home(agent))
+        try:
+            agent._memory_manager.sync_all(marker, "reply", session_id=agent.session_id)
+        finally:
+            hc.reset_hermes_home_override(token)
+        assert entered[marker].wait(15)
+    with scope.release_without_fence_wait():
+        for agent in agents:
+            assert streaming._close_evicted_agent_at_session_boundary(agent.session_id, agent)
+
+    retry_entered = threading.Event()
+    retry_resume = threading.Event()
+    failed_start_finished = threading.Event()
+    real_run = scope._run_release_intent
+    real_start_retry = scope._start_intent_retry
+    real_thread = threading.Thread
+    started_retries = []
+    attempts = []
+
+    def paused_retry(*args):
+        retry_entered.set()
+        assert retry_resume.wait(15)
+        return real_run(*args)
+
+    class _FailSecondRetryThread(real_thread):
+        def start(self):
+            if self.name == "webui-8613-deferred-release":
+                attempts.append(self)
+                if len(attempts) == 2:
+                    raise RuntimeError("can't start new thread")
+                started_retries.append(self)
+            return super().start()
+
+    def observe_start(*args, **kwargs):
+        real_start_retry(*args, **kwargs)
+        if len(attempts) == 2:
+            failed_start_finished.set()
+
+    monkeypatch.setattr(scope, "_run_release_intent", paused_retry)
+    monkeypatch.setattr(scope, "_start_intent_retry", observe_start)
+    monkeypatch.setattr(scope.threading, "Thread", _FailSecondRetryThread)
+    try:
+        resume[markers[0]].set()
+        assert retry_entered.wait(15), "the first retry never started"
+        resume[markers[1]].set()
+        assert failed_start_finished.wait(15), "the second retry's start did not fail"
+    finally:
+        for event in resume.values():
+            event.set()
+        retry_resume.set()
+        for thread in started_retries:
+            thread.join(15)
+            assert not thread.is_alive(), "the retry deadlocked"
+
+    assert sorted(provider.writes) == sorted(markers), provider.writes
+    assert provider.shutdowns == 1, "a failed retry start cancelled the started retry's release"
+    _assert_released_in_its_home(provider, homes["alpha"])

@@ -2816,11 +2816,11 @@ def _start_intent_retry(intent: _ReleaseIntent, *, poll: bool = False) -> None:
             name="webui-8613-deferred-release", daemon=True,
         ).start()
     except Exception:
-        # #8817 (senior r1, advisory 4): nothing would ever start this intent
-        # again (a construction's end already took it off the wait), so it is
-        # retired rather than left pinning its entries and manager.
-        with _provider_holders_lock:
-            _drop_intent_locked(intent)
+        # The intent is NOT dropped here (#8817 Codex r2): retries of one intent
+        # can be started by several sources (each armed manager's queued work,
+        # a construction's end), and a sibling retry that did start may not have
+        # claimed it yet. Retiring it would cancel that retry's release. A
+        # failed start only leaves the release to whichever retry runs next.
         logger.warning(
             "[webui] #8613: the deferred release of the memory provider of evicted session %s "
             "could not start; the provider keeps its worker until the WebUI restarts.",
