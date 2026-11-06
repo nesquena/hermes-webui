@@ -234,7 +234,18 @@ independently owned turns repeating one prompt inside a single timestamp bucket
 stay distinct owners. When an incoming owner already holds a retained slot, that
 slot is resolved and updated in place before any exact-key replacement may
 overwrite a different invalid or id-less occupant; with no retained owner the
-legacy exact-key replacement is preserved unchanged.
+legacy exact-key replacement is preserved unchanged. An exact key may hold
+several independent owners: when the row occupying the key's indexed slot
+carries no durable id but the key already holds a different durable owner,
+that occupant is a second owner of the key and the incoming owner is admitted
+as its own owner instead of replacing it. A row whose own exact key is already
+occupied by another row is a duplicate of that occurrence: its owner is
+already retained, so it collapses rather than taking a second slot or
+rewriting the owner's clock backwards. The clock rewrite is what made an
+adjacent assistant pair look like a cancelled-history splice to the
+Agent-replay projection - the sent projection kept the pair apart while the
+settle proof merged it, the strict prefix proof failed, and the settle dropped
+the current exchange from the persisted context.
 Consume each saved successor only with shared valid message/positive row identity
 or an exact non-null timestamp, plus compatible provider content. Cancelled
 consumers opt into private SQLite row IDs so newly accepted successors retain
