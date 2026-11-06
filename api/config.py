@@ -3997,6 +3997,8 @@ CUSTOM_ROUTE_NO_ENDPOINT = "custom_provider_endpoint_unresolved"
 # Kept beside the custom-provider reasons because it travels the same terminal
 # verdict path: an unresolvable route must stop before any provider routing.
 MODEL_ALIAS_ROUTE_UNRESOLVED = "model_alias_route_unresolved"
+# A built-in provider name that another provider record also claims (#8690).
+PROVIDER_NAME_AMBIGUOUS = "provider_name_ambiguous"
 
 # Key the verdict travels under on a merged bundle. ``None`` == routable.
 CUSTOM_ROUTE_ERROR_FIELD = "route_error"
@@ -4229,6 +4231,274 @@ def _custom_record_names_identity(display_name: object, provider_key: object, pi
         for value in (display_name, provider_key)
         if str(value or "").strip()
     )
+
+
+# ``hermes_cli.config._ENV_REF_RE``: the references the Agent expands in string values.
+_AGENT_ENV_REF_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def _agent_expands_env_ref(value: object) -> bool:
+    """True when the Agent expands a ``${VAR}`` / ``${env:VAR}`` in string ``value``.
+
+    Mirror of ``hermes_cli.config._env_ref_var_name``; ``${env:}``, other sources
+    (``${file:...}``) and an incomplete ``${`` stay verbatim, as do mapping keys.
+    """
+    if not isinstance(value, str):
+        return False
+    for inner in _AGENT_ENV_REF_RE.findall(value):
+        ref = inner.strip()
+        if ref.startswith("env:"):
+            if ref[len("env:"):].strip():
+                return True
+        elif not re.match(r"^[a-z][a-z0-9_-]*:", ref):
+            return True
+    return False
+
+
+def _agent_expanded_text(value: object) -> str | None:
+    """String ``value`` as the installed Agent's ``load_config()`` expands it here, else None.
+
+    Calls the Agent's own expander (``hermes_cli.config._expand_env_vars``: an env
+    ``${VAR}`` / ``${env:VAR}`` is read through ``agent.secret_scope.get_secret`` under the
+    bound scope; an unset or non-env reference stays verbatim), and only while
+    ``agent.secret_scope.current_secret_scope()`` is not None. When it is None this returns
+    None, so a templated name claims every name and a templated ``enabled`` flag keeps its
+    record claiming: fail closed, even where the Agent's own resolver would expand the value
+    from the process env. The rule is that condition, not a list of routes.
+
+    A known request path where it is None: the chat route's
+    ``streaming._resolve_runtime_connection_bundle`` (and the model-alias variant) for the
+    root profile (``default`` or a renamed root alias) or with no profile name, when no
+    outer scope is bound. ``profiles.profile_scope_for_detached_worker`` binds no scope for
+    those and leaves any outer one in place; for a named profile it binds one through
+    ``profiles.profile_env_for_background_worker``. Other paths may bind one, the root
+    profile included: read-only request scopes
+    (``profiles.profile_env_for_active_request_readonly``, the root profile too with
+    ``include_root=True``) and background workers such as title generation
+    (``profile_env_for_background_worker`` binds one for a non-empty profile name other
+    than ``default``, a renamed root alias included). None as well when the expander is unavailable or
+    fails: callers keep their fail-closed reading.
+    """
+    try:
+        from agent.secret_scope import current_secret_scope
+        from hermes_cli.config import _expand_env_vars as agent_expand_env_vars
+    except ImportError:
+        return None
+    try:
+        # Without a bound profile secret scope the expander reads the shared process env,
+        # which a concurrent worker for another profile can hold: keep the reading closed.
+        # Known case: the chat route's bundle resolution for the root profile or with no
+        # profile name, when no outer scope is bound (see the docstring).
+        # Re-reading that env after the resolver could see another value than the resolver
+        # read (test_a_concurrent_profile_env_between_the_resolver_and_the_guard_...).
+        # Follow-up: judge against the exact value the Agent resolver read for this request.
+        if current_secret_scope() is None:
+            return None
+        expanded = agent_expand_env_vars(value)
+    except Exception:
+        logger.debug("provider name check: Agent env expansion failed", exc_info=True)
+        return None
+    return expanded if isinstance(expanded, str) else None
+
+
+def _claiming_value(keys: tuple, values: tuple, names: set) -> str | None:
+    """The first identity in ``keys`` / ``values`` whose spellings include one of ``names``.
+
+    Spellings: the Agent's alias vocabulary (:func:`_custom_provider_alias_set`)
+    plus underscore folding. The claiming identity is returned for the message in
+    its raw spelling (never a URL, credential or expanded value). A value the Agent
+    env-expands is judged by the Agent's own expansion (:func:`_agent_expanded_text`,
+    an unset reference stays verbatim) only while an Agent profile secret scope is bound
+    (``agent.secret_scope.current_secret_scope()`` is not None); otherwise (no scope bound,
+    for example the chat route's bundle resolution for the root profile with no outer
+    scope; or no expander) it claims every name, since WebUI cannot then reproduce the
+    value the Agent's resolver reads with certainty.
+    """
+    for value, expandable in (*((key, False) for key in keys), *((val, True) for val in values)):
+        text = spelled = str(value or "").strip()
+        if expandable and _agent_expands_env_ref(value):
+            expanded = _agent_expanded_text(value)
+            if expanded is None:
+                return text
+            spelled = expanded.strip()
+        aliases = _custom_provider_alias_set(spelled, "") if spelled else frozenset()
+        if names & (aliases | {alias.replace("_", "-") for alias in aliases}):
+            return text
+    return None
+
+
+def _provider_identity_sources(config: object) -> tuple:
+    """The config views :func:`provider_name_ambiguity_verdict` reads identities from.
+
+    An explicit ``config`` is the only view. Otherwise the active profile's
+    config.yaml as parsed but NOT env-expanded (the file :func:`get_config`
+    serves, via :func:`_get_config_path`) comes first, then the cached view.
+    The Agent re-expands ``${VAR}`` references from the profile's current
+    secret scope on every load, while the cache keeps the expansion it saw when
+    it last reloaded (an edited .env does not change config.yaml's mtime), so
+    only the raw spelling tells reliably that a name is a reference (Codex r3).
+    The cached view still counts, so an in-memory config is never ignored.
+    Every view carries the Agent's managed scope (:func:`_with_managed_scope`).
+    """
+    if config is not None:
+        return (_with_managed_scope(config),)
+    try:
+        raw = _load_yaml_config_file_raw(_get_config_path(), _copy=False)
+    except Exception:
+        logger.debug("provider name check: raw config unreadable", exc_info=True)
+        raw = None
+    # A detached snapshot, not get_config()'s live cache dict: another profile's request can
+    # refill that dict in place while this check runs, and a retained reference then judged
+    # this profile's name against the other profile's records (release-lane tag-delta audit).
+    return (_with_managed_scope(raw), _with_managed_scope(get_config_snapshot()))
+
+
+def _with_managed_scope(view: object) -> object:
+    """``view`` with the Agent's managed-scope config.yaml merged on top (Codex r5).
+
+    The Agent resolves providers from ``load_config()``, which deep-merges the
+    IT-pushed managed config over the profile's, managed winning per leaf
+    (``hermes_cli.config._merge_managed_overlay``). Same reader and merge as
+    ``managed_scope.apply_managed_overlay``, minus its ``${VAR}`` expansion, so
+    a managed reference is judged like any other (:func:`_claiming_value`: by the
+    Agent's expander under a bound profile secret scope, else a wildcard). ``view``
+    is never mutated; an Agent
+    without managed scope, or no managed config, leaves it unchanged.
+    """
+    try:
+        from hermes_cli.config import _deep_merge
+        from hermes_cli.managed_scope import load_managed_config
+    except ImportError:
+        return view
+    try:
+        managed = load_managed_config() if isinstance(view, dict) else None
+        return _deep_merge(copy.deepcopy(view), managed) if isinstance(managed, dict) and managed else view
+    except Exception:
+        # The Agent fails open the same way (``apply_managed_overlay``).
+        logger.debug("provider name check: managed scope unreadable", exc_info=True)
+        return view
+
+
+def provider_name_ambiguity_verdict(provider: object, config: object = None) -> dict | None:
+    """Terminal verdict when one built-in provider name has two claimants (#8690).
+
+    Identities are read from every view :func:`_provider_identity_sources`
+    returns; the first view with an ambiguity decides (fail closed).
+
+    The Agent answers a name with the first record whose alias set contains it
+    and shares one credential pool between such records, so the endpoint and key
+    it returns can belong to different records depending on config order. The
+    route fails closed instead. Purely name-based (no URL is read); a record
+    claims in any spelling the Agent accepts. A keyed record the Agent treats as
+    disabled claims nothing; a templated ``enabled`` flag is judged after the Agent's
+    env expansion only while an Agent profile secret scope is bound
+    (``current_secret_scope()`` is not None), and with none bound the record keeps
+    claiming (fail closed). A templated ``name`` follows the same rule
+    (:func:`_agent_expanded_text`, which names a known request path with no scope). A legacy row counts enabled or not (the Agent's
+    legacy view still selects disabled rows).
+
+    * Bare built-in ``X``: ambiguous when any record other than ``providers.X``
+      claims ``X``, or two keys are ``X``. Without ``providers.X`` the built-in
+      identity (default endpoint, ambient key) is still the second claimant:
+      WebUI routes bare ``X`` as the built-in (#8685), the Agent as the sibling.
+    * Explicit ``custom:X`` (``X`` built-in): ambiguous when ``providers.X``
+      exists and another record also claims ``custom:X`` (the Agent's alias set
+      for ``providers.X`` contains it). Otherwise untouched.
+    """
+    route = str(provider or "").strip().lower().replace(" ", "-")
+    explicit = route.startswith("custom:")
+    builtin = _canonicalise_provider_id(route.split(":", 1)[1].strip() if explicit else route)
+    if (
+        not builtin
+        or builtin in {"custom", "auto"}
+        or builtin.startswith("custom:")
+        or _is_native_custom_provider_key(builtin)
+    ):
+        return None
+    names = {route, route.replace("_", "-"), f"custom:{builtin}" if explicit else builtin}
+    for source in _provider_identity_sources(config):
+        if isinstance(source, dict):
+            verdict = _provider_name_ambiguity_in(source, route, builtin, explicit, names)
+            if verdict is not None:
+                return verdict
+    return None
+
+
+def _provider_name_ambiguity_in(source: dict, route: str, builtin: str, explicit: bool, names: set) -> dict | None:
+    """:func:`provider_name_ambiguity_verdict` for one config view."""
+    own: list[str] = []
+    others: list[str] = []
+    providers = source.get("providers")
+    for key, record in (providers.items() if isinstance(providers, dict) else ()):
+        key_text = str(key or "").strip()
+        if not key_text or not isinstance(record, dict):
+            continue
+        # The Agent skips a keyed record whose ``enabled`` is false in both of its views
+        # (``_match_new_style_provider`` and ``providers_dict_to_custom_providers``), so a
+        # disabled one claims nothing. Legacy ``custom_providers`` rows stay counted below:
+        # the Agent's legacy view still selects a row the user switched off. A templated
+        # flag is judged as the Agent expands it only while a profile secret scope is bound
+        # (``current_secret_scope()`` is not None, :func:`_agent_expanded_text`); with none
+        # bound or no expander it is unknown and keeps the record claiming (fail closed).
+        flag = record.get("enabled", True)
+        if _agent_expands_env_ref(flag):
+            expanded = _agent_expanded_text(flag)
+            flag = flag if expanded is None else expanded
+        if not _raw_provider_record_enabled({"enabled": flag}):
+            continue
+        # The Agent's identities for a keyed record: its ``name`` (or key) and its key.
+        claimed_by = _claiming_value((key_text,), (record.get("name"),), names)
+        if claimed_by is None:
+            continue
+        if not key_text.lower().startswith("custom:") and _canonicalise_provider_id(key_text) == builtin:
+            own.append(key_text)
+        else:
+            others.append(f"'{key_text}'" + (f" (named '{claimed_by}')" if claimed_by != key_text else ""))
+    legacy = source.get("custom_providers")
+    # A legacy row's only identity is its ``name``; the Agent ignores a
+    # non-list section and a row's raw ``provider_key``.
+    for row in legacy if isinstance(legacy, list) else ():
+        claimed_by = _claiming_value((), (row.get("name"),), names) if isinstance(row, dict) else None
+        if claimed_by is not None:
+            others.append(f"custom_providers entry '{claimed_by}'")
+    if explicit:
+        ambiguous = bool(own) and len(own) + len(others) >= 2
+    else:
+        ambiguous = bool(others) or len(own) >= 2
+    if not ambiguous:
+        return None
+    claimants = [f"the built-in '{builtin}'"] + [f"'{key}'" for key in own[1:]] + others
+    count = {2: "Two", 3: "Three"}.get(len(claimants), str(len(claimants)))
+    listed = ", ".join(claimants[:-1]) + " and " + claimants[-1]
+    return {
+        "reason": PROVIDER_NAME_AMBIGUOUS,
+        "provider": route,
+        "message": (
+            f"{count} providers claim '{builtin}': {listed}. Rename the custom one "
+            "(for example custom:my-proxy) or remove one, then retry."
+        ),
+        "hint": "Edit the provider under Settings -> Providers or in config.yaml.",
+    }
+
+
+def _refuse_ambiguous_provider_name(bundle: dict, *providers: object) -> dict | None:
+    """Make ``bundle`` terminal when any of ``providers`` is ambiguous (#8690).
+
+    The verdict is what stops the turn (:data:`CUSTOM_ROUTE_ERROR_FIELD`); the
+    connection and every side field are cleared too, so a consumer that reads
+    the fields without checking it still has nothing to send.
+    """
+    for provider in dict.fromkeys(providers):
+        verdict = provider_name_ambiguity_verdict(provider)
+        if verdict is not None:
+            bundle["base_url"] = None
+            bundle["api_key"] = None
+            for field in CUSTOM_CONNECTION_SIDE_FIELDS:
+                bundle[field] = None
+            bundle[CUSTOM_ROUTE_ERROR_FIELD] = verdict
+            logger.warning("refusing provider route: %s", verdict["message"])
+            return verdict
+    return None
 
 
 # ``enabled:`` words YAML may hand us as strings, matching
@@ -5155,14 +5425,18 @@ def _custom_provider_runtime_bundle_with_provenance(
         "acp_command": _rt.get("acp_command", _rt.get("command")),
         "acp_args": _rt.get("acp_args", _rt.get("args")),
         "credential_pool": _rt.get("credential_pool"),
-        # Routable until a named custom route proves otherwise. Non-custom
-        # routes legitimately leave the endpoint and/or credential to the
-        # runtime provider, so only the named-``custom:`` branches below can
-        # record a verdict here.
+        # Routable until a route proves otherwise. Non-custom routes
+        # legitimately leave the endpoint and/or credential to the runtime
+        # provider; they record a verdict only when two records claim their
+        # name (#8690). Named ``custom:`` routes are judged below.
         CUSTOM_ROUTE_ERROR_FIELD: None,
     }
 
     lookup = lookup_provider or resolved_provider
+    # A name two records claim (#8690) is refused before any record is chosen:
+    # the runtime dict may already pair one record's endpoint with another's key.
+    if _refuse_ambiguous_provider_name(bundle, lookup, resolved_provider) is not None:
+        return bundle, None
     if not (isinstance(lookup, str) and lookup.startswith("custom:")):
         return bundle, None
 
@@ -9724,6 +9998,12 @@ def merge_model_alias_runtime_bundle(
                 CUSTOM_ROUTE_NO_CREDENTIAL,
                 provider or f"model alias {route.get('alias') or '<unknown>'}",
             )
+        elif not explicit_credential:
+            # The credential came from the provider's runtime, host-gated against the
+            # alias URL. For a name two records claim that is the shared pool's key,
+            # which can be the other record's (#8690): the alias takes the provider's
+            # verdict. An alias with its own key owns both halves and is untouched.
+            _refuse_ambiguous_provider_name(bundle, logical_provider)
         return bundle
 
     resolved_provider = provider
@@ -9765,6 +10045,9 @@ def merge_model_alias_runtime_bundle(
                 CUSTOM_ROUTE_NO_CREDENTIAL,
                 provider or f"model alias {route.get('alias') or '<unknown>'}",
             )
+    # Last, so an alias credential can neither complete nor relabel a pair the
+    # provider's runtime resolved under a name two records claim (#8690).
+    _refuse_ambiguous_provider_name(bundle, provider, route.get("provider"))
     return bundle
 
 
@@ -14073,6 +14356,19 @@ def _clear_thread_env():
 SESSION_AGENT_LOCKS = weakref.WeakValueDictionary()
 SESSION_AGENT_LOCKS_LOCK = threading.Lock()
 
+# Per-session lock for share create/revoke only (#8255 review). Kept separate from
+# the agent-turn lock on purpose: the agent lock is held across a turn's retry and
+# credential refresh, so coordinating shares on it would make a revoke wait for a
+# whole agent operation, and a create would block the streaming worker while it
+# redacts and embeds a large snapshot. This lock covers token resolution, the
+# snapshot write/mark and the token persist, nothing else.
+SHARE_SESSION_LOCKS = weakref.WeakValueDictionary()
+SHARE_SESSION_LOCKS_LOCK = threading.Lock()
+
+# A share call waits at most this long for another share call on the same session
+# (the repo's other handlers use the same bound and answer 503 instead of hanging).
+SHARE_SESSION_LOCK_TIMEOUT_SECONDS = 5.0
+
 
 def _get_session_agent_lock(session_id: str) -> threading.Lock:
     """Return the per-session Lock used to serialize all Session mutations.
@@ -14096,6 +14392,23 @@ def _get_session_agent_lock(session_id: str) -> threading.Lock:
         if lock is None:
             lock = threading.Lock()
             SESSION_AGENT_LOCKS[session_id] = lock
+        return lock
+
+
+def _get_session_share_lock(session_id: str) -> threading.Lock:
+    """Return the per-session Lock that serializes share create/revoke (#8255).
+
+    Deliberately separate from ``_get_session_agent_lock``: the agent lock is held
+    across an agent turn (including its credential-refresh retry), so coordinating
+    shares on it would make a revoke wait for a whole agent operation and a create
+    would lock the streaming worker out while it redacts a large snapshot. Weak
+    registry, same lifecycle as the agent locks.
+    """
+    with SHARE_SESSION_LOCKS_LOCK:
+        lock = SHARE_SESSION_LOCKS.get(session_id)
+        if lock is None:
+            lock = threading.Lock()
+            SHARE_SESSION_LOCKS[session_id] = lock
         return lock
 
 
