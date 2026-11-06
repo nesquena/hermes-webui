@@ -2814,6 +2814,11 @@ async function loadSession(sid){
   const _loadGeneration = ++_loadSessionGeneration;
   const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
   _loadingSessionId = sid;
+  // #8701: the INFLIGHT entry (and its stream) before this load's first await.
+  // A send during the awaits replaces or re-points it; the other-stream prompt
+  // skip below then must not apply to the new turn's prompt.
+  const _inflightAtLoadStart=INFLIGHT[sid];
+  const _inflightStreamAtLoadStart=String((_inflightAtLoadStart&&_inflightAtLoadStart.streamId)||'').trim();
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
   // land at the bottom of the new transcript, not wherever a stale unpin flag
@@ -3317,7 +3322,9 @@ async function loadSession(sid){
     }
     S.messages=_mergeInflightTailMessages(S.messages,inflightMessages,
       _inflightTurnOwnerStart(S.session,INFLIGHT[sid],activeStreamId),
-      _inflightNamesOtherStream(INFLIGHT[sid],activeStreamId)
+      INFLIGHT[sid]===_inflightAtLoadStart
+        &&String(INFLIGHT[sid].streamId||'').trim()===_inflightStreamAtLoadStart
+        &&_inflightNamesOtherStream(INFLIGHT[sid],activeStreamId)
         &&!!String((S.session&&S.session.pending_user_message)||'').trim());
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
     if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
@@ -5163,7 +5170,8 @@ function _inflightNamesOtherStream(inflight,activeStreamId){
 // stamps the copy so the pending merge reuses it rather than adding a second
 // one (`_recoveredPromptCopyForTurn`). `promptFromOtherStream` (optional;
 // loadSession sets it when _inflightNamesOtherStream AND the server sends a
-// non-blank pending_user_message, the field getPendingSessionMessage reads):
+// non-blank pending_user_message, the field getPendingSessionMessage reads, AND
+// the entry and its stream id are the ones the load started with):
 // the snapshot's prompt is not this turn's, so it is not placed; the pending
 // merge supplies the running turn's prompt, and placing both showed it twice
 // (#8701). Without a server prompt the snapshot's row stays, or the turn

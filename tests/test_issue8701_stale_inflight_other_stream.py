@@ -322,6 +322,86 @@ def test_windowed_stale_inflight_from_another_stream_shows_the_prompt_once():
     assert result["inflightRowShown"] is False, result
 
 
+_NEW_PROMPT = "JUST SENT"
+
+
+def _send_during_metadata(variant: str) -> dict:
+    """Run one `loadSession('s1',{force:true})` whose metadata response is delayed while this tab sends a prompt.
+
+    The metadata (read before the send) names `stream-1` with its pending prompt. While it is in transit `stream-1`
+    ends and a send establishes `stream-2`: the server, `S.session`, `S.activeStreamId` and INFLIGHT now describe the
+    new turn. `variant` is how INFLIGHT changes during the wait:
+
+    - `absent-replaced`: no entry at start; the send creates one on `stream-2` (Codex round-1 probe);
+    - `replaced`: a stale `stream-0` entry at start; the send replaces it with a new object on `stream-2`;
+    - `replaced-same-stream-id`: as `replaced`, but the new object names the start entry's stream id;
+    - `stream-reassigned`: the start entry itself is re-pointed to `stream-2` and given the new turn's rows.
+    """
+    body = f"""
+const NEW={json.dumps(_NEW_PROMPT)};
+const VARIANT={json.dumps(variant)};
+const metadataSession={{session_id:'s1',active_stream_id:'stream-1',pending_started_at:100,
+  pending_user_message:'running prompt',tool_calls:[],last_usage:{{}},message_count:2}};
+const sentSession={{...metadataSession,active_stream_id:'stream-2',pending_started_at:200,
+  pending_user_message:NEW,messages:[{{role:'user',content:'history',_ts:10}},
+    {{role:'assistant',content:'historical answer',_ts:11}}]}};
+let deliverMetadata=null;
+function api(url){{
+  if(url.includes('messages=0')) return new Promise(resolve=>{{
+    deliverMetadata=()=>resolve({{session:JSON.parse(JSON.stringify(metadataSession))}});
+  }});
+  if(url.includes('messages=1')) return Promise.resolve({{session:JSON.parse(JSON.stringify(sentSession))}});
+  throw new Error('unexpected '+url);
+}}
+S.session=JSON.parse(JSON.stringify(metadataSession));
+S.activeStreamId='stream-1';
+if(VARIANT!=='absent-replaced'){{
+  INFLIGHT.s1={{streamId:'stream-0',toolCalls:[],messages:[{{role:'user',content:'stale prompt',_ts:50,_pending:true}},
+    {{role:'assistant',content:'stale partial',_live:true}}]}};
+}}
+const atStart=INFLIGHT.s1;
+const users=(rows)=>rows.filter(m=>m&&m.role==='user'&&m.content===NEW).length;
+(async()=>{{
+  const loading=loadSession('s1',{{force:true}});
+  assert.equal(typeof deliverMetadata,'function');
+  // sendMessage/attachLiveStream publish the new turn after /api/chat/start returns stream-2.
+  S.session={{...sentSession}};
+  S.messages=[{{role:'user',content:NEW,_ts:199.9,_pending:true}},
+    {{role:'assistant',content:'new partial answer',_live:true}}];
+  S.busy=true;
+  S.activeStreamId='stream-2';
+  if(VARIANT==='stream-reassigned'){{
+    INFLIGHT.s1.streamId='stream-2';
+    INFLIGHT.s1.messages=S.messages.slice();
+  }}else{{
+    INFLIGHT.s1={{streamId:VARIANT==='replaced-same-stream-id'?'stream-0':'stream-2',
+      messages:S.messages.slice(),toolCalls:[]}};
+  }}
+  const sent=INFLIGHT.s1;
+  assert.equal(sent===atStart,VARIANT==='stream-reassigned');
+  deliverMetadata();
+  await loading;
+  process.stdout.write(JSON.stringify({{shown:users(S.messages),cached:users(INFLIGHT.s1.messages),
+    sameEntry:INFLIGHT.s1===sent,rows:view(S.messages),cachedRows:view(INFLIGHT.s1.messages)}}));
+}})().catch(e=>{{console.error(String(e&&e.stack||e));process.exit(1);}});
+"""
+    return _node(_prelude() + body)
+
+
+@pytest.mark.parametrize(
+    "variant", ["absent-replaced", "replaced", "replaced-same-stream-id", "stream-reassigned"]
+)
+def test_prompt_sent_while_metadata_is_in_flight_is_kept(variant):
+    """Codex round 1 (CORE): the metadata names `stream-1`, and a send establishes `stream-2` before it arrives.
+    The INFLIGHT entry then holds the NEW turn, not a stale one, so its prompt must not be suppressed: it is shown
+    exactly once and stays in INFLIGHT's rows (the pending-merge write-back must not drop it from the cache). The
+    other-stream suppression applies only to the entry `loadSession()` started with, still on the same stream."""
+    result = _send_during_metadata(variant)
+    assert result["sameEntry"] is True, result
+    assert result["shown"] == 1, result
+    assert result["cached"] == 1, result
+
+
 def test_tail_merge_skips_only_the_prompt_of_another_streams_snapshot():
     """Unit level: with the other-stream flag the merge keeps every non-prompt tail row and does not place the
     prompt; without it (omitted, false) the merge is unchanged."""
