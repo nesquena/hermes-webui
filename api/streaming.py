@@ -15092,6 +15092,99 @@ def _run_agent_streaming(
         except ImportError:
             logger.debug("Clarify module not available, falling back to polling")
 
+        # ── Vault prompts (browser_vault unlock / save-login / 2FA code) ──
+        # Registers the per-thread secrets callbacks on THIS agent thread so
+        # ``browser_vault`` can raise a masked prompt card in the browser
+        # instead of failing with ``unlock_unavailable``. Tool worker threads
+        # inherit the callbacks through hermes-agent's thread propagation.
+        # The values a user types travel only through the vault-respond POST
+        # into the pending entry and from there straight into
+        # ``agent.vault_backends`` — they are never logged or echoed.
+        _vault_registered = False
+        _unreg_vault_notify = None
+        _vault_unlock_cb = None
+        try:
+            from api.vault_prompts import (
+                register_gateway_notify as _reg_vault_notify,
+                unregister_gateway_notify as _unreg_vault_notify,
+                submit_pending as _submit_vault_pending,
+                respond_vault as _respond_vault_entry,
+            )
+            from agent.vault_backends import unlock as _vault_unlock_mod
+            import agent.vault_backends.unlock as _vault_times
+
+            _VAULT_UNLOCK_TIMEOUT_S = getattr(_vault_times, 'UNLOCK_TIMEOUT_S', 120)
+            _VAULT_SAVE_LOGIN_TIMEOUT_S = getattr(_vault_times, 'SAVE_LOGIN_TIMEOUT_S', 180)
+            _VAULT_CODE_TIMEOUT_S = getattr(_vault_times, 'CODE_TIMEOUT_S', 180)
+
+            def _vault_notify_cb(vault_data):
+                # Push the prompt card to the live chat stream. The frame only
+                # carries request metadata; a pending=None frame tells the
+                # browser a card can go away.
+                if vault_data:
+                    put('vault_prompt', {'session_id': session_id, 'pending': vault_data, 'pending_count': 1})
+
+            _reg_vault_notify(session_id, _vault_notify_cb)
+
+            def _ask_vault_card(kind, extra, timeout_s, cancel_evt):
+                data = {
+                    'kind': kind,
+                    'session_id': session_id,
+                    'requested_at': time.time(),
+                    'timeout_seconds': float(timeout_s or 0) or timeout_s,
+                    **(extra or {}),
+                }
+                entry = _submit_vault_pending(session_id, data)
+                deadline = time.monotonic() + max(float(data['timeout_seconds']), 1)
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    if entry.event.wait(timeout=min(remaining, 0.25)):
+                        break
+                    if cancel_evt is not None and cancel_evt.is_set():
+                        break
+                if not entry.event.is_set():
+                    # Expiry / run-cancel: resolve the entry with no answer so
+                    # the queue never keeps a stale card after the tool gave up.
+                    try:
+                        _respond_vault_entry(session_id, entry.prompt_id, {})
+                    except Exception:
+                        pass
+                    return {}
+                return dict(entry.values or {})
+
+            def _vault_unlock_prompt(backend_name, display_name):
+                values = _ask_vault_card(
+                    'unlock',
+                    {'backend': str(backend_name or ''), 'display_name': str(display_name or '')},
+                    _VAULT_UNLOCK_TIMEOUT_S, cancel_event)
+                return str(values.get('password', ''))
+
+            def _vault_save_login_prompt(origin, site):
+                values = _ask_vault_card(
+                    'save_login',
+                    {'origin': str(origin or ''), 'label': str(site or '')},
+                    _VAULT_SAVE_LOGIN_TIMEOUT_S, cancel_event)
+                if values.get('password'):
+                    return {'identifier': str(values.get('identifier', '')),
+                            'password': str(values.get('password', ''))}
+                return None
+
+            def _vault_code_prompt(site, hint):
+                values = _ask_vault_card(
+                    'code',
+                    {'site': str(site or ''), 'hint': str(hint or '')},
+                    _VAULT_CODE_TIMEOUT_S, cancel_event)
+                return str(values.get('code', ''))
+
+            _vault_unlock_mod.set_unlock_prompt_callback(_vault_unlock_prompt)
+            _vault_unlock_mod.set_save_login_prompt_callback(_vault_save_login_prompt)
+            _vault_unlock_mod.set_code_prompt_callback(_vault_code_prompt)
+            _vault_registered = True
+        except Exception:
+            logger.debug("Vault prompt callbacks not available", exc_info=True)
+
         def _clarify_ask_one(question, choices, sid, cancel_evt):
             """Show one clarify card and wait for it.
 
@@ -18432,6 +18525,25 @@ def _run_agent_streaming(
                     _unreg_clarify_notify(session_id)
                 except Exception:
                     logger.debug("Failed to unregister clarify callback")
+            if _vault_registered:
+                try:
+                    from agent.vault_backends import unlock as _vault_cleanup_mod
+                    _vault_cleanup_mod.set_unlock_prompt_callback(None)
+                    _vault_cleanup_mod.set_save_login_prompt_callback(None)
+                    _vault_cleanup_mod.set_code_prompt_callback(None)
+                except Exception:
+                    logger.debug("Failed to clear vault prompts callbacks")
+                if _unreg_vault_notify is not None:
+                    try:
+                        _unreg_vault_notify(session_id)
+                    except Exception:
+                        logger.debug("Failed to unregister vault callback")
+                try:
+                    from api.vault_prompts import clear_pending as _clear_vault_pending_cleanup
+                    _clear_vault_pending_cleanup(session_id)
+                    put('vault_prompt', {'pending': None, 'pending_count': 0})
+                except Exception:
+                    logger.debug("Failed to clear pending vault prompts")
             with _ENV_LOCK:
                 for _key, _old_value in old_profile_env.items():
                     if _old_value is None: os.environ.pop(_key, None)

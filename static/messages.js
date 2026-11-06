@@ -6770,6 +6770,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Browser notification is owned by showClarifyCard()/_notifyPromptCard().
     });
 
+    source.addEventListener('vault_prompt',e=>{
+      let d={};
+      try{ d=JSON.parse(e.data||'{}'); }catch(_){ return; }
+      const sid=(d.session_id||_promptActiveSessionId());
+      if(sid!==_promptActiveSessionId()) return;
+      if(d.pending){ showVaultCard(d.pending); playAttentionSound(_attentionSoundKey(_promptActiveSessionId()||'','vault',1)); }
+      else { if(_vaultSessionId===sid) hideVaultCard(true,'resolved'); }
+    });
+
     source.addEventListener('state_saved',e=>{
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
@@ -10405,6 +10414,319 @@ var _clarifyEventSource = null;
 var _clarifyFallbackTimer = null;
 var _clarifyHealthTimer = null;
 let _clarifyFallbackPollInFlight = false;
+
+// ── Vault prompt card (browser_vault unlock / save-login / 2FA code) ─────────
+// The card mirrors the clarify card visually (same .clarify-* classes) but the
+// answer is a credential: it is POSTed to /api/vault/respond and never pushed
+// into the conversation transcript, composer or draft storage.
+let _vaultSessionId = null;
+let _vaultPromptId = null;
+let _vaultKind = null;
+let _vaultSignature = '';
+let _vaultCountdownTimer = null;
+let _vaultExpiresAt = 0;
+let _vaultVisibleSince = 0;
+let _vaultPollInFlight = false;
+
+const VAULT_MIN_VISIBLE_MS = 600;
+
+function _vaultBelongsToActiveSession(sid) {
+  return sid === _promptActiveSessionId() || (!sid && !!_promptActiveSessionId());
+}
+
+function _hideVaultCardIfOwner(sid, force, reason) {
+  if (_vaultSessionId && sid && _vaultSessionId !== sid) return;
+  hideVaultCard(force === true, reason || 'session');
+}
+
+function _clearVaultCountdownTimer() {
+  if (_vaultCountdownTimer) { clearInterval(_vaultCountdownTimer); _vaultCountdownTimer = null; }
+}
+
+function _resetVaultCardState() {
+  _vaultSessionId = null;
+  _vaultPromptId = null;
+  _vaultKind = null;
+  _vaultSignature = '';
+  _vaultExpiresAt = 0;
+  _vaultVisibleSince = 0;
+}
+
+function _vaultSetControlsDisabled(disabled, loading = false) {
+  const inputs = [ 'vaultPrimaryInput', 'vaultIdentifierInput' ]
+    .map(id => $(id)).filter(Boolean);
+  inputs.forEach(inp => { inp.disabled = disabled; });
+  const submit = $("vaultSubmit");
+  if (submit) {
+    submit.disabled = disabled;
+    submit.classList.toggle("loading", !!loading);
+  }
+  const skip = $("vaultSkip");
+  if (skip) skip.disabled = disabled;
+}
+
+function _startVaultCountdown(pending) {
+  _clearVaultCountdownTimer();
+  const requestedAt = Number(pending.requested_at) || (Date.now() / 1000);
+  const timeout = Number(pending.timeout_seconds) || 0;
+  if (timeout <= 0) { $("vaultCountdown").textContent = ''; return; }
+  _vaultExpiresAt = (requestedAt + timeout) * 1000;
+  const el = $("vaultCountdown");
+  const tick = () => {
+    if (!el) return;
+    const remaining = Math.round((_vaultExpiresAt - Date.now()) / 1000);
+    if (remaining <= 0) {
+      el.textContent = '';
+      _clearVaultCountdownTimer();
+      if (_vaultSessionId && _vaultPromptId) hideVaultCard(true, 'expired');
+      return;
+    }
+    el.textContent = remaining >= 60
+      ? Math.floor(remaining / 60) + ':' + String(remaining % 60).padStart(2, '0')
+      : String(remaining) + 's';
+  };
+  tick();
+  _vaultCountdownTimer = setInterval(tick, 1000);
+}
+
+function _ensureVaultCardDom() {
+  let card = $("vaultCard");
+  if (card) return card;
+  const host = $("msgInner") || $("messages");
+  if (!host) return null;
+  card = document.createElement('div');
+  card.className = 'clarify-card';
+  card.id = 'vaultCard';
+  card.setAttribute('role', 'dialog');
+  card.setAttribute('aria-labelledby', 'vaultHeading');
+  card.setAttribute('aria-describedby', 'vaultQuestion vaultHint');
+  _setPromptFlyoutHidden(card, true);
+  card.innerHTML = `
+    <div class="clarify-inner">
+      <div class="clarify-header">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <span id="vaultHeading" data-i18n="vault_heading_unlock">Password needed</span>
+        <span class="clarify-countdown" id="vaultCountdown"></span>
+        <button type="button" class="clarify-collapse" id="vaultSkip" aria-label="Skip" data-i18n-title="vault_skip_title" title="Skip — the agent will be told you declined"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      </div>
+      <div class="clarify-question" id="vaultQuestion"></div>
+      <div class="clarify-choices" id="vaultFields"></div>
+      <div class="clarify-response">
+        <input class="clarify-input" id="vaultPrimaryInput" type="password" autocomplete="off" spellcheck="false" data-i18n-placeholder="vault_input_password_placeholder" placeholder="Type the password…">
+        <button class="clarify-submit" id="vaultSubmit" data-i18n="vault_send">Use it</button>
+      </div>
+      <div class="clarify-hint" id="vaultHint" data-i18n="vault_hint_unlock">The value is injected directly into the page — it never appears in the conversation.</div>
+    </div>
+  `;
+  host.appendChild(card);
+  const submit = $("vaultSubmit");
+  if (submit) submit.onclick = () => respondVault();
+  const skip = $("vaultSkip");
+  if (skip) skip.onclick = () => respondVault(null);
+  if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
+  return card;
+}
+
+function hideVaultCard(force = false, reason = "dismissed") {
+  const card = $("vaultCard");
+  const remaining = _vaultVisibleSince ? (VAULT_MIN_VISIBLE_MS - (Date.now() - _vaultVisibleSince)) : 0;
+  if (!force && reason !== 'expired' && remaining > 0 && card) {
+    setTimeout(() => hideVaultCard(true, reason), remaining);
+    return;
+  }
+  _clearVaultCountdownTimer();
+  _resetVaultCardState();
+  if (!card) return;
+  card.classList.remove("visible");
+  _setPromptFlyoutHidden(card, true);
+  $("vaultQuestion").textContent = "";
+  const fields = $("vaultFields");
+  if (fields) fields.innerHTML = '';
+  const primary = $("vaultPrimaryInput");
+  if (primary) { primary.value = ''; primary.disabled = false; }
+  const submit = $("vaultSubmit");
+  if (submit) { submit.disabled = false; submit.classList.remove("loading"); }
+  const skip = $("vaultSkip");
+  if (skip) skip.disabled = false;
+}
+
+function showVaultCard(pending) {
+  try {
+    _showVaultCardImpl(pending);
+  } catch (e) {
+    console.error('[vault] showVaultCard failed', e && e.stack || e);
+  }
+}
+
+function _showVaultCardImpl(pending) {
+  if (!pending) return;
+  const sid = pending.session_id || (S.session && S.session.session_id) || '';
+  if (typeof _notifyPromptCard === 'function') _notifyPromptCard('vault', sid, pending);
+  if (!_vaultBelongsToActiveSession(sid)) return;
+  const card = _ensureVaultCardDom();
+  if (!card) return;
+  const kind = String(pending.kind || 'unlock');
+  const sig = JSON.stringify({
+    kind,
+    pid: pending.prompt_id || null,
+    sid,
+    label: pending.label || pending.site || '',
+    display: pending.display_name || '',
+    hint: pending.hint || '',
+  });
+  const wasSame = card.classList.contains('visible') && _vaultSignature === sig;
+  _vaultSessionId = sid;
+  _vaultPromptId = pending.prompt_id || null;
+  _vaultKind = kind;
+  _vaultSignature = sig;
+  if (!wasSame) _vaultVisibleSince = Date.now();
+  const headingEl = $("vaultHeading");
+  const hintEl = $("vaultHint");
+  const questionEl = $("vaultQuestion");
+  const primary = $("vaultPrimaryInput");
+  const fields = $("vaultFields");
+  if (kind === 'save_login') {
+    if (headingEl) headingEl.setAttribute('data-i18n', 'vault_heading_save');
+    if (headingEl) headingEl.textContent = t('vault_heading_save') || 'Save this login?';
+    if (hintEl) { hintEl.setAttribute('data-i18n', 'vault_hint_save'); hintEl.textContent = t('vault_hint_save') || ''; }
+    if (primary) {
+      primary.setAttribute('data-i18n-placeholder', 'vault_input_password_placeholder');
+      primary.placeholder = t('vault_input_password_placeholder') || 'Password';
+    }
+    const target = pending.label || pending.origin || '';
+    if (questionEl) questionEl.textContent = (target ? target + ' — ' : '') + (t('vault_save_question') || 'Enter the login to save');
+    if (fields && !$('vaultIdentifierInput')) {
+      const wrap = document.createElement('div');
+      wrap.className = 'clarify-response';
+      const ident = document.createElement('input');
+      ident.className = 'clarify-input';
+      ident.id = 'vaultIdentifierInput';
+      ident.type = 'text';
+      ident.autocomplete = 'off';
+      ident.spellcheck = false;
+      ident.placeholder = t('vault_input_identifier_placeholder') || 'Username';
+      ident.setAttribute('data-i18n-placeholder', 'vault_input_identifier_placeholder');
+      ident.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); respondVault(); } };
+      wrap.appendChild(ident);
+      fields.innerHTML = '';
+      fields.appendChild(wrap);
+    }
+  } else if (kind === 'code') {
+    if (headingEl) headingEl.setAttribute('data-i18n', 'vault_heading_code');
+    if (headingEl) headingEl.textContent = t('vault_heading_code') || 'Code needed';
+    if (hintEl) { hintEl.setAttribute('data-i18n', 'vault_hint_code'); hintEl.textContent = t('vault_hint_code') || ''; }
+    if (primary) {
+      primary.setAttribute('type', 'text');
+      primary.setAttribute('inputmode', 'numeric');
+      primary.setAttribute('data-i18n-placeholder', 'vault_input_code_placeholder');
+      primary.placeholder = t('vault_input_code_placeholder') || 'One-time code';
+    }
+    if (questionEl) questionEl.textContent = pending.site || pending.hint || '';
+    if (fields) fields.innerHTML = '';
+  } else {
+    if (headingEl) headingEl.setAttribute('data-i18n', 'vault_heading_unlock');
+    if (headingEl) headingEl.textContent = t('vault_heading_unlock') || 'Password needed';
+    if (hintEl) { hintEl.setAttribute('data-i18n', 'vault_hint_unlock'); hintEl.textContent = t('vault_hint_unlock') || ''; }
+    const manager = pending.display_name || pending.backend || '';
+    if (questionEl) questionEl.textContent = t('vault_unlock_question', manager);
+    if (primary) {
+      primary.setAttribute('type', 'password');
+      primary.removeAttribute('inputmode');
+      primary.setAttribute('data-i18n-placeholder', 'vault_input_password_placeholder');
+      primary.placeholder = t('vault_input_password_placeholder') || 'Master password';
+    }
+    if (fields) fields.innerHTML = '';
+  }
+  if (!wasSame && primary) primary.value = '';
+  if (primary) {
+    primary.disabled = false;
+    primary.autofocus = false;
+    primary.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); respondVault(); } };
+  }
+  if (Number(pending.timeout_seconds) > 0) {
+    _startVaultCountdown(pending);
+  } else {
+    _clearVaultCountdownTimer();
+  }
+  _setPromptFlyoutHidden(card, false);
+  card.classList.add('visible');
+  _vaultSetControlsDisabled(false, false);
+  if (typeof applyLocaleToDOM === 'function') applyLocaleToDOM();
+  if (!wasSame && primary && document.activeElement !== $('msg')) {
+    try { primary.focus({ preventScroll: true }); } catch (_) { primary.focus(); }
+  }
+}
+
+async function respondVault(skipRequested) {
+  const sid = _vaultSessionId || (S.session && S.session.session_id);
+  if (!sid) return;
+  const promptId = _vaultPromptId;
+  const kind = _vaultKind;
+  if (!promptId) return;
+  const primary = $("vaultPrimaryInput");
+  const ident = $("vaultIdentifierInput");
+  let values = {};
+  if (!skipRequested) {
+    if (kind === 'save_login') {
+      const p = (primary && primary.value || '').trim();
+      const i = (ident && ident.value || '').trim();
+      if (!p) { if (primary) primary.focus(); return; }
+      values = { identifier: i, password: p };
+    } else if (kind === 'code') {
+      const c = (primary && primary.value || '').trim().replace(/\s+/g, '');
+      if (!c) { if (primary) primary.focus(); return; }
+      values = { code: c };
+    } else {
+      const p = (primary && primary.value || '').trim();
+      if (!p) { if (primary) primary.focus(); return; }
+      values = { password: p };
+    }
+  }
+  _vaultSetControlsDisabled(true, !skipRequested);
+  try {
+    await api("/api/vault/respond", {
+      method: "POST",
+      body: JSON.stringify({ session_id: sid, prompt_id: promptId, values })
+    });
+    // Success or stale never echoes the value back; the card just resolves.
+    if (_vaultPromptId === promptId) {
+      hideVaultCard(true, 'sent');
+    }
+  } catch (e) {
+    const status = e && typeof e.status === 'number' ? e.status : null;
+    if (status === 409) {
+      if (_vaultPromptId === promptId) hideVaultCard(true, 'expired');
+    } else {
+      // Transient: restore controls so the user can retry. The typed value
+      // stays only in the masked input, never in drafts or messages.
+      _vaultSetControlsDisabled(false, false);
+      if (typeof setStatus === 'function' && e && e.message) setStatus('Vault: ' + e.message);
+    }
+  }
+}
+
+function _vaultPollTick(sid) {
+  if (!S.session || S.session.session_id !== sid) {
+    _hideVaultCardIfOwner(sid, true, 'session');
+    return;
+  }
+  if (_vaultPollInFlight) return;
+  _vaultPollInFlight = true;
+  (async () => {
+    try {
+      const data = await api("/api/vault/pending?session_id=" + encodeURIComponent(sid), { timeoutToast: false });
+      if (!S.session || S.session.session_id !== sid) return;
+      if (data && data.pending) { showVaultCard(data.pending); }
+      else { _hideVaultCardIfOwner(sid, false, 'expired'); }
+    } catch (e) {
+      // Vault cards are best-effort live region: the chat-stream event and the
+      // run-end clear cover the normal paths; poll errors stay silent.
+    } finally {
+      _vaultPollInFlight = false;
+    }
+  })();
+}
+
 let _clarifyPollingSessionId = null;
 let _clarifyProfilePausedSessionId = null;
 
@@ -10440,6 +10762,8 @@ function _startClarifyFallbackPoll(sid) {
     if (_clarifyFallbackPollInFlight) return;
     _clarifyFallbackPollInFlight = true;
     const focusEpoch = _promptPollerFocusEpoch;
+    // Pending browser_vault cards ride the same poll cadence (best effort).
+    if (typeof _vaultPollTick === 'function') _vaultPollTick(sid);
     try {
       const generation = _clarifyPromptGeneration(sid);
       const data = await api("/api/clarify/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});

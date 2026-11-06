@@ -584,6 +584,23 @@
           <div class="clarify-hint" id="clarifyHint" data-i18n="clarify_hint">Pick a choice, or type your own answer below.</div>
         </div>
       </div>
+      <div class="clarify-card" id="vaultCard" role="dialog" aria-labelledby="vaultHeading" aria-describedby="vaultQuestion vaultHint" hidden aria-hidden="true" inert>
+        <div class="clarify-inner">
+          <div class="clarify-header">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+            <span id="vaultHeading" data-i18n="vault_heading_unlock">Password needed</span>
+            <span class="clarify-countdown" id="vaultCountdown"></span>
+            <button type="button" class="clarify-collapse" id="vaultSkip" aria-label="Skip vault prompt" data-i18n-aria-label="vault_skip" onclick="respondVault(null)" title="Skip (the agent will be told you declined)" data-i18n-title="vault_skip_title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+          </div>
+          <div class="clarify-question" id="vaultQuestion"></div>
+          <div class="clarify-choices" id="vaultFields"></div>
+          <div class="clarify-response">
+            <input class="clarify-input" id="vaultPrimaryInput" type="password" autocomplete="off" spellcheck="false" data-i18n-placeholder="vault_input_password_placeholder" placeholder="Type the password…">
+            <button class="clarify-submit" id="vaultSubmit" onclick="respondVault()" data-i18n="vault_send">Use it</button>
+          </div>
+          <div class="clarify-hint" id="vaultHint" data-i18n="vault_hint_unlock">The value is injected directly into the page — it never appears in the conversation.</div>
+        </div>
+      </div>
       <div class="composer-terminal-panel" id="composerTerminalPanel" hidden>
         <div class="composer-terminal-inner">
           <div class="composer-terminal-resize-handle" id="terminalResizeHandle" role="separator" aria-orientation="horizontal" aria-label="Resize terminal" tabindex="0"></div>
