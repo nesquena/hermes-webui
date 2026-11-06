@@ -31963,7 +31963,9 @@ def _handle_chat_sync(handler, body):
                 _dedupe_replayed_context_messages,
                 _deduplicate_context_messages,
                 _find_active_turn_checkpoint_index,
+                _mark_active_turn_checkpoint,
                 _merge_display_messages_after_agent_result,
+                _reconcile_prefix_occurrence_ownership,
                 _resolve_active_turn_authority,
                 _restore_display_reasoning_metadata,
                 _restore_reasoning_metadata_before_boundary,
@@ -32143,6 +32145,26 @@ def _handle_chat_sync(handler, body):
                     f"sync:{s.session_id}:{_active_turn_identity['turn_id']}",
                     time.time(),
                 )
+                # #8574 review (nesquena-hermes 2026-10-28): stamp the token
+                # onto the RETAINED result row NOW, while
+                # ``_active_image_index`` still addresses the original Agent
+                # result. ``_deduplicate_context_messages`` below shrinks the
+                # list (it removes replayed same-id history rows), so the
+                # authority's ``current_turn_user_idx`` is stale on the
+                # reduced array and the final ``_settle_current_turn_boundary``
+                # would miss the row — materializing a second plain-text copy
+                # of the prompt at the front while the retained image row
+                # stays un-stamped (ownership then differs between display and
+                # model context). Rows carrying ``_active_turn_token`` are
+                # protected by the identity dedup, and the settle locates the
+                # current row by token first, so the durable stamp survives
+                # the shrinking dedup and the settlement keeps the single
+                # original image row (the streaming path's pre/post-dedup
+                # settlement in ``_settle_result_messages`` establishes the
+                # same durable ownership before the dedup).
+                _mark_active_turn_checkpoint(
+                    _result_messages[_active_image_index], _active_turn_identity
+                )
         _turn_boundary = _active_turn_boundary(
             _result_messages, _previous_context_messages, _active_turn_identity, msg,
         )
@@ -32175,10 +32197,6 @@ def _handle_chat_sync(handler, body):
                 # must persist the compacted list, not the old history.
                 compression_authorized=_compression_authorized,
             )
-            s.context_messages = _deduplicate_context_messages(
-                _next_context_messages,
-                protected_rows=_proven_rows,
-            )
         else:
             # The Agent produced NO rows for this turn. The previous fallback
             # (``result.get("messages") or _previous_context_messages``) left
@@ -32192,6 +32210,29 @@ def _handle_chat_sync(handler, body):
             # keeping exactly one raw-history copy with no loss or
             # duplication.
             _next_context_messages = list(_previous_context_messages)
+            _proven_rows = None
+        # #8574 gate certification RED, finding 2 (nesquena-hermes
+        # 2026-10-31): settle the boundary BEFORE the identity dedup shrinks
+        # the list, then again after it — the same order the streaming settle
+        # (``_settle_result_messages``) has always applied. This route used to
+        # settle only once, after the shrink, so the authority's
+        # ``current_turn_user_idx`` (an index into the PRE-shrink list)
+        # addressed the wrong slot: when the fail-closed projection returned
+        # the raw previous context and the dedup then collapsed a replayed
+        # same-id pair, the current turn was materialized at the FRONT of the
+        # reduced history ([Q2, Q1, A1]) instead of at its tail, and the
+        # historical first row was pushed behind the new prompt. Settling on
+        # the unshrunk list first lets the prefix/checkpoint proofs resolve
+        # against the indices they were computed for; the post-dedup settle
+        # below then only has to re-stamp the row the first settle placed.
+        #
+        # The gate is the SAME predicate as the post-dedup settle below: this
+        # route has only ever settled token-authoritative turns, and a
+        # tokenless turn is never index-placed here, so it cannot be
+        # mis-placed by the shrink either. Widening the gate to every turn
+        # would also change the long-standing tokenless fail-closed contract
+        # pinned by tests/test_7237_round_n2_findings.py, which is outside
+        # this repair's scope.
         if _active_turn_identity.get("token"):
             _next_context_messages = _settle_current_turn_boundary(
                 _previous_context_messages,
@@ -32200,7 +32241,47 @@ def _handle_chat_sync(handler, body):
                 msg,
                 getattr(s, "pending_user_source", None) or "webui",
             )
-        s.context_messages = _next_context_messages
+        # #8574 review P2-2 (nesquena-hermes 2026-11-02): reconcile the
+        # retained ownership of the HISTORICAL PREFIX before the dedup. Now
+        # that this route actually APPLIES the identity dedup to the
+        # model-facing context (it used to compute it and overwrite it with the
+        # raw list), the conservative legacy collapse became reachable for
+        # history that carries no WebUI ids: two genuine turns repeating a
+        # prompt verbatim in DIFFERENT timestamp buckets share a content-only
+        # replay key, so the second was collapsed and a turn the display still
+        # shows was lost from the model context. A content group whose rows
+        # share ONE exact key is a replay and stays untouched, so the legacy
+        # collapse still collapses it.
+        _next_context_messages = _reconcile_prefix_occurrence_ownership(
+            _next_context_messages,
+            _result_messages,
+            _active_turn_identity,
+        )
+        # #6310 residual (nesquena-hermes 2026-10-27): the identity dedup is
+        # the FINAL persistence step here, exactly like the streaming settle
+        # (``api/streaming.py``) applies it. This block used to compute the
+        # dedup and then be overwritten by the raw ``_next_context_messages``
+        # below, so a previous context carrying a duplicate pair (same-id
+        # replay pollution or id-less legacy rows) persisted the duplicate
+        # into the model-facing context while the display merge collapsed it
+        # — the model was sent rows the transcript had already reconciled
+        # away. One retained ownership set, one dedup site, then settle.
+        s.context_messages = (
+            _deduplicate_context_messages(
+                _next_context_messages,
+                protected_rows=_proven_rows,
+            )
+            if result.get("messages")
+            else list(_next_context_messages)
+        )
+        if _active_turn_identity.get("token"):
+            s.context_messages = _settle_current_turn_boundary(
+                _previous_context_messages,
+                s.context_messages,
+                _active_turn_identity,
+                msg,
+                getattr(s, "pending_user_source", None) or "webui",
+            )
         s.messages = _merge_display_messages_after_agent_result(
             _previous_messages,
             _previous_context_messages,
