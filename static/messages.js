@@ -9,7 +9,7 @@
 // map at the top of this file was removed; its alias membership now
 // lives in the set below (#7675 follow-up #4).
 const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set([
-  'reload-mcp','reload-skills','codex-runtime','credits',
+  'reload-mcp','reload-skills','codex-runtime','credits','loop',
   'reload_mcp','reload_skills','codex_runtime','credits'
 ]);
 function _fallbackNonDispatchableAgentCommandCheck(_agentCmd){
@@ -1574,6 +1574,27 @@ function _setComposerAfterCliOnlyExplainer(value,owner){
   }
 }
 
+// Busy controls that need no registry wait (an alias such as /proactive does, so it is excluded).
+const _NATIVE_BUSY_CONTROLS=['steer','interrupt','queue','terminal','goal','yolo','stop','loop'];
+// Re-entrant send(): start a native busy control for the chat it was typed in and report whether it
+// was taken. Genuine messages, aliases and anything with staged files/selections keep the queue path.
+function _dispatchReentrantBusyControl(text){
+  if(!S.busy||!S.session||(S.pendingFiles&&S.pendingFiles.length)||_pendingSelections.length) return false;
+  const _pc=text.startsWith('/')&&typeof parseCommand==='function'&&parseCommand(text);
+  if(!_pc||!_NATIVE_BUSY_CONTROLS.includes(_pc.name)) return false;
+  const _bc=_pc.name==='loop'?null:COMMANDS.find(c=>c.name===_pc.name);
+  if(!_bc&&(_pc.name!=='loop'||typeof executeAgentCommand!=='function')) return false;
+  const _ownSid=S.session.session_id,_ownMsgs=S.messages;
+  $('msg').value='';autoResize();
+  if(_bc){Promise.resolve().then(()=>_bc.fn(_pc.args)).catch(e=>showToast(String(e&&e.message||e),3000));return true;}
+  _ownMsgs.push({role:'user',content:text,_ts:Date.now()/1000});
+  executeAgentCommand(text,{name:'loop'}).catch(e=>'Agent command error: '+(e&&e.message||e)).then(out=>{
+    _ownMsgs.push({role:'assistant',content:String(out||'(no output)'),_ts:Date.now()/1000});
+    if(S.messages===_ownMsgs&&(S.session&&S.session.session_id)===_ownSid&&typeof renderMessages==='function') renderMessages({preserveScroll:true});
+  });
+  return true;
+}
+
 async function send(){
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
@@ -1590,6 +1611,9 @@ async function send(){
   // instead of silently dropping it.
   if (_sendInProgress) {
     const _text=_composerTextWithPendingSelections().trim();
+    // A native busy control (/stop, /steer, /loop …) typed while an earlier send() is parked on a
+    // metadata await runs now; queueing it would act only after the turn it is meant to control.
+    if(typeof _dispatchReentrantBusyControl==='function'&&_dispatchReentrantBusyControl(_text)) return;
     // Use the in-flight session's sid, not the currently viewed session,
     // so the queued message goes to the chat that owns the active stream.
     const _targetSid=_sendInProgressSid||(S.session&&S.session.session_id);
@@ -1689,6 +1713,25 @@ async function send(){
       // or queued as the literal text "/stop" (#6951).
       if(text.startsWith('/')&&!literalSlash){
         const _pc=typeof parseCommand==='function'&&parseCommand(text);
+        // Native busy controls (and /loop) need no registry wait; only an alias (/proactive) does. Bind the
+        // owning chat BEFORE that await: the transport reads the mutable S.session, so a switch must abort.
+        const _ownSid=S.session&&S.session.session_id,_ownMsgs=S.messages,_ownProfile=S.activeProfile;
+        const _pcMeta=_pc&&!['steer','interrupt','queue','terminal','goal','yolo','stop','loop'].includes(_pc.name)&&typeof getAgentCommandMetadata==='function'?await getAgentCommandMetadata(_pc.name):null;
+        if(_pcMeta&&((S.session&&S.session.session_id)!==_ownSid||S.messages!==_ownMsgs||S.activeProfile!==_ownProfile)){
+          showToast('Chat changed — "'+text.slice(0,40)+'" was not sent',3000);  // composer/messages now belong to the other chat
+          return;
+        }
+        const _pcCmd=_pcMeta&&_pcMeta.command;
+        if(_pc&&(_pcCmd&&_pcCmd.name||_pc.name)==='loop'&&typeof executeAgentCommand==='function'){
+          // /loop status|pause|stop must reach the loop while its own wakeup turn runs.
+          $('msg').value='';autoResize();
+          S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+          let _out;
+          try{_out=await executeAgentCommand(text,_pcCmd||{name:'loop'});}catch(e){_out='Agent command error: '+(e&&e.message||e);}
+          _ownMsgs.push({role:'assistant',content:String(_out||'(no output)'),_ts:Date.now()/1000});
+          if(S.messages===_ownMsgs&&(S.session&&S.session.session_id)===_ownSid&&typeof renderMessages==='function') renderMessages({preserveScroll:true});
+          return;
+        }
         if(_pc&&['steer','interrupt','queue','terminal','goal','yolo','stop'].includes(_pc.name)){
           const _bc=COMMANDS.find(c=>c.name===_pc.name);
           if(_bc){
@@ -1891,6 +1934,12 @@ async function send(){
       const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'').trim().toLowerCase();
       if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){
         if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
+        // /loop is chat-scoped and the transport reads S.session synchronously at the call below: the
+        // registry wait above may span a chat switch, so refuse instead of acting on the chat switched to.
+        if(_agentCmdName==='loop'&&_slashOwner.sid&&(S.session&&S.session.session_id)!==_slashOwner.sid){
+          showToast('Chat changed — "'+text.slice(0,40)+'" was not sent',3000);
+          return;
+        }
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _agentOutput='(no output)';
         try{
