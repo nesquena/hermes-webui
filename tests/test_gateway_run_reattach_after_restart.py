@@ -111,7 +111,9 @@ def test_runs_api_start_sends_idempotency_key_and_persists_run_id(isolated_sessi
 
     assert captured["post_headers"]["Idempotency-key"] == f"webui-{stream_id}"
     # Only ids and flags are persisted, never a credential.
-    assert captured["persisted_at_events"] == {
+    persisted = dict(captured["persisted_at_events"])
+    assert isinstance(persisted.pop("turn_started_at"), float)
+    assert persisted == {
         "run_id": "run_live", "stream_id": stream_id, "regeneration": False, "goal_related": False,
     }
     saved = _saved(s.session_id)
