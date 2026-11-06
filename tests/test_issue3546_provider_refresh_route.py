@@ -577,6 +577,102 @@ def _replay_add_live(scenario: str) -> dict:
 """)
 
 
+# ---------------------------------------------------------------------------
+# #6919 (empty-membership remainder): the COMPLETE fetch → invalidate → add →
+# prune chain, replayed against the real production functions. Only the fetch
+# transport and the DOM are stubs.
+#
+# The maintainer's schedule:
+#   1. Hydrated Settings picker: a selected live model, a static catalog
+#      choice, and another provider's option.
+#   2. A completed live fetch inserts `@custom:cpa:gone` and the catalog's
+#      routed twin.
+#   3. invalidateLiveModelCache() dispatches its replacement.
+#   4. The replacement resolves with an explicitly empty membership → the
+#      unselected `gone` option must go, while the selection, the
+#      catalog-origin option and the other provider's option survive.
+# ---------------------------------------------------------------------------
+
+# A DOM faithful enough for the real pruner: ``selectedIndex`` is DERIVED from
+# ``sel.value`` (the production pruner resolves the protected selection via
+# sel.options[sel.selectedIndex], and the sort helper clears it with -1), so a
+# mutation can never silently desync the two and fake a protection.
+_EMPTY_MEMBERSHIP_PREAMBLE = """
+function _el(tag,attrs){
+  const e={tagName:String(tag).toUpperCase(),dataset:{},children:[],title:'',value:'',textContent:'',
+    appendChild(c){this.children.push(c);c.parentNode=this;c.parentElement=this;return c;},
+    insertBefore(node,ref){const i=this.children.indexOf(ref);if(i<0){this.children.push(node);}else{this.children.splice(i,0,node);}node.parentNode=this;node.parentElement=this;return node;},
+    removeChild(c){const i=this.children.indexOf(c);if(i>=0)this.children.splice(i,1);c.parentNode=null;c.parentElement=null;return c;}};
+  if(attrs){for(const k in attrs){if(k!=='dataset') e[k]=attrs[k];}}
+  if(attrs&&attrs.dataset) e.dataset=attrs.dataset;
+  return e;
+}
+function _mk(value,title,dataset){return _el('option',{value:value,title:title||'',dataset:dataset||{}});}
+function _makeSelect(groups,selectedValue){
+  const sel={querySelectorAll(t){return t==='optgroup'?groups:[];}};
+  Object.defineProperty(sel,'options',{get(){const out=[];for(const g of groups){for(const o of g.children) out.push(o);}return out;}});
+  sel.value=selectedValue===null?'':String(selectedValue||'');
+  Object.defineProperty(sel,'selectedIndex',{
+    get(){const opts=sel.options;if(!sel.value)return -1;const i=opts.findIndex(o=>o.value===sel.value);return i>=0?i:-1;},
+    set(v){if(v===null||v<0){sel.value='';return;}const opts=sel.options;sel.value=(opts[v]&&opts[v].value)||'';},
+    configurable:true,
+  });
+  return sel;
+}
+const _LIVE_TITLE='Live model — fetched from provider';
+let _dynamicModelLabels={};
+const S={session:{}};
+const window={_activeProvider:'custom:cpa'};
+const document={createElement(tag){return _el(tag);},baseURI:'http://localhost/',getElementById(id){return id==='settingsModel'?_settingsSel:null;}};
+const location={href:'http://localhost/'};
+function _sortModelPickerOptions(){}
+function _modelStateForSelect(){return null;}
+function _applyModelToDropdown(){return true;}
+function syncModelChip(){}
+function _getOptionProviderId(opt){
+  if(!opt) return '';
+  if(opt.dataset&&opt.dataset.provider) return opt.dataset.provider;
+  const g=opt.parentElement;
+  if(g&&g.dataset&&g.dataset.provider) return g.dataset.provider;
+  return '';
+}
+const _liveModelCache={};
+const _liveModelFetchPending=new Set();
+const _liveModelFetchOwners=new Map();
+let _liveModelInvalidationEpoch=0;
+let _modelDropdownRequestSeq=0;
+function _redirectIfUnauth(){return false;}
+const fetchUrls=[];
+const fetchDeferreds=[];
+function _deferred(){let resolve;const promise=new Promise(r=>{resolve=r});return {promise,resolve};}
+function fetch(url){fetchUrls.push(url);const d=_deferred();fetchDeferreds.push(d);return d.promise;}
+const _tick=()=>new Promise(r=>setTimeout(r,0));
+let _settingsSel=null;
+const console={debug(){},log(){},warn(){},error(){}};
+"""
+
+
+def _replay_empty_membership(scenario: str) -> dict:
+    """Replay the complete fetch → invalidate → add → prune chain with the
+    REAL production functions from static/ui.js."""
+    ui = _read_static("ui.js")
+    parts = [
+        _extract_function_body(ui, "function _modelPickerOptionIdentity("),
+        _extract_function_body(ui, "function _deduplicateModelPickerOptions("),
+        _extract_function_body(ui, "function _dropStaleLiveModelOptions("),
+        _extract_function_body(ui, "function _addLiveModelsToSelect("),
+        _extract_function_body(ui, "function invalidateLiveModelCache("),
+        _extract_function_body(ui, "async function _fetchLiveModels("),
+    ]
+    return _run_node(f"""
+{_EMPTY_MEMBERSHIP_PREAMBLE}
+{"".join(parts)}
+(async()=>{{
+{scenario}
+}})().catch(e=>{{process.stderr.write(String(e&&e.stack||e));process.exit(1);}});
+""")
+
+
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_reconcile_preserves_a_static_choice_replaced_by_a_live_twin():
     """Greptile follow-up: a routed live replacement stands in for a bare static
@@ -881,4 +977,231 @@ def test_settings_rearm_never_reloads_the_settings_form():
     ), (
         "the replacement must be dispatched AFTER eviction; before it, "
         "_fetchLiveModels() would hit the surviving cache entry and never re-fetch"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #6919 (empty-membership remainder): an explicitly successful EMPTY live-model
+# response must reconcile the picker to an empty set. Before the fix the
+# empty array returned early in two places (the fetch path and the append
+# path), so the pruner was never reached and a removed live-only option
+# stayed selectable.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_explicitly_empty_membership_reconciles_the_picker_to_empty():
+    """The maintainer's schedule, end to end: hydrated Settings picker →
+    live fetch inserts `gone` + the catalog's routed twin → invalidate →
+    the replacement resolves with an explicitly empty membership.
+
+    The unselected, removed live-only option must disappear; the current
+    selection, the catalog-origin option and the other provider's option must
+    all survive.
+    """
+    result = _replay_empty_membership("""
+  // 1. Hydrated Settings picker: a selected live model, a static catalog
+  //    choice, and another provider's option.
+  const group=_el('optgroup',{dataset:{provider:'custom:cpa'}});
+  group.appendChild(_mk('model-x',''));                       // static catalog
+  group.appendChild(_mk('@custom:cpa:selected',_LIVE_TITLE,{provider:'custom:cpa',live:'1'}));
+  const otherGroup=_el('optgroup',{dataset:{provider:'other'}});
+  otherGroup.appendChild(_mk('other/model',_LIVE_TITLE,{provider:'other',live:'1'}));
+  const sel=_makeSelect([group,otherGroup],'@custom:cpa:selected');
+  _settingsSel=sel;
+
+  // 2. A completed live fetch inserts `@custom:cpa:gone` and the catalog's
+  //    routed twin.
+  const first=_fetchLiveModels('custom:cpa',sel,null,{reconcile:true});
+  await _tick();
+  fetchDeferreds[0].resolve({json:async()=>({models:[
+    {id:'model-x',label:'Model X'},
+    {id:'gone',label:'Gone'},
+  ]})});
+  await first;
+  await _tick();
+  const afterFetch=group.children.map(o=>o.value);
+  const selectedBefore=sel.value;
+
+  // 3. invalidateLiveModelCache() correctly dispatches its replacement.
+  invalidateLiveModelCache();
+  await _tick();
+  const dispatched=fetchUrls.length;
+
+  // 4. The replacement resolves with an explicitly empty membership.
+  fetchDeferreds[1].resolve({json:async()=>({models:[]})});
+  await _tick();
+  await _tick();
+
+  process.stdout.write(JSON.stringify({
+    afterFetch:afterFetch,
+    selectedBefore:selectedBefore,
+    dispatched:dispatched,
+    afterEmpty:group.children.map(o=>o.value),
+    otherAfter:otherGroup.children.map(o=>o.value),
+    selectedAfter:sel.value,
+  }));
+""")
+    assert result["afterFetch"] == [
+        "@custom:cpa:model-x",
+        "@custom:cpa:selected",
+        "@custom:cpa:gone",
+    ], f"unexpected pre-reconcile picker shape: {result['afterFetch']}"
+    assert result["dispatched"] == 2, (
+        "#6919: the invalidation must dispatch exactly one replacement fetch, "
+        f"got {result['dispatched']}"
+    )
+    assert "@custom:cpa:gone" not in result["afterEmpty"], (
+        "#6919: an explicitly empty live-model response must drop the "
+        "unselected, removed live-only option — it is still selectable: "
+        f"{result['afterEmpty']}"
+    )
+    assert result["selectedAfter"] == "@custom:cpa:selected", (
+        "#6919: reconciliation must never remove the current selection — "
+        f"got {result['selectedAfter']}"
+    )
+    assert "@custom:cpa:selected" in result["afterEmpty"], (
+        "#6919: the selected option must stay selectable — "
+        f"got {result['afterEmpty']}"
+    )
+    assert "@custom:cpa:model-x" in result["afterEmpty"], (
+        "#6919: the catalog-origin option (a routed stand-in for a static "
+        f"catalog row) must survive reconciliation — got {result['afterEmpty']}"
+    )
+    assert result["otherAfter"] == ["other/model"], (
+        "#6919: reconciliation is provider-scoped; another provider's options "
+        f"must survive — got {result['otherAfter']}"
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_discovery_failure_does_not_reconcile_the_picker_to_empty():
+    """Negative control for the empty-membership fix: a discovery FAILURE is
+    not authoritative membership. The endpoint publishes its failure shape
+    with an ``error`` marker, and that must never prune the picker — a
+    provider we could not reach says nothing about what it offers.
+    """
+    result = _replay_empty_membership("""
+  const group=_el('optgroup',{dataset:{provider:'custom:cpa'}});
+  group.appendChild(_mk('@custom:cpa:gone',_LIVE_TITLE,{provider:'custom:cpa',live:'1'}));
+  const sel=_makeSelect([group],'@custom:cpa:gone');
+  _settingsSel=sel;
+
+  const first=_fetchLiveModels('custom:cpa',sel,null,{reconcile:true});
+  await _tick();
+  fetchDeferreds[0].resolve({json:async()=>({models:[{id:'gone',label:'Gone'}]})});
+  await first;
+  await _tick();
+
+  invalidateLiveModelCache();
+  await _tick();
+  // The replacement FAILS to discover anything: the endpoint's failure shape.
+  fetchDeferreds[1].resolve({json:async()=>({models:[],error:'no_models_discovered'})});
+  await _tick();
+  await _tick();
+
+  process.stdout.write(JSON.stringify({
+    afterFailure:group.children.map(o=>o.value),
+    selectedAfter:sel.value,
+  }));
+""")
+    assert result["afterFailure"] == ["@custom:cpa:gone"], (
+        "#6919: a discovery failure must NOT be read as authoritative empty "
+        "membership — the option must survive: "
+        f"{result['afterFailure']}"
+    )
+    assert result["selectedAfter"] == "@custom:cpa:gone", (
+        "#6919: a discovery failure must not disturb the selection"
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_malformed_live_model_response_does_not_reconcile_the_picker_to_empty():
+    """Negative control: a MISSING or MALFORMED payload says nothing about the
+    provider's membership either. It must leave the picker untouched."""
+    for label, payload in (
+        ("missing-models", "{}"),
+        ("models-not-a-list", '{"models":"nope"}'),
+        ("models-null", '{"models":null}'),
+        ("not-an-object", "[]"),
+    ):
+        result = _replay_empty_membership(f"""
+  const group=_el('optgroup',{{dataset:{{provider:'custom:cpa'}}}});
+  group.appendChild(_mk('@custom:cpa:gone',_LIVE_TITLE,{{provider:'custom:cpa',live:'1'}}));
+  const sel=_makeSelect([group],'@custom:cpa:gone');
+  _settingsSel=sel;
+
+  const first=_fetchLiveModels('custom:cpa',sel,null,{{reconcile:true}});
+  await _tick();
+  fetchDeferreds[0].resolve({{json:async()=>({{models:[{{id:'gone',label:'Gone'}}]}})}});
+  await first;
+  await _tick();
+
+  invalidateLiveModelCache();
+  await _tick();
+  fetchDeferreds[1].resolve({{json:async()=>({payload})}});
+  await _tick();
+  await _tick();
+
+  process.stdout.write(JSON.stringify({{afterMalformed:group.children.map(o=>o.value)}}));
+""")
+        assert result["afterMalformed"] == ["@custom:cpa:gone"], (
+            f"#6919: a {label} response must NOT prune the picker — "
+            f"got {result['afterMalformed']}"
+        )
+
+
+def test_empty_membership_reconcile_is_wired_to_the_pruner():
+    """Structural pin: the empty-membership path must actually reach the
+    pruner, and the empty array must only be short-circuited on the plain
+    append path.
+
+    The behaviour tests above go red when the wiring is removed, but a
+    direct call to the pruner stays green even if the fetch path never
+    calls it — so the reachability is pinned separately.
+    """
+    ui = _read_static("ui.js")
+    fetch_live = _extract_function_body(ui, "async function _fetchLiveModels(")
+    assert "_authoritativeEmpty" in fetch_live, (
+        "#6919: the fetch path must distinguish an authoritative empty "
+        "membership from a discovery failure"
+    )
+    assert "!data.error" in fetch_live, (
+        "#6919: the endpoint's failure shape carries an `error` marker — the "
+        "fetch path must treat it as a non-authoritative empty result"
+    )
+    add = _extract_function_body(ui, "function _addLiveModelsToSelect(")
+    # The reconcile runs against the refreshed set, which is EMPTY for an
+    # authoritative empty membership — that is what prunes the live-only
+    # choices.
+    assert "if(reconcile&&refreshed) _dropStaleLiveModelOptions(provider,refreshed,sel);" in add, (
+        "#6919: the append path must reconcile after adding the fresh payload"
+    )
+    assert "const refreshed=reconcile?new Set():null;" in add, (
+        "#6919: the reconcile set must start EMPTY, so an authoritative empty "
+        "membership reconciles the picker to an empty set"
+    )
+    # The append block (and with it the optgroup creation) must be skipped
+    # for an empty payload, so an empty membership never manufactures a
+    # live group.
+    assert "if(models.length){" in add, (
+        "#6919: the append block must be skipped for an empty membership"
+    )
+    guard = add.index("if(models.length){")
+    group_create = add.index("providerGroup=document.createElement('optgroup')")
+    append_loop = add.index("for(const m of models){")
+    prune_call = add.index("_dropStaleLiveModelOptions(provider,refreshed,sel)")
+    assert guard < group_create < append_loop, (
+        "#6919: the optgroup creation and the append loop must sit inside the "
+        "non-empty guard"
+    )
+    assert prune_call > append_loop, (
+        "#6919: the reconcile must run AFTER the append, so the fresh "
+        "payload's own options cannot be dropped as stale"
+    )
+    # The plain append path keeps its empty-array no-op: without the
+    # reconcile request, an empty payload must not touch the picker.
+    assert "const reconcile=!!(opts&&opts.reconcile);" in add, (
+        "#6919: only the reconcile path may reconcile an empty membership — "
+        "the plain append path keeps its empty-array no-op"
     )

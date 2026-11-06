@@ -25834,6 +25834,16 @@ def _handle_live_models(handler, parsed):
     qs = parse_qs(parsed.query)
     provider = (qs.get("provider", [""])[0] or "").lower().strip()
 
+    # #6919 (empty-membership remainder): an EMPTY model list is only
+    # "this provider really has no models" when a discovery step actually
+    # SUCCEEDED. Every fallback path below degrades to an empty list too, so
+    # an empty list alone cannot be read as authoritative membership — the
+    # frontend would prune live choices on what is really a discovery
+    # failure. Track whether a discovery step completed successfully; when
+    # none did, the empty answer is published with an ``error`` marker so the
+    # client can tell the two apart (the endpoint's existing failure shape).
+    _discovery_succeeded = False
+
     try:
         from api.config import get_config as _gc
         cfg = _gc()
@@ -25881,6 +25891,11 @@ def _handle_live_models(handler, parsed):
         except Exception as _import_err:
             logger.debug("provider_model_ids import failed for %s: %s", provider, _import_err)
             ids = []
+
+        if ids:
+            # #6919: the agent's resolver produced a real catalog, so this
+            # response is authoritative membership.
+            _discovery_succeeded = True
 
         if not ids:
             custom_provider_entry = None
@@ -26017,6 +26032,11 @@ def _handle_live_models(handler, parsed):
                         elif isinstance(_body, list):
                             ids = [m.get("id", m) if isinstance(m, dict) else m for m in _body]
 
+                        # #6919: the endpoint answered, so an EMPTY list here is
+                        # the provider's real membership — not a discovery
+                        # failure. Mark the response authoritative.
+                        _discovery_succeeded = True
+
                         if ids:
                             logger.debug("Live-fetched %d models from custom provider %s", len(ids), _base_url)
                         else:
@@ -26098,6 +26118,10 @@ def _handle_live_models(handler, parsed):
                         with urllib.request.urlopen(_req, timeout=8) as _resp:
                             _body = json.loads(_resp.read())
                         ids = [m.get("id", "") for m in _body.get("data", []) if m.get("id")]
+                        # #6919: the endpoint answered, so an EMPTY list here is
+                        # the provider's real membership — not a discovery
+                        # failure. Mark the response authoritative.
+                        _discovery_succeeded = True
                         logger.debug("Live-fetched %d models from %s /v1/models", len(ids), provider)
                 except Exception as _fetch_err:
                     logger.debug("Live fetch from %s failed: %s", provider, _fetch_err)
@@ -26108,6 +26132,16 @@ def _handle_live_models(handler, parsed):
             from api.config import _PROVIDER_MODELS as _pm
             ids = [m["id"] for m in _pm.get(provider, [])]
         if not ids:
+            # #6919: nothing discovered. When no discovery step actually
+            # completed, this empty list is NOT authoritative membership —
+            # it means "we could not find out". Publish it in the endpoint's
+            # existing failure shape (``error`` marker) so the client does
+            # not reconcile the picker to an empty set on a discovery
+            # failure. A completed discovery that genuinely found no models
+            # stays a plain, authoritative empty list.
+            if not _discovery_succeeded:
+                return _finish({"provider": provider, "models": [], "count": 0,
+                                "error": "no_models_discovered"})
             return _finish({"provider": provider, "models": [], "count": 0})
 
         # Match the same dropdown visibility budget that /api/models uses so
