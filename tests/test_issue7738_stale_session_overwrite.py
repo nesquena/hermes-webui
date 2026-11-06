@@ -734,7 +734,7 @@ def _reasoning_profile_writes(monkeypatch):
     writes = []
     monkeypatch.setattr(
         routes, "write_reasoning_effort",
-        lambda effort, profile_home=None: writes.append((effort, str(profile_home))) or effort,
+        lambda effort, profile_home=None, *_a, **_kw: writes.append((effort, str(profile_home))) or effort,
     )
     monkeypatch.setattr(
         routes, "get_reasoning_status",
