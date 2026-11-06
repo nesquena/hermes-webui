@@ -300,6 +300,7 @@ def _bounded_tail_snapshot_if_safe(session, read_floor):
         _session_message_visible_key,
         _visible_key_field,
         _visible_key_without_occurrence,
+        _visible_key_without_private_identity,
         _VISIBLE_KEY_OCCURRENCE_INDEX,
         get_state_db_regeneration_tail_snapshot,
     )
@@ -322,6 +323,18 @@ def _bounded_tail_snapshot_if_safe(session, read_floor):
         # Empty skipped prefix: the bounded read already covers every row.
         return snap["tail"]
     # Non-empty skipped prefix: prove identical ordered visible identity.
+    #
+    # Both sides of the ordered proof use the SAME representation: the visible
+    # key with the PRIVATE identity removed from the occurrence slot (#8672
+    # review P2).  The sidecar carries a stable message ``id`` while the
+    # SQLite projection carries a ``_state_db_row_id``; those describe
+    # DIFFERENT things about the SAME logical row, so comparing the raw keys
+    # literally made the proof fail for every settled row.  That refused the
+    # bounded path and forced a full-history read of the whole transcript.
+    #
+    # The representation stays CLOCK-sensitive (the clock half is kept), so a
+    # repeated turn below and above the floor stays distinguishable, and the
+    # tool/provider identity (slots 2 and 4) keeps separating rows.
     sidecar_keys = []
     for message in getattr(session, "messages", None) or []:
         if not isinstance(message, dict):
@@ -334,8 +347,11 @@ def _bounded_tail_snapshot_if_safe(session, read_floor):
             key = _session_message_visible_key(message)
             if key is None:
                 return None
-            sidecar_keys.append(key)
-    if list(snap["prefix_keys"]) != sidecar_keys:
+            sidecar_keys.append(_visible_key_without_private_identity(key))
+    prefix_keys = [
+        _visible_key_without_private_identity(key) for key in snap["prefix_keys"]
+    ]
+    if prefix_keys != sidecar_keys:
         return None  # mismatch → full read
     # Occurrence-count collision (#6826 r3 #1) and in-tail duplicate (#6826
     # r5): both proofs compare the OCCURRENCE-FREE identity, not the #7587
