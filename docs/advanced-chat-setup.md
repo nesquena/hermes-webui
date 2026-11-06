@@ -272,6 +272,52 @@ off by default. When it is on, the ID is the last line of the system text
 (`- Session ID: <id>`), so everything before it is still the same across
 chats.
 
+## Per-model reasoning effort overrides
+
+`agent.reasoning_effort` sets the reasoning effort for every model;
+`agent.reasoning_overrides` lets one model opt out with its own level:
+
+```yaml
+agent:
+  reasoning_effort: high      # applies to every model without an override
+  reasoning_overrides:
+    claude-opus-4-5: low      # this model only
+    "@openrouter:gpt-5.4-mini": xhigh
+```
+
+A per-model override **always wins over the global `agent.reasoning_effort`**
+for that model. The override key is matched tolerantly against the model id
+that is actually used, so any of these spellings works for the same model:
+
+- the bare id (`gpt-5.4-mini`) and its lowercase form (`gpt-5.4-mini` is
+  matched case-insensitively),
+- the WebUI route-hint form (`@openrouter:gpt-5.4-mini`),
+- slash-qualified ids (`openai/gpt-5.4-mini`, and the aggregator form
+  `openrouter/openai/gpt-5.4-mini` for a model reached through an
+  aggregator),
+- provider-prefixed variants of the bare id (`openai/gpt-5.4-mini` matching
+  a bare `gpt-5.4-mini`),
+- dots and dashes in version numbers are interchangeable
+  (`claude-opus-4.5` ≡ `claude-opus-4-5`).
+
+When more than one spelling matches, the most specific one wins: the exact
+form given to the request outranks a stripped bare-tail form, which outranks
+a prefixed variant. Valid levels are `none`, `minimal`, `low`, `medium`,
+`high`, `xhigh` and `max`; `none` disables reasoning for that model.
+
+A model with **no matching override falls back to the global
+`agent.reasoning_effort`** — an override for an unknown or typo'd model id is
+never an error, it is simply unused (the model keeps the global level).
+
+The composer's reasoning dropdown and the `/reasoning` command share this
+resolution. When a model context is present (the dropdown's per-model
+selection), WebUI writes **both** the per-model override and the global
+`agent.reasoning_effort`, so the selection sticks for that model and the
+global value stays in sync for everyone else. Selecting **Default** in a
+model context clears that model's override (every spelling of it) and the
+global key, so the provider's default level applies again. `/reasoning
+<level>` without a model context writes only the global key.
+
 ## Gateway-backed browser chat
 
 By default, browser chat runs through WebUI's in-process legacy runtime. Advanced

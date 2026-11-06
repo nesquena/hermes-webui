@@ -7819,12 +7819,20 @@ def _profile_default_model_state(profile=None):
     return default_model or get_effective_default_model(), default_provider
 
 
-def _profile_default_reasoning_effort(profile=None):
+def _profile_default_reasoning_effort(
+    profile=None,
+    *,
+    model_id=None,
+    provider_id=None,
+):
     """Return the profile reasoning preference for a newly-created session."""
     try:
         from api.profiles import get_hermes_home_for_profile
         return _cfg.effective_session_reasoning_effort(
-            None, get_hermes_home_for_profile(profile),
+            None,
+            get_hermes_home_for_profile(profile),
+            model_id=model_id,
+            provider_id=provider_id,
         )
     except Exception:
         # Stay legacy (None) so the turn-time fallback still reads the profile
@@ -7879,7 +7887,11 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         workspace=workspace_path or get_last_workspace(profile=profile),
         model=effective_model,
         model_provider=effective_model_provider,
-        reasoning_effort=_profile_default_reasoning_effort(profile),
+        reasoning_effort=_profile_default_reasoning_effort(
+            profile,
+            model_id=effective_model,
+            provider_id=effective_model_provider,
+        ),
         profile=profile,
         project_id=project_id,
         personality=None,

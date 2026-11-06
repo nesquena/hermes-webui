@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 import api.config as config
 import api.gateway_chat as gateway_chat
@@ -388,7 +389,9 @@ def test_runtime_paths_prefer_session_reasoning_effort():
     # The live session is the source, matching the Gateway worker.
     assert "_session_effort = getattr(s, 'reasoning_effort', None)" in streaming
     assert "getattr(_session_meta, 'reasoning_effort'" not in streaming
-    assert "effective_session_reasoning_effort(\n                        _session_effort, _profile_home," in streaming
+    assert "effective_session_reasoning_effort(" in streaming
+    assert "model_id=resolved_model" in streaming
+    assert "provider_id=resolved_provider" in streaming
     assert "resolve_session_reasoning_effort(" in gateway
     # The Gateway worker starts from the live session too, and resolves a legacy
     # session through the same isolated session-profile read as the chip.
@@ -908,6 +911,49 @@ def test_effective_session_effort_shares_one_legacy_source(
         assert models._profile_default_reasoning_effort("work") == "high"
 
 
+@pytest.mark.parametrize(
+    "session_effort, expected",
+    [(None, "low"), ("high", "high"), ("", "")],
+    ids=["inherited-uses-model-override", "saved-pick-wins", "saved-default-wins"],
+)
+def test_session_effort_only_inherits_through_model_override(
+    isolated_reasoning_profiles, session_effort, expected
+):
+    _root, work = isolated_reasoning_profiles
+    config_path = work / "config.yaml"
+    config_data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_data["agent"]["reasoning_overrides"] = {"gpt-5": "low"}
+    config_path.write_text(yaml.safe_dump(config_data, sort_keys=False), encoding="utf-8")
+
+    assert config.effective_session_reasoning_effort(
+        session_effort,
+        work,
+        model_id="gpt-5",
+        provider_id="openai",
+    ) == expected
+
+
+def test_new_session_snapshots_inherited_model_override(
+    isolated_reasoning_profiles, tmp_path
+):
+    _root, work = isolated_reasoning_profiles
+    config_path = work / "config.yaml"
+    config_data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_data["agent"]["reasoning_overrides"] = {"gpt-5": "low"}
+    config_path.write_text(yaml.safe_dump(config_data, sort_keys=False), encoding="utf-8")
+
+    session = models.new_session(
+        workspace=str(tmp_path),
+        model="gpt-5",
+        model_provider="openai",
+        profile="work",
+    )
+    try:
+        assert session.reasoning_effort == "low"
+    finally:
+        models.SESSIONS.pop(session.session_id, None)
+
+
 @pytest.mark.parametrize("parent_effort", ["high", "none", "", None])
 @pytest.mark.parametrize("route", ["btw", "background"])
 def test_btw_and_background_children_inherit_parent_effort(
@@ -1205,3 +1251,27 @@ def test_gateway_legacy_named_profile_chat_sends_the_chips_effort(
     payload = captured[0][3]
     assert payload["reasoning_effort"] == "high"
     assert payload["model_options"] == {"reasoning": {"enabled": True, "effort": "high"}}
+
+
+@pytest.mark.parametrize("runs_api", [False, True], ids=["legacy-api", "runs-api"])
+def test_gateway_legacy_chat_inherits_the_session_model_override(
+    isolated_reasoning_profiles, tmp_path, monkeypatch, runs_api
+):
+    _root, work = isolated_reasoning_profiles
+    config_path = work / "config.yaml"
+    config_data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_data["agent"]["reasoning_overrides"] = {"gpt-5": "low"}
+    config_path.write_text(yaml.safe_dump(config_data, sort_keys=False), encoding="utf-8")
+    session = Session(
+        session_id="gateway-legacy-model-override", profile="work", model="gpt-5",
+        model_provider="openai", workspace=str(tmp_path), reasoning_effort=None,
+    )
+
+    captured, _ = _run_gateway_turn(
+        session, "gateway-legacy-model-override-stream", tmp_path, monkeypatch,
+        runs_api=runs_api,
+    )
+
+    payload = captured[0][3]
+    assert payload["reasoning_effort"] == "low"
+    assert payload["model_options"] == {"reasoning": {"enabled": True, "effort": "low"}}

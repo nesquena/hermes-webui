@@ -105,7 +105,11 @@ class TestIssue4536ServiceTier:
         )
         assert openrouter_payload == {}
 
-        def resolve_alias(model: str, *_args):
+        def resolve_alias(model: str, *_args, **kwargs):
+            # Stub mirrors the real ``resolve_model_provider(model_id, *,
+            # explicitly_picked=..., config_obj=...)`` signature, which
+            # ``_main_model_request_overrides`` now calls with the profile
+            # snapshot it was handed (#7170 profile-scoped provider lookup).
             return model, "openai", ""
 
         monkeypatch.setattr(config, "resolve_model_provider", resolve_alias)
