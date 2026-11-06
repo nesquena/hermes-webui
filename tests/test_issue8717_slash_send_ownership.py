@@ -88,6 +88,10 @@ def _run(command: str, script_body: str, *, registry_error: bool = False, start_
           startApprovalPolling(){{}}, startClarifyPolling(){{}},
           _fetchYoloState(){{}}, attachLiveStream(){{}},
           newSession: async () => {{ ctx.S.session = {{ session_id: 'sid-new', title: 'New' }}; }},
+          // uploadPendingFiles lives in ui.js, which this realm does not load.
+          // send() calls it with no typeof guard, and any throw now aborts the
+          // send before /api/chat/start. An empty snapshot is the no-file path.
+          uploadPendingFiles: async () => [],
           $: id => id === 'msg' ? msgInput : genericEl,
           EventSource: function(){{ this.addEventListener=()=>{{}}; this.close=()=>{{}}; }},
           URL: function(){{ this.href=''; }},
