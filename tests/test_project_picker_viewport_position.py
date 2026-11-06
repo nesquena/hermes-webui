@@ -2098,9 +2098,18 @@ def test_automatic_repaints_route_through_the_background_wrapper():
     filter_end = js.index("\nfunction ", filter_start + 1)
     filter_body = js[filter_start:filter_end]
     # The synchronous first paint stays user intent; the debounced content
-    # search reply is an automatic update and must defer.
+    # search reply is an automatic update and must defer. The reply is streamed
+    # now, so the deferred repaint lives in the merge helper its callbacks use —
+    # filterSessions must not paint a second time.
     assert filter_body.count("renderSessionListFromCache();") == 1
-    assert filter_body.count("_repaintSidebarForBackgroundChurn();") == 1
+    assert filter_body.count("_repaintSidebarForBackgroundChurn();") == 0
+
+    merge_start = js.index("function _mergeContentSearchResults(")
+    merge_end = js.index("\nfunction ", merge_start + 1)
+    merge_body = js[merge_start:merge_end]
+    assert merge_body.count("_repaintSidebarForBackgroundChurn();") == 1, (
+        "the streamed content-search reply must repaint through the background wrapper"
+    )
 
     scroll_start = js.index("function _scheduleSessionVirtualizedRender(){")
     scroll_end = js.index("\nfunction ", scroll_start + 1)

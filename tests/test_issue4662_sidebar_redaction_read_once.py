@@ -119,12 +119,21 @@ def test_sessions_search_branches_redact_derived_titles():
     redactor so search rows can't leak a derived display_title the sidebar hides.
     Source-guard: the #6056 class-fix is easy to regress by adding a 4th branch."""
     import inspect
-    src = inspect.getsource(routes._handle_sessions_search)
+    # The scan moved into a background job, so the three response branches now
+    # live in two helpers: the empty-query list in the handler, the title and
+    # content rows in _content_search_match. Both must redact.
+    src = inspect.getsource(routes._handle_sessions_search) + inspect.getsource(
+        routes._content_search_match
+    )
     # 3 response branches (empty-query list, title-match, content-match) each build
     # an `item` and must pass it through _redact_sidebar_title_fields.
     assert src.count("_redact_sidebar_title_fields(item") >= 3, (
         "a /api/sessions/search branch builds a row without redacting the derived "
         "title fields (display_title/_state_db_title/parent_title)"
     )
-    # And it must read the setting once, not per-_redact_text call.
-    assert "_search_redact_enabled" in src
+    # And it must read the setting once per request, in the shared preparation,
+    # not per _redact_text call.
+    prep = inspect.getsource(routes._sessions_search_prepare)
+    assert prep.count("load_settings()") == 1
+    assert "redact_enabled" in prep
+    assert "_search_redact_enabled" not in src

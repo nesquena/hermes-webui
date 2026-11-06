@@ -18307,6 +18307,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/sessions/search":
         return _handle_sessions_search(handler, parsed)
 
+    if parsed.path == "/api/sessions/search/stream":
+        return _handle_sessions_search_stream(handler, parsed)
+
     if parsed.path == "/api/list":
         return _handle_list_dir(handler, parsed)
 
@@ -23537,104 +23540,565 @@ def _session_search_preview(text, query, max_len=124):
     return excerpt
 
 
-def _handle_sessions_search(handler, parsed):
+def _search_env_int(name, default, minimum, maximum):
+    """Read an int operator override, falling back to *default* on junk."""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    if value < minimum or value > maximum:
+        return default
+    return value
+
+
+# How many content scans may run at the same time. One is the right default on
+# a small host: the scan resolves every sidebar transcript, and two of them used
+# to push a 16 GB host into swap while the WebUI stopped accepting connections.
+CONTENT_SEARCH_SCAN_SLOTS = _search_env_int("HERMES_WEBUI_SEARCH_SCAN_SLOTS", 1, 1, 4)
+_CONTENT_SEARCH_SLOTS = threading.BoundedSemaphore(CONTENT_SEARCH_SCAN_SLOTS)
+# Rows per ``results`` event. Small enough to paint the first hits early, big
+# enough that a fast scan does not send hundreds of events.
+CONTENT_SEARCH_BATCH_SIZE = _search_env_int("HERMES_WEBUI_SEARCH_BATCH", 20, 1, 200)
+# How long the scan waits for new matches before re-checking for a disconnect.
+_CONTENT_SEARCH_POLL_SECONDS = 0.2
+# Coalesce hits into one event per interval: one event per hit would send
+# dozens of tiny frames for a common term.
+_CONTENT_SEARCH_FLUSH_SECONDS = 0.15
+# Heartbeat interval on the search stream. Shorter than the chat streams' 15 s
+# because this endpoint holds a global scan slot: the heartbeat write is how the
+# handler notices that the tab went away, and how long a cancelled scan keeps
+# occupying the semaphore after the user types the next character.
+_CONTENT_SEARCH_KEEPALIVE_SECONDS = 1.0
+
+
+def _content_search_wait_seconds():
+    raw = (os.getenv("HERMES_WEBUI_SEARCH_WAIT_SECONDS") or "").strip() or "20"
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 20.0
+    if value < 1:
+        return 20.0
+    return min(value, 600.0)
+
+
+# Budget for the legacy blocking endpoint. The stream endpoint has no such cap.
+CONTENT_SEARCH_WAIT_SECONDS = _content_search_wait_seconds()
+
+
+class _ContentSearchJob:
+    """One content scan whose matches are published while it runs."""
+
+    __slots__ = (
+        "query",
+        "depth",
+        "content_search",
+        "total",
+        "results",
+        "seen",
+        "scanned",
+        "done",
+        "cancelled",
+        "error",
+        "started_at",
+        "finished_at",
+        "_lock",
+        "_wake",
+    )
+
+    def __init__(self, query, depth, content_search, total):
+        self.query = query
+        self.depth = depth
+        self.content_search = content_search
+        self.total = total
+        self.results = []
+        self.seen = set()
+        self.scanned = 0
+        self.done = False
+        self.cancelled = False
+        self.error = None
+        self.started_at = time.time()
+        self.finished_at = None
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+
+    def publish(self, item):
+        """Append one search row, ignoring a session that was already hit."""
+        sid = item.get("session_id")
+        with self._lock:
+            if sid in self.seen:
+                return False
+            self.seen.add(sid)
+            self.results.append(item)
+        self._wake.set()
+        return True
+
+    def advance(self, *, scanned=None, done=False, error=None):
+        with self._lock:
+            if scanned is not None:
+                self.scanned = scanned
+            if error is not None:
+                self.error = error
+            if done:
+                self.done = True
+                self.finished_at = time.time()
+        self._wake.set()
+
+    def take(self, cursor):
+        with self._lock:
+            return (
+                self.results[cursor:],
+                len(self.results),
+                self.scanned,
+                self.done,
+                self.error,
+            )
+
+    def cancel(self):
+        self.cancelled = True
+        self._wake.set()
+
+    def partial(self):
+        """True when the scan stopped before reaching the last session.
+
+        ``done`` alone cannot answer this: the worker sets it in its ``finally``
+        block for a cancelled scan too, so a budget timeout would otherwise
+        report a complete result set. ``total`` is the session count the job was
+        created with, which is the same list the caller renders.
+        """
+        with self._lock:
+            return bool(self.error) or self.scanned < self.total
+
+    def wait(self, timeout):
+        # Clear BEFORE waiting. Clearing afterwards would drop a wake-up that
+        # arrived between the wait returning and the clear, and the caller would
+        # then sleep a whole interval past `done` (a visible stall at the end of
+        # every scan). With this order a later set() makes the next wait return
+        # immediately, so the loop always re-reads state after a publish.
+        self._wake.clear()
+        self._wake.wait(timeout)
+
+
+def _sessions_search_prepare(parsed):
+    """Shared request preparation for both search endpoints."""
     qs = parse_qs(parsed.query)
     q = qs.get("q", [""])[0].lower().strip()
     content_search = qs.get("content", ["1"])[0] == "1"
     from api.profiles import get_active_profile_name
+
     active_profile = get_active_profile_name()
     all_profiles = _all_profiles_enabled(parsed)
     sessions = all_sessions()
     if not all_profiles:
         sessions = [
-            s for s in sessions
+            s
+            for s in sessions
             if _profiles_match(s.get("profile"), active_profile)
         ]
     # Reject a malformed depth instead of letting int() raise ValueError and
     # surface as a confusing 500. Clamp to >= 0 so a negative value can't reach
-    # the messages[:depth] slice below — messages[:-n] would silently exclude
-    # the most recent messages from the content search instead of capping it.
+    # the messages[:depth] slice — messages[:-n] would silently exclude the most
+    # recent messages from the content search instead of capping it.
     # (depth == 0 keeps its existing meaning: search the full transcript.)
     try:
         depth = max(0, int(qs.get("depth", ["5"])[0]))
     except (ValueError, TypeError):
         depth = 5
     # Read the redaction setting ONCE for the whole response (mirrors the
-    # /api/sessions read-once optimization, #4662) and thread it through every
-    # branch + the shared title-field redactor so search rows redact the same
-    # fields as the sidebar list.
+    # /api/sessions read-once optimization, #4662).
     try:
-        _search_redact_enabled = bool(load_settings().get("api_redact_enabled", True))
+        redact_enabled = bool(load_settings().get("api_redact_enabled", True))
     except Exception:
-        _search_redact_enabled = True  # fail safe: redact when settings unreadable
-    if not q:
-        safe_sessions = []
-        for s in sessions:
-            item = dict(s)
-            if isinstance(item.get("title"), str):
-                item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
-            _redact_sidebar_title_fields(item, _search_redact_enabled)
-            _stamp_sidebar_profile_group(item)
-            safe_sessions.append(item)
-        return j(handler, {
-            "sessions": safe_sessions,
-            "all_profiles": all_profiles,
-            "active_profile": active_profile,
-        })
-    results = []
-    for s in sessions:
-        title_match = q in (s.get("title") or "").lower()
-        if title_match:
-            item = dict(s, match_type="title")
-            if isinstance(item.get("title"), str):
-                item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
-            _redact_sidebar_title_fields(item, _search_redact_enabled)
-            _stamp_sidebar_profile_group(item)
-            results.append(item)
-            continue
-        if content_search:
-            try:
-                # Scan accessor, not get_session(): a content search walks every
-                # session, and routing that through the LRU would evict the
-                # user's working set on every keystroke-debounced search.
-                sess = get_session_for_scan(s["session_id"])
-                if sess is None:
-                    continue
-                # Hidden internal rows neither match nor consume the search
-                # depth budget (#quiet-delegation gate review). Each row keeps
-                # its RAW index into the full sess.messages list (hidden rows
-                # included, as they are in the /api/session payload) so a
-                # content hit can tell the frontend where it matched (#4159).
-                scan_pool = [
-                    (raw_idx, m) for raw_idx, m in enumerate(sess.messages or [])
-                    if not is_hidden_transcript_row(m)
-                ]
-                msgs = scan_pool[:depth] if depth else scan_pool
-                for raw_idx, m in msgs:
-                    c = _session_search_message_text(m)
-                    if q in str(c).lower():
-                        # match_message_idx is a FULL-session index, not an
-                        # index into a paged tail window; the frontend
-                        # translates it before jumping (#5106).
-                        item = dict(s, match_type="content", match_message_idx=raw_idx)
-                        preview = _session_search_preview(c, q)
-                        if preview:
-                            item["match_preview"] = _redact_text(preview, _enabled=_search_redact_enabled)
-                        if isinstance(item.get("title"), str):
-                            item["title"] = _redact_text(item["title"], _enabled=_search_redact_enabled)
-                        _redact_sidebar_title_fields(item, _search_redact_enabled)
-                        _stamp_sidebar_profile_group(item)
-                        results.append(item)
-                        break
-            except (KeyError, Exception):
-                pass
-    return j(handler, {
-        "sessions": results,
+        redact_enabled = True
+    return {
         "query": q,
-        "count": len(results),
-        "all_profiles": all_profiles,
+        "content_search": content_search,
+        "depth": depth,
         "active_profile": active_profile,
-    })
+        "all_profiles": all_profiles,
+        "sessions": sessions,
+        "redact_enabled": redact_enabled,
+    }
+
+
+def _content_search_match(session, query, depth, content_search, redact_enabled):
+    """Return the search row for *session*, or None.
+
+    Same semantics as the historical inline loop: a title hit short-circuits to
+    a ``title`` row without touching the transcript, a content hit needs the
+    first non-hidden transcript row whose flattened text contains the query.
+    """
+    title = session.get("title")
+    if query in (title or "").lower():
+        item = dict(session, match_type="title")
+        if isinstance(item.get("title"), str):
+            item["title"] = _redact_text(item["title"], _enabled=redact_enabled)
+        _redact_sidebar_title_fields(item, redact_enabled)
+        _stamp_sidebar_profile_group(item)
+        return item
+    if not content_search:
+        return None
+    try:
+        # Scan accessor, not get_session(): a content search walks every
+        # session, and routing that through the LRU would evict the user's
+        # working set on every keystroke-debounced search.
+        sess = get_session_for_scan(session["session_id"])
+        if sess is None:
+            return None
+        # Hidden internal rows neither match nor consume the search depth
+        # budget (#quiet-delegation gate review). Each row keeps its RAW index
+        # into the full sess.messages list (hidden rows included, as they are in
+        # the /api/session payload) so a content hit can tell the frontend where
+        # it matched (#4159).
+        scan_pool = [
+            (raw_idx, m)
+            for raw_idx, m in enumerate(sess.messages or [])
+            if not is_hidden_transcript_row(m)
+        ]
+        msgs = scan_pool[:depth] if depth else scan_pool
+        for raw_idx, m in msgs:
+            c = _session_search_message_text(m)
+            if query in str(c).lower():
+                # match_message_idx is a FULL-session index, not an index into a
+                # paged tail window; the frontend translates it before jumping
+                # (#5106).
+                item = dict(session, match_type="content", match_message_idx=raw_idx)
+                preview = _session_search_preview(c, query)
+                if preview:
+                    item["match_preview"] = _redact_text(preview, _enabled=redact_enabled)
+                if isinstance(item.get("title"), str):
+                    item["title"] = _redact_text(item["title"], _enabled=redact_enabled)
+                _redact_sidebar_title_fields(item, redact_enabled)
+                _stamp_sidebar_profile_group(item)
+                return item
+    except (KeyError, Exception):
+        return None
+    return None
+
+
+def _content_search_worker(job, sessions, redact_enabled):
+    """Scan *sessions* for *job*, publishing rows as they are found."""
+    scanned = 0
+    try:
+        # A job that was cancelled while it queued behind the semaphore must not
+        # take the slot at all: the SQL/sidecar reads are the expensive part.
+        if job.cancelled:
+            return
+        # Acquire in slices, not with a single blocking `with`. A plain
+        # `with _CONTENT_SEARCH_SLOTS:` parked a superseded job's thread until the
+        # running scan released the slot, so a burst of replaced queries (every
+        # debounced keystroke starts one) piled cancelled workers up behind a
+        # long transcript - each of them a thread outside the request cap.
+        while not _CONTENT_SEARCH_SLOTS.acquire(timeout=_CONTENT_SEARCH_POLL_SECONDS):
+            if job.cancelled:
+                return
+        try:
+            for session in sessions:
+                if job.cancelled:
+                    break
+                item = _content_search_match(
+                    session,
+                    job.query,
+                    job.depth,
+                    job.content_search,
+                    redact_enabled,
+                )
+                if item is not None:
+                    job.publish(item)
+                scanned += 1
+                # Publish progress for every session, not every tenth one: a
+                # partial response that lists matches but reports `scanned: 0`
+                # is worse than useless. A lock plus an event set is nothing
+                # next to resolving a transcript.
+                job.advance(scanned=scanned)
+            job.advance(scanned=scanned)
+        finally:
+            _CONTENT_SEARCH_SLOTS.release()
+    except Exception as exc:  # a scan must never take the UI down
+        logger.warning("content search scan failed: %s", exc, exc_info=True)
+        job.advance(scanned=scanned, error=str(exc))
+    finally:
+        job.advance(scanned=scanned, done=True)
+
+
+def _start_content_search(query, sessions, depth, content_search, redact_enabled):
+    job = _ContentSearchJob(query, depth, content_search, len(sessions))
+    threading.Thread(
+        target=_content_search_worker,
+        args=(job, sessions, redact_enabled),
+        name="content-search",
+        daemon=True,
+    ).start()
+    return job
+
+
+# How long the legacy endpoint waits for a cancelled worker to leave its
+# current session before it answers with what it has. The worker only looks at
+# `cancelled` between sessions, so this grace is what keeps `scanned` and the
+# returned rows consistent and stops the scan from resolving sessions the
+# response no longer mentions.
+_CONTENT_SEARCH_CANCEL_GRACE_SECONDS = 0.25
+
+
+def _run_content_search(query, sessions, depth, content_search, redact_enabled):
+    """Blocking compatibility wrapper behind /api/sessions/search.
+
+    Returns ``(results, partial, scanned)``. ``partial`` is True when the caller
+    gets an incomplete answer — the budget expired or the scan raised.
+    """
+    job = _start_content_search(query, sessions, depth, content_search, redact_enabled)
+    deadline = time.time() + CONTENT_SEARCH_WAIT_SECONDS
+    while not job.done:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        job.wait(min(_CONTENT_SEARCH_POLL_SECONDS, remaining))
+    if not job.done:
+        job.cancel()
+        grace = time.time() + _CONTENT_SEARCH_CANCEL_GRACE_SECONDS
+        while not job.done and time.time() < grace:
+            job.wait(_CONTENT_SEARCH_POLL_SECONDS)
+    results, _, scanned, _done, _err = job.take(0)
+    return results, job.partial(), scanned
+
+
+def _handle_sessions_search(handler, parsed):
+    # perf(sessions/search): the content scan resolves every sidebar transcript,
+    # so this is the one search path whose duration is unbounded by anything the
+    # caller controls. Instrumenting it is what makes a wedged scan visible as a
+    # slow-request record instead of a request that silently never answers.
+    _diag = RequestDiagnostics.maybe_start(
+        "GET", parsed.path, logger=logger, print_fn=getattr(handler, "_safe_webui_print", None)
+    )
+    try:
+        ctx = _sessions_search_prepare(parsed)
+        if _diag:
+            _diag.stage("prep")
+        q = ctx["query"]
+        sessions = ctx["sessions"]
+        redact_enabled = ctx["redact_enabled"]
+        if not q:
+            safe_sessions = []
+            for s in sessions:
+                item = dict(s)
+                if isinstance(item.get("title"), str):
+                    item["title"] = _redact_text(item["title"], _enabled=redact_enabled)
+                _redact_sidebar_title_fields(item, redact_enabled)
+                _stamp_sidebar_profile_group(item)
+                safe_sessions.append(item)
+            if _diag:
+                _diag.stage("empty_query")
+            return j(
+                handler,
+                {
+                    "sessions": safe_sessions,
+                    "all_profiles": ctx["all_profiles"],
+                    "active_profile": ctx["active_profile"],
+                },
+            )
+        if _diag:
+            _diag.stage("scan_drain")
+        try:
+            results, partial, scanned = _run_content_search(
+                q,
+                sessions,
+                ctx["depth"],
+                ctx["content_search"],
+                redact_enabled,
+            )
+        except Exception as exc:
+            # Thread creation can fail under exactly the exhaustion this change
+            # exists to survive. The stream route already answers 503 for it; the
+            # legacy route must not turn the same fault into an unhandled 500.
+            logger.warning("content search worker could not start: %s", exc)
+            return bad(handler, "content search unavailable", status=503)
+        if _diag:
+            _diag.stage("response_serialize")
+        return j(
+            handler,
+            {
+                "sessions": results,
+                "query": q,
+                "count": len(results),
+                "partial": partial,
+                "scanned": scanned,
+                "total": len(sessions),
+                "all_profiles": ctx["all_profiles"],
+                "active_profile": ctx["active_profile"],
+            },
+        )
+    finally:
+        # Idempotent; unregisters the watchdog entry on every return path,
+        # including the empty-query early return and a raised response write.
+        if _diag:
+            _diag.finish()
+
+
+def _content_search_sse_open(handler) -> None:
+    """Send the SSE response headers for the search stream.
+
+    Uses the repo's shared SSE framing helpers (``end_sse_headers`` for the
+    optional chunked framing, ``_sse_set_write_deadline`` so a backpressured
+    socket cannot pin this request thread) instead of a private header block.
+    """
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+    handler.send_header("Cache-Control", "no-cache")
+    handler.send_header("X-Accel-Buffering", "no")
+    handler.send_header("Connection", "close")
+    end_sse_headers(handler)
+    _sse_set_write_deadline(handler)
+
+
+def _handle_sessions_search_stream(handler, parsed):
+    """SSE variant of /api/sessions/search that fills in while scanning.
+
+    Emits ``results`` events with the matches found so far plus a final ``done``
+    event, so the sidebar paints the first hits instead of waiting for the last
+    session. A browser that navigates away or types the next character drops the
+    connection, which cancels the scan at the next session boundary.
+    """
+    # Same allowlist entry as the legacy handler: one watchdog registration per
+    # request, finished on every return path below.
+    _diag = RequestDiagnostics.maybe_start(
+        "GET", parsed.path, logger=logger, print_fn=getattr(handler, "_safe_webui_print", None)
+    )
+    try:
+        ctx = _sessions_search_prepare(parsed)
+        if _diag:
+            _diag.stage("prep")
+        q = ctx["query"]
+        sessions = ctx["sessions"]
+        if not q:
+            # The only client of this route is an EventSource, so the empty-query
+            # answer is an empty stream rather than a JSON body: a JSON body here
+            # surfaces as a stream error and makes the client run the whole
+            # classic request for nothing.
+            _content_search_sse_open(handler)
+            _sse(
+                handler,
+                "done",
+                {
+                    "query": "",
+                    "count": 0,
+                    "scanned": 0,
+                    "total": len(sessions),
+                    "cancelled": False,
+                    "partial": False,
+                    "elapsed_ms": 0.0,
+                },
+            )
+            if _diag:
+                _diag.stage("empty_query")
+            return True
+        try:
+            job = _start_content_search(
+                q,
+                sessions,
+                ctx["depth"],
+                ctx["content_search"],
+                ctx["redact_enabled"],
+            )
+        except Exception as exc:  # thread exhaustion: answer, never wedge
+            logger.warning("content search worker could not start: %s", exc)
+            return bad(handler, "content search unavailable", status=503)
+        if _diag:
+            _diag.stage("scan_drain")
+        cursor = 0
+        first_batch_sent = False
+        interrupted = False
+        last_write = time.time()
+        try:
+            # Inside the cancellation guard on purpose: a client that goes away
+            # while these headers are written must still cancel the job that was
+            # already started above, instead of leaving a full scan running.
+            _content_search_sse_open(handler)
+            while True:
+                batch, hits, scanned, done, error = job.take(cursor)
+                now = time.time()
+                ready = bool(batch) and (
+                    done
+                    or len(batch) >= CONTENT_SEARCH_BATCH_SIZE
+                    or (now - last_write) >= _CONTENT_SEARCH_FLUSH_SECONDS
+                )
+                if ready:
+                    while batch:
+                        chunk = batch[:CONTENT_SEARCH_BATCH_SIZE]
+                        batch = batch[CONTENT_SEARCH_BATCH_SIZE:]
+                        _sse(
+                            handler,
+                            "results",
+                            {
+                                "sessions": chunk,
+                                "count": hits,
+                                "scanned": scanned,
+                                "total": len(sessions),
+                            },
+                        )
+                        cursor += len(chunk)
+                    if _diag and not first_batch_sent:
+                        first_batch_sent = True
+                        _diag.stage("first_batch")
+                    last_write = now
+                if done:
+                    break
+                if now - last_write > _CONTENT_SEARCH_KEEPALIVE_SECONDS:
+                    # The scan holds a semaphore slot for its whole life, so a
+                    # dead peer has to be noticed quickly: this write is how this
+                    # endpoint observes the disconnect, and a superseded scan is
+                    # then cancelled at the next session boundary.
+                    _sse_keepalive(handler)
+                    last_write = now
+                if batch:
+                    # Hits are pending but the flush window is still open:
+                    # sleeping is what keeps this from turning into a busy loop,
+                    # because publish() already set the wake event.
+                    time.sleep(_CONTENT_SEARCH_FLUSH_SECONDS)
+                else:
+                    job.wait(_CONTENT_SEARCH_POLL_SECONDS)
+        except _CLIENT_DISCONNECT_ERRORS:
+            interrupted = True
+        finally:
+            if not job.done:
+                job.cancel()
+        elapsed_ms = (time.time() - job.started_at) * 1000.0
+        if _diag:
+            _diag.stage("stream_close")
+        if not interrupted:
+            try:
+                _sse(
+                    handler,
+                    "done",
+                    {
+                        "query": q,
+                        "count": cursor,
+                        "scanned": job.scanned,
+                        "total": len(sessions),
+                        "cancelled": job.cancelled,
+                        "partial": job.partial(),
+                        "elapsed_ms": round(elapsed_ms, 1),
+                    },
+                )
+            except _CLIENT_DISCONNECT_ERRORS:
+                interrupted = True
+        handler._safe_webui_print(
+            "[webui] search-stream q=%r sessions=%d hits=%d scanned=%d elapsed=%.0fms%s"
+            % (
+                q,
+                len(sessions),
+                cursor,
+                job.scanned,
+                elapsed_ms,
+                " cancelled" if job.cancelled or interrupted else "",
+            )
+        )
+        return True
+    finally:
+        if _diag:
+            _diag.finish()
 
 
 def _handle_list_dir(handler, parsed):
