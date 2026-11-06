@@ -281,51 +281,71 @@ S.pendingFiles=[{name:fileName}];
 $('msg').value=params.get('draft')||'hi';
 renderTray();
 _fitComposerFooter();
-const send=$('btnSend').getBoundingClientRect();
-const box=$('composerBox').getBoundingClientRect();
-const footer=document.querySelector('.composer-footer');
-const tray=$('attachTray');
-const trayRect=tray.getBoundingClientRect();
-const chip=tray.querySelector('.attach-chip');
-const button=chip.querySelector('button');
-const buttonRect=button.getBoundingClientRect();
-const nameEl=chip.querySelector('.attach-chip-name');
-const sx=(send.left+send.right)/2, sy=(send.top+send.bottom)/2;
-const bx=(buttonRect.left+buttonRect.right)/2, by=(buttonRect.top+buttonRect.bottom)/2;
-const sendHit=document.elementFromPoint(sx, sy);
-const buttonHit=document.elementFromPoint(bx, by);
-document.documentElement.dataset.metrics=JSON.stringify({
-  innerWidth, innerHeight,
-  pointer: matchMedia('(pointer: coarse)').matches ? 'coarse' : 'fine',
-  footerClass: footer.className,
-  sidebarW: document.querySelector('.sidebar').getBoundingClientRect().width,
-  draft: $('msg').value,
-  boxH: box.height,
-  boxB: box.bottom,
-  boxMax: getComputedStyle($('composerBox')).maxHeight,
-  sendT: send.top,
-  sendB: send.bottom,
-  sendClip: Math.max(0, send.bottom-innerHeight),
-  sendOutside: Math.max(0, send.bottom-box.bottom),
-  sendHit: !!(sendHit && sendHit.closest && sendHit.closest('#btnSend')),
-  trayClient: tray.clientHeight,
-  trayScroll: tray.scrollHeight,
-  taH: $('msg').getBoundingClientRect().height,
-  footerH: footer.getBoundingClientRect().height,
-  chipText: nameEl ? nameEl.textContent : '',
-  nameClient: nameEl ? nameEl.clientWidth : 0,
-  nameScroll: nameEl ? nameEl.scrollWidth : 0,
-  nameFont: nameEl ? getComputedStyle(nameEl).fontFamily : '',
-  btnL: buttonRect.left,
-  btnR: buttonRect.right,
-  btnT: buttonRect.top,
-  btnB: buttonRect.bottom,
-  btnW: buttonRect.width,
-  btnH: buttonRect.height,
-  btnHit: !!(buttonHit && button.contains(buttonHit)),
-  chipW: chip.getBoundingClientRect().width,
-  trayW: trayRect.width,
-});
+function _trayProbe(){
+  const send=$('btnSend').getBoundingClientRect();
+  const box=$('composerBox').getBoundingClientRect();
+  const footer=document.querySelector('.composer-footer');
+  const tray=$('attachTray');
+  const trayRect=tray.getBoundingClientRect();
+  const chip=tray.querySelector('.attach-chip');
+  const button=chip.querySelector('button');
+  const buttonRect=button.getBoundingClientRect();
+  const nameEl=chip.querySelector('.attach-chip-name');
+  const nameRect=nameEl.getBoundingClientRect();
+  const range=document.createRange();
+  range.selectNodeContents(nameEl);
+  const glyph=range.getBoundingClientRect();
+  const icon=button.querySelector('svg');
+  const iconRect=icon?icon.getBoundingClientRect():buttonRect;
+  const overlap=(a,b)=>Math.max(0, Math.min(a.bottom,b.bottom)-Math.max(a.top,b.top));
+  const sx=(send.left+send.right)/2, sy=(send.top+send.bottom)/2;
+  const bx=(buttonRect.left+buttonRect.right)/2, by=(buttonRect.top+buttonRect.bottom)/2;
+  const nx=(nameRect.left+nameRect.right)/2, ny=(nameRect.top+nameRect.bottom)/2;
+  const sendHit=document.elementFromPoint(sx, sy);
+  const buttonHit=document.elementFromPoint(bx, by);
+  const nameHit=document.elementFromPoint(nx, ny);
+  return {
+    innerWidth, innerHeight,
+    pointer: matchMedia('(pointer: coarse)').matches ? 'coarse' : 'fine',
+    footerClass: footer.className,
+    sidebarW: document.querySelector('.sidebar').getBoundingClientRect().width,
+    draft: $('msg').value,
+    boxH: box.height,
+    boxB: box.bottom,
+    boxMax: getComputedStyle($('composerBox')).maxHeight,
+    sendT: send.top,
+    sendB: send.bottom,
+    sendClip: Math.max(0, send.bottom-innerHeight),
+    sendOutside: Math.max(0, send.bottom-box.bottom),
+    sendHit: !!(sendHit && sendHit.closest && sendHit.closest('#btnSend')),
+    trayClient: tray.clientHeight,
+    trayScroll: tray.scrollHeight,
+    scrollTop: tray.scrollTop,
+    taH: $('msg').getBoundingClientRect().height,
+    footerH: footer.getBoundingClientRect().height,
+    chipText: nameEl ? nameEl.textContent : '',
+    nameClient: nameEl ? nameEl.clientWidth : 0,
+    nameScroll: nameEl ? nameEl.scrollWidth : 0,
+    nameFont: nameEl ? getComputedStyle(nameEl).fontFamily : '',
+    nameHit: !!(nameHit && nameEl.contains(nameHit)),
+    glyphH: glyph.height,
+    glyphTray: overlap(glyph, trayRect),
+    btnL: buttonRect.left,
+    btnR: buttonRect.right,
+    btnT: buttonRect.top,
+    btnB: buttonRect.bottom,
+    btnW: buttonRect.width,
+    btnH: buttonRect.height,
+    btnHit: !!(buttonHit && button.contains(buttonHit)),
+    btnTray: overlap(buttonRect, trayRect),
+    iconH: iconRect.height,
+    iconTray: overlap(iconRect, trayRect),
+    chipW: chip.getBoundingClientRect().width,
+    trayW: trayRect.width,
+  };
+}
+window._trayProbe=_trayProbe;
+document.documentElement.dataset.metrics=JSON.stringify(_trayProbe());
 </script>
 </body>
 </html>
@@ -354,7 +374,7 @@ async def _cdp(ws, ids, method, params=None):
             return msg.get("result", {})
 
 
-def _measure_real(shell: Path, page: Path, width: int, height: int, query: str, click: bool):
+def _measure_real(shell: Path, page: Path, width: int, height: int, query: str, click: bool, scroll: bool = False):
     try:
         import websockets
     except ImportError:
@@ -426,6 +446,16 @@ def _measure_real(shell: Path, page: Path, width: int, height: int, query: str, 
                     await asyncio.sleep(0.05)
                 if metrics is None:
                     raise AssertionError("real composer page produced no metrics")
+                if scroll:
+                    moved = await _cdp(ws, ids, "Runtime.evaluate", {
+                        "expression": (
+                            "(()=>{const tray=document.getElementById('attachTray');"
+                            "tray.scrollTop=tray.scrollHeight;"
+                            "return JSON.stringify(window._trayProbe());})()"
+                        ),
+                        "returnByValue": True,
+                    })
+                    metrics = json.loads(moved["result"]["value"])
                 if click:
                     x = (metrics["btnL"] + metrics["btnR"]) / 2
                     y = (metrics["btnT"] + metrics["btnB"]) / 2
@@ -457,11 +487,31 @@ def _measure_real(shell: Path, page: Path, width: int, height: int, query: str, 
             proc.kill()
 
 
+def _assert_chip_name_and_remove_reachable(metrics):
+    """The filename glyphs and the remove control are on screen, and a
+    native click on the button center drops the file.
+
+    A 44px box or ``scrollHeight > clientHeight`` is not enough: the center
+    has to land inside the tray's visible slice.
+    """
+    assert metrics["nameHit"] is True, metrics
+    assert metrics["glyphH"] > 8, metrics
+    assert metrics["glyphTray"] >= metrics["glyphH"] - 0.5, metrics
+    assert metrics["iconH"] > 8, metrics
+    assert metrics["iconTray"] >= metrics["iconH"] - 0.5, metrics
+    assert metrics["btnW"] >= 44 and metrics["btnH"] >= 44, metrics
+    assert metrics["btnTray"] > 18, metrics
+    assert metrics["btnHit"] is True, metrics
+    assert metrics["afterClick"] == {"files": 0, "chips": 0, "has": False}, metrics
+
+
 def test_real_footer_stays_inside_short_touch_viewport(tmp_path):
     """One file, coarse 844×200, sidebar open, real cf-icons footer.
 
     The unshrinkable tray used to push Send to 214px (14px past the viewport).
-    The draft stays at its minimum and the tray yields instead.
+    The draft stays at its minimum and the tray yields instead. Yielding must
+    still leave the filename and the remove control's center on screen, at
+    rest and after the tray is scrolled to its bottom.
     """
     shell = _headless_shell()
     if shell is None:
@@ -473,7 +523,7 @@ def test_real_footer_stays_inside_short_touch_viewport(tmp_path):
         844,
         200,
         "name=notes.txt&draft=hi&model=Claude%20Sonnet%204.6",
-        click=False,
+        click=True,
     )
     assert metrics["innerWidth"] == 844, metrics
     assert metrics["innerHeight"] == 200, metrics
@@ -491,6 +541,23 @@ def test_real_footer_stays_inside_short_touch_viewport(tmp_path):
     assert metrics["sendOutside"] < 1, metrics
     assert metrics["sendT"] >= 0, metrics
     assert metrics["sendHit"] is True, metrics
+    assert metrics["scrollTop"] == 0, metrics
+    _assert_chip_name_and_remove_reachable(metrics)
+    scrolled = _measure_real(
+        shell,
+        page,
+        844,
+        200,
+        "name=notes.txt&draft=hi&model=Claude%20Sonnet%204.6",
+        click=True,
+        scroll=True,
+    )
+    assert scrolled["scrollTop"] > 8, scrolled
+    assert scrolled["sendClip"] < 1, scrolled
+    assert scrolled["sendOutside"] < 1, scrolled
+    assert scrolled["sendHit"] is True, scrolled
+    assert scrolled["trayScroll"] > scrolled["trayClient"] + 16, scrolled
+    _assert_chip_name_and_remove_reachable(scrolled)
 
 
 def test_long_monospace_filename_keeps_remove_control(tmp_path):

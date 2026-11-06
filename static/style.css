@@ -2769,6 +2769,17 @@
     .composer-box:has(.attach-tray.has-files) > textarea#msg{max-height:88px;}
     .attach-chip button{min-width:44px;min-height:44px;}
   }
+  /* Very short windows: the 52px+24px reserve leaves the populated tray a
+     22px strip once the draft sits on its 44px floor, so the filename and
+     the remove control's center are clipped. Below 240px, reserve 39px+14px
+     while files are attached. The compact titlebar is 52px at this width;
+     that bar plus the new cap still fits, and Send stays inside the
+     viewport. No fixed tray height. An empty composer stays uncapped. */
+  @media (max-height: 240px){
+    .composer-box:has(.attach-tray.has-files){
+      max-height:calc(100dvh - 39px - var(--app-titlebar-safe-top, 0px) - var(--keyboard-bottom-inset, 0px) - 14px);
+    }
+  }
   .attach-chip{display:flex;align-items:center;gap:5px;max-width:100%;min-width:0;background:var(--accent-bg);border:1px solid var(--accent-bg-strong);border-radius:8px;padding:4px 10px;font-size:11px;font-weight:500;color:var(--accent-text);}
   .attach-chip button{flex:0 0 auto;background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;line-height:1;padding:0 0 0 3px;}
   .attach-chip button:hover{color:var(--accent);}
