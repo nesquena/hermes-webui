@@ -30680,7 +30680,9 @@ def _handle_chat_sync(handler, body):
         # share ONE exact key is a replay and stays untouched, so the legacy
         # collapse still collapses it.
         _next_context_messages = _reconcile_prefix_occurrence_ownership(
-            _next_context_messages, _result_messages
+            _next_context_messages,
+            _result_messages,
+            _active_turn_identity,
         )
         # #6310 residual (nesquena-hermes 2026-10-27): the identity dedup is
         # the FINAL persistence step here, exactly like the streaming settle
