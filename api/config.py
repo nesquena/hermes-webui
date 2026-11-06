@@ -4347,6 +4347,14 @@ def _custom_record_pool_runtime(base_url: str | None, record: dict) -> dict | No
 _CUSTOM_NO_AUTH_PLACEHOLDER = "no-key-required"
 
 
+# The wire protocol a raw ``providers:`` record runs on when it declares none
+# and the installed runtime cannot host-detect one for its endpoint. The
+# OpenAI-compatible default — the same rung the authority resolver itself
+# falls back to, so a "does the owner's own effective mode disagree?" question
+# has ONE answer everywhere.
+_DEFAULT_RECORD_API_MODE = "chat_completions"
+
+
 def _custom_record_effective_api_mode(record: dict, base_url: str | None) -> str | None:
     """Wire protocol a raw ``providers:`` record runs on: its declared
     api_mode / transport, else the protocol the INSTALLED runtime would
@@ -4435,7 +4443,7 @@ def _raw_provider_record_runtime_authority(
     else:
         api_mode = _custom_record_effective_api_mode(record, base_url)
     if not api_mode:
-        api_mode = "chat_completions"
+        api_mode = _DEFAULT_RECORD_API_MODE
 
     credential_pool = None
     if pool_runtime and pool_runtime.get("credential_pool") is not None:
@@ -4981,8 +4989,26 @@ def _custom_provider_runtime_bundle_with_provenance(
                     if _canonicalise_provider_id(str(raw_key)) == canonical_lookup
                 ]
                 owner_url_declared = str(owner_cfg.get("base_url") or "").strip()
+                # #8664 review P1 "Legacy credentials get skipped" (Greptile,
+                # 2026-11-04): the credential the record DECLARES is not only an
+                # inline ``api_key``. A record may declare its credential as
+                # ``key_env`` or ``key_cmd``, and the single-record repair used
+                # to recognise only the inline form — so ``owner_key_declared``
+                # was empty for those records, the repair never fired, and chat
+                # proceeded without the record's credential.
+                #
+                # Declaration, not resolution: the same predicate the
+                # keyless-decision already uses (:func:`_custom_record_declares_credential`)
+                # answers "does this record declare a credential source at all?"
+                # for api_key / key_env / key_cmd / credential_pool alike.
+                # The declared VALUE that must match the resolved one is still
+                # the inline ``api_key`` — an env/cmd record resolves to a
+                # secret the record never spells out, so comparing it to the
+                # resolved key would always report a disagreement.
+                owner_declares_credential = _custom_record_declares_credential(
+                    owner_cfg, owner_url_declared or None, None,
+                )
                 owner_key_declared = str(owner_cfg.get("api_key") or "").strip()
-                owner_mode_declared = _custom_record_api_mode(owner_cfg)
 
                 # #8664 review P2-1 (nesquena-hermes 2026-11-03): the ONE
                 # invariant that decides whether this repair runs is whether the
@@ -5021,15 +5047,41 @@ def _custom_provider_runtime_bundle_with_provenance(
                     and str(resolved_api_key or "").strip() != owner_key_declared
                 )
                 resolved_mode = _rt.get("api_mode") if isinstance(_rt, dict) else None
+                # #8664 review P2 "Matching connections get rebuilt" (Greptile,
+                # 2026-11-04): the trailing comma made this a 1-tuple, so it
+                # could never equal a mode string and ``mode_split`` was ALWAYS
+                # true — a connection that already matched its owner was
+                # needlessly rebuilt (an extra credential-pool lookup and a
+                # fresh re-resolution of fields that were already right).
                 resolved_mode_str = (
                     str(resolved_mode).strip().lower()
                     if isinstance(resolved_mode, str)
-                    else "",
+                    else ""
+                )
+                # #8664 review P1 "Chat uses the wrong format" (Greptile,
+                # 2026-11-04): the owner may DECLARE no api_mode at all, and
+                # then its EFFECTIVE mode is its own default — not "no opinion",
+                # and never the sibling's declared protocol. Comparing only the
+                # owner's DECLARED mode missed the collision where the owner
+                # omits api_mode, both records share URL and key, and the
+                # sibling declares ``anthropic_messages``: all three split
+                # checks were false, so the client kept the sibling's wire
+                # format instead of the owner's own default.
+                #
+                # So compare the owner's EFFECTIVE mode (declared, else the
+                # protocol the installed runtime would assume for its endpoint,
+                # else the OpenAI-compatible default the authority resolver
+                # itself falls back to) with the resolved one. Two records that
+                # genuinely agree stay equal — the fix must not turn every
+                # same-mode collision into a split.
+                owner_mode_effective = (
+                    _custom_record_effective_api_mode(owner_cfg, owner_url_declared or None)
+                    or _DEFAULT_RECORD_API_MODE
                 )
                 mode_split = bool(
-                    owner_mode_declared
+                    owner_mode_effective
                     and resolved_mode_str
-                    != str(owner_mode_declared).strip().lower(),
+                    != owner_mode_effective.strip().lower()
                 )
                 if sibling_exists:
                     split = url_split or key_split or mode_split
@@ -5038,8 +5090,16 @@ def _custom_provider_runtime_bundle_with_provenance(
                     # is "the resolver produced no credential for this record
                     # while the record declares one" (the different-spelling
                     # case). An ambient/pool key is the resolver's authority.
+                    #
+                    # #8664 review P1 "Legacy credentials get skipped": the
+                    # record may declare its credential as key_env or key_cmd,
+                    # so the DECLARATION is what counts here — an inline
+                    # api_key is only one of the sources. Using the shared
+                    # declaration predicate keeps "the record has no
+                    # credential at all" (the keyless claim) distinguishable
+                    # from "the record has a credential the resolver missed".
                     split = bool(
-                        owner_key_declared
+                        owner_declares_credential
                         and not str(resolved_api_key or "").strip()
                     )
                 if not split:
