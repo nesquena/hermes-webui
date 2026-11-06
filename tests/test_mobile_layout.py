@@ -1129,6 +1129,7 @@ def test_composer_controls_switch_to_fit_stage_classes():
     # ellipsize — it must NOT hide the label elements (that is cf-icons' job).
     for selector in (
         ".composer-footer.cf-shrink .composer-left",
+        ".composer-footer.cf-shrink .composer-left > *",
         ".composer-footer.cf-shrink .composer-divider",
         ".composer-footer.cf-shrink #btnSavedPrompts",
         ".composer-footer.cf-shrink .composer-profile-chip",

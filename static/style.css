@@ -3309,6 +3309,9 @@
      tightened paddings/gap reclaim the rest. Label elements already ellipsize
      via their own min-width:0/overflow rules. */
   .composer-footer.cf-shrink .composer-left{gap:3px;}
+  /* Compact labels may ellipsize inside their capped chips, but the controls
+     themselves must not flex-shrink to make the stage look like it fits. */
+  .composer-footer.cf-shrink .composer-left > *{flex-shrink:0;}
   .composer-footer.cf-shrink .composer-divider{display:none;}
   .composer-footer.cf-shrink #btnSavedPrompts,
   .composer-footer.cf-shrink .saved-prompts-popup{display:none!important;}

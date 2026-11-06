@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Real-browser regression gate for composer-tooltip measurement lifecycle.
 
-Binds the two regressions reproduced on PR #8766 (2026-11-05):
+Binds the three regressions reproduced on PR #8766 (2026-11-05):
 
 * with Dictate visible, enabled, idle, neither hovered nor focused, Chromium's
   accessibility tree must still name #btnMic "Dictate" (Attach is the positive
   control), and its generated tooltip text must not have been destroyed;
 * with Attach's tooltip already visible, a real viewport resize in both
-  directions must not hide and re-reveal it while hover remains active.
+  directions must not hide and re-reveal it while hover remains active;
+* in a populated long-name scene at 1120x900, the natural shrink-to-icons
+  boundary must keep the enabled Attach control at its declared 34px width,
+  demoting to icons when needed rather than squeezing its click target.
 
 The server and state are disposable and agent-free. No production app, browser,
 credentials, or service is touched.
@@ -135,6 +138,16 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
         page.wait_for_selector("#btnMic", state="visible", timeout=15000)
         if not _wait_until(page, "typeof window._fitComposerFooter === 'function'", 15000):
             return ["app did not initialize the composer fit path"], evidence
+        # Static HTML starts with "Attach files" before the later locale pass
+        # stamps the current translation. Wait for that pass rather than letting
+        # a mid-test string swap restart the tooltip reveal and masquerade as a
+        # native-resize regression.
+        if not _wait_until(
+            page,
+            "typeof t === 'function' && document.querySelector('#btnAttach').dataset.tooltip === t('composer_control_attach')",
+            15000,
+        ):
+            return ["locale hydration did not settle the Attach tooltip"], evidence
         # Ensure this is the certifier's idle case: no hover and no focus.
         page.mouse.move(5, 5)
         page.evaluate("document.activeElement && document.activeElement.blur()")
@@ -240,6 +253,72 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
                     f"{len(blanked)}/24 frames; "
                     f"first={blanked[0]}"
                 )
+        # R1 (2026-11-05): build a synthetic populated long-name scene near
+        # the shrink-to-icons boundary. Only control content/presence and the
+        # viewport change; the production resize handler chooses the stage.
+        page.evaluate(
+            """() => {
+              const labels = {
+                composerWorkspaceLabel: 'a-very-long-workspace-name-for-layout-regression',
+                composerModelLabel: 'an-extremely-long-language-model-display-name-for-the-footer',
+              };
+              for (const [id, text] of Object.entries(labels)) {
+                const element = document.getElementById(id);
+                if (element) element.textContent = text;
+              }
+              const workspace = document.getElementById('composerWorkspaceChip');
+              if (workspace) workspace.disabled = false;
+              const quota = document.getElementById('providerQuotaChip');
+              quota.hidden = false;
+              quota.style.display = 'inline-flex';
+              document.getElementById('providerQuotaChipLabel').textContent = '82% remaining';
+              const reasoning = document.getElementById('composerReasoningWrap');
+              reasoning.style.display = 'block';
+              document.getElementById('composerReasoningLabel').textContent = 'XHIGH';
+              document.getElementById('ctxIndicatorWrap').style.display = 'inline-flex';
+              const status = document.getElementById('composerStatus');
+              status.style.display = 'inline';
+              status.textContent = 'Running';
+            }"""
+        )
+        page.set_viewport_size({"width": 1120, "height": 900})
+        page.wait_for_timeout(400)
+        shrink = page.evaluate(
+            """() => {
+              const footer = document.querySelector('.composer-footer');
+              const left = document.querySelector('.composer-left');
+              const attach = document.querySelector('#btnAttach');
+              const rect = attach.getBoundingClientRect();
+              const style = getComputedStyle(attach);
+              return {
+                stage: footer.classList.contains('cf-burger') ? 'burger'
+                  : footer.classList.contains('cf-shrink') ? 'shrink'
+                  : footer.classList.contains('cf-icons') ? 'icons' : 'full',
+                footerClasses: footer.className,
+                attachEnabled: !attach.disabled,
+                attachWidth: rect.width,
+                attachHeight: rect.height,
+                attachFlexShrink: style.flexShrink,
+                leftClientWidth: left.clientWidth,
+                leftScrollWidth: left.scrollWidth,
+                children: Array.from(left.children).map((element) => ({
+                  id: element.id,
+                  className: element.className,
+                  display: getComputedStyle(element).display,
+                  flexShrink: getComputedStyle(element).flexShrink,
+                  width: element.getBoundingClientRect().width,
+                })),
+              };
+            }"""
+        )
+        evidence["longName1120"] = shrink
+        if shrink["stage"] not in {"shrink", "icons"}:
+            failures.append(f"populated 1120px scene missed the natural shrink-to-icons boundary: {shrink}")
+        if not shrink["attachEnabled"]:
+            failures.append(f"Attach is unexpectedly disabled in the 1120px boundary scene: {shrink}")
+        if abs(shrink["attachWidth"] - 34) > 0.5:
+            failures.append(f"compact stage squeezed enabled Attach below its declared 34px width: {shrink}")
+
         if page_errors:
             failures.append(f"uncaught browser errors: {page_errors}")
         return failures, evidence
@@ -317,7 +396,7 @@ def main() -> int:
                         print(" - " + failure, file=sys.stderr)
                     print(json.dumps(evidence, indent=2), file=sys.stderr)
                     return 1
-                print("COMPOSER TOOLTIP GEOMETRY PASSED: idle AX name + 2x24 native-resize frames")
+                print("COMPOSER TOOLTIP GEOMETRY PASSED: idle AX + 2x24 resize frames + 1120px shrink target")
                 return 0
             finally:
                 proc.terminate()
