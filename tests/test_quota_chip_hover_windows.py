@@ -146,3 +146,14 @@ def test_fixed_mode_keeps_tooltip_order_and_skips_invalid_measurements():
     assert text["title"].split("\n")[1:] == ["Weekly: 70% remaining", "Session: 90% remaining"]
     # No usable measurement at all: the account-window chip is not rendered.
     assert _chip_label([_w("A", None, WEEK)], "shortest") is None
+
+
+def test_shortest_and_longest_work_for_opencode_go_shaped_windows():
+    """#8548 review finding: with the sanitizer's durations, the fixed modes move off most-constrained."""
+    from api.providers import _sanitize_opencode_go_quota
+    windows = _sanitize_opencode_go_quota({"quota": {
+        "rolling": {"percent": 20}, "monthly": {"percent": 80}}})["windows"]  # 80% left 5-hour, 20% left monthly
+    short, = _run_chip([_status(windows)], mode="shortest")
+    long_, = _run_chip([_status(windows)], mode="longest")
+    most, = _run_chip([_status(windows)], mode="most_constrained")
+    assert "80" in short["label"] and "20" in long_["label"] and "20" in most["label"]
