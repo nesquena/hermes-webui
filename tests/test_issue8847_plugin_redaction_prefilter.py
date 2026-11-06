@@ -324,6 +324,47 @@ def test_dict_registry_shape_also_fails_closed():
         assert module.CALLS == [text]
 
 
+class _RegisterAfterRegistryRead(dict):
+    """Policy namespace that lands a registration right after the registry is
+    read: the window between the reads of one policy snapshot."""
+
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+        self.armed = False
+
+    def get(self, key, default=None):
+        value = self.module.__dict__.get(key, default)
+        if key == "_PLUGIN_PREFIX_PATTERNS" and self.armed:
+            self.armed = False
+            value = type(value)(value)  # what the read saw, before the registration
+            self.module.register_redaction_patterns([_STUB_PATTERN])
+        return value
+
+
+def test_registration_racing_the_policy_snapshot_is_not_pinned():
+    """The registry is read after the fingerprint, so a registration landing
+    between the reads leaves an old fingerprint in the state and the next call
+    resyncs. Read the other way round, the state would pair the NEW
+    fingerprint with an empty registry and keep the shortcut until the next
+    registration."""
+    module = _stub_agent_module()
+    redact_fn = _build_with(module)
+    namespace = _RegisterAfterRegistryRead(module)
+    redact_fn._redaction_policy_ns = namespace
+    with mock.patch.object(helpers, "_redact_fn_uncached", redact_fn), mock.patch.object(
+        helpers, "_redact_fn_lru", functools.lru_cache(maxsize=64)(redact_fn)
+    ):
+        text = _plain_texts(1, "race")[0]
+        assert helpers._redact_text(text, _enabled=True) is text  # synced, no plugins
+        module._reset_plugin_redaction_patterns()  # moves the fingerprint: next call resyncs
+        namespace.armed = True
+        helpers._redact_text(text, _enabled=True)  # this call races the registration
+        assert not namespace.armed, "the race was not exercised"
+        assert module._PLUGIN_PREFIX_PATTERNS == [_STUB_PATTERN]
+        assert _STUB_TOKEN not in helpers._redact_text(text, _enabled=True)
+
+
 # ── 4. Old agents and no agent ─────────────────────────────────────────────
 
 # Rebinds the #8863 fingerprint like a registry would, but exposes no
