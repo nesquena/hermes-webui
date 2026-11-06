@@ -281,9 +281,9 @@ def test_share_create_of_an_external_session_deleted_mid_request_fails_closed(st
 # ── A messaging session deleted a second time in the same process ────────────
 
 
-def _messaging_session_deleted_and_shared_again(monkeypatch):
-    """A messaging session keeps its state.db rows, so it can be shared, deleted
-    and shared again. Returns its sidecar path and the token of the second share."""
+def _messaging_session(monkeypatch):
+    """A messaging session: its state.db rows survive a delete, so it can be
+    shared again afterwards. Returns its sidecar path (absent at first)."""
     from api import routes
 
     path = _external_session(monkeypatch, source="telegram")
@@ -298,6 +298,13 @@ def _messaging_session_deleted_and_shared_again(monkeypatch):
         "get_cli_session_messages",
         lambda sid, **kw: [dict(m) for m in transcript] if sid == EXTERNAL_SID else [],
     )
+    return path
+
+
+def _messaging_session_deleted_and_shared_again(monkeypatch):
+    """A messaging session keeps its state.db rows, so it can be shared, deleted
+    and shared again. Returns its sidecar path and the token of the second share."""
+    path = _messaging_session(monkeypatch)
     assert _post("/api/share/create", {"session_id": EXTERNAL_SID})[0] == 200
     assert _post("/api/session/delete", {"session_id": EXTERNAL_SID})[0] == 200
     assert not path.exists()
@@ -340,6 +347,90 @@ def test_share_revoke_racing_a_second_delete_of_a_messaging_session(state, monke
     assert (status, reply.get("error")) == (404, "Session not found"), reply
     _assert_stays_deleted(path, EXTERNAL_SID, race)
     _assert_not_served(token)
+
+
+# ── The share persists between the delete's revoke step and its unlink ───────
+
+
+def _delete_held_after_its_revoke_step(monkeypatch, sid):
+    """Start a delete of ``sid`` right after the share handler publishes its
+    snapshot and hold it just after its revoke-before-delete step. That step
+    finds no token: the new one is in neither the sidecar nor the resident copy
+    yet. The share request then persists its token into the sidecar, which still
+    exists. Returns ``finish()``, which lets the delete take the persist lock
+    and unlink, and returns its reply."""
+    from api import routes
+
+    revoked, resume = threading.Event(), threading.Event()
+    race = {}
+    original_revoke = routes._revoke_owned_shares_before_delete
+    original_publish = routes.write_share_snapshot
+
+    def revoke_then_hold(*args, **kwargs):
+        value = original_revoke(*args, **kwargs)
+        revoked.set()
+        assert resume.wait(15), "the test never resumed the delete"
+        return value
+
+    def publish_then_start_delete(*args, **kwargs):
+        meta = original_publish(*args, **kwargs)
+        if "thread" not in race:
+            race["thread"], race["result"] = _delete_on_its_own_thread(sid)
+            assert revoked.wait(15), "the delete never reached its revoke step"
+        return meta
+
+    monkeypatch.setattr(routes, "_revoke_owned_shares_before_delete", revoke_then_hold)
+    monkeypatch.setattr(routes, "write_share_snapshot", publish_then_start_delete)
+
+    def finish():
+        assert "thread" in race, "the delete never ran inside the share request"
+        resume.set()
+        race["thread"].join(timeout=15)
+        assert not race["thread"].is_alive(), "the delete never finished"
+        # Later requests run without the race hooks.
+        monkeypatch.setattr(routes, "write_share_snapshot", original_publish)
+        monkeypatch.setattr(routes, "_revoke_owned_shares_before_delete", original_revoke)
+        return race["result"]["reply"]
+
+    return finish
+
+
+def _share_persisted_before_the_unlink(monkeypatch, path, sid):
+    finish_delete = _delete_held_after_its_revoke_step(monkeypatch, sid)
+    status, reply = _post("/api/share/create", {"session_id": sid})
+    on_disk = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    delete_reply = finish_delete()  # before any assert, so the held delete never outlives the test
+    # The share landed first: its token was in the sidecar the delete had not removed yet.
+    assert status == 200, reply
+    token = reply["share"]["token"]
+    assert on_disk.get("share_token") == token, on_disk
+    assert delete_reply[0] == 200, delete_reply
+    assert not path.exists()
+    assert sid not in _index_ids()
+    return token
+
+
+def test_share_persisted_after_the_delete_revoke_step_is_revoked(state, monkeypatch):
+    path = _save_session()
+    raced = _share_persisted_before_the_unlink(monkeypatch, path, SID)
+    assert _snapshot_file(raced).get("revoked_at"), "the delete left the raced link live in its snapshot"
+    _assert_not_served(raced)
+
+
+def test_share_persisted_after_the_delete_revoke_step_stays_dead_after_a_reshare(state, monkeypatch):
+    """The unlink removed the only record of the raced token, and the snapshot
+    itself was never revoked. A messaging session keeps its state.db rows, so
+    sharing it again writes a sidecar for this id, and the raced link served again."""
+    path = _messaging_session(monkeypatch)
+    raced = _share_persisted_before_the_unlink(monkeypatch, path, EXTERNAL_SID)
+    assert _snapshot_file(raced).get("revoked_at"), "the delete left the raced link live in its snapshot"
+    _assert_not_served(raced)
+    status, reply = _post("/api/share/create", {"session_id": EXTERNAL_SID})
+    assert status == 200, reply
+    assert path.exists()
+    assert reply["share"]["token"] != raced
+    _assert_served(reply["share"]["token"])
+    _assert_not_served(raced)
 
 
 # ── The delete lands while the share request is patching the sidecar ─────────
