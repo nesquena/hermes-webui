@@ -301,7 +301,7 @@ def test_a_failed_retry_start_never_cancels_a_started_sibling_retry(hc, homes, h
 
     provider.remember = paused_save
     agents = [_shared_agent(homes["alpha"], provider, f"8817-sibling-{i}") for i in range(2)]
-    for agent, marker in zip(agents, markers):
+    for agent, marker in zip(agents, markers, strict=True):
         token = hc.set_hermes_home_override(_agent_home(agent))
         try:
             agent._memory_manager.sync_all(marker, "reply", session_id=agent.session_id)
@@ -354,8 +354,9 @@ def test_a_failed_retry_start_never_cancels_a_started_sibling_retry(hc, homes, h
         retry_resume.set()
         for thread in started_retries:
             thread.join(15)
-            assert not thread.is_alive(), "the retry deadlocked"
 
+    # Checked after the try block, so a failure inside it is never masked.
+    assert not any(thread.is_alive() for thread in started_retries), "the retry deadlocked"
     assert sorted(provider.writes) == sorted(markers), provider.writes
     assert provider.shutdowns == 1, "a failed retry start cancelled the started retry's release"
     _assert_released_in_its_home(provider, homes["alpha"])
