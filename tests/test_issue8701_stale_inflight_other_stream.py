@@ -251,13 +251,23 @@ def test_stale_inflight_from_another_stream_does_not_show_its_older_prompt():
 def test_proven_turn_still_shows_one_prompt_at_the_turn_start():
     """#8697 behaviour for a proven turn (the snapshot names the active stream) is unchanged: one copy, the
     snapshot's own row (keeps its client `_ts`), stamped for the server start, in front of the activity."""
+    first = _load_passes(_ACTIVITY, [_u(PROMPT, 99.9, _pending=True), _LIVE], "stream-1", passes=1)
+    assert first["counts"] == [1], first
+    assert first["inflightRowShown"] is True, first
+    assert _shape(first["rows"]) == [
+        ("user", PROMPT, True, 100),
+        ("assistant", "Saved activity before reload", False, None),
+        ("tool", "tool output", False, None),
+        ("assistant", "partial", False, None),
+    ], first
+    assert first["rows"][0]["ts"] == 99.9, first
     result = _load_passes(_ACTIVITY, [_u(PROMPT, 99.9, _pending=True), _LIVE], "stream-1")
     assert result["counts"] == [1, 1, 1], result
     assert result["inflightRowShown"] is True, result
     rows = result["rows"]
     assert rows[0]["role"] == "user" and rows[0]["content"] == PROMPT, result
     assert rows[0]["displayOnly"] is True and rows[0]["owner"] == 100 and rows[0]["ts"] == 99.9, result
-    assert [r["role"] for r in rows[1:]][-1] == "assistant" and rows[-1]["live"] is True, result
+    assert rows[-1]["live"] is True, result
 
 
 def test_snapshot_without_a_stream_id_is_unchanged():
@@ -269,14 +279,24 @@ def test_snapshot_without_a_stream_id_is_unchanged():
 
 
 def test_windowed_stale_inflight_from_another_stream_shows_the_prompt_once():
-    """The windowed variant already showed one copy; it still does, placed by the server start after the
-    previous turn's rows."""
+    """The windowed variant already showed one copy; it still does, in the same place (after the previous turn's
+    question, in front of the current turn's activity). The copy is now the server's pending prompt, not the stale
+    snapshot's row."""
     saved = [
         _u("previous question", 90),
         {"role": "assistant", "content": "previous answer", "_ts": 99},
         {"role": "assistant", "content": "current activity", "_ts": 101},
         {"role": "tool", "content": "tool output", "_ts": 102},
     ]
+    first = _load_passes(
+        saved, [_u(PROMPT, 98, _pending=True), _LIVE], "stream-0", passes=1, offset=31, message_count=35
+    )
+    assert [(r["role"], r["content"], r["displayOnly"]) for r in first["rows"]] == [
+        ("user", "previous question", False),
+        ("user", PROMPT, True),
+        ("tool", "tool output", False),
+        ("assistant", "partial", False),
+    ], first
     result = _load_passes(
         saved, [_u(PROMPT, 98, _pending=True), _LIVE], "stream-0", offset=31, message_count=35
     )
