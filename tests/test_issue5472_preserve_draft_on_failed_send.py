@@ -191,7 +191,14 @@ _GUARD = (
 )
 
 
-def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, sid="sid-1"):
+def _run_helper_in_node(
+    draft_text,
+    files_snapshot,
+    initial_input,
+    visible_sid,
+    sid="sid-1",
+    owner_profile=None,
+):
     """Execute _restoreComposerDraftAfterFailedSend in a node vm sandbox."""
     node = shutil.which("node")
     if not node:  # pragma: no cover
@@ -212,6 +219,7 @@ def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, 
           pendingFiles: [],
           trayRendered: false,
           saved: null,
+          remembered: [],
           sendBtnUpdated: false,
         };
         const $ = (id) => (id === 'msg' ? state.input : null);
@@ -219,13 +227,24 @@ def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, 
         function autoResize(){ state.input.resized = true; }
         function updateSendBtn(){ state.sendBtnUpdated = true; }
         function renderTray(){ state.trayRendered = true; }
-        function _saveComposerDraftNow(sid, text, files){ state.saved = {sid, text, files}; }
+        function _rememberComposerPendingFiles(sid, files, ownerProfile){
+          state.remembered.push({sid, files, ownerProfile});
+        }
+        function _saveComposerDraftNow(sid, text, files, _contId, opts){
+          const ownerProfile=(opts&&opts.ownerProfile)||null;
+          state.saved = {sid, text, files};
+          if(ownerProfile) state.saved.ownerProfile = ownerProfile;
+        }
 
         %(guard)s
         %(guard)s
         %(helper)s
 
-        const ret = _restoreComposerDraftAfterFailedSend(%(draft_text)s, %(files)s, %(sid)s);
+        const failedFiles = %(files)s;
+        if(%(owner_profile)s) failedFiles._ownerProfile = %(owner_profile)s;
+        const ret = _restoreComposerDraftAfterFailedSend(
+          %(draft_text)s, failedFiles, %(sid)s, null
+        );
         console.log(JSON.stringify({
           ret,
           inputValue: state.input.value,
@@ -233,6 +252,7 @@ def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, 
           sendBtnUpdated: state.sendBtnUpdated,
           trayRendered: state.trayRendered,
           pendingFiles: S.pendingFiles,
+          remembered: state.remembered,
           saved: state.saved,
         }));
         """
@@ -244,6 +264,7 @@ def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, 
         "draft_text": json.dumps(draft_text),
         "files": json.dumps(files_snapshot),
         "sid": json.dumps(sid),
+        "owner_profile": json.dumps(owner_profile),
     }
     proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
@@ -322,6 +343,12 @@ def test_lock_composer_for_clarify_rejects_persistence_without_unhandled_and_ret
         }}
 
         function showToast() {{}}
+        // master's lock path records the disabled reason through this helper.
+        function _composerControlSetDisabledReason(el, reason, active) {{
+          const reasons = el._composerDisabledReasons || (el._composerDisabledReasons = new Set());
+          if (active) reasons.add(reason); else reasons.delete(reason);
+          el.disabled = reasons.size > 0;
+        }}
 
         %(lock_fn)s
 
@@ -487,6 +514,30 @@ def test_does_not_pollute_a_different_visible_session():
     assert out["inputValue"] == ""
     assert out["pendingFiles"] == []
     assert out["saved"] == {"sid": "sid-1", "text": "failed on old session", "files": []}
+
+
+def test_background_failure_keeps_files_under_captured_owner_profile():
+    files = [{"name": "private.pdf"}]
+    out = _run_helper_in_node(
+        "failed on old session",
+        files,
+        "visible session draft",
+        visible_sid="sid-2",
+        owner_profile="source-profile",
+    )
+
+    assert out["ret"] is False
+    assert out["inputValue"] == "visible session draft"
+    assert out["pendingFiles"] == []
+    assert out["remembered"] == [
+        {"sid": "sid-1", "files": files, "ownerProfile": "source-profile"}
+    ]
+    assert out["saved"] == {
+        "sid": "sid-1",
+        "text": "failed on old session",
+        "files": files,
+        "ownerProfile": "source-profile",
+    }
 
 
 def test_noop_when_nothing_to_restore():

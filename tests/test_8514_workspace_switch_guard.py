@@ -38,6 +38,14 @@ WORKSPACE_JS = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8
 BOOT_JS = (REPO_ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
+SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+
+
+def _context_transition_helpers() -> str:
+    """The serialized context-transition coordinator switchToWorkspace runs in."""
+    start = SESSIONS_JS.index("let _contextTransitionGeneration=0;")
+    end = SESSIONS_JS.index(chr(10) + "const _newSessionPendingText", start)
+    return SESSIONS_JS[start:end]
 
 
 def _function_block(src: str, name: str) -> str:
@@ -252,6 +260,7 @@ __SWITCH__
 
 def _run(params, tmp_path):
     js = _HARNESS.replace("__PARAMS__", json.dumps(params))
+    js = _context_transition_helpers() + chr(10) + js
     for token, src, name in (
         ("__ONSCREEN__", WORKSPACE_JS, "_previewEditorOnScreen"),
         ("__SYNC__", WORKSPACE_JS, "_syncPreviewDirty"),

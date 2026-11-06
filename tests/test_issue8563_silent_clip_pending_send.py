@@ -61,6 +61,9 @@ let recognition = null;
 let _forceMediaRecorder = false;
 const _micForceMediaRecorderKey = 'mic_force_mediarecorder';
 let ta = { value: input.composerText || '' };
+// The composer-ownership layer names its producers; the driver only needs the
+// identifier to exist because _transcribeBlob defaults its handle to it.
+const _micComposerProducerToken = 'test-mic-producer';
 const toasts = [];
 let sendCalls = 0;
 const statuses = [];
@@ -75,6 +78,14 @@ function _ensureSpeechRecognition() { return null; }
 function _composerHasContent() {
   return !!(ta.value.trim().length > 0 || (input.pendingFiles || 0) > 0 || !!input.hasSelection);
 }
+// Composer-ownership helpers the extracted functions call. The driver has a
+// single producer and a single composer, so every claim is current and a text
+// write goes straight to the fake textarea.
+function _micProducerIsCurrent() { return true; }
+// The ownership layer reports the live composer for its producer; the driver
+// has exactly one producer, so its state is always the visible textarea.
+function _composerProducerOwnerState() { return { text: ta.value, visible: true }; }
+function _composerSetText(next) { ta.value = next; return true; }
 
 // The real transcription endpoint answer: 200 + empty transcript.
 global.FormData = class { append() {} };

@@ -131,8 +131,8 @@ def test_the_failed_send_persist_passes_the_token() -> None:
     """The failed-start persist must hand the token to the save helper."""
     start = MESSAGES_JS.find("function _restoreComposerDraftAfterFailedSend(")
     assert start >= 0
-    body = MESSAGES_JS[start : start + 6000]
-    assert "_saveComposerDraftNow(sid," in body, (
+    body = MESSAGES_JS[start : start + 9500]
+    assert "_saveComposerDraftNow(" in body and "sid,persistedText" in body, (
         "the failed-send persist no longer calls the save helper"
     )
     # The 4th argument is the token, and it is conditional on the text being
@@ -141,7 +141,7 @@ def test_the_failed_send_persist_passes_the_token() -> None:
         "the failed-send persist does not pass the token (and does not fail "
         "closed on an edited draft) (#7855 finding 1)"
     )
-    assert "_saveComposerDraftNow(sid,persistedText,persistedFiles,_persistContId)" in body, (
+    assert "sid,persistedText,persistedFiles,_persistContId" in body, (
         "the failed-send persist does not hand the resolved token to the save "
         "helper (#7855 finding 1)"
     )
@@ -150,7 +150,7 @@ def test_the_failed_send_persist_passes_the_token() -> None:
 def test_an_edited_draft_does_not_persist_the_token() -> None:
     """The token is persisted only while the text is the one it belongs to."""
     start = MESSAGES_JS.find("function _restoreComposerDraftAfterFailedSend(")
-    body = MESSAGES_JS[start : start + 6000]
+    body = MESSAGES_JS[start : start + 9500]
     assert (
         "const _persistContId=_restoreContId" in body
         and "String(persistedText||'').trim()===String(restore||'').trim()" in body
@@ -183,7 +183,7 @@ def test_submitting_the_draft_clears_the_stored_token() -> None:
 def test_the_deferred_persist_does_not_rebind_the_token() -> None:
     """The persist must not re-bind the token to the live composer text."""
     start = MESSAGES_JS.find("function _restoreComposerDraftAfterFailedSend(")
-    body = MESSAGES_JS[start : start + 6000]
+    body = MESSAGES_JS[start : start + 9500]
     # The round-5 line bound the token to whatever was in the composer at
     # persist time; a genuine message typed after the failure inherited it.
     assert "_setRestoredGoalContinuationDraft(_restoreContId,liveText)" not in body, (

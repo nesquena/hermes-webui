@@ -8,6 +8,8 @@ REPO = Path(__file__).resolve().parent.parent
 # en-only keys by design (#6067): absent from every non-English locale.
 # profile_concept_* keys were filled in for #7579 and are no longer exempted.
 PROFILE_CONCEPT_FALLBACK_KEYS = {
+    "composer_disabled_profile_switch",
+    "profile_switch_dictation_pending",
     "workspace_artifact_source_session",
     *scripts_fallback_keys('ru'),
 }

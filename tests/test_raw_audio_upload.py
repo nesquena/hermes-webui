@@ -175,6 +175,8 @@ def test_send_raw_audio_honors_explicit_pending_send():
     end = _BOOT_JS.index("function _commitTranscript", idx)
     body = _BOOT_JS[idx:end]
     assert "window._micPendingSend" in body and "send()" in body
+    assert "if(ownerState.visible)send()" in body
+    assert "ownerState.visible&&!String(ownerState.text||'').trim()" in body
 
 
 def test_commit_transcript_appends_to_live_text_not_stale_snapshot():
@@ -183,18 +185,18 @@ def test_commit_transcript_appends_to_live_text_not_stale_snapshot():
     # implementation appended to `_prefix` (the recording-start snapshot),
     # which clobbered live edits AND resurrected text the user had cleared.
     #
-    # Fix: when prefixOverride IS passed (server-STT path), trust live ta.value
-    # unconditionally — even when empty. The fallback to _prefix only applies
-    # when no prefixOverride is given AND ta.value is empty (defensive only —
-    # no current caller hits this branch; browser-SR commits inline in sr.onend).
+    # Fix: when prefixOverride IS passed (server-STT path), trust the resolved
+    # producer owner's current text unconditionally — even when empty. For the
+    # visible owner this is live ta.value; after a session handoff it is the
+    # remembered source snapshot, so a late transcript cannot consume or
+    # overwrite the destination composer.
     idx = _BOOT_JS.index("function _commitTranscript")
     end = _BOOT_JS.index("\n  function ", idx + 1)
     body = _BOOT_JS[idx:end]
-    # The append base must be `prefixOverride !== undefined ? ta.value : ...`
-    # so live ta.value (including empty) wins for the server-STT path.
-    assert "prefixOverride !== undefined ? ta.value" in body, (
-        "_commitTranscript must use live ta.value when prefixOverride is set, "
-        "even when empty — otherwise cleared textarea resurrects on resolve "
+    assert "prefixOverride !== undefined ? ownerState.text" in body, (
+        "_commitTranscript must use the resolved owner's current text when "
+        "prefixOverride is set, even when empty — otherwise cleared text can "
+        "resurrect or a late source transcript can overwrite the destination "
         "(Greptile P1 finding on 0239bb4e)"
     )
     # Sanity: the fallback branch should still exist for the defensive case.
