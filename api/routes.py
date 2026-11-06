@@ -16694,18 +16694,21 @@ def _handle_insights_traffic(handler, parsed) -> bool:
         start_ts = end_ts - (days - 1) * 86400
         end_exclusive = False
     
+    # Derive every window from `now` (time.time()), not _datetime.now(), so
+    # an injected clock (tests) drives the day/month windows consistently.
+    now_dt = _datetime.fromtimestamp(now)
     if start_ts is None:
-        start_dt = _datetime.now() - _timedelta(days=30)
-        end_dt = _datetime.now()
+        start_dt = now_dt - _timedelta(days=30)
+        end_dt = now_dt
     else:
         start_dt = _datetime.fromtimestamp(start_ts)
         end_dt = _datetime.fromtimestamp(end_ts)
-    
+
     # Inbound IPs from nginx logs
     # For day and month windows
-    one_day_ago = _datetime.now() - _timedelta(days=1)
+    one_day_ago = now_dt - _timedelta(days=1)
     day_start = _datetime(one_day_ago.year, one_day_ago.month, one_day_ago.day)
-    month_start = _datetime.now() - _timedelta(days=30)
+    month_start = now_dt - _timedelta(days=30)
     
     ip_counts_day = _collections.Counter()
     ip_counts_month = _collections.Counter()
@@ -16740,16 +16743,16 @@ def _handle_insights_traffic(handler, parsed) -> bool:
                     ip = m.group(1)
                     dt = _parse_nginx_date(m.group(2))
                     if dt:
-                        if day_start <= dt <= _datetime.now():
+                        if day_start <= dt <= now_dt:
                             ip_counts_day[ip] += 1
-                        if month_start <= dt <= _datetime.now():
+                        if month_start <= dt <= now_dt:
                             ip_counts_month[ip] += 1
         except Exception:
             continue
     
     # Outbound domains from Hermes state.db
-    out_day = _get_outbound_domains(day_start, _datetime.now())
-    out_month = _get_outbound_domains(month_start, _datetime.now())
+    out_day = _get_outbound_domains(day_start, now_dt)
+    out_month = _get_outbound_domains(month_start, now_dt)
     
     def _ip_to_domain(ip):
         try:
