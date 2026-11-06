@@ -20858,7 +20858,7 @@ def handle_post(handler, parsed) -> bool:
                     if isinstance(persisted, tuple) and persisted[0]:
                         late_share_tokens.append(str(persisted[0]))
                 except Exception:
-                    logger.debug("Failed to re-read the share token of %s", sid, exc_info=True)
+                    logger.warning("Failed to re-read the share token of %s", sid, exc_info=True)
                 with LOCK:
                     SESSIONS.pop(sid, None)
                     # #7738: recorded with the eviction, so a writer waiting on the
