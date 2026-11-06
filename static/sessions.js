@@ -9091,6 +9091,12 @@ function filterSessions(){
     // Inline (not _nextSessionSearchJumpGen) so harnesses that extract
     // filterSessions alone keep working.
     if(typeof window!=='undefined') window._sessionSearchJumpGen=(Number(window._sessionSearchJumpGen)||0)+1;
+    // Content rows belong to the query that produced them. Drop them and stop
+    // their stream *before* this paint: clearing after the paint left the old
+    // rows on screen, and when the new query has no content hits nothing ever
+    // repainted them away.
+    _contentSearchResults=[];
+    _stopContentSearchSSE();
   }
   renderSessionListFromCache();
   clearTimeout(_searchDebounceTimer);
