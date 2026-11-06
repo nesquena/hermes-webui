@@ -988,13 +988,20 @@ def _redaction_policy_namespace_of(lru):
 
 
 def _redaction_policy_state_for(lru):
-    """``(lru, policy_ns.get, _PREFIX_RE, _PREFIX_SUBSTRINGS)`` as seen now.
+    """``(lru, policy_ns.get, _PREFIX_RE, _PREFIX_SUBSTRINGS, has_plugin_patterns)`` as seen now.
 
     The state holds strong references to the fingerprint objects, so their
     identities cannot be recycled while they are compared with ``is``.
+
+    ``has_plugin_patterns`` (#8847) is recomputed only when the fingerprint
+    moves, so it needs no invalidation of its own. It is read AFTER the
+    fingerprint: every registry shape (a list, later a per-source dict) is
+    mutated before ``_rebuild_prefix_matcher()`` rebinds the fingerprint, so a
+    state holding the new fingerprint has seen the new registry. An Agent
+    without the registry reports False, which keeps today's prefilter.
     """
     get = _redaction_policy_namespace_of(lru).get
-    return (lru, get, get("_PREFIX_RE"), get("_PREFIX_SUBSTRINGS"))
+    return (lru, get, get("_PREFIX_RE"), get("_PREFIX_SUBSTRINGS"), bool(get("_PLUGIN_PREFIX_PATTERNS")))
 
 
 _redaction_policy_lock = threading.Lock()
@@ -1018,7 +1025,7 @@ def _sync_redaction_policy():
         current = _redaction_policy_state_for(lru)
         if lru is state[0]:
             if current[2] is state[2] and current[3] is state[3]:
-                return lru  # another thread already synced this policy
+                return state  # another thread already synced this policy
             try:
                 maxsize = lru.cache_info().maxsize
             except Exception:
@@ -1034,21 +1041,23 @@ def _sync_redaction_policy():
         if callable(clear):
             clear()
         _redaction_policy_state = current
-        return lru
+        return current
+
+
+def _current_redaction_policy():
+    """The policy state for the memo and Agent policy in force now (#8844)."""
+    lru = _redact_fn_lru
+    state = _redaction_policy_state
+    policy_get = state[1]
+    if lru is state[0] and policy_get("_PREFIX_RE") is state[2] and policy_get("_PREFIX_SUBSTRINGS") is state[3]:
+        return state
+    return _sync_redaction_policy()
 
 
 def _redact_fn_cached(text):
     if len(text) > _REDACT_CACHE_MAX_TEXT_LEN:
         return _redact_fn_uncached(text)
-    lru = _redact_fn_lru
-    seen_lru, policy_get, prefix_re, prefix_substrings = _redaction_policy_state
-    if (
-        lru is seen_lru
-        and policy_get("_PREFIX_RE") is prefix_re
-        and policy_get("_PREFIX_SUBSTRINGS") is prefix_substrings
-    ):
-        return lru(text)
-    return _sync_redaction_policy()(text)
+    return _current_redaction_policy()[0](text)
 
 
 _SENSITIVE_CASE_MARKERS = (
@@ -1213,7 +1222,11 @@ def _redact_text(text: str, *, _enabled: bool | None = None) -> str:
         _enabled = bool(load_settings().get("api_redact_enabled", True))
     if not _enabled:
         return text
-    if not _might_contain_sensitive_text(text):
+    # The prefilter knows only WebUI's fixed markers, not the token shapes a
+    # plugin registered with the Agent at runtime. While any exist, every
+    # string goes to the Agent (fail closed, #8847); without them the shortcut
+    # and its cost are unchanged.
+    if not _might_contain_sensitive_text(text) and not _current_redaction_policy()[4]:
         return text
     return _redact_fn_cached(text)
 
