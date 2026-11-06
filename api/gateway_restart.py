@@ -10,6 +10,7 @@ import sys
 import threading
 from pathlib import Path
 
+from api.agent_health import GATEWAY_EXTERNALLY_MANAGED_MESSAGE, gateway_lifecycle_capability
 from api.profiles import (
     _PROFILE_ID_RE,
     _is_root_profile,
@@ -87,7 +88,23 @@ def restart_active_profile_gateway(
     - in_progress: command did not finish within ``quick_timeout_seconds``.
     - failed: command finished quickly with non-zero exit status.
     - busy: restart already in progress from another caller.
+    - external: the monitored Gateway is not controlled by this WebUI's local
+      CLI (#8391); nothing was launched and nothing was restarted.
     """
+    # Ownership policy runs BEFORE the lock and before any subprocess: a
+    # Gateway WebUI does not control must never get a local replacement.
+    capability = gateway_lifecycle_capability(profile=profile)
+    if not capability.get("managed"):
+        logger.info(
+            "Skipping gateway restart: monitored Gateway is managed outside WebUI (%s)",
+            capability.get("reason"),
+        )
+        return {
+            "status": "external",
+            "message": GATEWAY_EXTERNALLY_MANAGED_MESSAGE,
+            "lifecycle": capability,
+        }
+
     if not _GATEWAY_RESTART_LOCK.acquire(blocking=False):
         return {
             "status": "busy",

@@ -444,11 +444,11 @@ def test_delete_serializes_with_workspace_recovery_and_sidecar_stays_deleted(
     monkeypatch.setattr(models_module, "_write_session_index", lambda **_kwargs: None)
     monkeypatch.setattr(routes_module, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes_module, "get_session", lambda *_args, **_kwargs: session)
-    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid, **_kw: {})
     monkeypatch.setattr(routes_module, "_session_is_subagent_view_only", lambda _sid: False)
     monkeypatch.setattr(routes_module, "_is_messaging_session_id", lambda _sid: False)
     monkeypatch.setattr(
-        routes_module, "_worktree_retained_payload_for_session_id", lambda _sid: {}
+        routes_module, "_worktree_retained_payload_for_session_id", lambda _sid, **_kw: {}
     )
     monkeypatch.setattr(routes_module, "prune_session_from_index", lambda _sid: None)
     monkeypatch.setattr(
@@ -547,13 +547,13 @@ def test_delete_returns_503_without_mutation_when_session_lock_is_busy(
         "get_session",
         lambda *_args, **_kwargs: cached_session,
     )
-    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", lambda _sid, **_kw: {})
     monkeypatch.setattr(
         routes_module, "_session_is_subagent_view_only", lambda _sid: False
     )
     monkeypatch.setattr(routes_module, "_is_messaging_session_id", lambda _sid: False)
     monkeypatch.setattr(
-        routes_module, "_worktree_retained_payload_for_session_id", lambda _sid: {}
+        routes_module, "_worktree_retained_payload_for_session_id", lambda _sid, **_kw: {}
     )
     monkeypatch.setattr(
         routes_module, "_get_session_agent_lock", lambda _sid: ContendedLock()

@@ -143,7 +143,11 @@ environment reference resolve in the active profile across named `providers:`,
 precedence over `api_key_env`; an unresolved credential is not treated as
 keyless, including an `api_key: ${VAR}` or `key_cmd: ${VAR}` whose variable is
 blank or unset in the profile, or a pooled credential that still holds the
-unresolved reference; an unresolved `key_cmd` is never executed. A
+unresolved reference. A `key_cmd` that is exactly one `${VAR}` reference
+is resolved in the active profile; if it is blank or unset, no command provider
+is built. In a longer command, embedded `${...}` references that the profile
+does not define are left for the shell to expand from the server process
+environment at send time. Status reads never execute `key_cmd`. A
 `base_url: ${VAR}` that does not resolve in the profile is not an
 endpoint: the status asks for a base URL and chat reports the missing endpoint
 instead of sending the literal reference.

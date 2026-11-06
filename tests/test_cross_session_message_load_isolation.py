@@ -144,6 +144,9 @@ COMPOSER_DRAFT_HELPERS_SRC = "\n".join(
         "_composerDraftFileSignature",
         "_composerDraftPayloadSignature",
         "_composerDraftPayloadSignatureForSid",
+        "_composerDraftRevision",
+        "_noteComposerDraftPayload",
+        "_bumpComposerDraftRevision",
         "_clearComposerDraftRestoreSuppression",
         "_isComposerDraftRestoreSuppressed",
         "_suppressComposerDraftRestoreAfterSubmit",
@@ -422,6 +425,11 @@ let toastCalls = [];
 
 // Source under test
 let _draftSaveTimer = null;
+let _draftSaveTimerSid = null;
+let _draftSaveTimerPayload = null;
+let _draftSaveTimerRev = 0;
+const _composerDraftRevBySid = new Map();
+const _composerDraftLastPayloadBySid = new Map();
 const _DRAFT_SAVE_DELAY_MS = 400;
 const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';
 const _COMPOSER_DRAFT_RESTORE_SUPPRESS_MS = 30000;
@@ -966,12 +974,51 @@ async function runDraftSaveFailureNavigation() {
   };
 }
 
+async function runNewChatMidflight() {
+  createEnvironment();
+  const apiHost = makeHarness();
+  globalThis.apiHost = apiHost;
+  globalThis.api = apiHost.api;
+
+  const calls = {
+    beaconMeta: apiHost.enqueue(buildMessageUrl('sid-beacon', 0)),
+    beaconMsgs: apiHost.enqueue(buildMessageUrl('sid-beacon', 1)),
+  };
+
+  const load = loadSession('sid-beacon', { force: true });
+  await waitForQueued(apiHost, calls.beaconMeta.url);
+  calls.beaconMeta._resolve(API_BEACON_META);
+  // Beacon's transcript fetch is now in flight and owns the load.
+  await waitForQueued(apiHost, calls.beaconMsgs.url);
+
+  // #8356: New Chat takes the pane while that fetch is in flight. This
+  // mirrors newSession()'s pane hand-off only (S.session becomes the new
+  // session's object, S.messages is reset); the load bookkeeping is
+  // deliberately left untouched, because catching THIS shape is the
+  // commit-point guard's job — newSession's separate load invalidation
+  // covers the outer continuations.
+  S.session = { session_id: 'sid-new-chat', message_count: 0 };
+  S.messages = [];
+
+  calls.beaconMsgs._resolve(API_BEACON_MSGS);
+  await load;
+
+  return {
+    scenario: 'new-chat-midflight',
+    finalSid: S.session && S.session.session_id,
+    messages: snapshotState().messages,
+    loadingSid: snapshotState().loadingSid,
+    loadingGeneration: snapshotState().loadingGeneration,
+  };
+}
+
 async function runAll() {
   return {
     crossSessionOrdering: await runCrossSessionOrdering(),
     observedIdleCrossSessionOrdering: await runObservedIdleCrossSessionOrdering(),
     staleIdleCatch: await runStaleRejectedIdleCatch(),
     draftSaveFailureNavigation: await runDraftSaveFailureNavigation(),
+    newChatMidflight: await runNewChatMidflight(),
   };
 }
 
@@ -1166,14 +1213,16 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
     assert superseded["newerTargetDraftWins"]["sameFile"] is True
     assert len(superseded["newerTargetClearWins"]["calls"]) == 2
     assert superseded["newerTargetClearWins"]["calls"][0]["session_id"] == "sid-parent"
+    # #7855: a clear posts an explicit empty continuation token so the stored
+    # token is dropped with the draft it belonged to.
     assert superseded["newerTargetClearWins"]["calls"][1] == {
-        "session_id":"sid-target", "text":"", "files":[],
+        "session_id":"sid-target", "text":"", "files":[], "goal_continuation_id":"",
     }
     assert superseded["newerTargetClearWins"]["staleStatus"] == 409
     assert superseded["newerTargetClearWins"]["targetDraft"] == {"text":"", "files":[]}
     assert superseded["clearReplay"]["sids"] == ["sid-clear-parent", "sid-clear-target"]
     assert superseded["clearReplay"]["payload"] == {
-        "session_id":"sid-clear-target", "text":"", "files":[],
+        "session_id":"sid-clear-target", "text":"", "files":[], "goal_continuation_id":"",
     }
     assert superseded["clearReplay"]["targetDraft"] == {"text":"", "files":[]}
     replay_order = superseded["serializedReplayOrdering"]
@@ -1185,3 +1234,64 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
         ("sid-serialized-target", "newer target draft"),
     ]
     assert replay_order["durableDraft"]["text"] == "newer target draft"
+
+
+# ── #8356: New Chat takes the pane while a load is in flight ───────────────
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_new_chat_pane_takeover_midflight_does_not_write_stale_rows(tmp_path):
+    """The #8356 reproduction: a session load is in flight, the user clicks
+    New Chat (the pane's session is replaced), then the stale load's
+    transcript response lands.
+
+    The commit point in ``_ensureMessagesLoaded`` (``_ownsLoad``) must reject
+    a response whose session no longer owns the pane. RED before the fix: the
+    stale transcript overwrites the new pane."""
+    script = (
+        _NODE_SCRIPT_TEMPLATE.replace(
+            "__INFLIGHT_HAS_VISIBLE_STATE_SRC__", INFLIGHT_HAS_VISIBLE_STATE_SRC
+        )
+        .replace(
+            "__SELECT_LIVE_RECOVERY_INFLIGHT_SRC__", SELECT_LIVE_RECOVERY_INFLIGHT_SRC
+        )
+        .replace(
+            "__MERGE_PENDING_SESSION_MESSAGE_SRC__", MERGE_PENDING_SESSION_MESSAGE_SRC
+        )
+        .replace("__COMPOSER_DRAFT_HELPERS_SRC__", COMPOSER_DRAFT_HELPERS_SRC)
+        .replace("__LOAD_SESSION_SRC__", LOAD_SESSION_SRC)
+        .replace("__ENSURE_MESSAGES_LOADED_SRC__", ENSURE_MESSAGES_LOADED_SRC)
+    )
+    body = _run_node(script, tmp_path)
+
+    new_chat = body["newChatMidflight"]
+    assert new_chat["finalSid"] == "sid-new-chat", (
+        "the pane should still belong to the new chat"
+    )
+    assert new_chat["messages"] == [], (
+        "the superseded load's transcript leaked into the new pane: "
+        f"{new_chat['messages']}"
+    )
+
+
+def test_new_session_invalidates_the_superseded_load():
+    """Contract half of the #8356 repair: newSession() must clear
+    ``_loadingSessionId`` and advance ``_loadSessionGeneration`` right after
+    it takes the pane, so loadSession()'s outer continuations
+    (``_isCurrentLoad``) bail — the idle error catch, the inflight restore
+    and the busy-flag cleanup can no longer mutate the new pane. The
+    behavioural commit-point guard is covered by the node test above; this
+    pins the source shape so a refactor cannot silently drop the
+    invalidation."""
+    start = SESSIONS_SRC.index("async function newSession(")
+    end = SESSIONS_SRC.index("\nasync function ", start + 10)
+    body = SESSIONS_SRC[start:end]
+    pane_take = body.index("S.session=data.session;")
+    invalidation = body.index("_loadingSessionId = null;", pane_take)
+    generation = body.index("_loadSessionGeneration++;", pane_take)
+    assert 0 < invalidation < generation, (
+        "newSession() must invalidate the superseded load (clear "
+        "_loadingSessionId, advance _loadSessionGeneration) after taking the "
+        "pane — stale loadSession continuations would otherwise keep mutating "
+        "the new pane (#8356)"
+    )

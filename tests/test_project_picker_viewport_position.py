@@ -2467,6 +2467,8 @@ function autoResize(){}
 function hideCmdDropdown(){}
 function renderTray(){}
 function showToast(){}
+function _normalizeGoalContinuationId(id){return String(id||'').trim();}
+function _takeRestoredDraftGoalContinuationId(){return '';}
 """ + send_source + r"""
 (async()=>{
   const pending=send();

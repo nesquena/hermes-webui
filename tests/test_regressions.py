@@ -588,7 +588,10 @@ def test_queue_card_cross_session_clear_called_before_draft_save(cleanup_test_se
         "const draftText = ($('msg') || {}).value || '';",
         "const draftFiles = S.pendingFiles ? [...S.pendingFiles] : [];",
         "try {",
-        "await _saveComposerDraftNow(currentSid, draftText, draftFiles);",
+        # #7855 (round 7+): the save now also carries the departing session's
+        # restored continuation token as a 4th argument. The ordering this
+        # test pins (clear → capture → await) is unchanged.
+        "await _saveComposerDraftNow(currentSid, draftText, draftFiles, _switchContId);",
     )
     positions = [cross_block.index(step) for step in ordered_steps]
     assert positions == sorted(positions), (
@@ -788,7 +791,8 @@ def test_loadSession_inflight_merges_tail_with_persisted_transcript(cleanup_test
     assert "await _ensureMessagesLoaded(sid" in inflight_block, (
         "returning to an active stream should load the persisted transcript before adding the live tail"
     )
-    assert "_mergeInflightTailMessages(S.messages,inflightMessages)" in inflight_block, (
+    # Prefix match: the call may pass the optional turn-owner argument (#8698).
+    assert "_mergeInflightTailMessages(S.messages,inflightMessages" in inflight_block, (
         "INFLIGHT messages should be merged as a tail, not replace the full transcript"
     )
     assert "function _mergeInflightTailMessages" in src, (

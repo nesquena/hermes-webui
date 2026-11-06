@@ -288,7 +288,7 @@ def token_builder(monkeypatch):
     Records every command handed to the builder and returns a provider that
     fails if anything ever invokes it: a status read or a routing decision must
     build a provider for a literal ``key_cmd`` without executing it, and must
-    never hand an unresolved ``${CMD}`` to the builder at all.
+    never hand an unresolved whole-value ``${CMD}`` to the builder at all.
     """
     calls = []
     module = ModuleType("agent.command_token_source")
@@ -498,26 +498,34 @@ def test_pooled_literal_on_undeclared_record_is_not_keyless(
 KEY_CMD = "ONBOARDING_SCOPE_TEST_KEY_CMD"
 
 
-@pytest.mark.parametrize("cmd_in", ["blank_in_profile", "unset"])
+@pytest.mark.parametrize("profile", ["default", "work"])
+@pytest.mark.parametrize(
+    "cmd_in", ["blank_in_profile", "unset", "whitespace", "env_prefix"]
+)
 @pytest.mark.parametrize("shape", SHAPES)
 def test_unresolved_key_cmd_envref_is_unresolved_not_keyless(
-    shape_profiles, monkeypatch, token_builder, shape, cmd_in
+    shape_profiles, monkeypatch, token_builder, shape, cmd_in, profile
 ):
     """``key_cmd: ${CMD}`` that expands blank or stays unresolved is a declared
     credential source with nothing behind it: not keyless, no placeholder, no
     token provider, and the literal never reaches the Agent's command source."""
     monkeypatch.delenv(KEY_CMD, raising=False)
+    reference = "${" + KEY_CMD + "}"
+    if cmd_in == "whitespace":
+        reference = "  " + reference + "  "
+    elif cmd_in == "env_prefix":
+        reference = "${env:" + KEY_CMD + "}"
     _write_record_shape(
         shape_profiles.homes,
         shape,
-        {"base_url": "http://127.0.0.1:8000/v1", "key_cmd": "${" + KEY_CMD + "}"},
+        {"base_url": "http://127.0.0.1:8000/v1", "key_cmd": reference},
     )
     if cmd_in == "blank_in_profile":
-        (shape_profiles.homes["work"] / ".env").write_text(
+        (shape_profiles.homes[profile] / ".env").write_text(
             f'{KEY_CMD}=" "\n', encoding="utf-8"
         )
 
-    payload = request_status(shape_profiles, "work")
+    payload = request_status(shape_profiles, profile)
 
     assert payload["system"]["provider_ready"] is False
     assert payload["system"]["chat_ready"] is False
@@ -527,16 +535,46 @@ def test_unresolved_key_cmd_envref_is_unresolved_not_keyless(
     )
     assert shape_profiles.keys == [None]
 
-    bundle = _bundle_in_profile("work")
+    bundle = _bundle_in_profile(profile)
     assert bundle["api_key"] is None
     assert bundle["keyless"] is False
 
-    merged = _chat_merge("work")
+    merged = _chat_merge(profile)
     assert not callable(merged.get("api_key"))
     assert merged.get("api_key") != config.KEYLESS_CUSTOM_API_KEY
     verdict = config.custom_provider_route_error(merged)
     assert verdict and verdict["reason"] == config.CUSTOM_ROUTE_NO_CREDENTIAL
     assert token_builder == []
+
+
+@pytest.mark.parametrize("profile", ["default", "work"])
+@pytest.mark.parametrize("shape", SHAPES)
+@pytest.mark.parametrize("command_kind", ["local_variable", "path_variable"])
+def test_key_cmd_with_embedded_shell_var_builds_provider(
+    shape_profiles, monkeypatch, token_builder, shape, profile, command_kind
+):
+    """Shell-variable commands stay usable without running during status reads."""
+    variable = "ONBOARDING_SCOPE_TEST_EMBEDDED"
+    monkeypatch.delenv(variable, raising=False)
+    if command_kind == "local_variable":
+        command = f'{variable}=synthetic; printf "%s" "${{{variable}}}"'
+    else:
+        command = f"cat ${{{variable}}}/token"
+    _write_record_shape(
+        shape_profiles.homes,
+        shape,
+        {"base_url": "http://127.0.0.1:8000/v1", "key_cmd": command},
+    )
+
+    payload = request_status(shape_profiles, profile)
+    assert payload["system"]["chat_ready"] is True
+    assert callable(shape_profiles.keys[0])
+    bundle = _bundle_in_profile(profile)
+    assert bundle["keyless"] is False
+    merged = _chat_merge(profile)
+    assert config.custom_provider_route_error(merged) is None
+    assert callable(merged["api_key"])
+    assert token_builder and set(token_builder) == {command}
 
 
 @pytest.mark.parametrize("shape", SHAPES)

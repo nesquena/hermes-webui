@@ -1046,6 +1046,240 @@ async function loadCronGatewayNotice() {
   }
 }
 
+// #2316: Scripts subtab -- list and read-only view of the profile's
+// ~/.hermes/scripts/ directory. Read-only is the first slice.
+//
+// #7685 finding 3: the pane is PROFILE-OWNED. Every reply is published only
+// if the request was issued for the profile and generation that are still
+// current (the same discipline switchProfile() applies to the conversation
+// list and workspace tree), and an accepted profile switch clears the rows
+// immediately so a newer profile never shows an earlier profile's scripts.
+let _scriptsOwnerProfile='';
+let _scriptsRequestSeq=0;
+let _scriptsLastDir=null;
+// ── #7685 finding 4/5: a transition GENERATION the switch paths bump. A
+// reply's owner key can still equal the current active profile while the
+// switch is in flight (the caller flips S.activeProfile optimistically), so
+// publication must also match this generation. Both switch paths share
+// _invalidateScriptsForProfileSwitch()/_refreshScriptsAfterProfileSwitch()
+// and no path may duplicate the clear/refresh logic below.
+let _scriptsInvalidateSeq=0;
+// Set by the invalidate helper when the Scripts pane was the visible subtab,
+// so the accepted switch can refresh it for the new owner instead of leaving
+// it empty.
+let _scriptsSwitchNeedsRefresh=false;
+
+function _scriptsOwnerKey(){
+  // The server resolves the list against the active profile, so the client's
+  // notion of "who is active" is what ownership means here.
+  return (typeof S!=='undefined'&&S&&S.activeProfile)||'default';
+}
+
+function clearScriptsList(){
+  // Used by the profile-switch path: drop the previous owner's rows without
+  // issuing a fetch that would race the switch.
+  const box=$('scriptsList');
+  if(box) box.innerHTML='';
+  _scriptsOwnerProfile='';
+  _scriptsLastDir=null;
+}
+
+// Shared invalidate: called at the START of EVERY switch path (canonical
+// switchToProfile and the alternate session-load switch). It empties the
+// pane immediately and bumps the generation so a reply still on the wire
+// (success OR error) is refused at publication, so the old profile's rows
+// can neither stay up nor overwrite the new owner's.
+function _invalidateScriptsForProfileSwitch(){
+  _scriptsSwitchNeedsRefresh = _currentTasksSubtab === 'scripts';
+  ++_scriptsInvalidateSeq;
+  clearScriptsList();
+}
+
+// Shared refresh: called when a switch is ACCEPTED (new owner is now the
+// current profile) AND when a switch is REFUSED (we are still on the old
+// profile — restoring beats leaving the pane blank, #7685 finding 5).
+//
+// #7685 finding 1 (MUST-FIX): the refresh decision is made HERE, from the
+// subtab's visibility AT THIS MOMENT, not from a flag captured at switch
+// start. Opening Scripts while a switch is still pending used to leave the
+// flag false, so nothing repainted the pane for the new owner.
+//
+// The load is silent-on-error ONLY when the pane is not visible: a background
+// switch refresh must not paint a banner over a pane we are deliberately
+// repopulating, but a VISIBLE pane that fails to reload must keep showing
+// "Could not load scripts." instead of going blank (#7685 finding 2).
+function _refreshScriptsAfterProfileSwitch(){
+  if (_currentTasksSubtab !== 'scripts') return;
+  _scriptsSwitchNeedsRefresh = false;
+  if (typeof loadScriptsList !== 'function') return;
+  // `silent` is false for a visible pane so a failed reload keeps its error
+  // state; the pane is dimmed while the load is in flight.
+  loadScriptsList(false, false);
+}
+
+// The publication gate every Scripts reply must pass. A reply is current
+// only if the owner it was issued for is STILL the active profile AND no
+// switch has invalidated the pane since AND no newer request superseded it.
+function _scriptsReplyIsCurrent(owner, gen, seq){
+  return owner===_scriptsOwnerKey() && gen===_scriptsInvalidateSeq && seq===_scriptsRequestSeq;
+}
+
+async function loadScriptsList(animate, silent){
+  const box=$('scriptsList');
+  if(!box) return;
+  const owner=_scriptsOwnerKey();
+  const gen=_scriptsInvalidateSeq;
+  const seq=++_scriptsRequestSeq;
+  // The dim belongs to the NEWEST request, whichever one that is. Setting it
+  // only on the animate arm let a superseded request's late reply clear a
+  // newer request's dim (or leave a held request stuck at half opacity when
+  // the newer refresh never animated). A stale reply must return without
+  // touching opacity — the newest request owns it (#7685 opacity fix).
+  if(box) box.style.opacity=animate?'0.5':'';
+  let data;
+  try{
+    data=await api('/api/scripts/list');
+  }catch(_e){
+    // Late reply for a superseded owner/generation, or a silent background
+    // refresh: do not paint either way.
+    if(!_scriptsReplyIsCurrent(owner,gen,seq)){ return; }
+    if(animate) box.style.opacity='';
+    if(!silent){
+      box.innerHTML=`<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('scripts_load_failed')||'Could not load scripts.')}</div>`;
+    }
+    return;
+  }
+  // Stale-owner guard: a profile switch (or a newer request) superseded this
+  // one while it was in flight. Publishing would overwrite the current
+  // owner's result with the previous profile's scripts (or an error).
+  if(!_scriptsReplyIsCurrent(owner,gen,seq)){ return; }
+  if(animate) box.style.opacity='';
+  // The main column's Scripts copy says the panel lists this profile's
+  // scripts. On a capability refusal it has to agree with the panel instead
+  // of promising a listing (#7685 release review). Only while the Scripts
+  // tab is showing: the Jobs tab owns that copy otherwise.
+  const mainSub=$('taskDetailEmptySub');
+  const scriptsPane=$('scriptsList');
+  if(mainSub&&scriptsPane&&!scriptsPane.hidden){
+    const subKey=data.unavailable?'scripts_unavailable':'scripts_detail_empty_sub';
+    mainSub.setAttribute('data-i18n',subKey);
+    mainSub.textContent=t(subKey)||(data.unavailable
+      ?'Scripts are unavailable on this platform.'
+      :'This panel lists the scripts in this profile. To view or edit one, open the file on the server.');
+  }
+  const dirCaption=data.directory?`<div class="scripts-dir-caption">${esc(data.directory)}</div>`:'';
+  // A capability refusal is NOT an empty profile: the platform could not
+  // serve the listing at all. Say so instead of showing the empty state.
+  if(data.unavailable){
+    box.innerHTML=`<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('scripts_unavailable')||'Scripts are unavailable on this platform.')}</div>`;
+    _scriptsLastDir=null;
+    return;
+  }
+  if(!data.exists){
+    box.innerHTML=`<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('scripts_no_directory')||'No scripts directory yet.')}</div>`;
+    _scriptsLastDir=null;
+    return;
+  }
+  if(!data.scripts.length){
+    box.innerHTML=dirCaption+`<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('scripts_empty')||'No scripts in this profile yet.')}</div>`;
+    _scriptsLastDir=data.directory||null;
+    return;
+  }
+  _scriptsLastDir=data.directory||null;
+  box.innerHTML=dirCaption+data.scripts.map(s=>_renderScriptItem(s)).join('');
+}
+
+function _renderScriptItem(s){
+  const name=esc(s.name||'');
+  const desc=s.description?`<div class="scripts-item-desc">${esc(s.description)}</div>`:'';
+  const size=s.size!=null?`<span class="scripts-item-size">${_formatScriptSize(s.size)}</span>`:'';
+  return `<div class="scripts-item" data-script-name="${name}">
+    <div class="scripts-item-head">
+      <span class="scripts-item-name" title="${name}">${name}</span>
+      ${size}
+    </div>
+    ${desc}
+  </div>`;
+}
+
+function _formatScriptSize(bytes){
+  if(bytes==null) return '';
+  if(bytes<1024) return `${bytes} B`;
+  if(bytes<1024*1024) return `${Math.round(bytes/1024)} KB`;
+  return `${(bytes/1024/1024).toFixed(1)} MB`;
+}
+
+let _currentTasksSubtab='jobs';
+function switchTasksSubtab(name){
+  if(name!=='jobs'&&name!=='scripts') return;
+  _currentTasksSubtab=name;
+  // Attribute gate for the jobs-only gateway notice: the notice sets an
+  // inline `display`, so CSS hides it on the Scripts tab via the attribute
+  // selector (#7685 UX review).
+  const panel=$('panelTasks');
+  if(panel) panel.dataset.tasksSubtab=name;
+  const titleEl=$('tasksPanelTitle');
+  if(titleEl){
+    const titleKey=name==='scripts'?'cron_tab_scripts':'scheduled_jobs';
+    titleEl.setAttribute('data-i18n',titleKey);
+    titleEl.textContent=t(titleKey)||(name==='scripts'?'Scripts':'Scheduled jobs');
+  }
+  // The shared Refresh button reloads the active tab (refreshTasksPanel), so
+  // its tooltip and accessible name follow the tab too (#7685 UX review).
+  const refreshBtn=$('cronRefreshBtn');
+  if(refreshBtn){
+    const refreshLabel=name==='scripts'?'Refresh script list':'Refresh job list';
+    refreshBtn.setAttribute('data-tooltip',refreshLabel);
+    refreshBtn.setAttribute('aria-label',refreshLabel);
+  }
+  const jobsBtn=$('tasksTabJobs');
+  const scriptsBtn=$('tasksTabScripts');
+  if(jobsBtn) jobsBtn.classList.toggle('active',name==='jobs');
+  if(scriptsBtn) scriptsBtn.classList.toggle('active',name==='scripts');
+  if(jobsBtn) jobsBtn.setAttribute('aria-selected',String(name==='jobs'));
+  if(scriptsBtn) scriptsBtn.setAttribute('aria-selected',String(name==='scripts'));
+  const cronList=$('cronList');
+  const scriptsList=$('scriptsList');
+  if(cronList) cronList.hidden=(name!=='jobs');
+  if(scriptsList) scriptsList.hidden=(name!=='scripts');
+  // The Scripts tab is a read-only browse of the profile's scripts
+  // directory: there is no "create" action there, so the shared "New job"
+  // button would offer a job action that has nothing to do with the tab
+  // (#7685 open item). Hide it for the whole Scripts tab rather than
+  // relabelling it -- a "New script" button would be a lie, because the
+  // panel cannot create a script either.
+  const newJobBtn=$('cronNewJobBtn');
+  if(newJobBtn) newJobBtn.hidden=(name==='scripts');
+  // The main column's empty state belongs to the Jobs tab: it names a
+  // scheduled job and points at the job detail. On the Scripts tab the
+  // list itself IS the content (a script row is not selectable -- there is
+  // no script detail view yet), so the empty state has to say what the
+  // panel actually offers instead of promising a selection that cannot
+  // happen.
+  const emptyTitle=$('taskDetailEmptyTitle');
+  const emptySub=$('taskDetailEmptySub');
+  if(emptyTitle){
+    const key=name==='scripts'?'scripts_detail_empty_title':'tasks_empty_title';
+    emptyTitle.setAttribute('data-i18n',key);
+    emptyTitle.textContent=t(key)||(name==='scripts'?'Scripts':'Select a scheduled job');
+  }
+  if(emptySub){
+    const key=name==='scripts'?'scripts_detail_empty_sub':'tasks_empty_sub';
+    emptySub.setAttribute('data-i18n',key);
+    emptySub.textContent=t(key)||(name==='scripts'
+      ?'This panel lists the scripts in this profile. To view or edit one, open the file on the server.'
+      :'Pick a job from the sidebar to view its details and runs, or create a new one.');
+  }
+  if(name==='scripts') loadScriptsList(true);
+}
+
+// The panel Refresh button reloads whatever subtab is active (#7685 UX
+// review must-fix 3): Scripts refreshes the script list, Jobs the cron list.
+function refreshTasksPanel(){
+  if(_currentTasksSubtab==='scripts') loadScriptsList(true);
+  else loadCrons(true);
+}
+
 let _cronLoadGeneration = 0;  // monotonically bumped per loadCrons() entry; stale loads bail
 let _cronAcceptedLoadGeneration = 0;  // latest load that published _cronList
 let _cronLatestLoadSettled = Promise.resolve();  // lets save completion await a superseding reader
@@ -5076,8 +5310,9 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
         const showLabel = idx === 0 || idx === chartRows.length - 1 || idx % labelEvery === 0;
         const titleDate = r.title || r.date;
         const cacheRead = Number(r.cache_read_tokens || 0);
-        // Bounded daily cache hit rate: reads / (input + reads), 0-100%.
-        const cacheDenom = input + cacheRead;
+        // Daily cache hit rate: reads over the full prompt total. The server
+        // already counts cache reads and writes inside input_tokens.
+        const cacheDenom = input;
         const cacheStr = (cacheRead > 0 && cacheDenom > 0)
           ? ` · ${Math.min(100, Math.round((cacheRead / cacheDenom) * 100))}% ${t('insights_model_cache')}`
           : '';
@@ -6462,10 +6697,6 @@ function renderWorkspacesPanel(workspaces){
 
     panel.appendChild(row);
   }
-  const hint=document.createElement('div');
-  hint.style.cssText='font-size:11px;color:var(--muted);padding:8px 0';
-  hint.textContent=t('workspace_paths_validated_hint');
-  panel.appendChild(hint);
   // Re-render detail if we have one cached and we're not in a form
   if (_currentWorkspaceDetail && _workspaceMode !== 'create' && _workspaceMode !== 'edit') {
     const refreshed = workspaces.find(w => w.path === _currentWorkspaceDetail.path);
@@ -6787,6 +7018,38 @@ async function promptWorkspacePath(){
   }
 }
 
+// #8514 (review): one place decides what a workspace transition does to the open
+// preview, and it answers with unsaved TEXT rather than with what is on screen.
+// `_previewDirty` is deliberately false for a closed panel, so gating a
+// transition on it let a hidden edit cross into another workspace, where the
+// session's next Save resolved its relative path against the new tree and wrote
+// A's text into B's same-named file.
+//   - different workspace + unsaved text  → ask, and honour Cancel before the
+//     session workspace is mutated or a new chat is created;
+//   - different workspace + clean editor  → drop the editor silently (it belongs
+//     to the tree we are leaving, so it must not stay savable);
+//   - same workspace (in-place refresh / directory navigation) → leave the
+//     preview alone: loadDir() preserves its hidden edits, nothing to warn about.
+async function _settlePreviewForWorkspaceSwitch(targetWs){
+  const cur=(S.session&&S.session.workspace)||'';
+  const target=targetWs||cur;
+  if(!cur||!target||String(target)===String(cur)) return true;
+  if(typeof _previewNeedsDiscardPrompt==='function'&&_previewNeedsDiscardPrompt()){
+    const discard=await showConfirmDialog({
+      title:t('discard_file_edits_title'),
+      message:t('discard_file_edits_message'),
+      confirmLabel:t('discard'),
+      danger:true
+    });
+    if(!discard) return false;
+  }
+  if(typeof _previewBelongsToWorkspace==='function'&&!_previewBelongsToWorkspace(target)){
+    if(typeof cancelEditMode==='function')cancelEditMode();
+    if(typeof clearPreview==='function')clearPreview({keepPanelOpen:true});
+  }
+  return true;
+}
+
 async function switchToWorkspace(path,name){
   // Opus review Q6: if called from blank page, auto-create a session bound to
   // the requested workspace so the switch doesn't silently no-op.
@@ -6818,17 +7081,8 @@ async function switchToWorkspace(path,name){
     S.session && S.session.workspace && path && path!==S.session.workspace &&
     Array.isArray(S.messages) && S.messages.length>0
   ){
-    if(typeof _previewDirty!=='undefined'&&_previewDirty){
-      const discard=await showConfirmDialog({
-        title:t('discard_file_edits_title'),
-        message:t('discard_file_edits_message'),
-        confirmLabel:t('discard'),
-        danger:true
-      });
-      if(!discard)return;
-      if(typeof cancelEditMode==='function')cancelEditMode();
-      if(typeof clearPreview==='function')clearPreview();
-    }
+    if(typeof _settlePreviewForWorkspaceSwitch==='function'
+       && !(await _settlePreviewForWorkspaceSwitch(path))) return;
     closeWsDropdown();
     // Bind the new chat to the selected workspace via the one-shot flag newSession() reads.
     S._profileSwitchWorkspace=path;
@@ -6841,17 +7095,8 @@ async function switchToWorkspace(path,name){
     showToast(t('workspace_switched_new_chat',name||getWorkspaceFriendlyName(path)));
     return;
   }
-  if(typeof _previewDirty!=='undefined'&&_previewDirty){
-    const discard=await showConfirmDialog({
-      title:t('discard_file_edits_title'),
-      message:t('discard_file_edits_message'),
-      confirmLabel:t('discard'),
-      danger:true
-    });
-    if(!discard)return;
-    if(typeof cancelEditMode==='function')cancelEditMode();
-    if(typeof clearPreview==='function')clearPreview();
-  }
+  if(typeof _settlePreviewForWorkspaceSwitch==='function'
+     && !(await _settlePreviewForWorkspaceSwitch(path))) return;
   const composerDd=(typeof $==='function')?$('composerWsDropdown'):null;
   const restoreComposerFocusTarget=(composerDd&&composerDd.classList.contains('open')&&typeof _getComposerWorkspaceFocusTarget==='function')
     ? _getComposerWorkspaceFocusTarget()
@@ -7494,6 +7739,15 @@ async function switchToProfile(name) {
   // context change where dismissing those transient affordances is correct.
   if (typeof _renamingSid !== 'undefined' && _renamingSid) _renamingSid = null;
   if (typeof closeSessionActionMenu === 'function') closeSessionActionMenu();
+  // #7685 finding 3/4/5: drop the previous profile's Scripts rows now.
+  // Without this the next profile kept showing the earlier profile's scripts
+  // until the user clicked the subtab, and a late reply from the old owner
+  // could then overwrite the new one's list. The shared invalidate helper
+  // bumps the pane's transition generation so requests already in flight are
+  // refused at publication, and marks the visible pane for refresh.
+  if (typeof _invalidateScriptsForProfileSwitch === 'function') {
+    _invalidateScriptsForProfileSwitch();
+  }
   // Determine whether the current session must be replaced instead of being
   // retagged in place. A session with messages/active runtime belongs to the
   // current profile. After the profile-switch POST returns, we also treat an
@@ -7511,6 +7765,7 @@ async function switchToProfile(name) {
     sessionInProgress = true;
   }
   const _workspaceVisibleAtStart = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
+  let _reasoningSwitchHeld = false;
   // Stale-snapshot guard ownership for THIS switch: armed the instant
   // S.activeProfile changes (see below), handed to the settings reconciliation
   // on success, released in `finally` on every other exit. The counter arms are
@@ -7544,6 +7799,11 @@ async function switchToProfile(name) {
     // red error while the real switch completes and renders. The catch block below is
     // the single source of truth for switch failure and is gated on _switchGen, so the
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
+    // Effort saves queued in the previous profile must go out under its cookie.
+    if (typeof _beginReasoningProfileSwitch === 'function') {
+      _reasoningSwitchHeld = true;
+      await _beginReasoningProfileSwitch();
+    }
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
     if (_switchGen !== _profileSwitchGeneration) return false;
     // A retained empty-composer pick belongs to the old profile's providers; keeping it
@@ -7566,6 +7826,25 @@ async function switchToProfile(name) {
     if (typeof _tabVisReconcilePending === 'number') _tabVisReconcilePending++;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
+    }
+    // #7685 finding 3/4/5: the switch is accepted, so the Scripts pane's
+    // owner is now this profile. If it was the visible subtab, refresh it for
+    // the new owner (its rows were cleared at switch start). The load's own
+    // owner/generation gate drops any still-in-flight reply from the old
+    // owner.
+    //
+    // #7685 finding 1 (MUST-FIX): invalidate AGAIN here, at accept. The
+    // canonical switch does not change S.activeProfile until its POST
+    // returns, so a list load issued while the switch was PENDING captured
+    // the OLD owner key and passed its gate — it repainted the previous
+    // profile's rows under the new profile. Bumping the generation at accept
+    // retires that in-flight reply, and the refresh below repopulates the
+    // pane for the owner that is now current.
+    if (typeof _invalidateScriptsForProfileSwitch === 'function') {
+      _invalidateScriptsForProfileSwitch();
+    }
+    if (typeof _refreshScriptsAfterProfileSwitch === 'function') {
+      _refreshScriptsAfterProfileSwitch();
     }
     // #7509: the slash-skill caches hold the previous profile's disabled-filtered
     // /api/skills payload, so drop them once the switch has actually succeeded —
@@ -7782,13 +8061,21 @@ async function switchToProfile(name) {
         loadDir('.');
       } else if (_workspaceVisibleAtStart && typeof clearWorkspaceTreeSkeleton === 'function') {
         // No workspace to restore on the (still-current) previous profile —
-        // clear the up-front workspace skeleton so it doesn't strand on a switch
+        // clear the up-front workspace skeleton so it can't strand on a switch
         // failure, mirroring the success-path no-workspace handling (#4662).
         clearWorkspaceTreeSkeleton();
+      }
+      // #7685 finding 5: the Scripts pane was cleared at switch start but the
+      // switch never took effect, so the old profile is still active. Restore
+      // it for that profile instead of leaving the pane blank. The refresh is
+      // silent-on-error so a failed restore cannot paint a spurious banner.
+      if (typeof _refreshScriptsAfterProfileSwitch === 'function') {
+        _refreshScriptsAfterProfileSwitch();
       }
     }
     return false;
   } finally {
+    if (_reasoningSwitchHeld) _endReasoningProfileSwitch();
     // Always remove loading indicator regardless of success or failure
     if (_switchGen === _profileSwitchGeneration && _chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
     if (_switchGen === _profileSwitchGeneration && _titlebarBtn) { _titlebarBtn.classList.remove('switching'); _titlebarBtn.disabled = false; }
@@ -9178,7 +9465,11 @@ if(typeof window!=='undefined') window._pickChatActivityDisplayMode=_pickChatAct
 function _pickTransparentEventTimestamps(enabled){
   _syncTransparentEventTimestampsControl(enabled,window._chatActivityDisplayMode);
   if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
-  if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+  // Reconcile both preserved live rows and settled history immediately. A full
+  // transcript rebuild can restore a structurally-ahead live turn unchanged.
+  if(typeof _syncTransparentEventTimestampVisibility==='function'){
+    document.querySelectorAll('#msgInner .transparent-event-row').forEach(_syncTransparentEventTimestampVisibility);
+  }
   _scheduleAppearanceAutosave();
 }
 if(typeof window!=='undefined') window._pickTransparentEventTimestamps=_pickTransparentEventTimestamps;
@@ -9370,6 +9661,8 @@ function _preferencesPayloadFromUi(){
   if(showTpsCb) payload.show_tps=showTpsCb.checked;
   const fadeTextCb=$('settingsFadeTextEffect');
   if(fadeTextCb) payload.fade_text_effect=fadeTextCb.checked;
+  const screenReaderModeCb=$('settingsScreenReaderMode');
+  if(screenReaderModeCb) payload.screen_reader_mode=screenReaderModeCb.checked;
   const terminalAutoExpandCb=$('settingsTerminalAutoExpand');
   if(terminalAutoExpandCb) payload.terminal_auto_expand_on_output=terminalAutoExpandCb.checked;
   const workspaceTodosTabCb=$('settingsWorkspaceTodosTab');
@@ -9544,6 +9837,9 @@ function _schedulePreferencesAutosave(){
 async function _autosavePreferencesSettings(payload){
   try{
     const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
+    if(payload&&payload.screen_reader_mode!==undefined){
+      setScreenReaderMode(saved&&saved.screen_reader_mode);
+    }
     if(payload&&payload.terminal_auto_expand_on_output!==undefined){
       window._terminalAutoExpandOnOutput=!!(saved&&saved.terminal_auto_expand_on_output);
     }
@@ -10156,6 +10452,8 @@ async function loadSettingsPanel(){
     }
     const terminalAutoExpandCb=$('settingsTerminalAutoExpand');
     if(terminalAutoExpandCb){terminalAutoExpandCb.checked=!!settings.terminal_auto_expand_on_output;window._terminalAutoExpandOnOutput=terminalAutoExpandCb.checked;terminalAutoExpandCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const screenReaderModeCb=$('settingsScreenReaderMode');
+    if(screenReaderModeCb){screenReaderModeCb.checked=!!settings.screen_reader_mode;setScreenReaderMode(screenReaderModeCb.checked);screenReaderModeCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const workspaceTodosTabCb=$('settingsWorkspaceTodosTab');
     if(workspaceTodosTabCb){
       workspaceTodosTabCb.checked=!!settings.workspace_todos_tab;
@@ -11941,6 +12239,8 @@ function _buildProviderQuotaCard(status){
   const card=document.createElement('div');
   const state=(status.status||'unavailable').replace(/[^a-z0-9_-]/gi,'').toLowerCase()||'unavailable';
   card.className='provider-quota-card provider-quota-card-'+state;
+  // No provider configured is a neutral state, not a failure: keep its message muted.
+  if(!status.provider) card.classList.add('provider-quota-card-neutral');
   const accountLimits=status.account_limits||null;
   const providerBase=status.display_name||status.provider||t('provider_quota_active_provider');
   const provider=(accountLimits&&accountLimits.plan)?`${providerBase} · ${accountLimits.plan}`:providerBase;
@@ -11948,7 +12248,9 @@ function _buildProviderQuotaCard(status){
   let body='';
   if(accountLimits&&(status.status==='available'||accountLimits.pool)){
     const windows=Array.isArray(accountLimits.windows)?accountLimits.windows:[];
-    const details=Array.isArray(accountLimits.details)&&!accountLimits.pool?accountLimits.details:[];
+    // A pool snapshot's own details only repeat the breakdown below; usage-API details
+    // (e.g. credit balance) are the account's and stay visible next to the pool.
+    const details=Array.isArray(accountLimits.details)&&(!accountLimits.pool||accountLimits.source==='usage_api')?accountLimits.details:[];
     const windowHtml=windows.map(w=>{
       const used=_formatProviderQuotaPercent(w&&w.used_percent);
       const reset=_formatProviderQuotaReset(w&&w.reset_at);
@@ -11969,6 +12271,9 @@ function _buildProviderQuotaCard(status){
     const poolHtml=_buildProviderQuotaPoolBreakdown(accountLimits);
     body=windowHtml+detailHtml+poolHtml;
     if(!body) body=`<div class="provider-quota-message">${esc(status.message||t('provider_quota_account_limits_loaded'))}</div>`;
+    // A pool breakdown shown next to a failure reflects locally recorded credential
+    // state, not the failed check: keep the failure message visible above it.
+    else if(status.status!=='available'&&status.message) body=`<div class="provider-quota-message">${esc(status.message)}</div>`+body;
   }else if(status.status==='available'&&quota){
     body=`
       <div class="provider-quota-metric"><span>${esc(t('provider_quota_metric_remaining'))}</span><strong>${esc(_formatProviderQuotaMoney(quota.limit_remaining))}</strong></div>
@@ -12863,6 +13168,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._simplifiedToolCalling=true;
   _syncChatActivityDisplayModeControl(body.chat_activity_display_mode);
   _syncTransparentEventTimestampsControl(body.transparent_stream_event_timestamps, body.chat_activity_display_mode);
+  setScreenReaderMode(saved&&saved.screen_reader_mode!==undefined?saved.screen_reader_mode:body.screen_reader_mode);
   window._terminalAutoExpandOnOutput=!!body.terminal_auto_expand_on_output;
   window._workspaceTodosTab=!!body.workspace_todos_tab;
   if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
@@ -12984,7 +13290,7 @@ async function checkUpdatesNow(channelOverride){
       const parts=[];
       const formatUpdatePart=(typeof _formatUpdateTargetStatus==='function')
         ? _formatUpdateTargetStatus
-        : ((label,info)=>info&&info.behind>0?label+': '+info.behind:null);
+        : ((label,info)=>info&&info.behind>0?label+': '+info.behind+' update'+(info.behind>1?'s':''):null);
       const webuiPart=formatUpdatePart('WebUI',data.webui);
       const agentPart=formatUpdatePart('Agent',data.agent);
       if(webuiPart) parts.push(webuiPart);
@@ -13009,7 +13315,9 @@ async function checkUpdatesNow(channelOverride){
       // The target whose tag is shown. Its own release arrow may already name the tag (#6859 Fable r1).
       const tagOwner=(data.webui&&data.webui.latest_tag)?data.webui:data.agent;
       if(parts.length){
-        let txt=t('settings_updates_available').replace('{count}',parts.join(', '));
+        // Each part already carries its own count and unit ("WebUI: 2 releases"), so the
+        // template only wraps the list and must not add another unit (#8283).
+        let txt=t('settings_updates_available_targets',parts.join(', '));
         if(manualInstruction) txt+=' · '+manualInstruction;
         if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
         if(tagInfo&&!_updateTargetArrowNamesTag(tagOwner,tagInfo)) txt += ' ' + t('settings_latest_tag_suffix').replace('{0}', tagInfo);
@@ -13604,6 +13912,7 @@ async function saveSettings(andClose){
   body.show_busy_placeholder_hint=showBusyPlaceholderHint===true;
   body.show_tps=showTps;
   body.fade_text_effect=fadeTextEffect;
+  body.screen_reader_mode=!!($('settingsScreenReaderMode')||{}).checked;
   body.terminal_auto_expand_on_output=!!($('settingsTerminalAutoExpand')||{}).checked;
   body.workspace_todos_tab=!!window._workspaceTodosTab;
   body.api_redact_enabled=!!($('settingsApiRedact')||{}).checked;
@@ -14059,9 +14368,9 @@ function toggleMcpServer(name, enabled){
       _refreshMcpToolsetsCatalog();
       showToast(t(enabled?'mcp_enabled_toast':'mcp_disabled_toast',name));
     }
-    else showToast(t('mcp_toggle_failed'),'error');
+    else showToast(t('mcp_toggle_failed'),null,'error');
     loadMcpServers();
-  }).catch(()=>{showToast(t('mcp_toggle_failed'),'error');loadMcpServers();});
+  }).catch(()=>{showToast(t('mcp_toggle_failed'),null,'error');loadMcpServers();});
 }
 function _refreshMcpToolsetsCatalog(payload){
   if(typeof window.invalidateToolsetsCatalog==='function') window.invalidateToolsetsCatalog(payload);
@@ -14241,7 +14550,43 @@ function _gatewayActionButton(action){
   const labels={start:t('gateway_start'),stop:t('gateway_stop'),restart:t('gateway_restart')};
   return `<button class="sm-btn gateway-action-btn" data-gateway-action="${esc(action)}" onclick="_gatewayAction(${jsArg(action)})" ${_gatewayActionInFlight?'disabled':''} style="padding:5px 10px;font-size:12px">${esc(labels[action]||action)}</button>`;
 }
+function _gatewayLockNote(kind,bodyHtml){
+  const icon=typeof li==='function'?`<span style="display:inline-flex;flex-shrink:0;margin-top:2px">${li('lock',12)}</span>`:'';
+  return `<div class="gateway-external-note" data-gateway-note="${esc(kind)}" style="display:flex;align-items:flex-start;gap:6px;margin-top:10px;font-size:12px;line-height:1.45;color:var(--muted)">${icon}<span>${bodyHtml}</span></div>`;
+}
+function _gatewayLocalUnprovenNoteHtml(lifecycle){
+  // The exact one-time start command comes from the server (it adds
+  // `--profile <name>` for a named profile, like the Start button does).
+  // Escape the whole translation first, then put the escaped command, wrapped
+  // in inline code, at the locale's {cmd} placeholder. Only static markup and
+  // escaped text are added after esc(), so the note stays XSS-safe.
+  const raw=lifecycle&&lifecycle.start_command;
+  const command=(typeof raw==='string'&&raw.trim())?raw:'hermes gateway start';
+  const codeStyle='font-family:var(--font-mono,monospace);font-size:11px;background:var(--code-bg);padding:1px 5px;border-radius:4px;white-space:pre-wrap;overflow-wrap:anywhere';
+  // Keep each `--flag` whole when the chip wraps: a break inside `--profile`
+  // left a bare `--` at the line end, which reads as the end-of-options marker.
+  // The pattern only matches `--` plus letters/hyphens in the already escaped
+  // text, so it cannot touch an entity or markup.
+  const cmdHtml=esc(command).replace(/(^|\s)(--[a-z][a-z-]*)/g,'$1<span style="white-space:nowrap">$2</span>');
+  return esc(t('gateway_local_unproven')).split('{cmd}').join(`<code style="${codeStyle}">${cmdHtml}</code>`);
+}
 function _gatewayActionControls(r){
+  // Lifecycle actions drive the LOCAL `hermes gateway` CLI. Offer them only when
+  // the server proved that CLI controls the Gateway shown here (#8391); a remote
+  // or unproven Gateway stays read-only. Missing capability fails closed.
+  const lifecycle=(r&&r.lifecycle&&typeof r.lifecycle==='object')?r.lifecycle:null;
+  const managed=!!(lifecycle&&lifecycle.managed===true);
+  if(!managed){
+    // A loopback Gateway WebUI has not yet seen running for this profile, and
+    // that is not running now: most likely this machine's own Gateway, stopped
+    // since before the upgrade. Point at the one-time CLI start that proves it.
+    // A RUNNING unproven loopback Gateway (e.g. a Docker port map) really is
+    // managed elsewhere, so it keeps the external note.
+    if(lifecycle&&lifecycle.reason==='local_gateway_unproven'&&!(r&&r.running)){
+      return _gatewayLockNote('local_unproven',_gatewayLocalUnprovenNoteHtml(lifecycle));
+    }
+    return _gatewayLockNote('external',esc(t('gateway_external_managed')));
+  }
   const actions=(r&&r.running)?['stop','restart']:['start'];
   return `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px">${actions.map(_gatewayActionButton).join('')}</div>`;
 }
@@ -14270,7 +14615,16 @@ function _renderGatewayStatus(r){
       return `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;background:var(--code-bg);border:1px solid var(--border2);border-radius:12px;font-size:12px;font-weight:500">${icon} ${esc(p.label)}</span>`;
     }).join(' ');
   }
-  const lastActive=r.last_active?`<span style="font-size:11px;color:var(--muted)">${esc(t('gateway_last_active'))}: ${esc(new Date(r.last_active).toLocaleString())}</span>`:'';
+  // #8621: the card shows one separator, and it is the one the translator
+  // chose. A label that already ends in a colon keeps it -- a full-width "：",
+  // or a French " : " -- and only a label with no colon gets the template's
+  // ": ". An ASCII colon is followed by a space, a full-width one is not.
+  const _laLabel=t('gateway_last_active');
+  const _laSep=/([：:])\s*$/u.exec(_laLabel);
+  const _laText=_laSep
+    ? _laLabel.slice(0,_laSep.index)+_laSep[1]+(_laSep[1]===':'?' ':'')
+    : _laLabel+': ';
+  const lastActive=r.last_active?`<span style="font-size:11px;color:var(--muted)">${esc(_laText)}${esc(new Date(r.last_active).toLocaleString())}</span>`:'';
   const sessionInfo=r.session_count?`<span style="font-size:11px;color:var(--muted)">${r.session_count} ${esc(r.session_count!==1?t('gateway_sessions'):t('gateway_session'))}</span>`:'';
   card.innerHTML=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></span><span style="font-size:13px;font-weight:500;color:#22c55e">${esc(t('gateway_running'))}</span></div>${badges?`<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${badges}</div>`:''}<div style="display:flex;gap:12px">${sessionInfo}${lastActive}</div>${_gatewayActionControls(r)}`;
 }
