@@ -4738,15 +4738,27 @@ function _refreshProviderQuotaTitle(){
   if(mobileAction) mobileAction.title=text.title;
 }
 // Bound lazily from renderProviderQuotaIndicator (hover only matters once the chip has drawn),
-// so this block runs no top-level DOM code.
+// so this block runs no top-level DOM code. Both the desktop chip and the compact composer's
+// quota button refresh on hover / focus (CSS hides the chip in the compact layout).
 let _providerQuotaTitleRefreshBound=false;
+let _providerQuotaMobileTitleRefreshBound=false;
 function _initProviderQuotaTitleRefresh(){
-  if(_providerQuotaTitleRefreshBound) return;
-  const chip=$('providerQuotaChip');
-  if(!chip||typeof chip.addEventListener!=='function') return;
-  chip.addEventListener('mouseenter',_refreshProviderQuotaTitle);
-  chip.addEventListener('focus',_refreshProviderQuotaTitle);
-  _providerQuotaTitleRefreshBound=true;
+  if(!_providerQuotaTitleRefreshBound){
+    const chip=$('providerQuotaChip');
+    if(chip&&typeof chip.addEventListener==='function'){
+      chip.addEventListener('mouseenter',_refreshProviderQuotaTitle);
+      chip.addEventListener('focus',_refreshProviderQuotaTitle);
+      _providerQuotaTitleRefreshBound=true;
+    }
+  }
+  if(!_providerQuotaMobileTitleRefreshBound){
+    const mobileAction=$('composerMobileQuotaAction');
+    if(mobileAction&&typeof mobileAction.addEventListener==='function'){
+      mobileAction.addEventListener('mouseenter',_refreshProviderQuotaTitle);
+      mobileAction.addEventListener('focus',_refreshProviderQuotaTitle);
+      _providerQuotaMobileTitleRefreshBound=true;
+    }
+  }
 }
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map

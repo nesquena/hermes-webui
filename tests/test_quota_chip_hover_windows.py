@@ -148,6 +148,35 @@ def test_fixed_mode_keeps_tooltip_order_and_skips_invalid_measurements():
     assert _chip_label([_w("A", None, WEEK)], "shortest") is None
 
 
+def test_compact_quota_button_refreshes_its_countdown_on_hover_and_focus():
+    """The compact composer hides the desktop chip (CSS), so its quota button needs the same refresh."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    start = UI_JS.index("function _isQuotaMeasurement")
+    end = UI_JS.index("// Dynamic model labels")
+    status = _status([
+        {"label": "5-hour", "remaining_percent": 40, "reset_at": _iso(3 * HOUR_MS), "limit_window_seconds": 18000},
+        {"label": "Weekly", "remaining_percent": 70, "reset_at": _iso(50 * HOUR_MS), "limit_window_seconds": 604800},
+    ])
+    script = (
+        "let now=" + str(NOW_MS) + ";Date.now=()=>now;"
+        "const window={_quotaChipWindow:'most_constrained',addEventListener(){}};"
+        "function el(){const l={};return {hidden:false,title:'',textContent:'',"
+        "addEventListener(t,f){(l[t]=l[t]||[]).push(f)},fire(t){(l[t]||[]).forEach(f=>f())},removeAttribute(a){this[a]=''}}}"
+        "const els={providerQuotaChip:el(),composerMobileQuotaAction:el()};const $=id=>els[id]||null;"
+        + UI_JS[start:end]
+        + ";_providerQuotaLastStatus=" + json.dumps(status) + ";_initProviderQuotaTitleRefresh();"
+        "const m=els.composerMobileQuotaAction;m.fire('mouseenter');const a=m.title;"
+        "now+=2*" + str(HOUR_MS) + ";m.fire('focus');const b=m.title;"
+        "_initProviderQuotaTitleRefresh();m.title='';m.fire('mouseenter');"
+        "console.log(JSON.stringify({a,b,once:m.title===b}));"
+    )
+    out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30, check=True).stdout)
+    assert out["a"] and out["b"] and out["a"] != out["b"]  # the countdown moved with the clock
+    assert out["once"]  # re-init does not double-bind (title rebuilt by exactly the bound listeners)
+
+
 def test_shortest_and_longest_work_for_opencode_go_shaped_windows():
     """#8548 review finding: with the sanitizer's durations, the fixed modes move off most-constrained."""
     from api.providers import _sanitize_opencode_go_quota
