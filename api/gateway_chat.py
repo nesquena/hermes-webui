@@ -2191,23 +2191,15 @@ def _shared_gateway_url_config(process_env: dict[str, str]) -> dict:
 
     get_config() expands from live os.environ at reload time, so a reload while another profile's background worker
     has mirrored its .env would cache that worker's host. Re-expand the raw file value against the clean view."""
-    from api.config import _expand_env_vars, _get_config_path, _load_yaml_config_file_raw, _thread_ctx, get_config
+    from api.config import _get_config_path, _has_env_ref, get_config
+    from api.profiles import load_profile_config
 
     cfg = get_config()
     value = cfg.get("webui_gateway_base_url") if isinstance(cfg, dict) else None
-    try:
-        raw_cfg = _load_yaml_config_file_raw(_get_config_path(), _copy=False)
-    except Exception:
-        raw_cfg = {}
-    raw = raw_cfg.get("webui_gateway_base_url") if isinstance(raw_cfg, dict) else None
-    if isinstance(raw, str) and "${" in raw and isinstance(value, str) and value != raw:
-        previous_env = getattr(_thread_ctx, "env", {})
-        previous_block = bool(getattr(_thread_ctx, "block_process_env_fallback", False))
-        _thread_ctx.env, _thread_ctx.block_process_env_fallback = dict(process_env), True
-        try:
-            value = _expand_env_vars(raw)
-        finally:
-            _thread_ctx.env, _thread_ctx.block_process_env_fallback = previous_env, previous_block
+    if isinstance(value, str) and value:
+        clean = load_profile_config(Path(_get_config_path()).parent, env=process_env).get("webui_gateway_base_url")
+        if isinstance(clean, str) and clean and not _has_env_ref(clean):
+            value = clean
     return {"webui_gateway_base_url": value} if value else {}
 
 
