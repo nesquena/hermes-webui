@@ -499,3 +499,93 @@ def test_refresh_eviction_and_generation_bump_are_one_critical_section(monkeypat
         "generation bump — the stale entry survived the refresh"
     )
     assert after["models"][0]["id"] == "openai/model-2"
+
+
+# ---------------------------------------------------------------------------
+# #6919 (empty-membership remainder): the endpoint must distinguish an
+# authoritative EMPTY membership ("this provider really has no models") from a
+# discovery FAILURE ("we could not find out"). Both arrive as an empty list,
+# but only the first may reconcile the client's picker to an empty set.
+#
+# The failure shape is the endpoint's existing one — an ``error`` marker —
+# so a client can tell the two apart without a new field.
+# ---------------------------------------------------------------------------
+
+
+def test_live_models_empty_discovery_failure_is_marked_as_a_failure(monkeypatch):
+    """No discovery step completed: the empty list means "unknown", and it
+    must carry the endpoint's failure marker so the client does not prune
+    live choices."""
+    import api.routes as routes
+    import api.config as config
+
+    _install_provider_model_ids(monkeypatch, lambda provider: [])
+    _patch_live_models_basics(monkeypatch, routes)
+    # No static catalog for this provider, so the empty list is reached.
+    monkeypatch.setattr(config, "_PROVIDER_MODELS", {})
+
+    parsed = urlparse("/api/models/live?provider=openai")
+    payload = routes._handle_live_models(object(), parsed)
+
+    assert payload["models"] == [], (
+        f"#6919: expected an empty model list, got {payload['models']}"
+    )
+    assert payload.get("error"), (
+        "#6919: a discovery failure must publish the endpoint's failure marker "
+        f"so the client can tell it apart from authoritative empty membership: {payload}"
+    )
+
+
+def test_live_models_completed_discovery_with_no_models_is_authoritative(monkeypatch):
+    """A live endpoint that ANSWERED with an empty list is authoritative: the
+    provider really offers no models. It must NOT carry the failure marker.
+
+    Uses the custom-provider probe path: it performs its own /v1/models
+    request, so an empty (but successful) answer is observable here.
+    """
+    import api.routes as routes
+    import api.config as config
+    import urllib.request
+
+    _install_provider_model_ids(monkeypatch, lambda provider: [])
+    _patch_live_models_basics(monkeypatch, routes)
+    monkeypatch.setattr(config, "_PROVIDER_MODELS", {})
+    monkeypatch.setattr(
+        config,
+        "get_config",
+        lambda: {
+            "model": {"provider": "custom:test-gateway"},
+            "custom_providers": [
+                {
+                    "name": "test-gateway",
+                    "base_url": "https://example.invalid/v1",
+                    "api_key": "test-key",
+                }
+            ],
+        },
+    )
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            self.close()
+            return False
+
+    def _fake_urlopen(req, timeout=None):
+        # The endpoint answered, with no models at all.
+        return _Resp(json.dumps({"data": []}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    parsed = urlparse("/api/models/live?provider=custom:test-gateway")
+    payload = routes._handle_live_models(object(), parsed)
+
+    assert payload["models"] == [], (
+        f"#6919: expected an empty model list, got {payload['models']}"
+    )
+    assert not payload.get("error"), (
+        "#6919: a completed discovery that found no models is AUTHORITATIVE "
+        "membership — it must not carry the failure marker: " f"{payload}"
+    )

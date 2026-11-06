@@ -5898,10 +5898,28 @@ function _dropStaleLiveModelOptions(provider, freshValues, sel){
   return removed;
 }
 
+// #6919 (empty-membership remainder): an authoritative EMPTY membership is a
+// real answer — "this provider offers no models" — and must reconcile the
+// picker to that empty set, dropping the live choices the provider no longer
+// advertises.
+//
+// The append below has nothing to add for an empty payload, so the append
+// block is skipped and the reconcile at the end runs against the EMPTY set:
+// the pruner drops the live-only choices and keeps the selection, the
+// catalog-origin options and the other providers' options. Before this, the
+// empty case returned early and the pruner was never reached, leaving a
+// removed live-only option selectable.
+//
+// Only the reconcile path reconciles. The plain append path (the composer)
+// keeps its empty-array no-op, and a non-empty `models` array never takes
+// this branch.
 function _addLiveModelsToSelect(provider, models, sel, opts){
-  if(!provider||!models||!models.length||!sel) return 0;
+  if(!provider||!models||!sel) return 0;
   const currentVal=sel.value;
   const reconcile=!!(opts&&opts.reconcile);
+  // The plain append path keeps its empty-array no-op: without a reconcile
+  // request there is nothing to prune and nothing to append.
+  if(!models.length&&!reconcile) return 0;
   let providerGroup=null;
   for(const og of sel.querySelectorAll('optgroup')){
     if(og.dataset.provider&&og.dataset.provider===provider){
@@ -5910,14 +5928,6 @@ function _addLiveModelsToSelect(provider, models, sel, opts){
     if(og.label&&og.label.toLowerCase().includes(provider.toLowerCase())){
       providerGroup=og; break;
     }
-  }
-  if(!providerGroup){
-    providerGroup=document.createElement('optgroup');
-    providerGroup.label=provider.charAt(0).toUpperCase()+provider.slice(1)+' (live)';
-    providerGroup.dataset.provider=provider;
-    sel.appendChild(providerGroup);
-  }else if(!providerGroup.dataset.provider){
-    providerGroup.dataset.provider=provider;
   }
   const existingIds=new Set([...sel.options].map(o=>o.value));
   const _ap=(window._activeProvider||'').toLowerCase();
@@ -5930,65 +5940,79 @@ function _addLiveModelsToSelect(provider, models, sel, opts){
   // #6919: every mid present in the fresh payload is retained by reconcile.
   const refreshed=reconcile?new Set():null;
   let added=0;
-  for(const m of models){
-    let mid=m.id;
-    if(_isPortalFetch && !mid.startsWith('@')){
-      mid=`@${provider}:${mid}`;
+  if(models.length){
+    if(!providerGroup){
+      providerGroup=document.createElement('optgroup');
+      providerGroup.label=provider.charAt(0).toUpperCase()+provider.slice(1)+' (live)';
+      providerGroup.dataset.provider=provider;
+      sel.appendChild(providerGroup);
+    }else if(!providerGroup.dataset.provider){
+      providerGroup.dataset.provider=provider;
     }
-    if(refreshed) refreshed.add(String(mid));
-    if(existingIds.has(mid)) continue;
-    const identity=optionIdentity(mid,provider);
-    let twin=null;
-    if(existingNorm.has(identity)){
-      const sameGroup=Array.from(providerGroup.children||[]).find(o=>optionIdentity(o.value,_getOptionProviderId(o))===identity);
-      if(sameGroup){
-        const incomingRoutable=String(mid).startsWith('@');
-        const existingRoutable=String(sameGroup.value||'').startsWith('@');
-        if(!(!existingRoutable&&incomingRoutable)) continue; // let proxy replace catalog twin
-        twin=sameGroup;
+    for(const m of models){
+      let mid=m.id;
+      if(_isPortalFetch && !mid.startsWith('@')){
+        mid=`@${provider}:${mid}`;
       }
+      if(refreshed) refreshed.add(String(mid));
+      if(existingIds.has(mid)) continue;
+      const identity=optionIdentity(mid,provider);
+      let twin=null;
+      if(existingNorm.has(identity)){
+        const sameGroup=Array.from(providerGroup.children||[]).find(o=>optionIdentity(o.value,_getOptionProviderId(o))===identity);
+        if(sameGroup){
+          const incomingRoutable=String(mid).startsWith('@');
+          const existingRoutable=String(sameGroup.value||'').startsWith('@');
+          if(!(!existingRoutable&&incomingRoutable)) continue; // let proxy replace catalog twin
+          twin=sameGroup;
+        }
+      }
+      const opt=document.createElement('option');
+      opt.value=mid;
+      opt.textContent=m.label||m.id;
+      opt.title='Live model — fetched from provider';
+      opt.dataset.provider=provider;
+      opt.dataset.live='1';
+      if(m && (m.supports_fast_tier === true || String(m.supports_fast_tier).toLowerCase()==='true')){
+        opt.dataset.fast='1';
+      }else if(m && (m.supports_fast_tier === false || String(m.supports_fast_tier).toLowerCase()==='false')){
+        opt.dataset.fast='0';
+      }
+      if(twin){
+        // A routed replacement for a catalog twin takes the twin's place and its
+        // curated/extra status (#7528 option B): dedup then drops the bare twin,
+        // so a built-in group keeps its curated order instead of the replacement
+        // being sorted into the extras block.
+        //
+        // #6919: remember that the replacement stands in for a STATIC catalog row.
+        // Dedup removed the bare option, so dropping the replacement on a later
+        // refresh (a capped live list can change order) would silently remove a
+        // model the static catalog still offers. Reconciliation only prunes
+        // live-ONLY choices.
+        opt.dataset.catalogOrigin='1';
+        if(twin.dataset&&twin.dataset.extra) opt.dataset.extra='1';
+        providerGroup.insertBefore(opt,twin);
+      }else{
+        // Not part of the group's curated `models` list: _sortModelPickerOptions
+        // sorts these after the catalog rows of a built-in group (#7528 option B).
+        opt.dataset.extra='1';
+        providerGroup.appendChild(opt);
+      }
+      existingIds.add(mid);
+      existingNorm.add(identity);
+      _dynamicModelLabels[mid]=m.label||m.id;
+      added++;
     }
-    const opt=document.createElement('option');
-    opt.value=mid;
-    opt.textContent=m.label||m.id;
-    opt.title='Live model — fetched from provider';
-    opt.dataset.provider=provider;
-    opt.dataset.live='1';
-    if(m && (m.supports_fast_tier === true || String(m.supports_fast_tier).toLowerCase()==='true')){
-      opt.dataset.fast='1';
-    }else if(m && (m.supports_fast_tier === false || String(m.supports_fast_tier).toLowerCase()==='false')){
-      opt.dataset.fast='0';
-    }
-    if(twin){
-      // A routed replacement for a catalog twin takes the twin's place and its
-      // curated/extra status (#7528 option B): dedup then drops the bare twin,
-      // so a built-in group keeps its curated order instead of the replacement
-      // being sorted into the extras block.
-      //
-      // #6919: remember that the replacement stands in for a STATIC catalog row.
-      // Dedup removed the bare option, so dropping the replacement on a later
-      // refresh (a capped live list can change order) would silently remove a
-      // model the static catalog still offers. Reconciliation only prunes
-      // live-ONLY choices.
-      opt.dataset.catalogOrigin='1';
-      if(twin.dataset&&twin.dataset.extra) opt.dataset.extra='1';
-      providerGroup.insertBefore(opt,twin);
-    }else{
-      // Not part of the group's curated `models` list: _sortModelPickerOptions
-      // sorts these after the catalog rows of a built-in group (#7528 option B).
-      opt.dataset.extra='1';
-      providerGroup.appendChild(opt);
-    }
-    existingIds.add(mid);
-    existingNorm.add(identity);
-    _dynamicModelLabels[mid]=m.label||m.id;
-    added++;
   }
   // #6919: reconcile AFTER the append so the fresh payload's own options are
-  // already in `refreshed` and cannot be dropped as stale.
+  // already in `refreshed` and cannot be dropped as stale. For an
+  // authoritative EMPTY membership `refreshed` is the empty set, so this
+  // reconciles the picker to "this provider offers no models" — the pruner
+  // drops the live-only choices and keeps the selection, the catalog-origin
+  // options and the other providers' options.
   if(reconcile&&refreshed) _dropStaleLiveModelOptions(provider,refreshed,sel);
   if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,currentVal);
-  if(typeof _sortModelPickerOptions==='function') _sortModelPickerOptions(providerGroup);
+  if(providerGroup&&typeof _sortModelPickerOptions==='function') _sortModelPickerOptions(providerGroup);
   const currentState=(currentVal&&typeof _modelStateForSelect==='function')
     ? _modelStateForSelect(sel, currentVal)
     : {model:currentVal||'', model_provider:(S.session&&S.session.model_provider)||null};
@@ -6037,9 +6061,19 @@ async function _fetchLiveModels(provider, sel, requestSeq=null, opts=null){
     const data=await _liveRes.json();
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
     if(invalidationEpoch!==_liveModelInvalidationEpoch) return;
-    if(!data.models||!data.models.length) return;
+    // #6919: an EMPTY live list is only authoritative membership when the
+    // response itself says the discovery SUCCEEDED. The endpoint publishes
+    // its failure shape with an ``error`` marker, so an empty list WITHOUT
+    // an error is "this provider really has no models" and must reconcile
+    // the picker to that empty set. A discovery failure, a missing field
+    // and a malformed payload say nothing about what the provider offers
+    // and must leave the picker untouched.
+    const _modelsList=(data&&Array.isArray(data.models))?data.models:null;
+    const _hasModels=!!(_modelsList&&_modelsList.length);
+    const _authoritativeEmpty=!!(_modelsList&&!_modelsList.length&&!data.error);
+    if(!_hasModels&&!_authoritativeEmpty) return;
     if(invalidationEpoch!==_liveModelInvalidationEpoch) return;
-    _liveModelCache[provider]=data.models;
+    if(_hasModels) _liveModelCache[provider]=data.models;
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
     const added=_addLiveModelsToSelect(provider,data.models,sel,opts);
     if(added>0){
