@@ -8819,6 +8819,16 @@ let _contentSearchSSE = null;
 // Own query state: the search box value is not a reliable identity for a
 // running scan (repaints and the mobile header rewrite it).
 let _contentSearchQuery = '';
+// Attempt token. Query text cannot identify an attempt — A → B → A is the same
+// string twice — so every start bumps this and every callback checks it. Without
+// it a late response from the abandoned first A could paint its rows under the
+// current A, and because the merge keeps the first row per session id it would
+// keep the stale match index and preview forever.
+let _contentSearchGen = 0;
+function _bumpContentSearchGen(){
+  _contentSearchGen = (Number(_contentSearchGen) || 0) + 1;
+  return _contentSearchGen;
+}
 function _stopContentSearchSSE(es){
   // Identity-scoped: a late event from a stream that a newer query already
   // superseded must not tear down the replacement stream. Called with no
@@ -8828,7 +8838,10 @@ function _stopContentSearchSSE(es){
     _contentSearchSSE=null;
   }
 }
-function _mergeContentSearchResults(items, query){
+function _mergeContentSearchResults(items, query, gen){
+  // Ownership before content: a response from an abandoned attempt must never
+  // contribute rows, even when its query text equals the current one.
+  if(gen!==undefined && gen!==_contentSearchGen) return;
   const incoming=Array.isArray(items)?items:[];
   if(!incoming.length) return;
   const directAndTitleMatches=_sessionSearchDirectAndTitleMatches(_allSessions,query);
@@ -8845,36 +8858,38 @@ function _mergeContentSearchResults(items, query){
   }
   if(added) _repaintSidebarForBackgroundChurn();
 }
-async function _contentSearchFallback(query){
+async function _contentSearchFallback(query, gen){
   try{
     const data = await api(`/api/sessions/search?q=${encodeURIComponent(query)}&content=1&depth=5`);
-    // _contentSearchQuery still holds *query* here: the caller only clears it
-    // when the user actually changes the search, so a fallback for the current
-    // query is never discarded as stale.
+    // Both checks matter: the generation rejects an abandoned attempt whose
+    // query text matches again (A → B → A), the query check rejects a response
+    // that arrived after the box moved on.
+    if(gen!==undefined && gen!==_contentSearchGen) return;
     if(_contentSearchQuery!==query) return;
-    _mergeContentSearchResults(data.sessions, query);
+    _mergeContentSearchResults(data.sessions, query, gen);
   } catch(e) { /* ignore */ }
 }
 function _startContentSearchSSE(query){
   _stopContentSearchSSE();
+  const gen = _bumpContentSearchGen();
   _contentSearchQuery = query;
   _contentSearchResults = [];
-  if(typeof EventSource==='undefined'){ _contentSearchFallback(query); return; }
+  if(typeof EventSource==='undefined'){ _contentSearchFallback(query, gen); return; }
   let es=null;
   try{
     es=new EventSource(`api/sessions/search/stream?q=${encodeURIComponent(query)}&content=1&depth=5`);
   }catch(_){
-    _contentSearchFallback(query);
+    _contentSearchFallback(query, gen);
     return;
   }
   _contentSearchSSE=es;
   let finished=false;
-  const isCurrent=()=>_contentSearchQuery===query;
+  const isCurrent=()=>gen===_contentSearchGen && _contentSearchQuery===query;
   es.addEventListener('results', (ev)=>{
     if(!isCurrent()){ _stopContentSearchSSE(es); return; }
     try{
       const data=JSON.parse(ev.data)||{};
-      _mergeContentSearchResults(data.sessions, query);
+      _mergeContentSearchResults(data.sessions, query, gen);
     }catch(_){ }
   });
   es.addEventListener('done', ()=>{ finished=true; _stopContentSearchSSE(es); });
@@ -8883,7 +8898,7 @@ function _startContentSearchSSE(query){
     finished=true;
     _stopContentSearchSSE(es);
     // No endless reconnect: the classic endpoint returns the same matches.
-    if(isCurrent()) _contentSearchFallback(query);
+    if(isCurrent()) _contentSearchFallback(query, gen);
   };
 }
 let _hideSearchPreviewsAfterSelect = false;
@@ -9122,6 +9137,8 @@ function filterSessions(){
     // repainted them away.
     _contentSearchResults=[];
     _stopContentSearchSSE();
+    // Abandon whatever attempt was in flight: its generation is now stale.
+    _bumpContentSearchGen();
     // Move the identity with the input, not with the 350ms debounce: an
     // in-flight fallback for the previous query must fail its staleness check
     // the moment the box changes, not once the timer starts the next stream.
@@ -9135,6 +9152,7 @@ function filterSessions(){
     _contentSearchQuery = '';
     _contentSearchResults = [];
     _stopContentSearchSSE();
+    _bumpContentSearchGen();
     return;
   }
   _searchDebounceTimer = setTimeout(() => {
