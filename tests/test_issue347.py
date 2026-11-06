@@ -457,6 +457,24 @@ def test_numeric_inline_math_renders(body):
     assert f'<span class="katex-inline" data-katex="inline">{body}</span>' in html
 
 
+@pytest.mark.parametrize("sample,body", [
+    ("$.5x$", ".5x"),
+    ("$.5 + .2$", ".5 + .2"),
+])
+def test_leading_decimal_inline_math_renders(sample, body):
+    html = _run_renderers(sample)["assistant"]
+    assert f'<span class="katex-inline" data-katex="inline">{body}</span>' in html
+    assert "\x00" not in html
+
+
+@pytest.mark.parametrize("sample", ["$.99", "Costs $.99 per item", "$.99$"])
+def test_fractional_currency_stays_literal(sample):
+    html = _run_renderers(sample)["assistant"]
+    assert sample in html
+    assert "katex-inline" not in html
+    assert "\x00" not in html
+
+
 @pytest.mark.parametrize("sample", [
     "$1,000",
     "$1,000 xuống ~$95",

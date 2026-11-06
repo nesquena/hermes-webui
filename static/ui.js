@@ -10775,10 +10775,12 @@ function renderMd(raw){
   }
   function isLikelyNumericInlineMath(body, followingSlice){
     const v=body.trim();
-    if(!/^\d/.test(v)) return false;
+    if(!/^(\d|\.\d)/.test(v)) return false;
     if(/[+\-*/=<>^_,;:(–—]$/.test(v)) return false;
     if(/\d/.test(followingSlice.charAt(0))||/^\.\d/.test(followingSlice)) return false;
     if(/https?:\/\//i.test(v)) return false;
+    // Leading decimals need an explicit math signal; bare fractions remain currency.
+    if(/^\.\d/.test(v)) return /[+\-*/=<>^_{}A-Za-z]/.test(v);
     return /[+\-*/=<>^_{}]|\d[.,]\d|\\[A-Za-z]+/.test(v);
   }
   function _maskCurrencyDollars(text){
