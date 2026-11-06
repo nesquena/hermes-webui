@@ -45,7 +45,7 @@ def test_session_endpoint_merges_sidecar_and_lineage_messages_for_cli_sessions(m
     monkeypatch.setattr(routes, "_resolve_effective_session_model_for_display", lambda s: getattr(s, "model", None))
     monkeypatch.setattr(routes, "_resolve_effective_session_model_provider_for_display", lambda s: None)
     monkeypatch.setattr(routes, "_merge_cli_sidebar_metadata", lambda raw, meta: raw)
-    monkeypatch.setattr(routes, "redact_session_data", lambda raw: raw)
+    monkeypatch.setattr(routes, "redact_session_data", lambda raw, **kwargs: raw)
     monkeypatch.setattr(routes, "j", lambda handler, payload, status=200: captured.setdefault("payload", payload))
 
     class Handler:
@@ -112,7 +112,7 @@ def test_session_endpoint_preserves_distinct_messages_with_different_ids(monkeyp
     monkeypatch.setattr(routes, "_resolve_effective_session_model_for_display", lambda s: getattr(s, "model", None))
     monkeypatch.setattr(routes, "_resolve_effective_session_model_provider_for_display", lambda s: None)
     monkeypatch.setattr(routes, "_merge_cli_sidebar_metadata", lambda raw, meta: raw)
-    monkeypatch.setattr(routes, "redact_session_data", lambda raw: raw)
+    monkeypatch.setattr(routes, "redact_session_data", lambda raw, **kwargs: raw)
     monkeypatch.setattr(routes, "j", lambda handler, payload, status=200: captured.setdefault("payload", payload))
 
     class Handler:
@@ -231,7 +231,7 @@ def test_webui_continuation_session_opens_with_snapshot_parent_messages(monkeypa
     monkeypatch.setattr(routes, "_resolve_effective_session_model_for_display", lambda s: getattr(s, "model", None))
     monkeypatch.setattr(routes, "_resolve_effective_session_model_provider_for_display", lambda s: None)
     monkeypatch.setattr(routes, "_merge_cli_sidebar_metadata", lambda raw, meta: raw)
-    monkeypatch.setattr(routes, "redact_session_data", lambda raw: raw)
+    monkeypatch.setattr(routes, "redact_session_data", lambda raw, **kwargs: raw)
     monkeypatch.setattr(routes, "j", lambda handler, payload, status=200: captured.setdefault("payload", payload))
 
     class Handler:

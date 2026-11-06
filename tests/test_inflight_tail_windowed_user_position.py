@@ -430,6 +430,7 @@ def test_fork_payload_survives_older_page_load():
     fork_src = _fork_caller()
     bump_generation = _function(SESSIONS_JS_PATH.read_text(encoding="utf-8"), "_bumpMessagesGeneration")
     load_older = _function(SESSIONS_JS_PATH.read_text(encoding="utf-8"), "_loadOlderMessages")
+    prefix_proof = _prefix_proof_helpers()
     script = (
         _fork_harness(index_helpers, helper_src, fork_src)
         + f"""
@@ -442,6 +443,12 @@ let _messagesGeneration = 0;
 const _INITIAL_MSG_LIMIT = 30;
 const MESSAGE_RENDER_WINDOW_DEFAULT = 50;
 var window = {{}};
+// #7925 re-gate (2026-11-02): module state the real paging path references —
+// an empty digest and an empty provenance store, so nothing is provable and the
+// proof bookkeeping is inert for this scenario.
+let _sessionPrefixFp = '';
+let _sessionPrefixFpEnd = -1;
+let _prefixProvenRows = new WeakSet();
 {bump_generation}
 
 // Full canonical transcript: row 10 is the still-running turn's user prompt.
@@ -464,9 +471,23 @@ function api(url, opts) {{
 function $() {{ return null; }}
 function renderMessages() {{}}
 function _syncToolCallsForLoadedMessages() {{}}
+// #7925 re-gate (2026-10-31, finding 2): _loadOlderMessages now merges the
+// page's cards into the held ones before the sync; this harness stubs the
+// merge (it asserts row placement, not card content).
+function _mergeSessionToolCards(existing, incoming, existingShift, incomingShift) {{
+  const out = Array.isArray(existing) ? existing.slice() : [];
+  for (const tc of (Array.isArray(incoming) ? incoming : [])) {{
+    const idx = Number(tc && tc.assistant_msg_idx);
+    out.push(Number.isFinite(idx)
+      ? Object.assign({{}}, tc, {{assistant_msg_idx: idx + (Number(incomingShift) || 0)}})
+      : Object.assign({{}}, tc));
+  }}
+  return out;
+}}
 function _advanceVisibleBaselineForServerKnownRows() {{}}
 function _currentMessageRenderWindowSize() {{ return 50; }}
 function msgContent(m) {{ return String((m && m.content) || ''); }}
+{prefix_proof}
 {load_older}
 
 (async () => {{
@@ -627,6 +648,18 @@ const inflightTail = [
 """
 
 
+def _prefix_proof_helpers() -> str:
+    """#7925 re-gate (2026-11-02): the per-row proof helpers the real reload flow
+    now calls. The harness injects only the functions it names, so the three
+    helpers travel with ``_ensureMessagesLoaded`` (same convention as
+    ``_ensure_loaded_scaffold``'s module-state declarations)."""
+    src = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    return "\n".join(
+        _function(src, name)
+        for name in ("_markPrefixProvenRows", "_heldRowsArePrefixProven", "_adoptPrefixProof")
+    )
+
+
 def _ensure_loaded_scaffold() -> str:
     """Module-state + stubs required to run the real `_ensureMessagesLoaded`."""
     return """
@@ -637,6 +670,14 @@ let _sameSessionForceReloadHint = null;
 let _messagesTruncated = false;
 let _msgLimitMax = 500;
 const _MSG_LIMIT_MAX = 500;
+// #7925 re-gate (2026-10-27): module state the extracted loader references.
+// Empty digest ⇒ the append-only fast path is skipped.
+// #7925 re-gate (2026-11-02): the per-row provenance store the proof-gated
+// fast path reads (same convention — the harness injects the extracted
+// functions, not the module-level lets).
+let _sessionPrefixFp = '';
+let _sessionPrefixFpEnd = -1;
+let _prefixProvenRows = new WeakSet();
 function _messageReloadLimitForSession() { return 30; }
 function _clearSameSessionForceReloadHint() {}
 function clearLiveToolCards() {}
@@ -788,6 +829,7 @@ def test_zero_offset_repeated_recovery_keeps_one_prompt():
         _fork_harness(index_helpers, helper_src, fork_src, oldest_idx=0)
         + _ZERO_OFFSET_FIXTURES
         + _ensure_loaded_scaffold()
+        + _prefix_proof_helpers()
         + f"""
 {ensure}
 let ensureCalls = 0;
@@ -845,6 +887,7 @@ def test_zero_offset_canonical_reload_drops_display_copy():
         _fork_harness(index_helpers, helper_src, fork_src, oldest_idx=0)
         + _ZERO_OFFSET_FIXTURES
         + _ensure_loaded_scaffold()
+        + _prefix_proof_helpers()
         + f"""
 {ensure}
 function api(url, opts) {{

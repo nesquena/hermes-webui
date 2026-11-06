@@ -103,13 +103,26 @@ def test_redact_session_data_reads_settings_once():
     # The function reads settings once and threads _enabled through.
     redact_fn_idx = src.find("def redact_session_data(")
     assert redact_fn_idx != -1, "redact_session_data missing"
-    body = src[redact_fn_idx : redact_fn_idx + 1500]
+    # Slice to the function's own end (the next top-level def) rather than a
+    # fixed character window: the function's docstring grew when the
+    # request-captured redaction policy was threaded in, and a fixed window
+    # silently stopped covering the call sites it is meant to count.
+    body_end = src.find("\ndef ", redact_fn_idx + 1)
+    body = src[redact_fn_idx : body_end if body_end != -1 else len(src)]
     assert "load_settings()" in body, (
         "redact_session_data must read load_settings() once at the top"
     )
     assert body.count("_enabled=_enabled") >= 3, (
         "redact_session_data must thread _enabled through to title, "
         "messages, and tool_calls (3 call sites)"
+    )
+    # #7925 by-construction: the caller may hand the policy in, so the
+    # settings read is a FALLBACK — when a policy is supplied, nothing here
+    # may re-read it (a second read is the drift the snapshot boundary
+    # exists to close).
+    assert "redact_enabled: bool | None = None" in body, (
+        "redact_session_data must accept the caller's captured redaction "
+        "policy instead of always re-reading the setting"
     )
 
     # _redact_text and _redact_value accept _enabled kwarg.
