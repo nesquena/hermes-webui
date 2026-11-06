@@ -2120,6 +2120,8 @@ class Session:
                     # failure mode pre-fix was "backup is lost"; with
                     # this fix the backup either lands cleanly or doesn't
                     # land at all.
+                    bak_tmp = None
+                    salvage_tmp = None
                     try:
                         backup_text = existing_text
                         if (
@@ -2144,24 +2146,40 @@ class Session:
                                 existing_exact_replay_rows_removed,
                                 self.session_id,
                             )
-                        bak_tmp = bak_path.with_suffix(
-                            f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
-                        )
-                        if backup_text is None and _usable_backup(bak_path, incoming_msg_count):
-                            # Torn bytes are only for manual salvage. They
-                            # must not replace a backup that recovery can
-                            # still use (#8798 review).
-                            logger.warning(
-                                "Kept existing backup for session %s; old sidecar is not valid UTF-8",
-                                self.session_id,
+                        if backup_text is None:
+                            # Undecodable old sidecar (#8798 / #8807 P1): never
+                            # publish torn bytes onto the recovery ``.json.bak``.
+                            # Keep any readable backup as-is (count vs the
+                            # uncommitted incoming snapshot does not matter —
+                            # primary publication may still fail). Park the raw
+                            # bytes on a non-recovery sibling for manual salvage.
+                            salvage_path = self.path.with_suffix('.json.torn')
+                            salvage_tmp = salvage_path.with_name(
+                                f'{salvage_path.name}.tmp.{os.getpid()}.{threading.current_thread().ident}'
                             )
-                        elif backup_text is None:
-                            with open(bak_tmp, 'wb') as bf:
+                            with open(salvage_tmp, 'wb') as bf:
                                 bf.write(existing_bytes)
                                 bf.flush()
                                 os.fsync(bf.fileno())
-                            _safe_replace(bak_tmp, bak_path)
+                            _safe_replace(salvage_tmp, salvage_path)
+                            if _readable_recovery_backup(bak_path):
+                                logger.warning(
+                                    "Kept existing backup for session %s; "
+                                    "undecodable old sidecar salvaged at %s",
+                                    self.session_id,
+                                    salvage_path.name,
+                                )
+                            else:
+                                logger.warning(
+                                    "Old sidecar for session %s is not valid UTF-8; "
+                                    "salvaged bytes at %s (not a recovery backup)",
+                                    self.session_id,
+                                    salvage_path.name,
+                                )
                         else:
+                            bak_tmp = bak_path.with_suffix(
+                                f'.bak.tmp.{os.getpid()}.{threading.current_thread().ident}'
+                            )
                             with open(bak_tmp, 'w', encoding='utf-8') as bf:
                                 bf.write(backup_text)
                                 bf.flush()
@@ -2172,10 +2190,13 @@ class Session:
                             _safe_replace(bak_tmp, bak_path)
                     except OSError:
                         # Backup is best-effort; main save proceeds regardless.
-                        try:
-                            bak_tmp.unlink(missing_ok=True)
-                        except Exception:
-                            pass
+                        for _tmp in (bak_tmp, salvage_tmp):
+                            if _tmp is None:
+                                continue
+                            try:
+                                _tmp.unlink(missing_ok=True)
+                            except Exception:
+                                pass
         except OSError:
             pass
 
@@ -5928,9 +5949,13 @@ def _sidecar_stat_signature(path):
 _MESSAGE_COUNT_MARKER = 1
 
 
-def _usable_backup(bak_path, live_count) -> bool:
-    """True when ``bak_path`` is a readable session that recovery could
-    still restore over a live file of ``live_count`` messages (#8798)."""
+def _readable_recovery_backup(bak_path) -> bool:
+    """True when ``bak_path`` is a readable session recovery can use (#8807).
+
+    Count relative to an uncommitted incoming snapshot is irrelevant: a
+    failed primary publication must not have already swapped this file for
+    undecodable bytes.
+    """
     try:
         data = json.loads(bak_path.read_text(encoding='utf-8'))
     except (OSError, UnicodeDecodeError, ValueError):
@@ -5938,7 +5963,7 @@ def _usable_backup(bak_path, live_count) -> bool:
     if not isinstance(data, dict):
         return False
     messages = data.get('messages')
-    return isinstance(messages, list) and len(messages) > live_count
+    return isinstance(messages, list)
 
 
 def _prefix_message_count(path):

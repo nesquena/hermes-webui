@@ -77,8 +77,9 @@ def test_shrink_save_with_readable_prefix_saves_and_backs_up_exact_bytes(session
     data = _reload(path)
     assert [m["content"] for m in data["messages"]] == ["kept 0", "kept 1", "kept 2"]
     assert data["title"] == "UTF-8 session"
-    # The shrink backup still happens and keeps the prior bytes exactly.
-    assert path.with_suffix(".json.bak").read_bytes() == cut
+    # Torn bytes are parked on a non-recovery sibling, not on .json.bak.
+    assert not path.with_suffix(".json.bak").exists()
+    assert path.with_suffix(".json.torn").read_bytes() == cut
 
 
 def test_full_read_fallback_treats_undecodable_sidecar_like_malformed_json(session_dir):
@@ -135,6 +136,7 @@ def test_torn_shrink_keeps_an_existing_usable_backup(session_dir):
     assert data["title"] == "UTF-8 session"
     # The 10-message backup is still there and still restorable.
     assert bak.read_bytes() == good_bak
+    assert path.with_suffix(".json.torn").exists(), "torn sidecar should be salvaged aside"
     status = inspect_session_recovery_status(path)
     assert status["live_messages"] == 3
     assert status["bak_messages"] == 10
@@ -163,3 +165,72 @@ def test_keeping_a_backup_never_renames_a_stale_backup_temp(session_dir):
 
     assert [m["content"] for m in _reload(path)["messages"]] == ["kept 0", "kept 1", "kept 2"]
     assert bak.read_bytes() == good_bak, "stale temp must not demote the 10-message backup"
+
+
+def _grow_cut_with_bak10(session_dir, sid):
+    """Save 10 → 8 (bak=10), grow primary to 12, cut mid-UTF-8 (prefix=12)."""
+    from api.models import _prefix_message_count
+
+    _session(sid, _messages(10)).save(skip_index=True)
+    _session(sid, _messages(8)).save(skip_index=True)
+    path = session_dir / f"{sid}.json"
+    bak = path.with_suffix(".json.bak")
+    good_bak = bak.read_bytes()
+    assert len(json.loads(good_bak)["messages"]) == 10
+
+    _session(sid, _messages(12)).save(skip_index=True)
+    # Grow does not shrink, so bak stays the 10-message copy.
+    assert bak.read_bytes() == good_bak
+
+    cut = _cut_mid_character(path)
+    assert _prefix_message_count(path) == 12
+    return path, bak, good_bak, cut
+
+
+@pytest.mark.parametrize("incoming_count", [9, 10, 11])
+def test_primary_failure_keeps_readable_bak_for_below_equal_above_incoming(
+    session_dir, monkeypatch, incoming_count
+):
+    """#8807 P1: a failed primary publish must not have already replaced a
+    readable .json.bak with undecodable torn bytes, whether the backup count
+    is below, equal to, or above the uncommitted incoming snapshot."""
+    import api.models as models
+    from api.session_recovery import inspect_session_recovery_status
+
+    sid = f"s_8798_pfail_{incoming_count}"
+    path, bak, good_bak, _cut = _grow_cut_with_bak10(session_dir, sid)
+
+    def _boom(tmp, dst, session_id):
+        raise OSError("injected primary replace failure")
+
+    monkeypatch.setattr(models, "_replace_session_sidecar", _boom)
+
+    with pytest.raises(OSError, match="injected primary replace failure"):
+        _session(sid, _messages(incoming_count, word="kept")).save(skip_index=True)
+
+    # Primary still torn; recovery backup still the readable 10-message copy.
+    with pytest.raises(UnicodeDecodeError):
+        path.read_text(encoding="utf-8")
+    assert bak.read_bytes() == good_bak
+    status = inspect_session_recovery_status(path)
+    assert status["bak_messages"] == 10
+    assert status["recommend"] == "restore"
+
+
+@pytest.mark.parametrize("incoming_count", [9, 10, 11])
+def test_no_fault_primary_publishes_and_keeps_readable_bak(session_dir, incoming_count):
+    """Matching no-fault controls: primary lands, readable bak stays at 10."""
+    from api.session_recovery import inspect_session_recovery_status
+
+    sid = f"s_8798_ok_{incoming_count}"
+    path, bak, good_bak, _cut = _grow_cut_with_bak10(session_dir, sid)
+
+    _session(sid, _messages(incoming_count, word="kept")).save(skip_index=True)
+
+    data = _reload(path)
+    assert len(data["messages"]) == incoming_count
+    assert [m["content"] for m in data["messages"]] == [f"kept {i}" for i in range(incoming_count)]
+    assert bak.read_bytes() == good_bak
+    status = inspect_session_recovery_status(path)
+    assert status["live_messages"] == incoming_count
+    assert status["bak_messages"] == 10
