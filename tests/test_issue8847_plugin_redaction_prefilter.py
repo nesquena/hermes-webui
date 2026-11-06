@@ -21,8 +21,12 @@ Contract verified here:
   3. without plugin patterns the shortcut still skips the redactor for plain
      text (no agent call, no registry walk, bounded policy reads), and the
      same harness fails closed once a pattern is registered;
-  4. Agents without the registry attribute, without the policy globals, with
-     the legacy signature, and no Agent at all keep today's fast path.
+  4. Agents that predate the registry, without the policy globals, with the
+     legacy signature, and no Agent at all keep today's fast path;
+  5. an Agent where plugins can register (``register_redaction_patterns``)
+     but the registry name is absent (renamed) fails closed: every string goes
+     to the redactor. A registry that is present but empty keeps the fast
+     path.
 """
 import functools
 import socket
@@ -367,8 +371,9 @@ def test_registration_racing_the_policy_snapshot_is_not_pinned():
 
 # ── 4. Old agents and no agent ─────────────────────────────────────────────
 
-# Rebinds the #8863 fingerprint like a registry would, but exposes no
-# _PLUGIN_PREFIX_PATTERNS attribute.
+# Rebinds the #8863 fingerprint like a registry would and keeps
+# register_redaction_patterns, but the registry has another name: what WebUI
+# sees if the Agent renames its private registry. Fails closed (section 5).
 _NO_REGISTRY_ATTR_SOURCE = _STUB_SOURCE.replace("_PLUGIN_PREFIX_PATTERNS", "_OTHER_NAME")
 
 _PRE_REGISTRY_SOURCE = r'''
@@ -393,7 +398,6 @@ def redact_sensitive_text(text):
 
 
 def _old_agent_shapes():
-    yield "no_registry_attribute", _stub_agent_module(_NO_REGISTRY_ATTR_SOURCE)
     yield "pre_registry_agent", _stub_agent_module(_PRE_REGISTRY_SOURCE)
     yield "legacy_signature_agent", _stub_agent_module(_LEGACY_SIGNATURE_SOURCE)
     yield "agent_without_redactor", types.ModuleType("agent.redact")
@@ -434,3 +438,98 @@ def test_agents_without_plugin_registry_keep_todays_fast_path():
         assert helpers._redact_text(text, _enabled=True) is text
         module.register_redaction_patterns([_STUB_PATTERN])
         assert _STUB_TOKEN not in helpers._redact_text(text, _enabled=True)
+
+
+# ── 5. Registry name absent vs present-but-empty ───────────────────────────
+
+
+def _register(patterns, source="plugin"):
+    return len(patterns)
+
+
+def _policy_state_from(namespace):
+    def redact_fn(text):
+        return text
+
+    if namespace is not None:
+        redact_fn._redaction_policy_ns = namespace
+    return helpers._redaction_policy_state_for(functools.lru_cache(maxsize=4)(redact_fn))
+
+
+@pytest.mark.parametrize(
+    "names, expected",
+    [
+        ({"_PLUGIN_PREFIX_PATTERNS": [_STUB_PATTERN], "register_redaction_patterns": _register}, True),
+        ({"_PLUGIN_PREFIX_PATTERNS": {"plugin:x": [_STUB_PATTERN]}}, True),
+        ({"_PLUGIN_PREFIX_PATTERNS": [], "register_redaction_patterns": _register}, False),
+        ({"_PLUGIN_PREFIX_PATTERNS": {}, "register_redaction_patterns": _register}, False),
+        ({"register_redaction_patterns": _register}, True),  # registry unreadable: fail closed
+        ({"_PREFIX_RE": None}, False),  # predates the registry: cannot register
+        (None, False),  # no policy namespace at all (_NO_REDACTION_POLICY)
+    ],
+    ids=["populated", "populated-no-register", "empty-list", "empty-dict", "renamed", "pre-registry", "none"],
+)
+@pytest.mark.parametrize("view", [dict, types.MappingProxyType])
+def test_plugin_bit_tells_absent_registry_from_empty(names, expected, view):
+    namespace = None if names is None else view(dict(names))
+    assert _policy_state_from(namespace)[4] is expected
+
+
+@pytest.mark.parametrize("view", [None, types.MappingProxyType], ids=["module_globals", "mappingproxy"])
+def test_registry_renamed_but_registration_possible_fails_closed(view):
+    """Plugins can register, but WebUI can't read the registry: it can't know
+    whether patterns exist, so marker-free text goes to the Agent anyway."""
+    module = _stub_agent_module(_NO_REGISTRY_ATTR_SOURCE)
+    assert "_PLUGIN_PREFIX_PATTERNS" not in vars(module) and callable(module.register_redaction_patterns)
+    redact_fn = _build_with(module)
+    assert redact_fn._redaction_policy_ns is vars(module)
+    if view is not None:
+        redact_fn._redaction_policy_ns = view(vars(module))
+    calls, spy = _redact_fn_cached_spy()
+    with mock.patch.object(helpers, "_redact_fn_uncached", redact_fn), mock.patch.object(
+        helpers, "_redact_fn_lru", functools.lru_cache(maxsize=64)(redact_fn)
+    ), mock.patch.object(helpers, "_redact_fn_cached", spy):
+        text = _plain_texts(1, "renamed")[0]
+        assert helpers._might_contain_sensitive_text(text) is False
+
+        # Before any registration: plain text with no WebUI marker is sent.
+        assert helpers._redact_text(text, _enabled=True) == text
+        assert calls == [text]
+        assert module.CALLS == [text]
+
+        # After one, the plugin shape is masked, in text served before too.
+        assert module.register_redaction_patterns([_STUB_PATTERN]) == 1
+        for probe in (text, _plain_texts(1, "renamed-after")[0]):
+            redacted = helpers._redact_text(probe, _enabled=True)
+            assert _STUB_TOKEN not in redacted and "[stub-redacted]" in redacted
+            assert _STUB_TOKEN not in _session_content(probe)
+
+        # A reset doesn't make the registry readable: still fail closed.
+        module._reset_plugin_redaction_patterns()
+        other = _plain_texts(1, "renamed-reset")[0]
+        seen = len(module.CALLS)
+        assert helpers._redact_text(other, _enabled=True) == other
+        assert module.CALLS[seen:] == [other]
+
+
+@pytest.mark.parametrize("registry_factory", [list, dict])
+@pytest.mark.parametrize("view", [None, types.MappingProxyType], ids=["module_globals", "mappingproxy"])
+def test_present_but_empty_registry_keeps_plain_text_fast_path(registry_factory, view):
+    module = _stub_agent_module(registry_factory=registry_factory)
+    registry = module._PLUGIN_PREFIX_PATTERNS
+    assert type(registry) is registry_factory and not registry
+    assert callable(module.register_redaction_patterns)
+    redact_fn = _build_with(module)
+    if view is not None:
+        redact_fn._redaction_policy_ns = view(vars(module))
+    calls, spy = _redact_fn_cached_spy()
+    with mock.patch.object(helpers, "_redact_fn_uncached", redact_fn), mock.patch.object(
+        helpers, "_redact_fn_lru", functools.lru_cache(maxsize=64)(redact_fn)
+    ), mock.patch.object(helpers, "_redact_fn_cached", spy):
+        plain = _plain_texts(20, "empty")
+        assert not any(helpers._might_contain_sensitive_text(t) for t in plain)
+        assert all(helpers._redact_text(t, _enabled=True) is t for t in plain)
+        assert _session_content(plain[0]) is plain[0]
+        assert calls == []
+        assert module.CALLS == []
+        assert helpers._current_redaction_policy()[4] is False

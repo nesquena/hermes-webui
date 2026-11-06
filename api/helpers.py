@@ -767,6 +767,7 @@ MAX_BODY_BYTES = 20 * 1024 * 1024  # 20MB limit for non-upload POST bodies
 # part of the policy the small-string memo depends on (#8844).
 _REDACTION_POLICY_KEYS = ("_PREFIX_RE", "_PREFIX_SUBSTRINGS")
 _NO_REDACTION_POLICY = MappingProxyType({})
+_REDACTION_POLICY_MISSING = object()  # tells an absent policy name from an empty one (#8847)
 
 
 def _redaction_policy_namespace(redact_sensitive_text, module):
@@ -997,11 +998,21 @@ def _redaction_policy_state_for(lru):
     moves, so it needs no invalidation of its own. It is read AFTER the
     fingerprint: every registry shape (a list, later a per-source dict) is
     mutated before ``_rebuild_prefix_matcher()`` rebinds the fingerprint, so a
-    state holding the new fingerprint has seen the new registry. An Agent
-    without the registry reports False, which keeps today's prefilter.
+    state holding the new fingerprint has seen the new registry. If the
+    registry name is absent but plugins can still register patterns (the
+    Agent renamed its private registry), WebUI can't tell, so it reports True
+    and fails closed. Without either name (an Agent that predates the
+    registry, or no policy namespace) it reports False: today's prefilter.
     """
     get = _redaction_policy_namespace_of(lru).get
-    return (lru, get, get("_PREFIX_RE"), get("_PREFIX_SUBSTRINGS"), bool(get("_PLUGIN_PREFIX_PATTERNS")))
+    prefix_re, prefix_substrings = get("_PREFIX_RE"), get("_PREFIX_SUBSTRINGS")
+    registry = get("_PLUGIN_PREFIX_PATTERNS", _REDACTION_POLICY_MISSING)
+    if registry is not _REDACTION_POLICY_MISSING:
+        has_plugin_patterns = bool(registry)
+    else:  # the registry can't be read: fail closed if plugins can register
+        register = get("register_redaction_patterns", _REDACTION_POLICY_MISSING)
+        has_plugin_patterns = register is not _REDACTION_POLICY_MISSING
+    return (lru, get, prefix_re, prefix_substrings, has_plugin_patterns)
 
 
 _redaction_policy_lock = threading.Lock()
