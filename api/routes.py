@@ -5413,6 +5413,11 @@ def _ensure_full_session_before_mutation(sid: str, session):
 # session lock so a writer that was waiting on that lock cannot save the
 # empty-shell fallback back to disk.
 _DELETED_SESSION_IDS: set[str] = set()
+# How many times /api/session/delete removed each id in this process (#8864),
+# bumped with the set add above. A share request compares it with the value at
+# its start: membership alone cannot show a second delete of a messaging session,
+# which keeps its state.db rows and can be shared again. Never pruned, like the set.
+_DELETED_SESSION_GENERATION: dict[str, int] = {}
 
 
 def _resolve_session_under_lock(sid: str, outside=None):
@@ -7392,7 +7397,9 @@ def _resident_share_token(sid: str) -> str:
     return str(getattr(cached, "share_token", "") or "").strip()
 
 
-def _persist_share_fields(sid: str, session, *, share_token, share_created_at, mirrored=None) -> None:
+def _persist_share_fields(
+    sid: str, session, *, share_token, share_created_at, delete_generation: int, mirrored=None,
+) -> None:
     """Persist only the two share fields of ``sid``.
 
     Saving the copy the handler resolved writes its conversation fields back over
@@ -7406,6 +7413,14 @@ def _persist_share_fields(sid: str, session, *, share_token, share_created_at, m
     check and the fallback would otherwise be reverted by the whole-object save
     that follows it (#8399 review). The lock is reentrant, so the patch helper
     and ``save()`` re-entering it is expected.
+
+    #8864: the fallback is for a session without a sidecar, not for one that
+    /api/session/delete removed while the request ran: saving it would bring the
+    deleted conversation and its index row back. ``delete_generation`` is the
+    id's ``_DELETED_SESSION_GENERATION`` when the request began (a messaging
+    session keeps its state.db rows and can be shared again after a delete, even
+    twice). If a delete bumped it since, raise KeyError instead. Delete bumps it
+    and unlinks under this lock, so the check cannot go stale.
     """
     with _session_persist_lock(sid):
         try:
@@ -7414,6 +7429,8 @@ def _persist_share_fields(sid: str, session, *, share_token, share_created_at, m
                 share_token=share_token,
                 share_created_at=share_created_at,
             ):
+                if _DELETED_SESSION_GENERATION.get(sid, 0) != delete_generation:
+                    raise KeyError(sid)
                 session.share_token = share_token
                 session.share_created_at = share_created_at
                 session.save(touch_updated_at=False)
@@ -19409,6 +19426,7 @@ def handle_post(handler, parsed) -> bool:
         sid = str(body.get("session_id") or "").strip()
         if not sid:
             return bad(handler, "session_id is required", 400)
+        delete_generation = _DELETED_SESSION_GENERATION.get(sid, 0)  # #8864, see _persist_share_fields
         try:
             snapshot_session, stored_session, cli_meta = _resolve_share_session_pair(sid, handler)
         except KeyError:
@@ -19496,13 +19514,28 @@ def handle_post(handler, parsed) -> bool:
             # restore the title and transcript it was built from, reverting a
             # writer that finished while the snapshot was built (#8255 review,
             # third round).
-            _persist_share_fields(
-                sid,
-                persisted_session,
-                share_token=share_meta["share_token"],
-                share_created_at=share_meta["share_created_at"],
-                mirrored=mirrored,
-            )
+            try:
+                _persist_share_fields(
+                    sid,
+                    persisted_session,
+                    share_token=share_meta["share_token"],
+                    share_created_at=share_meta["share_created_at"],
+                    mirrored=mirrored,
+                    delete_generation=delete_generation,
+                )
+            except KeyError:
+                # #8864: deleted during this request. Take down the link it just
+                # published, so it stays dead if a sidecar with this id comes back.
+                # A revoke that fails is logged, like the delete's late-share
+                # revoke; the request still answers 404 and never returns the token.
+                try:
+                    if not revoke_share_owned_by(share_meta["share_token"], sid):
+                        logger.warning("Failed to revoke the share minted for deleted session %s", sid)
+                except Exception:
+                    logger.warning(
+                        "Failed to revoke the share minted for deleted session %s", sid, exc_info=True,
+                    )
+                return bad(handler, "Session not found", 404)
         finally:
             share_lock.release()
         _publish_session_list_changed(
@@ -19534,6 +19567,7 @@ def handle_post(handler, parsed) -> bool:
         sid = str(body.get("session_id") or "").strip()
         if not sid:
             return bad(handler, "session_id is required", 400)
+        delete_generation = _DELETED_SESSION_GENERATION.get(sid, 0)  # #8864, see _persist_share_fields
         try:
             snapshot_session, stored_session, cli_meta = _resolve_share_session_pair(sid, handler)
         except KeyError:
@@ -19594,13 +19628,17 @@ def handle_post(handler, parsed) -> bool:
             # Clear only the share fields, so a conversation write that landed
             # after the final re-read above is not reverted (#8255 review, third
             # round).
-            _persist_share_fields(
-                sid,
-                target_session,
-                share_token=None,
-                share_created_at=None,
-                mirrored=mirrored,
-            )
+            try:
+                _persist_share_fields(
+                    sid,
+                    target_session,
+                    share_token=None,
+                    share_created_at=None,
+                    mirrored=mirrored,
+                    delete_generation=delete_generation,
+                )
+            except KeyError:
+                return bad(handler, "Session not found", 404)  # #8864: deleted during this request
         finally:
             share_lock.release()
         _publish_session_list_changed(
@@ -20845,15 +20883,38 @@ def handle_post(handler, parsed) -> bool:
             except Exception:
                 logger.debug("Failed to close workspace terminal for deleted session %s", sid)
             sidecar_deleted = False
-            with LOCK:
-                SESSIONS.pop(sid, None)
-                # #7738: recorded with the eviction, so a writer waiting on the
-                # session lock cannot save the empty-shell fallback back to disk.
-                _DELETED_SESSION_IDS.add(sid)
+            # #8864: under the persist lock too, so a share request that finds no
+            # sidecar under it also finds this delete counted, and a patch that
+            # read the sidecar replaces it before the unlink, not after.
+            late_share_tokens = []
+            with _session_persist_lock(sid):
+                # A share create that published after the revoke above and
+                # persisted before this lock left its token in the sidecar.
                 try:
-                    p.unlink(missing_ok=True)
+                    from api.models import _persisted_share_fields
+
+                    persisted = _persisted_share_fields(p)
+                    if isinstance(persisted, tuple) and persisted[0]:
+                        late_share_tokens.append(str(persisted[0]))
                 except Exception:
-                    logger.debug("Failed to unlink session file %s", p)
+                    logger.warning("Failed to re-read the share token of %s", sid, exc_info=True)
+                with LOCK:
+                    SESSIONS.pop(sid, None)
+                    # #7738: recorded with the eviction, so a writer waiting on the
+                    # session lock cannot save the empty-shell fallback back to disk.
+                    _DELETED_SESSION_IDS.add(sid)
+                    _DELETED_SESSION_GENERATION[sid] = _DELETED_SESSION_GENERATION.get(sid, 0) + 1  # #8864
+                    try:
+                        p.unlink(missing_ok=True)
+                    except Exception:
+                        logger.debug("Failed to unlink session file %s", p)
+            # Revoked after the locks, so the snapshot write never runs under the persist lock.
+            for token in late_share_tokens:
+                try:
+                    if not revoke_share_owned_by(token, sid):
+                        logger.warning("Failed to revoke a late share of deleted session %s", sid)
+                except Exception:
+                    logger.warning("Failed to revoke a late share of deleted session %s", sid, exc_info=True)
             sidecar_deleted = not p.exists()
             try:
                 draft_deleted = bool(_delete_session_draft(sid))
