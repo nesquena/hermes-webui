@@ -13,6 +13,7 @@ the delete, on its own thread, at the exact point inside the share request.
 
 import io
 import json
+import logging
 import threading
 import urllib.parse
 from collections import OrderedDict
@@ -431,6 +432,40 @@ def test_share_persisted_after_the_delete_revoke_step_stays_dead_after_a_reshare
     assert reply["share"]["token"] != raced
     _assert_served(reply["share"]["token"])
     _assert_not_served(raced)
+
+
+@pytest.mark.parametrize("failure", ["raises", "returns_false"])
+def test_share_create_racing_a_delete_still_answers_404_when_revoking_its_token_fails(
+    state, monkeypatch, caplog, failure
+):
+    """The 404 path revokes the token the request minted. If that revoke fails (a
+    write error in the share store), the request must still answer 404 rather
+    than escape as a 500, and the failure must be logged, as the delete's own
+    late-share revoke logs it; the token is never returned to the caller."""
+    from api import routes
+
+    path = _messaging_session(monkeypatch)
+    race = _delete_right_after(monkeypatch, PUBLISHED, EXTERNAL_SID)
+    share_thread = threading.current_thread()
+    real_revoke = routes.revoke_share_owned_by
+
+    def failing_revoke(token, sid):
+        if threading.current_thread() is share_thread:
+            if failure == "raises":
+                raise OSError("share store write failed")
+            return False
+        return real_revoke(token, sid)
+
+    monkeypatch.setattr(routes, "revoke_share_owned_by", failing_revoke)
+    with caplog.at_level(logging.WARNING):
+        status, reply = _post("/api/share/create", {"session_id": EXTERNAL_SID})
+    assert "reply" in race, "the delete never ran inside the share request"
+    assert (status, reply.get("error")) == (404, "Session not found"), reply
+    _assert_stays_deleted(path, EXTERNAL_SID, race)
+    assert any(
+        record.levelno >= logging.WARNING and EXTERNAL_SID in record.getMessage() and "revoke" in record.getMessage()
+        for record in caplog.records
+    ), "a failed revoke of the minted token was not logged"
 
 
 # ── The delete lands while the share request is patching the sidecar ─────────

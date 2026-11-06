@@ -19495,7 +19495,15 @@ def handle_post(handler, parsed) -> bool:
             except KeyError:
                 # #8864: deleted during this request. Take down the link it just
                 # published, so it stays dead if a sidecar with this id comes back.
-                revoke_share_owned_by(share_meta["share_token"], sid)
+                # A revoke that fails is logged, like the delete's late-share
+                # revoke; the request still answers 404 and never returns the token.
+                try:
+                    if not revoke_share_owned_by(share_meta["share_token"], sid):
+                        logger.warning("Failed to revoke the share minted for deleted session %s", sid)
+                except Exception:
+                    logger.warning(
+                        "Failed to revoke the share minted for deleted session %s", sid, exc_info=True,
+                    )
                 return bad(handler, "Session not found", 404)
         finally:
             share_lock.release()
