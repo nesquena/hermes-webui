@@ -1080,18 +1080,31 @@ def test_discovery_failure_does_not_reconcile_the_picker_to_empty():
     not authoritative membership. The endpoint publishes its failure shape
     with an ``error`` marker, and that must never prune the picker — a
     provider we could not reach says nothing about what it offers.
+
+    The option under assertion is deliberately UNSELECTED: the pruner exempts
+    the current selection, so a selected option would survive every prune and
+    the assertion could not discriminate. Here a DIFFERENT live option holds
+    the selection, so the option being asserted on is a genuine prune
+    candidate.
     """
     result = _replay_empty_membership("""
   const group=_el('optgroup',{dataset:{provider:'custom:cpa'}});
+  // The current selection is a DIFFERENT live option, so `gone` below is an
+  // unselected live-only choice — the shape the pruner would remove.
+  group.appendChild(_mk('@custom:cpa:selected',_LIVE_TITLE,{provider:'custom:cpa',live:'1'}));
   group.appendChild(_mk('@custom:cpa:gone',_LIVE_TITLE,{provider:'custom:cpa',live:'1'}));
-  const sel=_makeSelect([group],'@custom:cpa:gone');
+  const sel=_makeSelect([group],'@custom:cpa:selected');
   _settingsSel=sel;
 
   const first=_fetchLiveModels('custom:cpa',sel,null,{reconcile:true});
   await _tick();
-  fetchDeferreds[0].resolve({json:async()=>({models:[{id:'gone',label:'Gone'}]})});
+  fetchDeferreds[0].resolve({json:async()=>({models:[
+    {id:'selected',label:'Selected'},
+    {id:'gone',label:'Gone'},
+  ]})});
   await first;
   await _tick();
+  const beforeFailure=group.children.map(o=>o.value);
 
   invalidateLiveModelCache();
   await _tick();
@@ -1101,16 +1114,24 @@ def test_discovery_failure_does_not_reconcile_the_picker_to_empty():
   await _tick();
 
   process.stdout.write(JSON.stringify({
+    beforeFailure:beforeFailure,
     afterFailure:group.children.map(o=>o.value),
     selectedAfter:sel.value,
   }));
 """)
-    assert result["afterFailure"] == ["@custom:cpa:gone"], (
+    assert "@custom:cpa:gone" in result["beforeFailure"], (
+        "the fixture must place an unselected live-only option in the picker — "
+        f"got {result['beforeFailure']}"
+    )
+    assert result["afterFailure"] == [
+        "@custom:cpa:selected",
+        "@custom:cpa:gone",
+    ], (
         "#6919: a discovery failure must NOT be read as authoritative empty "
-        "membership — the option must survive: "
+        "membership — the UNSELECTED live-only option must survive: "
         f"{result['afterFailure']}"
     )
-    assert result["selectedAfter"] == "@custom:cpa:gone", (
+    assert result["selectedAfter"] == "@custom:cpa:selected", (
         "#6919: a discovery failure must not disturb the selection"
     )
 
@@ -1118,7 +1139,13 @@ def test_discovery_failure_does_not_reconcile_the_picker_to_empty():
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_malformed_live_model_response_does_not_reconcile_the_picker_to_empty():
     """Negative control: a MISSING or MALFORMED payload says nothing about the
-    provider's membership either. It must leave the picker untouched."""
+    provider's membership either. It must leave the picker untouched.
+
+    As in the failure control above, the option under assertion is
+    UNSELECTED — a different live option holds the selection, so the
+    assertion genuinely discriminates instead of riding on the pruner's
+    selected-option exemption.
+    """
     for label, payload in (
         ("missing-models", "{}"),
         ("models-not-a-list", '{"models":"nope"}'),
@@ -1127,13 +1154,17 @@ def test_malformed_live_model_response_does_not_reconcile_the_picker_to_empty():
     ):
         result = _replay_empty_membership(f"""
   const group=_el('optgroup',{{dataset:{{provider:'custom:cpa'}}}});
+  group.appendChild(_mk('@custom:cpa:selected',_LIVE_TITLE,{{provider:'custom:cpa',live:'1'}}));
   group.appendChild(_mk('@custom:cpa:gone',_LIVE_TITLE,{{provider:'custom:cpa',live:'1'}}));
-  const sel=_makeSelect([group],'@custom:cpa:gone');
+  const sel=_makeSelect([group],'@custom:cpa:selected');
   _settingsSel=sel;
 
   const first=_fetchLiveModels('custom:cpa',sel,null,{{reconcile:true}});
   await _tick();
-  fetchDeferreds[0].resolve({{json:async()=>({{models:[{{id:'gone',label:'Gone'}}]}})}});
+  fetchDeferreds[0].resolve({{json:async()=>({{models:[
+    {{id:'selected',label:'Selected'}},
+    {{id:'gone',label:'Gone'}},
+  ]}})}});
   await first;
   await _tick();
 
@@ -1145,9 +1176,13 @@ def test_malformed_live_model_response_does_not_reconcile_the_picker_to_empty():
 
   process.stdout.write(JSON.stringify({{afterMalformed:group.children.map(o=>o.value)}}));
 """)
-        assert result["afterMalformed"] == ["@custom:cpa:gone"], (
-            f"#6919: a {label} response must NOT prune the picker — "
-            f"got {result['afterMalformed']}"
+        assert result["afterMalformed"] == [
+            "@custom:cpa:selected",
+            "@custom:cpa:gone",
+        ], (
+            f"#6919: a {label} response must NOT prune the picker — the "
+            "UNSELECTED live-only option must survive: "
+            f"{result['afterMalformed']}"
         )
 
 
