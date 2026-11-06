@@ -8811,6 +8811,81 @@ function stopGatewaySSE(){
 let _searchDebounceTimer = null;
 let _contentSearchResults = [];  // results from /api/sessions/search content scan
 let _lastSessionSearchQuery = '';
+
+// Incremental content search: the server scans sessions in a background worker
+// and pushes matches as SSE batches, so the first hit paints immediately instead
+// of after the last transcript (and the request thread stays free).
+let _contentSearchSSE = null;
+// Own query state: the search box value is not a reliable identity for a
+// running scan (repaints and the mobile header rewrite it).
+let _contentSearchQuery = '';
+function _stopContentSearchSSE(es){
+  // Identity-scoped: a late event from a stream that a newer query already
+  // superseded must not tear down the replacement stream. Called with no
+  // argument it closes whatever is current (empty query, page teardown).
+  if(_contentSearchSSE && (!es || _contentSearchSSE===es)){
+    try{_contentSearchSSE.close();}catch(_){ }
+    _contentSearchSSE=null;
+  }
+}
+function _mergeContentSearchResults(items, query){
+  const incoming=Array.isArray(items)?items:[];
+  if(!incoming.length) return;
+  const directAndTitleMatches=_sessionSearchDirectAndTitleMatches(_allSessions,query);
+  const directOrTitleIds=new Set(directAndTitleMatches.map(s=>s.session_id));
+  const seen=new Set(_contentSearchResults.map(s=>s.session_id));
+  let added=false;
+  for(const s of incoming){
+    if(!s||s.match_type!=='content') continue;
+    const sid=s.session_id;
+    if(!sid||directOrTitleIds.has(sid)||seen.has(sid)) continue;
+    seen.add(sid);
+    _contentSearchResults.push(s);
+    added=true;
+  }
+  if(added) _repaintSidebarForBackgroundChurn();
+}
+async function _contentSearchFallback(query){
+  try{
+    const data = await api(`/api/sessions/search?q=${encodeURIComponent(query)}&content=1&depth=5`);
+    // _contentSearchQuery still holds *query* here: the caller only clears it
+    // when the user actually changes the search, so a fallback for the current
+    // query is never discarded as stale.
+    if(_contentSearchQuery!==query) return;
+    _mergeContentSearchResults(data.sessions, query);
+  } catch(e) { /* ignore */ }
+}
+function _startContentSearchSSE(query){
+  _stopContentSearchSSE();
+  _contentSearchQuery = query;
+  _contentSearchResults = [];
+  if(typeof EventSource==='undefined'){ _contentSearchFallback(query); return; }
+  let es=null;
+  try{
+    es=new EventSource(`api/sessions/search/stream?q=${encodeURIComponent(query)}&content=1&depth=5`);
+  }catch(_){
+    _contentSearchFallback(query);
+    return;
+  }
+  _contentSearchSSE=es;
+  let finished=false;
+  const isCurrent=()=>_contentSearchQuery===query;
+  es.addEventListener('results', (ev)=>{
+    if(!isCurrent()){ _stopContentSearchSSE(es); return; }
+    try{
+      const data=JSON.parse(ev.data)||{};
+      _mergeContentSearchResults(data.sessions, query);
+    }catch(_){ }
+  });
+  es.addEventListener('done', ()=>{ finished=true; _stopContentSearchSSE(es); });
+  es.onerror = ()=>{
+    if(finished) return;
+    finished=true;
+    _stopContentSearchSSE(es);
+    // No endless reconnect: the classic endpoint returns the same matches.
+    if(isCurrent()) _contentSearchFallback(query);
+  };
+}
 let _hideSearchPreviewsAfterSelect = false;
 let _archivedSearchPagingQueryActive = false;
 let _serverTimeDelta = 0;       // ms offset: client clock - server clock (for clock-skew compensation)
@@ -9044,18 +9119,16 @@ function filterSessions(){
   }
   renderSessionListFromCache();
   clearTimeout(_searchDebounceTimer);
-  if (!q) { _contentSearchResults = []; return; }
-  _searchDebounceTimer = setTimeout(async () => {
-    const requestedQ = q;
-    try {
-      const data = await api(`/api/sessions/search?q=${encodeURIComponent(requestedQ)}&content=1&depth=5`);
-      const currentQ = ($('sessionSearch').value || '').trim();
-      if(currentQ!==requestedQ) return;
-      const directAndTitleMatches=_sessionSearchDirectAndTitleMatches(_allSessions,currentQ);
-      const directOrTitleIds=new Set(directAndTitleMatches.map(s=>s.session_id));
-      _contentSearchResults = (data.sessions||[]).filter(s => s.match_type === 'content' && !directOrTitleIds.has(s.session_id));
-      _repaintSidebarForBackgroundChurn();
-    } catch(e) { /* ignore */ }
+  if (!q) {
+    // Clearing the box abandons the query: an in-flight fallback for the old
+    // one must not paint content hits into an empty search.
+    _contentSearchQuery = '';
+    _contentSearchResults = [];
+    _stopContentSearchSSE();
+    return;
+  }
+  _searchDebounceTimer = setTimeout(() => {
+    _startContentSearchSSE(q);
   }, 350);
 }
 
