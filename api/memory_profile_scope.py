@@ -2200,6 +2200,8 @@ def _retain_for_fence_locked(retain: "Optional[_ReleaseIntent]", entries: list) 
     for entry in entries:
         entry.intent = retain
     retain.fence_homes = frozenset(entry.home_key for entry in entries)
+    retain.retained = True
+    retain.deferred_for = "construction"
     return True
 
 
@@ -2214,8 +2216,10 @@ def _fence_refusal_outcome(kept: bool) -> str:
 def _fence_intents_ready_locked() -> list:
     """Intents waiting on constructions whose profile homes have none in flight
     any more (#8817), each taken off the wait so it is started exactly once.
-    Holder lock held. Read through the holder table, so an intent a new holder
-    took over (``entry.intent = None``) or one already dropped is never started."""
+    Holder lock held. Read through the holder table, so an intent no entry
+    carries any more (a new holder took every instance over, or it was dropped)
+    is never started. One a new holder took over on only some of its instances
+    is started, and its claim then drops it (``_claim_release_intent``)."""
     ready: dict = {}
     for entry in list(_provider_holders.values()):
         intent = entry.intent
@@ -2305,6 +2309,8 @@ def _claim_last_held_teardown(agent: Any, *, retain: "Optional[_ReleaseIntent]" 
                     # the caller arms it (``_arm_release_intent``).
                     for entry in claiming_entries:
                         entry.intent = retain
+                    retain.retained = True
+                    retain.deferred_for = "work"
                     return False, why, []
                 if wait_for != "fence":
                     # #8613 round 3 (finding 3): the releasing agent's own queued
@@ -2548,6 +2554,19 @@ def release_unowned_memory_provider(agent: Any, *, session_id: str, owner_home: 
                 session_id, why,
             )
             return False
+        if intent.retained:
+            # #8817 (senior r1, nit 1): the refusal kept the intent, and before
+            # this arm ran a retry started by ``_end_acquisition`` claimed it (or
+            # a new holder of the instance took it over). Nothing was lost, so
+            # "until the WebUI restarts" would be false.
+            _log_once(
+                f"release-deferred:{session_id}",
+                "[webui] #8613: the memory provider of evicted session %s was not released "
+                "at eviction: %s. The release was kept and has since been taken over, by its "
+                "retry or by a new holder of the instance.",
+                session_id, why,
+            )
+            return False
         # Keyed per session: a static key logged only the FIRST refusal in the
         # process, so every later evicted session was silent about its provider.
         _log_once(
@@ -2564,8 +2583,15 @@ def release_unowned_memory_provider(agent: Any, *, session_id: str, owner_home: 
     )
 
 
+# The tail of a deferred release's log line, by what it was deferred for.
+_DEFERRED_RELEASE_SUFFIX = {
+    "work": " once its queued memory work had drained",
+    "construction": " once a construction of the same profile had finished",
+}
+
+
 def _run_claimed_release(holder: Any, claimed: list, *, manager: Any, bound_home: str,
-                         bound_key: Optional[str], session_id: str, deferred: bool = False) -> bool:
+                         bound_key: Optional[str], session_id: str, deferred: str = "") -> bool:
     """Run a release whose teardown ``claimed`` (``_claim_last_held_teardown`` or
     ``_claim_release_intent``) already holds: ``release_soft`` in the provider's
     bound profile home, never a session end, then settle the claim. True when the
@@ -2620,7 +2646,7 @@ def _run_claimed_release(holder: Any, claimed: list, *, manager: Any, bound_home
     logger.info(
         "[webui] #8613: released the memory provider of evicted session %s without "
         "session end (its owner cannot be resolved)%s",
-        session_id, " once its queued memory work had drained" if deferred else "",
+        session_id, _DEFERRED_RELEASE_SUFFIX.get(deferred, ""),
     )
     return True
 
@@ -2666,7 +2692,7 @@ class _ReleaseIntent:
     """
 
     __slots__ = ("_memory_manager", "bound_home", "bound_key", "session_id", "armed", "agent_ref",
-                 "fence_homes")
+                 "fence_homes", "retained", "deferred_for")
 
     def __init__(self, manager: Any, bound_home: str, bound_key: Optional[str], session_id: str,
                  agent_ref: Optional[Callable[[], Any]] = None):
@@ -2686,6 +2712,13 @@ class _ReleaseIntent:
         # starts the retry). None when it is not waiting on a construction.
         # Holder lock.
         self.fence_homes: Optional[frozenset] = None
+        # True once a refusal has kept this intent on the entries, so a caller
+        # that finds no entry carrying it any more knows a retry already took
+        # it over rather than that it was never kept. Holder lock.
+        self.retained = False
+        # What the release was last deferred for, for its log line: "work"
+        # (queued memory work) or "construction" (#8817). Holder lock.
+        self.deferred_for = "work"
 
 
 def _outstanding_futures(manager: Any) -> list:
@@ -2783,6 +2816,11 @@ def _start_intent_retry(intent: _ReleaseIntent, *, poll: bool = False) -> None:
             name="webui-8613-deferred-release", daemon=True,
         ).start()
     except Exception:
+        # #8817 (senior r1, advisory 4): nothing would ever start this intent
+        # again (a construction's end already took it off the wait), so it is
+        # retired rather than left pinning its entries and manager.
+        with _provider_holders_lock:
+            _drop_intent_locked(intent)
         logger.warning(
             "[webui] #8613: the deferred release of the memory provider of evicted session %s "
             "could not start; the provider keeps its worker until the WebUI restarts.",
@@ -2804,9 +2842,16 @@ def _claim_release_intent(intent: _ReleaseIntent) -> tuple[str, str, list]:
             entries = [_live_holders_entry(provider) for provider in instances]
             if not instances or any(entry is None or entry.intent is not intent for entry in entries):
                 # A new holder took the instance over, a newer intent replaced
-                # this one, or the instance is no longer tracked.
+                # this one, another retry of it already claimed it, or the
+                # instance is no longer tracked (its release already ran).
+                if not instances or any(entry is None for entry in entries):
+                    gone = "the provider instance is no longer tracked; its release already ran"
+                elif any(entry.teardown for entry in entries):
+                    gone = "another retry of this release is already running it"
+                else:
+                    gone = "another agent holds the provider instance now, or a newer release replaced this one"
                 _drop_intent_locked(intent)
-                return "dropped", "another agent holds the provider instance now", []
+                return "dropped", gone, []
             ok, why, wait_for = _last_provider_holder_locked(intent, self_dropped=True)
             if ok:
                 for entry in entries:
@@ -2815,6 +2860,7 @@ def _claim_release_intent(intent: _ReleaseIntent) -> tuple[str, str, list]:
                 intent.armed.clear()
                 return "claimed", "", instances
             if wait_for in ("own_work", "work"):
+                intent.deferred_for = "work"
                 return "work", why, []
             if wait_for == "fence":
                 remaining = deadline - time.monotonic()
@@ -2826,6 +2872,7 @@ def _claim_release_intent(intent: _ReleaseIntent) -> tuple[str, str, list]:
                 # finish (``_end_acquisition`` restarts it), in this same
                 # critical section, so the end cannot be missed.
                 intent.fence_homes = frozenset(entry.home_key for entry in entries if entry is not None)
+                intent.deferred_for = "construction"
                 return "fenced", why, []
             _drop_intent_locked(intent)
             return "dropped", why, []
@@ -2841,7 +2888,8 @@ def _run_release_intent(intent: _ReleaseIntent, poll: bool = False) -> None:
         if state == "claimed":
             _run_claimed_release(
                 intent, claimed, manager=intent._memory_manager, bound_home=intent.bound_home,
-                bound_key=intent.bound_key, session_id=intent.session_id, deferred=True,
+                bound_key=intent.bound_key, session_id=intent.session_id,
+                deferred=intent.deferred_for or "work",
             )
             return
         if state == "fenced":

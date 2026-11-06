@@ -19,6 +19,7 @@ nothing may be released under it.
 # ruff: noqa: F811  (pytest fixtures imported from the #8517 P0 module)
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
@@ -195,3 +196,90 @@ def test_a_deferred_retry_that_meets_a_construction_keeps_waiting(
 
     build.finish()
     _assert_released_in_its_home(provider, homes["alpha"])
+
+
+# ── round-1 senior review: log accuracy and a retry that cannot start ─────────
+
+_SCOPE_LOGGER = "api.memory_profile_scope"
+
+
+def _session_logs(caplog, session_id):
+    return [record.getMessage() for record in caplog.records if session_id in record.getMessage()]
+
+
+def test_a_release_its_retry_took_over_before_the_arm_is_not_logged_as_lost(
+    hc, homes, holder_registry, monkeypatch, caplog
+):
+    """The construction ends, and its retry releases the provider, BEFORE the
+    evicting thread arms the kept intent: the arm finds no entry carrying it.
+    One release, and no log line may claim it waits for a WebUI restart."""
+    provider = RecordingProvider()
+    agent = _shared_agent(homes["alpha"], provider, "8817-early")
+    build = _PausedBuild(homes["alpha"], _fresh_instance, "8817-early-builder")
+    real_arm = scope._arm_release_intent
+    arms = []
+
+    def arm_after_the_release(intent):
+        build.finish()
+        assert _wait_for(lambda: provider.shutdowns == 1, 10), "the retry never released"
+        arms.append(real_arm(intent))
+        return arms[-1]
+
+    monkeypatch.setattr(scope, "_arm_release_intent", arm_after_the_release)
+    caplog.set_level(logging.INFO, logger=_SCOPE_LOGGER)
+    with scope.release_without_fence_wait():
+        assert streaming._close_evicted_agent_at_session_boundary("8817-early", agent) is True
+
+    assert arms == ["unretained"], arms
+    _assert_released_in_its_home(provider, homes["alpha"])
+    logs = _session_logs(caplog, "8817-early")
+    assert not any("until the WebUI restarts" in line for line in logs), logs
+    assert any("has since been taken over" in line for line in logs), logs
+
+
+def test_a_release_deferred_for_a_construction_says_so(hc, homes, holder_registry, caplog):
+    provider = RecordingProvider()
+    agent = _shared_agent(homes["alpha"], provider, "8817-why")
+    build = _PausedBuild(homes["alpha"], _fresh_instance, "8817-why-builder")
+    caplog.set_level(logging.INFO, logger=_SCOPE_LOGGER)
+    with scope.release_without_fence_wait():
+        assert streaming._close_evicted_agent_at_session_boundary("8817-why", agent) is True
+    build.finish()
+    _assert_released_in_its_home(provider, homes["alpha"])
+    assert _wait_for(lambda: any(
+        "released the memory provider" in line for line in _session_logs(caplog, "8817-why")
+    ), 5)
+    released = [line for line in _session_logs(caplog, "8817-why") if "released the memory provider" in line]
+    assert released and released[0].endswith("once a construction of the same profile had finished"), released
+
+
+def test_a_retry_that_cannot_start_does_not_strand_its_intent(
+    hc, homes, holder_registry, monkeypatch, caplog
+):
+    """``_end_acquisition`` takes the intent off the wait and then cannot start
+    its retry thread: the intent is retired instead of pinning its entries and
+    manager forever, and the construction itself is unaffected."""
+    provider = RecordingProvider()
+    agent = _shared_agent(homes["alpha"], provider, "8817-nothread")
+    build = _PausedBuild(homes["alpha"], _fresh_instance, "8817-nothread-builder")
+    with scope.release_without_fence_wait():
+        assert streaming._close_evicted_agent_at_session_boundary("8817-nothread", agent) is True
+    real_thread = threading.Thread
+
+    class _NoRetryThread(real_thread):
+        def start(self):
+            if self.name == "webui-8613-deferred-release":
+                raise RuntimeError("can't start new thread")
+            return super().start()
+
+    monkeypatch.setattr(scope.threading, "Thread", _NoRetryThread)
+    caplog.set_level(logging.WARNING, logger=_SCOPE_LOGGER)
+    newcomer = build.finish()
+    monkeypatch.setattr(scope.threading, "Thread", real_thread)
+
+    assert newcomer is not None, "the construction failed because the retry could not start"
+    assert not any(
+        entry.intent is not None for entry in scope._provider_holders.values()
+    ), "an intent nothing will ever start is still pinned"
+    assert any("could not start" in line for line in _session_logs(caplog, "8817-nothread"))
+    assert provider.shutdowns == 0  # the same outcome as before #8817, now logged
