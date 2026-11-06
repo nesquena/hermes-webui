@@ -1007,6 +1007,11 @@ global._syncArchivedSearchPagingRefresh=()=>{};
 global.renderSessionListFromCache=()=>{};
 global._searchDebounceTimer=null;
 global._contentSearchResults=[];
+global._contentSearchQuery='';
+// The debounce now opens the incremental search stream instead of issuing one
+// blocking /api/sessions/search call.
+global._startContentSearchSSE=()=>{};
+global._stopContentSearchSSE=()=>{};
 global._lastSessionSearchQuery='';
 global._hideSearchPreviewsAfterSelect=false;
 global.api=async()=>({sessions:[]});
