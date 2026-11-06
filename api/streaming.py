@@ -9170,6 +9170,23 @@ def _independently_owned_user_pair(prior_row, candidate_row) -> bool:
     )
 
 
+def _register_exact_key_owner(exact_key, msg, exact_key_owners) -> None:
+    """Record ``msg`` as a durable owner of ``exact_key``.
+
+    #8574 review P2 (nesquena-hermes 2026-11-06): one exact key can hold
+    SEVERAL independent owners (two turns repeating one prompt inside one
+    timestamp bucket). The set of owners is what tells the dedup that an
+    id-less occupant of the key is a second owner rather than the key's only
+    row - see the replacement guard in ``_deduplicate_context_messages``.
+    """
+    if exact_key is None:
+        return
+    stable_id, stable_valid = _stable_message_ownership_id(msg)
+    if not (stable_valid and stable_id is not None):
+        return
+    exact_key_owners.setdefault(exact_key, set()).add(stable_id)
+
+
 def _register_seen_stable_id(key, msg, seen_stable_by_key) -> None:
     """Append ``msg``'s durable stable id to the per-key kept-id registry.
 
@@ -9341,6 +9358,17 @@ def _deduplicate_context_messages(messages, protected_rows=None):
     # ``user_exact_index`` names (possibly a different owner) or append another
     # copy of itself.
     retained_owner_slots = {}
+    # #8574 review P2 (nesquena-hermes 2026-11-06): the durable owners that
+    # hold each EXACT key, ``exact_key -> {stable_id, ...}``. One exact key
+    # can carry SEVERAL independent owners (two turns repeating one prompt
+    # inside one timestamp bucket), and that fact decides whether an incoming
+    # owner may REPLACE the row that currently occupies the key's indexed
+    # slot. The legacy exact-replacement path lets a token holder replace an
+    # id-less occupant — but only while that occupant is the key's FIRST owner.
+    # Once the key already holds a DIFFERENT durable owner, the occupant is a
+    # second owner of the same key, and replacing it would delete a turn the
+    # display transcript still shows.
+    exact_key_owners = {}
     for msg in messages:
         if _is_context_compression_marker(msg):
             marker_key = (
@@ -9408,6 +9436,21 @@ def _deduplicate_context_messages(messages, protected_rows=None):
                     key, msg, retained_owner_slots
                 )
                 if own_slot is not None and prior_exact_idx is not None:
+                    # #8574 review P2 (nesquena-hermes 2026-11-06): a row whose
+                    # OWN exact key is already occupied by another row is a
+                    # duplicate of that occurrence - the owner is already
+                    # retained in its own slot - so it collapses instead of
+                    # taking a second slot or rewriting the owner's clock.
+                    occupant_exact = _user_exact_key(deduped[own_slot])
+                    occurrence_taken = bool(
+                        _user_exact_key(deduped[prior_exact_idx]) == user_exact_key
+                    )
+                    if occurrence_taken and occupant_exact != user_exact_key:
+                        _register_seen_stable_id(key, msg, seen_stable_by_key)
+                        _register_exact_key_owner(
+                            user_exact_key, msg, exact_key_owners
+                        )
+                        continue
                     # The exact-key entry naming this slot for the DISPLACED
                     # row must be dropped before the incoming row's own key is
                     # published — the owner's ORIGINAL timestamp keeps an entry
@@ -9419,12 +9462,53 @@ def _deduplicate_context_messages(messages, protected_rows=None):
                     )
                     deduped[own_slot] = msg
                     _register_seen_stable_id(key, msg, seen_stable_by_key)
+                    _register_exact_key_owner(
+                        user_exact_key, msg, exact_key_owners
+                    )
                     _register_retained_owner_slot(
                         key, msg, own_slot, retained_owner_slots
                     )
                     user_exact_index[user_exact_key] = own_slot
                     continue
                 if prior_exact_idx is not None:
+                    # #8574 review P2 (nesquena-hermes 2026-11-06): an exact
+                    # key may hold SEVERAL independent owners. When the row
+                    # that currently occupies the indexed slot carries no
+                    # durable id but the key ALREADY holds a different durable
+                    # owner, that occupant is a second owner of the same key,
+                    # not a mere replay: replacing it here would delete a turn
+                    # the display transcript still shows (the row vanished from
+                    # the persisted context on the NEXT settle, while the
+                    # display kept it). The incoming owner is then admitted as
+                    # the owner it is and keeps its own slot.
+                    prior_stable_id, prior_stable_valid = _stable_message_ownership_id(
+                        deduped[prior_exact_idx]
+                    )
+                    incoming_stable_id, incoming_stable_valid = (
+                        _stable_message_ownership_id(msg)
+                    )
+                    key_owners = exact_key_owners.get(user_exact_key) or set()
+                    prior_has_owner = bool(
+                        prior_stable_valid and prior_stable_id is not None
+                    )
+                    other_owner_present = bool(
+                        not prior_has_owner
+                        and incoming_stable_valid
+                        and incoming_stable_id is not None
+                        and any(
+                            owner != incoming_stable_id for owner in key_owners
+                        )
+                    )
+                    if other_owner_present:
+                        deduped.append(msg)
+                        _register_seen_stable_id(key, msg, seen_stable_by_key)
+                        _register_retained_owner_slot(
+                            key, msg, len(deduped) - 1, retained_owner_slots
+                        )
+                        exact_key_owners.setdefault(user_exact_key, set()).add(
+                            incoming_stable_id
+                        )
+                        continue
                     # #8574 gate certification RED, finding 1 (nesquena-hermes
                     # 2026-10-31): a token-bearing user row may be an
                     # INDEPENDENTLY OWNED turn that repeats an earlier turn's
@@ -9460,6 +9544,9 @@ def _deduplicate_context_messages(messages, protected_rows=None):
                         )
                         deduped[prior_exact_idx] = msg
                         _register_seen_stable_id(key, msg, seen_stable_by_key)
+                        _register_exact_key_owner(
+                            user_exact_key, msg, exact_key_owners
+                        )
                         _register_retained_owner_slot(
                             key, msg, prior_exact_idx, retained_owner_slots
                         )
@@ -9484,6 +9571,41 @@ def _deduplicate_context_messages(messages, protected_rows=None):
                         key, msg, retained_owner_slots
                     )
                     if own_slot is not None:
+                        # #8574 review P2 (nesquena-hermes 2026-11-06): the slot
+                        # belongs to the OWNER and holds the owner's own
+                        # occurrence. Two shapes must NOT overwrite it:
+                        #
+                        # * a replay whose clock drifted to another bucket
+                        #   keeps the owner's newest row (the token-preferred
+                        #   replay) — that is the pre-existing contract;
+                        # * a row whose OWN exact key is already occupied by
+                        #   another row is a duplicate of THAT occurrence. Its
+                        #   owner is already retained elsewhere, so it
+                        #   collapses instead of taking a second slot. This
+                        #   is the row an exact-key replacement displaced: it
+                        #   reappears with its original clock and must not
+                        #   rewrite the owner's clock backwards. A rewritten
+                        #   clock made the following assistant pair look like
+                        #   a cancelled-history splice to the Agent-replay
+                        #   projection — the sent projection kept the pair
+                        #   apart while the settle proof merged it, the strict
+                        #   prefix proof failed, and the settle dropped the
+                        #   current exchange from the persisted context.
+                        occupant_exact = _user_exact_key(deduped[own_slot])
+                        occurrence_taken = bool(
+                            prior_exact_idx is not None
+                            and _user_exact_key(deduped[prior_exact_idx])
+                            == user_exact_key
+                        )
+                        if occurrence_taken and occupant_exact != user_exact_key:
+                            # Collapse: the occurrence this row belongs to is
+                            # already retained, and the owner keeps its own
+                            # row in its own slot.
+                            _register_seen_stable_id(key, msg, seen_stable_by_key)
+                            _register_exact_key_owner(
+                                user_exact_key, msg, exact_key_owners
+                            )
+                            continue
                         # #8574 review P2 (nesquena-hermes 2026-11-02): this is
                         # the in-place owner update — the slot's OCCUPANT
                         # changes, so the exact-key entry naming this slot for
@@ -9500,6 +9622,9 @@ def _deduplicate_context_messages(messages, protected_rows=None):
                         )
                         deduped[own_slot] = msg
                         _register_seen_stable_id(key, msg, seen_stable_by_key)
+                        _register_exact_key_owner(
+                            user_exact_key, msg, exact_key_owners
+                        )
                         _register_retained_owner_slot(
                             key, msg, own_slot, retained_owner_slots
                         )
@@ -9507,6 +9632,9 @@ def _deduplicate_context_messages(messages, protected_rows=None):
                         continue
                     deduped.append(msg)
                     _register_seen_stable_id(key, msg, seen_stable_by_key)
+                    _register_exact_key_owner(
+                        user_exact_key, msg, exact_key_owners
+                    )
                     _register_retained_owner_slot(
                         key, msg, len(deduped) - 1, retained_owner_slots
                     )
@@ -9568,6 +9696,9 @@ def _deduplicate_context_messages(messages, protected_rows=None):
         # never reaches this site, so no index can outlive its row.
         if retained_exact_key is not None:
             user_exact_index[retained_exact_key] = len(deduped) - 1
+            _register_exact_key_owner(
+                retained_exact_key, msg, exact_key_owners
+            )
     return deduped
 
 
@@ -10855,11 +10986,19 @@ def _reconcile_prefix_occurrence_ownership(
         stable_id, stable_valid = _stable_message_ownership_id(row)
         if stable_valid and stable_id is not None:
             # The exact-key registry is the RECALL path for a row that carries
-            # no token of its own: such a row shares one occurrence with the
-            # owner that already holds its exact key. A token-bearing owner is
-            # a MORE specific owner of the same exact key and must not be
-            # overridden by the loose fallback.
-            if exact not in owner_by_exact and not row.get("_active_turn_token"):
+            # no token of its own: such a row is a MIRROR of the occurrence
+            # that already holds its exact key and must reconcile onto that
+            # owner's id instead of being minted an independent one. A
+            # token-bearing owner registers here too — it is the authoritative
+            # owner of that exact key, and excluding it left a tokenless
+            # mirror with no owner to recall, so the mirror was minted a fresh
+            # id and the identity dedup retained BOTH copies of one turn.
+            # #8574 review P2 (nesquena-hermes 2026-11-06): the FIRST owner
+            # of an exact key claims it. A SECOND owner of the same exact key
+            # that carries a DIFFERENT turn token is a genuinely distinct
+            # occurrence and keeps its own id through the stable-id path
+            # below — it never needs the exact-key registry.
+            if exact not in owner_by_exact:
                 owner_by_exact[exact] = stable_id
     split_groups = {
         replay_key for replay_key, exacts in groups.items() if len(set(exacts)) >= 2
