@@ -250,6 +250,73 @@ def test_populate_model_dropdown_releases_the_switch_reset_only_after_the_rebuil
     )
 
 
+def test_profile_switch_writers_fence_catalog_publication_before_stale_writes():
+    """#8576 catalog-owner: BOTH profile-transition writers must invalidate the
+    in-flight catalog generation BEFORE any stale defaults/options/reset write.
+
+    A delayed previous-profile catalog reply can publish its defaults, rebuild
+    its options and release the one-shot reset inside the switch's publication
+    window (after the automatic New Chat, before the destination hydration).
+    Guarding only the reset RELEASE is insufficient: newSession()'s
+    configured-default arm reads the stale globals first. The fence call must
+    therefore precede the persisted-state clear, the
+    window._defaultModel/_activeProvider pair write AND the
+    S._profileSwitchModelReset write in each writer.
+    """
+    assert "function _invalidateModelDropdownRequests(" in UI_JS, (
+        "the catalog-generation invalidator must exist in ui.js"
+    )
+    inv_start = UI_JS.index("function _invalidateModelDropdownRequests(")
+    inv_end = UI_JS.index("\n}", inv_start)
+    inv_body = UI_JS[inv_start:inv_end]
+    assert "_modelDropdownRequestSeq++" in inv_body, (
+        "the invalidator must advance the request sequence so an in-flight "
+        "reply can no longer pass populateModelDropdown's seq gate"
+    )
+
+    cases = [
+        (
+            (REPO / "static" / "panels.js").read_text(encoding="utf-8"),
+            "switchToProfile",
+            "window._defaultModel = data.default_model || null;",
+            "S._profileSwitchModelReset = !data.default_model;",
+            "const data = await api('/api/profile/switch'",
+        ),
+        (
+            (REPO / "static" / "sessions.js").read_text(encoding="utf-8"),
+            "_switchProfileForSessionLoad",
+            "window._defaultModel=data.default_model||null;",
+            "S._profileSwitchModelReset=!data.default_model;",
+            "const data=await api('/api/profile/switch'",
+        ),
+    ]
+    for src, fn, pair_write, reset_write, post_marker in cases:
+        start = src.index("async function " + fn)
+        # The fence must sit BEFORE the default-model/provider pair write...
+        pair = src.index(pair_write)
+        prefix = src[start:pair]
+        assert "_invalidateModelDropdownRequests" in prefix, (
+            f"{fn}: the catalog fence must run before the default pair write"
+        )
+        # ...before the one-shot reset write...
+        reset = src.index(reset_write)
+        assert "_invalidateModelDropdownRequests" in src[start:reset], (
+            f"{fn}: the catalog fence must run before the reset write"
+        )
+        # ...and before the persisted-state clear (the first stale write).
+        clear = src.index("_clearPersistedModelState()", start)
+        assert "_invalidateModelDropdownRequests" in src[start:clear], (
+            f"{fn}: the catalog fence must run before the persisted-state clear"
+        )
+        # The fence itself must be inside the SUCCESS path of the switch (after
+        # the switch POST resolves), so a FAILED switch keeps the previous
+        # profile's in-flight replies valid.
+        post = src.index(post_marker, start)
+        assert "_invalidateModelDropdownRequests" in src[post:pair], (
+            f"{fn}: the fence must run only after a successful switch response"
+        )
+
+
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_non_boot_model_refresh_preserves_current_in_page_selection(populate_driver_path):
     got = _run_populate_driver(

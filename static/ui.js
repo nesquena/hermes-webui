@@ -5608,6 +5608,26 @@ function _persistSessionModelCorrection(model, provider, opts){
 let _modelDropdownRequestSeq=0;
 let _modelCatalogFallbackRetried=false;
 
+// #8576 catalog-owner fence: retires every in-flight /api/models publication.
+// Both profile-transition writers (switchToProfile in panels.js and
+// _switchProfileForSessionLoad in sessions.js) call this on a SUCCESSFUL
+// switch, BEFORE adopting the destination's defaults/options/reset, so a
+// delayed catalog reply that was started on the PREVIOUS profile can no
+// longer pass the requestSeq check inside populateModelDropdown — it can
+// neither restore the old profile's globals (newSession()'s configured-default
+// arm reads window._defaultModel FIRST, ahead of any reset gate) nor release
+// the one-shot profile-switch model reset. There is no profile-name
+// comparison: ANY pre-transition request is stale once its generation was
+// invalidated — which is what makes A→B→A (a reply started while the same
+// profile was previously active) safe too. The destination hydration that
+// follows the fence captures a fresh requestSeq and owns the picker from
+// there on.
+function _invalidateModelDropdownRequests(){
+  if(typeof _modelDropdownRequestSeq!=='number') _modelDropdownRequestSeq=0;
+  _modelDropdownRequestSeq++;
+  return _modelDropdownRequestSeq;
+}
+
 function _applySessionModelFallback(sel){
   if(!sel) return null;
   const configuredDefault=String(window._defaultModel||'').trim();

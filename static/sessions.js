@@ -2713,6 +2713,14 @@ async function _switchProfileForSessionLoad(profile){
     // hold the previous profile's /api/skills payload, so drop them (and any reply
     // still in flight) once the switch has succeeded.
     if(typeof window!=='undefined'&&typeof window.invalidateSlashSkillCaches==='function') window.invalidateSlashSkillCaches();
+    // #8576 catalog-owner fence: mirror the canonical switch in panels.js —
+    // invalidate the in-flight catalog generation BEFORE adopting any
+    // destination defaults/options/reset, so a delayed reply started on the
+    // previous profile cannot publish under the new one (its requestSeq is
+    // stale by the time it arrives). No profile-name comparison: any
+    // pre-transition request, including one started while the same profile was
+    // previously active (A→B→A), is stale once its generation was invalidated.
+    if(typeof _invalidateModelDropdownRequests==='function') _invalidateModelDropdownRequests();
     if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
     else localStorage.removeItem('hermes-webui-model');
     // The destination profile's defaults are a PAIR: adopting its default model

@@ -1041,6 +1041,13 @@ _UI_PICKER_FUNCTIONS = [
     "_reconcileModelDropdownSelection",
 ]
 
+# The #8576 catalog-owner fence helper the profile-transition writers call
+# BEFORE adopting destination defaults/options/reset — extracted verbatim so
+# the delayed-reply schedules observe the real generation invalidation.
+_UI_INVALIDATE_FNS = [
+    "_invalidateModelDropdownRequests",
+]
+
 _REFRESH_DRIVER_BODY = r"""
 const fs = require('fs');
 const vm = require('vm');
@@ -1051,6 +1058,13 @@ const scenario = JSON.parse(process.argv[4]);
 
 const calls = [];
 const newSessionBodies = [];
+// Delayed /api/models responses: the FIRST 'deferredModelsCount' catalog
+// requests are held open until 'releaseDelayedModels()' resolves them (in
+// order), so a scenario can land an old-profile reply inside the
+// profile-switch publication window. After the deferred quota is consumed,
+// catalog fetches behave normally (immediate).
+const _modelsDeferred = [];
+let _deferredRemaining = (typeof scenario.deferredModelsCount === 'number') ? scenario.deferredModelsCount : 0;
 const noop = () => {};
 const promiseNoop = () => Promise.resolve();
 
@@ -1165,6 +1179,11 @@ const ctx = {
   api: (url, opts) => {
     calls.push(url);
     if (url === '/api/profile/switch') {
+      // switchDataQueue lets a scenario drive MULTIPLE real switches (A->B->A)
+      // with per-call destination data, consumed in order.
+      if (Array.isArray(scenario.switchDataQueue) && scenario.switchDataQueue.length) {
+        return Promise.resolve(scenario.switchDataQueue.shift());
+      }
       return Promise.resolve(scenario.switchData);
     }
     if (url === '/api/session/new') {
@@ -1193,12 +1212,26 @@ const ctx = {
   fetch: async (url) => {
     const href = String(url);
     if (href.includes('api/models')) {
+      if (_deferredRemaining > 0) {
+        _deferredRemaining -= 1;
+        return new Promise((resolve) => {
+          _modelsDeferred.push(() => resolve({
+            status: 200, ok: true, json: async () => scenario.modelsPayload,
+          }));
+        });
+      }
       // modelsStatus / modelsFetchError let a scenario model a DEGRADED
       // catalog refresh (HTTP 500 with a JSON body, or a transport failure)
       // instead of a healthy 200. Default behaviour is unchanged.
       if (scenario.modelsFetchError) throw new Error(String(scenario.modelsFetchError));
       const status=(typeof scenario.modelsStatus==='number')?scenario.modelsStatus:200;
-      return {status: status, ok: status>=200&&status<300, json: async () => scenario.modelsPayload};
+      // Non-deferred fetches are the DESTINATION hydration in the delayed
+      // schedules: they must serve the destination's own payload (the old
+      // profile's catalog is only the held-open reply's).
+      const payload=(typeof scenario.destinationPayload!=='undefined')
+        ? scenario.destinationPayload
+        : scenario.modelsPayload;
+      return {status: status, ok: status>=200&&status<300, json: async () => payload};
     }
     throw new Error('unexpected fetch ' + href);
   },
@@ -1286,6 +1319,15 @@ const ctx = {
   // must never touch the globals (that indirection is what let the premature
   // release hide).
   _refreshProfileSwitchBackground: () => { calls.push('_refreshProfileSwitchBackground'); },
+  // Resolve every held-open catalog response (in order). The caller waits a
+  // full event-loop tick afterwards so the reply's whole continuation — seq
+  // gate, json parse, globals/options/reset writes — settles before the next
+  // step of the schedule.
+  releaseDelayedModels: () => {
+    const pending = _modelsDeferred.splice(0);
+    for (const release of pending) release();
+    return Promise.resolve();
+  },
   Object, JSON, Promise, Array, String, Number, Boolean, Math, RegExp, Date,
   Error, TypeError, console, setTimeout, isNaN, parseInt, parseFloat,
 };
@@ -1298,6 +1340,14 @@ const context = vm.createContext(proxy);
 vm.runInContext('var _dynamicModelLabels = {};', context);
 for (const name of __PICKER_FNS__) {
   vm.runInContext(extractFunction(srcUi, name), context);
+}
+for (const name of __INVALIDATE_FNS__) {
+  // Conditional: on a reviewed head WITHOUT the #8576 fence the function does
+  // not exist yet — the schedule must still run (and fail on its assertions,
+  // not on extraction) so the pre-fix payload is observable.
+  if (srcUi.includes('function ' + name + '(')) {
+    vm.runInContext(extractFunction(srcUi, name), context);
+  }
 }
 vm.runInContext(extractAsyncFunction(srcUi, 'populateModelDropdown'), context);
 vm.runInContext(extractAsyncFunction(srcSessions, 'newSession'), context);
@@ -1316,27 +1366,119 @@ const switched = scenario.flow === 'loadSwitch'
   ? context._switchProfileForSessionLoad(scenario.switchName)
   : (scenario.flow === 'switch' ? context.switchToProfile(scenario.switchName) : Promise.resolve());
 
-switched
-  // The real post-switch catalog hydration (same call shape the session-load
-  // refresh uses).
-  .then(() => context.populateModelDropdown({freshness: 'session_visit'}))
-  .then(() => {
-    const afterRefresh = snapshot();
-    // "Create another conversation" — the caller that exposed the stale pair.
-    return context.newSession(false, scenario.newSessionOptions || {}).then(() => afterRefresh);
-  })
-  .then((afterRefresh) => {
-    process.stdout.write(JSON.stringify({
-      ok: true,
-      calls: calls,
-      newSessionBodies: newSessionBodies,
-      afterRefresh: afterRefresh,
-      afterNewSession: snapshot(),
-    }));
-  })
-  .catch((err) => {
-    process.stdout.write(JSON.stringify({ok: false, error: String((err && err.stack) || err)}));
-  });
+// A full event-loop tick: lets a released catalog reply's WHOLE continuation
+// (seq gate, json parse, globals/options/reset writes, rebuild) settle before
+// the next step of the schedule reads the state it mutated.
+const settleTick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+if (scenario.schedule === 'delayedOldCatalog') {
+  // Maintainer schedule (2026-11-04, PR #8576 catalog-owner):
+  //   1. start the OLD profile's catalog request and DELAY its response
+  //   2. switch to a model-less new-profile: the real automatic New Chat
+  //      completes, adopts its session, and the switch waits on its
+  //      sidebar-list adapter — New Chat pending/inflight state is already
+  //      clear
+  //   3. let the old catalog complete BEFORE a destination catalog request
+  //      starts — it would restore the old pair and clear the reset
+  //   4. another real New Chat completes its POST/adoption — the eventual
+  //      destination refresh cannot retract that accepted request
+  context.populateModelDropdown(); // (1) held open by deferredModelsCount
+  switched
+    .then(() => context.releaseDelayedModels()) // (3) old reply lands here
+    .then(settleTick)
+    .then(() => {
+      const afterOldReply = snapshot();
+      // (4) another REAL New Chat — captured payload is the assertion target.
+      return context.newSession(false, scenario.newSessionOptions || {}).then(() => afterOldReply);
+    })
+    // The eventual destination catalog refresh runs AFTER the accepted POST.
+    .then((afterOldReply) => context.populateModelDropdown({freshness: 'session_visit'}).then(() => afterOldReply))
+    .then((afterOldReply) => {
+      process.stdout.write(JSON.stringify({
+        ok: true,
+        calls: calls,
+        newSessionBodies: newSessionBodies,
+        afterOldReply: afterOldReply,
+        afterRefresh: snapshot(),
+        afterNewSession: snapshot(),
+      }));
+    })
+    .catch((err) => {
+      process.stdout.write(JSON.stringify({ok: false, error: String((err && err.stack) || err)}));
+    });
+} else if (scenario.schedule === 'destinationFirst') {
+  // Ordering control: a NEWER destination request starts before the delayed
+  // old reply arrives — the existing request-sequence supersession must
+  // handle it (this control already passes on the reviewed head).
+  context.populateModelDropdown(); // held open by deferredModelsCount
+  switched
+    .then(() => context.populateModelDropdown({freshness: 'session_visit'}))
+    .then(() => context.releaseDelayedModels())
+    .then(settleTick)
+    .then(() => context.newSession(false, scenario.newSessionOptions || {}))
+    .then(() => {
+      process.stdout.write(JSON.stringify({
+        ok: true,
+        calls: calls,
+        newSessionBodies: newSessionBodies,
+        afterRefresh: snapshot(),
+        afterNewSession: snapshot(),
+      }));
+    })
+    .catch((err) => {
+      process.stdout.write(JSON.stringify({ok: false, error: String((err && err.stack) || err)}));
+    });
+} else if (scenario.schedule === 'abaRoundTrip') {
+  // A->B->A: the delayed reply was started on profile A BEFORE any switch.
+  // Once the tab is back on A, a profile-NAME-only comparison would accept
+  // it (the reply's profile matches the current one) — only the transition
+  // generation can reject it. B's own catalog hydration is deliberately NOT
+  // run in this window, so no newer request masks the gap (that arm is the
+  // destinationFirst control above).
+  context.populateModelDropdown(); // held open by deferredModelsCount
+  switched
+    // A->B completed.
+    .then(() => context.switchToProfile(scenario.switchBackName)) // B->A
+    .then(() => context.releaseDelayedModels())
+    .then(settleTick)
+    .then(() => {
+      const afterOldReply = snapshot();
+      return context.newSession(false, scenario.newSessionOptions || {}).then(() => afterOldReply);
+    })
+    .then((afterOldReply) => {
+      process.stdout.write(JSON.stringify({
+        ok: true,
+        calls: calls,
+        newSessionBodies: newSessionBodies,
+        afterOldReply: afterOldReply,
+        afterNewSession: snapshot(),
+      }));
+    })
+    .catch((err) => {
+      process.stdout.write(JSON.stringify({ok: false, error: String((err && err.stack) || err)}));
+    });
+} else {
+  // Default schedule: the real post-switch catalog hydration (same call shape
+  // the session-load refresh uses), then "Create another conversation".
+  switched
+    .then(() => context.populateModelDropdown({freshness: 'session_visit'}))
+    .then(() => {
+      const afterRefresh = snapshot();
+      return context.newSession(false, scenario.newSessionOptions || {}).then(() => afterRefresh);
+    })
+    .then((afterRefresh) => {
+      process.stdout.write(JSON.stringify({
+        ok: true,
+        calls: calls,
+        newSessionBodies: newSessionBodies,
+        afterRefresh: afterRefresh,
+        afterNewSession: snapshot(),
+      }));
+    })
+    .catch((err) => {
+      process.stdout.write(JSON.stringify({ok: false, error: String((err && err.stack) || err)}));
+    });
+}
 """
 
 
@@ -1347,6 +1489,7 @@ def _run_refresh_driver(scenario: dict) -> dict:
     driver = (
         _EXTRACTOR
         + _REFRESH_DRIVER_BODY.replace("__PICKER_FNS__", json.dumps(_UI_PICKER_FUNCTIONS))
+        .replace("__INVALIDATE_FNS__", json.dumps(_UI_INVALIDATE_FNS))
     )
     proc = subprocess.run(
         [NODE_BIN, "-e", driver, str(SESSIONS_JS), str(PANELS_JS), str(UI_JS), json.dumps(scenario)],
@@ -1775,4 +1918,254 @@ def test_empty_catalog_quarantine_is_scoped_to_a_pending_profile_switch():
     assert cond_open >= 0 and ")" not in prefix[cond_open:guard_index], (
         "the empty-catalog clear must sit inside an if() whose condition is "
         "the pending profile-switch reset (#8576 P2)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Maintainer re-gate (2026-11-04 08:33Z, PR #8576 catalog-owner): a delayed
+# PREVIOUS-profile catalog reply must not publish into the new-profile session.
+#
+# populateModelDropdown() checks only the request sequence
+# (static/ui.js:5636,5642,5649), and neither profile-transition writer
+# invalidates that generation. The canonical switch awaits its sidebar render
+# (static/panels.js:8003) after its automatic New Chat has completed, but
+# before it starts the destination catalog hydration (8056) -- that gives an
+# older request a publication window:
+#
+#   1. start an old-profile catalog request and delay its response
+#   2. switch to a model-less new-profile: the real automatic New Chat
+#      completes and adopts its session; the switch waits on its normal
+#      sidebar-list adapter. New Chat pending/inflight state is already clear.
+#   3. let the old catalog complete before a destination catalog request
+#      starts: it restores 'vendor/old-model' / 'old-route' and clears the
+#      reset
+#   4. another real New Chat completes its POST, session adoption, URL
+#      update, sidebar refresh and pending cleanup with
+#      {"profile":"new-profile","model":"vendor/old-model",
+#       "model_provider":"old-route"} -- the eventual destination catalog
+#      refresh cannot retract that accepted request
+#
+# The fence must live at BOTH profile-transition writers, BEFORE any stale
+# defaults/options/reset writes: invalidating the catalog generation on a
+# successful transition (or checking a transition token with the request
+# sequence). A profile-name-only comparison misses A->B->A, and guarding only
+# the reset release is insufficient because newSession()'s configured-default
+# branch already reads the stale globals (static/sessions.js, the
+# window._defaultModel arm ahead of any reset gate).
+#
+# These tests drive the REAL switchToProfile -> REAL newSession chain, REAL
+# populateModelDropdown, the REAL picker helpers and the REAL generation
+# invalidator, with only the transport and the minimal <select> stubbed. The
+# delayed old reply is a held-open /api/models fetch resolved at a
+# harness-chosen point of the schedule.
+# ---------------------------------------------------------------------------
+
+
+# The OLD profile's catalog payload: healthy, populated, and carrying the
+# previous profile's pair -- exactly the reply that must NOT publish under the
+# new profile.
+_OLD_PROFILE_CATALOG_PAYLOAD = {
+    "active_provider": "old-route",
+    "default_model": "vendor/old-model",
+    "configured_model_badges": {},
+    "groups": [
+        {
+            "provider": "Old route",
+            "provider_id": "old-route",
+            "models": [{"id": "vendor/old-model", "label": "Old Model"}],
+        },
+    ],
+}
+
+# The picker as hydrated on the OLD profile when the delayed request started.
+_OLD_PROFILE_PICKER = {
+    "value": "vendor/old-model",
+    "groups": [
+        {
+            "provider": "Old route",
+            "provider_id": "old-route",
+            "options": [
+                {
+                    "value": "vendor/old-model",
+                    "label": "Old Model",
+                    "dataset": {"provider": "old-route"},
+                },
+            ],
+        },
+    ],
+}
+
+
+def _delayed_old_catalog_scenario(flow, schedule, **extra):
+    """A tab on the OLD profile with an in-flight catalog request (response
+    delayed), switching to a model-less destination before that reply lands.
+
+    'deferredModelsCount: 1' holds exactly the FIRST /api/models fetch open;
+    later catalog fetches (the destination hydration) complete immediately.
+    """
+    scenario = {
+        "flow": flow,
+        "schedule": schedule,
+        "switchName": _SWITCH_NAME,
+        "switchData": _MODEL_LESS_SWITCH_DATA,
+        "deferredModelsCount": 1,
+        "modelsPayload": _OLD_PROFILE_CATALOG_PAYLOAD,
+        # The destination hydration after the deferred quota completes
+        # immediately and must serve the MODEL-LESS destination's own empty
+        # catalog (the old profile's catalog is only the held-open reply's).
+        "destinationPayload": _EMPTY_CATALOG_PAYLOAD,
+        # Globals + picker hydrated from the OLD profile's catalog.
+        "defaultModel": "vendor/old-model",
+        "activeProvider": "old-route",
+        "session": _OLD_SESSION if flow == "switch" else None,
+        "messages": _OLD_MESSAGES if flow == "switch" else [],
+        "modelSelect": _OLD_PROFILE_PICKER,
+    }
+    scenario.update(extra)
+    return scenario
+
+
+def _assert_new_profile_session_stays_model_less(result, flow, label):
+    assert result["ok"], result.get("error")
+    bodies = result["newSessionBodies"]
+    assert bodies, f"[{label}] the chained New Chat must actually POST /api/session/new"
+    if flow == "switch":
+        assert len(bodies) == 2, (
+            f"[{label}] the canonical switch auto-creates one session and the "
+            f"chained New Chat creates the second; got {len(bodies)} POSTs"
+        )
+        first = bodies[0]
+        assert first.get("model") in (None, ""), (
+            f"[{label}] the switch's own auto-created session must stay "
+            f"model-less; got {first.get('model')!r}"
+        )
+    second = bodies[-1]
+    assert second.get("profile") == _SWITCH_NAME, (
+        f"[{label}] the request must be scoped to the destination profile; got "
+        f"{second.get('profile')!r}"
+    )
+    assert second.get("model") in (None, ""), (
+        f"[{label}] the delayed previous-profile catalog must not restore its "
+        f"model into the new-profile session; got {second.get('model')!r}"
+    )
+    assert second.get("model_provider") in (None, ""), (
+        f"[{label}] the delayed previous-profile catalog must not pin its "
+        f"provider into the new-profile session; got "
+        f"{second.get('model_provider')!r} — the no-old-provider assertion"
+    )
+
+
+@pytest.mark.parametrize("flow", ["switch", "loadSwitch"])
+def test_delayed_old_profile_catalog_cannot_publish_into_new_profile_session(flow):
+    """The maintainer's exact schedule (2026-11-04 08:33Z): the old catalog
+    reply lands AFTER the switch's automatic New Chat completed but BEFORE a
+    destination catalog request starts, and a further real New Chat must not
+    carry the old profile's model/provider pair.
+
+    RED on the reviewed head: the reply passed the request-seq gate (neither
+    switch writer invalidates it), restored 'vendor/old-model'/'old-route' and
+    cleared the reset, so the chained New Chat posted
+    {"profile":"new-profile","model":"vendor/old-model",
+     "model_provider":"old-route"}.
+    """
+    result = _run_refresh_driver(_delayed_old_catalog_scenario(flow, "delayedOldCatalog"))
+    _assert_new_profile_session_stays_model_less(result, flow, "delayed old catalog")
+    # The fence must run BEFORE any stale write: at the moment the old reply
+    # lands, the globals must still be the destination's cleared pair and the
+    # one-shot reset must still be armed.
+    after = result["afterOldReply"]
+    assert after["guard"], (
+        "the one-shot reset gate must stay armed across the delayed old reply — "
+        "fencing the publication before the stale writes is the requirement "
+        "(guarding only the reset RELEASE is not enough: newSession's "
+        "configured-default arm reads the globals first)"
+    )
+    assert after["defaultModel"] in (None, ""), (
+        f"the old reply must not restore its default model; got "
+        f"{after['defaultModel']!r}"
+    )
+    assert after["activeProvider"] in (None, ""), (
+        f"the old reply must not restore its active provider; got "
+        f"{after['activeProvider']!r}"
+    )
+    # The eventual destination refresh (empty catalog for the model-less
+    # destination) keeps the gate armed and quarantines the stale options.
+    after_refresh = result["afterRefresh"]
+    assert after_refresh["guard"], (
+        "the destination refresh must keep the gate armed through its empty "
+        "catalog — the delayed reply must not have released it beforehand"
+    )
+    assert after_refresh["pickerOptions"] == [], (
+        "the destination refresh must quarantine the previous profile's "
+        f"options; retained {after_refresh['pickerOptions']!r}"
+    )
+
+
+@pytest.mark.parametrize("flow", ["switch", "loadSwitch"])
+def test_delayed_old_profile_catalog_rejected_by_newer_destination_request(flow):
+    """Ordering control (already green on the reviewed head and kept green by
+    the fix): when a NEWER destination catalog request starts before the
+    delayed old reply arrives, the existing request-sequence supersession must
+    reject the old reply — the fix must not disturb the newest-request control.
+    """
+    result = _run_refresh_driver(_delayed_old_catalog_scenario(flow, "destinationFirst"))
+    _assert_new_profile_session_stays_model_less(result, flow, "destination-first control")
+    after_refresh = result["afterRefresh"]
+    assert after_refresh["guard"], (
+        "the destination-first control must leave the gate armed through its "
+        "empty catalog"
+    )
+
+
+@pytest.mark.parametrize("flow", ["switch", "loadSwitch"])
+def test_delayed_old_catalog_rejected_after_aba_round_trip(flow):
+    """A->B->A: a delayed reply started on profile A (before ANY switch) must
+    be rejected once the tab has switched away and back — its profile name
+    matches the CURRENT profile, so a profile-name-only comparison would
+    accept it; only the transition generation invalidates it.
+
+    A's configuration changed while the reply was in flight (its switch
+    response now carries 'vendor/current-model'/'current-route'), so the stale
+    reply would publish 'vendor/old-model'/'old-route' over the freshly
+    adopted pair and the next New Chat would POST the stale pair.
+
+    RED on the reviewed head: neither transition bumped the catalog
+    generation, so the reply passed the seq gate and republished the stale
+    pair.
+    """
+    scenario = _delayed_old_catalog_scenario(flow, "abaRoundTrip", **{
+        "switchName": "profile-b",
+        "switchBackName": "profile-a",
+        "switchDataQueue": [
+            {"active": "profile-b", "is_default": False, "default_model": None},
+            {
+                "active": "profile-a",
+                "is_default": False,
+                "default_model": "vendor/current-model",
+                "default_model_provider": "current-route",
+            },
+        ],
+    })
+    result = _run_refresh_driver(scenario)
+    assert result["ok"], result.get("error")
+    bodies = result["newSessionBodies"]
+    assert bodies, "the chained New Chat must actually POST /api/session/new"
+    second = bodies[-1]
+    assert second.get("model") == "vendor/current-model", (
+        "after A->B->A the next New Chat must use the CURRENT pair adopted "
+        "from the B->A switch response, not the stale pre-transition catalog; "
+        f"got {second.get('model')!r}"
+    )
+    assert second.get("model_provider") == "current-route", (
+        "after A->B->A the next New Chat must use the CURRENT provider, not "
+        f"the stale 'old-route'; got {second.get('model_provider')!r}"
+    )
+    after = result["afterOldReply"]
+    assert after["defaultModel"] == "vendor/current-model", (
+        "the delayed reply must not overwrite the pair adopted by the B->A "
+        f"switch; got {after['defaultModel']!r}"
+    )
+    assert after["activeProvider"] == "current-route", (
+        "the delayed reply must not overwrite the provider adopted by the "
+        f"B->A switch; got {after['activeProvider']!r}"
     )
