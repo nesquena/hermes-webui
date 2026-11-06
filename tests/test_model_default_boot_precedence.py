@@ -193,7 +193,11 @@ def test_boot_model_dropdown_explicitly_requests_profile_default_precedence():
 
 
 def test_populate_model_dropdown_reconciles_selection_after_rebuild():
-    assert "const previousSelection=_captureModelDropdownSelection(sel);" in UI_JS
+    # #8527 re-gate: the capture is now reset-aware — while a profile-switch
+    # model reset is pending the dropdown's selection belongs to the PREVIOUS
+    # profile, so it is quarantined (null) instead of reconciled back in.
+    assert "const previousSelection=(typeof S!=='undefined'&&S&&S._profileSwitchModelReset)" in UI_JS
+    assert ":_captureModelDropdownSelection(sel);" in UI_JS
     assert "_reconcileModelDropdownSelection(sel,data,previousSelection,opts);" in UI_JS
     snippet = _reconcile_selection_snippet()
     assert "preferProfileDefaultOnFreshBoot" in snippet
@@ -209,6 +213,108 @@ def test_populate_model_dropdown_reconciles_selection_after_rebuild():
     assert "_ensureModelOptionInDropdown(modelId, sel, providerId)" in snippet
     assert "_readPersistedModelState()" not in snippet
     assert "localStorage.getItem('hermes-webui-model')" not in snippet
+
+
+def test_populate_model_dropdown_releases_the_switch_reset_only_after_the_rebuild():
+    """#8527 re-gate: the one-shot profile-switch model reset
+    (``S._profileSwitchModelReset``) must be released only AFTER the picker has
+    been rebuilt and reconciled.
+
+    Releasing it when the /api/models payload arrives let the
+    no-groups/no-configured-fallback branch return with the gate already open
+    while the PREVIOUS profile's option was still selected — the next
+    newSession() then adopted that stale pair. The empty-result branch must
+    keep the gate armed and quarantine the stale options instead.
+    """
+    start = UI_JS.index("async function populateModelDropdown")
+    end = UI_JS.index("function _addLiveModelsToSelect", start)
+    body = UI_JS[start:end]
+    release = body.index("S._profileSwitchModelReset=false")
+    reconcile = body.index(
+        "_reconcileModelDropdownSelection(sel,data,previousSelection,opts);"
+    )
+    assert reconcile < release, (
+        "the reset gate must be released after the picker is rebuilt/reconciled, "
+        "not when the payload arrives"
+    )
+    # The empty-result branch (no groups, no configured fallback) must neither
+    # release the gate nor keep the previous profile's options selectable.
+    empty_branch = body[
+        body.index("if(!groups.length){"):body.index("// Clear existing options")
+    ]
+    assert "sel.innerHTML='';" in empty_branch, (
+        "an empty catalog must quarantine the previous profile's options"
+    )
+    assert "_profileSwitchModelReset=false" not in empty_branch, (
+        "the reset gate must stay armed through empty hydration"
+    )
+
+
+def test_profile_switch_writers_fence_catalog_publication_before_stale_writes():
+    """#8576 catalog-owner: BOTH profile-transition writers must invalidate the
+    in-flight catalog generation BEFORE any stale defaults/options/reset write.
+
+    A delayed previous-profile catalog reply can publish its defaults, rebuild
+    its options and release the one-shot reset inside the switch's publication
+    window (after the automatic New Chat, before the destination hydration).
+    Guarding only the reset RELEASE is insufficient: newSession()'s
+    configured-default arm reads the stale globals first. The fence call must
+    therefore precede the persisted-state clear, the
+    window._defaultModel/_activeProvider pair write AND the
+    S._profileSwitchModelReset write in each writer.
+    """
+    assert "function _invalidateModelDropdownRequests(" in UI_JS, (
+        "the catalog-generation invalidator must exist in ui.js"
+    )
+    inv_start = UI_JS.index("function _invalidateModelDropdownRequests(")
+    inv_end = UI_JS.index("\n}", inv_start)
+    inv_body = UI_JS[inv_start:inv_end]
+    assert "_modelDropdownRequestSeq++" in inv_body, (
+        "the invalidator must advance the request sequence so an in-flight "
+        "reply can no longer pass populateModelDropdown's seq gate"
+    )
+
+    cases = [
+        (
+            (REPO / "static" / "panels.js").read_text(encoding="utf-8"),
+            "switchToProfile",
+            "window._defaultModel = data.default_model || null;",
+            "S._profileSwitchModelReset = !data.default_model;",
+            "const data = await api('/api/profile/switch'",
+        ),
+        (
+            (REPO / "static" / "sessions.js").read_text(encoding="utf-8"),
+            "_switchProfileForSessionLoad",
+            "window._defaultModel=data.default_model||null;",
+            "S._profileSwitchModelReset=!data.default_model;",
+            "const data=await api('/api/profile/switch'",
+        ),
+    ]
+    for src, fn, pair_write, reset_write, post_marker in cases:
+        start = src.index("async function " + fn)
+        # The fence must sit BEFORE the default-model/provider pair write...
+        pair = src.index(pair_write)
+        prefix = src[start:pair]
+        assert "_invalidateModelDropdownRequests" in prefix, (
+            f"{fn}: the catalog fence must run before the default pair write"
+        )
+        # ...before the one-shot reset write...
+        reset = src.index(reset_write)
+        assert "_invalidateModelDropdownRequests" in src[start:reset], (
+            f"{fn}: the catalog fence must run before the reset write"
+        )
+        # ...and before the persisted-state clear (the first stale write).
+        clear = src.index("_clearPersistedModelState()", start)
+        assert "_invalidateModelDropdownRequests" in src[start:clear], (
+            f"{fn}: the catalog fence must run before the persisted-state clear"
+        )
+        # The fence itself must be inside the SUCCESS path of the switch (after
+        # the switch POST resolves), so a FAILED switch keeps the previous
+        # profile's in-flight replies valid.
+        post = src.index(post_marker, start)
+        assert "_invalidateModelDropdownRequests" in src[post:pair], (
+            f"{fn}: the fence must run only after a successful switch response"
+        )
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
