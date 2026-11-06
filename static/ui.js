@@ -5859,10 +5859,104 @@ const _liveModelCache={};
 // Used by syncTopbar() to defer model corrections until the fetch completes,
 // preventing premature fallback to the first static model (#1169).
 const _liveModelFetchPending=new Set();
+// Per-provider owner token for the pending marker above: an obsolete fetch's
+// cleanup must not clear a successor's pending state (#1169, #6919).
+const _liveModelFetchOwners=new Map();
+// #6919: advanced by invalidateLiveModelCache(). A _fetchLiveModels() dispatch
+// captures the epoch before it fires and rejects its response after the
+// awaits when the epoch moved, so a response that was in flight during an
+// invalidation cannot repopulate _liveModelCache or enrich the dropdown.
+// Deliberately independent of _modelDropdownRequestSeq, which only orders
+// concurrent populateModelDropdown() calls — the Settings caller passes no
+// requestSeq at all.
+let _liveModelInvalidationEpoch=0;
 
-function _addLiveModelsToSelect(provider, models, sel){
-  if(!provider||!models||!models.length||!sel) return 0;
+// #6919: the providers-panel "Refresh Models" button clears the SERVER's
+// live-models cache; this is the matching browser-side eviction so the next
+// _fetchLiveModels() actually re-fetches instead of serving the stale page
+// cache. providerId omitted -> clear every provider. Every invalidation
+// advances the epoch so in-flight fetches are revoked too, even when no
+// completed cache entry exists.
+function invalidateLiveModelCache(providerId){
+  _liveModelInvalidationEpoch++;
+  if(providerId){
+    delete _liveModelCache[providerId];
+  }else{
+    for(const k in _liveModelCache) delete _liveModelCache[k];
+  }
+  // #6919: the Settings → Conversation picker is a second live-model receiver,
+  // distinct from the composer dropdown. The epoch advance above revokes its
+  // in-flight fetch, and switchSettingsSection() only toggles panes — it never
+  // re-runs the Settings loader — so without a successor the picker stays
+  // unenriched until the whole Settings panel is reopened. Re-arm it here,
+  // AFTER the eviction: before it, _fetchLiveModels() would hit the surviving
+  // cache entry and never re-fetch. The re-fetch only appends options and
+  // re-applies the current selection, so no unsaved Settings state is reset.
+  try{
+    const sel=(typeof document!=='undefined'&&document.getElementById)
+      ? document.getElementById('settingsModel') : null;
+    // Only a picker hydrated by the Settings loader has the static catalog to
+    // enrich; a never-opened Settings pane is repainted on entry anyway.
+    if(sel&&sel.options&&sel.options.length){
+      const provider=(typeof window!=='undefined'&&window._activeProvider)
+        ? String(window._activeProvider)
+        : (providerId?String(providerId):'');
+      if(provider) Promise.resolve(_fetchLiveModels(provider,sel,null,{reconcile:true})).catch(()=>{});
+    }
+  }catch(_e){}
+}
+
+// #6919 (Greptile follow-up): _addLiveModelsToSelect() only appends, so a model
+// the provider has since removed stays selectable forever — "Refresh Models"
+// reports success while the Settings picker still offers the dead entry. Drop
+// the live options that are absent from the fresh payload, but never the
+// current selection and never a static catalog row: the user's persisted or
+// unsaved choice has to survive the reconciliation.
+function _dropStaleLiveModelOptions(provider, freshValues, sel){
+  let removed=0;
+  try{
+    if(!sel||!sel.querySelectorAll) return 0;
+    const selected=(sel.options&&sel.selectedIndex>=0)?sel.options[sel.selectedIndex]:null;
+    for(const og of sel.querySelectorAll('optgroup')){
+      if(String((og.dataset||{}).provider||'')!==String(provider)) continue;
+      for(const opt of [...(og.children||[])]){
+        const isLive=(opt.dataset&&opt.dataset.live==='1')
+          || opt.title==='Live model — fetched from provider';
+        if(!isLive||opt===selected) continue;
+        // A live replacement that stands in for a static catalog row (the bare
+        // twin was deduped away) must survive: the catalog still offers it.
+        if(opt.dataset&&opt.dataset.catalogOrigin==='1') continue;
+        if(freshValues.has(String(opt.value))) continue;
+        og.removeChild(opt);
+        removed++;
+      }
+    }
+  }catch(_e){}
+  return removed;
+}
+
+// #6919 (empty-membership remainder): an authoritative EMPTY membership is a
+// real answer — "this provider offers no models" — and must reconcile the
+// picker to that empty set, dropping the live choices the provider no longer
+// advertises.
+//
+// The append below has nothing to add for an empty payload, so the append
+// block is skipped and the reconcile at the end runs against the EMPTY set:
+// the pruner drops the live-only choices and keeps the selection, the
+// catalog-origin options and the other providers' options. Before this, the
+// empty case returned early and the pruner was never reached, leaving a
+// removed live-only option selectable.
+//
+// Only the reconcile path reconciles. The plain append path (the composer)
+// keeps its empty-array no-op, and a non-empty `models` array never takes
+// this branch.
+function _addLiveModelsToSelect(provider, models, sel, opts){
+  if(!provider||!models||!sel) return 0;
   const currentVal=sel.value;
+  const reconcile=!!(opts&&opts.reconcile);
+  // The plain append path keeps its empty-array no-op: without a reconcile
+  // request there is nothing to prune and nothing to append.
+  if(!models.length&&!reconcile) return 0;
   let providerGroup=null;
   for(const og of sel.querySelectorAll('optgroup')){
     if(og.dataset.provider&&og.dataset.provider===provider){
@@ -5872,14 +5966,6 @@ function _addLiveModelsToSelect(provider, models, sel){
       providerGroup=og; break;
     }
   }
-  if(!providerGroup){
-    providerGroup=document.createElement('optgroup');
-    providerGroup.label=provider.charAt(0).toUpperCase()+provider.slice(1)+' (live)';
-    providerGroup.dataset.provider=provider;
-    sel.appendChild(providerGroup);
-  }else if(!providerGroup.dataset.provider){
-    providerGroup.dataset.provider=provider;
-  }
   const existingIds=new Set([...sel.options].map(o=>o.value));
   const _ap=(window._activeProvider||'').toLowerCase();
   const _providerLower=String(provider||'').toLowerCase();
@@ -5888,54 +5974,82 @@ function _addLiveModelsToSelect(provider, models, sel){
   // Keep existingNorm.has( within the #907 source slice.
   const optionIdentity=_modelPickerOptionIdentity;
   const existingNorm=new Set([...sel.options].map(o=>optionIdentity(o.value,_getOptionProviderId(o))));
+  // #6919: every mid present in the fresh payload is retained by reconcile.
+  const refreshed=reconcile?new Set():null;
   let added=0;
-  for(const m of models){
-    let mid=m.id;
-    if(_isPortalFetch && !mid.startsWith('@')){
-      mid=`@${provider}:${mid}`;
+  if(models.length){
+    if(!providerGroup){
+      providerGroup=document.createElement('optgroup');
+      providerGroup.label=provider.charAt(0).toUpperCase()+provider.slice(1)+' (live)';
+      providerGroup.dataset.provider=provider;
+      sel.appendChild(providerGroup);
+    }else if(!providerGroup.dataset.provider){
+      providerGroup.dataset.provider=provider;
     }
-    if(existingIds.has(mid)) continue;
-    const identity=optionIdentity(mid,provider);
-    let twin=null;
-    if(existingNorm.has(identity)){
-      const sameGroup=Array.from(providerGroup.children||[]).find(o=>optionIdentity(o.value,_getOptionProviderId(o))===identity);
-      if(sameGroup){
-        const incomingRoutable=String(mid).startsWith('@');
-        const existingRoutable=String(sameGroup.value||'').startsWith('@');
-        if(!(!existingRoutable&&incomingRoutable)) continue; // let proxy replace catalog twin
-        twin=sameGroup;
+    for(const m of models){
+      let mid=m.id;
+      if(_isPortalFetch && !mid.startsWith('@')){
+        mid=`@${provider}:${mid}`;
       }
+      if(refreshed) refreshed.add(String(mid));
+      if(existingIds.has(mid)) continue;
+      const identity=optionIdentity(mid,provider);
+      let twin=null;
+      if(existingNorm.has(identity)){
+        const sameGroup=Array.from(providerGroup.children||[]).find(o=>optionIdentity(o.value,_getOptionProviderId(o))===identity);
+        if(sameGroup){
+          const incomingRoutable=String(mid).startsWith('@');
+          const existingRoutable=String(sameGroup.value||'').startsWith('@');
+          if(!(!existingRoutable&&incomingRoutable)) continue; // let proxy replace catalog twin
+          twin=sameGroup;
+        }
+      }
+      const opt=document.createElement('option');
+      opt.value=mid;
+      opt.textContent=m.label||m.id;
+      opt.title='Live model — fetched from provider';
+      opt.dataset.provider=provider;
+      opt.dataset.live='1';
+      if(m && (m.supports_fast_tier === true || String(m.supports_fast_tier).toLowerCase()==='true')){
+        opt.dataset.fast='1';
+      }else if(m && (m.supports_fast_tier === false || String(m.supports_fast_tier).toLowerCase()==='false')){
+        opt.dataset.fast='0';
+      }
+      if(twin){
+        // A routed replacement for a catalog twin takes the twin's place and its
+        // curated/extra status (#7528 option B): dedup then drops the bare twin,
+        // so a built-in group keeps its curated order instead of the replacement
+        // being sorted into the extras block.
+        //
+        // #6919: remember that the replacement stands in for a STATIC catalog row.
+        // Dedup removed the bare option, so dropping the replacement on a later
+        // refresh (a capped live list can change order) would silently remove a
+        // model the static catalog still offers. Reconciliation only prunes
+        // live-ONLY choices.
+        opt.dataset.catalogOrigin='1';
+        if(twin.dataset&&twin.dataset.extra) opt.dataset.extra='1';
+        providerGroup.insertBefore(opt,twin);
+      }else{
+        // Not part of the group's curated `models` list: _sortModelPickerOptions
+        // sorts these after the catalog rows of a built-in group (#7528 option B).
+        opt.dataset.extra='1';
+        providerGroup.appendChild(opt);
+      }
+      existingIds.add(mid);
+      existingNorm.add(identity);
+      _dynamicModelLabels[mid]=m.label||m.id;
+      added++;
     }
-    const opt=document.createElement('option');
-    opt.value=mid;
-    opt.textContent=m.label||m.id;
-    opt.title='Live model — fetched from provider';
-    opt.dataset.provider=provider;
-    if(m && (m.supports_fast_tier === true || String(m.supports_fast_tier).toLowerCase()==='true')){
-      opt.dataset.fast='1';
-    }else if(m && (m.supports_fast_tier === false || String(m.supports_fast_tier).toLowerCase()==='false')){
-      opt.dataset.fast='0';
-    }
-    if(twin){
-      // A routed replacement for a catalog twin takes the twin's place and its
-      // curated/extra status (#7528 option B): dedup then drops the bare twin,
-      // so a built-in group keeps its curated order instead of the replacement
-      // being sorted into the extras block.
-      if(twin.dataset&&twin.dataset.extra) opt.dataset.extra='1';
-      providerGroup.insertBefore(opt,twin);
-    }else{
-      // Not part of the group's curated `models` list: _sortModelPickerOptions
-      // sorts these after the catalog rows of a built-in group (#7528 option B).
-      opt.dataset.extra='1';
-      providerGroup.appendChild(opt);
-    }
-    existingIds.add(mid);
-    existingNorm.add(identity);
-    _dynamicModelLabels[mid]=m.label||m.id;
-    added++;
   }
+  // #6919: reconcile AFTER the append so the fresh payload's own options are
+  // already in `refreshed` and cannot be dropped as stale. For an
+  // authoritative EMPTY membership `refreshed` is the empty set, so this
+  // reconciles the picker to "this provider offers no models" — the pruner
+  // drops the live-only choices and keeps the selection, the catalog-origin
+  // options and the other providers' options.
+  if(reconcile&&refreshed) _dropStaleLiveModelOptions(provider,refreshed,sel);
   if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,currentVal);
-  if(typeof _sortModelPickerOptions==='function') _sortModelPickerOptions(providerGroup);
+  if(providerGroup&&typeof _sortModelPickerOptions==='function') _sortModelPickerOptions(providerGroup);
   const currentState=(currentVal&&typeof _modelStateForSelect==='function')
     ? _modelStateForSelect(sel, currentVal)
     : {model:currentVal||'', model_provider:(S.session&&S.session.model_provider)||null};
@@ -5956,29 +6070,49 @@ function _addLiveModelsToSelect(provider, models, sel){
   return added;
 }
 
-async function _fetchLiveModels(provider, sel, requestSeq=null){
+async function _fetchLiveModels(provider, sel, requestSeq=null, opts=null){
   if(!provider||!sel) return;
   if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+  // #6919: capture the invalidation epoch BEFORE dispatch. A response that
+  // was in flight when invalidateLiveModelCache() ran is obsolete and must
+  // not repopulate the cache or enrich the dropdown — checked after each
+  // await, before the cache publication and the DOM enrichment below.
+  const invalidationEpoch=_liveModelInvalidationEpoch;
   // Already fetched — apply cached models to this select element (#872)
   if(_liveModelCache[provider]){
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
-    const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel);
+    const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel,opts);
     if(added>0 && typeof syncModelChip==='function') syncModelChip();
     return;
   }
   _liveModelFetchPending.add(provider);
+  const fetchOwner={};
+  _liveModelFetchOwners.set(provider,fetchOwner);
   try{
     const url=new URL('api/models/live',document.baseURI||location.href);
     url.searchParams.set('provider',provider);
     const _liveRes=await fetch(url.href,{credentials:'include'});
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
+    if(invalidationEpoch!==_liveModelInvalidationEpoch) return;
     if(_redirectIfUnauth(_liveRes)) return;
     const data=await _liveRes.json();
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
-    if(!data.models||!data.models.length) return;
-    _liveModelCache[provider]=data.models;
+    if(invalidationEpoch!==_liveModelInvalidationEpoch) return;
+    // #6919: an EMPTY live list is only authoritative membership when the
+    // response itself says the discovery SUCCEEDED. The endpoint publishes
+    // its failure shape with an ``error`` marker, so an empty list WITHOUT
+    // an error is "this provider really has no models" and must reconcile
+    // the picker to that empty set. A discovery failure, a missing field
+    // and a malformed payload say nothing about what the provider offers
+    // and must leave the picker untouched.
+    const _modelsList=(data&&Array.isArray(data.models))?data.models:null;
+    const _hasModels=!!(_modelsList&&_modelsList.length);
+    const _authoritativeEmpty=!!(_modelsList&&!_modelsList.length&&!data.error);
+    if(!_hasModels&&!_authoritativeEmpty) return;
+    if(invalidationEpoch!==_liveModelInvalidationEpoch) return;
+    if(_hasModels) _liveModelCache[provider]=data.models;
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
-    const added=_addLiveModelsToSelect(provider,data.models,sel);
+    const added=_addLiveModelsToSelect(provider,data.models,sel,opts);
     if(added>0){
       if(typeof syncModelChip==='function') syncModelChip();
       console.debug('[hermes] Live models loaded for',provider+':',added,'new models added');
@@ -5986,7 +6120,14 @@ async function _fetchLiveModels(provider, sel, requestSeq=null){
   }catch(e){
     console.debug('[hermes] Live model fetch failed for',provider,e.message);
   }finally{
-    _liveModelFetchPending.delete(provider);
+    // Successor-aware cleanup: if a newer fetch for the same provider
+    // claimed the pending marker while this one was in flight, this
+    // (possibly revoked) fetch must not clear the successor's pending
+    // state — syncTopbar() defers model correction on it (#1169).
+    if(_liveModelFetchOwners.get(provider)===fetchOwner){
+      _liveModelFetchPending.delete(provider);
+      _liveModelFetchOwners.delete(provider);
+    }
   }
 }
 

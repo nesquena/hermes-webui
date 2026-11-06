@@ -12958,6 +12958,12 @@ async function _saveSelfHostedProvider(providerId){
 // loaded yet (e.g. during early Settings open) cannot break the save flow.
 function _refreshModelDropdownsAfterProviderChange(){
   try{
+    // #6919: drop the browser-side live-model cache before rebuilding the
+    // dropdowns, so a "Refresh Models" success is not followed by the same
+    // stale per-page list.
+    if(typeof invalidateLiveModelCache==='function'){
+      invalidateLiveModelCache();
+    }
     if(typeof window._invalidateSlashModelCache==='function'){
       window._invalidateSlashModelCache();
     }

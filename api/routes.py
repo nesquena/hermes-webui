@@ -2732,6 +2732,9 @@ _OPENAI_COMPAT_ENDPOINTS = {
 _LIVE_MODELS_CACHE_TTL = 60.0
 _LIVE_MODELS_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 _LIVE_MODELS_CACHE_LOCK = threading.RLock()
+# #6919: bumped by POST /api/models/refresh; responses that captured an older
+# generation must not repopulate the cache with pre-refresh bytes.
+_LIVE_MODELS_CACHE_GENERATION = 0
 
 
 def _active_profile_for_live_models_cache() -> str:
@@ -2769,9 +2772,64 @@ def _set_cached_live_models(key: tuple[str, str], payload: dict) -> None:
         _LIVE_MODELS_CACHE[key] = (time.monotonic(), copy.deepcopy(payload))
 
 
+def _publish_live_models(key: tuple[str, str], payload: dict, expected_generation: int) -> bool:
+    """Fence-and-publish a live-models payload atomically (#6919).
+
+    The expected-generation comparison and the cache publication share one
+    ``_LIVE_MODELS_CACHE_LOCK`` hold. With separate acquisitions a refresh
+    can land between a worker's generation check and its cache write, after
+    which the worker repopulates the just-evicted entry with pre-refresh
+    bytes. Returns True when the payload was published.
+
+    Provider work and JSON response I/O stay outside this helper. The lock
+    is an RLock, so the nested ``_live_models_generation()`` and
+    ``_set_cached_live_models()`` calls re-enter the same hold.
+    """
+    with _LIVE_MODELS_CACHE_LOCK:
+        if _live_models_generation() != expected_generation:
+            return False
+        _set_cached_live_models(key, payload)
+        return True
+
+
 def _clear_live_models_cache() -> None:
     with _LIVE_MODELS_CACHE_LOCK:
         _LIVE_MODELS_CACHE.clear()
+
+
+def _invalidate_live_models_cache(provider: str) -> None:
+    """Evict the live-models entry for the active profile + provider (#6919)."""
+    key = _live_models_cache_key(provider)
+    with _LIVE_MODELS_CACHE_LOCK:
+        _LIVE_MODELS_CACHE.pop(key, None)
+
+
+def _invalidate_live_models_cache_and_bump(provider: str) -> int:
+    """Evict a provider's live-models entry and advance the cache generation
+    in ONE critical section (#6919).
+
+    Separate eviction/bump acquisitions leave a pop-to-bump interval where
+    an in-flight worker that already passed its generation check can
+    publish, resurrecting the entry the refresh just evicted. The lock is
+    an RLock, so the nested calls re-enter the same hold.
+    """
+    with _LIVE_MODELS_CACHE_LOCK:
+        _invalidate_live_models_cache(provider)
+        return _bump_live_models_generation()
+
+
+def _live_models_generation() -> int:
+    with _LIVE_MODELS_CACHE_LOCK:
+        return _LIVE_MODELS_CACHE_GENERATION
+
+
+def _bump_live_models_generation() -> int:
+    """Fence in-flight live-model responses: a response started before a
+    refresh must not write its stale payload back into the cache."""
+    global _LIVE_MODELS_CACHE_GENERATION
+    with _LIVE_MODELS_CACHE_LOCK:
+        _LIVE_MODELS_CACHE_GENERATION += 1
+        return _LIVE_MODELS_CACHE_GENERATION
 
 
 from api import route_session_list_cache as _route_session_list_cache
@@ -20002,6 +20060,11 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "provider is required")
         from api.config import invalidate_provider_models_cache
         invalidate_provider_models_cache(provider_id)
+        # #6919: also evict the live-models cache (normalized key) and fence
+        # in-flight responses against repopulation — eviction and generation
+        # advance share one critical section.
+        from api.config import _resolve_provider_alias
+        _invalidate_live_models_cache_and_bump(_resolve_provider_alias(provider_id))
         return j(handler, {"ok": True, "provider": provider_id})
 
     if parsed.path == "/api/reasoning":
@@ -27307,6 +27370,16 @@ def _handle_live_models(handler, parsed):
     qs = parse_qs(parsed.query)
     provider = (qs.get("provider", [""])[0] or "").lower().strip()
 
+    # #6919 (empty-membership remainder): an EMPTY model list is only
+    # "this provider really has no models" when a discovery step actually
+    # SUCCEEDED. Every fallback path below degrades to an empty list too, so
+    # an empty list alone cannot be read as authoritative membership — the
+    # frontend would prune live choices on what is really a discovery
+    # failure. Track whether a discovery step completed successfully; when
+    # none did, the empty answer is published with an ``error`` marker so the
+    # client can tell the two apart (the endpoint's existing failure shape).
+    _discovery_succeeded = False
+
     try:
         from api.config import get_config as _gc
         cfg = _gc()
@@ -27328,12 +27401,18 @@ def _handle_live_models(handler, parsed):
             return j(handler, {"provider": provider, "models": [], "count": 0})
 
         cache_key = _live_models_cache_key(provider)
+        generation = _live_models_generation()
         cached = _get_cached_live_models(cache_key)
         if cached is not None:
             return j(handler, cached)
 
         def _finish(payload: dict):
-            _set_cached_live_models(cache_key, payload)
+            # #6919 generation fence: a response that started before a
+            # models refresh must not repopulate the cache with stale
+            # bytes. The comparison and the cache write share one lock
+            # hold (_publish_live_models); the JSON response stays
+            # outside the critical section.
+            _publish_live_models(cache_key, payload, generation)
             return j(handler, payload)
 
         # Delegate to the agent's live-fetch + fallback resolver.
@@ -27352,6 +27431,11 @@ def _handle_live_models(handler, parsed):
         except Exception as _import_err:
             logger.debug("provider_model_ids import failed for %s: %s", provider, _import_err)
             ids = []
+
+        if ids:
+            # #6919: the agent's resolver produced a real catalog, so this
+            # response is authoritative membership.
+            _discovery_succeeded = True
 
         if not ids:
             custom_provider_entry = None
@@ -27488,6 +27572,26 @@ def _handle_live_models(handler, parsed):
                         elif isinstance(_body, list):
                             ids = [m.get("id", m) if isinstance(m, dict) else m for m in _body]
 
+                        # #6919: the endpoint answered, but an HTTP 200 alone
+                        # does not make the answer a MODEL LIST. A body like
+                        # {"error": "temporarily unavailable"}, {}, {"data":
+                        # null}, {"data": "unavailable"} or a bare JSON string
+                        # is a failed/wrong-shaped discovery, and treating it
+                        # as successful would publish an authoritative EMPTY
+                        # membership — the client would then prune live
+                        # choices on what is really an upstream failure.
+                        #
+                        # Only the two SUPPORTED model-list shapes count as a
+                        # successful discovery: {"data": [...]} (an empty list
+                        # included — that is genuine "no models") and a bare
+                        # [...]. Everything else leaves discovery unsuccessful.
+                        _valid_model_list_shape = (
+                            (isinstance(_body, dict) and isinstance(_body.get("data"), list))
+                            or isinstance(_body, list)
+                        )
+                        if _valid_model_list_shape:
+                            _discovery_succeeded = True
+
                         if ids:
                             logger.debug("Live-fetched %d models from custom provider %s", len(ids), _base_url)
                         else:
@@ -27568,8 +27672,28 @@ def _handle_live_models(handler, parsed):
                         )
                         with urllib.request.urlopen(_req, timeout=8) as _resp:
                             _body = json.loads(_resp.read())
-                        ids = [m.get("id", "") for m in _body.get("data", []) if m.get("id")]
-                        logger.debug("Live-fetched %d models from %s /v1/models", len(ids), provider)
+                        # #6919: same shape contract as the custom-provider
+                        # probe — only {"data": [...]} or a bare [...] is a
+                        # successful model-list discovery. A 200 with the wrong
+                        # shape is a failed discovery, not an authoritative
+                        # empty membership.
+                        if isinstance(_body, dict) and isinstance(_body.get("data"), list):
+                            ids = [m.get("id", "") for m in _body.get("data", []) if m.get("id")]
+                            _discovery_succeeded = True
+                            logger.debug("Live-fetched %d models from %s /v1/models", len(ids), provider)
+                        elif isinstance(_body, list):
+                            ids = [m.get("id", m) if isinstance(m, dict) else m for m in _body]
+                            _discovery_succeeded = True
+                            logger.debug("Live-fetched %d models from %s /v1/models", len(ids), provider)
+                        else:
+                            # A 200 with an unsupported shape: not a model list.
+                            # Leave discovery unsuccessful so the empty answer
+                            # is published as a failure rather than as an
+                            # authoritative membership.
+                            logger.debug(
+                                "Live fetch from %s returned an unsupported model-list shape",
+                                provider,
+                            )
                 except Exception as _fetch_err:
                     logger.debug("Live fetch from %s failed: %s", provider, _fetch_err)
                     # Fall through to static list below
@@ -27579,6 +27703,16 @@ def _handle_live_models(handler, parsed):
             from api.config import _PROVIDER_MODELS as _pm
             ids = [m["id"] for m in _pm.get(provider, [])]
         if not ids:
+            # #6919: nothing discovered. When no discovery step actually
+            # completed, this empty list is NOT authoritative membership —
+            # it means "we could not find out". Publish it in the endpoint's
+            # existing failure shape (``error`` marker) so the client does
+            # not reconcile the picker to an empty set on a discovery
+            # failure. A completed discovery that genuinely found no models
+            # stays a plain, authoritative empty list.
+            if not _discovery_succeeded:
+                return _finish({"provider": provider, "models": [], "count": 0,
+                                "error": "no_models_discovered"})
             return _finish({"provider": provider, "models": [], "count": 0})
 
         # Match the same dropdown visibility budget that /api/models uses so
