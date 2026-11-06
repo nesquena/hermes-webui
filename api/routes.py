@@ -2718,7 +2718,9 @@ _PROVIDER_ALIASES = {
 _OPENAI_COMPAT_ENDPOINTS = {
     "zai": "https://api.z.ai/v1",
     "minimax": "https://api.minimax.chat/v1",
-    "mistralai": "https://api.mistral.ai/v1",
+    # Keyed by the canonical provider slug — ``mistral``, not the OpenRouter
+    # vendor namespace ``mistralai`` (#6894).
+    "mistral": "https://api.mistral.ai/v1",
     "xai": "https://api.x.ai/v1",
     "deepseek": "https://api.deepseek.com",
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -27547,7 +27549,31 @@ def _handle_live_models(handler, parsed):
                 try:
                     import urllib.request
                     _providers_cfg = cfg.get("providers") or {}
-                    _prov = _providers_cfg.get(provider, {}) if isinstance(_providers_cfg, dict) else {}
+                    # #8664 review P2 "Live models lose their key" (Greptile,
+                    # 2026-11-04): ``provider`` here is the CANONICAL slug
+                    # (``mistral``), but the record in config.yaml may still be
+                    # the legacy spelling (``providers.mistralai``). Reading
+                    # ``providers[provider]`` by exact spelling then missed the
+                    # record's own api_key, the authenticated fetch was skipped,
+                    # and the user got the two static models instead of the
+                    # live list.
+                    #
+                    # So resolve the RAW config key first: the same
+                    # ``_raw_provider_key_for_provider_id`` the rest of the
+                    # WebUI uses to pick one owning record. It returns the
+                    # requested id unchanged when no record matches, so the
+                    # canonical record's own key is still found.
+                    _raw_provider_key = provider
+                    try:
+                        from api.config import _raw_provider_key_for_provider_id as _raw_key_for
+                        _raw_provider_key = _raw_key_for(provider)
+                    except Exception:
+                        pass
+                    _prov = (
+                        _providers_cfg.get(_raw_provider_key, {})
+                        if isinstance(_providers_cfg, dict)
+                        else {}
+                    )
                     # Only use a provider-scoped key.  A top-level model.api_key
                     # is safe here only when it belongs to the requested provider;
                     # otherwise /api/models/live?provider=<other> could forward
