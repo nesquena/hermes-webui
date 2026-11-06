@@ -7682,6 +7682,11 @@ def _migrate_compression_session_ownership(
     index_path = _models.SESSION_INDEX_FILE
     index_row_snapshot = None
     index_file_existed = False
+    persisted_message_count = _models._prefix_message_count(old_path)
+    boundary_may_add_parent_rows = (
+        persisted_message_count is None
+        or len(getattr(s, 'messages', []) or []) <= persisted_message_count
+    )
     try:
         old_preimage = old_path.read_text(encoding='utf-8')
         with _models._INDEX_WRITE_LOCK:
@@ -7790,14 +7795,20 @@ def _migrate_compression_session_ownership(
                 SESSION_AGENT_LOCKS.pop(new_sid, None)
         return False
 
-    try:
-        compression_boundary = _compression_disjoint_parent_boundary(s, old_sid)
-    except Exception:
-        # Boundary metadata is an optimisation only. Snapshot preservation and
-        # ownership migration remain authoritative; ambiguous proof falls back
-        # to the established full-lineage read path.
-        logger.debug("Could not build compression boundary proof", exc_info=True)
-        compression_boundary = None
+    compression_boundary = None
+    if boundary_may_add_parent_rows:
+        try:
+            compression_boundary = _compression_disjoint_parent_boundary(s, old_sid)
+        except Exception:
+            # Boundary metadata is an optimisation only. Snapshot preservation and
+            # ownership migration remain authoritative; ambiguous proof falls back
+            # to the established full-lineage read path.
+            logger.debug("Could not build compression boundary proof", exc_info=True)
+    # When the in-memory continuation has more rows than the marked sidecar,
+    # _preserve_pre_compression_snapshot rewrites the snapshot from that same
+    # cumulative message sequence. Such a parent cannot add a row omitted by the
+    # child, so parsing it and running two full-history merges under the agent
+    # lock can only rediscover that no disjoint boundary exists.
 
     try:
         with LOCK:

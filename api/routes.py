@@ -11663,6 +11663,34 @@ def _limited_webui_messages_for_display_with_sidecar(
         sidecar_messages = list(sidecar_messages or [])
         if not sidecar_owners:
             sidecar_owners = _display_exact_owner_positions(session, sidecar_messages)
+    # The state.db reconciler enriches matching rows in place (for example with
+    # provider ``api_content``).  Never hand it Session.messages or lineage-cache
+    # row objects: mutating those aliases changes the next request's compression
+    # proof and makes the post-merge projection check compare an object to itself.
+    # Capture exact owner positions against the source identities first, then
+    # reconcile only disposable row copies.
+    sidecar_messages = [
+        dict(message) if isinstance(message, dict) else message
+        for message in list(sidecar_messages or [])
+    ]
+    # Cancellation recovery needs the complete saved child history as an owner
+    # proof, including rows outside a bounded display slice. Rebuild that history
+    # with the selected display copies wherever an exact owner projection exists;
+    # clone every other row. This preserves the merge helper's intentional
+    # object-sharing between owner and selected rows without exposing the durable
+    # Session.messages objects to its in-place provider-sidecar reconciliation.
+    isolated_owner_messages = []
+    for owner_index, message in enumerate(getattr(session, "messages", None) or []):
+        projected_index = sidecar_owners.get(owner_index)
+        if (
+            type(projected_index) is int
+            and 0 <= projected_index < len(sidecar_messages)
+        ):
+            isolated_owner_messages.append(sidecar_messages[projected_index])
+        else:
+            isolated_owner_messages.append(
+                dict(message) if isinstance(message, dict) else message
+            )
     state_db_messages = list(state_db_messages or [])
     if not state_db_messages:
         if owner_positions is not None:
@@ -11749,7 +11777,7 @@ def _limited_webui_messages_for_display_with_sidecar(
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
         incoming_provenance="state_db",
-        cancelled_journal_owner_messages=getattr(session, "messages", None) or [],
+        cancelled_journal_owner_messages=isolated_owner_messages,
     )
     merged = _project_native_image_payload_conflicts_for_display(
         sidecar_messages,
@@ -12618,6 +12646,34 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20, 
     seen = {str(getattr(session, "session_id", "") or "")}
     parent_sigs: list[tuple[str, tuple]] = []
     parent_signatures_complete = True
+
+    def _cache_lineage_result(messages, projected_owners):
+        if (
+            cache_allowed
+            and self_sig is not None
+            and parent_sigs
+            and parent_signatures_complete
+        ):
+            cached_messages = [
+                dict(message) if isinstance(message, dict) else message
+                for message in messages
+            ]
+            with _lineage_display_cache_lock:
+                _lineage_display_cache[sid] = {
+                    "self_sig": self_sig,
+                    "parent_sigs": parent_sigs,
+                    "provenance_complete": True,
+                    "messages": cached_messages,
+                    "owner_positions": projected_owners,
+                }
+                _lineage_display_cache.move_to_end(sid, last=True)
+                while len(_lineage_display_cache) > _LINEAGE_DISPLAY_CACHE_MAX:
+                    _lineage_display_cache.popitem(last=False)
+            # Hand out copies so caller-side metadata mutation cannot corrupt
+            # the cached rows (same contract as the cache-hit path).
+            return [dict(m) if isinstance(m, dict) else m for m in cached_messages]
+        return messages
+
     for _ in range(max(0, int(max_hops))):
         parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
         if not parent_id:
@@ -12649,10 +12705,15 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20, 
             session_messages,
             getattr(parent, "messages", []) or [],
         ):
+            projected_owners = _display_exact_owner_positions(session, session_messages)
             if owner_positions is not None:
                 owner_positions.clear()
-                owner_positions.update(_display_exact_owner_positions(session, session_messages))
-            return session_messages
+                owner_positions.update(projected_owners)
+            # A cumulative child needs no stitch, but the parent read above still
+            # proves both the projection and its owner coordinates. Cache that
+            # exact provenance so owner-aware pagination and merge-cache keys do
+            # not parse the same parent again on this or every warm request.
+            return _cache_lineage_result(session_messages, projected_owners)
         segments.append(parent)
         seen.add(parent_id)
         current = parent
@@ -12684,27 +12745,7 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20, 
     if owner_positions is not None:
         owner_positions.clear()
         owner_positions.update(projected_owners)
-    if (
-        cache_allowed
-        and self_sig is not None
-        and parent_sigs
-        and parent_signatures_complete
-    ):
-        with _lineage_display_cache_lock:
-            _lineage_display_cache[sid] = {
-                "self_sig": self_sig,
-                "parent_sigs": parent_sigs,
-                "provenance_complete": True,
-                "messages": merged,
-                "owner_positions": projected_owners,
-            }
-            _lineage_display_cache.move_to_end(sid, last=True)
-            while len(_lineage_display_cache) > _LINEAGE_DISPLAY_CACHE_MAX:
-                _lineage_display_cache.popitem(last=False)
-        # Hand out copies so caller-side metadata mutation cannot corrupt
-        # the cached rows (same contract as the cache-hit path).
-        return [dict(m) if isinstance(m, dict) else m for m in merged]
-    return merged
+    return _cache_lineage_result(merged, projected_owners)
 
 
 def _merged_session_messages_for_display(session, cli_messages=None) -> list:

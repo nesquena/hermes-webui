@@ -46,7 +46,7 @@ def _make_state_db(path: Path, sid: str, rows):
         "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, model TEXT, started_at REAL, message_count INTEGER)"
     )
     conn.execute(
-        "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, timestamp REAL, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT)"
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, timestamp REAL, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT, api_content TEXT)"
     )
     conn.execute(
         "INSERT INTO sessions (id, source, title, model, started_at, message_count) VALUES (?, ?, ?, ?, ?, ?)",
@@ -54,7 +54,7 @@ def _make_state_db(path: Path, sid: str, rows):
     )
     for row in rows:
         conn.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp, tool_call_id, tool_calls, tool_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO messages (session_id, role, content, timestamp, tool_call_id, tool_calls, tool_name, api_content) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 sid,
                 row["role"],
@@ -63,6 +63,7 @@ def _make_state_db(path: Path, sid: str, rows):
                 row.get("tool_call_id"),
                 row.get("tool_calls"),
                 row.get("tool_name"),
+                row.get("api_content"),
             ),
         )
     conn.commit()
@@ -977,6 +978,228 @@ def test_msg_limit_compression_child_fast_path_preserves_pagination_cursor(
     assert [msg["content"] for msg in second_payload["messages"]] == [
         f"child {idx}" for idx in range(440, 470)
     ]
+
+
+def test_msg_limit_state_enrichment_does_not_mutate_cached_compression_child(
+    monkeypatch,
+    tmp_path,
+):
+    import api.models as models
+    import api.routes as routes
+
+    parent_sid = "parent_compression_snapshot_enrichment"
+    child_sid = "continuation_child_enrichment"
+    parent_messages = [
+        {"role": "assistant", "content": f"parent {idx}", "timestamp": float(idx)}
+        for idx in range(1000)
+    ]
+    child_messages = [
+        {"role": "assistant", "content": f"child {idx}", "timestamp": 1000.0 + idx}
+        for idx in range(500)
+    ]
+    parent = _install_test_session(monkeypatch, tmp_path, parent_sid, parent_messages)
+    parent.pre_compression_snapshot = True
+    parent.updated_at = 200.0
+    parent.save(touch_updated_at=False)
+    child = models.Session(
+        session_id=child_sid,
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=child_messages,
+        parent_session_id=parent_sid,
+        compression_disjoint_parent_boundary=_disjoint_parent_boundary(parent, child_messages),
+        created_at=300.0,
+        updated_at=900.0,
+    )
+    child.save(touch_updated_at=False)
+    state_messages = [dict(message) for message in child_messages]
+    state_messages[-15]["api_content"] = json.dumps(
+        [{"type": "input_text", "text": "provider payload"}]
+    )
+    _make_state_db(tmp_path / "state.db", child_sid, state_messages)
+
+    original_child_messages = [dict(message) for message in child.messages]
+    real_lineage_loader = routes._webui_sidecar_lineage_messages_for_display
+    captured = {"lineage_loads": 0}
+
+    def wrapped_lineage_loader(*args, **kwargs):
+        captured["lineage_loads"] += 1
+        return real_lineage_loader(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", wrapped_lineage_loader)
+
+    first = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0&msg_limit=30"
+    )
+    routes.handle_get(first, urlparse(first.path))
+    first_payload = first.response_json["session"]
+
+    assert first.status == 200
+    assert captured["lineage_loads"] > 0, (
+        "state enrichment must fail closed to the full lineage path"
+    )
+    assert child.messages == original_child_messages
+    assert all("api_content" not in message for message in child.messages)
+
+    second = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0&msg_limit=30"
+    )
+    routes.handle_get(second, urlparse(second.path))
+    second_payload = second.response_json["session"]
+
+    assert second.status == 200
+    assert child.messages == original_child_messages
+    assert first_payload["message_count"] == second_payload["message_count"] == 1500
+    assert first_payload["_messages_offset"] == second_payload["_messages_offset"] == 1470
+    assert first_payload["messages"] == second_payload["messages"]
+
+
+def test_cancelled_successor_enrichment_uses_isolated_owner_projection():
+    import api.models as models
+    import api.routes as routes
+
+    saved_messages = [
+        {
+            "message_id": "cancel-owner",
+            "role": "user",
+            "content": "stop this",
+            "timestamp": 10.0,
+        },
+        {
+            "message_id": "recovered-partial",
+            "role": "assistant",
+            "content": "partial",
+            "timestamp": 11.0,
+            "_recovered_from_cancel_journal": True,
+        },
+        {
+            "message_id": "cancel-carrier",
+            "role": "assistant",
+            "content": "Cancelled",
+            "timestamp": 12.0,
+            "_error": True,
+        },
+        {
+            "message_id": "saved-user",
+            "role": "user",
+            "content": "continue",
+            "timestamp": 20.0,
+        },
+        {
+            "message_id": "saved-answer",
+            "role": "assistant",
+            "content": "continued",
+            "timestamp": 21.0,
+        },
+    ]
+    state_messages = [dict(message) for message in saved_messages]
+    state_messages[-2]["api_content"] = json.dumps(
+        [{"type": "input_text", "text": "provider user"}]
+    )
+    state_messages[-1]["api_content"] = json.dumps(
+        [{"type": "output_text", "text": "provider answer"}]
+    )
+    session = models.Session(
+        session_id="cancelled-successor-owner-isolation",
+        messages=saved_messages,
+    )
+    original_messages = [dict(message) for message in session.messages]
+
+    first = routes._limited_webui_messages_for_display_with_sidecar(
+        session,
+        session.messages,
+        [dict(message) for message in state_messages],
+        allow_cache=False,
+    )
+    second = routes._limited_webui_messages_for_display_with_sidecar(
+        session,
+        session.messages,
+        [dict(message) for message in state_messages],
+        allow_cache=False,
+    )
+
+    assert session.messages == original_messages
+    assert first == second
+    assert first[-2]["api_content"] == state_messages[-2]["api_content"]
+    assert first[-1]["api_content"] == state_messages[-1]["api_content"]
+
+
+def test_msg_limit_cumulative_child_warm_reads_reuse_owner_provenance(
+    monkeypatch,
+    tmp_path,
+):
+    import api.models as models
+    import api.routes as routes
+
+    parent_sid = "parent_compression_snapshot_owner_cache"
+    child_sid = "cumulative_child_owner_cache"
+    parent_messages = [
+        {"role": "assistant", "content": f"parent {idx}", "timestamp": float(idx)}
+        for idx in range(120)
+    ]
+    child_messages = [
+        *[dict(message) for message in parent_messages],
+        *[
+            {"role": "assistant", "content": f"child {idx}", "timestamp": 120.0 + idx}
+            for idx in range(500)
+        ],
+    ]
+    parent = _install_test_session(monkeypatch, tmp_path, parent_sid, parent_messages)
+    monkeypatch.setattr(routes, "SESSION_DIR", tmp_path / "sessions")
+    parent.pre_compression_snapshot = True
+    parent.updated_at = 200.0
+    parent.save(touch_updated_at=False)
+    child = models.Session(
+        session_id=child_sid,
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=child_messages,
+        parent_session_id=parent_sid,
+        created_at=300.0,
+        updated_at=900.0,
+    )
+    child.save(touch_updated_at=False)
+    _make_state_db(tmp_path / "state.db", child_sid, child_messages)
+
+    with routes._lineage_display_cache_lock:
+        routes._lineage_display_cache.clear()
+    with routes._display_merge_cache_lock:
+        routes._display_merge_cache.clear()
+
+    parent_loads = 0
+    real_load = routes.Session.load.__func__
+
+    def counted_load(cls, session_id):
+        nonlocal parent_loads
+        if session_id == parent_sid:
+            parent_loads += 1
+        return real_load(cls, session_id)
+
+    monkeypatch.setattr(routes.Session, "load", classmethod(counted_load))
+
+    first = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0&msg_limit=30"
+    )
+    routes.handle_get(first, urlparse(first.path))
+    first_payload = first.response_json["session"]
+    loads_after_first = parent_loads
+
+    second = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0&msg_limit=30"
+    )
+    routes.handle_get(second, urlparse(second.path))
+    second_payload = second.response_json["session"]
+
+    assert first.status == second.status == 200
+    assert loads_after_first == 1
+    assert parent_loads == loads_after_first, (
+        "warm bounded reads must reuse exact owner provenance"
+    )
+    assert first_payload["message_count"] == second_payload["message_count"] == 620
+    assert first_payload["_messages_offset"] == second_payload["_messages_offset"] == 590
+    assert first_payload["messages"] == second_payload["messages"]
 
 
 def test_loaded_prefix_count_requires_the_complete_child_sequence():
