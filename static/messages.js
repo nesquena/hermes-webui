@@ -7012,6 +7012,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // the server copy was never touched — which is the whole #6112 symptom.
           let _doneFinalAnswer='';
           try{ if(typeof _streamDisplay==='function') _doneFinalAnswer=_streamDisplay()||''; }catch(_){}
+          const _preSettleSession=S.session;
+          const _preSettleOldestIdx=(typeof _oldestIdx!=='undefined')?_oldestIdx:null;
+          const _preSettleMessagesTruncated=(typeof _messagesTruncated!=='undefined')&&!!_messagesTruncated;
           const _preSettle=Array.isArray(S.messages)?S.messages:[];
           S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
           if(_pendingTitleUpdates.has(completedSid)){
@@ -7019,10 +7022,37 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             _pendingTitleUpdates.delete(completedSid);
             _pendingTitleExpectedCurrent.delete(completedSid);
           }
-          // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
-          if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
-          // #6112 settle guard.
-          S.messages=_adoptDoneSnapshotMessages(_preSettle, S.messages, _doneFinalAnswer).messages;
+          const _preSettleGeneration=_preSettleSession&&_preSettleSession.transcript_generation;
+          const _doneGeneration=d.session&&d.session.transcript_generation;
+          const _doneOffsetRaw=d.session&&d.session._messages_offset;
+          const _doneOffset=Number(_doneOffsetRaw);
+          const _doneMessageCount=Number(d.session&&d.session.message_count);
+          const _doneMessagesLength=Array.isArray(d.session&&d.session.messages)?d.session.messages.length:0;
+          const _doneOffsetIsValid=_doneOffsetRaw==null||(typeof _doneOffsetRaw==='number'&&Number.isSafeInteger(_doneOffsetRaw)&&_doneOffsetRaw>=0);
+          const _doneMessageCountPresent=d.session&&d.session.message_count!=null;
+          const _doneMessageCountIsValid=!_doneMessageCountPresent||(
+            typeof d.session.message_count==='number'&&Number.isSafeInteger(d.session.message_count)&&d.session.message_count>=0&&
+            _doneOffset+_doneMessagesLength===_doneMessageCount
+          );
+          const _doneHasBoundedProof=!!(
+            (d.session&&d.session._messages_truncated===true)||(Number.isFinite(_doneOffset)&&_doneOffset>0)
+          )&&_doneOffsetIsValid&&_doneMessageCountIsValid;
+          // #6112 settle guard. Only a proven bounded recovery tail from the
+          // same transcript generation may retain an older resident prefix.
+          const _doneAdoption=_adoptDoneSnapshotMessages(_preSettle,S.messages,_doneFinalAnswer,{
+            allowResidentPrefixMerge:_doneHasBoundedProof&&(
+              _preSettleGeneration==null||_doneGeneration==null||String(_preSettleGeneration)===String(_doneGeneration)
+            ),
+          });
+          S.messages=_doneAdoption.messages;
+          if(_doneAdoption.mergedResidentPrefix){
+            // #4720: the merged array still starts at the resident origin, not
+            // the settled tail's offset. Preserve that coordinate before hydrate.
+            if(typeof _oldestIdx!=='undefined')_oldestIdx=_preSettleOldestIdx==null?0:_preSettleOldestIdx;
+            if(typeof _messagesTruncated!=='undefined')_messagesTruncated=_preSettleMessagesTruncated||!!d.session._messages_truncated;
+          }else if(typeof _oldestIdx!=='undefined'){
+            _oldestIdx=_doneOffsetIsValid?(_doneOffset||0):(_preSettleOldestIdx==null?0:_preSettleOldestIdx);
+          }
           S.messages=_filterRecoveryControlMessages(S.messages || []);
           if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
           if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
@@ -7925,21 +7955,58 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return false;
   }
-  function _adoptDoneSnapshotMessages(preSettleMessages, settledMessages, finalAnswer){
+  // Merge anchors need finite timestamped identity on both sides. An unkeyed
+  // or duplicate occurrence is ambiguous and must fall back to server-wins.
+  function _residentMergeIdentityKey(m){
+    if(!m||!m.role) return '';
+    const ts=m._ts!=null?m._ts:m.timestamp;
+    if(ts==null||ts===''||!Number.isFinite(Number(ts))) return '';
+    return _messageIdentityKey(m);
+  }
+  function _mergeResidentPrefix(pre,settled){
+    if(!Array.isArray(pre)||!Array.isArray(settled)||!pre.length||!settled.length) return null;
+    const firstKey=_residentMergeIdentityKey(settled[0]);
+    if(!firstKey) return null;
+    let anchor=-1,matches=0;
+    for(let i=0;i<pre.length;i++){
+      if(_residentMergeIdentityKey(pre[i])===firstKey){anchor=i;matches++;}
+    }
+    if(matches!==1||anchor<=0) return null;
+    if(settled.some((m,i)=>i>0&&_residentMergeIdentityKey(m)===firstKey)) return null;
+    // Only a contiguous suffix match proves this is the same history window.
+    // Older repeated rows are retained by occurrence, never dropped by text.
+    const comparable=Math.min(settled.length,pre.length-anchor);
+    for(let i=0;i<comparable;i++){
+      const key=_residentMergeIdentityKey(pre[anchor+i]);
+      if(!key||key!==_residentMergeIdentityKey(settled[i])) return null;
+    }
+    return pre.slice(0,anchor).concat(settled);
+  }
+  function _adoptDoneSnapshotMessages(preSettleMessages, settledMessages, finalAnswer, options){
     const pre=Array.isArray(preSettleMessages)?preSettleMessages:[];
     const settled=Array.isArray(settledMessages)?settledMessages:[];
     const adopted=settled.length>0;
-    const messages=(adopted||!pre.length)?settled:pre;
+    let messages=(adopted||!pre.length)?settled:pre;
+    let mergedResidentPrefix=false;
+    if(options&&options.allowResidentPrefixMerge===true){
+      const merged=_mergeResidentPrefix(pre,settled);
+      if(merged){messages=merged;mergedResidentPrefix=true;}
+    }
     const answer=String(finalAnswer||'').trim();
-    if(!answer) return {adopted:adopted,messages:messages};
-    if(_finalAnswerIsInTranscript(messages,answer)) return {adopted:adopted,messages:messages};
+    if(!answer) return {adopted:adopted,messages:messages,mergedResidentPrefix};
+    // Once a prefix is retained, an older repeat must not satisfy the current
+    // turn. Restrict these checks to the suffix after the latest user boundary.
+    let currentTurnStart=0;
+    for(let i=0;i<messages.length;i++) if(messages[i]&&messages[i].role==='user') currentTurnStart=i;
+    const currentTurnMessages=messages.slice(currentTurnStart);
+    if(_finalAnswerIsInTranscript(currentTurnMessages,answer)) return {adopted:adopted,messages:messages,mergedResidentPrefix};
     // #6112: if the snapshot already ends this turn in a usable final assistant
     // row (e.g. the Agent rewrote the answer before persisting), keep the
     // snapshot and do not append the streamed copy — re-attach only when that
     // row is absent.
-    if(_snapshotHasUsableFinalAssistantRow(messages)) return {adopted:adopted,messages:messages};
-    if(!messages.length) return {adopted:adopted,messages:messages};
-    return {adopted:true,messages:messages.concat([{role:'assistant',content:String(finalAnswer)}])};
+    if(_snapshotHasUsableFinalAssistantRow(currentTurnMessages)) return {adopted:adopted,messages:messages,mergedResidentPrefix};
+    if(!messages.length) return {adopted:adopted,messages:messages,mergedResidentPrefix};
+    return {adopted:true,messages:messages.concat([{role:'assistant',content:String(finalAnswer)}]),mergedResidentPrefix};
   }
   if(typeof window!=='undefined'){
     window._adoptDoneSnapshotMessages=_adoptDoneSnapshotMessages;

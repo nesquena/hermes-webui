@@ -1,0 +1,223 @@
+"""Bounded done-tail recovery keeps already-loaded resident history.
+
+Only the done-settlement slice is covered here. These tests execute the real
+helpers and listener statements from static/messages.js. The new merge helpers
+are optional in the Node harness so the same behavior assertions can run on
+unmodified upstream without turning the red control into a harness error.
+"""
+from __future__ import annotations
+
+import json
+import pathlib
+import shutil
+import subprocess
+import textwrap
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
+MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
+NODE = shutil.which("node")
+
+
+def _extract_function(src: str, name: str) -> str:
+    start = src.find(f"function {name}(")
+    assert start >= 0, f"{name} not found in static/messages.js"
+    brace = src.find("{", start)
+    depth = 1
+    i = brace + 1
+    while i < len(src) and depth:
+        depth += (src[i] == "{") - (src[i] == "}")
+        i += 1
+    assert depth == 0, f"{name} braces unbalanced"
+    return src[start:i]
+
+
+def _optional_function(src: str, name: str) -> str:
+    return _extract_function(src, name) if f"function {name}(" in src else ""
+
+
+def _pieces() -> list[str]:
+    names = (
+        "_messageIdentityKey",
+        "_carryForwardEphemeralTurnFields",
+        "_finalAnswerIsInTranscript",
+        "_snapshotHasUsableFinalAssistantRow",
+        "_streamRecoveryControlMessageText",
+        "_streamRecoveryControlMessage",
+        "_isMarkerOnlyAssistantMessage",
+        "_filterRecoveryControlMessages",
+        "_adoptDoneSnapshotMessages",
+    )
+    return [
+        *[_extract_function(MESSAGES_JS, name) for name in names],
+        _optional_function(MESSAGES_JS, "_residentMergeIdentityKey"),
+        _optional_function(MESSAGES_JS, "_mergeResidentPrefix"),
+        "const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];",
+        _extract_function(MESSAGES_JS, "_isHistoricalAnchorActivityScene"),
+        "function msgContent(m){return (m && m.content)||'';}",
+        "function _isPreservedCompressionTaskListMarkerOnlyText(t){return /active task list was preserved/i.test(String(t||''));}",
+    ]
+
+
+def _run_node(case: str) -> dict:
+    assert NODE, "node is required for these behavioural regressions"
+    result = subprocess.run(
+        [NODE, "-e", "\n".join([*_pieces(), textwrap.dedent(case)])],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip())
+
+
+def _sample_messages() -> list[dict]:
+    return [
+        {"role": "user", "_ts": "1", "content": "old question 1"},
+        {"role": "assistant", "_ts": "2", "content": "old answer 1"},
+        {"role": "user", "_ts": "3", "content": "old question 2"},
+        {"role": "assistant", "_ts": "4", "content": "old answer 2"},
+        {"role": "user", "_ts": "5", "content": "new question"},
+        {"role": "assistant", "_ts": "6", "content": "The streamed final answer."},
+    ]
+
+
+def test_bounded_tail_retains_prefix_once_and_is_idempotent() -> None:
+    js = r'''
+        const pre=[{role:'user',_ts:'1',content:'old question 1'},{role:'assistant',_ts:'2',content:'old answer 1'},{role:'user',_ts:'3',content:'old question 2'},{role:'assistant',_ts:'4',content:'old answer 2'},{role:'user',_ts:'5',content:'new question'},{role:'assistant',_ts:'6',content:'The streamed final answer.'}];
+        const settled=pre.slice(2);
+        const opts={allowResidentPrefixMerge:true};
+        const first=_adoptDoneSnapshotMessages(pre,settled,'The streamed final answer.',opts);
+        const second=_adoptDoneSnapshotMessages(first.messages,settled,'The streamed final answer.',opts);
+        const texts=first.messages.map(m=>m.content);
+        const keys=first.messages.map(m=>m.role+'|'+m._ts);
+        console.log(JSON.stringify({
+          count:first.messages.length,secondCount:second.messages.length,
+          noDuplicates:new Set(keys).size===keys.length,
+          keepsOld:texts.includes('old question 1')&&texts.includes('old answer 1'),
+          keepsIdentity:first.messages[0]===pre[0]&&first.messages[1]===pre[1],
+          tailPresent:texts.includes('The streamed final answer.'),
+          firstMerged:first.mergedResidentPrefix===true,secondMerged:second.mergedResidentPrefix===true
+        }));
+    '''
+    expected = {
+        "count": 6,
+        "secondCount": 6,
+        "noDuplicates": True,
+        "keepsOld": True,
+        "keepsIdentity": True,
+        "tailPresent": True,
+        "firstMerged": True,
+        "secondMerged": True,
+    }
+    assert _run_node(js) == expected
+
+
+def test_only_contiguous_bounded_overlap_merges_other_cases_server_wins() -> None:
+    js = r'''
+        const opts={allowResidentPrefixMerge:true};
+        const pre=[{role:'user',_ts:'1',content:'one'},{role:'assistant',_ts:'2',content:'two'},{role:'user',_ts:'3',content:'three'},{role:'assistant',_ts:'4',content:'four'}];
+        const suffix=[pre[2],pre[3]];
+        const unrelated=[{role:'user',_ts:'49',content:'new question'},{role:'assistant',_ts:'50',content:'new turn'}];
+        const covered=_adoptDoneSnapshotMessages(pre,suffix,'four',opts);
+        const replace=_adoptDoneSnapshotMessages(pre,unrelated,'new turn',opts);
+        console.log(JSON.stringify({
+          suffixCount:covered.messages.length,
+          suffixPrefix:covered.messages[0]===pre[0]&&covered.messages[1]===pre[1],
+          unrelatedReplaced:replace.messages.length===2&&replace.messages[0]===unrelated[0]&&replace.messages[1]===unrelated[1]
+        }));
+    '''
+    assert _run_node(js) == {"suffixCount": 4, "suffixPrefix": True, "unrelatedReplaced": True}
+
+
+def test_unkeyed_ambiguous_and_noncontiguous_matches_fail_closed() -> None:
+    js = r'''
+        const opts={allowResidentPrefixMerge:true};
+        const repeatA={role:'assistant',_ts:'2',content:'repeat'};
+        const repeatB={role:'assistant',_ts:'2',content:'repeat'};
+        const pre=[{role:'user',_ts:'1',content:'old'},repeatA,{role:'assistant',_ts:'3',content:'unique'},repeatB,{role:'assistant',_ts:'4',content:'final'}];
+        const duplicate=_adoptDoneSnapshotMessages(pre,[repeatB,pre[4]],'final',opts);
+        const unkeyed=_adoptDoneSnapshotMessages(pre,[{role:'assistant',content:'tail'}],'',opts);
+        const noncontiguous=_adoptDoneSnapshotMessages(pre,[repeatA,{role:'assistant',_ts:'9',content:'different'}],'',opts);
+        console.log(JSON.stringify({
+          duplicateSkipped:duplicate.mergedResidentPrefix===false&&duplicate.messages.length===2,
+          unkeyedSkipped:unkeyed.mergedResidentPrefix===false&&unkeyed.messages.length===1,
+          noncontiguousSkipped:noncontiguous.mergedResidentPrefix===false&&noncontiguous.messages.length===2
+        }));
+    '''
+    assert _run_node(js) == {"duplicateSkipped": True, "unkeyedSkipped": True, "noncontiguousSkipped": True}
+
+
+def test_older_identical_answer_cannot_satisfy_current_turn() -> None:
+    js = r'''
+        const pre=[{role:'user',_ts:'1',content:'old question'},{role:'assistant',_ts:'2',content:'yes'},{role:'user',_ts:'3',content:'new question'}];
+        const settled=[pre[2]];
+        const r=_adoptDoneSnapshotMessages(pre,settled,'yes',{allowResidentPrefixMerge:true});
+        console.log(JSON.stringify({count:r.messages.length,lastRole:r.messages[r.messages.length-1].role,lastText:r.messages[r.messages.length-1].content,texts:r.messages.map(m=>m.content)}));
+    '''
+    got = _run_node(js)
+    assert got == {"count": 4, "lastRole": "assistant", "lastText": "yes", "texts": ["old question", "yes", "new question", "yes"]}
+
+
+def _listener(prev: list[dict], settled: dict, *, pre_generation=None, pre_oldest_idx=0) -> dict:
+    start = MESSAGES_JS.find("let _doneFinalAnswer=")
+    end = MESSAGES_JS.find("if(typeof _hydrateTodosFromSession", start)
+    assert start >= 0 and end > start, "real done settle statements not found"
+    statements = MESSAGES_JS[start:end]
+    case = f"""
+        const _residentMessages={json.dumps(prev)};
+        const _residentSession={{session_id:'A',title:'resident'}};
+        if({json.dumps(pre_generation)}!==null) _residentSession.transcript_generation={json.dumps(pre_generation)};
+        const S={{session:_residentSession,messages:_residentMessages,activeStreamId:'stream-one'}};
+        const d={{session:{json.dumps(settled)},stream_id:'stream-one'}};
+        const activeSid='A',completedSid='A';
+        const _settledStreamId='stream-one';
+        const _pendingTitleUpdates=new Map();
+        const _pendingTitleExpectedCurrent=new Map();
+        function applySessionTitleUpdate(){{}}
+        let _oldestIdx={pre_oldest_idx};
+        let _messagesTruncated=false;
+        {statements}
+        console.log(JSON.stringify({{
+          sessionId:S.session&&S.session.session_id,
+          sessionTitle:S.session&&S.session.title,
+          texts:S.messages.map(m=>m.content),
+          prefixIdentity:S.messages[0]===_residentMessages[0],
+          oldestIdx:_oldestIdx,
+          messagesTruncated:_messagesTruncated
+        }}));
+    """
+    return _run_node(case)
+
+
+def test_real_done_listener_keeps_prefix_and_resident_paging_origin() -> None:
+    prev = _sample_messages()[:4]
+    got = _listener(prev, {"session_id": "A", "messages": prev[2:], "_messages_offset": 72, "message_count": 74}, pre_oldest_idx=70)
+    assert got["texts"] == [m["content"] for m in prev]
+    assert got["prefixIdentity"] is True
+    assert got["oldestIdx"] == 70
+
+
+def test_unmarked_shorter_snapshot_stays_server_wins() -> None:
+    prev = _sample_messages()[:4]
+    got = _listener(prev, {"session_id": "A", "messages": prev[2:]}, pre_oldest_idx=70)
+    assert got["texts"] == [m["content"] for m in prev[2:]]
+
+
+def test_newer_generation_does_not_resurrect_deleted_nonempty_prefix() -> None:
+    prev = _sample_messages()[:4]
+    got = _listener(prev, {"session_id": "A", "title": "after-edit", "messages": prev[2:], "transcript_generation": 2, "_messages_offset": 2, "message_count": 2}, pre_generation=1, pre_oldest_idx=70)
+    assert got["texts"] == [m["content"] for m in prev[2:]]
+    assert got["sessionTitle"] == "after-edit"
+    assert got["oldestIdx"] == 2
+
+
+def test_present_but_malformed_window_metadata_fails_closed() -> None:
+    prev = _sample_messages()[:4]
+    for bad in ("garbage", -2, 2.5, True):
+        got = _listener(prev, {"session_id": "A", "messages": prev[2:], "_messages_offset": bad}, pre_oldest_idx=70)
+        assert got["texts"] == [m["content"] for m in prev[2:]], bad
+        assert got["oldestIdx"] == 70, bad
+    for bad_count in ("garbage", 3.5, "4", True):
+        got = _listener(prev, {"session_id": "A", "messages": prev[2:], "_messages_offset": 2, "message_count": bad_count}, pre_oldest_idx=70)
+        assert got["texts"] == [m["content"] for m in prev[2:]], bad_count
+        assert got["oldestIdx"] == 2, bad_count
