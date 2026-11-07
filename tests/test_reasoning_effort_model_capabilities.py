@@ -594,3 +594,28 @@ def test_qwen_prefixed_alias_reasoning_detection():
             f"{model} must remain reasoning-capable (DeepSeek-R1 hybrid, "
             f"Qwen 2.x must not shadow the DeepSeek detector)"
         )
+
+
+def test_v12_providers_dict_model_reasoning_efforts(monkeypatch):
+    # v12+ configs migrate custom_providers into the ``providers:`` dict; a
+    # named custom:<slug> route must still honour its per-model list.
+    monkeypatch.setitem(cfg.cfg, "custom_providers", [])
+    monkeypatch.setitem(
+        cfg.cfg,
+        "providers",
+        {
+            "spark0-glm": {"enabled": False, "reasoning_efforts": ["low"]},
+            "spark0-dsv4": {
+                "api": "http://spark0:8000/v1",
+                "models": {
+                    "deepseek": {"reasoning_efforts": ["low", "high", "xhigh", "max"]}
+                },
+            },
+        },
+    )
+    assert cfg.resolve_model_reasoning_efforts(
+        "deepseek", provider_id="custom:spark0-dsv4"
+    ) == ["low", "high", "xhigh", "max"]
+    assert cfg.resolve_model_reasoning_efforts(
+        "deepseek", provider_id="custom:spark0-glm"
+    ) != ["low"]
