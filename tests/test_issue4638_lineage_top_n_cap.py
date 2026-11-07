@@ -9,7 +9,8 @@ covers the visible window while bounding wall-clock. The cap is env-configurable
 
 These tests pin: (1) only the top-N ids are probed when the list exceeds the cap,
 (2) the env override is honored, (3) a non-positive / unparseable cap disables the
-cap (enrich all), (4) lists at/under the cap probe everything.
+cap (enrich all), (4) lists at/under the cap probe everything, and (5) fork-source
+rows do not expand the capped lineage lookup.
 """
 from __future__ import annotations
 
@@ -87,3 +88,44 @@ def test_enrichment_failure_is_swallowed(monkeypatch):
     monkeypatch.setattr(models, "_active_state_db_path", lambda: ":memory:")
     # Must not raise.
     models._enrich_sidebar_lineage_metadata(_sessions(10))
+
+
+def test_parent_linked_forks_do_not_expand_lineage_cap(monkeypatch):
+    seen = _capture_probed_ids(monkeypatch)
+    monkeypatch.delenv("HERMES_WEBUI_LINEAGE_TOP_N", raising=False)
+    sessions = _sessions(1000)
+    sessions[450].update(session_source="fork", parent_session_id="snapshot")
+    sessions[600].update(session_source=" Fork ", parent_session_id="other-parent")
+    sessions[800].update(session_source="webui", parent_session_id="ordinary-parent")
+    sessions[900].update(session_source="fork")
+    models._enrich_sidebar_lineage_metadata(sessions)
+    assert seen["ids"] == {f"s{i}" for i in range(300)}
+
+
+def test_old_fork_source_overlay_does_not_expand_lineage_or_message_counts(monkeypatch):
+    seen = _capture_probed_ids(monkeypatch)
+    monkeypatch.setenv("HERMES_WEBUI_LINEAGE_TOP_N", "1")
+    rows = [
+        {"session_id": "recent"},
+        {"session_id": "old-fork", "session_source": "fork", "parent_session_id": "original",
+         "message_count": 2},
+        {"session_id": "old-webui", "session_source": "webui"},
+    ]
+    calls = []
+
+    def source_only(_db_path, ids, *, count_session_ids):
+        calls.append((ids, count_session_ids))
+        return {"old-fork": {
+            "_state_db_source": "webui", "_state_db_session_source": "webui",
+            "_state_db_message_count": 1000,
+        }}
+
+    monkeypatch.setattr(models, "_read_state_db_sidebar_overrides", source_only)
+    models._enrich_sidebar_lineage_metadata(rows)
+    assert seen["ids"] == {"recent"}
+    assert calls == [({"old-fork"}, set())]
+    assert rows[1]["session_source"] == "webui"
+    assert rows[1]["parent_session_id"] == "original"
+    assert rows[1]["message_count"] == 2
+    assert "actual_message_count" not in rows[1]
+    assert "_lineage_root_id" not in rows[1]
