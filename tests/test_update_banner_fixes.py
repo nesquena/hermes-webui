@@ -341,14 +341,20 @@ class TestUpdateChecker:
         import api.updates as upd
 
         class FakeResponse:
+            _BODY = b'{"status":"ok","platform":"hermes-agent","version":"0.14.1"}'
+
             def __enter__(self):
                 return self
 
             def __exit__(self, exc_type, exc, tb):
                 return False
 
-            def read(self):
-                return b'{"status":"ok","platform":"hermes-agent","version":"0.14.1"}'
+            def read(self, amt=-1):
+                # Mirror http.client.HTTPResponse.read(amt=-1): a positive amt
+                # is the body cap used by the probe.
+                if amt is None or amt < 0:
+                    return self._BODY
+                return self._BODY[:amt]
 
         seen = []
 
@@ -361,7 +367,12 @@ class TestUpdateChecker:
         monkeypatch.setattr(upd.urllib.request, 'urlopen', fake_urlopen)
 
         assert upd._detect_agent_version() == '0.14.1'
-        assert seen == [('http://hermes-agent:8642/health', 0.75)]
+        # One overall deadline: the first path gets ~the full budget (a hair
+        # less, since time is consumed computing the deadline).
+        assert len(seen) == 1, seen
+        url, timeout = seen[0]
+        assert url == 'http://hermes-agent:8642/health'
+        assert timeout == pytest.approx(0.75, abs=0.01)
 
 
 class TestConflictError:
