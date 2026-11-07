@@ -1030,6 +1030,7 @@ def test_draft_compression_migration_rollback_when_evictor_interleaves_after_loc
         assert persisted is not None
         assert persisted.pre_compression_snapshot is False
         assert persisted.pre_compression_continuation_session_id is None
+        assert migrating.compression_disjoint_parent_boundary is None
         assert observed["locked"] is lock
         with routes.LOCK:
             assert routes.SESSIONS.get(old_sid) is migrating

@@ -120,6 +120,8 @@ from api.models import (
     clear_process_wakeup_pause,
     get_state_db_session_messages,
     record_process_wakeup_provider_unavailable_pause,
+    merge_session_messages_append_only,
+    _compression_child_messages_digest,
     reconciled_state_db_messages_for_session,
 )
 from api.session_ops import mark_session_title_generated, session_has_manual_title
@@ -133,6 +135,7 @@ from api.process_event_utils import (
     restore_durable_process_completions,
     schedule_async_delegation_claim_retry,
     stamp_message_source,
+    is_hidden_transcript_row,
 )
 
 
@@ -7509,6 +7512,89 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     return None, llm_status or 'empty_title', raw_preview
 
 
+def _disjoint_compression_parent_message_count(
+    parent_messages,
+    child_messages,
+    *,
+    parent_truncation_watermark=None,
+    parent_truncation_boundary=None,
+) -> int | None:
+    """Return the parent length only when the child is provably disjoint.
+
+    This check runs once at compression rotation, where both arrays are already
+    available. Persisting its result lets bounded reads avoid reparsing the
+    parent later without guessing from timestamps or relative lengths.
+    """
+    parent_messages = list(parent_messages or [])
+    child_messages = list(child_messages or [])
+    if not parent_messages or not child_messages:
+        return None
+
+    # The display-lineage reader canonicalizes its first segment by merging it
+    # into an empty transcript. A raw parent containing duplicate or truncated
+    # rows can therefore have a different count/order from the coordinates the
+    # endpoint later publishes. Mint a marker only when canonicalization leaves
+    # the persisted parent sequence exactly unchanged.
+    canonical_parent = merge_session_messages_append_only(
+        [],
+        parent_messages,
+        truncation_watermark=parent_truncation_watermark,
+        truncation_boundary=parent_truncation_boundary,
+    )
+    if canonical_parent != parent_messages:
+        return None
+
+    expected = canonical_parent + child_messages
+    merged = merge_session_messages_append_only(
+        canonical_parent,
+        child_messages,
+        truncation_watermark=None,
+    )
+    if merged != expected:
+        return None
+    return len(canonical_parent)
+
+
+def _compression_disjoint_parent_boundary(s, old_sid: str) -> dict | None:
+    """Build a durable child marker from the snapshot bytes just preserved."""
+    from api.models import Session, _last_message_timestamp
+
+    try:
+        snapshot = Session.load(old_sid)
+    except Exception:
+        logger.debug("Could not reload compression snapshot for boundary proof", exc_info=True)
+        return None
+    if snapshot is None or not getattr(snapshot, 'pre_compression_snapshot', False):
+        return None
+    parent_messages = list(getattr(snapshot, 'messages', None) or [])
+    child_messages = list(getattr(s, 'messages', None) or [])
+    parent_count = _disjoint_compression_parent_message_count(
+        parent_messages,
+        child_messages,
+        parent_truncation_watermark=getattr(snapshot, 'truncation_watermark', None),
+        parent_truncation_boundary=getattr(snapshot, 'truncation_boundary', None),
+    )
+    if parent_count is None:
+        return None
+    parent_updated_at = float(getattr(snapshot, 'updated_at', 0) or 0)
+    if not math.isfinite(parent_updated_at) or parent_updated_at <= 0:
+        return None
+    last_message_at = _last_message_timestamp(parent_messages) or parent_updated_at
+    return {
+        'parent_session_id': old_sid,
+        'message_count': parent_count,
+        'visible_message_count': sum(
+            1 for message in parent_messages
+            if isinstance(message, dict) and not is_hidden_transcript_row(message)
+        ),
+        'last_message_at': last_message_at,
+        'parent_updated_at': parent_updated_at,
+        'canonical_parent_proof': True,
+        'child_message_count': len(child_messages),
+        'child_messages_digest': _compression_child_messages_digest(child_messages),
+    }
+
+
 def _preserve_pre_compression_snapshot(
     s,
     old_sid: str,
@@ -7519,6 +7605,8 @@ def _preserve_pre_compression_snapshot(
     Context compression rotates the active WebUI session id from old_sid to the
     agent's new continuation id. The old JSON must remain on disk for lineage
     traversal, but it should not continue to appear as an active sidebar row.
+
+    Returns whether the snapshot and index marker were durably preserved.
     """
     old_path = SESSION_DIR / f'{old_sid}.json'
     if not old_path.exists():
@@ -7628,6 +7716,13 @@ def _preserve_pre_compression_snapshot(
     return False
 
 
+def _compression_boundary_may_add_parent_rows(session, persisted_message_count):
+    """Whether the archived parent can still contribute disjoint rows."""
+    if type(persisted_message_count) is not int or persisted_message_count < 0:
+        return True
+    return len(getattr(session, 'messages', []) or []) <= persisted_message_count
+
+
 def _migrate_compression_session_ownership(
     s,
     old_sid: str,
@@ -7644,11 +7739,17 @@ def _migrate_compression_session_ownership(
         bool(getattr(s, 'pre_compression_snapshot', False)),
         getattr(s, 'pre_compression_continuation_session_id', None),
         getattr(s, 'parent_session_id', None),
+        copy.deepcopy(getattr(s, 'compression_disjoint_parent_boundary', None)),
     )
     old_path = SESSION_DIR / f'{old_sid}.json'
     index_path = _models.SESSION_INDEX_FILE
     index_row_snapshot = None
     index_file_existed = False
+    persisted_message_count = _models._prefix_message_count(old_path)
+    boundary_may_add_parent_rows = _compression_boundary_may_add_parent_rows(
+        s,
+        persisted_message_count,
+    )
     try:
         old_preimage = old_path.read_text(encoding='utf-8')
         with _models._INDEX_WRITE_LOCK:
@@ -7757,6 +7858,21 @@ def _migrate_compression_session_ownership(
                 SESSION_AGENT_LOCKS.pop(new_sid, None)
         return False
 
+    compression_boundary = None
+    if boundary_may_add_parent_rows:
+        try:
+            compression_boundary = _compression_disjoint_parent_boundary(s, old_sid)
+        except Exception:
+            # Boundary metadata is an optimisation only. Snapshot preservation and
+            # ownership migration remain authoritative; ambiguous proof falls back
+            # to the established full-lineage read path.
+            logger.debug("Could not build compression boundary proof", exc_info=True)
+    # When the in-memory continuation has more rows than the marked sidecar,
+    # _preserve_pre_compression_snapshot rewrites the snapshot from that same
+    # cumulative message sequence. Such a parent cannot add a row omitted by the
+    # child, so parsing it and running two full-history merges under the agent
+    # lock can only rediscover that no disjoint boundary exists.
+
     try:
         with LOCK:
             if SESSIONS.get(old_sid) is not s or str(getattr(s, 'session_id', '') or '') != old_sid:
@@ -7776,6 +7892,7 @@ def _migrate_compression_session_ownership(
                 s.pre_compression_snapshot = False
                 s.pre_compression_continuation_session_id = None
                 s.parent_session_id = old_sid
+                s.compression_disjoint_parent_boundary = compression_boundary
                 SESSIONS[new_sid] = s
                 SESSIONS.move_to_end(new_sid)
                 _evict_sessions_over_cap()
@@ -7798,7 +7915,13 @@ def _migrate_compression_session_ownership(
                 SESSIONS[new_sid] = existing_new_session
             if SESSIONS.get(old_sid) is None:
                 SESSIONS[old_sid] = s
-            s.session_id, s.pre_compression_snapshot, s.pre_compression_continuation_session_id, s.parent_session_id = previous_state
+            (
+                s.session_id,
+                s.pre_compression_snapshot,
+                s.pre_compression_continuation_session_id,
+                s.parent_session_id,
+                s.compression_disjoint_parent_boundary,
+            ) = previous_state
             with SESSION_AGENT_LOCKS_LOCK:
                 if SESSION_AGENT_LOCKS.get(old_sid) is agent_lock:
                     if old_lock is missing:
