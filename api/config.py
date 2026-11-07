@@ -15035,6 +15035,17 @@ _SETTINGS_WRITE_VERSION = 0
 _SETTINGS_WRITE_LOCK = __import__("threading").RLock()
 
 
+def _is_valid_instance_name(value: object) -> bool:
+    """Require plain UTF-8 text; callers retain their own length policies."""
+    if not isinstance(value, str) or any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        return False
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _atomic_write_settings_text(path: Path, text: str) -> None:
     """Write *text* to *path* atomically (temp file + fsync + os.replace).
 
@@ -15214,9 +15225,7 @@ def _save_settings_locked(settings: dict, *, _branding=None) -> dict:
             # the value in C-level consumers) and over-long values. An empty
             # string is VALID and clears the label.
             if k == "instance_name":
-                if not isinstance(v, str):
-                    continue
-                if "\x00" in v or any(ord(ch) < 32 or ord(ch) == 127 for ch in v):
+                if not _is_valid_instance_name(v):
                     continue
                 v = v.strip()[:80]
             # Validate language codes (BCP-47-like: 'en', 'zh', 'fr', 'zh-CN')

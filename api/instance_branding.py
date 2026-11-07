@@ -379,8 +379,7 @@ def mutate(handler, patch=None, image=None):
                         branding[key] = patch[key]
                 if "instance_name" in patch:
                     value = patch["instance_name"]
-                    if (not isinstance(value, str) or len(value.strip()) > 80
-                            or any(ord(ch) < 32 or ord(ch) == 127 for ch in value)):
+                    if not config._is_valid_instance_name(value) or len(value.strip()) > 80:
                         raise BrandingError("Invalid instance name", 400)
                     changes["instance_name"] = value.strip()
         if branding["enabled"] and not _complete_image(branding["image_revision"]):
