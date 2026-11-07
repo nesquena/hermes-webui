@@ -17852,15 +17852,20 @@ def _run_agent_streaming(
                         from agent.model_metadata import get_model_context_length
                         from api.routes import _context_length_lookup_inputs_for_model
                         _cfg_base_url = getattr(agent, 'base_url', '') or resolved_base_url or ''
+                        # #8822: pass the Agent's own pair, like the compressor
+                        # check above, and send exactly the key the lookup returns:
+                        # it drops a key whose source doesn't own every host the
+                        # Agent contacts, and a fallback here would put it back.
                         _ctx_lookup = _context_length_lookup_inputs_for_model(
                             getattr(agent, 'model', resolved_model or '') or '',
                             resolved_provider,
                             base_url=_cfg_base_url,
+                            api_key=getattr(agent, 'api_key', '') or resolved_api_key or '',
                             cfg=_cfg if isinstance(_cfg, dict) else {},
                         )
                         _cfg_ctx_len = _ctx_lookup.config_context_length
                         _cfg_custom_providers = _ctx_lookup.custom_providers
-                        _cfg_api_key = _ctx_lookup.api_key or getattr(agent, 'api_key', '') or resolved_api_key or ''
+                        _cfg_api_key = _ctx_lookup.api_key
                         _cfg_base_url = _ctx_lookup.base_url or _cfg_base_url
                         _cfg_provider = _ctx_lookup.provider or resolved_provider or ''
                         _resolved_cl = get_model_context_length(
@@ -18227,11 +18232,14 @@ def _run_agent_streaming(
                         getattr(agent, 'model', resolved_model or '') or '',
                         resolved_provider,
                         base_url=getattr(agent, 'base_url', '') or resolved_base_url or '',
+                        # #8822: the Agent's own pair; send exactly what the
+                        # lookup returns (no fallback key).
+                        api_key=getattr(agent, 'api_key', '') or resolved_api_key or '',
                         cfg=_cfg if isinstance(_cfg, dict) else {},
                     )
                     _cfg_ctx_len = _ctx_lookup.config_context_length
                     _cfg_custom_providers = _ctx_lookup.custom_providers
-                    _cfg_api_key = _ctx_lookup.api_key or getattr(agent, 'api_key', '') or resolved_api_key or ''
+                    _cfg_api_key = _ctx_lookup.api_key
                     _cfg_base_url = _ctx_lookup.base_url
                     _cfg_provider = _ctx_lookup.provider or resolved_provider or ''
                     try:

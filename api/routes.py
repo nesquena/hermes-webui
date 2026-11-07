@@ -9184,6 +9184,65 @@ class _ContextLengthLookupInputs:
         self.api_key = api_key
 
 
+# #8822: hosts the Agent's context-length lookup contacts on its own, by the
+# provider id it is given. Measured on every supported Agent with a no-network
+# request recorder (union over Agent versions: an Agent that skips a host only
+# makes this table conservative). "no_url" hosts are contacted when the lookup
+# passes no base URL; "with_url" hosts even when it passes one. Any id not listed
+# sends its key only to the base URL's own host.
+_CONTEXT_LOOKUP_FIXED_HOSTS = {
+    "anthropic": {"no_url": ("api.anthropic.com",)},
+    "novita": {"no_url": ("api.novita.ai",)},
+    "copilot": {"no_url": ("api.githubcopilot.com",)},
+    "copilot-acp": {"no_url": ("api.githubcopilot.com",)},
+    "openai-codex": {"no_url": ("chatgpt.com",), "with_url": ("chatgpt.com",)},
+}
+
+
+def _context_lookup_origin(url: object) -> str:
+    """Return ``host:port`` for a base URL, or "" when it names no host."""
+    from urllib.parse import urlsplit
+
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    try:
+        parts = urlsplit(text if "://" in text else f"https://{text}")
+        host = (parts.hostname or "").lower()
+        port = parts.port or (80 if parts.scheme == "http" else 443)
+    except ValueError:
+        return ""
+    return f"{host}:{port}" if host else ""
+
+
+def _context_lookup_fixed_origins(provider: str, *, with_url: bool) -> frozenset:
+    entry = _CONTEXT_LOOKUP_FIXED_HOSTS.get(str(provider or "").strip().lower()) or {}
+    return frozenset(f"{host}:443" for host in entry.get("with_url" if with_url else "no_url", ()))
+
+
+def _context_lookup_contacted_origins(provider: str, base_url: str) -> frozenset:
+    """Every origin the Agent may send the lookup's key to for (provider, base_url)."""
+    if str(base_url or "").strip():
+        # A URL that names no host can't be owned by any key (the empty string
+        # is never in an owned set), so its key is dropped.
+        return frozenset({_context_lookup_origin(base_url)}) | _context_lookup_fixed_origins(provider, with_url=True)
+    return _context_lookup_fixed_origins(provider, with_url=False)
+
+
+def _context_lookup_owned_origins(base_url: object, *, own_provider: str = "") -> frozenset:
+    """Origins a key may go to: its own source's URL, plus the fixed hosts of the
+    provider it belongs to (``own_provider``: a built-in record, the model block
+    configured for that provider, or the caller's own provider)."""
+    owned = set()
+    origin = _context_lookup_origin(base_url)
+    if origin:
+        owned.add(origin)
+    if own_provider:
+        owned |= _context_lookup_fixed_origins(own_provider, with_url=False)
+        owned |= _context_lookup_fixed_origins(own_provider, with_url=True)
+    return frozenset(owned)
+
+
 def _positive_context_length(value) -> int | None:
     try:
         parsed = int(value)
@@ -9314,6 +9373,19 @@ def _context_length_config_api_key_for_provider(
     cfg: dict | None,
 ) -> str:
     """Return a config/env API key usable for context-window metadata lookup."""
+    return _context_length_config_api_key_and_owner(provider, cfg)[0]
+
+
+def _context_length_config_api_key_and_owner(
+    provider: str | None,
+    cfg: dict | None,
+) -> tuple[str, frozenset]:
+    """Return (config/env API key for the metadata lookup, origins that key owns).
+
+    The key's own origins are its source's base URL, plus the provider's fixed
+    metadata hosts when the source is that provider's own: a built-in
+    ``providers.<id>`` record, or the model block configured for that provider (#8822).
+    """
     cfg = cfg if isinstance(cfg, dict) else {}
     provider = _canonical_context_provider(provider)
 
@@ -9345,7 +9417,11 @@ def _context_length_config_api_key_for_provider(
                 continue
             api_key = _resolve_key(provider_cfg.get("api_key"), provider_cfg.get("key_env"))
             if api_key:
-                return api_key
+                builtin = not str(provider_key or "").strip().lower().startswith("custom:")
+                return api_key, _context_lookup_owned_origins(
+                    provider_cfg.get("base_url"),
+                    own_provider=provider if builtin else "",
+                )
 
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
@@ -9353,8 +9429,11 @@ def _context_length_config_api_key_for_provider(
         if not provider or _providers_match_for_context(model_provider, provider):
             api_key = _resolve_key(model_cfg.get("api_key"), model_cfg.get("key_env"))
             if api_key:
-                return api_key
-    return ""
+                return api_key, _context_lookup_owned_origins(
+                    model_cfg.get("base_url"),
+                    own_provider=provider if (provider and model_provider) else "",
+                )
+    return "", frozenset()
 
 
 def _context_length_lookup_inputs_for_model(
@@ -9388,6 +9467,9 @@ def _context_length_lookup_inputs_for_model(
     bare_model, explicit_provider = _split_provider_qualified_model(model_for_lookup)
     effective_provider = _canonical_context_provider(provider or explicit_provider)
     effective_base_url = str(base_url or "").strip()
+    # #8822: a caller's key owns only the URL the caller passed with it (plus its
+    # provider's fixed metadata hosts). With no caller URL it owns no URL.
+    caller_provider = effective_provider
 
     model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
     if isinstance(model_cfg, dict):
@@ -9450,6 +9532,11 @@ def _context_length_lookup_inputs_for_model(
 
     custom_context_length = None
     effective_api_key = str(api_key or "").strip()
+    effective_api_key_owned = (
+        _context_lookup_owned_origins(base_url, own_provider=caller_provider)
+        if effective_api_key
+        else frozenset()
+    )
     if custom_providers:
         target_base = effective_base_url.rstrip("/")
         model_candidates = set(_model_lookup_candidates(bare_model or model_for_lookup))
@@ -9481,6 +9568,7 @@ def _context_length_lookup_inputs_for_model(
                 effective_base_url = entry_base
             if not effective_api_key:
                 effective_api_key = _custom_provider_api_key_for_context(entry, effective_provider or entry_slug)
+                effective_api_key_owned = _context_lookup_owned_origins(entry_base)
             custom_context_length = _models_config_context_length(models_cfg, bare_model or model_for_lookup)
             break
 
@@ -9499,7 +9587,16 @@ def _context_length_lookup_inputs_for_model(
             global_context_length = _positive_context_length(raw_cfg_ctx)
 
     if not effective_api_key:
-        effective_api_key = _context_length_config_api_key_for_provider(effective_provider, cfg)
+        effective_api_key, effective_api_key_owned = _context_length_config_api_key_and_owner(effective_provider, cfg)
+
+    # #8822: a key goes only where its own source sends it. The Agent contacts the
+    # base URL's host plus the provider's fixed metadata hosts; if any of those is
+    # not owned by the key's source, the lookup sends no key (it still runs, and
+    # falls back to catalog or default limits). This never changes the URL.
+    if effective_api_key and not (
+        _context_lookup_contacted_origins(effective_provider, effective_base_url) <= effective_api_key_owned
+    ):
+        effective_api_key = ""
 
     return _ContextLengthLookupInputs(
         config_context_length=provider_context_length or custom_context_length or global_context_length,
