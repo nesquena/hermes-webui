@@ -261,6 +261,46 @@ Requirements:
 - Recovery/control events stay internal unless they describe a user-visible
   terminal outcome.
 
+**Session-switch reconciliation mechanics.** The concrete recovery policy in
+`static/sessions.js` (`_prepareRunningLiveTail` / `_mergeInflightTailMessages`)
+implements the requirements above for session switch, refresh, and reconnect:
+
+- **Replacement policy for completed assistant rows.** When the current
+  turn's user row is already in the loaded transcript and a completed
+  assistant row for that same turn follows it (a lost `done` event), the
+  settled row is replaced — never dropped-then-maybe-empty. Its text is
+  first preserved into the live row (backfilled when the live row is empty
+  or a prefix of the settled text; a divergent live partial is flagged
+  `_supersededBySettled` and filtered out of the merge so the authoritative
+  answer is never shown twice), and only then is the settled row dropped
+  before the inflight merge. When the persisted tail does NOT belong to the
+  current turn (deferred save), settled rows are never touched and the live
+  turn is appended as-is.
+
+- **Timestamp authority: client `_ts` vs server `pending_started_at`.** The
+  client's optimistic `_ts` is provisional; the server's `pending_started_at`
+  is the authoritative start stamp of the active turn (captured server-side
+  by `_active_turn_authority` in `api/streaming.py` and adopted into the
+  user row at start/settle time). Recovery pairs the two with a precision-only
+  epsilon (`_PENDING_ACTIVE_TURN_TS_EPSILON`, 1e-6) that absorbs state.db
+  sub-µs round-trip drift but never a whole-second (or sub-second) difference
+  — a rapid repeated prompt is a genuinely different turn. A recovery row
+  still carrying a stale client stamp is re-stamped with the server stamp
+  (`_adoptServerStartStampForRecoveryUser`) so the same turn precision-matches.
+
+- **Two anti-duplicate layers.** The pending resolver first tries a strict
+  tail lookup (`_pendingCurrentTailUserMessage`), which stops at a completed
+  assistant; when the current turn's output already follows its user row, the
+  identity checks (`_pendingActiveTurnUserMessage` /
+  `_hasInflightTailUserDuplicate`) decide: the server's `_active_turn_user`
+  marker, the `_active_turn_token` (`stream_id:started_at`), or the epsilon
+  timestamp pair. A completed answer between the rows acts as a settled-turn
+  boundary only when no identity signal proves the pair is the same turn; a
+  provisional (`_pending`, unmarked, id-less) candidate is the client's own
+  speculative row by construction and is exempt from that veto. A prompt the
+  transcript already holds is therefore never materialized a second time,
+  while a genuinely missing prompt is still recovered.
+
 ### Terminal outcomes
 
 Every turn needs a terminal outcome. A turn without a final answer must not
