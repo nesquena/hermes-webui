@@ -1953,7 +1953,7 @@ def _named_custom_provider_slug_for_provider(
     # selector; WebUI selector resolution never hands it the bare built-in
     # route (#8685). The Agent's own runtime resolution is order-dependent
     # downstream of this (#8690).
-    legacy_only = not raw.startswith("custom:") and not _is_native_custom_provider_key(raw)
+    legacy_only = _is_bare_builtin_provider_id(raw)
     legacy_names = _legacy_custom_provider_names(config_obj) if legacy_only else set()
     for entry in _custom_provider_entries(config_obj):
         entry_name = str(entry.get("name") or "").strip().lower()
@@ -1978,6 +1978,119 @@ def _legacy_custom_provider_names(config_obj: dict | None = None) -> set[str]:
         for entry in raw_entries
         if isinstance(entry, dict) and str(entry.get("name") or "").strip()
     }
+
+
+def _is_bare_builtin_provider_id(provider: object) -> bool:
+    """Whether a bare (non-``custom:``) id names a built-in or plugin provider.
+
+    Such an id is claimed only by a legacy ``custom_providers`` entry of that
+    name, never by a native ``providers['custom:<id>']`` record (#8685, #8816).
+
+    ``_is_native_custom_provider_key`` alone decides plugin-backed built-ins from
+    the plugin registry, so with plugin discovery unavailable the Agent's
+    canonical ``xai`` (WebUI's tables say ``x-ai``) read as a native custom key,
+    and a bare xAI session took the ``custom:xai`` record's endpoint and key
+    (#8816). A static-table built-in is therefore also matched through the
+    provider alias table, independent of plugin discovery.
+    """
+    raw = str(provider or "").strip().lower()
+    if not raw or raw.startswith("custom:"):
+        return False
+    if not _is_native_custom_provider_key(raw):
+        return True
+
+    targets = _provider_id_forms(raw)
+    # A registered plugin reached through an alias (``fw`` -> ``fireworks``).
+    if any(_is_plugin_model_provider(t) for t in targets):
+        return True
+    # A built-in from WebUI's tables or the Agent's own provider catalog, so the
+    # answer doesn't depend on WebUI's plugin discovery (``fireworks`` is in the
+    # Agent catalog but not in WebUI's tables).
+    return bool(targets & _known_builtin_provider_forms())
+
+
+def _provider_id_forms(value: object) -> set[str]:
+    """A provider id's spellings: itself, ``_`` as ``-``, and each one's alias target."""
+    value = str(value or "").strip().lower()
+    forms = {value, value.replace("_", "-")}
+    forms |= {str(_resolve_provider_alias(f) or f).strip().lower() for f in tuple(forms)}
+    # The generic ``custom`` target (Agent aliases ollama/local/vllm -> custom;
+    # catalog slug ``custom``) is a placeholder, not a provider identity: a
+    # bare ``vllm`` with its own ``custom:vllm`` record keeps that route, as on
+    # .630. A raw ``custom`` id never reaches here (the caller returns first).
+    return {f for f in forms if f and f != "custom"}
+
+
+# (key, forms) for _known_builtin_provider_forms; replaced whole, never mutated.
+_KNOWN_BUILTIN_FORMS_CACHE: tuple[tuple, frozenset[str]] | None = None
+
+
+def _known_builtin_provider_forms() -> frozenset[str]:
+    """Every spelling of every built-in id WebUI knows: its tables plus the Agent catalog.
+
+    Rebuilding this for each unknown bare custom name made ``resolve_model_provider``
+    up to ~6x slower (#8816, round 7). The cache key is everything the result
+    depends on: the Agent's and WebUI's alias tables (by content), WebUI's provider
+    tables (by key) and the Agent catalog's entries. Any change rebuilds it, so a
+    stale answer is never served.
+    """
+    global _KNOWN_BUILTIN_FORMS_CACHE
+    try:
+        from hermes_cli.models import _PROVIDER_ALIASES as _agent_aliases
+
+        agent_aliases = tuple(_agent_aliases.items()) if isinstance(_agent_aliases, dict) else ()
+    except Exception:
+        agent_aliases = ()
+    try:
+        from hermes_cli.models import CANONICAL_PROVIDERS as _catalog
+
+        # The entries (NamedTuples in every Agent so far) themselves, not their slugs:
+        # plugin admission inserts entries at runtime, which changes this tuple, and
+        # comparing it short-circuits on identity, so the slug walk below runs only
+        # when the catalog changed.
+        catalog_key = tuple(_catalog or ())
+    except Exception:
+        catalog_key = ()
+    key = (
+        agent_aliases,
+        tuple(_PROVIDER_ALIASES.items()),
+        tuple(_PROVIDER_DISPLAY),
+        tuple(_PROVIDER_MODELS),
+        catalog_key,
+    )
+    cached = _KNOWN_BUILTIN_FORMS_CACHE
+    try:
+        if cached is not None and cached[0] == key:
+            return cached[1]
+    except Exception:
+        pass  # an entry type whose comparison raises: rebuild
+    known = [k for k in (*_PROVIDER_DISPLAY, *_PROVIDER_MODELS) if isinstance(k, str)]
+    known.extend(_agent_builtin_provider_ids())
+    forms = frozenset(form for k in known for form in _provider_id_forms(k))
+    _KNOWN_BUILTIN_FORMS_CACHE = (key, forms)
+    return forms
+
+
+def _agent_builtin_provider_ids() -> tuple[str, ...]:
+    """Provider slugs in the Agent's canonical catalog, or ``()`` when the Agent
+    (or an older Agent without the catalog) isn't importable, or the catalog has
+    a shape this WebUI doesn't know. Never raises into routing."""
+    try:
+        from hermes_cli.models import CANONICAL_PROVIDERS
+
+        slugs = []
+        for entry in CANONICAL_PROVIDERS or ():
+            if isinstance(entry, str):
+                slug = entry
+            else:
+                slug = getattr(entry, "slug", None)
+                if slug is None and isinstance(entry, (tuple, list)) and entry:
+                    slug = entry[0]
+            if isinstance(slug, str) and slug.strip():
+                slugs.append(slug.strip().lower())
+        return tuple(slugs)
+    except Exception:
+        return ()
 
 
 def _resolve_configured_provider_id(
@@ -3631,8 +3744,14 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         for slug, pdef in providers_cfg.items():
             if not isinstance(pdef, dict):
                 continue
-            if _is_native_custom_provider_key(slug):
-                continue  # handled by the read view, including enabled/legacy precedence
+            if target not in _configured_model_ids(pdef.get('models')):
+                continue
+            if _is_native_custom_provider_key(slug) and not _is_bare_builtin_provider_id(slug):
+                # Handled by the read view, including enabled/legacy precedence.
+                # A built-in's own record (``providers.fireworks`` when plugin
+                # discovery is unavailable) stays its URL override, as on .630
+                # and v0.52.544 (#8816 senior round 4).
+                continue
             # Copilot is the documented exception: `providers.copilot.models` is
             # a per-model SETTINGS map (reasoning_effort, limits, etc.), NOT a
             # routable allowlist (see the exception at the catalog-build site).

@@ -9295,19 +9295,6 @@ def _context_length_config_api_key_for_provider(
     cfg = cfg if isinstance(cfg, dict) else {}
     provider = _canonical_context_provider(provider)
 
-    if provider.startswith("custom:"):
-        from api.config import (
-            _custom_provider_entries, _custom_provider_slug_key,
-            _select_custom_provider_record, _unique_custom_provider_entry,
-        )
-
-        entry, _source, _exact, _status = _select_custom_provider_record(
-            provider, _custom_provider_slug_key(provider), cfg,
-        )
-        if entry is None:
-            entry = _unique_custom_provider_entry(_custom_provider_entries(cfg), _custom_provider_slug_key(provider))
-        return _custom_provider_api_key_for_context(entry, provider) if entry is not None else ""
-
     def _resolve_key(raw_api_key, raw_key_env=None) -> str:
         api_key_text = str(raw_api_key or "").strip()
         if (
@@ -9404,8 +9391,12 @@ def _context_length_lookup_inputs_for_model(
             try:
                 from api.config import _canonicalise_provider_id as _canon_provider_id
 
-                _owner_provider = _canon_provider_id(_owner_provider) or _owner_provider
-                _session_provider = _canon_provider_id(_session_provider) or _session_provider
+                # v0.52.544's canonicaliser folded "_" to "-" in custom:* ids;
+                # since 091c26592 it keeps them, so fold here to keep this
+                # ownership comparison 544's (#8819 Codex round 10). Routing
+                # elsewhere keeps the newer canonicalisation.
+                _owner_provider = _canon_provider_id(str(_owner_provider or "").replace("_", "-")) or _owner_provider
+                _session_provider = _canon_provider_id(str(_session_provider or "").replace("_", "-")) or _session_provider
             except Exception:
                 pass
             if (
@@ -9415,16 +9406,13 @@ def _context_length_lookup_inputs_for_model(
             ):
                 effective_base_url = str(model_cfg.get("base_url") or "").strip()
 
-    from api.config import (
-        _custom_provider_entries, _custom_provider_slug_key,
-        _select_custom_provider_record, _unique_custom_provider_entry,
-    )
-
-    custom_providers = _custom_provider_entries(cfg)
+    custom_providers = cfg.get("custom_providers") if isinstance(cfg, dict) else None
+    if not isinstance(custom_providers, list):
+        custom_providers = None
 
     provider_context_length = None
     providers_cfg = (cfg.get("providers") or {}) if isinstance(cfg, dict) else {}
-    if isinstance(providers_cfg, dict) and not str(effective_provider or "").startswith("custom:"):
+    if isinstance(providers_cfg, dict):
         for provider_key, provider_cfg in providers_cfg.items():
             if not isinstance(provider_cfg, dict):
                 continue
@@ -9440,51 +9428,39 @@ def _context_length_lookup_inputs_for_model(
 
     custom_context_length = None
     effective_api_key = str(api_key or "").strip()
-    entry = None
-    if effective_provider and effective_provider != "custom":
-        # Identity outranks URL: shared gateways are not shared authorities.
-        # The read view omits bad identities; an explicitly requested native
-        # collision must still fail closed rather than become a metadata miss.
-        selected, selected_source = None, ""
-        if effective_provider.startswith("custom:"):
-            selected, selected_source, _exact, _status = _select_custom_provider_record(
-                effective_provider, _custom_provider_slug_key(effective_provider), cfg,
-            )
-        entry = _unique_custom_provider_entry(
-            custom_providers, _custom_provider_slug_key(effective_provider),
-        )
-        if entry is None and selected is not None and selected_source in {"providers", "custom_providers"}:
-            entry = dict(selected)
-            entry["name"] = effective_provider
-    elif custom_providers:
+    if custom_providers:
         target_base = effective_base_url.rstrip("/")
         model_candidates = set(_model_lookup_candidates(bare_model or model_for_lookup))
-        matches = []
-        for candidate in custom_providers:
-            candidate_base = str(candidate.get("base_url") or "").strip().rstrip("/")
-            models_cfg = candidate.get("models")
-            model_matches = bool(model_candidates.intersection(_model_lookup_candidates(candidate.get("model"))))
+        for entry in custom_providers:
+            if not isinstance(entry, dict):
+                continue
+            entry_name = str(entry.get("name") or "").strip()
+            entry_slug = _custom_provider_slug_for_context(entry_name)
+            entry_base = str(entry.get("base_url") or "").strip()
+            entry_base_norm = entry_base.rstrip("/")
+            provider_matches = bool(
+                effective_provider
+                and (
+                    effective_provider == entry_slug
+                    or effective_provider == entry_name.lower()
+                    or (effective_provider == "custom" and len(custom_providers) == 1)
+                )
+            )
+            base_matches = bool(target_base and entry_base_norm and target_base == entry_base_norm)
+            model_matches = bool(model_candidates.intersection(set(_model_lookup_candidates(entry.get("model")))))
+            models_cfg = entry.get("models")
             if isinstance(models_cfg, dict):
-                model_matches = model_matches or any(mid in models_cfg for mid in model_candidates)
-            if (target_base and target_base == candidate_base) or (not target_base and model_matches):
-                matches.append(candidate)
-        if len(matches) == 1:
-            entry = matches[0]
-    # Downstream metadata resolvers must not repeat a URL-only match against
-    # another identity after we have already selected (or refused) an owner.
-    custom_providers = [entry] if entry is not None else []
-    if entry is not None:
-        entry_slug = _custom_provider_slug_for_context(entry.get("name"))
-        if not effective_provider or effective_provider == "custom":
-            effective_provider = entry_slug
-        if not effective_base_url:
-            effective_base_url = str(entry.get("base_url") or "").strip()
-        if not effective_api_key:
-            effective_api_key = _custom_provider_api_key_for_context(entry, effective_provider)
-        custom_context_length = (
-            _models_config_context_length(entry.get("models"), bare_model or model_for_lookup)
-            or _positive_context_length(entry.get("context_length"))
-        )
+                model_matches = model_matches or any(candidate in models_cfg for candidate in model_candidates)
+            if not (provider_matches or base_matches or (not effective_provider and model_matches)):
+                continue
+            if not effective_provider and entry_slug:
+                effective_provider = entry_slug
+            if not effective_base_url and entry_base:
+                effective_base_url = entry_base
+            if not effective_api_key:
+                effective_api_key = _custom_provider_api_key_for_context(entry, effective_provider or entry_slug)
+            custom_context_length = _models_config_context_length(models_cfg, bare_model or model_for_lookup)
+            break
 
     global_context_length = None
     if isinstance(model_cfg, dict):
