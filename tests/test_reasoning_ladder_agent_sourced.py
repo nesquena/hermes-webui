@@ -23,6 +23,8 @@ of whatever Agent happens to be installed on the CI host: they monkeypatch
 both or derive from them.
 """
 
+import sys
+import types
 from typing import Any
 
 import pytest
@@ -246,6 +248,99 @@ def test_custom_providers_never_get_ultra(tmp_path, monkeypatch):
     )
     for provider in ("custom:reviewer-codex", "reviewer-codex", "custom:mygw"):
         assert cfg._route_wire_accepts_ultra("gpt-5.6", provider) is False, provider
+
+
+def _alias_lane(monkeypatch, *, model: str, provider: str) -> str:
+    """Route one configured alias and return its opaque picker-app lane token."""
+    monkeypatch.setattr(
+        cfg,
+        "cfg",
+        {"model_aliases": {"sol": {"model": model, "provider": provider}}},
+    )
+    # No direct-alias table: the configured model_aliases[] entry is the route.
+    monkeypatch.setitem(sys.modules, "hermes_cli.model_switch", types.SimpleNamespace())
+    return cfg._public_model_alias_routes()["sol"]["route_provider"]
+
+
+def test_alias_lane_resolves_the_codex_route_for_ultra(monkeypatch):
+    # Greptile P1: an alias onto openai-codex + codex_app_server is a Codex
+    # route, not an unknown OpenAI-compatible one. The chat worker resolves the
+    # lane before building the turn, so the picker must advertise and keep the
+    # same levels — otherwise Ultra High disappears from the dropdown while the
+    # worker still sends it.
+    monkeypatch.setattr(
+        cfg, "_resolve_model_reasoning_efforts_impl", lambda *a, **k: list(_LADDER)
+    )
+    route = _alias_lane(monkeypatch, model="gpt-5.6", provider="openai-codex")
+
+    assert cfg._route_wire_accepts_ultra("gpt-5.6", route, "codex_app_server") is True
+    assert cfg.coerce_reasoning_effort_for_model(
+        "ultra", model_id="gpt-5.6", provider_id=route, api_mode="codex_app_server"
+    ) == "ultra"
+    status = cfg.get_reasoning_status(
+        model_id="gpt-5.6",
+        provider_id=route,
+        effort_override="ultra",
+        api_mode="codex_app_server",
+    )
+    assert "ultra" in status["supported_efforts"]
+    assert status["reasoning_effort"] == "ultra"
+    assert status["reasoning_effort_display"] == "ultra"
+    # The picker spelling of the same lane resolves identically.
+    hinted = f"@{route}:gpt-5.6"
+    assert cfg._route_wire_accepts_ultra(hinted, route, "codex_app_server") is True
+
+
+def test_alias_lane_follows_the_same_runtime_opt_out(monkeypatch):
+    # Same alias on the default Responses runtime: no Ultra, stored one runs as
+    # max — exactly like the bare openai-codex route.
+    monkeypatch.setattr(
+        cfg, "_resolve_model_reasoning_efforts_impl", lambda *a, **k: list(_LADDER)
+    )
+    route = _alias_lane(monkeypatch, model="gpt-5.6", provider="openai-codex")
+
+    assert cfg._route_wire_accepts_ultra("gpt-5.6", route, "codex_responses") is False
+    assert cfg.coerce_reasoning_effort_for_model(
+        "ultra", model_id="gpt-5.6", provider_id=route, api_mode="codex_responses"
+    ) == "max"
+    status = cfg.get_reasoning_status(
+        model_id="gpt-5.6",
+        provider_id=route,
+        effort_override="ultra",
+        api_mode="codex_responses",
+    )
+    assert "ultra" not in status["supported_efforts"]
+    assert status["reasoning_effort"] == "max"
+    assert status["reasoning_effort_display"] == "ultra (sends max on this route)"
+
+
+def test_alias_lane_applies_the_real_provider_ceilings(monkeypatch):
+    # The alias's own provider owns the ceiling: a Gemini alias must not
+    # advertise max/ultra just because the lane token is unrecognized.
+    monkeypatch.setattr(
+        cfg, "_resolve_model_reasoning_efforts_impl", lambda *a, **k: list(_LADDER)
+    )
+    route = _alias_lane(monkeypatch, model="gemini-4-argon", provider="gemini")
+
+    supported = cfg.resolve_model_reasoning_efforts("gemini-4-argon", provider_id=route)
+    assert "xhigh" in supported
+    assert "max" not in supported, supported
+    status = cfg.get_reasoning_status(
+        model_id="gemini-4-argon", provider_id=route, effort_override="ultra"
+    )
+    assert status["reasoning_effort"] == "xhigh"
+    assert status["reasoning_effort_display"] == "ultra (sends xhigh on this route)"
+
+
+def test_unresolved_alias_lane_keeps_failing_closed(monkeypatch):
+    # A lane that no longer resolves (deleted alias, foreign profile) has no
+    # route to describe: keep the opaque identity, advertise no above-max level
+    # and coerce a stored one to max rather than guessing.
+    hostile = "model-alias-" + "f" * 64
+    assert cfg._route_wire_accepts_ultra("gpt-5.6", hostile, "codex_app_server") is False
+    assert cfg.coerce_reasoning_effort_for_model(
+        "ultra", model_id="gpt-5.6", provider_id=hostile, api_mode="codex_app_server"
+    ) == "max"
 
 
 def test_ultra_sends_max_on_documented_max_routes(monkeypatch):
@@ -643,6 +738,73 @@ class TestComposedHandlerRegressions:
 
 
 # ── Gate #8681: real handler, session, and profile persistence boundaries ────
+
+def _configured_alias_lane(monkeypatch, *, model: str, provider: str) -> str:
+    """Register one alias in the session profile's alias registry.
+
+    The composed handler chain reloads ``api.config.cfg`` under the session's
+    profile, so a test that only mutates the ambient mapping loses the alias
+    mid-request. The registry reader is the adapter here; the digest, lane
+    resolution and expected-model match stay production code.
+    """
+    entries = {
+        "sol": {
+            "model": model,
+            "provider": provider,
+            "base_url": "",
+            "api_key": "",
+            "key_env": "",
+        }
+    }
+    monkeypatch.setattr(cfg, "_configured_model_alias_entries", lambda *a, **k: dict(entries))
+    monkeypatch.setitem(sys.modules, "hermes_cli.model_switch", types.SimpleNamespace())
+    return cfg._public_model_alias_routes()["sol"]["route_provider"]
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_composed_handler_resolves_the_alias_lane_provider(
+    tmp_path, monkeypatch, method,
+):
+    # Greptile P1, composed: /api/reasoning receives the opaque
+    # ``model-alias-<digest>`` token as the provider. The chat worker resolves
+    # that lane to openai-codex before building the turn, so the handlers must
+    # resolve it too — otherwise GET hides Ultra High and POST reports the
+    # coerced max for a session the worker still runs as ultra.
+    routes, captured, _dir, sid, raw = _composed_handler_env(
+        tmp_path, monkeypatch, ambient=None, profile_runtime="codex_app_server",
+        stored_effort="ultra" if method == "GET" else "high",
+    )
+    monkeypatch.setattr(cfg, "_resolve_model_reasoning_efforts_impl", lambda *a, **k: list(_LADDER))
+    route = _configured_alias_lane(monkeypatch, model="gpt-5.6", provider="openai-codex")
+    if method == "GET":
+        _drive_get(routes, sid, provider=route)
+    else:
+        _drive_post(routes, sid, monkeypatch, provider=route)
+    assert captured["status"] == 200, captured
+    status = captured["payload"]
+    assert status["reasoning_effort"] == "ultra"
+    assert status["reasoning_effort_display"] == "ultra"
+    assert "ultra" in status["supported_efforts"]
+    assert raw() == "ultra"
+
+
+def test_composed_handler_alias_lane_follows_the_runtime_opt_out(
+    tmp_path, monkeypatch,
+):
+    routes, captured, _dir, sid, raw = _composed_handler_env(
+        tmp_path, monkeypatch, ambient=None, profile_runtime="auto",
+    )
+    monkeypatch.setattr(cfg, "_resolve_model_reasoning_efforts_impl", lambda *a, **k: list(_LADDER))
+    route = _configured_alias_lane(monkeypatch, model="gpt-5.6", provider="openai-codex")
+    _drive_get(routes, sid, provider=route)
+    assert captured["status"] == 200, captured
+    assert captured["payload"]["reasoning_effort"] == "max"
+    assert captured["payload"]["reasoning_effort_display"] == (
+        "ultra (sends max on this route)"
+    )
+    assert "ultra" not in captured["payload"]["supported_efforts"]
+    assert raw() == "ultra"
+
 
 @pytest.mark.parametrize("method", ["GET", "POST"])
 @pytest.mark.parametrize("model", ["gpt-6-sol", "@openai-codex:gpt-6-sol"])
@@ -1111,3 +1273,4 @@ def test_set_reasoning_effort_still_rejects_garbage():
          mock.patch("api.config.reload_config"):
         with pytest.raises(ValueError):
             cfg.set_reasoning_effort("banana")
+
