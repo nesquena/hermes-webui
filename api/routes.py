@@ -990,6 +990,13 @@ def _retag_empty_session_profile(session, requested_profile):
             row_profile in root_profile_names and requested_owner in root_profile_names
         ):
             return session_profile, "same_owner"
+        # External history can live entirely in Agent state.db. An empty
+        # sidecar is not a WebUI placeholder and cannot confer a new owner.
+        from api.gateway_sessions import external_session
+        if (getattr(session, "read_only", False)
+                or getattr(session, "is_cli_session", False)
+                or external_session(vars(session))):
+            return session_profile, "external"
         has_persisted_turns = bool(
             getattr(session, "messages", None)
             or getattr(session, "context_messages", None)
@@ -6993,7 +7000,7 @@ def _handle_session_anchor_scene(handler, body):
     return j(handler, {"ok": True, "message_index": idx, "message_ref": ref})
 
 
-def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False):
+def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False, for_chat: bool = False):
     """Get a session, materializing from CLI/agent metadata if not in WebUI store.
 
     Mirrors the fallback logic in /api/session/archive (routes.py:~8530).
@@ -7003,6 +7010,10 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
     """
     try:
         s = get_session(sid)
+        if for_chat:
+            reason = gateway_session_chat_read_only_reason(vars(s))
+            if reason:
+                raise GatewayExternalSessionReadOnly(reason)
         s = _ensure_full_session_before_mutation(sid, s)
         # Read-only guard on the happy path too: an already-stored read-only /
         # imported session must not be mutated via rename/update/move
@@ -7010,7 +7021,9 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
         # read_only flag — a stored messaging session already owns its sidecar,
         # so the messaging-fork concern only applies to the materialize fallback
         # below (and the heuristic record-check would mis-trip on mock sessions).
-        if getattr(s, "read_only", False):
+        from api.gateway_sessions import configured as gateway_session_configured
+        canonical_chat = for_chat and webui_gateway_chat_enabled(get_config()) and gateway_session_configured(vars(s))
+        if getattr(s, "read_only", False) and not canonical_chat:
             raise PermissionError("read-only imported session")
         # A previously-persisted subagent sidecar (#5307) is view-only and
         # owned by the delegate runner — even if it was stored with
@@ -7048,6 +7061,10 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
     # profile B's sessions.  The archive handler has its own request-scoped
     # all-profiles path (#7549, #7731).
     cli_meta = _resolve_cli_import_metadata(sid)
+    if for_chat and cli_meta:
+        reason = gateway_session_chat_read_only_reason(cli_meta)
+        if reason:
+            raise GatewayExternalSessionReadOnly(reason)
 
     # Delegated subagent children (#5307) are view-only: their transcript lives
     # in state.db and ownership belongs to the delegate runner, not WebUI. They
@@ -7070,7 +7087,9 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
     # record — agent rows normalize messaging sources without setting read_only,
     # and state.db (not a WebUI sidecar) is the source of truth for them, so
     # materializing a writable sidecar would fork the title/state.
-    if cli_meta.get("read_only") or _is_messaging_session_record(cli_meta):
+    from api.gateway_sessions import configured as gateway_session_configured
+    canonical_chat = for_chat and webui_gateway_chat_enabled(get_config()) and gateway_session_configured(cli_meta)
+    if (cli_meta.get("read_only") or _is_messaging_session_record(cli_meta)) and not canonical_chat:
         raise PermissionError("read-only imported session")
 
     # Preserve source metadata fields
@@ -7086,6 +7105,8 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
         s.thread_id = cli_meta.get("thread_id")
         s.session_key = cli_meta.get("session_key")
         s.platform = cli_meta.get("platform")
+        if canonical_chat:
+            s.read_only = bool(cli_meta.get("read_only")) or _is_messaging_session_record(cli_meta)
 
     if _is_messaging_session_record(cli_meta):
         # Messaging sessions: lightweight Session with no messages (state.db is source of truth)
@@ -7096,6 +7117,7 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
             model=cli_meta.get("model") or "unknown",
             created_at=cli_meta.get("created_at"),
             updated_at=cli_meta.get("updated_at"),
+            profile=cli_meta.get("profile"),
         )
         _apply_source_meta(s)
         s.save(touch_updated_at=False)
@@ -13996,7 +14018,12 @@ from api.streaming import (
     _compact_for_echo_compare,
     _CompactEchoIndex,
 )
-from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
+from api.gateway_chat import (
+    GatewayExternalSessionReadOnly,
+    _run_gateway_chat_streaming,
+    gateway_session_chat_read_only_reason,
+    webui_gateway_chat_enabled,
+)
 from api.run_drain import (  # #7293
     RunAdmissionClosed,
     assert_run_admission_open_locked,
@@ -17270,7 +17297,7 @@ def _handle_session_get(handler, parsed) -> bool:
             )
             if revision:
                 raw["regeneration_revision"] = revision
-        redact = redact_session_data(raw)
+        redact = public_session_projection(raw)
         _t5 = _time.monotonic()
         if _diag: _diag.stage("t5_after_redact")
         resp = j(handler, {"session": redact})
@@ -20676,6 +20703,12 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "Read-only imported sessions cannot be updated from WebUI", 403)
             if _update_cli_meta:
                 _apply_cli_source_meta_to_session(s, _update_cli_meta)
+            from api.gateway_sessions import config_for_session, configured as native_configured
+            native_cfg = config_for_session(vars(s))
+            native = webui_gateway_chat_enabled(native_cfg) and native_configured(vars(s), native_cfg)
+            if native and any(key in body and body[key] != getattr(s, key, None)
+                              for key in ("model", "model_provider")):
+                return bad(handler, "Change this conversation's model in its original client before continuing here.", 400)
             old_ws = getattr(s, "workspace", "")
             try:
                 new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace), profile=getattr(s, "profile", None)))
@@ -30946,6 +30979,8 @@ def _handle_goal_command(handler, body):
         session_profile, retag_result = _retag_empty_session_profile(
             s, requested_profile
         )
+        if retag_result == "external":
+            return bad(handler, "Session belongs to a different profile", 403)
         if retag_result == "pinned_empty":
             return _session_profile_mismatch_response(
                 handler, body.get("session_id", ""), session_profile
@@ -31299,10 +31334,27 @@ def _handle_chat_start(handler, body, diag=None):
         if _refuse_cross_profile_chat_start_before_load(handler, body):
             return None
         diag.stage("get_session") if diag else None
+        # #8523: a stored session the active profile cannot see (the same test as this route's profile check and the
+        # session detail load's stored branch), which only a crafted or stale request can name, takes master's path
+        # here: master's loader and refusals, then master's profile check, never a retag. Read-only reasons,
+        # native-transport exemptions and transport checks apply only to sessions the profile can open.
+        # The owner is read without loading the session: a full load runs journal recovery, which spends retry budget,
+        # so this request must load it once, as master does. Unreadable ownership metadata takes master's path, whose
+        # loader and checks judge it as master does; no stored session keeps the no-sidecar path.
+        _hidden_session = False
+        try:
+            _stored_owner = get_session_profile_readonly(body["session_id"])
+        except KeyError:
+            pass
+        except (OSError, ValueError, TypeError):
+            _hidden_session = True
+        else:
+            _hidden_session = not _session_visible_to_active_profile(_stored_owner, handler)
         try:
             s = _get_or_materialize_session(
                 body["session_id"],
                 refresh_cli_messages=body.get("regenerate") is not True,
+                for_chat=not _hidden_session,
             )
             if getattr(s, "_sidecar_names_other_session", None):
                 # #8852: this file's body names another session, so every
@@ -31325,23 +31377,30 @@ def _handle_chat_start(handler, body, diag=None):
                 # safety violation). All collapse to 404 — the client only
                 # knows the right thing to do for "this session is gone".
                 return bad(handler, "Session not found", 404)
+            chat_reason = gateway_session_chat_read_only_reason(vars(synth))
+            if chat_reason:
+                return j(handler, {
+                    "error": chat_reason, "code": "gateway_external_session_read_only",
+                }, status=409)
+            from api.gateway_sessions import configured as gateway_session_configured
             if reason == "not_claimable":
-                # Foreign store says this session is read-only / owned by
-                # a non-WebUI process (messaging, claude_code,
-                # external_agent, cron, gateway/unknown, or explicit
-                # read_only flag). The session is real and viewable, but
-                # the WebUI must not take write ownership of it — that
-                # would be an ownership-boundary violation (#4911 review).
-                # 403 (not 404) because 404 triggers the frontend's
-                # empty-state self-heal handler which strips the URL and
-                # clears localStorage; for a legitimately-listed read-only
-                # session the user should keep their URL and see a refusal,
-                # not have their session vanish.
-                return bad(
-                    handler,
-                    "session is read-only in its foreign store; cannot be claimed writeable in WebUI",
-                    403,
-                )
+                if not (webui_gateway_chat_enabled(get_config()) and gateway_session_configured(vars(synth))):
+                    # Foreign store says this session is read-only / owned by
+                    # a non-WebUI process (messaging, claude_code,
+                    # external_agent, cron, gateway/unknown, or explicit
+                    # read_only flag). The session is real and viewable, but
+                    # the WebUI must not take write ownership of it — that
+                    # would be an ownership-boundary violation (#4911 review).
+                    # 403 (not 404) because 404 triggers the frontend's
+                    # empty-state self-heal handler which strips the URL and
+                    # clears localStorage; for a legitimately-listed read-only
+                    # session the user should keep their URL and see a refusal,
+                    # not have their session vanish.
+                    return bad(
+                        handler,
+                        "session is read-only in its foreign store; cannot be claimed writeable in WebUI",
+                        403,
+                    )
             try:
                 synth.save()
             except Exception as _save_err:
@@ -31370,8 +31429,18 @@ def _handle_chat_start(handler, body, diag=None):
                 # with the just-persisted sidecar; _start_run will load it
                 # from disk if needed.
                 pass
+        except GatewayExternalSessionReadOnly as exc:
+            return j(handler, {
+                "error": str(exc), "code": "gateway_external_session_read_only",
+            }, status=409)
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be continued from WebUI", 403)
+        from api.gateway_sessions import configured as gateway_session_configured, model_change_requested
+        if not _hidden_session and webui_gateway_chat_enabled(get_config()) and gateway_session_configured(vars(s)):
+            if body.get("regenerate") or body.get("attachments"):
+                return bad(handler, "Gateway session continuation currently supports text messages. Use the original client for attachments or regeneration.", 400)
+            if model_change_requested(s, body):
+                return bad(handler, "Change this conversation's model in its original client before continuing here.", 400)
         diag.stage("validate_profile") if diag else None
         requested_profile, _requested_profile_invalid = _chat_start_requested_profile(body)
         active_profile = _get_active_profile_name()
@@ -31379,6 +31448,13 @@ def _handle_chat_start(handler, body, diag=None):
             return bad(handler, "invalid profile", 400)
         session_profile = getattr(s, "profile", None)
         if not _session_visible_to_active_profile(session_profile, handler):
+            from api.gateway_sessions import external_session
+            if external_session(vars(s)) or (_hidden_session and gateway_session_chat_read_only_reason(vars(s))):
+                # #8523: another client's session in another profile is refused exactly as master refuses a
+                # session of another profile, and is never retagged to the requesting profile.
+                return _session_profile_mismatch_response(
+                    handler, body.get("session_id", ""), session_profile
+                )
             if (
                 requested_profile
                 and _profiles_match(requested_profile, active_profile)
@@ -31394,6 +31470,13 @@ def _handle_chat_start(handler, body, diag=None):
                 return _session_profile_mismatch_response(
                     handler, body.get("session_id", ""), session_profile
                 )
+        if _hidden_session:
+            # Fail closed: a session reached from another profile is never continued while it is read-only here.
+            _hidden_reason = gateway_session_chat_read_only_reason(vars(s))
+            if _hidden_reason:
+                return j(handler, {
+                    "error": _hidden_reason, "code": "gateway_external_session_read_only",
+                }, status=409)
         # Resolve durable rotations before any workspace/model/pending mutation.
         # GET navigation adopts the tip; POST never silently replays a user turn.
         from api.compression_continuation import durable_compression_continuation
@@ -33876,6 +33959,8 @@ def _relay_gateway_run_approval(
             )
 
         base_url, api_key = gateway_run_endpoint(run_id)
+        from api.gateway_sessions import PREFIX, control as session_control
+        canonical_session = run_id.startswith(PREFIX)
         # The identity decision was made once, when the gateway's own payload
         # was interpreted: a mirror flagged v1 either carried an exact
         # per-prompt id plus its execution generation, or came from a gateway
@@ -33938,6 +34023,11 @@ def _relay_gateway_run_approval(
             decision must not depend on how the message happens to be worded.
             """
             try:
+                if canonical_session:
+                    # The native relay owns the receipt and generation fence.
+                    # Never reinterpret its session id as a REST Runs API id.
+                    session_control(run_id, "approval", approval_id=reply_prompt_id, choice=choice)
+                    return None
                 # Constructed per send: a misconfigured base must raise inside
                 # this try, or it escapes the relay and falls through to the
                 # legacy path as a false success.
@@ -33960,7 +34050,7 @@ def _relay_gateway_run_approval(
         already_resolved = False
         try:
             relay_error = _respond(prompt_id, execution_generation)
-            if getattr(relay_error, "code", "") == "approval_not_pending":
+            if not canonical_session and getattr(relay_error, "code", "") == "approval_not_pending":
                 # The mirror outlived the prompt it was built from: the run has
                 # since answered it, or parked a newer one. Re-read the run's own
                 # pending_controls and act only on what they prove.
@@ -34492,7 +34582,11 @@ def _handle_approval_respond(handler, body):
 
 
 def _resolve_clarify_legacy(sid: str, clarify_id: str, response: str) -> bool:
-    """Resolve clarify through the existing callback path without new state."""
+    """Resolve clarify through its owning transport without a local fallback."""
+    from api.gateway_sessions import respond_clarify
+    remote = respond_clarify(sid, clarify_id, response)
+    if remote is not None:
+        return remote
     # When a stable clarify_id is provided, match the specific entry so stale
     # or late responses from the frontend are reliably rejected (issue #2639).
     if clarify_id:
