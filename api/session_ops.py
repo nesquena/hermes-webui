@@ -296,7 +296,12 @@ def _bounded_tail_snapshot_if_safe(session, read_floor):
         return None
     profile = getattr(session, "profile", None)
     from api.models import (
+        _occurrence_parts,
         _session_message_visible_key,
+        _visible_key_field,
+        _visible_key_without_occurrence,
+        _visible_key_without_private_identity,
+        _VISIBLE_KEY_OCCURRENCE_INDEX,
         get_state_db_regeneration_tail_snapshot,
     )
 
@@ -318,6 +323,18 @@ def _bounded_tail_snapshot_if_safe(session, read_floor):
         # Empty skipped prefix: the bounded read already covers every row.
         return snap["tail"]
     # Non-empty skipped prefix: prove identical ordered visible identity.
+    #
+    # Both sides of the ordered proof use the SAME representation: the visible
+    # key with the PRIVATE identity removed from the occurrence slot (#8672
+    # review P2).  The sidecar carries a stable message ``id`` while the
+    # SQLite projection carries a ``_state_db_row_id``; those describe
+    # DIFFERENT things about the SAME logical row, so comparing the raw keys
+    # literally made the proof fail for every settled row.  That refused the
+    # bounded path and forced a full-history read of the whole transcript.
+    #
+    # The representation stays CLOCK-sensitive (the clock half is kept), so a
+    # repeated turn below and above the floor stays distinguishable, and the
+    # tool/provider identity (slots 2 and 4) keeps separating rows.
     sidecar_keys = []
     for message in getattr(session, "messages", None) or []:
         if not isinstance(message, dict):
@@ -330,21 +347,80 @@ def _bounded_tail_snapshot_if_safe(session, read_floor):
             key = _session_message_visible_key(message)
             if key is None:
                 return None
-            sidecar_keys.append(key)
-    if list(snap["prefix_keys"]) != sidecar_keys:
+            sidecar_keys.append(_visible_key_without_private_identity(key))
+    prefix_keys = [
+        _visible_key_without_private_identity(key) for key in snap["prefix_keys"]
+    ]
+    if prefix_keys != sidecar_keys:
         return None  # mismatch → full read
-    # Occurrence-count collision (#6826 r3 #1): if any bounded-tail key ALSO
-    # occurs in the skipped prefix, the reconciler may drop the repeated tail
-    # row — fall back conservatively.
-    prefix_key_set = set(snap["prefix_keys"])
+    # Occurrence-count collision (#6826 r3 #1) and in-tail duplicate (#6826
+    # r5): both proofs compare the OCCURRENCE-FREE identity, not the #7587
+    # occurrence-sensitive keys.  The bounded snapshot feeds a CLOCK-TOLERANT
+    # downstream (state_db_delta_after_context), which collapses a genuinely
+    # later repeated exchange onto its earlier twin regardless of clock.  An
+    # occurrence-sensitive proof lets such a repeated exchange pass as
+    # "distinct" (no in-tail duplicate, no prefix collision), so the bounded
+    # path is taken and the alignment swallows the fresh exchange — the
+    # full and bounded reads then disagree (Revisions differ) and
+    # plan_regeneration raises stale_regeneration_revision with no
+    # intervening write (#8672 gate r2).  Refusing the bounded path falls
+    # back to the full read, which is what master always did for these
+    # shapes, so full/bounded revision parity is restored.
+    prefix_key_set = {_visible_key_without_occurrence(k) for k in snap["prefix_keys"]}
     for key in snap["tail_keys"]:
-        if key in prefix_key_set:
+        if _visible_key_without_occurrence(key) in prefix_key_set:
             return None
-    # In-tail duplicates (#6826 r5): a repeated message wholly inside the
-    # bounded tail makes the reconciler's context dedup diverge from the full
-    # read (display may still match) → refuse the bounded path.
-    if len(snap["tail_keys"]) != len(set(snap["tail_keys"])):
+    if len(snap["tail_keys"]) != len({_visible_key_without_occurrence(k) for k in snap["tail_keys"]}):
         return None
+    # Restamped-twin proof (#8672 gate r3 D5).  The bounded snapshot feeds a
+    # POSITIONAL, clock-tolerant replay probe that starts at the sidecar head
+    # while the bounded tail starts at the read floor.  When state.db has
+    # restamped one row by a second relative to its sidecar twin, that
+    # misalignment means the bounded merge cannot recognise the replay and
+    # appends a duplicate; the full read aligns from index 0 and collapses it.
+    # Both stores then disagree on display/context counts and the revisions
+    # differ, so plan_regeneration raises stale_regeneration_revision with no
+    # intervening write.
+    #
+    # Two ESTABLISHED, different clocks for the same clock-free row identity
+    # prove only that the bounded proof cannot establish parity -- it cannot
+    # tell a restamp from a genuinely new repeated row.  Conservatively fall
+    # back to the full read (master behaviour for these shapes).  A clockless
+    # row on either side is a wildcard and proves nothing; a private id is
+    # deliberately ignored here (the id may be one-sided and cannot establish
+    # a clock disagreement).
+    sidecar_tail_clocks = {}
+    for message in getattr(session, "messages", None) or []:
+        if not isinstance(message, dict):
+            continue
+        try:
+            message_ts = float(message.get("timestamp"))
+        except (TypeError, ValueError):
+            message_ts = None
+        if message_ts is None or message_ts < read_floor:
+            continue
+        key = _session_message_visible_key(
+            message, normalize_workspace_prefix=True
+        )
+        clock, _identity = _occurrence_parts(
+            _visible_key_field(key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
+        )
+        if not clock:
+            continue
+        sidecar_tail_clocks.setdefault(
+            _visible_key_without_occurrence(key), set()
+        ).add(clock)
+    for key in snap["tail_keys"]:
+        clock, _identity = _occurrence_parts(
+            _visible_key_field(key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
+        )
+        if not clock:
+            continue
+        established = sidecar_tail_clocks.get(
+            _visible_key_without_occurrence(key)
+        )
+        if established and clock not in established:
+            return None
     return snap["tail"]
 
 
