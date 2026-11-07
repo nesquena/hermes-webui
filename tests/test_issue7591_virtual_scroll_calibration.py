@@ -999,6 +999,14 @@ let cacheDeletes = [];
 function _resetMessageVirtualMeasurementBurst(){}
 function _resetMessageRenderWindow(){}
 function _latestPreservedCompressionTaskListMessages(){ return []; }
+// #7778 rebase: renderMessages' cached branch now consults the compression
+// state (and clears its UI timers when a pane settles) — stub the three
+// compression symbols so the real function body evaluates in node.
+function _compressionStateForCurrentSession(){ return null; }
+function _clearCompressionElapsedTimer(){}
+function _setCompressionSessionLock(){}
+function _captureWorklogDetailDisclosureState(){ return null; }
+function _handoffStateForCurrentSession(){ return null; }
 function _getVisibleMessagesWithIdx(){ return [{ rawIdx: 0, m: {} }, { rawIdx: 1, m: {} }]; }
 function _currentMessageVirtualWindow(){
   return { virtualized: true, start: 0, end: 2, topPad: 0, bottomPad: 0, total: 2, tailStart: 2 };
@@ -1074,6 +1082,9 @@ const _sessionHtmlCache = {
       msgCount: S.messages.length,
       renderWindowKey: 'window-key',
       signature: 'signature',
+      // #7778: the cached fast path also gates on the Prism grammar
+      // signature. This stub environment has no Prism, so prismSigNow is 0.
+      prismSig: 0,
     };
   },
   delete(sid){ cacheDeletes.push(sid); },
