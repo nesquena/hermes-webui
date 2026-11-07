@@ -9474,6 +9474,8 @@ def _context_length_lookup_inputs_for_model(
     base_url: str | None = None,
     api_key: str | None = None,
     cfg: dict | None = None,
+    fallback_api_key: object = None,
+    fallback_base_url: str | None = None,
 ) -> _ContextLengthLookupInputs:
     """Return the effective metadata resolver inputs for a WebUI model.
 
@@ -9641,6 +9643,24 @@ def _context_length_lookup_inputs_for_model(
         _context_lookup_contacted_origins(effective_provider, effective_base_url) <= effective_api_key_owned
     ):
         effective_api_key = ""
+
+    # A fallback key (the Agent's own key at the streaming sites) is used only when
+    # the config selection left none, and only under the same rule: it owns the URL
+    # it came with, or, with no URL, its provider's fixed hosts. The lookup's URL is
+    # never changed for it. This keeps v0.52.544's order (config key first, then
+    # the Agent's) without putting the Agent's key on a URL it doesn't own.
+    fallback_key = (
+        fallback_api_key
+        if (fallback_api_key and not isinstance(fallback_api_key, str))
+        else str(fallback_api_key or "").strip()
+    )
+    if not effective_api_key and fallback_key:
+        fallback_owned = _context_lookup_owned_origins(
+            fallback_base_url,
+            own_provider="" if str(fallback_base_url or "").strip() else caller_provider,
+        )
+        if _context_lookup_contacted_origins(effective_provider, effective_base_url) <= fallback_owned:
+            effective_api_key = fallback_key
 
     return _ContextLengthLookupInputs(
         config_context_length=provider_context_length or custom_context_length or global_context_length,
