@@ -124,6 +124,7 @@ def test_shared_http_identity_initial_html_manifest_assets_notifications(http, p
         assert b'window.__HERMES_INSTANCE_BRANDING__=' in document
         assert b'static/favicon.svg' not in document
         assert effective["apple_touch_icon"].encode() in document
+        assert b'<meta name="apple-mobile-web-app-title" content="&lt;Team &quot;Console&quot;&gt;">' in document
         assert b"password_hash" not in document
     original = json.loads((Path(config.get_static_root()) / "manifest.json").read_bytes())
     for path in ("/manifest.json", "/manifest.webmanifest", "/session/manifest.json", "/session/manifest.webmanifest"):
@@ -153,7 +154,9 @@ def test_shared_http_identity_initial_html_manifest_assets_notifications(http, p
             if key == "apple_touch_icon":
                 assert image.mode == "RGB"
         assert http("/session/" + effective[key], cookie=None)[2] == data
-        assert http("/" + effective[key], cookie=None, headers={"If-None-Match": headers["ETag"]})[0] == 304
+        not_modified, conditional_headers, conditional_body = http("/" + effective[key], cookie=None, headers={"If-None-Match": headers["ETag"]})
+        assert not_modified == 304 and not conditional_body
+        assert int(conditional_headers["Content-Length"]) == len(data)
     ico = http("/" + effective["favicon_ico"], cookie=None)[2]
     with Image.open(io.BytesIO(ico)) as image:
         assert image.ico.sizes() == {(16, 16), (32, 32), (48, 48)}
