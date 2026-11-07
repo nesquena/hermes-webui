@@ -389,12 +389,10 @@ def test_runtime_paths_prefer_session_reasoning_effort():
     assert "_session_effort = getattr(s, 'reasoning_effort', None)" in streaming
     assert "getattr(_session_meta, 'reasoning_effort'" not in streaming
     assert "effective_session_reasoning_effort(\n                        _session_effort, _profile_home," in streaming
-    assert "resolve_session_reasoning_effort(" in gateway
-    # The Gateway worker starts from the live session too, and resolves a legacy
-    # session through the same isolated session-profile read as the chip.
-    assert 'session_effort = getattr(s, "reasoning_effort", None)' in gateway
-    assert "session_effort = effective_session_reasoning_effort(" in gateway
-    assert "session_effort=session_effort," in gateway
+    # Gateway settings are resolved together from one profile-owned snapshot;
+    # unlike the local path, they must retain receiver capability negotiation.
+    assert 'stored = getattr(session, "reasoning_effort", None)' in gateway
+    assert "session_effort=_stored_session_reasoning_effort(session)," in gateway
 
 
 def test_reasoning_slash_command_posts_active_session_context():
@@ -421,6 +419,13 @@ def isolated_reasoning_profiles(tmp_path, monkeypatch):
         "agent:\n  reasoning_effort: high\nwebui_gateway_base_url: http://work-gateway:8650\n"
     )
     monkeypatch.setenv("HERMES_CONFIG_PATH", str(root / "config.yaml"))
+    # A launcher override belongs to the process owner, not a temporary worker
+    # mirror. Model both stable authorities as well as the live config env.
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(root))
+    monkeypatch.setattr(profiles, "_INITIAL_PROCESS_ENV", {
+        "HERMES_CONFIG_PATH": str(root / "config.yaml"),
+    })
+    monkeypatch.setattr(profiles, "_PROCESS_OWNER_DOTENV", {})
     monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root)
     monkeypatch.setattr(profiles, "_active_profile", "default")
     monkeypatch.setattr(profiles._tls, "profile", None, raising=False)
@@ -515,6 +520,9 @@ def _run_gateway_turn(session, stream_id, tmp_path, monkeypatch, *, runs_api, ht
     events = channel.subscribe()
     monkeypatch.setitem(config.STREAMS, stream_id, channel)
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_USE_RUNS_API", "1" if runs_api else "0")
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {
+        "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1" if runs_api else "0",
+    })
     monkeypatch.setattr(gateway_chat, "gateway_supports_approval", lambda *a: True)
     monkeypatch.setattr(gateway_chat, "gateway_approval_unavailable_reason", lambda *a: None)
     # Avoid external platform discovery in system-prompt preparation.
@@ -611,6 +619,9 @@ def external_root_with_named_active(isolated_reasoning_profiles, tmp_path, monke
     (work / ".env").write_text("HERMES_WEBUI_GATEWAY_API_KEY=work-test-key\n")
     monkeypatch.setenv("HERMES_CONFIG_PATH", str(external))
     monkeypatch.setattr(profiles, "_active_profile", "work")
+    monkeypatch.setattr(profiles, "_INITIAL_PROCESS_ENV", {
+        "HERMES_CONFIG_PATH": str(external),
+    })
     # The active named profile's key is loaded into the process environment.
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "work-test-key")
     monkeypatch.setattr(profiles, "_loaded_profile_env_keys", {"HERMES_WEBUI_GATEWAY_API_KEY"})
@@ -648,11 +659,9 @@ def test_root_gateway_turn_honors_external_config_while_named_profile_active(
     # The effort follows the isolated root config: the external override is
     # root's while a named profile is sticky-active (this PR's rule).
     assert payload["reasoning_effort"] == "xhigh"
-    # The endpoint follows master's #7983 resolver unchanged: the active
-    # profile owns an external HERMES_CONFIG_PATH, so root uses its own
-    # config.yaml URL when it has one and otherwise keeps the shared
-    # (ambient) URL; on either URL root sends its own .env alias.
-    expected_url = "http://root-file:8650" if root_config_exists else "http://external-root:8650"
+    # The launcher override belongs to the stable root process owner even
+    # while a named profile is active. Both live and recovery resolve it.
+    expected_url = "http://external-root:8650"
     assert url.startswith(expected_url + "/")
     assert authorization == "Bearer root-test-key"
     assert endpoint == (expected_url, "root-test-key")
@@ -1160,7 +1169,9 @@ def test_gateway_receives_the_session_effort_where_it_reads_it(
         session, "gateway-effort-shape-stream", tmp_path, monkeypatch, runs_api=runs_api,
     )
     payload = captured[0][3]
-    assert payload["model_options"] == {"reasoning": expected}
+    assert payload["model_options"] == {
+        "reasoning": expected, "reasoning_effort": session_effort,
+    }
     assert payload["reasoning_effort"] == session_effort
     decode = _gateway_reasoning_decoder()
     if decode is not None:
@@ -1204,4 +1215,6 @@ def test_gateway_legacy_named_profile_chat_sends_the_chips_effort(
     )
     payload = captured[0][3]
     assert payload["reasoning_effort"] == "high"
-    assert payload["model_options"] == {"reasoning": {"enabled": True, "effort": "high"}}
+    assert payload["model_options"] == {
+        "reasoning": {"enabled": True, "effort": "high"}, "reasoning_effort": "high",
+    }

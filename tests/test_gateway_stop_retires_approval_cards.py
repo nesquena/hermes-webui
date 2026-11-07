@@ -102,6 +102,12 @@ def gateway_env(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "gateway")
     monkeypatch.delenv("HERMES_WEBUI_GATEWAY_USE_RUNS_API", raising=False)
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", BASE_URL)
+    # The real worker snapshots deployment settings; patching the old endpoint
+    # helper alone no longer selects the intercepted legacy transport.
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {
+        "HERMES_WEBUI_GATEWAY_BASE_URL": BASE_URL,
+        "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "0",
+    })
     monkeypatch.setattr(gateway_chat, "_gateway_endpoint_for_profile", lambda profile: (BASE_URL, ""))
     monkeypatch.setattr(gateway_chat, "_gateway_reasoning_effort_for_request", lambda *a, **k: None)
     monkeypatch.setattr(gateway_chat, "gateway_approval_unavailable_reason", lambda *a, **k: None)

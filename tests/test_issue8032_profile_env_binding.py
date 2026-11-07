@@ -408,6 +408,8 @@ _ALLOWED = {
     ("config.py", "_load_yaml_config_file_raw"): _LOADER,
     ("config.py", "_load_yaml_config_file"): _LOADER + " (expands under the caller's scope)",
     ("config.py", "_refresh_config_cache"): _LOADER + " (expands under the pinned process env)",
+    ("config.py", "get_config_snapshot"): _LOADER + " (expands a private copy under the request profile scope)",
+    ("config.py", "get_config_for_process_owner"): _LOADER + " (expands against the stable owner mapping, never request TLS)",
     ("routes.py", "_read_profile_config_cached"): _LOADER + " (raw parse cache)",
     ("yaml_compat.py", "safe_load"): _LOADER,
     ("profiles.py", "load_profile_config"): "THE helper",

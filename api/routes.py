@@ -509,6 +509,7 @@ from api.profiles import (  # noqa: F401, E402  (re-export)
     get_active_hermes_home,
     list_profiles_api,
     profile_scope_for_detached_worker,
+    profile_scope_for_request_read,
 )
 
 
@@ -30210,13 +30211,23 @@ def _server_initiated_turn_routing(session, *, model, model_provider):
             "server-initiated turn routing",
             logger_override=logger,
         ):
+            config_snapshot = get_config_snapshot()
             return (
-                webui_gateway_chat_enabled(get_config_snapshot()),
-                api_config.resolve_model_alias_runtime(model_provider, expected_model=model),
+                webui_gateway_chat_enabled(config_snapshot),
+                api_config.resolve_model_alias_runtime(
+                    model_provider,
+                    expected_model=model,
+                    config_data=config_snapshot,
+                ),
             )
+    config_snapshot = get_config_snapshot()
     return (
-        webui_gateway_chat_enabled(get_config_snapshot()),
-        api_config.resolve_model_alias_runtime(model_provider, expected_model=model),
+        webui_gateway_chat_enabled(config_snapshot),
+        api_config.resolve_model_alias_runtime(
+            model_provider,
+            expected_model=model,
+            config_data=config_snapshot,
+        ),
     )
 
 
@@ -30247,6 +30258,48 @@ def _external_model_alias_lane_response(alias_route, *, external_owned: bool) ->
         "hint": "Use the in-process chat backend or select a provider-only model alias.",
         "_status": 400,
     }
+
+
+def _runner_reasoning_effort_for_session(session, *, model=None, model_provider=None):
+    """Resolve the runner override from the session-owned profile snapshot."""
+    from api.config import _thread_ctx
+    from api.gateway_chat import (
+        _gateway_reasoning_effort_for_request,
+        _profile_config_path,
+        _stored_session_reasoning_effort,
+    )
+    from api.profiles import get_hermes_home_for_profile
+
+    profile_name = str(getattr(session, "profile", "") or "").strip()
+    profile_home = get_hermes_home_for_profile(profile_name)
+
+    # The read-only scope binds profile env values, but the config snapshot
+    # must also be pinned to this session's file rather than a live launcher
+    # HERMES_CONFIG_PATH that can belong to the process owner or a parked worker.
+    with profile_scope_for_request_read(
+        profile_name,
+        "runner reasoning request settings",
+        logger_override=logger,
+    ):
+        previous_config_path = getattr(_thread_ctx, "config_snapshot_path", None)
+        _thread_ctx.config_snapshot_path = _profile_config_path(profile_home)
+        try:
+            cfg = get_config_snapshot()
+        finally:
+            if previous_config_path is None:
+                try:
+                    del _thread_ctx.config_snapshot_path
+                except AttributeError:
+                    pass
+            else:
+                _thread_ctx.config_snapshot_path = previous_config_path
+
+        return _gateway_reasoning_effort_for_request(
+            cfg,
+            model=model,
+            model_provider=model_provider,
+            session_effort=_stored_session_reasoning_effort(session),
+        )
 
 
 def _start_run(
@@ -30372,6 +30425,11 @@ def _start_run(
             return LegacyJournalRuntimeAdapter(start_run_delegate=_legacy_start_run)
 
         try:
+            runner_reasoning_effort = _runner_reasoning_effort_for_session(
+                s,
+                model=model,
+                model_provider=model_provider,
+            )
             adapter = build_runtime_adapter(
                 legacy_adapter_factory=_legacy_adapter_factory,
                 runner_client_factory=_runtime_runner_client_factory,
@@ -30387,6 +30445,7 @@ def _start_run(
                     profile=getattr(s, "profile", None),
                     provider=model_provider,
                     model=model,
+                    reasoning_effort=runner_reasoning_effort,
                     source=source,
                     metadata={
                         "route": route,

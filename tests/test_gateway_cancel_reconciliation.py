@@ -51,6 +51,7 @@ import threading
 import time
 import unittest
 import urllib.request
+from contextlib import contextmanager
 from unittest.mock import patch
 from urllib.parse import urlparse
 
@@ -68,6 +69,7 @@ for _trial_dir in (
     pathlib.Path(_trial_dir).mkdir(parents=True, exist_ok=True)
 
 import api.config as cfg  # noqa: E402
+import api.profiles as profiles  # noqa: E402
 import api.routes as routes  # noqa: E402
 from api.models import Session, get_session  # noqa: E402
 
@@ -721,11 +723,22 @@ class ReconciliationHarness(unittest.TestCase):
         self.assertEqual(body.get("input"), "q1")
         teardown_stream_state(regen_stream)
 
+    @contextmanager
     def _gateway_worker_env(self):
-        return patch.dict(os.environ, {
+        """Configure the deployment as Gateway-backed for the worker body.
+
+        A root/default session resolves its Gateway settings from the launcher
+        snapshot bound for the request (``profile_scope_for_request_read``), not
+        from live ``os.environ``, so the fixture seeds the snapshot as well.
+        """
+        values = {
             "HERMES_WEBUI_CHAT_BACKEND": "gateway",
             "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
-        })
+        }
+        with patch.dict(os.environ, values), patch.dict(
+            profiles._INITIAL_PROCESS_ENV, values
+        ):
+            yield
 
     def _drive_full_worker(self, session_id, msg_text, stream_id):
         """Drive the real _run_gateway_chat_streaming end to end."""
