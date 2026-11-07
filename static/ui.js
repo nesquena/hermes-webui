@@ -10975,6 +10975,24 @@ function renderMd(raw){
     }
     return out+run.slice(cursor);
   }
+  // Emphasis tag/entity stash shared by inlineMd() and renderMd()'s outer pass.
+  // The italic and strikethrough passes esc() their captured text, so tags and
+  // entities emitted by the bold pass — and by the italic pass itself — must be
+  // stashed or they surface as literal &lt;strong&gt; and double-escape an
+  // already-escaped &#39; into &amp;#39;. Only bare tags/entities are stashed,
+  // never their content, so nested emphasis (**a *b* c**) still renders. The
+  // token carries a per-call random prefix because renderMd() does not strip NUL
+  // from its input: a message containing a literal token would otherwise be
+  // restored as markup, and \x00B already belongs to _al_stash. See #8235.
+  function _mkEmphasisStash(){
+    const tk='\x00I'+Math.random().toString(36).slice(2,8)+'_';
+    const re=new RegExp(tk.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'(\\d+)\x00','g');
+    const st=[];
+    return {
+      stash:v=>v.replace(/<\/?(?:strong|em|del)>|&(?:amp|lt|gt|quot|#39);/g,m=>{st.push(m);return tk+(st.length-1)+'\x00';}),
+      restore:v=>v.replace(re,(_,i)=>st[+i])
+    };
+  }
   // inlineMd: process bold/italic/code/links within a single line of text.
   // Used inside list items and blockquotes where the text may already contain
   // HTML from the pre-pass → bold pipeline, so we cannot call esc() directly.
@@ -10984,9 +11002,15 @@ function renderMd(raw){
     t=t.replace(/`([^`\n]+)`/g,(_,x)=>{_code_stash.push(`<code>${esc(x)}</code>`);return `\x00C${_code_stash.length-1}\x00`;});
     t=t.replace(/\*\*\*(.+?)\*\*\*/g,(_,x)=>`<strong><em>${esc(x)}</em></strong>`);
     t=t.replace(/\*\*(.+?)\*\*/g,(_,x)=>`<strong>${esc(x)}</strong>`);
+    // Shield the tags/entities emitted so far, and the <em> tags the italic
+    // pass below emits, from the esc() in the italic/strikethrough passes.
+    const _es=_mkEmphasisStash();
+    t=_es.stash(t);
     t=t.replace(/\*([^\s*](?:[^*\n]*?[^\s*])?)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
+    t=_es.stash(t);
     // Strikethrough: ~~text~~ → <del>text</del>
     t=t.replace(/~~(.+?)~~/g,(_,x)=>`<del>${esc(x)}</del>`);
+    t=_es.restore(t);
     // #487: Image pass — runs while code stash is active so ![x](url) inside
     // backticks stays protected as a \x00C token and is never rendered as <img>.
     // Must run before _code_stash restore and before _link_stash so the image
@@ -11014,8 +11038,15 @@ function renderMd(raw){
   s=s.replace(/(<code\b[^>]*>[\s\S]*?<\/code>)/g,m=>{_ob_stash.push(m);return `\x00O${_ob_stash.length-1}\x00`;});
   s=s.replace(/\*\*\*(.+?)\*\*\*/g,(_,t)=>`<strong><em>${esc(t)}</em></strong>`);
   s=s.replace(/\*\*(.+?)\*\*/g,(_,t)=>`<strong>${esc(t)}</strong>`);
+  // Same protection as inlineMd above: the italic/strikethrough passes esc()
+  // their captured text, so the tags/entities emitted so far (and by the
+  // italic pass) must be stashed first.
+  const _oes=_mkEmphasisStash();
+  s=_oes.stash(s);
   s=s.replace(/\*([^\s*](?:[^*\n]*?[^\s*])?)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
+  s=_oes.stash(s);
   s=s.replace(/~~(.+?)~~/g,(_,t)=>`<del>${esc(t)}</del>`);
+  s=_oes.restore(s);
   s=s.replace(/\x00O(\d+)\x00/g,(_,i)=>_ob_stash[+i]);
   s=s.replace(/^###### (.+)$/gm,(_,t)=>`<h6>${inlineMd(t)}</h6>`).replace(/^##### (.+)$/gm,(_,t)=>`<h5>${inlineMd(t)}</h5>`).replace(/^#### (.+)$/gm,(_,t)=>`<h4>${inlineMd(t)}</h4>`).replace(/^### (.+)$/gm,(_,t)=>`<h3>${inlineMd(t)}</h3>`).replace(/^## (.+)$/gm,(_,t)=>`<h2>${inlineMd(t)}</h2>`).replace(/^# (.+)$/gm,(_,t)=>`<h1>${inlineMd(t)}</h1>`);
   s=s.replace(/^---+$/gm,'<hr>');
@@ -11404,6 +11435,8 @@ function renderMd(raw){
   // Stash rendered <pre> blocks (with optional pre-header div) and mermaid/katex
   // divs before paragraph splitting so \n inside code blocks is never replaced
   // with <br>. Token \x00E (next free after B D F G L M C O A).
+  // \x00I is reserved for the emphasis tag/entity stash (random-suffixed
+  // \x00I<rand>_<n>\x00 tokens in inlineMd/renderMd), so it is not free here.
   // Fixes #745: code blocks collapse to single line when not preceded by blank line.
   const _pre_stash=[];
   // #1463 / #1618: regex must match <pre> with ANY attributes — PR #484 added
