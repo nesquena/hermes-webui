@@ -2334,7 +2334,7 @@ def _resume_gateway_run_for_session(session) -> bool:
                 "model_provider": session.model_provider,
                 "goal_related": bool(run.get("goal_related")),
                 "regeneration": bool(run.get("regeneration")),
-                "reattach_run": run,
+                "reattach_run": {**run, "pending_started_at": getattr(session, "pending_started_at", None)},
                 "reattach_endpoint": endpoint,
                 "reattach_claim_token": claim_token,
             },
@@ -2994,6 +2994,19 @@ def _submit_stream_approval_mirror(session_id: str, approval_data: dict, cancel_
     return head, total
 
 
+def _reattached_turn_started_at(reattach_run) -> float | None:
+    """Original turn start of a reattached run (saved record, else the pending turn's start)."""
+    if not reattach_run:
+        return None
+    for value in (reattach_run.get("turn_started_at"), reattach_run.get("pending_started_at")):
+        try:
+            if value and float(value) > 0:
+                return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _run_gateway_chat_streaming(
     session_id,
     msg_text,
@@ -3020,6 +3033,12 @@ def _run_gateway_chat_streaming(
     final user/assistant turn back into the WebUI session.
     """
     cancel_event = threading.Event()
+    # A reattached run keeps the ORIGINAL turn's start: a fresh timestamp would
+    # make an in-turn Gateway goal evaluation saved before the restart look stale
+    # and get the turn judged (and counted) a second time.
+    _turn_started_at = _reattached_turn_started_at(reattach_run) or time.time()
+    _detached_goal_continuation_prompt = ""
+    _detached_goal_continuation_id = ""
     q = peek_stream(stream_id)
     if q is not None:
         # A snapshot lookup is not admission. A concurrent chat/start can classify
@@ -3225,6 +3244,7 @@ def _run_gateway_chat_streaming(
                 _record_gateway_run(
                     session_id, stream_id, run_id, request=request,
                     regeneration=bool(regeneration), goal_related=bool(goal_related),
+                    turn_started_at=_turn_started_at,
                 )
                 if run_id:  # the Gateway accepted the run: its delegation lease is delivered
                     _settle_delegation_reservation(session_id, stream_id, accepted=True)
@@ -3637,14 +3657,28 @@ def _run_gateway_chat_streaming(
             success_writeback_committed = True
         try:
             from api.goals import (
+                goal_message_key as _goal_message_key,
+                dispatch_goal_continuation,
                 evaluate_goal_after_turn,
+                gateway_evaluated_goal_in_turn,
                 has_active_goal,
                 register_pending_goal_continuation,
             )
             from api.profiles import get_hermes_home_for_profile
 
             profile_home = get_hermes_home_for_profile(getattr(s, "profile", None))
-            if goal_related and has_active_goal(session_id, profile_home=profile_home):
+            _gateway_evaluated = gateway_evaluated_goal_in_turn(
+                session_id,
+                min_evaluated_at=_turn_started_at,
+                profile_home=profile_home,
+            )
+            # Only a goal-related turn the WebUI started gives the WebUI the
+            # continuation decision; an in-turn native evaluation is reported
+            # here but dispatched by the Agent, never a second time.
+            _webui_owns_goal = bool(
+                goal_related and has_active_goal(session_id, profile_home=profile_home)
+            )
+            if _gateway_evaluated or _webui_owns_goal:
                 put_gateway_event("goal", {
                     "session_id": session_id,
                     "state": "evaluating",
@@ -3656,6 +3690,7 @@ def _run_gateway_chat_streaming(
                     assistant_text,
                     user_initiated=True,
                     profile_home=profile_home,
+                    min_evaluated_at=_turn_started_at if _gateway_evaluated else None,
                 ) or {}
                 goal_message = str(decision.get("message") or "").strip()
                 if goal_message:
@@ -3663,13 +3698,11 @@ def _run_gateway_chat_streaming(
                         "session_id": session_id,
                         "state": "continuing" if decision.get("should_continue") else "idle",
                         "message": goal_message,
-                        "message_key": decision.get("message_key") or (
-                            "goal_continuing" if goal_message else ""
-                        ),
+                        "message_key": _goal_message_key(decision),
                         "message_args": decision.get("message_args") or [],
                         "decision": decision,
                     })
-                if decision.get("should_continue"):
+                if decision.get("should_continue") and _webui_owns_goal:
                     continuation_prompt = str(decision.get("continuation_prompt") or "").strip()
                     continuation_id = None
                     if continuation_prompt:
@@ -3683,16 +3716,24 @@ def _run_gateway_chat_streaming(
                         if not continuation_id:
                             continuation_prompt = ""
                     if continuation_prompt:
-                        put_gateway_event("goal_continue", {
-                            "session_id": session_id,
-                            "continuation_prompt": continuation_prompt,
-                            "continuation_id": continuation_id,
-                            "text": continuation_prompt,
-                            "message": goal_message,
-                            "message_key": decision.get("message_key") or "goal_continuing",
-                            "message_args": decision.get("message_args") or [],
-                            "decision": decision,
-                        })
+                        # A browser subscriber holds the dispatch; without one
+                        # the server starts the turn at teardown.
+                        if dispatch_goal_continuation(
+                            session_id, str(continuation_id or ""), q
+                        ):
+                            put_gateway_event("goal_continue", {
+                                "session_id": session_id,
+                                "continuation_prompt": continuation_prompt,
+                                "continuation_id": continuation_id,
+                                "text": continuation_prompt,
+                                "message": goal_message,
+                                "message_key": _goal_message_key(decision),
+                                "message_args": decision.get("message_args") or [],
+                                "decision": decision,
+                            })
+                        else:
+                            _detached_goal_continuation_prompt = continuation_prompt
+                            _detached_goal_continuation_id = continuation_id or ""
         except Exception as goal_exc:
             logger.debug(
                 "Gateway goal continuation hook failed for session %s: %s",
@@ -3758,3 +3799,11 @@ def _run_gateway_chat_streaming(
         # the process lifetime (compare-and-clear: only clears if still owned by
         # this stream, mirroring the local streaming teardown).
         clear_session_writeback_owner_if_owned(session_id, stream_id)
+        from api.goals import settle_goal_continuation_after_turn
+
+        settle_goal_continuation_after_turn(
+            session_id,
+            _detached_goal_continuation_prompt,
+            _detached_goal_continuation_id,
+            cancelled=cancel_event.is_set(),
+        )
