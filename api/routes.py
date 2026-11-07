@@ -25632,7 +25632,11 @@ def _default_edge_voice(text: str = "") -> str:
         cfg = load_profile_config(get_active_hermes_home()) or {}
     except Exception:
         logger.debug("Failed to read the agent config for TTS voices", exc_info=True)
-    edge_cfg = (cfg.get("tts") or {}).get("edge") or {}
+    # Shape-validate: a hand-edited config must never crash the request.
+    tts_cfg = cfg.get("tts")
+    edge_cfg = tts_cfg.get("edge") if isinstance(tts_cfg, dict) else None
+    if not isinstance(edge_cfg, dict):
+        edge_cfg = {}
 
     def _usable(value) -> str:
         # An unresolved ${VAR} stays literal (load_profile_config); forwarding it
@@ -25688,7 +25692,11 @@ def _handle_tts(handler, parsed):
     try:
         data = read_body(handler)
         text = (data.get("text") or "").strip()
-        voice = data.get("voice") or _default_edge_voice(text)
+        voice = data.get("voice")
+        # Explicit override only: the configured default is resolved inside the
+        # Edge branch, after admission and rate limiting, so an engine that is
+        # not Edge never reads Edge (or any profile) config.
+        voice = voice.strip() if isinstance(voice, str) else ""
         rate_str = _normalize_tts_prosody(data.get("rate"), unit="%")
         pitch_str = _normalize_tts_prosody(data.get("pitch"), unit="Hz")
         request_engine = data.get("engine")
@@ -25961,6 +25969,12 @@ def _handle_tts(handler, parsed):
         return True
 
     # ── Edge TTS ────────────────────────────────────────────────────────
+    # Omitted voice: resolve the configured per-language default HERE, after
+    # validation, playback-profile admission and rate limiting. An unused Edge
+    # setting therefore cannot affect an OpenAI/ElevenLabs request, and a
+    # request rejected earlier never reads profile config.
+    if not voice:
+        voice = _default_edge_voice(text)
     allowed = {
         "zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunxiNeural",
         "zh-CN-YunjianNeural", "zh-CN-YunyangNeural",
