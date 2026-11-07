@@ -250,13 +250,14 @@ def test_custom_providers_never_get_ultra(tmp_path, monkeypatch):
         assert cfg._route_wire_accepts_ultra("gpt-5.6", provider) is False, provider
 
 
-def _alias_lane(monkeypatch, *, model: str, provider: str) -> str:
+def _alias_lane(
+    monkeypatch, *, model: str, provider: str, base_url: str = ""
+) -> str:
     """Route one configured alias and return its opaque picker-app lane token."""
-    monkeypatch.setattr(
-        cfg,
-        "cfg",
-        {"model_aliases": {"sol": {"model": model, "provider": provider}}},
-    )
+    entry = {"model": model, "provider": provider}
+    if base_url:
+        entry["base_url"] = base_url
+    monkeypatch.setattr(cfg, "cfg", {"model_aliases": {"sol": entry}})
     # No direct-alias table: the configured model_aliases[] entry is the route.
     monkeypatch.setitem(sys.modules, "hermes_cli.model_switch", types.SimpleNamespace())
     return cfg._public_model_alias_routes()["sol"]["route_provider"]
@@ -341,6 +342,45 @@ def test_unresolved_alias_lane_keeps_failing_closed(monkeypatch):
     assert cfg.coerce_reasoning_effort_for_model(
         "ultra", model_id="gpt-5.6", provider_id=hostile, api_mode="codex_app_server"
     ) == "max"
+
+
+def test_alias_lane_carries_its_endpoint_into_the_capability_lookup(monkeypatch):
+    # An alias endpoint is server-side only: the browser never sends it. The
+    # capability probe must therefore ask the alias's own server — otherwise an
+    # LM Studio alias reports levels from (or vanishes with) the profile default.
+    seen = []
+
+    def fake_impl(model_id=None, provider_id=None, base_url=None):
+        seen.append((model_id, provider_id, base_url))
+        return list(_LADDER)
+
+    monkeypatch.setattr(cfg, "_resolve_model_reasoning_efforts_impl", fake_impl)
+    route = _alias_lane(
+        monkeypatch, model="qwen3-vl-8b", provider="lmstudio",
+        base_url="http://127.0.0.1:1234/v1",
+    )
+
+    cfg.resolve_model_reasoning_efforts("qwen3-vl-8b", provider_id=route)
+    assert seen[-1] == ("qwen3-vl-8b", "lmstudio", "http://127.0.0.1:1234/v1")
+    # An explicit caller endpoint still wins over the alias's.
+    cfg.resolve_model_reasoning_efforts(
+        "qwen3-vl-8b", provider_id=route, base_url="http://caller.example.test/v1"
+    )
+    assert seen[-1][2] == "http://caller.example.test/v1"
+
+
+def test_alias_lane_keeps_the_zai_thinking_toggle(monkeypatch):
+    # GLM-4.5–5.1 on native zai expose no effort ladder but do accept the
+    # thinking on/off toggle. Through an alias lane the composer must still
+    # render that control instead of hiding reasoning entirely.
+    monkeypatch.setattr(cfg, "_resolve_model_reasoning_efforts_impl", lambda *a, **k: [])
+    route = _alias_lane(monkeypatch, model="glm-4.6", provider="zai")
+
+    status = cfg.get_reasoning_status(
+        model_id="glm-4.6", provider_id=route, effort_override=""
+    )
+    assert status["supported_efforts"] == []
+    assert status["supports_thinking_toggle"] is True
 
 
 def test_ultra_sends_max_on_documented_max_routes(monkeypatch):
