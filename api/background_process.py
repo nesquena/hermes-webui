@@ -2,10 +2,10 @@
 
 The hermes-agent ``tools.process_registry.ProcessRegistry`` exposes a thread-safe
 ``completion_queue`` (a ``queue.Queue``) that any background process pushes onto
-when it exits or matches a ``watch_patterns`` rule. In the CLI and in the
-gateway adapter this queue is drained by the host's main loop; in WebUI the
-queue was never read, so the agent never woke up from a ``notify_on_complete``
-finish. This module restores that behavior.
+when it exits, matches a ``watch_patterns`` rule, or produces heartbeat output.
+In the CLI and gateway adapter this queue is drained by the host's main loop;
+in WebUI the queue was never read, so the agent never woke up from a
+``notify_on_complete`` finish. This module restores that behavior.
 
 The drain thread:
     1. blocks on ``completion_queue.get()`` in a worker thread,
@@ -27,6 +27,9 @@ The drain thread:
        self-wake. When a turn is already active the wakeup is NOT started here;
        the ``PENDING_BG_TASK_COMPLETIONS`` marker is left for PR #2279's
        next-turn drain (``api/streaming._drain_webui_process_notifications``).
+
+Heartbeat progress skips both completion SSE names; an admitted wakeup turn
+publishes ``server_turn_started`` through ``routes.start_session_turn`` instead.
 
 The marker is *not* required for delivery — it's a telemetry-style flag the
 turn handler can read to know "this stream is a process_complete wakeup, not a
@@ -53,8 +56,10 @@ from typing import Any, Optional
 from api.process_event_utils import (
     ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
     claim_async_delegation_delivery,
+    claim_heartbeat_delivery,
     complete_async_delegation_delivery,
     completion_delivery_id,
+    forget_heartbeat_deliveries,
     release_async_delegation_delivery,
     requeue_async_delegation_event,
     restore_durable_process_completions,
@@ -1152,7 +1157,7 @@ def _truncate(text: str, limit: int) -> str:
 
 
 def format_wakeup_prompt(evt: object) -> str | None:
-    """Build the synthetic [IMPORTANT: …] message the agent will see.
+    """Build the synthetic process/delegation notification the agent will see.
 
     Mirrors ``cli._format_process_notification`` so wakeup payloads look the
     same in CLI and WebUI sessions.
@@ -1185,10 +1190,9 @@ def format_wakeup_prompt(evt: object) -> str | None:
         if sup:
             body += f"\n({sup} earlier matches were suppressed by rate limit)"
         return body + "]"
-    if evt_type == "async_delegation":
-        # A background ``delegate_task`` completion. The agent-side formatter
-        # renders these; delegate to it so the subagent result re-enters the
-        # parent conversation instead of being silently dropped (#4912).
+    if evt_type in {"async_delegation", "heartbeat"}:
+        # The Agent owns these formats, including heartbeat elapsed/interval,
+        # output-tail omission markers and child-process attribution.
         try:
             from tools.process_registry import (
                 format_process_notification as _agent_fmt,
@@ -1234,12 +1238,10 @@ def _build_payload(evt: dict, session_id: str) -> dict:
     - ``summary``: optional one-liner derived from the completion event when
       available (e.g. ``[IMPORTANT: …]`` synthetic body's first line); omitted
       otherwise to honour "keep the payload minimal".
-    - ``event_id``: server-generated uuid hex — per-emit, so a re-emit for the
-      same ``task_id`` (shouldn't happen today, but the spec is forward-looking)
-      still produces a distinct id. The cross-A/B dedupe stays keyed on
-      ``task_id`` (it prevents double-emit at the source, which is the right
-      layer); the WebUI consumer-side ring buffer (PR (b)) keys on
-      ``(session_id, event_id)`` to dedupe across reconnects.
+    - ``event_id``: server-generated uuid hex, distinct for each completion
+      notification. Source-side completion dedupe uses the process id;
+      ``task_id`` still identifies the actual process. The WebUI consumer-side
+      ring buffer keys on ``(session_id, event_id)`` across reconnects.
     """
     # ProcessRegistry completion events use the field name ``session_id`` for
     # the process id. Async delegation completions carry ``delegation_id``
@@ -1572,6 +1574,9 @@ def _deferred_entry_already_consumed(entry: dict) -> bool:
     be a legitimate ``wait``/``log`` mark for the same process_id, and clearing
     it would let the next-turn drain re-deliver a completion the agent already
     has.
+
+    Heartbeat entries carry a distinct process+seq delivery id, never a core
+    completion-consumed key, so reading the final result cannot discard them.
     """
     process_id = str((entry or {}).get("process_id") or "")
     if not process_id:
@@ -2113,6 +2118,16 @@ def _process_one(evt: dict) -> None:
             process_registry=_process_registry,
         )
         return
+    is_heartbeat = evt.get("type") == "heartbeat"
+    delivery_id = process_id
+    heartbeat_prompt = None
+    if is_heartbeat:
+        heartbeat_prompt = format_wakeup_prompt(evt)
+        if not heartbeat_prompt:
+            return
+        delivery_id = claim_heartbeat_delivery(evt, session_id)
+        if not delivery_id:
+            return
     # ── Idempotency vs the REAL merged upstream #2279 (shared dedupe key) ──
     # The real merged #2279 next-turn drain
     # (api/streaming._drain_webui_process_notifications) dedupes ONLY via
@@ -2124,7 +2139,7 @@ def _process_one(evt: dict) -> None:
     # order), it marked _completion_consumed; B must early-return here or it
     # would double-fire a wakeup. This guard aligns our B-drain to the real
     # upstream key (verified against origin/master streaming.py).
-    if process_id:
+    if process_id and not is_heartbeat:
         try:
             if _process_registry is not None and _process_registry.is_completion_consumed(process_id):
                 return
@@ -2138,14 +2153,20 @@ def _process_one(evt: dict) -> None:
     # (session_id, process_id) pair via THIS module, skip the duplicate. Two
     # _move_to_finished() callers (kill_process racing the reader thread) can
     # occasionally enqueue twice despite the process_registry guard.
-    with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
-        seen = _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.setdefault(session_id, set())
-        if process_id and process_id in seen:
-            return
-        if process_id:
-            seen.add(process_id)
-    payload = _build_payload(evt, session_id)
-    _emit_bg_task_complete_events_coalesced(session_id, payload)
+    # Heartbeats were atomically claimed by (owner, process, seq) above. Never
+    # put them in either process-wide terminal-completion gate: one progress
+    # tick must not suppress the next tick or the process's eventual exit.
+    if not is_heartbeat:
+        with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
+            seen = _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.setdefault(session_id, set())
+            if process_id and process_id in seen:
+                return
+            if process_id:
+                seen.add(process_id)
+        # The browser treats both completion SSE names as "Task … done".
+        # Heartbeats use the native wakeup turn's server_turn_started instead.
+        payload = _build_payload(evt, session_id)
+        _emit_bg_task_complete_events_coalesced(session_id, payload)
     _cfg.PENDING_BG_TASK_COMPLETIONS.add(session_id)
     # NOTE: the registry consumed-marker is NOT set here any more. Whether the
     # completion is delivered NOW (idle branch) or later (defer branch) is
@@ -2185,7 +2206,7 @@ def _process_one(evt: dict) -> None:
         # `{session_id, task_id, completed_at, summary?, event_id}`, so
         # we derive the prompt directly from the evt here (same source the
         # prior _build_payload used).
-        wakeup_prompt_raw = format_wakeup_prompt(evt)
+        wakeup_prompt_raw = heartbeat_prompt if is_heartbeat else format_wakeup_prompt(evt)
         wakeup_prompt = wakeup_prompt_raw.strip() if wakeup_prompt_raw else ""
         if wakeup_prompt and _session_has_active_turn(session_id):
             # Defer-path fix: persist the prompt so a turn-teardown
@@ -2209,7 +2230,7 @@ def _process_one(evt: dict) -> None:
             # duplicate enqueue it does deliver marks itself. The atomic claim
             # in ``claim_deferred_wakeups`` still guarantees exactly one
             # delivery of the persisted prompt.
-            record_deferred_wakeup(session_id, process_id, wakeup_prompt)
+            record_deferred_wakeup(session_id, delivery_id, wakeup_prompt)
             logger.debug(
                 "server-side wakeup deferred: turn active for session %s "
                 "(persisted for turn-teardown idle-hook redelivery)",
@@ -2228,7 +2249,7 @@ def _process_one(evt: dict) -> None:
             # ``consumed_claimed_by_dispatch`` so the teardown hook does not
             # read this key back as "the agent already read it" and drop the
             # retry (#8363 review).
-            if process_id:
+            if process_id and not is_heartbeat:
                 _mark_registry_completion_consumed(process_id)
                 consumed_claimed_by_dispatch = True
             if wakeup_prompt:
@@ -2243,7 +2264,7 @@ def _process_one(evt: dict) -> None:
                 _start_server_side_wakeup_turn(
                     session_id,
                     wakeup_prompt,
-                    process_id=process_id,
+                    process_id=delivery_id,
                     consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
                 )
     except Exception:
@@ -2258,7 +2279,7 @@ def _process_one(evt: dict) -> None:
             if wakeup_prompt:
                 record_deferred_wakeup(
                     session_id,
-                    process_id,
+                    delivery_id,
                     wakeup_prompt,
                     consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
                 )
@@ -2293,10 +2314,11 @@ def record_deferred_wakeup(
     Only the rejected-dispatch re-defer paths set it; a plain defer (turn was
     active) and the next-turn drain leave it False.
 
-    Idempotent per process_id: if the same process_id is already queued for
-    this session (kill_process racing the reader thread), it is not appended
-    twice. Returns whether the prompt is safely queued; never raises into the
-    drain loop.
+    ``process_id`` is the delivery identity: the registry process id for a
+    completion, or the process+seq id returned by ``claim_heartbeat_delivery``
+    for a heartbeat. Keep that identity unchanged through retries so separate
+    ticks and the final completion can coexist. Idempotent per delivery id;
+    returns whether the prompt is safely queued and never raises into the drain.
     """
     if not session_id or not wakeup_prompt:
         return False
@@ -2308,8 +2330,8 @@ def record_deferred_wakeup(
             # Idempotent per (process_id, wakeup_prompt).
             #
             # A non-empty ``process_id`` is the authoritative, immutable
-            # identity of its background completion — assigned once by the
-            # registry and already deduped upstream by
+            # delivery identity (process+seq for heartbeats), already deduped by
+            # the shared heartbeat sequence ranges or
             # ``BG_TASK_COMPLETE_EVENTS_SEEN`` / the ``_completion_consumed``
             # marker — so two deferred entries for the SAME non-empty id can
             # never represent two DIFFERENT wakeups: collapsing on the id is
@@ -2630,6 +2652,9 @@ def _start_server_side_wakeup_turn(
     synchronous session-load / workspace / model resolution first, which must
     not stall the single drain thread shared by every WebUI session.
 
+    ``process_id`` carries the delivery identity unchanged through admission
+    and launch-abort retries (process+seq for a heartbeat, not a registry id).
+
     ``retry_attempt`` is the per-delivery attempt marker from the bounded
     retry timer. It is forwarded to ``start_session_turn`` and from there into
     the launch-abort cleanup, so a launch failure on this already-retried
@@ -2660,8 +2685,9 @@ def _start_server_side_wakeup_turn(
         (one starts, the other 409s). On 409 we re-queue the prompt via
         ``record_deferred_wakeup`` (see below) so the racing turn's own
         teardown idle-hook — or PR #2279's next-turn drain — redelivers it.
-      - ``BG_TASK_COMPLETE_EVENTS_SEEN`` already deduped this process_id in
-        ``_process_one`` before we were called, so a process wakes at most once.
+      - ``_process_one`` already deduped this delivery (the process id for a
+        completion, process+seq for a heartbeat), so each wakes at most once
+        during the session's in-process lifetime.
 
     Why re-queue on 409 instead of trusting the PENDING marker: this helper is
     called from two sites. The idle branch of ``_process_one`` leaves the
@@ -2929,7 +2955,7 @@ def unregister_process_session(session_key: str) -> None:
 
 
 def forget_bg_task_completion_dedup(session_id: str) -> None:
-    """Drop a session's ``BG_TASK_COMPLETE_EVENTS_SEEN`` entry.
+    """Drop a session's completion dedup entry and heartbeat sequence ranges.
 
     Called on session deletion so a session deleted while a completion is still
     pending (undelivered) — which the reaper's delivery-gated sweep deliberately
@@ -2941,6 +2967,7 @@ def forget_bg_task_completion_dedup(session_id: str) -> None:
 
     with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
         _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(str(session_id), None)
+    forget_heartbeat_deliveries(str(session_id))
 
 
 def start_drain_thread() -> bool:
