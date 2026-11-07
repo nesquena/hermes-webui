@@ -527,6 +527,25 @@ write_agent_stage_manifest() {
   chmod 0644 "$_stage/.hermes-webui-stage-source"
 }
 
+# Strip group/world write from the staged install inputs. `rsync -a` / `cp -a`
+# preserve the source tree's mode bits, so a checkout whose files were written
+# under umask 002 (e.g. a `git pull` under umask 002 after a `git clone` under
+# umask 022) stages its inputs as 0664. The startup recovery installer
+# (`_trusted_install_inputs` in api/startup.py) rejects any group- or
+# world-writable install input (#8472) and would then fall back to the
+# read-only agent mount, where pip fails with EROFS. The staged copy must be
+# private before the manifest is published: this runs on the fresh stage, and
+# again on the existing stage on a fast restart (one published before this step
+# may still carry writable inputs).
+secure_stage_install_inputs() {
+  local _stage="$1" _f
+  for _f in pyproject.toml requirements.txt setup.py; do
+    if [ -f "$_stage/$_f" ]; then
+      chmod go-w "$_stage/$_f" || return 1
+    fi
+  done
+}
+
 # ── Rebuilding the agent venv without ever losing a working one (#8113) ─────
 # A rebuild is a transaction. The current venv and the staged agent source are
 # moved aside; the replacement is created, checked against the staged agent's
@@ -651,6 +670,11 @@ install_venv_dependencies() {
     fi
     chmod -R u+w "$_stage_src" \
       || { echo "!! Failed to make staged hermes-agent source writable (rsync/cp preserved :ro mount perms)"; return 1; }
+    # Make the staged install inputs private before the manifest is published
+    # (see secure_stage_install_inputs): a 0664 source input must not carry
+    # its group-writable mode into the recovery path's validation (#8472).
+    secure_stage_install_inputs "$_stage_src" \
+      || { echo "!! Failed to secure staged install inputs (chmod go-w)"; return 1; }
     # rsync excluded .git; the cp -a fallback copied it, and only now (after the
     # chmod: cp -a keeps a :ro mount's 0555 directories) can it be removed. A
     # stage with .git is never run by select_staged_agent_for_git_checkout.
@@ -897,11 +921,19 @@ source /app/venv/bin/activate || error_exit "Failed to activate hermeswebui virt
 test -x /app/venv/bin/python3
 
 if [ -f /app/venv/.deps_installed ]; then
-  if [ "$_venv_action" = "rebuilt" ]; then
-    echo ""; echo "== Dependencies were installed into the rebuilt virtual environment"
-  else
-    echo ""; echo "== Dependencies already installed — skipping (fast restart)"
-  fi
+    if [ "$_venv_action" = "rebuilt" ]; then
+      echo ""; echo "== Dependencies were installed into the rebuilt virtual environment"
+    else
+      echo ""; echo "== Dependencies already installed — skipping (fast restart)"
+      # Re-secure an existing stage: one published before the go-w step (or by
+      # an image predating it) may still carry group/world-writable install
+      # inputs, which the recovery installer rejects (#8472). Non-fatal: the
+      # next full boot restages from the source anyway.
+      if [ -d "$_agent_stage" ]; then
+        secure_stage_install_inputs "$_agent_stage" \
+          || echo "!! WARNING: could not re-secure the existing staged agent source at $_agent_stage"
+      fi
+    fi
 else
   install_venv_dependencies || error_exit "Failed to install hermes-webui dependencies"
 fi

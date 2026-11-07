@@ -428,6 +428,22 @@ def _docker_init_source() -> str:
     return _DOCKER_INIT.read_text(encoding="utf-8")
 
 
+def _secure_stage_install_inputs_function() -> str:
+    """Extract the ``secure_stage_install_inputs()`` shell function.
+
+    The staging block this test executes calls it, but the function is
+    defined further up in ``docker_init.bash`` — outside the sliced block —
+    so the isolated shell would fail with "command not found" and the
+    staging step would abort before the ``.git`` removal under test.
+    """
+    match = re.search(
+        r"^secure_stage_install_inputs\(\) \{\n.*?^\}\n",
+        _docker_init_source(), re.M | re.S,
+    )
+    assert match, "docker_init.bash must define secure_stage_install_inputs()"
+    return match.group(0)
+
+
 def _select_staged_agent_function() -> str:
     match = re.search(
         r"^select_staged_agent_for_git_checkout\(\) \{\n.*?^\}\n",
@@ -572,7 +588,12 @@ def test_cp_fallback_stage_drops_git_from_a_read_only_mount(tmp_path, staged_age
             "stage_it() {\n"
             f'  local _agent_src="{src}" _stage_src="{stage}"\n'
             + block
-            + "}\nstage_it; echo rc=$?\n"
+            + "}\n"
+            # The sliced block calls secure_stage_install_inputs(), which is
+            # defined above the slice in docker_init.bash. Provide it here so
+            # the isolated shell can run the staging block as written.
+            + _secure_stage_install_inputs_function()
+            + "stage_it; echo rc=$?\n"
         )
         result = subprocess.run(
             [shutil.which("bash") or "/bin/bash", "-c", script], env={"PATH": str(bindir)},
