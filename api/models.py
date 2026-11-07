@@ -1233,14 +1233,79 @@ def _session_sort_timestamp(session):
     return _last_message_timestamp(getattr(session, 'messages', None)) or getattr(session, 'updated_at', 0) or 0
 
 
+# 2096-10-02T00:00:00Z. Millisecond instants and other corrupt clocks sit at
+# or above this. The sidebar clamps a negative age to one minute, so those
+# values otherwise read as "1m" and sort to the top of the list.
+_MESSAGE_TIMESTAMP_MAX_UNIX_SECONDS = 4_000_000_000
+
+
 def _message_timestamp(message):
     if not isinstance(message, dict):
         return None
     raw = message.get('_ts') or message.get('timestamp')
     try:
-        return float(raw) if raw is not None else None
+        ts = float(raw) if raw is not None else None
     except (TypeError, ValueError):
         return None
+    if (
+        ts is None
+        or not math.isfinite(ts)
+        or ts <= 0
+        or ts >= _MESSAGE_TIMESTAMP_MAX_UNIX_SECONDS
+    ):
+        return None
+    return ts
+
+
+def _recovered_visible_text(message) -> str:
+    """Text a recovered row would still show in the transcript."""
+    if not isinstance(message, dict):
+        return ''
+    parts: list[str] = [_message_content_text(message)]
+    content = message.get('content')
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get('type') not in ('text', 'input_text', 'output_text'):
+                continue
+            # ``_message_content_text`` already kept a string ``text`` field.
+            if isinstance(item.get('text'), str):
+                continue
+            parts.append(str(item.get('content') or ''))
+    scene = message.get('_anchor_activity_scene')
+    if isinstance(scene, dict):
+        parts.append(str(scene.get('final_answer') or ''))
+    return ''.join(parts)
+
+
+def _is_empty_recovered_journal_anchor(message) -> bool:
+    """A journal placeholder with no visible text is not a turn.
+
+    Tool-first recovery keeps one empty assistant row so tool cards have a
+    host (#3875). ``ensure_assistant_anchor`` writes that row with empty
+    content and no reasoning. It must not become ``last_message_at``. A
+    recovered row that actually carries text or reasoning still counts.
+    """
+    if not isinstance(message, dict) or not message.get('_recovered_from_run_journal'):
+        return False
+    if _recovered_visible_text(message).strip():
+        return False
+    return not str(message.get('reasoning') or '').strip()
+
+
+def _recency_timestamp(message):
+    """Timestamp of a message that should move session recency.
+
+    Tool rows, cancelled empty activity, and empty journal anchors do not.
+    """
+    if isinstance(message, dict) and message.get('role') == 'tool':
+        return None
+    if _is_empty_partial_activity_message(message):
+        return None
+    if _is_empty_recovered_journal_anchor(message):
+        return None
+    return _message_timestamp(message)
 
 
 def _is_empty_partial_activity_message(message):
@@ -1273,12 +1338,11 @@ def _last_message_timestamp(messages, *, tail_window: int = 8):
     response.
 
     New behavior: the messages array is chronologically ordered, so the
-    last non-tool message is at the very end. We scan only the last
-    ``tail_window`` messages — covers the realistic case where 1-3 tool
-    rows sit after the last assistant/user message. Falls back to a full
-    scan only when no timestamp is found in the window, which preserves
-    exact correctness for messages with very large trailing tool clusters
-    (rare in practice; we'd need >8 consecutive tool rows to hit it).
+    last real turn is at the very end. We scan only the last
+    ``tail_window`` messages — enough for a few tool rows or one empty
+    journal anchor after the last assistant/user message. A longer tail of
+    tool rows or empty anchors misses the window and falls back to a full
+    scan, which keeps the result exact.
     """
     if not isinstance(messages, list):
         return None
@@ -1287,11 +1351,7 @@ def _last_message_timestamp(messages, *, tail_window: int = 8):
     # Walk from the end backwards. reversed() over a slice still creates
     # a full reverse iterator, but only the slice's elements are touched.
     for message in reversed(messages[start:]):
-        if isinstance(message, dict) and message.get('role') == 'tool':
-            continue
-        if _is_empty_partial_activity_message(message):
-            continue
-        ts = _message_timestamp(message)
+        ts = _recency_timestamp(message)
         if ts:
             return ts
     # Window miss — fall back to the original full-reversed scan. The
@@ -1299,11 +1359,7 @@ def _last_message_timestamp(messages, *, tail_window: int = 8):
     # which means the session is unusual (long tool tail or all-empty
     # messages).
     for message in reversed(messages):
-        if isinstance(message, dict) and message.get('role') == 'tool':
-            continue
-        if _is_empty_partial_activity_message(message):
-            continue
-        ts = _message_timestamp(message)
+        ts = _recency_timestamp(message)
         if ts:
             return ts
     return None

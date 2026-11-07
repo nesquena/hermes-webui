@@ -18,6 +18,7 @@ import json
 import textwrap
 
 from tests.test_anchor_fallback_ownership import (
+    ROOT,
     _function_source,
     _run_node_script,
     _ui_js,
@@ -54,6 +55,13 @@ _REAL_FUNCTIONS = (
     # evaluated with it. The shim's createElement() returns no template `content`, so the
     # helper takes its insertAdjacentHTML fallback here, exactly as before.
     "_insertSegmentBlock",
+    # renderMessages() opens each row through this chain. Keep the real helpers;
+    # messages in this scenario have no timestamps, so no separator is inserted.
+    "_recoveredAnchorText",
+    "_isEmptyRecoveredJournalAnchor",
+    "_fmtDateSep",
+    "_messageDateSepDayKey",
+    "_nextDateSepText",
     "renderMessages",
 )
 
@@ -482,10 +490,16 @@ console.log(JSON.stringify({
 
 def _scenario_script() -> str:
     js = _ui_js()
+    sessions_js = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    # Day keys reject far-future stamps against _serverNowMs(), not Date.now().
+    clock = (
+        "let _serverTimeDelta = 0;\n"
+        f"eval({json.dumps(_function_source(sessions_js, '_serverNowMs'))});"
+    )
     evals = "\n".join(
         f"eval({json.dumps(_function_source(js, name))});" for name in _REAL_FUNCTIONS
     )
-    return textwrap.dedent(_DOM_SHIM) + "\n" + evals + "\n" + textwrap.dedent(_SCENARIO)
+    return textwrap.dedent(_DOM_SHIM) + "\n" + clock + "\n" + evals + "\n" + textwrap.dedent(_SCENARIO)
 
 
 def test_stale_markers_do_not_suppress_current_summary_and_task_owner_is_unique():

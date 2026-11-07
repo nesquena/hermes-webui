@@ -15778,6 +15778,54 @@ function _assistantMessageHasVisibleContent(m){
   });
 }
 
+function _recoveredAnchorText(m){
+  // Text the transcript still shows for this row: a string, a string part,
+  // or a text/input_text/output_text part, plus an anchor-scene final answer.
+  if(!m) return '';
+  const scene=m._anchor_activity_scene;
+  const sceneText=scene&&typeof scene.final_answer==='string'?scene.final_answer:'';
+  const content=m.content;
+  let body='';
+  if(typeof content==='string') body=content;
+  else if(Array.isArray(content)){
+    body=content.map(part=>{
+      if(typeof part==='string') return part;
+      if(!part||typeof part!=='object') return '';
+      if(part.type==='text'||part.type==='input_text'||part.type==='output_text'){
+        return String(part.text||part.content||'');
+      }
+      return '';
+    }).join('\n');
+  }
+  return sceneText+'\n'+body;
+}
+function _isEmptyRecoveredJournalAnchor(m){
+  // Journal recovery inserts an assistant row with no text so tool cards
+  // have a host. That placeholder is not a turn and must not open a day.
+  // A recovered row that still has text or reasoning does open a day.
+  if(!m||!m._recovered_from_run_journal) return false;
+  if(_recoveredAnchorText(m).trim()) return false;
+  return !String(m.reasoning||'').trim();
+}
+function _messageDateSepDayKey(m){
+  if(!m||_isEmptyRecoveredJournalAnchor(m)) return '';
+  const n=Number(m._ts||m.timestamp);
+  // Outside 2001–2096, or more than two days ahead of the server clock
+  // (_serverNowMs, synced from /api/sessions server_time): salvage residue, not a day.
+  if(!Number.isFinite(n)||n<=1e9||n>=4e9||n>_serverNowMs()/1000+48*3600) return '';
+  const d=new Date(n*1000);
+  if(Number.isNaN(d.getTime())) return '';
+  return d.toDateString();
+}
+function _nextDateSepText(message, prevKey){
+  const key=_messageDateSepDayKey(message);
+  if(!key) return {text:'', key:prevKey||''};
+  if(prevKey&&prevKey!==key){
+    const raw=message&&(message._ts||message.timestamp);
+    return {text:_fmtDateSep(new Date(Number(raw)*1000)), key};
+  }
+  return {text:'', key};
+}
 function _fmtDateSep(d){
   const todayStart=new Date();todayStart.setHours(0,0,0,0);
   const dStart=new Date(d);dStart.setHours(0,0,0,0);
@@ -22671,18 +22719,14 @@ function renderMessages(options){
       inner.appendChild(_messageVirtualSpacer(virtualWindow.bottomPad,'after'));
     }
     const {m,rawIdx}=renderVisWithIdx[vi];
-    const _tsSep=m._ts||m.timestamp;
-    if(_tsSep){
-      const _d=new Date(_tsSep*1000);
-      const _key=_d.toDateString();
-      if(_prevSepKey && _prevSepKey!==_key){
-        const sep=document.createElement('div');
-        sep.className='msg-date-sep';
-        sep.textContent=_fmtDateSep(_d);
-        inner.appendChild(sep);
-      }
-      _prevSepKey=_key;
+    const _sep=_nextDateSepText(m, _prevSepKey);
+    if(_sep.text){
+      const sep=document.createElement('div');
+      sep.className='msg-date-sep';
+      sep.textContent=_sep.text;
+      inner.appendChild(sep);
     }
+    _prevSepKey=_sep.key;
     let content=m.content||'';
     let thinkingText='';
     let orderedTransparentParts=_transparentStreamOrderedParts(m);
