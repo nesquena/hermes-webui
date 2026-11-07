@@ -244,7 +244,11 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Preview text, code, Markdown (rendered), and images inline
 - Chat links using `workspace://path/to/file` open files in the right-side preview pane
 - Edit, create, delete, and rename files; create folders
-- Binary file download (auto-detected from server)
+- Binary file download (auto-detected from server). In the file tree, the file
+  context menu (right-click / long-press) offers a Download action for files
+  next to the existing Download Folder for directories; PDFs render a document
+  glyph like other previewable types, and every file type keeps its usual row
+  click behavior (preview, or whole-row download for binary formats).
 - File preview auto-closes on directory navigation (with unsaved-edit guard)
 - Dismissing the workspace panel is respected: resizing the viewport or showing the
   on-screen keyboard no longer force-reopens the panel after you close it (#6710)
