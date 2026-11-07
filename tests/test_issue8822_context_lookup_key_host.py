@@ -200,10 +200,11 @@ def _jwt(sub):
 
 
 @pytest.fixture
-def recorded_agent_requests(monkeypatch):
+def recorded_agent_requests(monkeypatch, tmp_path):
     """Record every request the Agent's metadata lookup makes; nothing leaves the process.
 
     ``state["mode"]``: "miss" answers 404, "hit" answers a models list (so every probe path runs).
+    The Agent gets its own throwaway ``HERMES_HOME`` so each probe can start from an empty disk cache.
     """
     import email.message
     import io
@@ -214,7 +215,10 @@ def recorded_agent_requests(monkeypatch):
     import httpx
     import requests
 
-    state = {"mode": "miss", "seen": []}
+    agent_home = (tmp_path / "agent-home").resolve()
+    agent_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(agent_home))
+    state = {"mode": "miss", "seen": [], "home": agent_home}
     payload = {"data": [{"id": "m-x", "context_length": 8192,
                          "capabilities": {"limits": {"max_prompt_tokens": 8192}}}],
                "models": [{"slug": "m-x", "context_window": 8192}]}
@@ -277,16 +281,28 @@ def recorded_agent_requests(monkeypatch):
 
 
 def _agent_keyed_hosts(state, url, key, provider):
-    """Hosts the installed Agent sends ``key`` to for (url, provider), over both endpoint modes."""
+    """Hosts the installed Agent sends ``key`` to for (url, provider), over both endpoint modes.
+
+    Each probe starts cold, like the recorder harness: in-memory caches cleared and the Agent's own
+    ``HERMES_HOME`` (a per-test temp dir, see the fixture) emptied, since the Agent keeps context lengths and
+    endpoint metadata on disk there. Without that, a second probe answers from cache and contacts nothing.
+    """
+    import shutil
+
     import agent.model_metadata as mm
     import hermes_cli.models as hm
+    from hermes_constants import get_hermes_home
 
+    home = pathlib.Path(get_hermes_home()).resolve()
+    assert state["home"] in (home, *home.parents), f"the Agent's HERMES_HOME {home} is not the test's temp dir"
     hosts = set()
     for mode in ("miss", "hit"):
         for module in (mm, hm):
             for name, value in list(vars(module).items()):
                 if "cache" in name.lower() and not name.isupper() and isinstance(value, (dict, set, list)):
                     value.clear()
+        shutil.rmtree(home, ignore_errors=True)
+        home.mkdir(parents=True)
         state["mode"] = mode
         state["seen"].clear()
         try:
@@ -317,19 +333,71 @@ PROBED_PROVIDERS = ("anthropic", "novita", "copilot", "copilot-acp", "github-cop
 
 @requires_agent
 def test_the_recorder_sees_the_agents_requests(recorded_agent_requests):
-    """Control: without it, an empty recording would make the coverage tests pass vacuously."""
+    """Control: without it, an empty recording would make the coverage tests pass vacuously.
+
+    The repeated ``novita`` probe proves each probe starts cold: a warm disk cache answers the second probe
+    without contacting anything, which would let a coverage assertion pass on an empty set.
+    """
     host = urllib.parse.urlsplit(C).hostname
     assert _agent_keyed_hosts(recorded_agent_requests, C, "K-synthetic", "custom:my-proxy") == {host}
     assert "api.anthropic.com" in _agent_keyed_hosts(recorded_agent_requests, "", "K-synthetic", "anthropic")
+    for _ in range(2):
+        assert "api.novita.ai" in _agent_keyed_hosts(recorded_agent_requests, "", "K-synthetic", "novita")
 
 
 @requires_agent
 @pytest.mark.parametrize("shape", ["synthetic", "jwt"])
-@pytest.mark.parametrize("provider", PROBED_PROVIDERS)
-def test_the_fixed_host_table_covers_the_installed_agent(provider, shape, recorded_agent_requests):
-    """Every host the installed Agent sends a key to is the URL's own host or listed in the table."""
+@pytest.mark.parametrize("raw_provider", PROBED_PROVIDERS)
+def test_the_fixed_host_table_covers_the_installed_agent(raw_provider, shape, recorded_agent_requests):
+    """Every host the installed Agent sends a key to is the URL's own host or listed in the table.
+
+    The Agent is given the id the lookup emits (``_canonical_context_provider``), not the raw spelling: the
+    lookup never hands the Agent ``github-copilot``. If alias folding ever stops, the emitted id has no row,
+    the fix drops the key (no leak), and this test fails loudly on the unlisted host.
+    """
+    provider = routes._canonical_context_provider(raw_provider)
     key = "K-synthetic" if shape == "synthetic" else _jwt("K-synthetic")
     for url in ("", C):
         sent = _agent_keyed_hosts(recorded_agent_requests, url, key, provider)
         known = {o.rsplit(":", 1)[0] for o in routes._context_lookup_contacted_origins(provider, url)}
-        assert sent <= known, f"{provider} url={url or '-'}: the Agent sent the key to {sorted(sent - known)}"
+        assert sent <= known, (
+            f"{raw_provider} (emitted {provider}) url={url or '-'}: the Agent sent the key to {sorted(sent - known)}"
+        )
+
+
+@pytest.mark.parametrize("raw_provider", ["github", "github-copilot", "GitHub-Copilot"])
+def test_copilot_aliases_still_fold_to_copilot(raw_provider):
+    """Named directly, so a change to the alias folding shows up here, not only as a coverage failure."""
+    assert routes._canonical_context_provider(raw_provider) == "copilot"
+
+
+def _agent_named_route(provider_id, cfg, monkeypatch):
+    """The named-custom entry the installed Agent's runtime would route ``provider_id`` through, for ``cfg``."""
+    from hermes_cli import runtime_provider_custom as rpc
+
+    monkeypatch.setattr(rpc._rp(), "load_config", lambda *a, **k: cfg)
+    try:
+        return rpc._get_named_custom_provider(provider_id, config=cfg, resolve_credentials=False)
+    except TypeError:  # older Agents: (requested_provider) only, reads load_config()
+        return rpc._get_named_custom_provider(provider_id)
+
+
+@requires_agent
+@pytest.mark.parametrize("provider_id", sorted(routes._CONTEXT_LOOKUP_FIXED_HOSTS))
+def test_a_caller_key_for_a_fixed_host_id_is_that_providers_own(provider_id, recorded_agent_requests, monkeypatch):
+    """Why the caller's key may go to its provider's fixed host (source identity, #8822 note §3).
+
+    The caller passes the Agent's own runtime pair. Wherever the installed Agent contacts a fixed host for this
+    id, a ``custom_providers`` / ``providers`` entry merely NAMED like the id must not capture the runtime route;
+    otherwise the caller's key could be that entry's key and the fixed host would not be its own.
+    """
+    contacts_fixed_host = bool(_agent_keyed_hosts(recorded_agent_requests, "", "K-synthetic", provider_id)
+                               | _agent_keyed_hosts(recorded_agent_requests, "", _jwt("K-synthetic"), provider_id))
+    if not contacts_fixed_host:
+        pytest.skip(f"the installed Agent contacts no fixed host for {provider_id}")
+    for cfg in ({"custom_providers": [{"name": provider_id, "base_url": L, "api_key": "KL-synthetic"}]},
+                {"providers": {provider_id: {"base_url": L, "api_key": "KL-synthetic"}}}):
+        assert not _agent_named_route(provider_id, cfg, monkeypatch), (
+            f"a custom entry named {provider_id!r} captures the runtime route on an Agent that sends that "
+            "id's key to its fixed host"
+        )
