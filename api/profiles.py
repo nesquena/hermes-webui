@@ -981,14 +981,29 @@ def is_live_profile_home_for_reads(home) -> bool:
     delete tombstone — or reading it would call ``ensure_dirs()`` and create
     ``cron/`` + ``cron/output/`` inside a ghost shell. The default/custom homes
     are not under ``profiles/`` and stay readable.
+
+    Fails CLOSED: when the identity helpers cannot be imported or the check
+    raises, the home is treated as not readable. AGENTS.md requires authority /
+    identity checks to deny access when safety cannot be confirmed — returning
+    ``True`` here let a stale profile name reach ``list_jobs()`` on any helper
+    failure, which is exactly the ghost-shell write this predicate exists to
+    prevent.
     """
     try:
         from hermes_constants import named_profile_home, named_profile_is_live
 
-        path = Path(home)
-        return named_profile_home(path) is None or named_profile_is_live(path)
-    except Exception:
-        return True
+        named = named_profile_home(Path(home))
+        if named is None:
+            # Not under a profiles/ root: the default/custom home is always readable.
+            return True
+        return named_profile_is_live(named)
+    except Exception as exc:
+        logger.warning(
+            "profile liveness check failed for %s (%s) — denying cross-profile read",
+            home,
+            exc,
+        )
+        return False
 
 
 _TERMINAL_ENV_MAPPINGS = {
