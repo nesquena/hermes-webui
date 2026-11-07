@@ -1,6 +1,7 @@
-pytest_plugins = ("tests.test_renderer_js_behaviour",)
+from tests import test_renderer_js_behaviour as _renderer
 
-from tests.test_renderer_js_behaviour import _render
+_render = _renderer._render
+driver_path = _renderer.driver_path
 
 
 def test_inline_code_inside_link_label_renders_as_code(driver_path):

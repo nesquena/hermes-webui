@@ -1,0 +1,164 @@
+[
+  {
+    "state": "before",
+    "width": 1280,
+    "fixtures": [
+      {
+        "title": "Malformed predecessor",
+        "html": "<p><a href=\"https://broken.test/path [Good](https://good.test/path\" target=\"_blank\" rel=\"noopener\">bad</a></p>",
+        "links": [
+          {
+            "text": "bad",
+            "href": "https://broken.test/path [Good](https://good.test/path"
+          }
+        ],
+        "code": []
+      },
+      {
+        "title": "Raw code stays literal",
+        "html": "<p>See `<a href=\"https://gw.example/a b.pdf\" target=\"_blank\" rel=\"noopener\">Literal</a>` here</p>",
+        "links": [
+          {
+            "text": "Literal",
+            "href": "https://gw.example/a b.pdf"
+          }
+        ],
+        "code": []
+      },
+      {
+        "title": "Spaced destination",
+        "html": "<p><a href=\"https://gw.example/a b.pdf\" target=\"_blank\" rel=\"noopener\">report</a></p>",
+        "links": [
+          {
+            "text": "report",
+            "href": "https://gw.example/a b.pdf"
+          }
+        ],
+        "code": []
+      }
+    ],
+    "page_errors": []
+  },
+  {
+    "state": "before",
+    "width": 390,
+    "fixtures": [
+      {
+        "title": "Malformed predecessor",
+        "html": "<p><a href=\"https://broken.test/path [Good](https://good.test/path\" target=\"_blank\" rel=\"noopener\">bad</a></p>",
+        "links": [
+          {
+            "text": "bad",
+            "href": "https://broken.test/path [Good](https://good.test/path"
+          }
+        ],
+        "code": []
+      },
+      {
+        "title": "Raw code stays literal",
+        "html": "<p>See `<a href=\"https://gw.example/a b.pdf\" target=\"_blank\" rel=\"noopener\">Literal</a>` here</p>",
+        "links": [
+          {
+            "text": "Literal",
+            "href": "https://gw.example/a b.pdf"
+          }
+        ],
+        "code": []
+      },
+      {
+        "title": "Spaced destination",
+        "html": "<p><a href=\"https://gw.example/a b.pdf\" target=\"_blank\" rel=\"noopener\">report</a></p>",
+        "links": [
+          {
+            "text": "report",
+            "href": "https://gw.example/a b.pdf"
+          }
+        ],
+        "code": []
+      }
+    ],
+    "page_errors": []
+  },
+  {
+    "state": "after",
+    "width": 1280,
+    "fixtures": [
+      {
+        "title": "Malformed predecessor",
+        "html": "<p>[bad](<a href=\"https://broken.test/path\" target=\"_blank\" rel=\"noopener\">https://broken.test/path</a> <a href=\"https://good.test/path\" target=\"_blank\" rel=\"noopener\">Good</a></p>",
+        "links": [
+          {
+            "text": "https://broken.test/path",
+            "href": "https://broken.test/path"
+          },
+          {
+            "text": "Good",
+            "href": "https://good.test/path"
+          }
+        ],
+        "code": []
+      },
+      {
+        "title": "Raw code stays literal",
+        "html": "<p>See <code>[Literal](https://gw.example/a b.pdf)</code> here</p>",
+        "links": [],
+        "code": [
+          "[Literal](https://gw.example/a b.pdf)"
+        ]
+      },
+      {
+        "title": "Spaced destination",
+        "html": "<p><a href=\"https://gw.example/a b.pdf\" target=\"_blank\" rel=\"noopener\">report</a></p>",
+        "links": [
+          {
+            "text": "report",
+            "href": "https://gw.example/a b.pdf"
+          }
+        ],
+        "code": []
+      }
+    ],
+    "page_errors": []
+  },
+  {
+    "state": "after",
+    "width": 390,
+    "fixtures": [
+      {
+        "title": "Malformed predecessor",
+        "html": "<p>[bad](<a href=\"https://broken.test/path\" target=\"_blank\" rel=\"noopener\">https://broken.test/path</a> <a href=\"https://good.test/path\" target=\"_blank\" rel=\"noopener\">Good</a></p>",
+        "links": [
+          {
+            "text": "https://broken.test/path",
+            "href": "https://broken.test/path"
+          },
+          {
+            "text": "Good",
+            "href": "https://good.test/path"
+          }
+        ],
+        "code": []
+      },
+      {
+        "title": "Raw code stays literal",
+        "html": "<p>See <code>[Literal](https://gw.example/a b.pdf)</code> here</p>",
+        "links": [],
+        "code": [
+          "[Literal](https://gw.example/a b.pdf)"
+        ]
+      },
+      {
+        "title": "Spaced destination",
+        "html": "<p><a href=\"https://gw.example/a b.pdf\" target=\"_blank\" rel=\"noopener\">report</a></p>",
+        "links": [
+          {
+            "text": "report",
+            "href": "https://gw.example/a b.pdf"
+          }
+        ],
+        "code": []
+      }
+    ],
+    "page_errors": []
+  }
+]
