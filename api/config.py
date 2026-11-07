@@ -8344,6 +8344,152 @@ def _invoke_models_rebuild(builder):
     return builder()
 
 
+def _configured_badge_model_identity(model_id: object, provider_id: object) -> str:
+    """Identity of a model id within one provider, for configured-model badges.
+
+    Strips only that provider's own routing wrapper (``@provider:`` or
+    ``provider/``). Vendor namespaces such as ``any/`` and ``codex/`` stay part
+    of the identity, so same-provider siblings never collapse to one key
+    (#8732). Mirrors ``_configuredModelIdentity`` in ``static/ui.js`` (#8730).
+
+    OpenRouter follows docs/architecture/model-picker-routing.md: only the
+    optional ``@openrouter:`` wrapper is dropped, and dashes are not folded
+    into dots, because OpenRouter lists distinct routes that differ only by
+    that spelling (and ``openrouter/auto`` is a real route, not a wrapper).
+    """
+    s = str(model_id or "").strip().lower()
+    provider = str(provider_id or "").strip().lower()
+    is_openrouter = provider == "openrouter"
+    if provider:
+        prefixes = (f"@{provider}:",) if is_openrouter else (f"@{provider}:", f"{provider}/")
+        for prefix in prefixes:
+            if s.startswith(prefix):
+                s = s[len(prefix):] or s
+                break
+    return s if is_openrouter else s.replace("-", ".")
+
+
+def _configured_badge_fallback_provider(entry: dict, config_obj: dict | None) -> str:
+    """Provider id of a ``fallback_providers`` entry, in the picker's spelling.
+
+    Uses the same resolution as the active provider, so a legacy
+    ``custom_providers`` name such as ``magpie`` becomes the ``custom:magpie``
+    group id instead of a bare alias no picker row carries (#8732).
+
+    A badge is cosmetic, so a malformed entry must not take ``/api/models``
+    down with it: ``base_url: "http://[bad"`` makes ``urlparse`` raise inside
+    the base-url match, and that entry then badges with its plain provider
+    alias (the pre-#8732 spelling) instead of failing the whole catalog.
+    """
+    model = str(entry.get("model") or "").strip()
+    try:
+        return _resolve_configured_provider_id(
+            entry.get("provider"),
+            config_obj,
+            base_url=entry.get("base_url"),
+            model_id=model or None,
+        )
+    except Exception as exc:
+        logger.debug(
+            "fallback_providers entry %r: provider resolution failed for its badge (%s); using the plain alias",
+            entry.get("provider"),
+            exc,
+        )
+        return _resolve_provider_alias(entry.get("provider")) or ""
+
+
+def _configured_badge_option_ids(groups: list[dict]) -> list[str]:
+    """Picker option ids, visible rows first, then each group's overflow tail."""
+    return [
+        str(m.get("id"))
+        for g in groups
+        for bucket in ("models", "extra_models")
+        for m in (g.get(bucket) or [])
+        if isinstance(m, dict) and m.get("id")
+    ]
+
+
+def _configured_badge_provider_options(groups: list[dict]) -> dict[str, str]:
+    """Map each picker option id (visible or overflow) to its group provider id."""
+    return {
+        str(m.get("id")): str(g.get("provider_id") or "")
+        for g in groups
+        for bucket in ("models", "extra_models")
+        for m in (g.get(bucket) or [])
+        if isinstance(m, dict) and m.get("id")
+    }
+
+
+def _configured_badge_provider_match(
+    model: str,
+    provider: str,
+    option_ids: list[str],
+    option_provider_lookup: dict[str, str],
+) -> str | None:
+    """Return the option that *model* names within *provider*, if any (#8732).
+
+    Rows owned by another provider are never candidates. A row owned by the
+    configured provider wins over a row with no provider id.
+
+    When no row has the configured id's identity, a bare configured id may
+    still name one row under a vendor spelling: ``claude-sonnet-4`` on a relay
+    that lists ``anthropic/claude-sonnet-4``. Such a row matches only when its
+    identity is exactly ``<vendor>/<configured id>`` with no ``/`` in either
+    part and exactly one row qualifies, so the badge (and the picker's
+    "Configured" row, which the frontend dedupes against that row) does not
+    vanish for an unambiguous match. Two rows that differ only by vendor
+    namespace (``any/`` and ``codex/``) never spell each other, so a sibling
+    still never borrows the badge, and two vendor spellings of one bare id
+    (``anthropic/`` and ``bedrock/``) are ambiguous and badge neither.
+
+    That is the only shape the frontend proves equivalent: its
+    ``_normalizeConfiguredModelKey()`` strips exactly one leading segment
+    (#3360 keeps ``vendor_a/x`` and ``vendor_b/y/x`` distinct), so a deeper
+    row is never deduped against the configured key. A configured
+    ``deepseek/deepseek-v4-pro`` therefore does not badge
+    ``vendor_a/deepseek/deepseek-v4-pro``, and a bare ``deepseek-v4-pro``
+    does not either; badging such a row showed two "Configured" choices that
+    save different ids (re-gate of #8741). Both stay unbadged and the picker
+    keeps the one choice that saves the configured id, as on master.
+
+    The other direction is deliberately not matched: a configured
+    ``anthropic/claude-sonnet-4`` on a relay that lists only
+    ``claude-sonnet-4`` badges no row. Nothing proves the relay routes the
+    two strings to the same model, and the frontend does not dedupe the
+    configured key against the bare row, so badging it would show two
+    "Configured" choices that save different ids. Left unbadged, the picker
+    keeps one choice that saves the configured id under its own provider,
+    as it does on master. OpenRouter is excluded from the vendor-spelling
+    pass: its route text must match exactly
+    (docs/architecture/model-picker-routing.md).
+    """
+    target = _configured_badge_model_identity(model, provider)
+    if not target:
+        return None
+    unowned_match = None
+    vendor_spellings: list[str] = []
+    for opt_id in option_ids:
+        opt_provider = option_provider_lookup.get(opt_id, "")
+        if opt_provider and opt_provider != provider:
+            continue
+        identity = _configured_badge_model_identity(opt_id, provider)
+        if identity == target:
+            if opt_provider == provider:
+                return opt_id
+            unowned_match = unowned_match or opt_id
+        elif "/" not in target and identity.partition("/")[2] == target:
+            # Exactly ``<vendor>/<target>``: the one vendor spelling the
+            # picker dedupes against the configured key (see docstring).
+            vendor_spellings.append(opt_id)
+    if unowned_match:
+        return unowned_match
+    if provider == "openrouter":
+        return None
+    if len(vendor_spellings) == 1:
+        return vendor_spellings[0]
+    return None
+
+
 def _configured_model_badges_from_static_catalog(
     groups: list[dict],
     *,
@@ -8366,7 +8512,7 @@ def _configured_model_badges_from_static_catalog(
         for idx, entry in enumerate(fallback_cfg, start=1):
             if not isinstance(entry, dict):
                 continue
-            provider = _resolve_provider_alias(entry.get("provider"))
+            provider = _configured_badge_fallback_provider(entry, cfg)
             model = str(entry.get("model") or "").strip()
             if not provider or not model:
                 continue
@@ -8379,19 +8525,11 @@ def _configured_model_badges_from_static_catalog(
                 }
             )
 
-    option_ids = [
-        m.get("id", "")
-        for g in groups
-        for m in g.get("models", [])
-        if m.get("id")
-    ]
-    option_lookup = {str(opt_id): str(opt_id) for opt_id in option_ids}
-    option_provider_lookup = {
-        str(m.get("id")): str(g.get("provider_id") or "")
-        for g in groups
-        for m in g.get("models", [])
-        if m.get("id")
-    }
+    # Overflow rows (``extra_models``) are real picker options too: a configured
+    # id the provider lists past the visible cut must still match (#8732).
+    option_ids = _configured_badge_option_ids(groups)
+    option_lookup = {opt_id: opt_id for opt_id in option_ids}
+    option_provider_lookup = _configured_badge_provider_options(groups)
 
     def _norm_static_model_id(model_id: str) -> str:
         s = str(model_id or "").strip().lower()
@@ -8436,6 +8574,14 @@ def _configured_model_badges_from_static_catalog(
                 match_id = option_lookup[candidate]
                 break
         if match_id is None:
+            match_id = _configured_badge_provider_match(
+                model, provider, option_ids, option_provider_lookup
+            )
+        # The loose first-segment match below is only a last resort for a
+        # provider spelling no picker group carries. When the configured
+        # provider owns rows, the provider-scoped match above is authoritative,
+        # so a same-provider sibling never borrows the badge (#8732).
+        if match_id is None and provider not in option_provider_lookup.values():
             for candidate in raw_candidates:
                 normalized = _norm_static_model_id(candidate)
                 matches = norm_lookup.get(normalized, [])
@@ -10967,7 +11113,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 for idx, entry in enumerate(fallback_cfg, start=1):
                     if not isinstance(entry, dict):
                         continue
-                    provider = _resolve_provider_alias(entry.get("provider"))
+                    provider = _configured_badge_fallback_provider(entry, cfg)
                     model = str(entry.get("model") or "").strip()
                     if not provider or not model:
                         continue
@@ -10980,14 +11126,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         }
                     )
 
-            option_ids = [m.get("id", "") for g in groups for m in g.get("models", []) if m.get("id")]
-            option_lookup = {str(opt_id): str(opt_id) for opt_id in option_ids}
-            option_provider_lookup = {
-                str(m.get("id")): str(g.get("provider_id") or "")
-                for g in groups
-                for m in g.get("models", [])
-                if m.get("id")
-            }
+            # Overflow rows (``extra_models``) are real picker options too: a
+            # configured id listed past the visible cut must still match (#8732).
+            option_ids = _configured_badge_option_ids(groups)
+            option_lookup = {opt_id: opt_id for opt_id in option_ids}
+            option_provider_lookup = _configured_badge_provider_options(groups)
             norm_lookup: dict[str, list[str]] = {}
             for opt_id in option_ids:
                 norm_lookup.setdefault(_norm_model_id(opt_id), []).append(opt_id)
@@ -11011,6 +11154,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         match_id = option_lookup[candidate]
                         break
                 if match_id is None:
+                    match_id = _configured_badge_provider_match(
+                        model, provider, option_ids, option_provider_lookup
+                    )
+                # The loose first-segment match below is only a last resort for
+                # a provider spelling no picker group carries. When the
+                # configured provider owns rows, the provider-scoped match above
+                # is authoritative, so a same-provider sibling never borrows the
+                # badge (#8732).
+                if match_id is None and provider not in option_provider_lookup.values():
                     for candidate in raw_candidates:
                         normalized = _norm_model_id(candidate)
                         matches = norm_lookup.get(normalized, [])
