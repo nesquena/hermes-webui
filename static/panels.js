@@ -9600,15 +9600,24 @@ const _SETTINGS_SPEECH_STORAGE_KEYS={
   voice_continuous:'hermes-voice-continuous',
   voice_silence_ms:'hermes-voice-silence-ms',
   raw_audio_mode:'hermes-raw-audio-mode',
+  mic_auto_stop:'hermes-mic-auto-stop',
 };
 let _settingsSpeechPersistedKeys=new Set();
 let _settingsSpeechLocalStorageKeys=new Set();
 let _settingsSpeechChangedKeys=new Set();
+// Speech preferences whose hydration could NOT install the value on screen (a
+// refused runtime-cache write). The control then shows the value actually in
+// force, not the durable one, so serializing the control would push that
+// fallback into the stored preference on the next unrelated autosave. Until a
+// deliberate edit succeeds, the payload omits the field and the durable value
+// survives untouched. Ownership itself is never cleared here.
+let _settingsSpeechUnappliedKeys=new Set();
 
 function _captureSpeechPreferenceOwnership(settings){
   _settingsSpeechPersistedKeys=new Set(Array.isArray(settings&&settings.persisted_speech_keys)?settings.persisted_speech_keys:[]);
   _settingsSpeechLocalStorageKeys=new Set();
   _settingsSpeechChangedKeys=new Set();
+  _settingsSpeechUnappliedKeys=new Set();
   Object.entries(_SETTINGS_SPEECH_STORAGE_KEYS).forEach(([settingKey,storageKey])=>{
     try{if(localStorage.getItem(storageKey)!==null) _settingsSpeechLocalStorageKeys.add(settingKey);}catch(_){}
   });
@@ -9629,7 +9638,29 @@ function _syncSpeechPreferenceCache(settingKey,value){
 }
 
 function _setOwnedSpeechPayload(payload,settingKey,value){
+  // An unapplied hydration means the control no longer mirrors the durable
+  // value: omit the field rather than persist the fallback it displays.
+  if(_settingsSpeechUnappliedKeys.has(settingKey)) return;
   if(_speechPreferenceIsOwned(settingKey)) payload[settingKey]=value;
+}
+
+// The storage note has one wording per direction — "you turned it on, but it
+// cannot be stored here" and the mirror. A single "this preference was not
+// changed" line described neither case, and it was shown inside the panel
+// before the user had touched anything. `wantedOn` is the direction the user
+// asked for (the durable preference at hydration, the switch they flipped on a
+// refused toggle), `effectiveOn` the value the meter will actually honour; only
+// a disagreement is worth a note. Neither toggle nor hydration persists
+// anything in the blocked case, so the wording must not claim a save.
+function _setMicAutoStopStorageNote(wantedOn,effectiveOn){
+  const note=$('settingsMicAutoStopNote');
+  if(!note) return;
+  const blocked=!!wantedOn!==!!effectiveOn;
+  note.hidden=!blocked;
+  const wantedOnEl=$('settingsMicAutoStopNoteSavedOn');
+  const wantedOffEl=$('settingsMicAutoStopNoteSavedOff');
+  if(wantedOnEl) wantedOnEl.hidden=!(blocked&&wantedOn);
+  if(wantedOffEl) wantedOffEl.hidden=!(blocked&&!wantedOn);
 }
 
 function _preferencesPayloadFromUi(){
@@ -9737,6 +9768,8 @@ function _speechPreferencesPayloadFromUi(){
   if(voiceModeCb) _setOwnedSpeechPayload(payload,'voice_mode_button',voiceModeCb.checked);
   const rawAudioCb=$('settingsRawAudio');
   _setOwnedSpeechPayload(payload,'raw_audio_mode',rawAudioCb?rawAudioCb.checked:localStorage.getItem('hermes-raw-audio-mode')==='true');
+  const micAutoStopCb=$('settingsMicAutoStop');
+  _setOwnedSpeechPayload(payload,'mic_auto_stop',micAutoStopCb?micAutoStopCb.checked:localStorage.getItem('hermes-mic-auto-stop')==='true');
   _setOwnedSpeechPayload(payload,'voice_continuous',localStorage.getItem('hermes-voice-continuous')==='true');
   const voiceSilence=parseInt(localStorage.getItem('hermes-voice-silence-ms'),10);
   _setOwnedSpeechPayload(payload,'voice_silence_ms',(Number.isFinite(voiceSilence)&&voiceSilence>=200)?voiceSilence:1800);
@@ -10567,6 +10600,55 @@ async function loadSettingsPanel(){
     }
     const voiceContinuous=_speechBool('voice_continuous','hermes-voice-continuous',false);
     _syncSpeechPreferenceCache('voice_continuous',voiceContinuous?'true':'false');
+    // Opt-in: silence auto-stop starts OFF (manual stop is the default capture).
+    const micAutoStopCb=$('settingsMicAutoStop');
+    if(micAutoStopCb){
+      const micAutoStop=_speechBool('mic_auto_stop','hermes-mic-auto-stop',false);
+      micAutoStopCb.checked=micAutoStop;
+      let micSeedApplied=true;
+      try{_syncSpeechPreferenceCache('mic_auto_stop',micAutoStop?'true':'false');}
+      catch(_){micSeedApplied=false;}
+      if(!micSeedApplied){
+        // Hydration must not display a preference the meter will not honour: when
+        // seeding the runtime cache is refused, the checkbox goes back to the
+        // cached value _micAutoStopEnabled() actually reads, and the note is
+        // shown instead of waiting for the next toggle to reveal the mismatch.
+        // The durable server value and the sparse ownership stay untouched.
+        let micCached=null;
+        try{micCached=localStorage.getItem('hermes-mic-auto-stop');}catch(_){}
+        micAutoStopCb.checked=micCached==='true';
+        // The box now mirrors the runtime cache, not the durable preference:
+        // keep the field out of every settings payload (unrelated autosave,
+        // whole-settings save) until a deliberate mic edit lands.
+        _settingsSpeechUnappliedKeys.add('mic_auto_stop');
+      }
+      // Say which direction this actually is: what was saved, and what will run.
+      _setMicAutoStopStorageNote(micAutoStop,micAutoStopCb.checked);
+      micAutoStopCb.onchange=function(){
+        // The runtime cache is the effective value: _micAutoStopEnabled() reads this
+        // very key at capture time. A refused write (quota, private mode) must not
+        // leave the checkbox showing a preference that is not applied, and must not
+        // abort the handler on its way to the autosave below.
+        const desired=!!this.checked;
+        let cached=true;
+        try{localStorage.setItem('hermes-mic-auto-stop',desired?'true':'false');}
+        catch(_){cached=false;}
+        if(!cached){
+          // Explicit rejection instead of a silently forked control: the box goes
+          // back to the value that is actually in force (and stays the one the
+          // meter predicate will read).
+          this.checked=!desired;
+          _setMicAutoStopStorageNote(desired,this.checked);
+          return;
+        }
+        _setMicAutoStopStorageNote(desired,desired);
+        // A deliberate mic edit that really landed: the checkbox is once again
+        // the durable intent, so the field may be serialized again.
+        _settingsSpeechUnappliedKeys.delete('mic_auto_stop');
+        _markSpeechPreferenceChanged('mic_auto_stop');
+        _schedulePreferencesAutosave();
+      };
+    }
     const voiceSilence=parseInt(_speechSetting('voice_silence_ms','hermes-voice-silence-ms',1800),10);
     _syncSpeechPreferenceCache('voice_silence_ms',Number.isFinite(voiceSilence)&&voiceSilence>=200?String(voiceSilence):'1800');
     // TTS settings use /api/settings as the durable source and localStorage as the runtime cache.
