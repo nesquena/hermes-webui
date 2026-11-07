@@ -17369,18 +17369,16 @@ def _handle_health_restart(handler) -> bool:
     )
 
 
-def _serve_manifest(handler) -> bool:
-    """Serve static/manifest.json with the correct PWA Content-Type.
+def _serve_manifest(handler, path) -> bool:
+    """Serve the installation PWA manifest, MIME application/manifest+json, no-store.
 
-    Shared by the root (/manifest.json, /manifest.webmanifest) and
-    session-prefixed (/session/manifest.json, /session/manifest.webmanifest)
-    routes so Firefox Android can fetch the manifest when installing from
-    a /session/<id> page.  See #2226.
+    Root and session aliases retain their existing PWA identity (#2226).
     """
     static_root = api_config.get_static_root()
     manifest_path = (static_root / "manifest.json").resolve()
     if manifest_path.exists():
-        data = manifest_path.read_bytes()
+        from api.instance_branding import render_manifest
+        data = render_manifest(manifest_path.read_bytes(), path)
         handler.send_response(200)
         handler.send_header("Content-Type", "application/manifest+json; charset=utf-8")
         handler.send_header("Cache-Control", "no-store")
@@ -18195,11 +18193,16 @@ def handle_get(handler, parsed) -> bool:
     # the manifest, and Firefox falls back to a generated letter icon.
     # See #2226.
     if parsed.path in ("/session/manifest.json", "/session/manifest.webmanifest"):
-        return _serve_manifest(handler)
+        return _serve_manifest(handler, parsed.path)
+
+    if parsed.path.startswith(("/branding/", "/session/branding/")):
+        from api.instance_branding import serve_asset
+        return serve_asset(handler, parsed.path)
 
     if parsed.path in ("/", "/index.html", "/sessions") or parsed.path.startswith("/session/"):
         try:
             from api.extensions import inject_extension_tags
+            from api.instance_branding import render_html
 
             csrf_token = ""
             try:
@@ -18234,7 +18237,7 @@ def handle_get(handler, parsed) -> bool:
             )
             return t(
                 handler,
-                inject_extension_tags(html),
+                inject_extension_tags(render_html(html)),
                 content_type="text/html; charset=utf-8",
             )
         except Exception as exc:
@@ -18327,7 +18330,8 @@ def handle_get(handler, parsed) -> bool:
             )
             .replace("{{OIDC_LOGIN_HTML}}", _oidc_login_html(parsed))
         )
-        return t(handler, _page, content_type="text/html; charset=utf-8")
+        from api.instance_branding import render_html
+        return t(handler, render_html(_page), content_type="text/html; charset=utf-8")
 
     if parsed.path == "/api/auth/oidc/start":
         from api.auth_oidc import OIDCAuthError, OIDCConfigError, build_authorization_redirect
@@ -18443,7 +18447,7 @@ def handle_get(handler, parsed) -> bool:
         )
 
     if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
-        return _serve_manifest(handler)
+        return _serve_manifest(handler, parsed.path)
 
     if parsed.path == "/sw.js":
         static_root = api_config.get_static_root()
@@ -18692,8 +18696,15 @@ def handle_get(handler, parsed) -> bool:
             days = 7
         return j(handler, get_provider_cost_history(provider_id, days))
 
+    if parsed.path == "/api/instance-branding":
+        from api.instance_branding import handle_management
+        return handle_management(handler)
+
     if parsed.path == "/api/settings":
         settings = load_settings()
+        from api.instance_branding import effective_instance_identity
+        settings["instance_name"] = effective_instance_identity(settings)["name"] or ""
+        settings.pop("instance_branding", None)
         settings["persisted_speech_keys"] = persisted_speech_settings_keys()
         # Never expose the stored password hash to clients
         settings.pop("password_hash", None)
@@ -19987,6 +19998,10 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/health/restart":
         return _handle_health_restart(handler)
+
+    if parsed.path in ("/api/instance-branding", "/api/instance-branding/image"):
+        from api.instance_branding import handle_management
+        return handle_management(handler, write=True, upload=parsed.path.endswith("/image"))
 
     if parsed.path == "/api/upload":
         return handle_upload(handler)
@@ -22606,7 +22621,15 @@ def handle_post(handler, parsed) -> bool:
 
         from api.config import get_max_tokens_status, set_max_tokens
 
-        saved = save_settings(body)
+        if "instance_branding" in body:
+            return bad(handler, "instance_branding is reserved; use its dedicated API", 400)
+        try:
+            saved = save_settings(body)
+        except ValueError as exc:
+            return bad(handler, str(exc), 409)
+        from api.instance_branding import effective_instance_identity
+        saved["instance_name"] = effective_instance_identity(saved)["name"] or ""
+        saved.pop("instance_branding", None)
         saved["persisted_speech_keys"] = persisted_speech_settings_keys()
         if max_tokens_provided:
             max_tokens_status = set_max_tokens(max_tokens_value)

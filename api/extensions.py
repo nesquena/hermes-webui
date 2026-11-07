@@ -1024,7 +1024,7 @@ def _gallery_installed_runtime_manifest(
         asset_base = ext_id
         if isinstance(manifest, dict):
             top_entry: Dict[str, object] = {"id": ext_id}
-            for key in ("name", "enabled", "scripts", "stylesheets", "sidecar", "permissions", "settings_schema"):
+            for key in ("name", "enabled", "scripts", "stylesheets", "sidecar", "permissions", "settings_schema", "instance_branding_api"):
                 if key in manifest:
                     top_entry[key] = manifest[key]
             if any(
@@ -1143,6 +1143,7 @@ def _manifest_extension_state(
                 "can_toggle": can_toggle,
                 "reload_required": True,
                 "storage_owned": _manifest_entry_storage_owned(entry),
+                **({"instance_branding_api": 1} if type(entry.get("instance_branding_api")) is int and entry["instance_branding_api"] == 1 else {}),
                 "settings_schema": settings_schema,
                 "status": (
                     "manifest_disabled"
@@ -1309,6 +1310,7 @@ def _extension_runtime_entries(
                 "id": ext_id,
                 "name": _manifest_entry_text(entry, "name") or ext_id,
                 "storage_owned": _manifest_entry_storage_owned(entry),
+                **({"instance_branding_api": 1} if type(entry.get("instance_branding_api")) is int and entry["instance_branding_api"] == 1 else {}),
                 "settings_schema": _sanitize_settings_schema(entry),
             }
         )

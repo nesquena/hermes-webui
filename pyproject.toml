@@ -17,6 +17,9 @@ classifiers = [
 requires-python = ">=3.11"
 dynamic = ["version", "dependencies"]
 
+[project.optional-dependencies]
+branding = ["Pillow==13.0.0"]
+
 [project.urls]
 Repository = "https://github.com/nesquena/hermes-webui"
 Issues = "https://github.com/nesquena/hermes-webui/issues"

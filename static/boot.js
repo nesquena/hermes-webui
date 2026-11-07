@@ -4317,7 +4317,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._composerControlOrder=[];
     _applyComposerControlOrder(window._composerControlOrder);
     window._botName='Hermes';
-    window._instanceName='';  // #7611: no label until settings arrive
+    window._instanceName=((window.__HERMES_INSTANCE_BRANDING__||{}).effective||{}).name||'';
     _bootSettings={check_for_updates:false};
     if(typeof setLocale==='function'){
       const _lang=typeof resolvePreferredLocale==='function'
