@@ -19,11 +19,13 @@ ROOT = Path(__file__).resolve().parents[1]
 def _run(case):
     sessions = (ROOT / "static/sessions.js").read_text(encoding="utf-8")
     messages = (ROOT / "static/messages.js").read_text(encoding="utf-8")
-    functions = "\n".join(
+    functions = "let _activeSessionSceneRestorePending = null;\nlet _loadSessionGeneration = 0;\nconst _PENDING_LIVE_ATTACHES=Object.create(null);\n" + "\n".join(
         f"function {name}({params}) {{" + _function_body(sessions, f"function {name}(") + "}"
         for name, params in [
             ("_isServerIdleSessionRow", "s"),
             ("_hasOwnedOpenLiveStream", "sid"),
+            ("_isActiveSessionSceneRestoreOwner", "sid, activeStreamId, loadGeneration"),
+            ("_activeSessionSceneRestorePendingFor", "sid, streamId"),
             ("_reconcileActiveSessionIdleStateFromList", "serverRows"),
         ]
     )
