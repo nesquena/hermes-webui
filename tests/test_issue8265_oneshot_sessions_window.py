@@ -218,7 +218,14 @@ def test_files_pane_lists_an_opened_oneshot_before_any_sidecar_exists(fake_herme
     payload, listed = _list_dir_payload(monkeypatch, tmp_path, "oneshot-000")
     assert payload.get("status") != 404, payload
     assert listed["workspace"] == tmp_path
-    assert seen["profile"] is None
+    # #7217 re-gate round 3 (reviewer finding 2, 2026-10-22): the
+    # active-profile lookup hit must ALSO derive the owner profile. This
+    # branch used to discard cli_meta["profile"] and resolve profile-less
+    # (seen["profile"] is None) — the defect the reviewer replayed as a
+    # 404 on mapped CLI sessions. The row lives in the default profile's
+    # home, so the owner profile is "default" — mirroring the
+    # all-profiles-fallback sibling test's seen["profile"] == "work".
+    assert seen["profile"] == "default"
 
     payload, _ = _list_dir_payload(monkeypatch, tmp_path, "no-such-session")
     assert payload == {"error": "Session not found", "status": 404}

@@ -799,6 +799,7 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 - [`docs/remote-access-zh.md`](docs/remote-access-zh.md) — 中文远程访问指南：Tailscale、SSH 隧道、Windows 原生部署（自启仅适用 WSL 用户）
 - [`docs/advanced-chat-setup.md`](docs/advanced-chat-setup.md) — optional dynamic recall-prefill and Gateway-backed browser chat for self-hosted deployments
 - [`docs/docker.md`](docs/docker.md) — Docker compose setup, common failures, and bind-mount migration
+- [`docs/workspace-path-maps.md`](docs/workspace-path-maps.md) — per-profile `webui.workspace_path_maps`: the agent-visible ↔ WebUI-local path table for multi-container profiles
 - [`docs/supervisor.md`](docs/supervisor.md) — launchd, systemd, supervisord, runit, and s6 process-supervisor setup
 - [`docs/wsl-autostart.md`](docs/wsl-autostart.md) — WSL2 auto-start at Windows login
 - [`docs/onboarding-agent-checklist.md`](docs/onboarding-agent-checklist.md) — safety rules and pass/fail checks for assistant-led install/reinstall support
