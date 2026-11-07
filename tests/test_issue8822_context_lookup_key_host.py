@@ -2,11 +2,16 @@
 
 The lookup hands (URL, key, provider) to the Agent's ``get_model_context_length``. The Agent contacts the URL's
 host, plus fixed metadata hosts for some providers (``_CONTEXT_LOOKUP_FIXED_HOSTS``). A key may go only to hosts
-its own config source owns: that source's ``base_url``, plus the provider's fixed hosts when the source is that
-provider's own. Otherwise the lookup sends no key. It never changes the URL.
+its own config source owns: every URL that source declares (``api``, ``url`` or ``base_url``), plus the provider's
+fixed hosts when the source is that provider's own (a built-in record, the model block configured for it, or a
+caller key that came with no URL). Otherwise the lookup sends no key. It never changes the URL, and a key that isn't
+a string (a ``key_cmd`` token source) passes through untouched.
 
-None of these tests needs an Agent, except the last two groups (``requires_agent``), which probe the installed
-Agent's own metadata lookup under a no-network request recorder.
+The two streaming sites ask the lookup for the config key first, as v0.52.544 did, and offer the Agent's own key
+only as its fallback, under the same rule; nothing is added after the lookup.
+
+Most of these tests need no Agent. The ``requires_agent`` group probes the installed Agent's own metadata lookup
+under a no-network request recorder.
 """
 import base64
 import json
@@ -71,10 +76,84 @@ def test_a_legacy_entry_keeps_its_own_pair():
     assert (got.base_url, got.api_key) == (L, "KL")
 
 
+@pytest.mark.parametrize("field", ["api", "url", "base_url"])
+def test_a_native_record_owns_its_url_in_every_spelling(field):
+    """WebUI and the Agent read a record's URL from ``api``, ``url`` or ``base_url``; all are the record's own."""
+    got = _lookup({"model": {"provider": "custom:my-proxy", "base_url": B},
+                   "providers": {"custom:my-proxy": {field: B, "api_key": "KB"}}}, "custom:my-proxy")
+    assert (got.base_url, got.api_key) == (B, "KB")
+
+
+@pytest.mark.parametrize("field", ["api", "url"])
+def test_a_legacy_entry_owns_its_url_in_every_spelling(field):
+    got = _lookup({"model": {"provider": "custom:my-proxy", "base_url": L},
+                   "custom_providers": [{"name": "my-proxy", field: L, "api_key": "KL"}]}, "custom:my-proxy")
+    assert (got.base_url, got.api_key) == (L, "KL")
+
+
+def test_a_record_spelling_owns_only_its_own_url():
+    got = _lookup({"model": {"provider": "custom:my-proxy", "base_url": A},
+                   "providers": {"custom:my-proxy": {"api": B, "api_key": "KB"}}}, "custom:my-proxy")
+    assert got.base_url == A
+    assert got.api_key == ""
+
+
 def test_a_caller_key_owns_the_callers_url():
     got = _lookup({"model": {"provider": "custom:my-proxy", "base_url": A}}, "custom:my-proxy",
                   base_url=C, api_key="KC")
     assert (got.base_url, got.api_key) == (C, "KC")
+
+
+@pytest.mark.parametrize("follows_url", [False, True])
+def test_a_caller_key_with_a_url_owns_only_that_url(follows_url, monkeypatch):
+    """A pair with a URL can carry another source's key under the provider's label (a model alias's own endpoint,
+    or the Agent's pair after a fallback switched its endpoint and key), so it owns its URL, not the provider's
+    fixed hosts. An Agent whose Codex catalog ignores the URL would also send the key to chatgpt.com."""
+    monkeypatch.setattr(routes, "_agent_codex_catalog_follows_url", lambda: follows_url)
+    got = _lookup({"model": {"provider": "openai-codex"}}, "openai-codex", base_url=C, api_key="K-ALIAS")
+    assert got.base_url == C
+    assert got.api_key == ("K-ALIAS" if follows_url else "")
+
+
+def test_a_caller_key_without_a_url_owns_its_providers_fixed_host():
+    got = _lookup({"model": {"provider": "anthropic"}}, "anthropic", api_key="KC")
+    assert (got.base_url, got.api_key) == ("", "KC")
+
+
+class _TokenSource:
+    """Shaped like the Agent's ``CommandTokenSource``: a credential minted on use, never a string."""
+
+    def __call__(self):
+        return "minted-token"
+
+    def __repr__(self):
+        return "<TokenSource object at 0x0>"
+
+
+def test_a_non_string_caller_key_passes_through_unchanged():
+    source = _TokenSource()
+    got = _lookup({"model": {"provider": "custom:my-proxy"}}, "custom:my-proxy", base_url=C, api_key=source)
+    assert got.api_key is source
+
+
+def test_a_non_string_fallback_key_passes_through_unchanged():
+    source = _TokenSource()
+    got = _lookup({"model": {"provider": "custom:my-proxy"}}, "custom:my-proxy", base_url=C,
+                  fallback_api_key=source, fallback_base_url=C)
+    assert got.api_key is source
+
+
+def test_the_config_key_that_owns_the_url_wins_over_the_fallback():
+    got = _lookup({"model": {"provider": "custom:foo"}, "providers": {"custom:foo": {"base_url": C, "api_key": "KA"}}},
+                  "custom:foo", base_url=C, fallback_api_key="AGENT-KEY", fallback_base_url=C)
+    assert (got.base_url, got.api_key) == (C, "KA")
+
+
+def test_a_fallback_key_never_lands_on_a_url_it_did_not_come_with():
+    got = _lookup({"model": {"provider": "custom:my-proxy", "base_url": A}}, "custom:my-proxy",
+                  fallback_api_key="AGENT-KEY", fallback_base_url=C)
+    assert got.base_url == A
+    assert got.api_key == ""
 
 
 @pytest.mark.parametrize("filled", ["model", "record"])
@@ -186,6 +265,82 @@ def test_a_site_still_sends_the_agents_own_pair(site, monkeypatch):
     assert (ns["_cfg_base_url"], ns["_cfg_api_key"]) == (C, "AGENT-KEY")
 
 
+@pytest.mark.parametrize("site", [0, 1])
+def test_a_site_prefers_the_config_key_that_owns_the_url(site, monkeypatch):
+    """#8816 round 7: the runtime bundle can pair record A's URL with record B's key (a shared-name credential
+    pool). The config key that owns A's URL wins, as on v0.52.544; the Agent's key is only the fallback."""
+    cfg = {"model": {"provider": "custom:foo"}, "custom_providers": [],
+           "providers": {"myproxy": {"name": "foo", "base_url": B, "api_key": "KB"},
+                         "custom:foo": {"name": "foo", "base_url": A, "api_key": "KA"}}}
+    import api.config as api_config
+    monkeypatch.setattr(api_config, "get_config", lambda *a, **k: cfg, raising=False)
+    ns = dict(agent=types.SimpleNamespace(model="m-x", base_url=A, api_key="KB"),
+              resolved_model="m-x", resolved_provider="custom:foo", resolved_base_url=A,
+              resolved_api_key="KB", _cfg=cfg)
+    exec(_site_blocks()[site], ns)
+    assert (ns["_cfg_base_url"], ns["_cfg_api_key"]) == (A, "KA")
+
+
+@pytest.mark.parametrize("site", [0, 1])
+@pytest.mark.parametrize("follows_url", [False, True])
+def test_a_site_under_another_label_sends_the_agents_key_only_where_it_owns_every_host(site, follows_url,
+                                                                                       monkeypatch):
+    """The Agent's pair after a fallback (or a model alias's own endpoint) keeps the session's provider label.
+    Under ``openai-codex`` an Agent whose Codex catalog ignores the URL also contacts chatgpt.com, which that key
+    doesn't own, so it goes nowhere; an Agent that follows the URL gets it at its own URL only."""
+    monkeypatch.setattr(routes, "_agent_codex_catalog_follows_url", lambda: follows_url)
+    cfg = {"model": {"provider": "openai-codex"}, "providers": {}, "custom_providers": []}
+    import api.config as api_config
+    monkeypatch.setattr(api_config, "get_config", lambda *a, **k: cfg, raising=False)
+    ns = dict(agent=types.SimpleNamespace(model="m-x", base_url=C, api_key="K-OTHER", provider="deepseek"),
+              resolved_model="m-x", resolved_provider="openai-codex", resolved_base_url=C,
+              resolved_api_key="K-OTHER", _cfg=cfg)
+    exec(_site_blocks()[site], ns)
+    assert ns["_cfg_base_url"] == C
+    assert ns["_cfg_api_key"] == ("K-OTHER" if follows_url else "")
+
+
+def _site_calls():
+    """Each site's block from its Agent import through its ``get_model_context_length`` call."""
+    blocks = []
+    for anchor, first, end, indent in (
+        ("Fallback: if the compressor didn't report a context_length",
+         "from agent.model_metadata import get_model_context_length\n", "\n                        if _resolved_cl:", 24),
+        ("Fallback: when the compressor is absent or reports context_length=0",
+         "from agent.model_metadata import get_model_context_length as _get_cl", "\n                    if _fb_cl:", 20),
+    ):
+        a = STREAMING_PY.index(anchor)
+        b = STREAMING_PY.index(first, a)
+        e = STREAMING_PY.index(end, b)
+        blocks.append(textwrap.dedent(" " * indent + STREAMING_PY[b:e]))
+    return blocks
+
+
+@pytest.mark.parametrize("site", [0, 1])
+def test_the_agent_receives_a_token_source_itself_not_its_repr(site, monkeypatch):
+    import sys
+
+    seen = {}
+
+    def get_model_context_length(model, base_url="", *args, api_key=None, **kwargs):
+        seen.update(base_url=base_url, api_key=api_key)
+        return 8192
+
+    stub = types.ModuleType("agent.model_metadata")
+    setattr(stub, "get_model_context_length", get_model_context_length)
+    monkeypatch.setitem(sys.modules, "agent.model_metadata", stub)
+    cfg = {"model": {"provider": "custom", "base_url": C}, "providers": {}, "custom_providers": []}
+    import api.config as api_config
+    monkeypatch.setattr(api_config, "get_config", lambda *a, **k: cfg, raising=False)
+    source = _TokenSource()
+    ns = dict(agent=types.SimpleNamespace(model="m-x", base_url=C, api_key=source, provider="custom"),
+              resolved_model="m-x", resolved_provider="custom", resolved_base_url=C, resolved_api_key=source,
+              _cfg=cfg)
+    exec(_site_calls()[site], ns)
+    assert seen["base_url"] == C
+    assert seen["api_key"] is source
+
+
 def test_no_site_falls_back_to_the_agents_key_after_the_lookup():
     assert not re.search(r"_ctx_lookup\.api_key\s+or\s+getattr\(agent,\s*'api_key'", STREAMING_PY)
 
@@ -218,15 +373,15 @@ def recorded_agent_requests(monkeypatch, tmp_path):
     agent_home = (tmp_path / "agent-home").resolve()
     agent_home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(agent_home))
-    state = {"mode": "miss", "seen": [], "home": agent_home}
+    state = {"mode": "miss", "seen": [], "home": agent_home, "blocked": 0}
     payload = {"data": [{"id": "m-x", "context_length": 8192,
                          "capabilities": {"limits": {"max_prompt_tokens": 8192}}}],
                "models": [{"slug": "m-x", "context_window": 8192}]}
 
     def note(url, headers):
-        creds = [str(v).removeprefix("Bearer ") for k, v in dict(headers or {}).items()
-                 if str(k).lower() in ("authorization", "x-api-key", "api-key")]
-        state["seen"].append((urllib.parse.urlsplit(str(url)).hostname or "", creds))
+        # Every header value and the URL itself: a key can travel under any header name or in a query string.
+        values = [str(v) for v in dict(headers or {}).values()]
+        state["seen"].append((urllib.parse.urlsplit(str(url)).hostname or "", values, str(url)))
 
     def req(self, method, url, *a, **kw):
         headers = dict(self.headers)
@@ -265,6 +420,8 @@ def recorded_agent_requests(monkeypatch, tmp_path):
             return 200
 
     def no_connect(self, address):
+        # A request that reaches a socket bypassed the recorded clients, so its key and host went unseen.
+        state["blocked"] += 1
         raise OSError("network disabled by test")
 
     def fake_dns(host, *a, **kw):
@@ -305,11 +462,16 @@ def _agent_keyed_hosts(state, url, key, provider):
         home.mkdir(parents=True)
         state["mode"] = mode
         state["seen"].clear()
+        state["blocked"] = 0
         try:
             mm.get_model_context_length("m-x", url, api_key=key, provider=provider)
         except Exception:
             pass
-        hosts |= {host for host, creds in state["seen"] if key and key in creds}
+        assert state["blocked"] == 0, (
+            f"{provider} url={url or '-'}: a request bypassed the recorded clients, so where the key went is unknown"
+        )
+        hosts |= {host for host, values, full in state["seen"]
+                  if key and (any(key in value for value in values) or key in full)}
     return hosts
 
 
@@ -327,10 +489,6 @@ def test_a_legacy_codex_entry_s_kept_key_reaches_only_its_own_url(shape, recorde
             urllib.parse.urlsplit(L).hostname}
 
 
-PROBED_PROVIDERS = ("anthropic", "novita", "copilot", "copilot-acp", "github-copilot", "openai-codex", "openai",
-                    "nous", "bedrock", "fireworks", "deepseek", "openrouter", "vllm", "local", "custom:my-proxy")
-
-
 @requires_agent
 def test_the_recorder_sees_the_agents_requests(recorded_agent_requests):
     """Control: without it, an empty recording would make the coverage tests pass vacuously.
@@ -345,24 +503,96 @@ def test_the_recorder_sees_the_agents_requests(recorded_agent_requests):
         assert "api.novita.ai" in _agent_keyed_hosts(recorded_agent_requests, "", "K-synthetic", "novita")
 
 
+def _agent_provider_ids():
+    """Every provider id the installed Agent knows, as the lookup would emit it, plus the URL-inferred ones."""
+    ids = set(routes._CONTEXT_LOOKUP_FIXED_HOSTS) | {"", "custom", "openrouter", "custom:my-proxy"}
+    try:
+        from hermes_cli.auth import PROVIDER_REGISTRY
+        ids |= {str(name) for name in PROVIDER_REGISTRY}
+    except Exception:
+        pass
+    try:
+        import providers as agent_providers
+        ids |= {str(getattr(p, "name", "") or "") for p in agent_providers.list_providers()}
+    except Exception:
+        pass
+    return sorted({routes._canonical_context_provider(i) if i else "" for i in ids})
+
+
+def _agent_known_hosts():
+    """Hosts the installed Agent treats as known provider endpoints (not custom endpoints)."""
+    import agent.model_metadata as mm
+
+    hosts = {h.lstrip(".") for h in getattr(mm, "_URL_TO_PROVIDER", {})}
+    try:
+        import providers as agent_providers
+        for p in agent_providers.list_providers():
+            hosts |= {str(h).lstrip(".*") for h in (*getattr(p, "hostnames", ()), *getattr(p, "metadata_hostnames", ()))}
+    except Exception:
+        pass
+    return sorted(h if h.count(".") >= 2 else f"api.{h}" for h in hosts if h)
+
+
+def _agent_has_copilot_live_models_step():
+    import hermes_cli.models as hm
+
+    return callable(getattr(hm, "get_copilot_model_context", None))
+
+
+def _is_held_copilot_row(provider, url, unlisted):
+    """#8822 d (held for Nathan): Copilot's live-models step reached with a URL set."""
+    return bool(url) and unlisted == {"api.githubcopilot.com"}
+
+
+def _coverage_gaps(state, key):
+    """(provider, url, unlisted hosts) for every probe where the Agent sent ``key`` to a host the table lacks."""
+    known_hosts = _agent_known_hosts()
+    inferred = {"", "custom", "openrouter"}
+    gaps = []
+    for provider in _agent_provider_ids():
+        urls = ["", C, "https://api.openai.com/v1"]
+        if provider in inferred:
+            urls += [f"https://{h}/v1" for h in known_hosts]
+        for url in urls:
+            sent = _agent_keyed_hosts(state, url, key, provider)
+            known = {o.rsplit(":", 1)[0] for o in routes._context_lookup_contacted_origins(provider, url)}
+            if sent - known:
+                gaps.append((provider, url, frozenset(sent - known)))
+    return gaps
+
+
 @requires_agent
 @pytest.mark.parametrize("shape", ["synthetic", "jwt"])
-@pytest.mark.parametrize("raw_provider", PROBED_PROVIDERS)
-def test_the_fixed_host_table_covers_the_installed_agent(raw_provider, shape, recorded_agent_requests):
+def test_the_fixed_host_table_covers_the_installed_agent(shape, recorded_agent_requests):
     """Every host the installed Agent sends a key to is the URL's own host or listed in the table.
 
-    The Agent is given the id the lookup emits (``_canonical_context_provider``), not the raw spelling: the
-    lookup never hands the Agent ``github-copilot``. If alias folding ever stops, the emitted id has no row,
-    the fix drops the key (no leak), and this test fails loudly on the unlisted host.
+    Probed over the Agent's whole provider set (as the lookup emits each id) plus ``''``, ``custom`` and
+    ``openrouter``, with no URL, a custom endpoint and a known provider host, and for the ids the Agent infers from
+    a URL, every known host. The held Copilot-with-a-URL rows are checked separately below.
     """
-    provider = routes._canonical_context_provider(raw_provider)
     key = "K-synthetic" if shape == "synthetic" else _jwt("K-synthetic")
-    for url in ("", C):
-        sent = _agent_keyed_hosts(recorded_agent_requests, url, key, provider)
-        known = {o.rsplit(":", 1)[0] for o in routes._context_lookup_contacted_origins(provider, url)}
-        assert sent <= known, (
-            f"{raw_provider} (emitted {provider}) url={url or '-'}: the Agent sent the key to {sorted(sent - known)}"
-        )
+    gaps = [g for g in _coverage_gaps(recorded_agent_requests, key) if not _is_held_copilot_row(*g)]
+    assert not gaps, f"the Agent sent the key to hosts the table lacks: {sorted((p, u, sorted(h)) for p, u, h in gaps)}"
+
+
+@requires_agent
+@pytest.mark.parametrize("shape", ["synthetic", "jwt"])
+def test_copilot_live_models_with_a_url_is_in_the_table(shape, recorded_agent_requests, request):
+    """Older Agents (with Copilot's live-models step) send a Copilot id's key, or an id inferred from a GitHub URL,
+    to api.githubcopilot.com even with a URL set. #8822 d covers it; held until Nathan answers."""
+    if _agent_has_copilot_live_models_step():
+        request.node.add_marker(pytest.mark.xfail(strict=True, reason="#8822 d: Copilot live models with a URL, held"))
+    key = "K-synthetic" if shape == "synthetic" else _jwt("K-synthetic")
+    held = [g for g in _coverage_gaps(recorded_agent_requests, key) if _is_held_copilot_row(*g)]
+    assert not held, f"{len(held)} Copilot-with-a-URL rows, e.g. {sorted((p, u) for p, u, _ in held)[:4]}"
+
+
+@requires_agent
+def test_the_codex_detector_matches_the_installed_agent(recorded_agent_requests):
+    """``_agent_codex_catalog_follows_url`` must say "follows" exactly when the Agent sends nothing to chatgpt.com
+    with a URL set, so a renamed Agent attribute fails here instead of silently dropping every Codex proxy key."""
+    sent = _agent_keyed_hosts(recorded_agent_requests, C, _jwt("K-synthetic"), "openai-codex")
+    assert ("chatgpt.com" in sent) == (not routes._agent_codex_catalog_follows_url())
 
 
 @pytest.mark.parametrize("raw_provider", ["github", "github-copilot", "GitHub-Copilot"])
@@ -385,11 +615,12 @@ def _agent_named_route(provider_id, cfg, monkeypatch):
 @requires_agent
 @pytest.mark.parametrize("provider_id", sorted(routes._CONTEXT_LOOKUP_FIXED_HOSTS))
 def test_a_caller_key_for_a_fixed_host_id_is_that_providers_own(provider_id, recorded_agent_requests, monkeypatch):
-    """Why the caller's key may go to its provider's fixed host (source identity, #8822 note §3).
+    """Why a caller key that came with no URL may go to its provider's fixed host (source identity, #8822 note §3b).
 
-    The caller passes the Agent's own runtime pair. Wherever the installed Agent contacts a fixed host for this
-    id, a ``custom_providers`` / ``providers`` entry merely NAMED like the id must not capture the runtime route;
-    otherwise the caller's key could be that entry's key and the fixed host would not be its own.
+    A caller key with a URL owns only that URL. One with no URL owns its provider's fixed hosts, on the premise
+    that it's the Agent's own credential for that provider. Wherever the installed Agent contacts a fixed host for
+    this id, a ``custom_providers`` / ``providers`` entry merely NAMED like the id must not capture the runtime route;
+    otherwise that key could be the entry's and the fixed host would not be its own.
     """
     contacts_fixed_host = bool(_agent_keyed_hosts(recorded_agent_requests, "", "K-synthetic", provider_id)
                                | _agent_keyed_hosts(recorded_agent_requests, "", _jwt("K-synthetic"), provider_id))

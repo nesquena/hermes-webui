@@ -9195,7 +9195,12 @@ _CONTEXT_LOOKUP_FIXED_HOSTS = {
     "novita": {"no_url": ("api.novita.ai",)},
     "copilot": {"no_url": ("api.githubcopilot.com",)},
     "copilot-acp": {"no_url": ("api.githubcopilot.com",)},
-    "openai-codex": {"no_url": ("chatgpt.com",), "with_url": ("chatgpt.com",)},
+    # Older Agents' Codex catalog ignores the lookup URL; newer ones follow it.
+    "openai-codex": {
+        "no_url": ("chatgpt.com",),
+        "with_url": ("chatgpt.com",),
+        "with_url_unless": "_agent_codex_catalog_follows_url",
+    },
 }
 
 
@@ -9218,9 +9223,10 @@ def _context_lookup_origin(url: object) -> str:
 def _context_lookup_fixed_origins(provider: str, *, with_url: bool) -> frozenset:
     entry = _CONTEXT_LOOKUP_FIXED_HOSTS.get(str(provider or "").strip().lower()) or {}
     hosts = entry.get("with_url" if with_url else "no_url", ())
-    if with_url and hosts and _agent_codex_catalog_follows_url():
-        # Agents whose Codex catalog follows the lookup URL send nothing to
-        # chatgpt.com when a URL is set; only older ones without it do.
+    unless = entry.get("with_url_unless")
+    if with_url and hosts and unless and globals()[unless]():
+        # The installed Agent's probe for this provider follows the lookup URL,
+        # so it contacts no fixed host when a URL is set.
         hosts = ()
     return frozenset(f"{host}:443" for host in hosts)
 
