@@ -219,12 +219,11 @@ def test_update_flows_keep_explicit_longer_timeouts():
     assert "api(_checkUrl,{method:_testUpdates?'GET':'POST',body:_testUpdates?undefined:JSON.stringify({force:false}),timeoutMs:300000})" in boot
     assert "api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000})" in panels
     assert "api('/api/updates/summary',{method:'POST',body:JSON.stringify({updates:scopedUpdates,target:target||null}),timeoutMs:60000})" in src
-    # apply/force now build their body inline to optionally carry the offered
-    # channel (Codex debounce-race fix), but MUST still carry the 120s override.
-    assert "api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:120000})" in src
+    # apply/force also need time for bounded fetch/pull and restart recovery.
+    assert "api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:300000})" in src
     # #7293: force builds its body in _forceBody (it may carry the explicit
     # force_active_runs override), same shape as apply's _applyBody.
-    assert "api('/api/updates/force',{method:'POST',body:JSON.stringify(_forceBody),timeoutMs:120000})" in src
+    assert "api('/api/updates/force',{method:'POST',body:JSON.stringify(_forceBody),timeoutMs:300000})" in src
 
 
 def test_session_message_loads_keep_explicit_longer_timeouts():
