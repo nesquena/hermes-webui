@@ -99,7 +99,7 @@ writes. Do not retry a mutation blindly: reload on 412 and show the current
 state. Successful mutations return the canonical state and a new ETag.
 
 JSON accepts only `enabled` (boolean), `instance_name` (string, trimmed,
-at most 80 characters, no C0/DEL controls), `manages_instance_name` (boolean),
+at most 80 characters, strictly UTF-8 encodable, no C0/DEL controls), `manages_instance_name` (boolean),
 or the standalone `{"action":"reset"}`. Uploading does not enable branding
 or change the name. No client-supplied revision, filesystem path, owner id,
 URL or data URL is accepted. An unknown persisted schema falls back and

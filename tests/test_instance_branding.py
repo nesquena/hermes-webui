@@ -435,6 +435,55 @@ def test_unknown_persisted_schema_falls_back_without_rewriting_name(http):
     assert config.load_settings()["instance_name"] == "Retained"
 
 
+@pytest.mark.parametrize("name", ["\ud800", "\udfff", "Team \ud800 Console", "Team \udfff Console"])
+def test_branding_rejects_unencodable_name_without_mutation(http, name):
+    assert save(http, {"instance_name": "Previous", "manages_instance_name": True})[0] == 200
+    before, etag = get_state(http)
+    stored = config.SETTINGS_FILE.read_bytes()
+    status, _, _ = save(http, {"instance_name": name}, etag)
+    assert status == 400
+    assert get_state(http) == (before, etag)
+    assert config.SETTINGS_FILE.read_bytes() == stored
+
+
+@pytest.mark.parametrize("name", ["\ud800", "\udfff", "Team \ud800 Console", "Team \udfff Console"])
+def test_native_settings_ignore_unencodable_name_and_save_other_fields(http, name):
+    config.save_settings({"instance_name": "Previous", "theme": "dark"})
+    before, etag = get_state(http)
+    status, _, body = http("/api/settings", "POST", {"instance_name": name, "theme": "light"})
+    assert status == 200, body
+    assert json.loads(body)["instance_name"] == "Previous"
+    assert config.load_settings()["instance_name"] == "Previous"
+    assert config.load_settings()["theme"] == "light"
+    assert get_state(http) == (before, etag)
+
+
+@pytest.mark.parametrize("name", ["  Équipe Café  ", "Console 🚀", "漢字 🛰️", "é" * 80])
+@pytest.mark.parametrize("path", ["/api/instance-branding", "/api/settings"])
+def test_name_paths_preserve_valid_unicode_through_json_and_utf8_storage(http, name, path):
+    before, etag = get_state(http)
+    # ASCII JSON escapes exercise decoding a valid surrogate pair for each emoji.
+    payload = json.dumps({"instance_name": name}, ensure_ascii=True).encode("ascii")
+    status, _, body = http(path, "POST", payload, headers={
+        "Content-Type": "application/json", "If-Match": etag,
+    })
+    assert status == 200, body
+    assert json.loads(config.SETTINGS_FILE.read_bytes().decode("utf-8", errors="strict"))["instance_name"] == name.strip()
+    current, changed_etag = get_state(http)
+    assert current["config"]["instance_name"] == name.strip()
+    assert current["effective"]["name"] == name.strip()
+    assert changed_etag != etag
+
+
+def test_name_length_policies_remain_distinct(http):
+    before, etag = get_state(http)
+    assert save(http, {"instance_name": "é" * 81}, etag)[0] == 400
+    assert get_state(http) == (before, etag)
+    status, _, body = http("/api/settings", "POST", {"instance_name": "é" * 81})
+    assert status == 200, body
+    assert config.load_settings()["instance_name"] == "é" * 80
+
+
 @pytest.mark.parametrize("patch", [[1], "invalid", 1, True, None])
 def test_non_object_patch_returns_bad_request_without_provider(http, monkeypatch, patch):
     monkeypatch.setattr(branding, "provider_available", lambda: False)
