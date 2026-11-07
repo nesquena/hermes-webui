@@ -81,6 +81,96 @@ _ISOLATED_PROFILE_TRUTHY_VALUES = frozenset({'1', 'true', 'yes', 'on'})
 _active_profile = 'default'
 _profile_lock = threading.Lock()
 _loaded_profile_env_keys: set[str] = set()
+# #7655: values a profile .env OVERWROTE in process env, keyed by name.
+# _reload_dotenv() writes a profile's .env straight into os.environ (only the
+# _PROTECTED_ENV_KEYS list is withheld), so a key the operator set at launch is
+# clobbered by whichever profile loaded last. Installation-scoped readers
+# (api.routes._read_installation_config) need the operator's original value to
+# expand a base-config ${VAR} placeholder without adopting the profile's.
+# Entries are removed when the owning profile is unloaded, exactly matching
+# _loaded_profile_env_keys bookkeeping.
+_profile_overridden_env: dict[str, str] = {}
+# #7655 round 6: the INSTALLATION / OPERATOR env, captured once at the startup
+# boundary before any profile .env is projected into os.environ.
+#
+# This is the only authority an installation-scoped placeholder may resolve
+# against. The earlier design inferred "operator-owned" by subtracting the
+# profile's tracked key set from the live process env, which cannot work: two
+# writers install profile env into os.environ without touching that bookkeeping
+# (``profile_env_for_background_worker`` and the streaming turn's
+# ``_safe_profile_runtime_env``), so a live read still returns a profile's
+# value -- a root settings read while an Alice-profile background scope is
+# active resolved ``$SLOT_NAME`` to AliceProfile instead of Production.
+#
+# A one-time capture at the boundary cannot be fooled by later injection: no
+# profile writer can have run yet. Populated by ``init_profile_state`` before
+# its first ``_reload_dotenv``; empty only when that never ran, in which case
+# installation placeholders resolve strictly from ``_PROTECTED_ENV_KEYS``
+# (fail closed) rather than from the live env (fail open).
+_INSTALLATION_ENV_SNAPSHOT: dict[str, str] = {}
+
+
+def get_installation_env_snapshot() -> dict[str, str]:
+    """Return the operator/launcher env captured before any profile injection.
+
+    #7655: installation-scoped readers expand ``${VAR}`` only from this
+    snapshot, so a profile value can never become the installation label.
+    Missing key -> None (unknown/unowned, the caller keeps the literal);
+    never a live-env fallback, which would reintroduce the leak.
+    """
+    return dict(_INSTALLATION_ENV_SNAPSHOT)
+
+
+def capture_installation_env_snapshot() -> dict[str, str]:
+    """Snapshot the current env as the installation/operator authority.
+
+    Called once from ``init_profile_state`` BEFORE the first ``_reload_dotenv``
+    (and therefore before any profile .env, background-worker scope or
+    streaming turn can have projected anything into ``os.environ``). A second
+    call is refused: re-capturing after profiles have run would enshrine
+    whatever a profile last installed.
+    """
+    global _INSTALLATION_ENV_SNAPSHOT
+    if _INSTALLATION_ENV_SNAPSHOT:
+        return dict(_INSTALLATION_ENV_SNAPSHOT)
+    _INSTALLATION_ENV_SNAPSHOT = {
+        str(k): str(v) for k, v in os.environ.items() if isinstance(v, str)
+    }
+    return dict(_INSTALLATION_ENV_SNAPSHOT)
+
+
+def env_value_is_named_launch_home_owned(key: str, value: str) -> bool:
+    """True when *value* was set by the NAMED launch home's ``.env`` at startup.
+
+    #7655 round 7: upstream's ``api.gateway_chat._env_value_is_profile_sourced``
+    applies this rule to the LIVE env value. Here it is applied to the value in
+    the installation snapshot -- the operator/launcher env captured at the
+    startup boundary -- because that is the only authority an installation-scoped
+    reader may use.
+
+    A shell launcher (``ctl.sh``) sources ``$HERMES_HOME/.env`` before Python
+    starts, so for a NAMED launch home those values sit in the env looking
+    like operator exports. Upstream treats such a value as that profile's
+    (fail closed), and so does this: the root home's ``.env`` is shared by
+    definition, so its values are NOT launch-home-owned.
+    """
+    value = str(value or "").strip()
+    if not value:
+        return False
+    launch_env = _INITIAL_HERMES_HOME_DOTENV or {}
+    if str(launch_env.get(key) or "").strip() != value:
+        return False
+    launch_home = str(_INITIAL_HERMES_HOME or "").strip()
+    if not launch_home:
+        return False
+    try:
+        from api.workspace import _safe_resolve
+
+        return _safe_resolve(Path(launch_home).expanduser()) != _safe_resolve(
+            Path(get_hermes_home_for_profile("")).expanduser()
+        )
+    except Exception:
+        return True  # fail closed
 
 # Thread-local profile context: set per-request by server.py, cleared after.
 # Enables per-client profile isolation (issue #798) — each HTTP request thread
@@ -252,6 +342,25 @@ _PROTECTED_ENV_KEYS = frozenset({
     # the operator intended. Same shape as the isolated-profile key: only
     # the operator/launcher env at startup can set it.
     'HERMES_WEBUI_MAX_SESSION_RESOLVE',
+    # #7611: HERMES_WEBUI_INSTANCE_NAME is the deployment's instance label. It is
+    # installation-scoped by definition (it distinguishes Production/Staging/Dev
+    # deployments for every user of that installation), so a per-profile .env must
+    # not be able to rewrite it — otherwise whichever profile loads last wins and
+    # two tabs on one deployment disagree on the label.
+    'HERMES_WEBUI_INSTANCE_NAME',
+    # #7655 round 7: HERMES_CONFIG_PATH is deliberately NOT here.
+    #
+    # Round 6 protected it, which changed a shared loader semantic and broke
+    # upstream #8432 round 4 (76986aef0): upstream deliberately lets a profile's
+    # .env SET HERMES_CONFIG_PATH and tells a profile-chosen path from an
+    # operator-chosen one by asking whether the key is in
+    # ``_loaded_profile_env_keys`` (see ``is_profile_sourced_env_value``).
+    # Blocking the key globally made that bookkeeping impossible, and upstream's
+    # own ``test_8432_a_config_path_a_profile_env_chose_is_not_shared`` went red.
+    #
+    # The #7611 guarantee now lives at the READ site instead:
+    # ``api.routes._installation_config_path()`` ignores a HERMES_CONFIG_PATH
+    # that a profile chose, and honours one the operator/launcher set.
 })
 
 
@@ -1939,11 +2048,13 @@ def _reload_dotenv(home: Path):
     profile-scoped secrets from leaking across profile switches.
     """
     global _loaded_profile_env_keys
+    global _profile_overridden_env
 
     # Remove keys loaded from the previous profile first.
     for key in list(_loaded_profile_env_keys):
         os.environ.pop(key, None)
     _loaded_profile_env_keys = set()
+    _profile_overridden_env = {}
 
     env_path = home / '.env'
     if not env_path.exists():
@@ -1967,11 +2078,19 @@ def _reload_dotenv(home: Path):
                             k, env_path,
                         )
                         continue
+                    # #7655: record the pre-profile value BEFORE overwriting so
+                    # an installation-scoped reader (base config.yaml
+                    # placeholders) can still resolve an operator-set ${VAR}
+                    # without adopting the profile's clobbered value.
+                    _prior = os.environ.get(k)
                     os.environ[k] = v
                     loaded_keys.add(k)
+                    if _prior is not None and _prior != v:
+                        _profile_overridden_env[k] = _prior
         _loaded_profile_env_keys = loaded_keys
     except Exception:
         _loaded_profile_env_keys = set()
+        _profile_overridden_env = {}
         logger.debug("Failed to reload dotenv from %s", env_path)
 
 
@@ -1990,6 +2109,12 @@ def init_profile_state() -> None:
         home = get_active_hermes_home()
     _set_hermes_home(home)  # also pins the process-profile home (MCP routing anchor)
     install_cron_scheduler_profile_isolation()
+    # #7655: capture the operator/launcher env here, at the startup boundary,
+    # BEFORE the first profile .env is projected. This snapshot is the only
+    # authority installation-scoped placeholders may resolve against, so a
+    # profile value can never become the installation label no matter which
+    # writer injects it later.
+    capture_installation_env_snapshot()
     _reload_dotenv(home)
 
 
