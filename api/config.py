@@ -5733,6 +5733,41 @@ def _efforts_above(ceiling: str) -> frozenset:
     return frozenset(VALID_REASONING_EFFORTS[idx + 1:])
 
 
+def _reasoning_route_identity(
+    model_id: str | None, provider_id: str | None
+) -> tuple[str, str]:
+    """The provider/model a WebUI routing token resolves to for reasoning rules.
+
+    An opaque ``model-alias-<digest>`` lane is a WebUI-only routing token: the
+    chat worker resolves it to the alias's real provider/model before building
+    the turn, so the Agent never classifies the digest. Every reasoning lookup
+    that asks the Agent's route rule or a provider ceiling must see that same
+    identity — otherwise an alias onto ``openai-codex`` + ``codex_app_server``
+    is judged as an unknown OpenAI-compatible provider: its above-``max``
+    levels disappear from the dropdown and a stored one coerces to ``max``
+    while the worker keeps it.
+
+    Non-alias selections are returned unchanged. An alias lane that no longer
+    resolves (deleted, foreign profile, retargeted) keeps its opaque identity,
+    exactly as before: there is no route to describe.
+    """
+    model = str(model_id or "").strip()
+    provider = str(provider_id or "").strip().lower()
+    if not provider.startswith(_MODEL_ALIAS_ROUTE_PREFIX):
+        return model, provider
+    try:
+        resolved = resolve_model_alias_runtime(
+            provider, expected_model=_strip_provider_hint_for_reasoning(model, provider)
+        )
+    except Exception:
+        resolved = None
+    if not resolved:
+        return model, provider
+    resolved_model = str(resolved.get("model") or "").strip() or model
+    resolved_provider = str(resolved.get("provider") or "").strip().lower() or provider
+    return resolved_model, resolved_provider
+
+
 def _route_wire_efforts(
     model_id: str | None, provider_id: str | None, api_mode: str | None = None
 ) -> frozenset | None:
@@ -5758,6 +5793,10 @@ def _route_wire_efforts(
     # classifies. Preserve the full provider before aliasing so multi-colon
     # custom-provider hints strip without changing a model's own suffix.
     model = _strip_provider_hint_for_reasoning(str(model_id or ""), provider)
+    # An opaque model-alias lane is likewise WebUI-only: resolve it to the
+    # provider/model the chat worker will actually send before the Agent's
+    # route rule sees the digest.
+    model, provider = _reasoning_route_identity(model, provider)
     try:
         provider = _resolve_provider_alias(provider)
     except Exception:
@@ -6490,6 +6529,7 @@ def resolve_model_reasoning_efforts(
     retained for GPT-5.6 and other models whose native ladder includes it, and
     stripped where it would be rejected or mishandled.
     """
+    model_id, provider_id = _reasoning_route_identity(model_id, provider_id)
     raw = _resolve_model_reasoning_efforts_impl(model_id, provider_id, base_url)
     if not raw:
         return raw
@@ -6671,6 +6711,10 @@ def coerce_reasoning_effort_for_model(
     ``_runtime_bundle['api_mode']``); omitted, the ambient profile's
     ``model.openai_runtime`` decides the Codex runtime.
     """
+    # An opaque model-alias lane is a WebUI routing token; the worker sends the
+    # alias's own provider/model, so resolve it before the wire rule, the
+    # provider ceilings and the capability lookup below judge the route.
+    model_id, provider_id = _reasoning_route_identity(model_id, provider_id)
     raw = str(effort or "").strip().lower()
     if not raw:
         return ""
@@ -6861,6 +6905,7 @@ def _effort_honest_label(
     literal = f"{stored} (sends {effective} on this route)"
     provider = str(provider_id or "").strip().lower()
     model = _strip_provider_hint_for_reasoning(str(model_id or ""), provider)
+    model, provider = _reasoning_route_identity(model, provider)
     try:
         provider = _resolve_provider_alias(provider)
     except Exception:
