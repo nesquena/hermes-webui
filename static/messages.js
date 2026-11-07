@@ -7022,32 +7022,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             _pendingTitleUpdates.delete(completedSid);
             _pendingTitleExpectedCurrent.delete(completedSid);
           }
-          const _preSettleGeneration=_preSettleSession&&_preSettleSession.transcript_generation;
-          const _doneGeneration=d.session&&d.session.transcript_generation;
-          const _doneOffsetRaw=d.session&&d.session._messages_offset;
-          const _doneMessageCount=Number(d.session&&d.session.message_count);
-          const _doneMessagesLength=Array.isArray(d.session&&d.session.messages)?d.session.messages.length:0;
-          const _doneMessageCountPresent=d.session&&d.session.message_count!=null;
-          const _doneOffset=_doneOffsetRaw!=null?Number(_doneOffsetRaw):((typeof d.session.message_count==='number'&&Number.isSafeInteger(d.session.message_count)&&_doneMessagesLength>0)?_doneMessageCount-_doneMessagesLength:NaN);
-          const _doneOffsetIsValid=_doneOffset>=0&&Number.isSafeInteger(_doneOffset)&&(_doneOffsetRaw==null||typeof _doneOffsetRaw==='number');
-          const _doneMessageCountIsValid=!_doneMessageCountPresent||(
-            typeof d.session.message_count==='number'&&Number.isSafeInteger(d.session.message_count)&&d.session.message_count>=0&&
-            _doneOffset+_doneMessagesLength===_doneMessageCount
-          );
-          const _doneHasBoundedProof=_doneMessageCountPresent&&!!(
-            (d.session&&d.session._messages_truncated===true)||(Number.isFinite(_doneOffset)&&_doneOffset>0)
-          )&&_doneOffsetIsValid&&_doneMessageCountIsValid;
-          const _doneGenerationMatches=Number.isSafeInteger(_preSettleGeneration)&&Number.isSafeInteger(_doneGeneration)&&_preSettleGeneration===_doneGeneration;
-          // #6112 settle guard. Only a proven bounded recovery tail from the
-          // same transcript generation may retain an older resident prefix.
-          const _doneAdoption=_adoptDoneSnapshotMessages(_preSettle,S.messages,_doneFinalAnswer,{
-            allowResidentPrefixMerge:_doneHasBoundedProof&&_doneGenerationMatches,
-            residentMergeWindow:{
-              residentOrigin:_preSettleOldestIdx,
-              settledOffset:_doneOffset,
-              messageCount:_doneMessageCountPresent?_doneMessageCount:null,
-            },
-          });
+          const _doneMergeOptions=(typeof _doneResidentMergeOptions==='function')
+            ? _doneResidentMergeOptions(_preSettleSession,_preSettleOldestIdx,d.session)
+            : null;
+          // #6112 settle guard. The options helper is optional in older isolated
+          // harnesses; when absent, the adoption stub keeps its legacy contract.
+          const _doneAdoption=(typeof _doneResidentMergeOptions==='function')
+            ? _adoptDoneSnapshotMessages(_preSettle,S.messages,_doneFinalAnswer,_doneMergeOptions)
+            : _adoptDoneSnapshotMessages(_preSettle,S.messages,_doneFinalAnswer);
+          const _doneOffsetIsValid=!_doneMergeOptions||_doneMergeOptions.offsetIsValid;
+          const _doneOffset=_doneMergeOptions?_doneMergeOptions.offset:d.session._messages_offset;
           S.messages=_doneAdoption.messages;
           if(_doneAdoption.mergedResidentPrefix){
             // #4720: the merged array still starts at the resident origin, not
@@ -7999,6 +7983,34 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     return pre.slice(0,anchor).concat(settled);
+  }
+  function _doneResidentMergeOptions(preSettleSession,preSettleOldestIdx,dSession){
+    const preGeneration=preSettleSession&&preSettleSession.transcript_generation;
+    const doneGeneration=dSession&&dSession.transcript_generation;
+    const offsetRaw=dSession&&dSession._messages_offset;
+    const count=Number(dSession&&dSession.message_count);
+    const length=Array.isArray(dSession&&dSession.messages)?dSession.messages.length:0;
+    const countPresent=dSession&&dSession.message_count!=null;
+    const offset=offsetRaw!=null?Number(offsetRaw):((typeof dSession.message_count==='number'&&Number.isSafeInteger(dSession.message_count)&&length>0)?count-length:NaN);
+    const offsetIsValid=offset>=0&&Number.isSafeInteger(offset)&&(offsetRaw==null||typeof offsetRaw==='number');
+    const countIsValid=!countPresent||(
+      typeof dSession.message_count==='number'&&Number.isSafeInteger(dSession.message_count)&&dSession.message_count>=0&&
+      offset+length===count
+    );
+    const bounded=countPresent&&!!(
+      (dSession&&dSession._messages_truncated===true)||(Number.isFinite(offset)&&offset>0)
+    )&&offsetIsValid&&countIsValid;
+    const generationMatches=Number.isSafeInteger(preGeneration)&&Number.isSafeInteger(doneGeneration)&&preGeneration===doneGeneration;
+    return {
+      allowResidentPrefixMerge:bounded&&generationMatches,
+      residentMergeWindow:{
+        residentOrigin:preSettleOldestIdx,
+        settledOffset:offset,
+        messageCount:countPresent?count:null,
+      },
+      offsetIsValid:offsetIsValid,
+      offset:offsetIsValid?(offset||0):0,
+    };
   }
   function _adoptDoneSnapshotMessages(preSettleMessages, settledMessages, finalAnswer, options){
     const pre=Array.isArray(preSettleMessages)?preSettleMessages:[];

@@ -51,6 +51,7 @@ def _pieces() -> list[str]:
         *[_extract_function(MESSAGES_JS, name) for name in names],
         _optional_function(MESSAGES_JS, "_residentMergeIdentityKey"),
         _optional_function(MESSAGES_JS, "_mergeResidentPrefix"),
+        _optional_function(MESSAGES_JS, "_doneResidentMergeOptions"),
         "const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];",
         _extract_function(MESSAGES_JS, "_isHistoricalAnchorActivityScene"),
         "function msgContent(m){return (m && m.content)||'';}",
