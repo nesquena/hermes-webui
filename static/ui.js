@@ -10778,6 +10778,19 @@ function renderMd(raw){
     return lead+'\x00P'+(_preBlock_stash.length-1)+'\x00';
   });
   s=s.replace(/`([^`\n]+)`/g,(_,c)=>{fence_stash.push('<code>'+esc(c)+'</code>');return '\x00F'+(fence_stash.length-1)+'\x00';});
+  // Stash raw <pre> blocks so the inline <code> rewrite below does not run
+  // inside them, and math extraction must leave their dollar signs literal.
+  // Running that rewrite in <pre> content can introduce stray
+  // backticks for multiline code and break subsequent code-box rendering.
+  const rawPreStash=[];
+  s=s.replace(/(<pre\b[^>]*>[\s\S]*?<\/pre>)/gi,m=>{rawPreStash.push(m);return `\x00R${rawPreStash.length-1}\x00`;});
+  // Protect link destinations during math extraction; restore before the
+  // existing Markdown link and sanitizer passes so URL policy stays centralized.
+  const mathLinkDestStash=[];
+  s=s.replace(/(\[[^\]\n]*\]\()((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:|\/|\.\.?\/)[^\s\)]+)(\))/g,(_,lead,url,end)=>{
+    mathLinkDestStash.push(url);
+    return lead+'\x00U'+(mathLinkDestStash.length-1)+'\x00'+end;
+  });
   // Math stash: protect $$..$$ and $..$ from markdown processing
   // Runs AFTER fence_stash so backtick code spans protect their dollar-sign contents
   const math_stash=[];
@@ -10785,19 +10798,70 @@ function renderMd(raw){
   s=s.replace(/\$\$([\s\S]+?)\$\$/g,(_,m)=>{math_stash.push({type:'display',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
   // Match a single literal backslash before the display delimiter (the common LLM form).
   s=s.replace(/\\\[([\s\S]+?)\\\]/g,(_,m)=>{math_stash.push({type:'display',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
-  // Inline math: $...$ — require non-space/non-digit at opening boundary to avoid
-  // false positives on currency like "$1,000 xuống ~$95" or "costs $5 and $10".
-  // Aligns with smd's se() guard which also rejects $ followed by digits.
-  s=s.replace(/\$([^\s$\d\n][^$\n]*?[^\s$\n]|[^\s\d])\$/g,(_,m)=>{if(m.includes(' | '))return '\$'+m+'\$';math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
+  // Currency protection & numeric inline math handling:
+  // Ported from Hermes Desktop (apps/desktop/src/lib/markdown-preprocess.ts).
+  // Masks non-math currency openers ($5, $.99, $0.50–$.99) so they don't consume adjacent math delimiters (e.g. Costs $5 ($x$ per unit)).
+  function _isEscapedAt(text, idx){
+    let c=0;
+    for(let i=idx-1;i>=0&&text[i]==='\\';i--) c++;
+    return c%2===1;
+  }
+  function _isCurrencyOpenerAt(text, idx){
+    if(text[idx]!=='$'||_isEscapedAt(text,idx)||text[idx-1]==='$'||text[idx+1]==='$') return false;
+    if(/\d/.test(text[idx+1]||'')) return true;
+    if(/^\.\d/.test(text.slice(idx+1,idx+3))) return true;
+    return /^[ \u00a0]\d/.test(text.slice(idx+1,idx+3))&&/(?:^|[\s(–—])[A-Za-z]+$/.test(text.slice(Math.max(0,idx-6),idx));
+  }
+  function _findClosingSingleDollar(text, start){
+    for(let i=start+1;i<text.length&&text[i]!=='\n';i++){
+      if(text[i]!=='$'||_isEscapedAt(text,i)) continue;
+      if(text[i-1]==='$'||text[i+1]==='$') continue;
+      return i;
+    }
+    return -1;
+  }
+  function isLikelyNumericInlineMath(body, followingSlice){
+    const v=body.trim();
+    if(!/^(\d|\.\d)/.test(v)) return false;
+    if(/[+\-*/=<>^_,;:(–—]$/.test(v)) return false;
+    if(/\d/.test(followingSlice.charAt(0))||/^\.\d/.test(followingSlice)) return false;
+    if(/https?:\/\//i.test(v)) return false;
+    // Leading decimals need an explicit math signal; bare fractions remain currency.
+    if(/^\.\d/.test(v)) return /[+\-*/=<>^_{}A-Za-z]/.test(v);
+    return /[+\-*/=<>^_{}]|\d[.,]\d|\\[A-Za-z]+/.test(v);
+  }
+  function _maskCurrencyDollars(text){
+    let out='', copied=0;
+    for(let i=0;i<text.length;i++){
+      if(text[i]!=='$'||_isEscapedAt(text,i)) continue;
+      const closer=_findClosingSingleDollar(text,i);
+      if(!_isCurrencyOpenerAt(text,i)){
+        // Preserve a complete math span before its closer can be mistaken for currency.
+        if(closer!==-1&&/^[^\s$\n](?:[^$\n]*[^\s$\n])?$/.test(text.slice(i+1,closer))) i=closer;
+        continue;
+      }
+      if(closer!==-1&&!_isCurrencyOpenerAt(text,closer)&&isLikelyNumericInlineMath(text.slice(i+1,closer),text.slice(closer+1,closer+3))){
+        i=closer;
+        continue;
+      }
+      out+=text.slice(copied,i)+'\x00CURRENCY\x00';
+      copied=i+1;
+    }
+    return out+text.slice(copied);
+  }
+  // Stash escaped dollar signs (\$ -> \x00S) so escaped prices (\$5-\$10) never match as math delimiters
+  const escDollarStash=[];
+  s=s.replace(/\\(\$)/g,(_,d)=>{escDollarStash.push(d);return `\x00S${escDollarStash.length-1}\x00`;});
+  s=_maskCurrencyDollars(s);
+  // Inline math: $...$ — require non-space boundaries and keep currency prose literal.
+  s=s.replace(/\$([^\s$\n][^$\n]*?[^\s$\n]|[^\s$\n])\$/g,(_,m)=>{if(m.includes(' | '))return '\$'+m+'\$';math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
   // Also stash \(...\) LaTeX delimiters.
   // Match a single literal backslash before the delimiter (the common LLM form).
   s=s.replace(/\\\((.+?)\\\)/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
+  s=s.replace(/\x00CURRENCY\x00/g,'$');
+  s=s.replace(/\x00S(\d+)\x00/g,(_,i)=>'\\'+escDollarStash[+i]);
+  s=s.replace(/\x00U(\d+)\x00/g,(_,i)=>mathLinkDestStash[+i]);
   // Safe tag → markdown equivalent (these produce the same output as **text** etc.)
-  // Stash raw <pre> blocks so the inline <code> rewrite below does not run
-  // inside them. Running that rewrite in <pre> content can introduce stray
-  // backticks for multiline code and break subsequent code-box rendering.
-  const rawPreStash=[];
-  s=s.replace(/(<pre\b[^>]*>[\s\S]*?<\/pre>)/gi,m=>{rawPreStash.push(m);return `\x00R${rawPreStash.length-1}\x00`;});
   // Bare file:// artifact links → media. Some gateway/tool surfaces emit bare
   // file:// links for local artifacts instead of MEDIA: tokens; browser clients
   // cannot open the server filesystem directly, so route them through /api/media.
@@ -11391,10 +11455,12 @@ function renderMd(raw){
   // These will be rendered by renderKatexBlocks() after DOM insertion
   s=s.replace(/\x00M(\d+)\x00/g,(_,i)=>{
     const item=math_stash[+i];
+    let src=escDollarStash.length ? item.src.replace(/\x00S(\d+)\x00/g,(_,si)=>'\\'+escDollarStash[+si]) : item.src;
+    if(mathLinkDestStash.length) src=src.replace(/\x00U(\d+)\x00/g,(_,ui)=>mathLinkDestStash[+ui]);
     if(item.type==='display'){
-      return `<div class="katex-block" data-katex="display">${esc(item.src)}</div>`;
+      return `<div class="katex-block" data-katex="display">${esc(src)}</div>`;
     }
-    return `<span class="katex-inline" data-katex="inline">${esc(item.src)}</span>`;
+    return `<span class="katex-inline" data-katex="inline">${esc(src)}</span>`;
   });
   // Restore fenced block stash (\x00P) → <pre><code> HTML.
   // Happens AFTER all markdown passes (lists, headings, tables, etc.) so
