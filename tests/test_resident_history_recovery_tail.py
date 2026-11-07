@@ -201,6 +201,7 @@ def test_unmarked_shorter_snapshot_stays_server_wins() -> None:
     prev = _sample_messages()[:4]
     got = _listener(prev, {"session_id": "A", "messages": prev[2:]}, pre_oldest_idx=70)
     assert got["texts"] == [m["content"] for m in prev[2:]]
+    assert got["oldestIdx"] == 0
 
 
 def test_newer_generation_does_not_resurrect_deleted_nonempty_prefix() -> None:
@@ -216,11 +217,22 @@ def test_present_but_malformed_window_metadata_fails_closed() -> None:
     for bad in ("garbage", -2, 2.5, True):
         got = _listener(prev, {"session_id": "A", "messages": prev[2:], "transcript_generation": 0, "_messages_offset": bad}, pre_generation=0, pre_oldest_idx=70)
         assert got["texts"] == [m["content"] for m in prev[2:]], bad
-        assert got["oldestIdx"] == 70, bad
+        assert got["oldestIdx"] == 0, bad
     for bad_count in ("garbage", 3.5, "4", True):
         got = _listener(prev, {"session_id": "A", "messages": prev[2:], "transcript_generation": 0, "_messages_offset": 2, "message_count": bad_count}, pre_generation=0, pre_oldest_idx=70)
         assert got["texts"] == [m["content"] for m in prev[2:]], bad_count
         assert got["oldestIdx"] == 2, bad_count
+    for bad_count in ("garbage", 3.5, "4", True):
+        got = _listener(prev, {"session_id": "A", "messages": prev[2:], "transcript_generation": 0, "message_count": bad_count}, pre_generation=0, pre_oldest_idx=70)
+        assert got["texts"] == [m["content"] for m in prev[2:]], bad_count
+        assert got["oldestIdx"] == 0, bad_count
+
+
+def test_offset_without_count_cannot_enable_prefix_merge() -> None:
+    prev = _sample_messages()[:4]
+    got = _listener(prev, {"session_id": "A", "messages": prev[2:], "transcript_generation": 0, "_messages_offset": 72}, pre_generation=0, pre_oldest_idx=70)
+    assert got["texts"] == [m["content"] for m in prev[2:]]
+    assert got["oldestIdx"] == 72
 
 
 def test_unknown_or_mixed_generation_cannot_enable_prefix_merge() -> None:

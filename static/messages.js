@@ -7028,13 +7028,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _doneMessageCount=Number(d.session&&d.session.message_count);
           const _doneMessagesLength=Array.isArray(d.session&&d.session.messages)?d.session.messages.length:0;
           const _doneMessageCountPresent=d.session&&d.session.message_count!=null;
-          const _doneOffset=_doneOffsetRaw!=null?Number(_doneOffsetRaw):((_doneMessageCountPresent&&_doneMessagesLength>0)?_doneMessageCount-_doneMessagesLength:NaN);
+          const _doneOffset=_doneOffsetRaw!=null?Number(_doneOffsetRaw):((typeof d.session.message_count==='number'&&Number.isSafeInteger(d.session.message_count)&&_doneMessagesLength>0)?_doneMessageCount-_doneMessagesLength:NaN);
           const _doneOffsetIsValid=_doneOffset>=0&&Number.isSafeInteger(_doneOffset)&&(_doneOffsetRaw==null||typeof _doneOffsetRaw==='number');
           const _doneMessageCountIsValid=!_doneMessageCountPresent||(
             typeof d.session.message_count==='number'&&Number.isSafeInteger(d.session.message_count)&&d.session.message_count>=0&&
             _doneOffset+_doneMessagesLength===_doneMessageCount
           );
-          const _doneHasBoundedProof=!!(
+          const _doneHasBoundedProof=_doneMessageCountPresent&&!!(
             (d.session&&d.session._messages_truncated===true)||(Number.isFinite(_doneOffset)&&_doneOffset>0)
           )&&_doneOffsetIsValid&&_doneMessageCountIsValid;
           const _doneGenerationMatches=Number.isSafeInteger(_preSettleGeneration)&&Number.isSafeInteger(_doneGeneration)&&_preSettleGeneration===_doneGeneration;
@@ -7057,7 +7057,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }else if(typeof _oldestIdx!=='undefined'){
             _oldestIdx=!_doneAdoption.adopted
               ? (_preSettleOldestIdx==null?0:_preSettleOldestIdx)
-              : (_doneOffsetIsValid?(_doneOffset||0):(_preSettleOldestIdx==null?0:_preSettleOldestIdx));
+              : (_doneOffsetIsValid?(_doneOffset||0):0);
           }
           S.messages=_filterRecoveryControlMessages(S.messages || []);
           if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
