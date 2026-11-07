@@ -273,6 +273,9 @@ does not match the touched subsystem.
   model setup, Docker onboarding, and WSL onboarding.
 - [`docs/docker.md`](docker.md): Docker compose setup, common failures, and
   bind-mount migration.
+- [`docs/public-exposure.md`](public-exposure.md): running the WebUI for
+  users other than the operator — exposure scopes, reverse proxy and TLS,
+  trusted-proxy/forwarded-header policy, and multi-user auth.
 - [`docs/troubleshooting.md`](troubleshooting.md): diagnostic flows for common
   failures.
 - [`docs/EXTENSIONS.md`](EXTENSIONS.md): administrator-controlled WebUI
