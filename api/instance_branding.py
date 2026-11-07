@@ -461,7 +461,8 @@ def serve_asset(handler, path):
     handler.send_header("Cache-Control", "public, max-age=31536000, immutable")
     handler.send_header("X-Content-Type-Options", "nosniff")
     handler.send_header("ETag", etag)
-    handler.send_header("Content-Length", "0" if handler.headers.get("If-None-Match") == etag else str(len(data)))
+    # A 304 may declare only the size the corresponding 200 would have sent.
+    handler.send_header("Content-Length", str(len(data)))
     handler.end_headers()
     if handler.headers.get("If-None-Match") != etag:
         handler.wfile.write(data)
@@ -491,8 +492,14 @@ def render_html(document, identity=None):
     if identity["name"]:
         name = html.escape(identity["name"], quote=True)
         document = re.sub(r"<title>.*?</title>", lambda _m: f"<title>{name}</title>", document, count=1, flags=re.S)
-        document = re.sub(r'<meta name="apple-mobile-web-app-title"[^>]*>',
-                          lambda _m: f'<meta name="apple-mobile-web-app-title" content="{name}">', document)
+    if identity["name"] or identity["active"]:
+        apple_name = html.escape(identity["name"] or "Hermes", quote=True)
+        apple_meta = f'<meta name="apple-mobile-web-app-title" content="{apple_name}">'
+        if '<meta name="apple-mobile-web-app-title"' in document:
+            document = re.sub(r'<meta name="apple-mobile-web-app-title"[^>]*>',
+                              lambda _m: apple_meta, document)
+        else:
+            document = document.replace("</head>", apple_meta + "\n</head>", 1)
     if identity["favicon_32"]:
         document = re.sub(r'<link\b[^>]*\brel="(?:icon|shortcut icon|apple-touch-icon)"[^>]*>\s*', "", document)
         links = [
