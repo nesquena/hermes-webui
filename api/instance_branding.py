@@ -349,6 +349,10 @@ def mutate(handler, patch=None, image=None):
         settings = config.load_settings()
         branding, _effective, provider, etag = _snapshot(settings)
         _require_match(handler, etag)
+        if prepared is None and (not isinstance(patch, dict) or set(patch) - {
+            "enabled", "instance_name", "manages_instance_name", "action"
+        }):
+            raise BrandingError("Expected a branding object with known fields", 400)
         if (type(branding["schema_version"]) is not int or branding["schema_version"] != 1) and patch != {"action": "reset"}:
             raise BrandingError("Unsupported branding schema; reset explicitly", 409)
         if not provider and not (patch and (patch.get("action") == "reset" or patch == {"enabled": False})):
@@ -361,10 +365,6 @@ def mutate(handler, patch=None, image=None):
                 branding["previous_image_revision"] = previous_image
             branding["image_revision"] = prepared[0]
         else:
-            if not isinstance(patch, dict) or set(patch) - {
-                "enabled", "instance_name", "manages_instance_name", "action"
-            }:
-                raise BrandingError("Unknown branding fields", 400)
             if "action" in patch:
                 if patch != {"action": "reset"}:
                     raise BrandingError("Expected only action: reset", 400)

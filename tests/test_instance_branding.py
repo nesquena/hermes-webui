@@ -433,3 +433,15 @@ def test_unknown_persisted_schema_falls_back_without_rewriting_name(http):
     assert not current["effective"]["active"]
     assert current["effective"]["name"] is None
     assert config.load_settings()["instance_name"] == "Retained"
+
+
+@pytest.mark.parametrize("patch", [[1], "invalid", 1, True, None])
+def test_non_object_patch_returns_bad_request_without_provider(http, monkeypatch, patch):
+    monkeypatch.setattr(branding, "provider_available", lambda: False)
+    before, etag = get_state(http)
+    status, _, data = http(
+        "/api/instance-branding", "POST", json.dumps(patch).encode(),
+        headers={"If-Match": etag, "Content-Type": "application/json"},
+    )
+    assert status == 400, data
+    assert get_state(http)[0] == before
