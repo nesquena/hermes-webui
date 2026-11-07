@@ -2390,6 +2390,10 @@ def _resume_gateway_run_for_session(session) -> bool:
 
     run = (session.gateway_run if session is not None else None) or {}
     stream_id = str(run.get("stream_id") or "")
+    if getattr(session, "_sidecar_names_other_session", None):
+        # #8852: the run would be reattached, and its answer written back,
+        # under the id this file's body names: another session.
+        return False
     # A persisted run is the authority whatever the process default backend is.
     if not stream_id or not (run.get("run_id") or run.get("request")) or session.active_stream_id != stream_id:
         return False
