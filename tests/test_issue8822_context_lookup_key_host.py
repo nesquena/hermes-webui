@@ -5,16 +5,21 @@ host, plus fixed metadata hosts for some providers (``_CONTEXT_LOOKUP_FIXED_HOST
 its own config source owns: that source's ``base_url``, plus the provider's fixed hosts when the source is that
 provider's own. Otherwise the lookup sends no key. It never changes the URL.
 
-None of these tests needs an Agent.
+None of these tests needs an Agent, except the last two groups (``requires_agent``), which probe the installed
+Agent's own metadata lookup under a no-network request recorder.
 """
+import base64
+import json
 import pathlib
 import re
 import textwrap
 import types
+import urllib.parse
 
 import pytest
 
 from api import routes
+from tests.conftest import requires_agent
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 STREAMING_PY = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
@@ -183,3 +188,148 @@ def test_a_site_still_sends_the_agents_own_pair(site, monkeypatch):
 
 def test_no_site_falls_back_to_the_agents_key_after_the_lookup():
     assert not re.search(r"_ctx_lookup\.api_key\s+or\s+getattr\(agent,\s*'api_key'", STREAMING_PY)
+
+
+# ── Against the installed Agent: every host it contacts must be one the table knows ─────────
+
+
+def _jwt(sub):
+    def b64(obj):
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip("=")
+    return f"{b64({'alg': 'none'})}.{b64({'sub': sub})}.sig"
+
+
+@pytest.fixture
+def recorded_agent_requests(monkeypatch):
+    """Record every request the Agent's metadata lookup makes; nothing leaves the process.
+
+    ``state["mode"]``: "miss" answers 404, "hit" answers a models list (so every probe path runs).
+    """
+    import email.message
+    import io
+    import socket
+    import urllib.error
+    import urllib.request
+
+    import httpx
+    import requests
+
+    state = {"mode": "miss", "seen": []}
+    payload = {"data": [{"id": "m-x", "context_length": 8192,
+                         "capabilities": {"limits": {"max_prompt_tokens": 8192}}}],
+               "models": [{"slug": "m-x", "context_window": 8192}]}
+
+    def note(url, headers):
+        creds = [str(v).removeprefix("Bearer ") for k, v in dict(headers or {}).items()
+                 if str(k).lower() in ("authorization", "x-api-key", "api-key")]
+        state["seen"].append((urllib.parse.urlsplit(str(url)).hostname or "", creds))
+
+    def req(self, method, url, *a, **kw):
+        headers = dict(self.headers)
+        headers.update(kw.get("headers") or {})
+        note(url, headers)
+        r = requests.Response()
+        r.status_code = 200 if state["mode"] == "hit" else 404
+        r._content = json.dumps(payload if state["mode"] == "hit" else {}).encode()
+        r.headers["content-type"] = "application/json"
+        r.url = str(url)
+        return r
+
+    def hx(self, request, *a, **kw):
+        note(request.url, request.headers)
+        return httpx.Response(200 if state["mode"] == "hit" else 404,
+                              json=payload if state["mode"] == "hit" else {}, request=request)
+
+    async def ahx(self, request, *a, **kw):
+        return hx(self, request)
+
+    def ul(self, fullurl, *a, **kw):
+        if isinstance(fullurl, urllib.request.Request):
+            url, headers = fullurl.full_url, dict(fullurl.header_items())
+        else:
+            url, headers = str(fullurl), {}
+        note(url, headers)
+        if state["mode"] == "miss":
+            raise urllib.error.HTTPError(url, 404, "probe miss", email.message.Message(), None)
+        return _Answer(json.dumps(payload).encode())
+
+    class _Answer(io.BytesIO):
+        status = code = 200
+        headers: dict = {}
+
+        def getcode(self):
+            return 200
+
+    def no_connect(self, address):
+        raise OSError("network disabled by test")
+
+    def fake_dns(host, *a, **kw):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+
+    monkeypatch.setattr(requests.sessions.Session, "request", req)
+    monkeypatch.setattr(httpx.Client, "send", hx)
+    monkeypatch.setattr(httpx.AsyncClient, "send", ahx)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", ul)
+    monkeypatch.setattr(socket, "getaddrinfo", fake_dns)
+    monkeypatch.setattr(socket.socket, "connect", no_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", no_connect)
+    return state
+
+
+def _agent_keyed_hosts(state, url, key, provider):
+    """Hosts the installed Agent sends ``key`` to for (url, provider), over both endpoint modes."""
+    import agent.model_metadata as mm
+    import hermes_cli.models as hm
+
+    hosts = set()
+    for mode in ("miss", "hit"):
+        for module in (mm, hm):
+            for name, value in list(vars(module).items()):
+                if "cache" in name.lower() and not name.isupper() and isinstance(value, (dict, set, list)):
+                    value.clear()
+        state["mode"] = mode
+        state["seen"].clear()
+        try:
+            mm.get_model_context_length("m-x", url, api_key=key, provider=provider)
+        except Exception:
+            pass
+        hosts |= {host for host, creds in state["seen"] if key and key in creds}
+    return hosts
+
+
+@requires_agent
+@pytest.mark.parametrize("shape", ["synthetic", "jwt"])
+def test_a_legacy_codex_entry_s_kept_key_reaches_only_its_own_url(shape, recorded_agent_requests):
+    """The lookup keeps a legacy ``openai-codex`` entry's key on its own URL only when the installed Agent's
+    Codex probe follows that URL; whatever it keeps, the Agent must send nowhere else (e.g. chatgpt.com)."""
+    key = "KL-synthetic" if shape == "synthetic" else _jwt("KL-synthetic")
+    got = _lookup({"model": {"provider": "openai-codex"},
+                   "custom_providers": [{"name": "openai-codex", "base_url": L, "api_key": key}]}, "openai-codex")
+    assert got.base_url == L
+    if got.api_key:
+        assert _agent_keyed_hosts(recorded_agent_requests, got.base_url, got.api_key, got.provider) <= {
+            urllib.parse.urlsplit(L).hostname}
+
+
+PROBED_PROVIDERS = ("anthropic", "novita", "copilot", "copilot-acp", "github-copilot", "openai-codex", "openai",
+                    "nous", "bedrock", "fireworks", "deepseek", "openrouter", "vllm", "local", "custom:my-proxy")
+
+
+@requires_agent
+def test_the_recorder_sees_the_agents_requests(recorded_agent_requests):
+    """Control: without it, an empty recording would make the coverage tests pass vacuously."""
+    host = urllib.parse.urlsplit(C).hostname
+    assert _agent_keyed_hosts(recorded_agent_requests, C, "K-synthetic", "custom:my-proxy") == {host}
+    assert "api.anthropic.com" in _agent_keyed_hosts(recorded_agent_requests, "", "K-synthetic", "anthropic")
+
+
+@requires_agent
+@pytest.mark.parametrize("shape", ["synthetic", "jwt"])
+@pytest.mark.parametrize("provider", PROBED_PROVIDERS)
+def test_the_fixed_host_table_covers_the_installed_agent(provider, shape, recorded_agent_requests):
+    """Every host the installed Agent sends a key to is the URL's own host or listed in the table."""
+    key = "K-synthetic" if shape == "synthetic" else _jwt("K-synthetic")
+    for url in ("", C):
+        sent = _agent_keyed_hosts(recorded_agent_requests, url, key, provider)
+        known = {o.rsplit(":", 1)[0] for o in routes._context_lookup_contacted_origins(provider, url)}
+        assert sent <= known, f"{provider} url={url or '-'}: the Agent sent the key to {sorted(sent - known)}"
