@@ -113,6 +113,29 @@ def _family_config(active, record, builtin="fireworks"):
     }
 
 
+@pytest.mark.parametrize("discovery", ["as-is", "empty"])
+@pytest.mark.parametrize(
+    "active,record",
+    [("fireworks", "fireworks"), ("Fireworks", "fireworks"), ("fw", "fw"), ("fw", "fireworks"),
+     ("fireworks-ai", "fireworks-ai"), ("fireworks_ai", "fireworks_ai")],
+)
+def test_a_fireworks_session_borrows_no_native_record_in_the_lookup(monkeypatch, discovery, active, record):
+    """The lookup half of the catalog test below, with or without an Agent: the bare session takes
+    neither the native record's key nor its limit, as on v0.52.544; the explicit id takes both."""
+    from api import plugin_providers
+
+    if discovery == "empty":
+        monkeypatch.setattr(plugin_providers, "_PROFILES_BY_NAME", {})
+    data = _family_config(active, record)
+    _use(monkeypatch, data)
+
+    bare = routes._context_length_lookup_inputs_for_model("m-x", active, cfg=data)
+    assert bare.api_key != "synthetic-named"
+    assert bare.config_context_length != 12345
+    explicit = routes._context_length_lookup_inputs_for_model("m-x", "custom:" + record, cfg=data)
+    assert (explicit.api_key, explicit.config_context_length) == ("synthetic-named", 12345)
+
+
 # Needs the Agent: Fireworks is a built-in only through the Agent's catalog (CI installs no Agent).
 @requires_agent
 @pytest.mark.parametrize("discovery", ["as-is", "empty"])
@@ -225,8 +248,8 @@ _KEY_OWNER = {"synthetic-A": "https://a.invalid/v1", "synthetic-B": "https://b.i
 def test_a_key_only_goes_to_its_own_records_url(monkeypatch, discovery, pid):
     """The #8816 security property, whatever the id's spelling: with ``providers.<id>`` at
     URL A and ``providers['custom:<id>']`` at URL B, the lookup never pairs one record's key
-    with the other record's URL (runtime plugin aliases such as ``deepseek-chat``/``or`` are
-    outside every alias table WebUI reads)."""
+    with the other record's URL (``deepseek-chat``/``or`` are listed by no WebUI table, Agent
+    catalog or alias table)."""
     from api import plugin_providers
 
     if discovery == "empty":
@@ -325,7 +348,7 @@ def _loopback_server(monkeypatch):
 @pytest.mark.parametrize("pid", ["openai", "deepseek-chat", "azure", "or"])
 def test_the_builtin_endpoint_never_receives_the_custom_key(monkeypatch, pid):
     """The real metadata lookup, against a loopback built-in endpoint that records Authorization.
-    ``deepseek-chat``/``azure``/``or`` are Agent runtime aliases outside WebUI's alias tables."""
+    ``deepseek-chat``/``azure``/``or`` are listed by no WebUI table, Agent catalog or alias table."""
     with _loopback_server(monkeypatch) as (origin, seen):
         builtin_url = f"{origin}/v1/{pid}"
         data = _config(pid, builtin_url)
