@@ -158,7 +158,7 @@ def test_older_identical_answer_cannot_satisfy_current_turn() -> None:
     assert got == {"count": 4, "lastRole": "assistant", "lastText": "yes", "texts": ["old question", "yes", "new question", "yes"]}
 
 
-def _listener(prev: list[dict], settled: dict, *, pre_generation=None, pre_oldest_idx=0) -> dict:
+def _listener(prev: list[dict], settled: dict, *, pre_generation=None, pre_oldest_idx=0, streamed_answer=None, pre_messages_truncated=False) -> dict:
     start = MESSAGES_JS.find("let _doneFinalAnswer=")
     end = MESSAGES_JS.find("if(typeof _hydrateTodosFromSession", start)
     assert start >= 0 and end > start, "real done settle statements not found"
@@ -175,7 +175,8 @@ def _listener(prev: list[dict], settled: dict, *, pre_generation=None, pre_oldes
         const _pendingTitleExpectedCurrent=new Map();
         function applySessionTitleUpdate(){{}}
         let _oldestIdx={pre_oldest_idx};
-        let _messagesTruncated=false;
+        let _messagesTruncated={json.dumps(pre_messages_truncated)};
+        const _streamDisplay=()=>({json.dumps(streamed_answer)});
         {statements}
         console.log(JSON.stringify({{
           sessionId:S.session&&S.session.session_id,
@@ -325,3 +326,18 @@ def test_negative_resident_origin_disallows_merge() -> None:
         """
     )
     assert got == {"merged": False, "count": 2}
+
+
+def test_empty_snapshot_with_live_answer_preserves_paging_and_truncation() -> None:
+    prev = _sample_messages()[:-1]
+    got = _listener(
+        prev,
+        {"session_id": "A", "messages": [], "message_count": 6},
+        pre_generation=0,
+        pre_oldest_idx=70,
+        streamed_answer="new final answer",
+        pre_messages_truncated=True,
+    )
+    assert got["texts"] == [m["content"] for m in prev] + ["new final answer"]
+    assert got["oldestIdx"] == 70
+    assert got["messagesTruncated"] is True

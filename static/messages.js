@@ -7055,9 +7055,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(typeof _oldestIdx!=='undefined')_oldestIdx=_preSettleOldestIdx==null?0:_preSettleOldestIdx;
             if(typeof _messagesTruncated!=='undefined')_messagesTruncated=_preSettleMessagesTruncated||!!d.session._messages_truncated;
           }else if(typeof _oldestIdx!=='undefined'){
-            _oldestIdx=!_doneAdoption.adopted
+            _oldestIdx=!_doneAdoption.snapshotAdopted
               ? (_preSettleOldestIdx==null?0:_preSettleOldestIdx)
               : (_doneOffsetIsValid?(_doneOffset||0):0);
+            if(!_doneAdoption.snapshotAdopted&&typeof _messagesTruncated!=='undefined') _messagesTruncated=_preSettleMessagesTruncated;
           }
           S.messages=_filterRecoveryControlMessages(S.messages || []);
           if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
@@ -8010,20 +8011,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(merged){messages=merged;mergedResidentPrefix=true;}
     }
     const answer=String(finalAnswer||'').trim();
-    if(!answer) return {adopted:adopted,messages:messages,mergedResidentPrefix};
+    if(!answer) return {adopted:adopted,snapshotAdopted:adopted,messages:messages,mergedResidentPrefix};
     // Once a prefix is retained, an older repeat must not satisfy the current
     // turn. Restrict these checks to the suffix after the latest user boundary.
     let currentTurnStart=0;
     for(let i=0;i<messages.length;i++) if(messages[i]&&messages[i].role==='user') currentTurnStart=i;
     const currentTurnMessages=messages.slice(currentTurnStart);
-    if(_finalAnswerIsInTranscript(currentTurnMessages,answer)) return {adopted:adopted,messages:messages,mergedResidentPrefix};
+    if(_finalAnswerIsInTranscript(currentTurnMessages,answer)) return {adopted:adopted,snapshotAdopted:adopted,messages:messages,mergedResidentPrefix};
     // #6112: if the snapshot already ends this turn in a usable final assistant
     // row (e.g. the Agent rewrote the answer before persisting), keep the
     // snapshot and do not append the streamed copy — re-attach only when that
     // row is absent.
-    if(_snapshotHasUsableFinalAssistantRow(currentTurnMessages)) return {adopted:adopted,messages:messages,mergedResidentPrefix};
-    if(!messages.length) return {adopted:adopted,messages:messages,mergedResidentPrefix};
-    return {adopted:true,messages:messages.concat([{role:'assistant',content:String(finalAnswer)}]),mergedResidentPrefix};
+    if(_snapshotHasUsableFinalAssistantRow(currentTurnMessages)) return {adopted:adopted,snapshotAdopted:adopted,messages:messages,mergedResidentPrefix};
+    if(!messages.length) return {adopted:adopted,snapshotAdopted:adopted,messages:messages,mergedResidentPrefix};
+    return {adopted:true,snapshotAdopted:adopted,messages:messages.concat([{role:'assistant',content:String(finalAnswer)}]),mergedResidentPrefix};
   }
   if(typeof window!=='undefined'){
     window._adoptDoneSnapshotMessages=_adoptDoneSnapshotMessages;

@@ -24,7 +24,7 @@ _sample_messages = _tail._sample_messages
 
 def test_full_done_payload_resets_offset_to_zero():
     prev = _sample_messages()
-    got = _listener(prev, {"session_id": "A", "messages": prev})
+    got = _listener(prev, {"session_id": "A", "messages": prev}, pre_oldest_idx=70)
     assert got["texts"] == [m["content"] for m in prev]
     assert got["oldestIdx"] == 0
 
