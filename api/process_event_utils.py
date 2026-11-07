@@ -56,6 +56,168 @@ def completion_delivery_id(evt: Any) -> str:
     return str(evt.get("session_id") or "").strip()
 
 
+# ── Immutable completion ownership + ownerless parking (#6752) ─────────────
+# A ``session_key`` -> WebUI-session mapping (``PROCESS_SESSION_INDEX``) is a
+# mutable routing hint captured at spawn time, not proof of ownership. Owner
+# decision (#6752): a completion that carries no immutable owner must never be
+# emitted to, injected into, or woken in a session chosen by that mapping
+# alone. Both completion-queue consumers (``background_process._process_one``
+# and ``streaming._drain_webui_process_notifications``) use the helpers below
+# so their admission rule cannot drift apart.
+#
+# Immutable owner sources, in precedence order:
+#   1. ``origin_ui_session_id`` on the event (the producer-stamped exact
+#      browser-tab return address — async delegations carry it today);
+#   2. an env-immune spawn-time owner attribute on the recovered
+#      ``ProcessSession`` (forward-compatible duck typing; current Agent
+#      builds do not stamp one on ordinary processes).
+COMPLETION_OWNER_ATTRS = (
+    "origin_ui_session_id",  # modern hermes-agent exact browser-tab return address
+    "spawn_session_id",
+    "owner_session_id",
+    "turn_session_id",
+)
+
+
+def _owner_text(value: Any) -> str:
+    """Accept only non-empty strings as owner ids (never ``str(obj)`` junk)."""
+    if isinstance(value, str):
+        return value.strip()
+    return ""
+
+
+def event_origin_ui_session_id(evt: Any) -> str:
+    """Return the producer-stamped immutable owner carried by *evt*, or ""."""
+    if not isinstance(evt, dict):
+        return ""
+    return _owner_text(evt.get("origin_ui_session_id"))
+
+
+def process_session_immutable_owner(proc_session: Any) -> str:
+    """Return an env-immune spawn owner from a ``ProcessSession``, or ""."""
+    if proc_session is None:
+        return ""
+    for attr in COMPLETION_OWNER_ATTRS:
+        try:
+            owner = _owner_text(getattr(proc_session, attr, ""))
+        except Exception:
+            owner = ""
+        if owner:
+            return owner
+    return ""
+
+
+PARKED_OWNERLESS_COMPLETIONS_MAX = 200
+# Liveness pings carry no deliverable content; they are dropped, not parked.
+_UNPARKED_OWNERLESS_EVENT_TYPES = frozenset({"heartbeat"})
+_PARKED_OWNERLESS_LOCK = threading.Lock()
+_PARKED_OWNERLESS: OrderedDict[str, dict] = OrderedDict()
+
+
+def park_ownerless_completion(
+    evt: Any,
+    *,
+    addressed_session_id: str,
+    consumer: str,
+) -> dict | None:
+    """Park a WebUI-addressed completion that has no immutable owner.
+
+    The parked record is session-less and deliberately omits the completion
+    output/result payload: it is a neutral notice that a completion was
+    withheld, not a delivery. It never touches the durable async-delegation
+    ledger (no claim, no ACK), so a consumer that CAN prove ownership still
+    sees the row as pending. Bounded and deduplicated per event type + id.
+    Returns a snapshot of the record, or ``None`` when nothing was parked.
+    """
+    if not isinstance(evt, dict):
+        return None
+    evt_type = str(evt.get("type") or "completion")
+    delivery_id = completion_delivery_id(evt)
+    if evt_type in _UNPARKED_OWNERLESS_EVENT_TYPES:
+        logger.debug(
+            "ownerless %s event for %r dropped (fail-closed, #6752)",
+            evt_type,
+            delivery_id,
+        )
+        return None
+    key = f"{evt_type}:{delivery_id}" if delivery_id else f"{evt_type}:anon:{id(evt)}:{time.time()}"
+    now = time.time()
+    with _PARKED_OWNERLESS_LOCK:
+        record = _PARKED_OWNERLESS.get(key)
+        first = record is None
+        if first:
+            # Deliberately NO command text: a command line can embed secrets,
+            # and the notice only needs to identify the withheld completion.
+            record = {
+                "id": key,
+                "delivery_id": delivery_id,
+                "type": evt_type,
+                "reason": "missing_immutable_owner",
+                # The session the mutable session-key mapping pointed at. An
+                # unverified hint for the user, never a routing decision.
+                "unverified_session_hint": str(addressed_session_id or ""),
+                "consumer": str(consumer or ""),
+                "first_parked_at": now,
+                "count": 0,
+            }
+            for field in ("exit_code", "completion_reason", "pattern"):
+                value = evt.get(field)
+                if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                    record[field] = value
+        record["count"] = int(record.get("count") or 0) + 1
+        record["last_parked_at"] = now
+        _PARKED_OWNERLESS[key] = record
+        _PARKED_OWNERLESS.move_to_end(key)
+        while len(_PARKED_OWNERLESS) > PARKED_OWNERLESS_COMPLETIONS_MAX:
+            _PARKED_OWNERLESS.popitem(last=False)
+        snapshot = dict(record)
+    if first:
+        logger.warning(
+            "ownerless background completion PARKED (fail-closed, #6752): "
+            "type=%s id=%r consumer=%s session_key_mapped_to=%r - it carries no "
+            "immutable owner (origin_ui_session_id / spawn owner), so it was NOT "
+            "emitted, injected, or woken in any session. Listed at "
+            "GET /api/background/parked-completions.",
+            evt_type,
+            delivery_id,
+            consumer,
+            addressed_session_id,
+        )
+    else:
+        logger.debug(
+            "ownerless background completion re-parked: type=%s id=%r count=%s",
+            evt_type,
+            delivery_id,
+            snapshot["count"],
+        )
+    return snapshot
+
+
+def list_parked_ownerless_completions() -> list[dict]:
+    """Return parked ownerless completions, most recently parked first."""
+    with _PARKED_OWNERLESS_LOCK:
+        return [dict(rec) for rec in reversed(_PARKED_OWNERLESS.values())]
+
+
+def dismiss_parked_ownerless_completions(ids: Any = None) -> int:
+    """Remove parked records by id (``None`` clears all); return the count."""
+    with _PARKED_OWNERLESS_LOCK:
+        if ids is None:
+            count = len(_PARKED_OWNERLESS)
+            _PARKED_OWNERLESS.clear()
+            return count
+        removed = 0
+        for record_id in ids:
+            if isinstance(record_id, str) and _PARKED_OWNERLESS.pop(record_id, None) is not None:
+                removed += 1
+        return removed
+
+
+def _reset_parked_ownerless_completions_for_tests() -> None:
+    with _PARKED_OWNERLESS_LOCK:
+        _PARKED_OWNERLESS.clear()
+
+
 # ── process-wakeup display metadata (#6345) ────────────────────────────────
 # Inverse of the two structured ``format_wakeup_prompt`` shapes (completion,
 # watch_match). Those shapes are pinned by

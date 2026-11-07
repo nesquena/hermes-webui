@@ -61,7 +61,11 @@ class _FakeProcessRegistry:
         self._procs: dict[str, types.SimpleNamespace] = {}
 
     def register(self, process_id: str, session_key: str) -> None:
-        self._procs[process_id] = types.SimpleNamespace(session_key=session_key)
+        # Modern producer shape: the immutable spawn owner is stamped; an
+        # ownerless process is parked, never routed by session_key (#6752).
+        self._procs[process_id] = types.SimpleNamespace(
+            session_key=session_key, origin_ui_session_id=session_key
+        )
 
     def get(self, process_id: str):
         return self._procs.get(process_id)

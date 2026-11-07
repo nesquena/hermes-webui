@@ -175,6 +175,9 @@ def _async_delegation_event(**overrides):
         "type": "async_delegation",
         "delegation_id": "deleg_test123",
         "session_key": "webui-session-1",
+        # Modern producers stamp the immutable commissioning owner; ownerless
+        # events are parked, never routed by session_key alone (#6752).
+        "origin_ui_session_id": "webui-session-1",
         "status": "completed",
         "is_batch": True,
         "results": [{"task_index": 0, "status": "completed", "summary": "backend summary"}],
@@ -308,6 +311,7 @@ def test_background_unmapped_legacy_event_is_requeued_best_effort(monkeypatch):
         delegation_id=None,
         session_id="proc_legacy_retry",
         session_key="legacy-unmapped-session",
+        origin_ui_session_id=None,
     )
 
     bp._process_one(evt)
@@ -896,7 +900,7 @@ def test_background_unmapped_durable_event_schedules_retry(monkeypatch):
     _reset_wakeup_state()
     registry = _install_fake_process_registry(monkeypatch)
     _install_fake_durable_delivery_api(monkeypatch)
-    evt = _async_delegation_event()
+    evt = _async_delegation_event(origin_ui_session_id=None)
 
     try:
         bp._process_one(evt)
@@ -1071,6 +1075,7 @@ from tools import async_delegation as ad
 record = ad.dispatch_async_delegation(
     goal="restart", context=None, toolsets=None, role="leaf", model="m",
     session_key="webui-session-1", parent_session_id="durable-parent",
+    origin_ui_session_id="webui-session-1",
     runner=lambda: {"status": "completed", "summary": "after restart"},
 )
 deadline = time.time() + 10
@@ -1154,6 +1159,7 @@ from tools.process_registry import process_registry
 record = ad.dispatch_async_delegation(
     goal="lease-restart", context=None, toolsets=None, role="leaf", model="m",
     session_key="webui-session-1", parent_session_id="durable-parent",
+    origin_ui_session_id="webui-session-1",
     runner=lambda: {"status": "completed", "summary": "after lease"},
 )
 deadline = time.time() + 10
@@ -1324,6 +1330,7 @@ def test_async_completion_with_unresolvable_target_retries_not_silent_drop(monke
     # No session_key index entry and no origin_ui_session_id → empty target.
     evt = _async_delegation_event()
     evt.pop("session_key", None)
+    evt.pop("origin_ui_session_id", None)
     bp._process_one(evt)
 
     assert len(retried) == 1, "unrouteable async event must be handed to the retry"
