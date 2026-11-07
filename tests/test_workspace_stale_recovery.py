@@ -172,7 +172,7 @@ def _post_new_session_with_workspace(
         else (_ for _ in ()).throw(KeyError(sid)),
     )
     monkeypatch.setattr(routes, "get_last_workspace", get_fallback)
-    monkeypatch.setattr(routes, "_session_model_state_from_request", lambda *_a: (None, None))
+    monkeypatch.setattr(routes, "_session_model_state_from_request", lambda *_a, **_k: (None, None))
     monkeypatch.setattr(routes, "new_session", create_session)
     monkeypatch.setattr(
         session_lifecycle,
