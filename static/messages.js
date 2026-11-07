@@ -7028,7 +7028,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _doneMessageCount=Number(d.session&&d.session.message_count);
           const _doneMessagesLength=Array.isArray(d.session&&d.session.messages)?d.session.messages.length:0;
           const _doneMessageCountPresent=d.session&&d.session.message_count!=null;
-          const _doneOffset=_doneOffsetRaw!=null?Number(_doneOffsetRaw):(_doneMessageCountPresent?_doneMessageCount-_doneMessagesLength:NaN);
+          const _doneOffset=_doneOffsetRaw!=null?Number(_doneOffsetRaw):((_doneMessageCountPresent&&_doneMessagesLength>0)?_doneMessageCount-_doneMessagesLength:NaN);
           const _doneOffsetIsValid=_doneOffset>=0&&Number.isSafeInteger(_doneOffset)&&(_doneOffsetRaw==null||typeof _doneOffsetRaw==='number');
           const _doneMessageCountIsValid=!_doneMessageCountPresent||(
             typeof d.session.message_count==='number'&&Number.isSafeInteger(d.session.message_count)&&d.session.message_count>=0&&
@@ -7055,7 +7055,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(typeof _oldestIdx!=='undefined')_oldestIdx=_preSettleOldestIdx==null?0:_preSettleOldestIdx;
             if(typeof _messagesTruncated!=='undefined')_messagesTruncated=_preSettleMessagesTruncated||!!d.session._messages_truncated;
           }else if(typeof _oldestIdx!=='undefined'){
-            _oldestIdx=_doneOffsetIsValid?(_doneOffset||0):(_preSettleOldestIdx==null?0:_preSettleOldestIdx);
+            _oldestIdx=!_doneAdoption.adopted
+              ? (_preSettleOldestIdx==null?0:_preSettleOldestIdx)
+              : (_doneOffsetIsValid?(_doneOffset||0):(_preSettleOldestIdx==null?0:_preSettleOldestIdx));
           }
           S.messages=_filterRecoveryControlMessages(S.messages || []);
           if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
@@ -7989,8 +7991,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // authoritative absolute coordinate. Otherwise fall back to server-wins.
       if(!Number.isSafeInteger(window.residentOrigin)||!Number.isSafeInteger(window.settledOffset)) return null;
       if(window.residentOrigin+anchor!==window.settledOffset) return null;
+      if(window.residentOrigin<0||window.settledOffset<0) return null;
       if(window.messageCount!=null){
-        if(!Number.isSafeInteger(window.messageCount)||window.residentOrigin+pre.length!==window.messageCount) return null;
+        const candidate=pre.slice(0,anchor).concat(settled);
+        if(!Number.isSafeInteger(window.messageCount)||window.messageCount<0||window.residentOrigin+candidate.length!==window.messageCount) return null;
       }
     }
     return pre.slice(0,anchor).concat(settled);

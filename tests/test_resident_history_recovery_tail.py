@@ -214,11 +214,11 @@ def test_newer_generation_does_not_resurrect_deleted_nonempty_prefix() -> None:
 def test_present_but_malformed_window_metadata_fails_closed() -> None:
     prev = _sample_messages()[:4]
     for bad in ("garbage", -2, 2.5, True):
-        got = _listener(prev, {"session_id": "A", "messages": prev[2:], "_messages_offset": bad}, pre_oldest_idx=70)
+        got = _listener(prev, {"session_id": "A", "messages": prev[2:], "transcript_generation": 0, "_messages_offset": bad}, pre_generation=0, pre_oldest_idx=70)
         assert got["texts"] == [m["content"] for m in prev[2:]], bad
         assert got["oldestIdx"] == 70, bad
     for bad_count in ("garbage", 3.5, "4", True):
-        got = _listener(prev, {"session_id": "A", "messages": prev[2:], "_messages_offset": 2, "message_count": bad_count}, pre_oldest_idx=70)
+        got = _listener(prev, {"session_id": "A", "messages": prev[2:], "transcript_generation": 0, "_messages_offset": 2, "message_count": bad_count}, pre_generation=0, pre_oldest_idx=70)
         assert got["texts"] == [m["content"] for m in prev[2:]], bad_count
         assert got["oldestIdx"] == 2, bad_count
 
@@ -263,3 +263,53 @@ def test_authoritative_offset_and_origin_mismatch_disallow_merge() -> None:
     )
     assert contradictory_zero["texts"] == [m["content"] for m in prev[2:]]
     assert contradictory_zero["oldestIdx"] == 0
+
+
+def test_merged_window_count_uses_candidate_before_answer_reattachment() -> None:
+    pre = _sample_messages()[:3]
+    tail = [pre[2], {"role": "assistant", "_ts": "4", "content": "final answer"}]
+    options = "{allowResidentPrefixMerge:true,residentMergeWindow:{residentOrigin:0,settledOffset:2,messageCount:4}}"
+    got = _run_node(
+        f"""
+        const pre={json.dumps(pre)};
+        const tail={json.dumps(tail)};
+        const r=_adoptDoneSnapshotMessages(pre,tail,'final answer',{options});
+        console.log(JSON.stringify({{count:r.messages.length,merged:r.mergedResidentPrefix===true,texts:r.messages.map(m=>m.content)}}));
+        """
+    )
+    assert got["merged"] is True
+    assert got["count"] == 4
+    assert got["texts"] == ["old question 1", "old answer 1", "old question 2", "final answer"]
+
+    replay = _run_node(
+        r'''
+        const pre=[{role:'user',_ts:'1',content:'old'},{role:'assistant',_ts:'2',content:'prior'},{role:'user',_ts:'3',content:'current'}];
+        const opts={allowResidentPrefixMerge:true,residentMergeWindow:{residentOrigin:0,settledOffset:2,messageCount:3}};
+        const first=_adoptDoneSnapshotMessages(pre,[pre[2]],'final',opts);
+        const second=_adoptDoneSnapshotMessages(first.messages,[pre[2]],'final',opts);
+        console.log(JSON.stringify({first:first.messages.length,second:second.messages.length,secondMerged:second.mergedResidentPrefix===true,secondText:second.messages.map(m=>m.content)}));
+        '''
+    )
+    assert replay["first"] == 4
+    assert replay["second"] == 4
+    assert replay["secondMerged"] is True
+    assert replay["secondText"] == ["old", "prior", "current", "final"]
+
+
+def test_empty_snapshot_keeps_resident_origin_instead_of_derived_end() -> None:
+    prev = _sample_messages()
+    got = _listener(prev, {"session_id": "A", "messages": [], "message_count": 6, "transcript_generation": 0}, pre_generation=0, pre_oldest_idx=0)
+    assert got["texts"] == [m["content"] for m in prev]
+    assert got["oldestIdx"] == 0
+
+
+def test_negative_resident_origin_disallows_merge() -> None:
+    pre = _sample_messages()[:4]
+    got = _run_node(
+        f"""
+        const pre={json.dumps(pre)};
+        const r=_adoptDoneSnapshotMessages(pre,pre.slice(2),'four',{{allowResidentPrefixMerge:true,residentMergeWindow:{{residentOrigin:-2,settledOffset:0,messageCount:2}}}});
+        console.log(JSON.stringify({{merged:r.mergedResidentPrefix===true,count:r.messages.length}}));
+        """
+    )
+    assert got == {"merged": False, "count": 2}
