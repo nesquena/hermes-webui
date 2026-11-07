@@ -13,6 +13,20 @@ sessions can be reopened and continued many times, so the lifecycle must guarant
 6. A commit runs as the session's OWNER profile (#8517), whichever turn or thread
    reached the boundary; one the Agent refused is not counted as committed.
 
+The delivery is BEST EFFORT (gateway parity — gateway/run_agent_cache.py:890
+``_commit_memory_before_soft_evict``): the explicit transcript is handed to
+``AIAgent.commit_memory_session()``, its return value is ignored, and a raising
+hook is logged and left for the next boundary.  Nothing waits for an
+acknowledgement and nothing latches a debt.  The installed Agent returns None
+and swallows provider errors, so no caller here can observe whether extraction
+ran; a release path that claimed otherwise would gate on a signal that can
+never arrive.  What IS observable is whether the session's work is still
+pending: the pressure valve keeps the transcript when a pre-release delivery was
+refused, so the next boundary can still hand that extraction its payload (the
+only losslessness conditions it consults are
+``api/agent_cache_governance.py::transcript_persistence_caught_up`` for the
+conversation and this ledger for the extraction).
+
 CLI-parity semantics — post-turn marking, boundary extraction/commit:
 
 - Completed turn: Hermes core still mirrors the exchange through
@@ -36,6 +50,7 @@ compare-and-clears only that captured segment after success.
 
 from __future__ import annotations
 
+import functools
 import logging
 import threading
 import time
@@ -134,22 +149,34 @@ def register_agent(session_id: str, agent) -> None:
         _condition.notify_all()
 
 
-def unregister_agent(session_id: str) -> None:
+def unregister_agent(session_id: str, agent=None) -> None:
     """Clear the current future-generation agent handle.
 
     Dirty segment owners are intentionally preserved so failed work remains
     retryable even if the cache drops the current agent reference.
+
+    ``agent`` makes the clear conditional on ownership: a same-session request
+    can register a replacement agent between the cache pop and the eviction
+    teardown, and the outgoing agent's cleanup must not drop the replacement's
+    freshly registered handle.  A handle that is already clear (``None``) is
+    not "someone else's", so the conditional form still clears it.  Callers
+    without an agent identity (session delete / clear / model switch) omit it
+    and keep the unconditional behavior.
     """
     if not session_id:
         return
     with _condition:
         entry = _sessions.get(session_id)
         if entry is not None:
+            owner = entry["agent"]
+            if agent is not None and owner is not None and owner is not agent:
+                # A replacement agent owns this entry now — leave it alone.
+                return
             entry["agent"] = None
         _condition.notify_all()
 
 
-def discard_session(session_id: str) -> bool:
+def discard_session(session_id: str, agent=None) -> bool:
     """Permanently drop a session's lifecycle entry to bound memory growth.
 
     The ``_sessions`` dict is process-global and historically only ever grew:
@@ -166,6 +193,14 @@ def discard_session(session_id: str) -> bool:
 
     Returns True when the entry was removed (or was already absent), False when
     it was retained because work is still pending.
+
+    ``agent`` adds an ownership precondition: when a replacement agent has
+    registered itself for this session (the cache pop and the eviction teardown
+    are not atomic), the entry belongs to that replacement and is retained
+    instead of deleted.  A handle that is already clear (``None``) does not
+    block removal, so the two-step eviction path (unregister, then discard)
+    still bounds the dict.  Callers without an agent identity omit it and keep
+    the unconditional behavior.
     """
     if not session_id:
         return False
@@ -173,6 +208,9 @@ def discard_session(session_id: str) -> bool:
         entry = _sessions.get(session_id)
         if entry is None:
             return True
+        owner = entry["agent"]
+        if agent is not None and owner is not None and owner is not agent:
+            return False  # a replacement agent owns this entry now
         if entry["in_flight"]:
             return False
         if entry["generation"] > entry["committed_generation"]:
@@ -233,6 +271,89 @@ def has_uncommitted_work(session_id: str) -> bool:
         return entry["generation"] > entry["committed_generation"]
 
 
+def release_in_flight(session_id: str) -> bool:
+    """Clear a session's in-flight claim after an ABANDONED commit.
+
+    ``in_flight`` is an advisory mutex — it only stops a second commit from
+    starting while one is inside the provider — not a record of work.  A
+    delivery that raises ``BaseException`` (``SystemExit`` from a lazy relaunch
+    import, an interrupt) unwinds through ``commit_session_memory`` without
+    reaching either of its clear points, and the claim then wedges the session
+    for the life of the process: every later ``commit_session_memory(wait=True)``
+    blocks on it and ``discard_session`` refuses.
+
+    The caller that observed the abort is the only one that knows the delivery
+    is over, so it hands the claim back here.  The ledger is untouched:
+    ``generation`` / ``committed_generation`` still say the work is pending, so
+    the next boundary retries it with whatever payload the caller kept.  Returns
+    True when a claim was actually held and cleared.
+    """
+    if not session_id:
+        return False
+    with _condition:
+        entry = _sessions.get(session_id)
+        if entry is None or not entry["in_flight"]:
+            return False
+        entry["in_flight"] = False
+        _condition.notify_all()
+        return True
+
+
+def forget_released_agent(session_id: str, agent) -> bool:
+    """Drop the ledger's strong reference to a SOFT-RELEASED agent handle.
+
+    A pressure shed pops the entry out of ``SESSION_AGENT_CACHE`` and calls
+    ``release_clients()``, which deliberately KEEPS the memory provider (the
+    session may resume).  The ledger's ``agent`` slot is a second, independent
+    strong reference to that same handle, so without this the provider stays
+    alive for the life of the process: nothing can reach the handle again (the
+    idle sweep only walks the cache) and the next turn builds a DIFFERENT agent
+    regardless.  The entry itself is kept — ``generation`` /
+    ``committed_generation`` / ``profile_home`` are what make the next turn's
+    re-registration cheap and correct.
+
+    Only MEMORY is dropped, never WORK: an uncommitted segment's owner is the
+    handle whose transcript is the only payload that extraction can still be
+    given, so it is kept.  The caller releases only after the fence showed
+    nothing pending, so no such segment should exist; the check below enforces
+    that rather than assuming it, and refuses to clear (loudly) if it does not
+    hold.  Owners of fully committed segments are dead weight — the commit path
+    pops those on success — so they are cleared too.
+
+    Returns True when at least one reference to ``agent`` was dropped.
+    """
+    if not session_id or agent is None:
+        return False
+    with _condition:
+        entry = _sessions.get(session_id)
+        if entry is None:
+            return False
+        committed = entry["committed_generation"]
+        segments = entry["segments"]
+        if any(seg.get("end", 0) > committed and seg.get("agent") is agent for seg in segments):
+            # The fence says this cannot happen; if it does, the reference is
+            # the retry payload and keeps the handle alive on purpose.
+            logger.warning(
+                "session_lifecycle: refusing to forget released agent for %s — an "
+                "uncommitted segment still owns it (generation %d, committed %d)",
+                session_id,
+                entry["generation"],
+                committed,
+            )
+            return False
+        dropped = False
+        if entry["agent"] is agent:
+            entry["agent"] = None
+            dropped = True
+        for seg in segments:
+            if seg.get("end", 0) <= committed and seg.get("agent") is agent:
+                seg["agent"] = None
+                dropped = True
+        if dropped:
+            _condition.notify_all()
+        return dropped
+
+
 def _first_uncommitted_segment(entry: dict) -> dict | None:
     committed = entry["committed_generation"]
     for segment in entry["segments"]:
@@ -241,7 +362,59 @@ def _first_uncommitted_segment(entry: dict) -> dict | None:
     return None
 
 
+def _selected_transcript(owner) -> list | None:
+    """Snapshot the transcript belonging to the segment's OWNER.
+
+    The payload must come from the agent that owns the segment being committed.
+    The caller's cached agent is whoever is in the cache NOW, which is not
+    necessarily the dirty owner — a rebuild leaves the older handle owning its
+    earlier dirty generation — and delivering the replacement's transcript to
+    the older owner commits that generation with the wrong payload.  An owner
+    with no resident transcript yields None (no payload) rather than someone
+    else's messages: a wrong payload is worse than an empty one, because it
+    writes another generation's conversation into this one's memories.
+    """
+    messages = getattr(owner, "_session_messages", None)
+    if not isinstance(messages, list) or not messages:
+        return None
+    return list(messages)
+
+
+def _deliver_commit_messages(agent, messages) -> None:
+    """Deliver an explicit transcript to the agent's commit hook (best effort).
+
+    ``AIAgent.commit_memory_session(messages=None)`` forwards its argument to
+    the memory provider's ``on_session_end``; a caller that omits it hands the
+    provider ``[]`` and batch-extraction providers with empty-input guards skip
+    extraction entirely.  Passing the captured transcript is what makes the
+    boundary commit actually extract instead of silently doing nothing.
+
+    The hook's return value is deliberately ignored (gateway parity: the
+    installed Agent returns None and runs provider I/O through its own
+    swallow-all helper, so success and failure look identical from here).  A
+    hook that cannot accept a transcript raises, which the caller logs and
+    leaves to the next boundary — there is no acknowledgement to wait for.
+    """
+    if messages is None:
+        agent.commit_memory_session()
+        return
+    agent.commit_memory_session(list(messages))
+
+
 def commit_session_memory(session_id: str, agent=None, *, wait: bool = False, timeout: float | None = None) -> bool:
+    """Commit the earliest uncommitted segment for a session (best effort).
+
+    The provider payload is the selected OWNER's retained transcript (see
+    ``_selected_transcript``), delivered instead of an empty list so a
+    batch-extraction provider's empty-input guard cannot skip the work.
+
+    Returns True when the delivery hook was reached for the selected
+    owner/generation and the ledger advanced.  The return value says nothing
+    about whether the provider extracted: nothing here can observe that (see
+    the module docstring).  A delivery that raised, or that the owner scope
+    refused, is not counted — the generation stays pending, and the next
+    boundary (or the shutdown drain) retries it.
+    """
     if not session_id:
         return False
     deadline = time.monotonic() + timeout if timeout is not None else None
@@ -278,20 +451,25 @@ def commit_session_memory(session_id: str, agent=None, *, wait: bool = False, ti
         owner_home = entry.get("profile_home") or ""
         entry["in_flight"] = True
 
+    # The payload belongs to the selected owner/generation, not to whichever
+    # agent happens to be cached now.
+    payload = _selected_transcript(effective_agent)
     try:
-        # #8517: run as the session's owner (boundaries fire from other profiles'
-        # turns and from fresh threads); a commit the Agent refused, or one that
-        # could not be scoped, is NOT counted: the generation stays pending.
-        committed = call_as_session_owner(
+        # #8517: The delivery IS the commit hook, so it runs inside the owner
+        # scope (boundaries fire from other profiles' turns and from fresh
+        # threads, and the Agent silently refuses on_session_end outside the
+        # owner's home).  A commit the Agent refused, or one that could not be
+        # scoped, is NOT counted: the generation stays pending.
+        delivered = call_as_session_owner(
             effective_agent,
-            effective_agent.commit_memory_session,
+            functools.partial(_deliver_commit_messages, effective_agent, payload),
             session_id=session_id,
             owner_home=owner_home,
         )
     except Exception:
         logger.exception("commit_memory_session() failed for session %s", session_id)
-        committed = False
-    if not committed:
+        delivered = False
+    if not delivered:
         with _condition:
             re_entry = _sessions.get(session_id)
             if re_entry is not None:
