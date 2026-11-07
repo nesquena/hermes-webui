@@ -41,6 +41,15 @@ _MODULE = 'api.updates'
 class TestApplyUpdateDiagnostics:
     """New code paths introduced in PR #227."""
 
+    @pytest.fixture(autouse=True)
+    def _mock_clean_preflight(self, monkeypatch):
+        # These tests exercise pull diagnostics; real-Git preflight has its own suite.
+        from api import updates
+        monkeypatch.setattr(updates, '_describe_checkout_sync', lambda *a: {
+            'relationship': 'behind', 'ahead': 0, 'behind': 1,
+            'dirty': False, 'dirty_tracked': False,
+        })
+
     def _apply(self, target, run_git_side_effect):
         """Call _apply_update_inner with _apply_lock bypassed and _run_git mocked."""
         from api import updates
@@ -294,6 +303,10 @@ class TestApplyUpdateDiagnostics:
         # already in progress". Stub the scheduler so no worker escapes; the
         # restart request itself is still asserted below.
         with patch(f'{_MODULE}.REPO_ROOT', tmp_path), \
+             patch(f'{_MODULE}._describe_checkout_sync', return_value={
+                 'relationship': 'behind', 'ahead': 0, 'behind': 1,
+                 'dirty': False, 'dirty_tracked': False,
+             }), \
              patch(f'{_MODULE}._run_git') as mock_run_git, \
              patch(f'{_MODULE}._update_cache', fake_cache), \
              patch(f'{_MODULE}._cache_lock'), \
