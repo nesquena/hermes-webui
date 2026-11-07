@@ -18,7 +18,11 @@ def test_workspace_artifacts_tab_collects_session_files_and_previews_them():
     assert "function renderSessionArtifacts()" in WORKSPACE_JS
     assert "function scheduleRenderSessionArtifacts()" in WORKSPACE_JS
     assert "function openArtifactPath(path)" in WORKSPACE_JS
-    assert "openFile(rel);" in WORKSPACE_JS
+    # The artifact tab previews through openFile(). #8421 scopes that open to the
+    # workspace: /api/file/raw falls back to the session's attachment inbox, so
+    # an unscoped follow-up would serve an upload for a path the workspace does
+    # not have. Other callers of openFile() pass no scope and keep the fallback.
+    assert "openFile(rel,{workspaceOnly:true});" in WORKSPACE_JS
     assert "Prose mentions" in WORKSPACE_JS
     assert "/(?:created|wrote|updated|edited|saved|modified)" not in WORKSPACE_JS
     assert "panel.dataset.activeTab = _workspacePanelActiveTab" in WORKSPACE_JS

@@ -129,7 +129,7 @@ def test_file_raw_inline_responses_use_sandbox_csp():
     content = _get_routes_content()
     idx = content.find("def _handle_file_raw")
     assert idx != -1, "_handle_file_raw not found"
-    block = content[idx:idx + 2200]
+    block = content[idx:idx + 2400]
     assert "sandbox_csp" in block
     assert "inline_preview" in block
     assert "disposition == \"inline\"" in block
