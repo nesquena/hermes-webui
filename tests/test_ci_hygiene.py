@@ -7,6 +7,8 @@ import subprocess
 import textwrap
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 
 def _make_executable(path):
@@ -20,6 +22,86 @@ def test_github_actions_quotes_pyyaml_version_specifier():
 
     assert '"pyyaml>=6.0"' in text or "'pyyaml>=6.0'" in text
     assert "pip install pyyaml>=6.0" not in text
+
+
+def test_pr_ci_keeps_full_suite_and_fast_cross_version_compatibility_gate():
+    """PR CI should cut duplicate runner time without losing the full-suite gate.
+
+    Parses the workflow structure (not substring checks) and locks:
+      * PR-only matrix reduction with a full 3.11/3.12/3.13 fallback for every
+        other (present or future) event — the reduced 3.12 set must be selected
+        ONLY for `pull_request`, never via a `!= 'push'` negation;
+      * all five PR shards;
+      * both compatibility jobs (3.11 and 3.13);
+      * docs-only fail-safe integration (`needs: changes`, `always()`, and the
+        per-step `docs_only != 'true'` gates on every job that performs work).
+    """
+    workflow = ROOT / ".github" / "workflows" / "tests.yml"
+    text = workflow.read_text(encoding="utf-8")
+
+    # PyYAML implements YAML 1.1, which parses the `on:` trigger key as bool True.
+    data = yaml.safe_load(text)
+    triggers = data.get("on") or data.get(True)
+    assert triggers is not None, "workflow must declare an `on:` trigger block"
+    assert set(triggers) == {"pull_request", "push"}
+
+    jobs = data["jobs"]
+
+    # Docs-only fail-safe detector job (added to master after this PR's base).
+    changes = jobs.get("changes")
+    assert changes is not None, "docs-only fail-safe `changes` job must exist"
+    assert changes["outputs"]["docs_only"] == "${{ steps.detect.outputs.docs_only }}"
+
+    # --- `test` job: PR-only reduction + full-event fallback + docs-only gating ---
+    test_job = jobs["test"]
+    assert test_job["needs"] == "changes", "test job must consume the docs detector"
+    assert "always()" in test_job["if"], "test job must run even if the detector fails"
+    matrix = test_job["strategy"]["matrix"]
+
+    expr = matrix["python-version"]
+    # Positive, explicit selection: 3.12 ONLY for pull_request…
+    assert "github.event_name == 'pull_request'" in expr
+    assert '["3.12"]' in expr
+    # …and the FULL matrix for every other event (including future event types).
+    assert '["3.11", "3.12", "3.13"]' in expr
+    # The reduction must never be expressed as "everything except push".
+    assert "!= 'push'" not in expr
+    assert "!= \"push\"" not in expr
+
+    # All five PR shards (pytest-shard is 0-indexed: 0..4).
+    assert matrix["shard"] == [0, 1, 2, 3, 4]
+    test_step_names = {s.get("name") for s in test_job["steps"]}
+    assert "Docs-only short-circuit" in test_step_names
+    assert "Run tests (shard ${{ matrix.shard }} of 5)" in test_step_names
+
+    # --- `compat` job: both cross-version jobs + docs-only fail-safe integration ---
+    compat_job = jobs["compat"]
+    assert compat_job["needs"] == "changes", "compat job must consume the docs detector"
+    assert "always()" in compat_job["if"], "compat job must run even if the detector fails"
+    # PR-only job: on pushes the full 3-version `test` matrix already covers it.
+    assert "github.event_name == 'pull_request'" in compat_job["if"]
+    compat_versions = compat_job["strategy"]["matrix"]["python-version"]
+    assert compat_versions == ["3.11", "3.13"], f"compat must cover 3.11+3.13, got {compat_versions}"
+
+    compat_steps = {s.get("name"): s for s in compat_job["steps"]}
+    assert "Docs-only short-circuit" in compat_steps, "compat must short-circuit docs-only PRs"
+    assert "Byte-compile whole tree (version-specific syntax gate)" in compat_steps
+    assert "Collect full test suite (imports every test module, no execution)" in compat_steps
+    # Every real-work step in compat must be gated behind the docs detector…
+    for name, step in compat_steps.items():
+        if name == "Docs-only short-circuit":
+            assert step.get("if") == "needs.changes.outputs.docs_only == 'true'"
+        elif "run" in step or "uses" in step:
+            assert step.get("if") == "needs.changes.outputs.docs_only != 'true'", (
+                f"compat step {name!r} must honor the docs-only fail-safe"
+            )
+    # …and compat must never install Playwright browsers (collection only).
+    assert "playwright install" not in text.split("  compat:", 1)[1]
+
+    # --- `lint` job: same docs-only contract (pre-existing, preserved on rebase) ---
+    lint_job = jobs["lint"]
+    assert lint_job["needs"] == "changes"
+    assert "always()" in lint_job["if"]
 
 
 def test_pytest_integration_marker_is_registered():
