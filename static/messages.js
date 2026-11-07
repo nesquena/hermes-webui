@@ -479,8 +479,408 @@ function _extractInlineThinkingFromContent(rawContent, existingReasoning, option
   }
   if(cursor<text.length) visible.push(text.slice(cursor));
   const content=leadingRemoved?visible.join('').replace(/^\s+/,''):visible.join('');
+  if(typeof options?.onExtracted==='function') options.onExtracted(extracted);
   const reasoning=_mergeInlineThinkingReasoning(existingReasoning,extracted);
   return {reasoning,content,thinkingText:reasoning,displayText:content,inThinking};
+}
+
+function _createIncrementalSemanticState(extractedParts, durable=false, xmlOnly=false){
+  let content='',body='',bodySpace='';
+  let openRaw='',openLeading=false;
+  let pending='',xmlPending='',xml=false,thinking=null;
+
+  let xmlKeywordTail='',xmlKeywordSeen=false,xmlHasText=false;
+  let fence='',backtick=false,lineSpaces=0,lineStart=true,indented=false;
+  let seenNonspace=false,leadingRemoved=false,uncertain=false,leadingIndented=false;
+  // Two bounded views: durable all-run reasoning and current live reasoning.
+  // A view consumes each completed block once; alternating readers cannot
+  // invalidate one another and force a full-history merge on every prose tick.
+  const views=[];
+  const parts=Array.from(new Set((extractedParts||[]).filter(Boolean)));
+  const completed=new Set(parts),partLengths=new Set(parts.map(part=>part.length));
+  // Work counters use UTF-16 code units, the JavaScript parser's input unit.
+  const stats={incrementalBytes:0,mergeBytes:0,steps:0,maxPending:0};
+  let prefixTrimmed=0;
+  function trimContentStart(){
+    const trimmed=content.replace(/^\s+/,'');
+    prefixTrimmed+=content.length-trimmed.length;content=trimmed;
+  }
+  function appendReason(text){
+    if(durable)openRaw+=text;
+    // Keep trimming local to new text, not the growing reasoning accumulator.
+    if(!body) text=text.replace(/^\s+/,'');
+    const tail=text.match(/\s+$/);
+    const end=tail?tail[0]:'';
+    const core=end?text.slice(0,-end.length):text;
+    if(core){body+=bodySpace+core;bodySpace=end;}else bodySpace+=end;
+  }
+  function closeThinking(){
+    if(body&&!completed.has(body)){
+      completed.add(body);partLengths.add(body.length);parts.push(body);
+    }
+    body='';bodySpace='';thinking=null;openRaw='';
+    // A closing delimiter occupies the current source line. Whitespace after
+    // it is not leading indentation, even when the hidden body contained '\n'.
+    lineStart=false;lineSpaces=0;indented=false;
+  }
+  function visible(text){
+    if(leadingRemoved&&!content) text=text.replace(/^\s+/,'');
+    content+=text;
+  }
+  function thinkWrite(text){
+    if(xmlOnly){content+=text;stats.steps+=text.length;return;}
+    text=pending+text;pending='';
+    let i=0,plain='';
+    const flush=()=>{if(plain){if(thinking) appendReason(plain);else visible(plain);plain='';}};
+    while(i<text.length){
+      stats.steps++;
+      const rest=text.slice(i,i+24),ch=text[i];
+      if(thinking){
+        if(text.startsWith(thinking.close,i)){
+          flush();i+=thinking.close.length;closeThinking();seenNonspace=true;continue;
+        }
+        if(ch==='<'&&thinking.close.startsWith(rest)&&rest.length<thinking.close.length){
+          flush();pending=text.slice(i);break;
+        }
+        plain+=ch;i++;continue;
+      }
+      // A possible fence marker at line start needs at most two bytes lookahead.
+      const atFence=lineStart&&lineSpaces<=3;
+      if(atFence&&(ch==='`'||ch==='~')){
+        const marker=ch.repeat(3);
+        if(rest.length<3&&marker.startsWith(rest)){flush();pending=text.slice(i);break;}
+        if(text.startsWith(marker,i)){
+          fence=fence===marker?'':(fence||marker);
+          plain+=marker;i+=3;lineStart=false;seenNonspace=true;continue;
+        }
+      }
+      if(!fence&&ch==='`') backtick=!backtick;
+      if(!fence&&!backtick&&!indented&&ch==='<'){
+        const pair=_thinkPairs.find(p=>text.startsWith(p.open,i));
+        if(pair){
+          flush();
+          if(!seenNonspace){leadingRemoved=true;trimContentStart();}
+          openLeading=!seenNonspace;openRaw=pair.open;
+          thinking=pair;i+=pair.open.length;continue;
+        }
+        if(_thinkPairs.some(p=>rest.length<p.open.length&&p.open.startsWith(rest))){
+          flush();pending=text.slice(i);break;
+        }
+      }
+      plain+=ch;
+      if(ch==='\n'){lineStart=true;lineSpaces=0;indented=false;}
+      else if(lineStart&&ch===' '){lineSpaces++;if(lineSpaces>=4)indented=true;}
+      else if(lineStart&&ch==='\t'){indented=lineSpaces===0||lineSpaces>=4;lineStart=false;}
+      else lineStart=false;
+      if(/\S/.test(ch)){
+        // Record the first visible line's indentation before a later XML gate
+        // can remove it, including when arbitrary blank lines precede it.
+        if(!seenNonspace)leadingIndented=indented;
+        seenNonspace=true;
+      }
+      i++;
+    }
+    flush();
+  }
+  let rawText='',replacement=null;
+  let xmlPhase='',xmlWordPos=0,xmlClosing=false,xmlPrefixEnd=0,xmlTrimmed='';
+  function xmlPreview(trimmed=false){
+    if(xml||(!xmlClosing&&xmlPhase==='word'&&xmlWordPos===14))return '';
+    const start=xmlClosing?0:xmlPrefixEnd;
+    if(trimmed)return xmlTrimmed;
+    return start===0?xmlPending:start===xmlPending.length?'':xmlPending.slice(start);
+  }
+  function writeFiltered(delta){
+    let plain='';
+    const flush=()=>{if(plain){
+      if(xmlKeywordSeen&&!xmlHasText)plain=plain.replace(/^\s+/,'');
+      if(/\S/.test(plain))xmlHasText=true;
+      thinkWrite(plain);plain='';
+    }};
+    const begin=()=>{xmlPending='<';xmlPhase='head';xmlClosing=false;xmlPrefixEnd=0;xmlTrimmed='<';};
+    const literal=()=>{
+      if(!xml)plain+=xmlClosing?xmlPending:xmlPending.slice(xmlPrefixEnd);
+      xmlPending='';xmlPhase='';xmlTrimmed='';
+    };
+    for(const ch of delta){
+      stats.steps++;
+      if(xml)continue; // Pass 2 suppresses the entire orphan tail permanently.
+      if(!xmlPending){
+        if(ch==='<'){flush();begin();}
+        else if(!xml)plain+=ch;
+        continue;
+      }
+      if(ch==='<'){
+        literal();flush();begin();continue;
+      }
+      xmlPending+=ch;
+      if(/\S/.test(ch))xmlTrimmed=xmlClosing?xmlPending:xmlPending.slice(xmlPrefixEnd);
+      stats.maxPending=Math.max(stats.maxPending,xmlPending.length);
+      if(xmlPhase==='head'){
+        if(ch==='/'){xmlClosing=true;xmlPhase='prefix';continue;}
+        xmlPhase='prefix';
+      }
+      if(xmlPhase==='prefix'){
+        if(ch.toLowerCase()==='f'){xmlPhase='word';xmlWordPos=1;continue;}
+        if(/\s/.test(ch)){xmlPhase='dsml-start';continue;}
+        if(ch==='｜'){xmlPhase='dsml-word';xmlWordPos=0;continue;}
+        literal();continue;
+      }
+      if(xmlPhase==='dsml-start'){
+        if(/\s/.test(ch))continue;
+        if(ch==='｜'){xmlPhase='dsml-word';xmlWordPos=0;continue;}
+        literal();continue;
+      }
+      if(xmlPhase==='dsml-word'){
+        if(xmlWordPos===0&&/\s/.test(ch))continue;
+        if(ch.toLowerCase()==='dsml'[xmlWordPos]){
+          if(++xmlWordPos===4)xmlPhase='separator';
+          continue;
+        }
+        literal();continue;
+      }
+      if(xmlPhase==='separator'){
+        if(/\s/.test(ch))continue;
+        if(ch==='｜'||ch==='|'){
+          xmlPhase='tool-start';xmlPrefixEnd=xmlPending.length;
+          if(!xmlClosing)xmlTrimmed='';
+          continue;
+        }
+        literal();continue;
+      }
+      if(xmlPhase==='tool-start'){
+        if(/\s/.test(ch)){xmlPrefixEnd=xmlPending.length;continue;}
+        if(ch.toLowerCase()==='f'){xmlPhase='word';xmlWordPos=1;continue;}
+        literal();continue;
+      }
+      if(xmlPhase==='word'){
+        if(ch.toLowerCase()!=='function_calls>'[xmlWordPos]){literal();continue;}
+        if(++xmlWordPos===15){
+          flush();
+          if(xmlClosing){xmlHasText=true;thinkWrite(xmlPending);}
+          else xml=true;
+          xmlPending='';xmlPhase='';xmlTrimmed='';
+        }
+      }
+    }
+    flush();
+    stats.maxPending=Math.max(stats.maxPending,pending.length);
+  }
+  // Pass 1 sees RAW input only. Its checkpoint is scalar lexer/thinking state:
+  // a valid tool-tag prefix cannot complete a thinking block. Completed parts
+  // and channel merge indexes therefore need neither cloning nor rollback.
+  let block=false,rawPhase='',rawWord=0,rawClosing=false,checkpoint=null;
+  function saveXmlState(){
+    return {content,body,bodySpace,openRaw,openLeading,pending,xmlPending,xml,
+      xmlHasText,fence,backtick,lineSpaces,lineStart,indented,seenNonspace,
+      leadingRemoved,leadingIndented,prefixTrimmed,xmlPhase,xmlWordPos,
+      xmlClosing,xmlPrefixEnd,xmlTrimmed};
+  }
+  function restoreXmlState(s){
+    ({content,body,bodySpace,openRaw,openLeading,pending,xmlPending,xml,
+      xmlHasText,fence,backtick,lineSpaces,lineStart,indented,seenNonspace,
+      leadingRemoved,leadingIndented,prefixTrimmed,xmlPhase,xmlWordPos,
+      xmlClosing,xmlPrefixEnd,xmlTrimmed}=s);
+    if(xmlKeywordSeen){
+      trimContentStart();leadingRemoved=true;
+      if(!xmlHasText){lineStart=true;lineSpaces=0;indented=false;}
+    }
+    views.forEach(view=>{view.body=null;});
+  }
+  function rawTag(ch){
+    if(rawPhase==='head'){
+      if(ch==='/'){rawClosing=true;rawPhase='prefix';return 0;}
+      rawPhase='prefix';
+    }
+    if(rawPhase==='prefix'){
+      if(ch.toLowerCase()==='f'){rawPhase='word';rawWord=1;return 0;}
+      if(/\s/.test(ch)){rawPhase='dsml-start';return 0;}
+      if(ch==='｜'){rawPhase='dsml-word';rawWord=0;return 0;}
+      return -1;
+    }
+    if(rawPhase==='dsml-start'){
+      if(/\s/.test(ch))return 0;
+      if(ch==='｜'){rawPhase='dsml-word';rawWord=0;return 0;}
+      return -1;
+    }
+    if(rawPhase==='dsml-word'){
+      if(rawWord===0&&/\s/.test(ch))return 0;
+      if(ch.toLowerCase()!=='dsml'[rawWord])return -1;
+      if(++rawWord===4)rawPhase='separator';
+      return 0;
+    }
+    if(rawPhase==='separator'){
+      if(/\s/.test(ch))return 0;
+      if(ch==='｜'||ch==='|'){rawPhase='tool-start';return 0;}
+      return -1;
+    }
+    if(rawPhase==='tool-start'){
+      if(/\s/.test(ch))return 0;
+      if(ch.toLowerCase()==='f'){rawPhase='word';rawWord=1;return 0;}
+      return -1;
+    }
+    if(ch.toLowerCase()!=='function_calls>'[rawWord])return -1;
+    return ++rawWord===15?1:0;
+  }
+  function write(delta){
+    delta=String(delta||'');stats.incrementalBytes+=delta.length;
+    if(durable){thinkWrite(delta);return;}
+    if(replacement){replacement.write(delta);return;}
+    if(!xmlKeywordSeen)rawText+=delta;
+    let rebuild=false;
+    for(const ch of delta){
+      stats.steps++;
+      if(!xmlKeywordSeen){
+        xmlKeywordTail=(xmlKeywordTail+ch.toLowerCase()).slice(-14);
+        if(xmlKeywordTail.endsWith('function_calls')||xmlKeywordTail.endsWith('dsml')){
+          xmlKeywordSeen=true;xmlKeywordTail='';rebuild=leadingIndented;
+          trimContentStart();leadingRemoved=true;
+          if(!xmlHasText){lineStart=true;lineSpaces=0;indented=false;}
+        }
+      }
+      if(ch==='<'){
+        if(!block)checkpoint=saveXmlState();
+        rawPhase='head';rawClosing=false;
+        if(!block)writeFiltered(ch);
+        continue;
+      }
+      if(!rawPhase){if(!block)writeFiltered(ch);continue;}
+      const matched=rawTag(ch);
+      if(!block)writeFiltered(ch);
+      if(matched===0)continue;
+      rawPhase='';
+      if(matched===1&&block&&rawClosing){
+        block=false;restoreXmlState(checkpoint);checkpoint=null;
+      }else if(matched===1&&!block&&!rawClosing){
+        block=true; // Non-nesting, first complete close wins, just like the regex.
+      }else if(!block)checkpoint=null;
+    }
+    if(rebuild){
+      replacement=_createIncrementalSemanticState();
+      replacement.write(rawText.replace(/^\s+/,''));
+    }
+    if(xmlKeywordSeen)rawText='';
+  }
+  function appendTrimmed(view,key,spaceKey,text){
+    if(!view[key])text=text.replace(/^\s+/,'');
+    const tail=text.match(/\s+$/),space=tail?tail[0]:'';
+    const core=space?text.slice(0,-space.length):text;
+    if(core){view[key]+=view[spaceKey]+core;view[spaceKey]=space;}
+    else view[spaceKey]+=space;
+  }
+  function partMatch(text){
+    // Hash only at a possible completed-block length, never every growing tail.
+    return partLengths.has(text.length)&&completed.has(text)?text:null;
+  }
+  function appendBase(view,delta){
+    stats.mergeBytes+=delta.length;
+    const oldTail=partMatch(view.tail),oldWhole=partMatch(view.trimmed);
+    appendTrimmed(view,'trimmed','space',delta);
+    // Paragraphs are indexed once on completion. The growing paragraph remains
+    // an unhashed tail; a delayed newline recognizes split "\n\n" separators.
+    for(const ch of delta){
+      if(ch==='\n'&&view.newline){
+        const tail=view.tail;
+        if(tail){
+          view.paragraphs.add(tail);view.lengths.add(tail.length);
+          if(partMatch(tail))view.dirty=true;
+        }
+        view.tail='';view.tailSpace='';view.newline=false;
+      }else{
+        if(view.newline)appendTrimmed(view,'tail','tailSpace','\n');
+        view.newline=ch==='\n';
+        if(!view.newline)appendTrimmed(view,'tail','tailSpace',ch);
+      }
+    }
+    if(oldTail!==partMatch(view.tail)||oldWhole!==partMatch(view.trimmed))view.dirty=true;
+    view.body=null;
+  }
+  function reasoningView(base){
+    let view=views.find(v=>v.base===base);
+    if(!view){
+      view={base,trimmed:'',space:'',tail:'',tailSpace:'',newline:false,
+        paragraphs:new Set(),lengths:new Set(),suffix:'',suffixParagraphs:new Set(),
+        suffixLengths:new Set(),cursor:0,body:null,duplicate:false,dirty:true};
+      appendBase(view,base);
+      if(views.length===2)views.shift();
+      views.push(view);
+    }
+    return view;
+  }
+  function appendReasoning(delta,updates){
+    if(replacement){replacement.appendReasoning(delta,updates);return;}
+    // The producer supplies before/after identities and the authoritative delta.
+    // Never discover growth by comparing/scanning the full accumulated prefix.
+    const changed=updates.map(([before,after])=>[reasoningView(before),after]);
+    const seen=new Set();
+    for(const [view,after] of changed){
+      if(seen.has(view))continue;
+      seen.add(view);appendBase(view,delta);view.base=after;
+    }
+  }
+  function snapshot(existingReasoning=''){
+    if(replacement)return replacement.snapshot(existingReasoning);
+    if(xmlOnly){
+      const text=content+xmlPreview();
+      return {content:text,displayText:text,reasoning:'',thinkingText:'',inThinking:false};
+    }
+    const view=reasoningView(String(existingReasoning||''));
+    // Only a semantic deduplication transition invalidates the inline suffix.
+    // Ordinary channel growth prepends the new base without replaying blocks.
+    if(view.dirty){
+      view.suffix='';view.suffixParagraphs.clear();view.suffixLengths.clear();
+      view.cursor=0;view.body=null;view.dirty=false;
+    }
+    const mergedText=()=>view.trimmed+(view.suffix?(view.trimmed?'\n\n':'')+view.suffix:'');
+    const isDuplicate=(part)=>{
+      if(view.tail.length===part.length&&view.tail===part)return true;
+      if(view.lengths.has(part.length)&&view.paragraphs.has(part))return true;
+      if(view.suffixLengths.has(part.length)&&view.suffixParagraphs.has(part))return true;
+      const length=view.trimmed.length+view.suffix.length+(view.trimmed&&view.suffix?2:0);
+      return length===part.length&&mergedText()===part;
+    };
+    while(view.cursor<parts.length){
+      const part=parts[view.cursor++];stats.mergeBytes+=part.length;
+      if(!isDuplicate(part)){
+        view.suffix+=(view.suffix?'\n\n':'')+part;
+        for(const paragraph of part.split('\n\n')){
+          const trimmed=paragraph.trim();
+          view.suffixParagraphs.add(trimmed);view.suffixLengths.add(trimmed.length);
+        }
+      }
+      view.body=null;
+    }
+    const tail=pending+(durable?'':xmlPreview());
+    const xmlTail=durable?'':xmlPreview(true);
+    const trimmedTail=xmlTail?pending+xmlTail:pending.replace(/\s+$/,'');
+    const activeBody=durable&&thinking&&!openLeading?'':body+(thinking&&trimmedTail?bodySpace+trimmedTail:'');
+    if(view.body!==activeBody){view.body=activeBody;view.duplicate=!!activeBody&&isDuplicate(activeBody);}
+    const base=mergedText();
+    const merged=base+(activeBody&&!view.duplicate?(base?'\n\n':'')+activeBody:'');
+    const previewBacktick=/^`+$/.test(pending)?(pending.length%2?!backtick:backtick):backtick;
+    let partialLength=0;
+    if(!durable&&!thinking&&!fence&&!previewBacktick&&!indented){
+      for(const p of _thinkPairs)for(let n=1;n<p.open.length&&n<=tail.length;n++){
+        if(p.open.startsWith(tail.slice(-n)))partialLength=Math.max(partialLength,n);
+      }
+    }
+    const partial=partialLength>0;
+    const visibleTail=partial?tail.slice(0,-partialLength):tail;
+    const visibleContent=partial&&!seenNonspace&&!visibleTail?'':content+(thinking?(durable&&!openLeading?openRaw+pending:''):visibleTail);
+    return {content:visibleContent,displayText:visibleContent,reasoning:merged,thinkingText:merged,
+      inThinking:durable?!!thinking&&openLeading:!!thinking||partial,uncertain};
+  }
+  return {write,snapshot,appendReasoning,
+    get stats(){
+      if(!replacement)return stats;
+      const child=replacement.stats;
+      return {incrementalBytes:stats.incrementalBytes+child.incrementalBytes,
+        mergeBytes:stats.mergeBytes+child.mergeBytes,steps:stats.steps+child.steps,
+        maxPending:Math.max(stats.maxPending,child.maxPending)};
+    },
+    rebased:()=>!!replacement,prefixTrimmed:()=>prefixTrimmed,
+    hasPending:()=>replacement?replacement.hasPending():!!pending||!!xmlPending,
+    uncertain:()=>uncertain};
 }
 
 if(typeof window!=='undefined'){
@@ -2659,9 +3059,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         : _fullInflightAssistant))
     : '';
   const _lastLiveReasoning = reconnecting
-    ? (_liveInflightAssistant&&_liveInflightAssistant.reasoning)
-      || (INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastReasoningText)
-      || ''
+    ? (typeof INFLIGHT[activeSid].lastReasoningText==='string'
+      ? INFLIGHT[activeSid].lastReasoningText
+      : ((_liveInflightAssistant&&_liveInflightAssistant.reasoning)||''))
     : '';
   assistantText = _lastLiveAssistant ? _lastLiveAssistant : '';
   reasoningText=_lastLiveReasoning ? _lastLiveReasoning : '';
@@ -3000,7 +3400,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const ts=Date.now()/1000;
     // Split inline <think> blocks into m.reasoning so the persisted inflight
     // state stays compact and the thinking card has a proper source field.
-    const split=_splitThinkFromContent(assistantText, reasoningText);
+    const split=_durableSemanticSnapshot();
     if(assistantIdx>=0){
       inflight.messages[assistantIdx].content=split.content;
       inflight.messages[assistantIdx].reasoning=split.reasoning||undefined;
@@ -3211,6 +3611,29 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     })
     : null);
   let _anchorShadowWarned=false;
+  let _anchorProjection=null;
+  let _anchorProjectionClosed=false;
+  function _anchorProjectionOwnerReplaced(){
+    const live=LIVE_STREAMS[activeSid];
+    const registered=_anchorRegistryMap&&_anchorRegistryMap.get(streamId);
+    // Transport closure releases projection state, not the registry's right to
+    // record failed recovery. Only an actual successor revokes that right.
+    return !!((live&&live.projectActivityScene!==_projectOwnedAnchorActivityScene)||
+      (registered&&registered!==_anchorRegistry));
+  }
+  function _releaseAnchorProjection(projector=_anchorProjection){
+    if(projector) projector.dispose();
+    if(_anchorProjection===projector) _anchorProjection=null;
+  }
+  function _projectOwnedAnchorActivityScene(options){
+    const live=LIVE_STREAMS[activeSid];
+    if(_anchorProjection&&!_anchorProjectionClosed&&live&&
+      live.projectActivityScene===_projectOwnedAnchorActivityScene&&
+      _anchorRegistryMap&&_anchorRegistryMap.get(streamId)===_anchorRegistry){
+      return _anchorProjection.project(options);
+    }
+    return _anchorApi.projectAssistantTurnAnchorActivityScene(_anchorRegistry,options);
+  }
   let _anchorReasoningFlushed=false;
   let _anchorLocalSeq=0;
   if(_anchorRegistryMap&&_anchorRegistry) _anchorRegistryMap.set(streamId,_anchorRegistry);
@@ -3229,6 +3652,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // Applying an event and painting it are separate outcomes. Reasoning uses the
   // optional holder to decide whether a temporary visible fallback is needed.
   function _applyToAnchor(sourceEventType, rawEventData, sseEvent, renderOutcome, options={}){
+    if(_anchorProjectionClosed&&_anchorProjectionOwnerReplaced()) return null;
     if(sourceEventType!=='reasoning') _flushPendingReasoningRender();
     if(renderOutcome&&typeof renderOutcome==='object') renderOutcome.rendered=false;
     if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.applyAssistantTurnAnchorSourceEvent!=='function') return null;
@@ -3249,11 +3673,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     };
     if(eventId) sourceEvent.event_id=eventId;
     try{
+      const previousLength=_anchorRegistry.anchor.activity_events.length;
       const result=_anchorApi.applyAssistantTurnAnchorSourceEvent(
         _anchorRegistry,
         sourceEvent,
         {session_id:activeSid,stream_id:streamId}
       );
+      if(_anchorProjection&&result.applied&&result.normalized.classification==='activity'){
+        _anchorProjection.append(previousLength);
+      }
       const rendered=options&&options.render===false?false:_renderAnchorLiveScene();
       if(renderOutcome&&typeof renderOutcome==='object') renderOutcome.rendered=rendered;
       return result;
@@ -3323,6 +3751,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return !!(result&&(result.applied||result.reason==='duplicate'));
   }
   function _replaceAnchorActivityEventByLocalId(localId, sourceEventType, patch){
+    if(_anchorProjectionClosed&&_anchorProjectionOwnerReplaced()) return null;
     const events=_anchorActivityEvents();
     if(!events||!localId) return null;
     for(let i=events.length-1;i>=0;i--){
@@ -3338,6 +3767,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         },
       };
       events[i]=next;
+      if(_anchorProjection) _anchorProjection.replace(i,event,next);
       return next;
     }
     return null;
@@ -3393,7 +3823,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _projectLiveAnchorActivityScene(){
     if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.projectAssistantTurnAnchorActivityScene!=='function') return null;
     try{
-      return _anchorApi.projectAssistantTurnAnchorActivityScene(_anchorRegistry,{mode:_anchorSceneActiveMode()});
+      return _projectOwnedAnchorActivityScene({mode:_anchorSceneActiveMode()});
     }catch(_){
       return null;
     }
@@ -4651,6 +5081,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   window.__anchorProseIncrementalNode=_anchorProseIncrementalNode;
   function _clearAnchorProseIncrementalNode(){
+    _releaseAnchorProjection();
     if(typeof window!=='undefined'&&window.__anchorProseIncrementalNode===_anchorProseIncrementalNode) window.__anchorProseIncrementalNode=null;
     // Clear the per-parser MEDIA tail for each cached smd parser.
     // _anchorProseSmdCache is a Map<key, {parser, ...}>; we can't
@@ -4740,6 +5171,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         });
       }else{
         events.splice(i,1);
+        if(_anchorProjection) _anchorProjection.invalidate();
       }
       _renderAnchorLiveScene();
       return true;
@@ -5013,10 +5445,72 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return s.replace(/^\s+/, '');
   }
   function _streamDisplay(){
-    return _extractInlineThinkingFromContent(_stripXmlToolCalls(assistantText), liveReasoningText, {streaming:true}).content;
+    return _semanticSnapshot().content;
+  }
+  let _semanticState=_createIncrementalSemanticState();
+  let _durableSemanticState=_createIncrementalSemanticState(undefined,true);
+  let _segmentSemanticState=null;
+  let _semanticCursor=0,_semanticRaw='';
+  let _semanticFallback=null,_semanticFallbackCursor=-1;
+  const _semanticMetrics={fullParses:0,fullBytes:0,resyncReasons:{}};
+  function _consumeSemanticProse(delta){
+    if(!_semanticState)return;
+    if(assistantText.length<_semanticCursor){_resyncSemanticProse('rewind');return;}
+    if(delta===undefined&&_semanticCursor&&assistantText!==_semanticRaw){_resyncSemanticProse('discontinuity');return;}
+    if(assistantText.length===_semanticCursor)return;
+    if(!_semanticState.uncertain())_semanticFallback=null;
+    const appended=delta===undefined?assistantText.slice(_semanticCursor):delta;
+    _semanticState.write(appended);
+    _durableSemanticState.write(appended);
+    if(_segmentSemanticState)_segmentSemanticState.write(appended);
+    _semanticCursor=assistantText.length;_semanticRaw=assistantText;
+  }
+  function _resyncSemanticProse(reason){
+    _semanticMetrics.resyncReasons[reason]=(_semanticMetrics.resyncReasons[reason]||0)+1;
+    _semanticFallback=_parseStreamStateBatch();_semanticFallbackCursor=assistantText.length;
+    _semanticState=_createIncrementalSemanticState();
+    _semanticState.write(assistantText);
+    _durableSemanticState=_createIncrementalSemanticState(undefined,true);
+    _durableSemanticState.write(assistantText);
+    _semanticCursor=assistantText.length;_semanticRaw=assistantText;
+    _segmentSemanticState=segmentStart?_createIncrementalSemanticState(undefined,false,true):null;
+    if(_segmentSemanticState)_segmentSemanticState.write(assistantText.slice(segmentStart));
+  }
+  function _semanticSnapshot(existingReasoning=liveReasoningText){
+    if(!_semanticState)return _semanticFallback||{content:'',displayText:'',reasoning:'',thinkingText:'',inThinking:false};
+    const parsed=_semanticState.snapshot(existingReasoning);
+    if(!_semanticFallback||!(_semanticState.uncertain()||_semanticState.hasPending()))return parsed;
+    const fallback=_semanticFallback;
+    const state=fallback.reasoningState||(fallback.reasoningState=_createIncrementalSemanticState(fallback.extractedParts));
+    const reasoning=state.snapshot(existingReasoning).reasoning;
+    return {content:fallback.content,displayText:fallback.displayText,
+      reasoning,thinkingText:reasoning,inThinking:fallback.inThinking};
+  }
+  function _durableSemanticSnapshot(){
+    return _durableSemanticState.snapshot(reasoningText);
+  }
+  function _parseCurrentSegmentDisplayText(){
+    // Preserve upstream's raw segment boundary and XML-only post-tool grammar.
+    return _segmentSemanticState?_segmentSemanticState.snapshot().content:_semanticSnapshot().content;
+  }
+  function _flushSemanticBoundary(terminal=false){
+    if(_semanticState&&(_semanticState.uncertain()||(terminal&&_semanticState.hasPending()))&&
+        (!_semanticFallback||_semanticFallbackCursor!==assistantText.length)){
+      _resyncSemanticProse('boundary');
+      syncInflightAssistantMessage();
+    }
+  }
+  _consumeSemanticProse();
+  if(segmentStart) _resyncSemanticProse('recovery');
+  function _parseStreamStateBatch(){
+    _semanticMetrics.fullParses++;_semanticMetrics.fullBytes+=assistantText.length;
+    let extractedParts=[];
+    const parsed=_extractInlineThinkingFromContent(_stripXmlToolCalls(assistantText), liveReasoningText,
+      {streaming:true,onExtracted:parts=>{extractedParts=parts;}});
+    return {...parsed,extractedParts};
   }
   function _parseStreamState(){
-    return _extractInlineThinkingFromContent(_stripXmlToolCalls(assistantText), liveReasoningText, {streaming:true});
+    return _semanticSnapshot();
   }
   function _renderLiveThinking(parsed){
     if(_reasoningRenderPending){_flushPendingReasoningRender();return;}
@@ -5938,7 +6432,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const parsed=_parseStreamState();
     return segmentStart===0
       ? parsed.displayText
-      : _stripXmlToolCalls(assistantText.slice(segmentStart));
+      : _parseCurrentSegmentDisplayText();
   }
   function _drainStreamFadeBeforeDone(onDone){
     const drainStartedAt=performance.now();
@@ -5974,6 +6468,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     step();
   }
   function _flushPendingSegmentRender(options={}){
+    _flushSemanticBoundary();
     _flushPendingReasoningRender();
     const force=!!(options&&options.force);
     const skipAnchorProcessProse=!!(options&&options.skipAnchorProcessProse);
@@ -5985,7 +6480,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(_renderPending) _cancelAnimationFramePendingStreamRender();
     const displayText=segmentStart===0
       ? _parseStreamState().displayText
-      : _stripXmlToolCalls(assistantText.slice(segmentStart));
+      : _parseCurrentSegmentDisplayText();
     if(!force&&_shouldUseLiveProseFade()){
       // Transport recovery keeps this segment open. Paint through the fade
       // renderer so its playout cursor and DOM stay consistent; the plain smd
@@ -6022,6 +6517,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     assistantRow=null;
     assistantBody=null;
     segmentStart=assistantText.length;
+    _segmentSemanticState=_createIncrementalSemanticState(undefined,false,true);
     _freshSegment=true;
     _smdEndParser();
     _resetStreamFadeState();
@@ -6350,7 +6846,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _renderLiveThinking(parsed);
       const displayText = segmentStart===0
         ? parsed.displayText                          // first segment: uses think-tag stripping
-        : _stripXmlToolCalls(assistantText.slice(segmentStart));
+        : _parseCurrentSegmentDisplayText();
       let anchorProcessText=displayText;
       if(assistantBody){
         if(_shouldUseLiveProseFade()){
@@ -6376,7 +6872,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             // parsed.displayText and users see unformatted markdown until done.
             const fallbackText = segmentStart===0
               ? parsed.displayText
-              : _stripXmlToolCalls(assistantText.slice(segmentStart));
+              : _parseCurrentSegmentDisplayText();
             assistantBody.innerHTML = renderMd ? renderMd(fallbackText) : esc(fallbackText);
           }
         }
@@ -6486,10 +6982,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof existingLive.cancelIdleRecovery==='function') existingLive.cancelIdleRecovery();
       try{if(existingLive.source.readyState!==2)existingLive.source.close();}catch(_){ }
     }
-    LIVE_STREAMS[activeSid]={streamId,source,dispose:(reconnecting=false)=>{
+    _anchorProjectionClosed=false;
+    _releaseAnchorProjection();
+    _anchorProjection=_anchorApi&&typeof _anchorApi.createAssistantTurnAnchorActivityProjector==='function'
+      ? _anchorApi.createAssistantTurnAnchorActivityProjector(_anchorRegistry) : null;
+    const projection=_anchorProjection;
+    LIVE_STREAMS[activeSid]={streamId,source,anchorRegistry:_anchorRegistry,
+      projectActivityScene:_projectOwnedAnchorActivityScene,dispose:(reconnecting=false)=>{
+      if(!LIVE_STREAMS[activeSid]||LIVE_STREAMS[activeSid].source!==source) return;
       if(reconnecting) _flushPendingSegmentRender();
       else _streamFinalized=true;
       _cancelAnimationFramePendingStreamRender();
+      _releaseAnchorProjection(projection);
+      if(LIVE_STREAMS[activeSid]&&LIVE_STREAMS[activeSid].source===source) _anchorProjectionClosed=true;
     }};
     _bindSidebarIdleRecovery(LIVE_STREAMS[activeSid]);
 
@@ -6512,6 +7017,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_terminalStateReached||_streamFinalized) return;
       const d=JSON.parse(e.data);
       assistantText+=d.text;
+      _consumeSemanticProse(d.text);
       syncInflightAssistantMessage();
       if(!S.session||S.session.session_id!==activeSid) return;
       _completeAutomaticCompressionOnLiveProgress(activeSid);
@@ -6562,7 +7068,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _resetAssistantSegment();
         return;
       }
-      assistantText += assistantText ? `\n\n${visible}` : visible;
+      const delta=assistantText ? `\n\n${visible}` : visible;
+      assistantText += delta;
+      _consumeSemanticProse(delta);
       visibleInterimSnippets.push(visible);
       syncInflightAssistantMessage();
       if(!S.session||S.session.session_id!==activeSid){
@@ -6621,8 +7129,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!_ownsActiveStreamOrBackground()) return;
       const d=JSON.parse(e.data);
       const text=d.text||'';
+      const previousReasoning=reasoningText,previousLiveReasoning=liveReasoningText;
       reasoningText += text;
       liveReasoningText += text;
+      const updates=[[previousReasoning,reasoningText],[previousLiveReasoning,liveReasoningText]];
+      _semanticState?.appendReasoning(text,updates);
+      _durableSemanticState?.appendReasoning(text,[[previousReasoning,reasoningText]]);
+      _semanticFallback?.reasoningState?.appendReasoning(text,updates);
       if(d.text&&S.session&&S.session.session_id===activeSid) _completeAutomaticCompressionOnLiveProgress(activeSid);
       syncInflightAssistantMessage();
       if(text&&S.session&&S.session.session_id===activeSid&&S.activeStreamId===streamId){
@@ -6640,9 +7153,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _completeAutomaticCompressionOnLiveProgress(activeSid);
       const tc=upsertLiveToolCall(d,'start');
       if(!tc) return;
+      _flushSemanticBoundary();
       const pendingDisplayTextBeforeTool=segmentStart===0
         ? (_parseStreamState().displayText||'')
-        : _stripXmlToolCalls(assistantText.slice(segmentStart));
+        : _parseCurrentSegmentDisplayText();
       if(String(pendingDisplayTextBeforeTool||'').trim()) _upsertAnchorProcessProse(pendingDisplayTextBeforeTool,{sealed:true,render:false});
       _applyToAnchor('tool',{...d,...tc},e,null,{render:false});
 
@@ -6655,7 +7169,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
       const pendingDisplayText=segmentStart===0
         ? (_parseStreamState().displayText||'')
-        : _stripXmlToolCalls(assistantText.slice(segmentStart));
+        : _parseCurrentSegmentDisplayText();
       if((assistantRow&&assistantBody)||String(pendingDisplayText||'').trim()){
         ensureAssistantRow(true);
       }
@@ -6679,9 +7193,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const tc=upsertLiveToolCall(d,'complete');
       if(!tc) return;
       tc.is_error=!!d.is_error;
+      _flushSemanticBoundary();
       const pendingDisplayTextBeforeComplete=segmentStart===0
         ? (_parseStreamState().displayText||'')
-        : _stripXmlToolCalls(assistantText.slice(segmentStart));
+        : _parseCurrentSegmentDisplayText();
       if(String(pendingDisplayTextBeforeComplete||'').trim()) _upsertAnchorProcessProse(pendingDisplayTextBeforeComplete,{sealed:true,render:false});
       _applyToAnchor('tool_complete',{...d,...tc,is_error:!!d.is_error},e,null,{render:false});
       if(typeof noteWorkspaceMutationsFromToolCall==='function') noteWorkspaceMutationsFromToolCall(tc);
@@ -6692,7 +7207,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(tc._createdByComplete){
         const pendingDisplayText=segmentStart===0
           ? (_parseStreamState().displayText||'')
-          : _stripXmlToolCalls(assistantText.slice(segmentStart));
+          : _parseCurrentSegmentDisplayText();
         if((assistantRow&&assistantBody)||String(pendingDisplayText||'').trim()){
           ensureAssistantRow(true);
           _flushPendingSegmentRender({force:true,skipAnchorProcessProse:true});
@@ -6914,6 +7429,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_streamFinalized) return;
       _clearStreamEndRecovery();
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
+      _flushSemanticBoundary(true);
       if(typeof _steerSettleTerminal==='function') _steerSettleTerminal(activeSid);
       // Set _streamFinalized IMMEDIATELY — before any fade delay. Without this,
       // a stream_end event arriving during the fade window sees
@@ -7395,6 +7911,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('apperror',e=>{
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       _clearStreamEndRecovery();
+      _flushSemanticBoundary(true);
       if(typeof _steerSettleTerminal==='function') _steerSettleTerminal(activeSid);
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
@@ -7679,6 +8196,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('cancel',e=>{
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       _clearStreamEndRecovery();
+      _flushSemanticBoundary(true);
       if(typeof _steerSettleTerminal==='function') _steerSettleTerminal(activeSid);
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
@@ -8103,7 +8621,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamFadeCleanupReduceMotionListener();
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
     _clearOwnerInflightState();
-    _closeSource(source);
     _clearApprovalForOwner();
     _clearClarifyForOwner('terminal');
     if(S.session&&S.session.session_id===activeSid){
@@ -8154,6 +8671,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         trackBackgroundError(activeSid,_errTitle,'Connection interrupted');
       }
     }
+    // Finish authoritative terminal writes before disposing the projection owner.
+    _closeSource(source);
     _setActivePaneIdleIfOwner();
     _dispatchExtensionTurnLifecycle('turn:error',activeSid,streamId,{
       status:'connection_lost',
