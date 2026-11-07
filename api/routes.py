@@ -25627,25 +25627,33 @@ def _default_edge_voice(text: str = "") -> str:
     """
     cfg: dict = {}
     try:
-        import yaml
+        from api.profiles import get_active_hermes_home, load_profile_config
 
-        cfg = yaml.safe_load(_active_profile_config_path().read_text()) or {}
+        cfg = load_profile_config(get_active_hermes_home()) or {}
     except Exception:
         logger.debug("Failed to read the agent config for TTS voices", exc_info=True)
     edge_cfg = (cfg.get("tts") or {}).get("edge") or {}
+
+    def _usable(value) -> str:
+        # An unresolved ${VAR} stays literal (load_profile_config); forwarding it
+        # would trip the voice allowlist, so treat it as absent.
+        if isinstance(value, str) and value.strip() and "${" not in value:
+            return value.strip()
+        return ""
+
     lang = _detect_text_lang(text)
     if lang:
         voices = edge_cfg.get("voices")
         if isinstance(voices, dict):
-            per_lang = voices.get(lang)
-            if isinstance(per_lang, str) and per_lang.strip():
-                return per_lang.strip()
+            per_lang = _usable(voices.get(lang))
+            if per_lang:
+                return per_lang
         builtin = {"it": "it-IT-ElsaNeural", "en": "en-US-AvaNeural"}.get(lang)
         if builtin:
             return builtin
-    voice = edge_cfg.get("voice")
-    if isinstance(voice, str) and voice.strip():
-        return voice.strip()
+    configured = _usable(edge_cfg.get("voice"))
+    if configured:
+        return configured
     return "it-IT-ElsaNeural"
 
 
