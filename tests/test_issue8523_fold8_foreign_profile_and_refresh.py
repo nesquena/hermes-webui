@@ -32,7 +32,6 @@ NODE = shutil.which("node")
 REASON = "Read-only in WebUI. Continue in Desktop."
 READ_ONLY_REPLY = (409, {"error": REASON, "code": "gateway_external_session_read_only"})
 # Master's answers at this route (exp-v0.52.635), before #8523:
-MASTER_IMPORTED_READ_ONLY = (403, "Read-only imported sessions cannot be continued from WebUI")
 MASTER_INVALID_PROFILE = (400, "invalid profile")
 
 
@@ -101,9 +100,11 @@ def test_hidden_read_only_session_gets_masters_response(chat_start, owner, reque
 
 @pytest.mark.parametrize("owner", [None, "default", "josue"])
 @pytest.mark.parametrize("requested", [None, "work", "bad!"])
-def test_hidden_imported_read_only_session_gets_masters_403(chat_start, owner, requested):
-    got, _ = chat_start(owner=owner, active="work", imported_flag=True, requested=requested)
-    assert got == MASTER_IMPORTED_READ_ONLY
+def test_hidden_imported_read_only_session_gets_masters_answer(chat_start, owner, requested):
+    # Since #8853 (exp-v0.52.644) master refuses a session this profile can't see before any load, ahead of the
+    # imported-session 403 it gave before: the imported flag makes no difference, as on master.
+    got, mismatch = chat_start(owner=owner, active="work", imported_flag=True, requested=requested)
+    assert got == (MASTER_INVALID_PROFILE if requested == "bad!" else mismatch)
 
 
 @pytest.mark.parametrize("owner", [None, "josue"])
@@ -137,13 +138,14 @@ def test_listed_read_only_session_still_says_why(chat_start, owner, active, impo
 
 @pytest.mark.parametrize("owner", [None, "default", "josue"])
 @pytest.mark.parametrize("requested", [None, "work", "bad!"])
-def test_hidden_imported_session_with_native_transport_gets_masters_403_before_any_refresh(chat_start, owner,
-                                                                                            requested):
+def test_hidden_imported_session_with_native_transport_gets_masters_answer_before_any_refresh(chat_start, owner,
+                                                                                               requested):
     # Codex r1105j: a configured transport exempted the session from master's refusal (and refreshed its cached
-    # transcript first) even though the requesting profile cannot list it.
-    got, _ = chat_start(owner=owner, active="work", read_only_reason="", imported_flag=True, requested=requested,
-                        transport=True, cli=True)
-    assert got == MASTER_IMPORTED_READ_ONLY
+    # transcript first) even though the requesting profile cannot list it. Since #8853 (exp-v0.52.644) master's
+    # refusal is its pre-load profile answer.
+    got, mismatch = chat_start(owner=owner, active="work", read_only_reason="", imported_flag=True,
+                               requested=requested, transport=True, cli=True)
+    assert got == (MASTER_INVALID_PROFILE if requested == "bad!" else mismatch)
     assert chat_start.refreshed == []
 
 

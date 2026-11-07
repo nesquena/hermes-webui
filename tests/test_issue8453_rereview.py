@@ -60,9 +60,11 @@ def test_foreign_native_chat_preserves_owner(native_home, monkeypatch, owner, ac
     monkeypatch.setattr(routes, "bad", lambda h, text, status=400: replies.append((status, text)) or True)
     try:
         routes.handle_post(MagicMock(), urlparse("/api/chat/start"))
-        # #8523 fold 8: refused exactly as master refuses it: this read-only imported session of another profile gets
-        # master's 403 before the profile check, with no source and no retag.
-        assert replies[-1] == (403, "Read-only imported sessions cannot be continued from WebUI")
+        # Refused exactly as master refuses it, with no source and no retag. Since #8853 (exp-v0.52.644) master
+        # refuses another profile's session before any load, with its profile-mismatch answer naming the owner, ahead
+        # of the read-only-import 403 it gave before.
+        assert replies[-1] == (409, {"error": "Session belongs to a different profile",
+                                     "code": "session_profile_mismatch", "session_id": sid, "profile": owner})
         assert session.profile == owner
         assert models.get_session(sid).profile == owner
         assert session.path.read_bytes() == original

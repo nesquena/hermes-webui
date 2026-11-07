@@ -127,10 +127,10 @@ def _marker():
     return data["messages"][-1]
 
 
-def _assert_one_attempt_spent_and_answer_still_recoverable(cache):
+def _assert_attempts_spent_and_answer_still_recoverable(cache, spent):
     marker = _marker()
     assert marker.get("_pending_journal_recovery") is True
-    assert marker.get("_journal_retry_attempts") == models._JOURNAL_RETRY_MAX_ATTEMPTS - 1
+    assert marker.get("_journal_retry_attempts") == models._JOURNAL_RETRY_MAX_ATTEMPTS - 2 + spent
     # The answer reaches the journal afterwards: the owner's next load recovers it.
     append_run_event(SID, STREAM, "token", {"text": "The answer arrived late."})
     cache.clear()
@@ -140,11 +140,13 @@ def _assert_one_attempt_spent_and_answer_still_recoverable(cache):
 
 
 @pytest.mark.parametrize("cached", [False, True], ids=["cold", "cached"])
-def test_another_profiles_request_spends_one_attempt_like_master(isolated, http_post, cached):
+def test_another_profiles_request_spends_no_attempt_like_master(isolated, http_post, cached):
+    # Since #8853 (exp-v0.52.644) master refuses another profile's session before any load, so the request runs no
+    # journal recovery and spends no retry budget.
     _seed("josue", isolated, cached=cached)
     status, _ = http_post({"session_id": SID, "message": "hello"})
     assert status in (404, 409)  # master's answer for a session of another profile
-    _assert_one_attempt_spent_and_answer_still_recoverable(isolated)
+    _assert_attempts_spent_and_answer_still_recoverable(isolated, 0)
 
 
 @pytest.mark.parametrize("cached", [False, True], ids=["cold", "cached"])
@@ -153,4 +155,4 @@ def test_owners_refused_request_spends_one_attempt_like_master(isolated, http_po
     _seed(None, isolated, cached=cached)
     status, _ = http_post({"session_id": SID, "message": ""})
     assert 400 <= status < 500
-    _assert_one_attempt_spent_and_answer_still_recoverable(isolated)
+    _assert_attempts_spent_and_answer_still_recoverable(isolated, 1)
