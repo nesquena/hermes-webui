@@ -1,0 +1,8 @@
+{
+  "before-1440": {"rows": ["daily-digest", "weekly-report", "backup-db", "inbox-triage"], "hasSearch": false, "pageErrors": []},
+  "after-1440": {"rows": ["daily-digest", "weekly-report", "backup-db", "inbox-triage"], "mixed": ["daily-digest", "daily-archive"], "clearButton": [24, 24], "clearGlyph": [14, 14], "coarsePointer": false, "pausedOnly": ["paused-only-sync"], "noMatch": "No jobs match your search.", "searchVisibleOnScripts": false, "afterClear": ["daily-digest", "weekly-report", "backup-db", "inbox-triage"], "focusAfterClear": "cronSearch", "cronReadsDuringFiltering": 0, "pausedPreference": null, "pageErrors": []},
+  "before-720": {"rows": ["daily-digest", "weekly-report", "backup-db", "inbox-triage"], "hasSearch": false, "pageErrors": []},
+  "after-720": {"rows": ["daily-digest", "weekly-report", "backup-db", "inbox-triage"], "mixed": ["daily-digest", "daily-archive"], "clearButton": [24, 24], "clearGlyph": [14, 14], "coarsePointer": false, "afterClear": ["daily-digest", "weekly-report", "backup-db", "inbox-triage"], "focusAfterClear": "cronSearch", "cronReadsDuringFiltering": 0, "pausedPreference": null, "pageErrors": []},
+  "before-390": {"rows": ["daily-digest", "weekly-report", "backup-db", "inbox-triage"], "hasSearch": false, "pageErrors": []},
+  "after-390": {"rows": ["daily-digest", "weekly-report", "backup-db", "inbox-triage"], "mixed": ["daily-digest", "daily-archive"], "clearButton": [44, 44], "clearGlyph": [14, 14], "coarsePointer": true, "afterClear": ["daily-digest", "weekly-report", "backup-db", "inbox-triage"], "focusAfterClear": "cronSearch", "cronReadsDuringFiltering": 0, "pausedPreference": null, "pageErrors": []}
+}
