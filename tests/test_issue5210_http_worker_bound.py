@@ -268,6 +268,10 @@ def test_worker_slot_releases_after_request_finishes(monkeypatch):
         hold_thread.join(timeout=5)
         assert "error" not in hold_result, hold_result.get("error")
         assert hold_result["value"][0] == 200
+        # The client can read the full response before process_request_thread's
+        # `finally` gives the slot back, so wait for the release (as the
+        # error/disconnect test does) instead of racing it.
+        _wait_for_worker_slot_release(srv.httpd)
 
         status, headers, body = _request(srv.port, "/fast")
         assert status == 200

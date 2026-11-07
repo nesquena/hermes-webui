@@ -73,6 +73,11 @@ def test_cron_search_clear_has_a_44px_touch_target_on_coarse_pointers():
     )
 
 
+def test_cron_search_is_hidden_on_the_scripts_subtab():
+    """The box filters jobs only, so it follows the jobs-only attribute gate (#2316)."""
+    assert '#panelTasks[data-tasks-subtab="scripts"] .cron-search{display:none!important;}' in STYLE_CSS
+
+
 def test_cron_filter_never_uses_locale_lowercasing():
     """toLocaleLowerCase() maps 'I' to dotless 'ı' under Turkish, breaking matches."""
     assert "toLocaleLowerCase" not in PANELS_JS
@@ -288,6 +293,31 @@ const SCENARIOS = {
     return { noQuery, pausedOnly, activeOnly, mixed, cleared,
              savedPref: localStorage.getItem('cron-paused-collapsed') };
   },
+  async refresh_while_filter_active() {
+    const first = loadCrons();
+    await tick();
+    respond(0, [job('1', 'daily-digest'), job('2', 'weekly'), job('3', 'daily-sync')]);
+    await first; await settle();
+    type('daily'); await settle();
+    const beforeRefresh = visibleNames();
+    // Poller refresh: one match removed, one added, one match paused, one non-match added.
+    const poll = loadCrons(false, { background: true });
+    await tick();
+    respond(1, [job('2', 'weekly'), job('3', 'daily-sync', { state: 'paused' }),
+                job('4', 'daily-new'), job('5', 'monthly')]);
+    await poll; await settle();
+    const afterPoll = rows();
+    // Manual refresh while still filtered.
+    const manual = loadCrons(true);
+    await tick();
+    respond(2, [job('6', 'daily-final'), job('7', 'yearly')]);
+    await manual; await settle();
+    const afterManual = visibleNames();
+    return { beforeRefresh, afterPoll, afterManual, query: els.cronSearch.value,
+             clearVisible: !els.cronSearchClear.hidden,
+             listRequests: requests.filter(u => u === '/api/crons').length,
+             savedPref: localStorage.getItem('cron-paused-collapsed') };
+  },
   async empty_list_vs_no_match() {
     const l1 = loadCrons();
     await tick();
@@ -383,3 +413,19 @@ def test_empty_list_and_no_match_states_differ_and_filter_skips_network(tmp_path
     assert "No jobs match your search." in r["noMatchHtml"]
     assert "No scheduled jobs found." not in r["noMatchHtml"]
     assert r["listRequests"] == 2, "filtering must reuse the cached list, not refetch"
+
+
+@needs_node
+def test_refresh_and_list_updates_while_filter_is_active(tmp_path):
+    r = _run("refresh_while_filter_active", tmp_path)
+    assert r["beforeRefresh"] == ["daily-digest", "daily-sync"]
+
+    poll_visible = sorted(x["name"] for x in r["afterPoll"] if x["visible"])
+    assert poll_visible == ["daily-new", "daily-sync"], (
+        "a poll must re-apply the active query to the fresh list: removed match gone, "
+        "new match shown, non-matches hidden, newly paused match still visible"
+    )
+    assert r["afterManual"] == ["daily-final"], "manual refresh must keep the filter applied"
+    assert r["query"] == "daily" and r["clearVisible"], "refresh must not reset the query"
+    assert r["listRequests"] == 3, "only the three loads fetch; filtering never does"
+    assert r["savedPref"] is None

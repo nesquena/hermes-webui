@@ -204,7 +204,7 @@ def test_worklog_reason_echo_requires_a_folded_anchor():
         "const anchorIsWorklogSource=anchorRow.classList"
         "&&anchorRow.classList.contains('assistant-segment-worklog-source');"
     )
-    state_lookup = body.find("let state=activityByTurn.get(anchorTurn);")
+    state_lookup = body.find("let state=activityByTurn.get(groupKey);")
     assert hoisted != -1 and state_lookup != -1, "settled worklog append path not found"
     assert hoisted < state_lookup, (
         "anchorIsWorklogSource must be computed per activity entry (before the "
