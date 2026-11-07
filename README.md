@@ -793,6 +793,7 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 - [`docs/kanban.md`](docs/kanban.md) — the Kanban board's status flow: who may set which column, how tasks enter and leave Scheduled, and the parent re-gating on Scheduled/Blocked → Ready
 - [`docs/scripts-panel.md`](docs/scripts-panel.md) — the Tasks panel's Scripts subtab: where the profile's `~/.hermes/scripts/` directory comes from, the read-only endpoints, and the containment rules
 - [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — administrator-controlled WebUI extension injection
+- [`docs/media-serving.md`](docs/media-serving.md) — the `/api/media` route: the ordinary allowlist, and the `generated=1` mode the renderer uses for model-emitted generated images
 
 **Deploying & operating**
 - [`docs/remote-access.md`](docs/remote-access.md) — SSH tunnel, Tailscale, and phone access (incl. a community ARM64-Android field report)
