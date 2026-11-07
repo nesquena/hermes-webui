@@ -41,6 +41,11 @@ def _make_homes(tmp_path: Path):
 
     ghost = profiles / "ghostprof"
     ghost.mkdir()
+    # Give the tombstoned home the SAME identity marker as `live` so the tombstone
+    # check is exercised on its own. Without a marker the identity check already
+    # rejects it, and both tests would stay green even if tombstone rejection were
+    # removed entirely (a deleted home whose identity files survived).
+    (ghost / "config.yaml").write_text("model: y\n", encoding="utf-8")
 
     shell = profiles / "shellprof"
     shell.mkdir()
@@ -78,3 +83,56 @@ def test_cron_read_predicate_skips_non_live_named_homes(tmp_path):
     assert webui_profiles.is_live_profile_home_for_reads(live) is True
     assert webui_profiles.is_live_profile_home_for_reads(ghost) is False  # tombstoned
     assert webui_profiles.is_live_profile_home_for_reads(shell) is False  # marker-less
+
+
+def test_tombstone_alone_rejects_an_otherwise_live_home(tmp_path):
+    """Control: the tombstoned home is identical to `live` except for the tombstone.
+
+    Both halves are pinned here — with the tombstone cleared the same home must be
+    readable, so this test cannot pass by the identity check doing the rejecting.
+    """
+    from api import profiles as webui_profiles
+    import hermes_constants
+
+    home, profiles, live, ghost, shell = _make_homes(tmp_path)
+    # Precondition: ghost carries the same identity marker as the live profile.
+    assert (ghost / "config.yaml").is_file() == (live / "config.yaml").is_file()
+
+    assert webui_profiles.is_live_profile_home_for_reads(ghost) is False
+
+    hermes_constants.clear_named_profile_deleted(ghost)
+    assert webui_profiles.is_live_profile_home_for_reads(ghost) is True
+
+
+def test_read_predicate_fails_closed_when_liveness_cannot_be_confirmed(tmp_path, monkeypatch):
+    """An unconfirmable identity check must DENY, never allow (AGENTS.md fail-closed)."""
+    from api import profiles as webui_profiles
+    import hermes_constants
+
+    home, profiles, live, ghost, shell = _make_homes(tmp_path)
+
+    def _boom(_home):
+        raise OSError("identity unreadable")
+
+    monkeypatch.setattr(hermes_constants, "named_profile_is_live", _boom)
+    # A named home that cannot be proven live is not readable...
+    assert webui_profiles.is_live_profile_home_for_reads(live) is False
+    # ...and the default home (not under profiles/) is unaffected by the failure.
+    assert webui_profiles.is_live_profile_home_for_reads(home) is True
+
+
+def test_read_predicate_fails_closed_when_helpers_are_missing(tmp_path, monkeypatch):
+    """Import failure is an unknown result for EVERY home: deny, do not allow.
+
+    With ``hermes_constants`` unimportable we cannot even tell whether a path is a
+    named profile home, so nothing can be confirmed — the predicate denies. This is
+    the reviewer's contract: unknown is never allowed.
+    """
+    from api import profiles as webui_profiles
+    import sys
+
+    home, profiles, live, ghost, shell = _make_homes(tmp_path)
+
+    monkeypatch.setitem(sys.modules, "hermes_constants", None)
+    assert webui_profiles.is_live_profile_home_for_reads(live) is False
+    assert webui_profiles.is_live_profile_home_for_reads(home) is False
