@@ -13210,7 +13210,7 @@ function _applySavedSettingsUi(saved, body, opts){
     _applyStructuredCodeViewSettings(body.structured_code_default_view,body.structured_code_auto_tree_lines,false);
   }
   window._botName=body.bot_name||'Hermes';
-  window._instanceName=body.instance_name||'';  // #7611
+  if(saved&&Object.prototype.hasOwnProperty.call(saved,'instance_name')) window._instanceName=saved.instance_name||'';  // server is canonical (#7611)
   if(typeof applyBotName==='function') applyBotName();
   else if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
   if(typeof setLocale==='function') setLocale(language);
