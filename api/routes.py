@@ -24758,6 +24758,25 @@ def _tts_open(req, *, timeout=30, opener_factory=None):
     return _urlopen(req, timeout=timeout)
 
 
+def _default_edge_voice() -> str:
+    """Default Edge voice for /api/tts: the agent config's ``tts.edge.voice``.
+
+    The previous hardcoded ``zh-CN-XiaoxiaoNeural`` made any request without an
+    explicit voice speak Chinese; the agent config (itself the voice the chat
+    TTS uses) is the single source of truth. Falls back to it-IT-ElsaNeural.
+    """
+    try:
+        import yaml
+
+        cfg = yaml.safe_load(_active_profile_config_path().read_text()) or {}
+        voice = ((cfg.get("tts") or {}).get("edge") or {}).get("voice")
+        if isinstance(voice, str) and voice.strip():
+            return voice.strip()
+    except Exception:
+        logger.debug("Failed to read tts.edge.voice from agent config", exc_info=True)
+    return "it-IT-ElsaNeural"
+
+
 def _handle_tts(handler, parsed):
     """Generate TTS audio via supported server TTS engines. POST JSON body only.
 
@@ -24776,7 +24795,7 @@ def _handle_tts(handler, parsed):
     async API at that time.
     """
     text = ""
-    voice = "zh-CN-XiaoxiaoNeural"
+    voice = _default_edge_voice()
     rate_str = ""
     pitch_str = ""
     engine = "edge"  # "edge" | "elevenlabs" | "openai" | "browser" (browser is client-side only)
