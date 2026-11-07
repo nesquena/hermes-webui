@@ -667,7 +667,17 @@ def _stt_provider_capability_from_module(stt):
                 return False
 
         def has_browser_audio_converter():
+            # Older agents define the ffmpeg resolver on transcription_tools itself.
+            # Current agents moved it to tools.transcription_audio (which
+            # transcription_tools imports, so it's already loaded) without
+            # re-exporting it. Ask the Agent's own resolver in either layout, so
+            # the probe agrees with what /api/transcribe will do (#8909).
             helper = getattr(stt, "_find_ffmpeg_binary", None)
+            if not callable(helper):
+                try:
+                    from tools.transcription_audio import _find_ffmpeg_binary as helper
+                except Exception:
+                    helper = None
             try:
                 return bool(helper()) if callable(helper) else False
             except Exception:
