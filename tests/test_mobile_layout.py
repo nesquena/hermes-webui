@@ -2036,8 +2036,8 @@ def test_model_and_reasoning_controls_live_in_mobile_overflow_panel():
         "mobile overflow panel must size the model/reasoning actions"
 
 
-def test_mobile_overflow_panel_quota_order_matches_desktop_sequence():
-    """The mobile overflow panel should keep the same shared control order as desktop."""
+def test_mobile_overflow_panel_places_full_width_rows_after_primary_actions():
+    """The mobile panel should show compact actions before quota and context rows."""
     panel_start = HTML.index('id="composerMobileConfigPanel"')
     panel_end = HTML.index('<div class="profile-dropdown"', panel_start)
     panel_html = HTML[panel_start:panel_end]
@@ -2046,8 +2046,8 @@ def test_mobile_overflow_panel_quota_order_matches_desktop_sequence():
     quota_idx = panel_html.index('id="composerMobileQuotaAction"')
     reasoning_idx = panel_html.index('id="composerMobileReasoningAction"')
     context_idx = panel_html.index('id="composerMobileContextAction"')
-    assert workspace_idx < model_idx < quota_idx < reasoning_idx < context_idx, \
-        "mobile control order should mirror the desktop/shared control sequence"
+    assert workspace_idx < model_idx < reasoning_idx < quota_idx < context_idx, \
+        "mobile primary actions should precede the full-width quota and context rows"
 
 
 def test_model_and_reasoning_dropdowns_use_mobile_panel_anchors():
@@ -2686,4 +2686,3 @@ console.log(JSON.stringify({ afterBaseline, afterNoop, afterEnterBurger, afterSt
     # leaving burger: exactly one more cleanup (both-directions policy)
     assert st["afterLeaveBurger"] == '{"mobile":2,"model":2,"reasoning":2} burger=false', \
         "leaving burger mode must also close the composer menu family exactly once"
-
