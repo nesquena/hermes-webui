@@ -150,7 +150,7 @@ function recordClientSSEError(source, details={}){
       url_path:(typeof location!=='undefined'&&location.pathname)||'/',
       reason:details.reason||'EventSource.onerror',
     };
-    void api('/api/client-events/log',{method:'POST',body:JSON.stringify(payload),timeoutMs:3000,timeoutToast:false}).catch(()=>{});
+    void api('/api/client-events/log',{method:'POST',body:JSON.stringify(payload),timeoutMs:3000,timeoutToast:false,redirect401:false}).catch(()=>{});
   }catch(_){}
 }
 
