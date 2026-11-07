@@ -6173,6 +6173,10 @@ def _route_wire_efforts(
         except Exception:
             provider = ""
         provider = str(provider or "").strip().lower()
+    # A picker token is a WebUI routing hint, not part of the model the Agent
+    # classifies. Preserve the full provider before aliasing so multi-colon
+    # custom-provider hints strip without changing a model's own suffix.
+    model = _strip_provider_hint_for_reasoning(str(model_id or ""), provider)
     try:
         provider = _resolve_provider_alias(provider)
     except Exception:
@@ -6182,7 +6186,7 @@ def _route_wire_efforts(
     else:
         api_mode = str(api_mode or "").strip().lower() or None
     try:
-        return frozenset(rule(provider, str(model_id or ""), api_mode))
+        return frozenset(rule(provider, model, api_mode))
     except Exception:
         return None
 
@@ -6224,11 +6228,12 @@ def _strip_provider_hint_for_reasoning(model_id: str, provider: str | None = Non
     no longer starts with ``vertex/gemini-``), silently re-enabling reasoning
     controls on routes that must never expose them.
 
-    When the resolved *provider* is known (e.g. ``"custom:agg"``), strip the
-    exact ``@{provider}:`` prefix first so both segments are removed in one
-    pass. Falls back to the generic first-colon split when no provider is
-    given or it doesn't match — preserving prior behavior for plain
-    ``@provider:model`` hints.
+    When the *provider* is known (e.g. ``"custom:agg"``), strip the exact
+    ``@{provider}:`` prefix first so both segments are removed in one pass.
+    A custom endpoint hint can resolve to a different provider (e.g. an
+    Ollama server's ``custom:host:port`` alias); for that mismatch, use the
+    same qualified-model parser as ``resolve_model_provider``. Other hints
+    keep the generic first-colon fallback.
     """
     model = str(model_id or "").strip()
     if not model.startswith("@"):
@@ -6237,6 +6242,10 @@ def _strip_provider_hint_for_reasoning(model_id: str, provider: str | None = Non
         exact_prefix = f"@{provider}:".lower()
         if model.lower().startswith(exact_prefix):
             return model[len(exact_prefix) :]
+    if model.lower().startswith("@custom:"):
+        parsed = _parse_provider_qualified_model_id("@custom:" + model[len("@custom:"):])
+        if parsed is not None:
+            return parsed[0]
     if ":" in model:
         return model.split(":", 1)[1]
     return model
@@ -7261,10 +7270,16 @@ def _effort_honest_label(
     effective = str(effective or "").strip().lower()
     if not stored or not effective or stored == effective:
         return effective
-    if stored not in _efforts_above("max"):
+    # A pre-clamp Agent omits ultra from the accepted ladder, but saved ultra
+    # is still coerced to max (or a lower model ceiling). Recognize that legacy
+    # selection for display without making it valid for new requests.
+    if stored not in _efforts_above("max") and not (
+        stored == "ultra" and _agent_route_supported_efforts() is None
+    ):
         return effective
     literal = f"{stored} (sends {effective} on this route)"
     provider = str(provider_id or "").strip().lower()
+    model = _strip_provider_hint_for_reasoning(str(model_id or ""), provider)
     try:
         provider = _resolve_provider_alias(provider)
     except Exception:
@@ -7276,7 +7291,7 @@ def _effort_honest_label(
             api_mode = openai_runtime_api_mode()
         else:
             api_mode = str(api_mode or "").strip().lower() or None
-        label = effort_display_label(stored, provider, str(model_id or ""), api_mode)
+        label = effort_display_label(stored, provider, model, api_mode)
         if label and f"(sends {effective} on this route)" in str(label):
             return str(label)
     except Exception:

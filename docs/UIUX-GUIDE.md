@@ -180,12 +180,16 @@ accepted when the installed Agent ships the clamping route rule
 (`agent.reasoning_effort.route_supported_efforts`, landed 2026-09-19 in
 `39726f8bb7f2`, `api_mode`-aware since 2026-10-02 in `3f4aedb37e5d`);
 older Agents that list such a level but forward it verbatim keep the six-level
-ladder and coerce a stored value down instead. The decision uses the runtime
-the turn actually resolved — the chat path's runtime bundle (falling back to
-the session profile when the runtime resolver failed), the reasoning status
-path's session-profile config, and the Gateway worker's session-profile config
-— not the process-ambient profile, so a named profile that opts into (or out
-of) the Codex app-server runtime answers for its own sessions. The dropdown
+ladder and coerce a stored value down instead. An existing saved `ultra` retains
+its downgrade explanation even when the route helper is unavailable; this does
+not allow new `ultra` selections on those Agents. WebUI provider hints are removed
+before passing the model ID to the Agent's route and display helpers, so a hinted
+model and its bare equivalent use the same capability decision. The decision uses
+the runtime the turn actually resolved — the chat path's runtime bundle (falling
+back to the session profile when the runtime resolver failed), the reasoning
+status path's session-profile config, and the Gateway worker's session-profile
+config — not the process-ambient profile, so a named profile that opts into (or
+out of) the Codex app-server runtime answers for its own sessions. The dropdown
 renders a row for every level the active route reports as supported, including
 levels with no row shipped in the page markup. Above-`max` levels appear in
 `supported_efforts` only when the Agent's route rule accepts them with the
