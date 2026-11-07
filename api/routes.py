@@ -9217,7 +9217,25 @@ def _context_lookup_origin(url: object) -> str:
 
 def _context_lookup_fixed_origins(provider: str, *, with_url: bool) -> frozenset:
     entry = _CONTEXT_LOOKUP_FIXED_HOSTS.get(str(provider or "").strip().lower()) or {}
-    return frozenset(f"{host}:443" for host in entry.get("with_url" if with_url else "no_url", ()))
+    hosts = entry.get("with_url" if with_url else "no_url", ())
+    if with_url and hosts and _agent_codex_catalog_follows_url():
+        # Agents whose Codex catalog follows the lookup URL send nothing to
+        # chatgpt.com when a URL is set; only older ones without it do.
+        hosts = ()
+    return frozenset(f"{host}:443" for host in hosts)
+
+
+def _agent_codex_catalog_follows_url() -> bool:
+    """True when the installed Agent's Codex metadata probe follows the base URL.
+
+    Without an importable Agent, or with one that lacks the URL-aware catalog,
+    answer False so the table stays conservative (the key is dropped).
+    """
+    try:
+        from agent import model_metadata as _mm
+    except Exception:
+        return False
+    return callable(getattr(_mm, "_codex_catalog_urls", None))
 
 
 def _context_lookup_contacted_origins(provider: str, base_url: str) -> frozenset:
