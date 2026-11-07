@@ -10694,7 +10694,7 @@ function renderMd(raw){
   // generated images) and replace them with inline <img> or download links.
   // Stashed so the path/URL is never processed as markdown.
   const media_stash=[];
-  s=s.replace(/MEDIA:([^\s\)\]]+)/g,(token,raw_ref,offset)=>{
+  s=s.replace(/MEDIA: ?([^\s\)\]]+)/g,(token,raw_ref,offset)=>{
     const parts=_mediaTokenParts(s,offset,raw_ref);
     if(!parts) return token;
     media_stash.push(parts[0]);
@@ -12317,7 +12317,7 @@ function _stripForTTS(text){
   // round-trips the original filename including a backtick in the
   // path — the only thing the TTS ever does with the captured
   // substring is throw it away.
-  text=text.replace(/MEDIA:[^\s]+/g,'a file');
+  text=text.replace(/MEDIA: ?[^\s]+/g,'a file');
   // Strip emoji and emoticons
   text=text.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{200D}]/gu,'');
   // Strip HTML tags that may leak through markdown

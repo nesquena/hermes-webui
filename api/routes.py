@@ -25976,7 +25976,7 @@ def _serve_inline_html_preview(handler, target: Path, cache_control: str, *, csp
     return True
 
 
-_MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)\]]+)")
+_MEDIA_TOKEN_RE = re.compile(r"MEDIA: ?([^\s\)\]]+)")
 # #7680 re-gate (9/22): two-pass scan.
 #   1. `` `MEDIA:path` `` (backtick-wrapped, inline-code form) → strip
 #      the wrapping backticks so the bare-token pass below sees a
