@@ -6153,27 +6153,31 @@ def _efforts_above(ceiling: str) -> frozenset:
 
 
 def _reasoning_route_identity(
-    model_id: str | None, provider_id: str | None
-) -> tuple[str, str]:
-    """The provider/model a WebUI routing token resolves to for reasoning rules.
+    model_id: str | None, provider_id: str | None, base_url: str | None = None
+) -> tuple[str, str, str | None]:
+    """The route a WebUI routing token resolves to for reasoning rules.
 
     An opaque ``model-alias-<digest>`` lane is a WebUI-only routing token: the
-    chat worker resolves it to the alias's real provider/model before building
-    the turn, so the Agent never classifies the digest. Every reasoning lookup
-    that asks the Agent's route rule or a provider ceiling must see that same
-    identity — otherwise an alias onto ``openai-codex`` + ``codex_app_server``
-    is judged as an unknown OpenAI-compatible provider: its above-``max``
-    levels disappear from the dropdown and a stored one coerces to ``max``
-    while the worker keeps it.
+    chat worker resolves it to the alias's real provider/model/endpoint before
+    building the turn, so the Agent never classifies the digest. Every reasoning
+    lookup that asks the Agent's route rule, a provider ceiling or a capability
+    probe must see that same identity — otherwise an alias onto ``openai-codex``
+    + ``codex_app_server`` is judged as an unknown OpenAI-compatible provider
+    (its above-``max`` levels disappear from the dropdown and a stored one
+    coerces to ``max`` while the worker keeps it), and a probe-backed provider
+    such as LM Studio is queried on the profile's default endpoint instead of
+    the alias's own.
 
-    Non-alias selections are returned unchanged. An alias lane that no longer
-    resolves (deleted, foreign profile, retargeted) keeps its opaque identity,
-    exactly as before: there is no route to describe.
+    Returns ``(model, provider, base_url)``. Non-alias selections are returned
+    unchanged. An alias lane that no longer resolves (deleted, foreign profile,
+    retargeted) keeps its opaque identity, exactly as before: there is no route
+    to describe.
     """
     model = str(model_id or "").strip()
     provider = str(provider_id or "").strip().lower()
+    base_url = str(base_url or "").strip() or None
     if not provider.startswith(_MODEL_ALIAS_ROUTE_PREFIX):
-        return model, provider
+        return model, provider, base_url
     try:
         resolved = resolve_model_alias_runtime(
             provider, expected_model=_strip_provider_hint_for_reasoning(model, provider)
@@ -6181,10 +6185,14 @@ def _reasoning_route_identity(
     except Exception:
         resolved = None
     if not resolved:
-        return model, provider
+        return model, provider, base_url
     resolved_model = str(resolved.get("model") or "").strip() or model
     resolved_provider = str(resolved.get("provider") or "").strip().lower() or provider
-    return resolved_model, resolved_provider
+    # The alias's endpoint is hidden from the browser, so a caller usually has
+    # none. Carry it here or a probe-backed provider asks a different server
+    # than the turn will use; an explicit caller endpoint still wins.
+    alias_base_url = str(resolved.get("base_url") or "").strip() or None
+    return resolved_model, resolved_provider, base_url or alias_base_url
 
 
 def _route_wire_efforts(
@@ -6215,7 +6223,7 @@ def _route_wire_efforts(
     # An opaque model-alias lane is likewise WebUI-only: resolve it to the
     # provider/model the chat worker will actually send before the Agent's
     # route rule sees the digest.
-    model, provider = _reasoning_route_identity(model, provider)
+    model, provider, _alias_base_url = _reasoning_route_identity(model, provider)
     try:
         provider = _resolve_provider_alias(provider)
     except Exception:
@@ -6948,7 +6956,9 @@ def resolve_model_reasoning_efforts(
     retained for GPT-5.6 and other models whose native ladder includes it, and
     stripped where it would be rejected or mishandled.
     """
-    model_id, provider_id = _reasoning_route_identity(model_id, provider_id)
+    model_id, provider_id, base_url = _reasoning_route_identity(
+        model_id, provider_id, base_url
+    )
     raw = _resolve_model_reasoning_efforts_impl(model_id, provider_id, base_url)
     if not raw:
         return raw
@@ -7131,9 +7141,11 @@ def coerce_reasoning_effort_for_model(
     ``model.openai_runtime`` decides the Codex runtime.
     """
     # An opaque model-alias lane is a WebUI routing token; the worker sends the
-    # alias's own provider/model, so resolve it before the wire rule, the
-    # provider ceilings and the capability lookup below judge the route.
-    model_id, provider_id = _reasoning_route_identity(model_id, provider_id)
+    # alias's own provider/model/endpoint, so resolve it before the wire rule,
+    # the provider ceilings and the capability lookup below judge the route.
+    model_id, provider_id, base_url = _reasoning_route_identity(
+        model_id, provider_id, base_url
+    )
     raw = str(effort or "").strip().lower()
     if not raw:
         return ""
@@ -7324,7 +7336,7 @@ def _effort_honest_label(
     literal = f"{stored} (sends {effective} on this route)"
     provider = str(provider_id or "").strip().lower()
     model = _strip_provider_hint_for_reasoning(str(model_id or ""), provider)
-    model, provider = _reasoning_route_identity(model, provider)
+    model, provider, _alias_base_url = _reasoning_route_identity(model, provider)
     try:
         provider = _resolve_provider_alias(provider)
     except Exception:
@@ -7432,8 +7444,15 @@ def get_reasoning_status(
     # when supported_efforts is empty. Without this, returning [] for those models
     # would hide the entire reasoning chip and silently regress the working
     # thinking on/off control (#6219 round-2 review).
+    # The zai tier check must see the alias's real provider too: an alias onto
+    # native zai keeps the thinking toggle for GLM-4.5–5.1 (which exposes no
+    # effort ladder at all), but judged by the opaque lane it looks like no
+    # control whatsoever and the composer hides the toggle.
+    zai_model, zai_provider, _zai_base_url = _reasoning_route_identity(
+        resolve_model, resolve_provider, resolve_base_url
+    )
     zai_thinking = _zai_glm_thinking_toggle_supported(
-        resolve_model, resolve_provider
+        zai_model, zai_provider
     )
     supports_thinking_toggle = bool(supported_efforts) or (zai_thinking is True)
     _stored_effort = str(effort_raw or "").strip().lower()
