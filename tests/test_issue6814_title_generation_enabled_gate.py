@@ -59,7 +59,6 @@ def _run_update(session, provisional, events):
 def test_disabled_skips_llm_and_keeps_provisional_title(disabled_value):
     """enabled=false (any canonical form) with an aux route configured:
     no LLM call, provisional title untouched, skipped status."""
-    from api.streaming import _run_background_title_update
     user_text = 'Design a REST API for user management.'
     s, provisional = _make_provisional_session(user_text)
     events = []
@@ -85,7 +84,6 @@ def test_disabled_skips_llm_and_keeps_provisional_title(disabled_value):
 def test_disabled_without_aux_route_does_not_use_agent_model():
     """enabled=false with no aux route: the active chat model must NOT be
     used as a fallback (the original bug path)."""
-    from api.streaming import _run_background_title_update
     user_text = 'Explain quantum entanglement simply.'
     s, provisional = _make_provisional_session(user_text)
     events = []
@@ -106,7 +104,6 @@ def test_disabled_without_aux_route_does_not_use_agent_model():
 def test_enabled_omitted_preserves_default_on_behavior():
     """enabled omitted (default true): existing behavior — LLM title runs
     and replaces the provisional title."""
-    from api.streaming import _run_background_title_update
     user_text = 'Write a haiku about the moon.'
     s, provisional = _make_provisional_session(user_text)
     events = []
