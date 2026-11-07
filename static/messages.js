@@ -7025,11 +7025,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _preSettleGeneration=_preSettleSession&&_preSettleSession.transcript_generation;
           const _doneGeneration=d.session&&d.session.transcript_generation;
           const _doneOffsetRaw=d.session&&d.session._messages_offset;
-          const _doneOffset=Number(_doneOffsetRaw);
           const _doneMessageCount=Number(d.session&&d.session.message_count);
           const _doneMessagesLength=Array.isArray(d.session&&d.session.messages)?d.session.messages.length:0;
-          const _doneOffsetIsValid=_doneOffsetRaw==null||(typeof _doneOffsetRaw==='number'&&Number.isSafeInteger(_doneOffsetRaw)&&_doneOffsetRaw>=0);
           const _doneMessageCountPresent=d.session&&d.session.message_count!=null;
+          const _doneOffset=_doneOffsetRaw!=null?Number(_doneOffsetRaw):(_doneMessageCountPresent?_doneMessageCount-_doneMessagesLength:NaN);
+          const _doneOffsetIsValid=_doneOffset>=0&&Number.isSafeInteger(_doneOffset)&&(_doneOffsetRaw==null||typeof _doneOffsetRaw==='number');
           const _doneMessageCountIsValid=!_doneMessageCountPresent||(
             typeof d.session.message_count==='number'&&Number.isSafeInteger(d.session.message_count)&&d.session.message_count>=0&&
             _doneOffset+_doneMessagesLength===_doneMessageCount
@@ -7037,12 +7037,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _doneHasBoundedProof=!!(
             (d.session&&d.session._messages_truncated===true)||(Number.isFinite(_doneOffset)&&_doneOffset>0)
           )&&_doneOffsetIsValid&&_doneMessageCountIsValid;
+          const _doneGenerationMatches=Number.isSafeInteger(_preSettleGeneration)&&Number.isSafeInteger(_doneGeneration)&&_preSettleGeneration===_doneGeneration;
           // #6112 settle guard. Only a proven bounded recovery tail from the
           // same transcript generation may retain an older resident prefix.
           const _doneAdoption=_adoptDoneSnapshotMessages(_preSettle,S.messages,_doneFinalAnswer,{
-            allowResidentPrefixMerge:_doneHasBoundedProof&&(
-              _preSettleGeneration==null||_doneGeneration==null||String(_preSettleGeneration)===String(_doneGeneration)
-            ),
+            allowResidentPrefixMerge:_doneHasBoundedProof&&_doneGenerationMatches,
+            residentMergeWindow:{
+              residentOrigin:_preSettleOldestIdx,
+              settledOffset:_doneOffset,
+              messageCount:_doneMessageCountPresent?_doneMessageCount:null,
+            },
           });
           S.messages=_doneAdoption.messages;
           if(_doneAdoption.mergedResidentPrefix){
@@ -7963,7 +7967,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(ts==null||ts===''||!Number.isFinite(Number(ts))) return '';
     return _messageIdentityKey(m);
   }
-  function _mergeResidentPrefix(pre,settled){
+  function _mergeResidentPrefix(pre,settled,window){
     if(!Array.isArray(pre)||!Array.isArray(settled)||!pre.length||!settled.length) return null;
     const firstKey=_residentMergeIdentityKey(settled[0]);
     if(!firstKey) return null;
@@ -7980,6 +7984,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const key=_residentMergeIdentityKey(pre[anchor+i]);
       if(!key||key!==_residentMergeIdentityKey(settled[i])) return null;
     }
+    if(window){
+      // Identity alone is not enough: the same row also has to occupy the
+      // authoritative absolute coordinate. Otherwise fall back to server-wins.
+      if(!Number.isSafeInteger(window.residentOrigin)||!Number.isSafeInteger(window.settledOffset)) return null;
+      if(window.residentOrigin+anchor!==window.settledOffset) return null;
+      if(window.messageCount!=null){
+        if(!Number.isSafeInteger(window.messageCount)||window.residentOrigin+pre.length!==window.messageCount) return null;
+      }
+    }
     return pre.slice(0,anchor).concat(settled);
   }
   function _adoptDoneSnapshotMessages(preSettleMessages, settledMessages, finalAnswer, options){
@@ -7989,7 +8002,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     let messages=(adopted||!pre.length)?settled:pre;
     let mergedResidentPrefix=false;
     if(options&&options.allowResidentPrefixMerge===true){
-      const merged=_mergeResidentPrefix(pre,settled);
+      const merged=_mergeResidentPrefix(pre,settled,options.residentMergeWindow||null);
       if(merged){messages=merged;mergedResidentPrefix=true;}
     }
     const answer=String(finalAnswer||'').trim();

@@ -191,7 +191,7 @@ def _listener(prev: list[dict], settled: dict, *, pre_generation=None, pre_oldes
 
 def test_real_done_listener_keeps_prefix_and_resident_paging_origin() -> None:
     prev = _sample_messages()[:4]
-    got = _listener(prev, {"session_id": "A", "messages": prev[2:], "_messages_offset": 72, "message_count": 74}, pre_oldest_idx=70)
+    got = _listener(prev, {"session_id": "A", "messages": prev[2:], "transcript_generation": 0, "_messages_offset": 72, "message_count": 74}, pre_generation=0, pre_oldest_idx=70)
     assert got["texts"] == [m["content"] for m in prev]
     assert got["prefixIdentity"] is True
     assert got["oldestIdx"] == 70
@@ -221,3 +221,45 @@ def test_present_but_malformed_window_metadata_fails_closed() -> None:
         got = _listener(prev, {"session_id": "A", "messages": prev[2:], "_messages_offset": 2, "message_count": bad_count}, pre_oldest_idx=70)
         assert got["texts"] == [m["content"] for m in prev[2:]], bad_count
         assert got["oldestIdx"] == 2, bad_count
+
+
+def test_unknown_or_mixed_generation_cannot_enable_prefix_merge() -> None:
+    prev = _sample_messages()[:4]
+    done = {
+        "session_id": "A",
+        "messages": prev[2:],
+        "transcript_generation": 1,
+        "_messages_offset": 2,
+        "message_count": 4,
+    }
+    unknown_resident = _listener(prev, done, pre_oldest_idx=0)
+    assert unknown_resident["texts"] == [m["content"] for m in prev[2:]]
+    assert unknown_resident["oldestIdx"] == 2
+
+    no_done_generation = dict(done)
+    no_done_generation.pop("transcript_generation")
+    no_done_generation["message_count"] = 4
+    mixed = _listener(prev, no_done_generation, pre_generation=0, pre_oldest_idx=0)
+    assert mixed["texts"] == [m["content"] for m in prev[2:]]
+    assert mixed["oldestIdx"] == 2
+
+
+def test_authoritative_offset_and_origin_mismatch_disallow_merge() -> None:
+    prev = _sample_messages()[:4]
+    mismatched = _listener(
+        prev,
+        {"session_id": "A", "messages": prev[2:], "transcript_generation": 0, "_messages_offset": 2, "message_count": 4},
+        pre_generation=0,
+        pre_oldest_idx=10,
+    )
+    assert mismatched["texts"] == [m["content"] for m in prev[2:]]
+    assert mismatched["oldestIdx"] == 2
+
+    contradictory_zero = _listener(
+        prev,
+        {"session_id": "A", "messages": prev[2:], "transcript_generation": 0, "_messages_offset": 0, "_messages_truncated": True, "message_count": 2},
+        pre_generation=0,
+        pre_oldest_idx=10,
+    )
+    assert contradictory_zero["texts"] == [m["content"] for m in prev[2:]]
+    assert contradictory_zero["oldestIdx"] == 0
