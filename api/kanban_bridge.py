@@ -11,10 +11,10 @@ Supported operations:
 - Comments and worker dispatch integration
 
 Status transitions are routed through the Agent's own verbs (``complete_task``,
-``block_task``, ``archive_task``, ``schedule_task``, ``unblock_task``). The
-full column/status flow — including how tasks enter and leave ``scheduled``
-and the parent re-gating on the way back to ``ready`` — is documented in
-``docs/kanban.md``.
+``block_task``, ``archive_task``, ``schedule_task``, ``request_review``,
+``unblock_task``). The full column/status flow — including how tasks enter and
+leave ``scheduled``, how they enter ``review``, and the parent re-gating on the
+way back to ``ready`` — is documented in ``docs/kanban.md``.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from api.agent_compat import agent_attr
 from api.helpers import bad, j
 from api.workspace import resolve_trusted_workspace
 
-BOARD_COLUMNS = ["triage", "todo", "scheduled", "ready", "running", "blocked", "done"]
+BOARD_COLUMNS = ["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done"]
 _TASK_PREFIX = "/api/kanban/tasks/"
 
 
@@ -412,7 +412,16 @@ def _patch_task(conn, task_id: str, body: dict):
         if hasattr(kb, "_append_event"):
             kb._append_event(conn, task_id, "updated", {"fields": list(updates), "source": "webui"})
 
-    if "assignee" in body:
+    # A combined assignee+review patch must capture the current implementer
+    # before request_review reassigns the card to the reviewer. Defer the
+    # assignee write until after the verb runs (dashboard plugin parity).
+    # Key presence, not value, decides deferral: an omitted assignee means
+    # "leave the card alone", while an explicit null/"" means "clear after
+    # the handoff" and must not erase the implementer before request_review
+    # records it.
+    requested_status = str(body.get("status") or "").strip().lower()
+    review_assignee_deferred = requested_status == "review" and "assignee" in body
+    if "assignee" in body and not review_assignee_deferred:
         if not kb.assign_task(conn, task_id, body.get("assignee") or None):
             raise LookupError("task not found")
 
@@ -464,6 +473,33 @@ def _patch_task(conn, task_id: str, body: dict):
         reason = body.get("reason") or None
         if not kb.schedule_task(conn, task_id, reason=reason):
             raise ValueError(f"cannot schedule task from status: {current.status}")
+    elif status == "review":
+        # Review is a handoff, not a plain status flip: request_review records
+        # the implementer/reviewer provenance, emits review_requested, and
+        # clears any live claim with force=True (a dashboard action is a human
+        # override, same contract as the Agent dashboard plugin). Accepts
+        # running/ready only; anything else is refused below with a 400.
+        if not hasattr(kb, "request_review"):
+            raise RuntimeError("review requires a newer Hermes Agent")
+        reviewer = body.get("assignee") or None
+        ok = kb.request_review(
+            conn,
+            task_id,
+            summary=body.get("summary"),
+            metadata=body.get("metadata"),
+            reviewer=reviewer,
+            force=True,
+        )
+        if not ok:
+            current = kb.get_task(conn, task_id)
+            raise ValueError(
+                f"cannot request review from status: {current.status if current else 'missing'}"
+            )
+        if review_assignee_deferred and not reviewer:
+            # Explicit clear (assignee: null or "") while requesting review:
+            # unassign after the handoff has captured the implementer.
+            if not kb.assign_task(conn, task_id, None):
+                raise LookupError("task not found")
     elif status in ("triage", "todo"):
         # Direct status write for drag-drop moves between non-running,
         # non-terminal columns. Uses the claim-aware helper that nulls out
@@ -705,6 +741,15 @@ def _bulk_tasks_payload(body: dict, *, board=None):
         raise ValueError("ids is required")
     results = []
     kb = _kb()
+    has_assignee = "assignee" in body
+    # Only the Review handoff needs the combined assignee+status payload:
+    # _patch_task defers that write until request_review captures the
+    # implementer. Every other status keeps the long-standing bulk ordering
+    # (status transition first, assign afterwards) so a rejected status never
+    # reassigns the card and a claimed running card is released before the
+    # assignee write hits the native claim fence.
+    requested_status = str(body.get("status") or "").strip().lower()
+    review_assignee_in_patch = has_assignee and requested_status == "review"
     with _conn(board=board) as conn:
         for task_id in ids:
             entry = {"id": task_id, "ok": True}
@@ -713,12 +758,23 @@ def _bulk_tasks_payload(body: dict, *, board=None):
                     entry.update(ok=False, error="not found")
                     results.append(entry)
                     continue
+                assignee_in_patch = False
                 if body.get("archive"):
                     if not kb.archive_task(conn, task_id):
                         entry.update(ok=False, error="archive refused")
                 elif body.get("status") is not None:
-                    _patch_task(conn, task_id, {"status": body.get("status")})
-                if body.get("assignee") is not None:
+                    # Carry the assignee through the status transition so bulk
+                    # and single PATCH share one handoff path. Review needs
+                    # this: _patch_task defers the assignee write until after
+                    # request_review captures the implementer, which a
+                    # separate assign_task call cannot reproduce. Other
+                    # statuses must not combine the fields (see above).
+                    patch_body = {"status": body.get("status")}
+                    if review_assignee_in_patch:
+                        patch_body["assignee"] = body.get("assignee")
+                        assignee_in_patch = True
+                    _patch_task(conn, task_id, patch_body)
+                if has_assignee and not assignee_in_patch:
                     if not kb.assign_task(conn, task_id, body.get("assignee") or None):
                         entry.update(ok=False, error="assign refused")
                 if body.get("priority") is not None:
