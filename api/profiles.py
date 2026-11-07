@@ -974,6 +974,23 @@ def get_hermes_home_for_profile(name: str) -> Path:
     return _resolve_profile_home_for_name(name)
 
 
+def is_live_profile_home_for_reads(home) -> bool:
+    """Whether a cross-profile reader may touch *home*.
+
+    A named profile home must still be live — identity marker present and no
+    delete tombstone — or reading it would call ``ensure_dirs()`` and create
+    ``cron/`` + ``cron/output/`` inside a ghost shell. The default/custom homes
+    are not under ``profiles/`` and stay readable.
+    """
+    try:
+        from hermes_constants import named_profile_home, named_profile_is_live
+
+        path = Path(home)
+        return named_profile_home(path) is None or named_profile_is_live(path)
+    except Exception:
+        return True
+
+
 _TERMINAL_ENV_MAPPINGS = {
     'backend': 'TERMINAL_ENV',
     'env_type': 'TERMINAL_ENV',
@@ -2575,6 +2592,8 @@ def _build_profile_rows_fast() -> list | None:
             _read_config_model,
             _check_gateway_running,
             _PROFILE_ID_RE as _UPSTREAM_PROFILE_ID_RE,
+            named_profile_has_identity,
+            named_profile_is_deleted,
         )
     except Exception:
         return None
@@ -2617,6 +2636,15 @@ def _build_profile_rows_fast() -> list | None:
             if not entry.is_dir():
                 continue
             if not _UPSTREAM_PROFILE_ID_RE.match(entry.name):
+                continue
+            # Upstream `_iter_named_profile_dirs()` lists a dir as a profile only when it
+            # carries an identity marker and is not tombstoned. This fast path used to
+            # stop at "is a dir + valid id", so a marker-less shell left behind by a
+            # delete (or by a recovery-artifact mkdir) showed up in the dropdown and was
+            # then read by /api/crons. Match upstream here or the two lists disagree.
+            if not named_profile_has_identity(entry):
+                continue
+            if named_profile_is_deleted(entry):
                 continue
             rows.append(_row(entry, entry.name, False))
 
