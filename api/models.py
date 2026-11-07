@@ -2075,8 +2075,12 @@ class Session:
                     except (UnicodeDecodeError, json.JSONDecodeError, ValueError, AttributeError):
                         existing_msg_count = -1  # corrupt → always back up
                 incoming_msg_count = len(guarded_messages or [])
+                # Preserve when the on-disk count is known-positive *or*
+                # unknown (-1 after UnicodeDecodeError / corrupt JSON). An
+                # unmarked torn sidecar sets -1, and must not lose its raw
+                # bytes to an empty active/pending snapshot (#8807 gate R2).
                 if (
-                    existing_msg_count > 0
+                    existing_msg_count != 0
                     and incoming_msg_count == 0
                     and (self.active_stream_id or self.pending_user_message)
                 ):

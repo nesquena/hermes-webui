@@ -382,3 +382,214 @@ def test_ordinary_session_delete_without_torn_still_clears_primary_and_bak(
     assert captured["payload"]["ok"] is True
     assert not path.exists()
     assert not bak.exists()
+
+
+def _patch_session_delete_route(monkeypatch, session_dir, sid):
+    """Wire /api/session/delete to the temp session_dir for focused delete tests."""
+    from types import SimpleNamespace
+
+    import api.models as models
+    import api.routes as routes
+    import api.config as config_module
+    import api.upload as upload_module
+    import api.turn_journal as turn_journal_module
+    import api.run_journal as run_journal_module
+    import api.background_process as background_module
+
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda handler: {"session_id": sid})
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda value: {})
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda value: False)
+    monkeypatch.setattr(routes, "_is_messaging_session_id", lambda value: False)
+    monkeypatch.setattr(
+        routes, "_worktree_retained_payload_for_session_id", lambda value: {}
+    )
+    monkeypatch.setattr(routes, "prune_session_from_index", lambda value: None)
+    monkeypatch.setattr(
+        routes, "_record_webui_deleted_session_tombstone", lambda value: None
+    )
+    monkeypatch.setattr(
+        routes, "_publish_session_list_changed", lambda *a, **k: None
+    )
+    monkeypatch.setattr(models, "delete_cli_session", lambda value: True)
+    monkeypatch.setattr(config_module, "_evict_session_agent", lambda value: None)
+    monkeypatch.setattr(
+        upload_module, "_session_attachment_dir", lambda value: session_dir / "att" / value
+    )
+    monkeypatch.setattr(turn_journal_module, "delete_turn_journal", lambda value: None)
+    monkeypatch.setattr(run_journal_module, "delete_run_journal", lambda value: None)
+    monkeypatch.setattr(
+        background_module, "forget_bg_task_completion_dedup", lambda value: None
+    )
+
+    captured = {}
+
+    def _capture(handler, payload, status=200, extra_headers=None):
+        captured.update(payload=payload, status=status)
+        return True
+
+    monkeypatch.setattr(routes, "j", _capture)
+    return routes, captured, SimpleNamespace
+
+
+def test_session_delete_removes_retained_torn_salvage_temp(session_dir, monkeypatch):
+    """#8807 R1: producer may leave `<sid>.json.torn.tmp.<pid>.<thread>` when
+    salvage rename/cleanup is denied. Accepted deletion must unlink that exact
+    grammar under the session mutation lock, without touching a neighboring
+    session's similarly named temp.
+    """
+    import os
+    import threading
+
+    import api.models as models
+
+    sid = "s_8798_delete_torn_tmp"
+    path, bak, good_bak, cut = _grow_cut_with_bak10(session_dir, sid)
+
+    # Real producer path: deny salvage publish + temp cleanup so the temp stays.
+    real_replace = models._safe_replace
+    real_unlink = type(path).unlink
+    deny = {"replace": 0, "cleanup": 0}
+
+    def _deny_salvage_replace(src, dst):
+        src_name = getattr(src, "name", str(src))
+        if ".json.torn.tmp." in src_name:
+            deny["replace"] += 1
+            raise OSError("injected salvage replace denial")
+        return real_replace(src, dst)
+
+    def _deny_torn_tmp_unlink(self, *args, **kwargs):
+        if ".json.torn.tmp." in self.name:
+            deny["cleanup"] += 1
+            raise OSError("injected salvage temp cleanup denial")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(models, "_safe_replace", _deny_salvage_replace)
+    monkeypatch.setattr(type(path), "unlink", _deny_torn_tmp_unlink)
+
+    _session(sid, _messages(9, word="kept")).save(skip_index=True)
+
+    # Restore normal unlink/replace for the delete path under test.
+    monkeypatch.setattr(models, "_safe_replace", real_replace)
+    monkeypatch.setattr(type(path), "unlink", real_unlink)
+
+    temps = [
+        p
+        for p in session_dir.iterdir()
+        if p.is_file() and p.name.startswith(f"{sid}.json.torn.tmp.")
+    ]
+    assert deny["replace"] == 1
+    assert len(temps) == 1, f"expected one retained salvage temp, got {temps}"
+    retained = temps[0]
+    assert retained.read_bytes() == cut
+
+    # Neighboring session id with the same producer grammar must survive.
+    neighbor_sid = "s_8798_delete_torn_tmp_neighbor"
+    neighbor_tmp = session_dir / (
+        f"{neighbor_sid}.json.torn.tmp.{os.getpid()}.{threading.current_thread().ident}"
+    )
+    neighbor_tmp.write_bytes(b"neighbor-salvage-temp")
+    # Also plant final .torn for the target so ordinary cleanup still runs.
+    torn = path.with_suffix(".json.torn")
+    # Producer never published final torn under the denial; plant one too.
+    if not torn.exists():
+        torn.write_bytes(cut)
+
+    routes, captured, SimpleNamespace = _patch_session_delete_route(
+        monkeypatch, session_dir, sid
+    )
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
+    assert captured["status"] == 200
+    assert captured["payload"]["ok"] is True
+
+    assert not path.exists()
+    assert not bak.exists()
+    assert not torn.exists()
+    assert not retained.exists(), "retained salvage temp must leave with the session"
+    assert neighbor_tmp.exists() and neighbor_tmp.read_bytes() == b"neighbor-salvage-temp"
+
+
+def _write_unmarked_torn_sidecar(path, n=4):
+    """Legacy-shaped sidecar (no _mc_v) cut mid-UTF-8 so prefix count is None
+    and the full-read fallback hits UnicodeDecodeError → existing_msg_count=-1.
+    """
+    from api.models import _prefix_message_count
+
+    payload = {
+        "title": "legacy UTF-8 session",
+        "workspace": "",
+        "model": "test-model",
+        "created_at": 1.0,
+        "updated_at": 2.0,
+        "messages": _messages(n, word="héllo ✓"),
+        # deliberately omit _mc_v and message_count
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    assert _prefix_message_count(path) is None, "fixture must be unmarked"
+    cut = _cut_mid_character(path)
+    assert _prefix_message_count(path) is None
+    return cut
+
+
+def test_unmarked_torn_sidecar_empty_active_save_preserves_primary(session_dir):
+    """#8807 R2: missing-marker torn primary + empty active snapshot must not
+    publish over the undecodable bytes just because the count is unknown (-1).
+    """
+    from api.models import _prefix_message_count
+
+    sid = "s_8798_unmarked_active"
+    path = session_dir / f"{sid}.json"
+    cut = _write_unmarked_torn_sidecar(path)
+    assert _prefix_message_count(path) is None
+
+    empty_active = _session(sid, [])
+    empty_active.active_stream_id = "still-running"
+    empty_active.save(skip_index=True)
+
+    assert path.read_bytes() == cut, "torn primary must stay when count is unknown"
+
+
+def test_unmarked_torn_sidecar_empty_pending_save_preserves_primary(session_dir):
+    """#8807 R2: missing-marker torn primary + empty pending snapshot must keep
+    the raw bytes (production pending_user_message / pending_started_at shape).
+    """
+    sid = "s_8798_unmarked_pending"
+    path = session_dir / f"{sid}.json"
+    cut = _write_unmarked_torn_sidecar(path)
+
+    empty_pending = _session(sid, [])
+    empty_pending.pending_user_message = "queued prompt"
+    empty_pending.pending_started_at = 123.0
+    empty_pending.save(skip_index=True)
+
+    assert path.read_bytes() == cut, "torn primary must stay for empty pending"
+
+
+def test_marked_torn_empty_active_still_preserves_and_unmarked_nonempty_may_save(
+    session_dir,
+):
+    """Controls: marked + empty active still refuses; unmarked torn + nonempty
+    incoming may still replace (nonempty fallback is not a certified regression).
+    """
+    from api.models import _prefix_message_count
+
+    # Marked control: normal save then cut, empty active refuses.
+    sid_marked = "s_8798_marked_active"
+    _session(sid_marked, _messages(5)).save(skip_index=True)
+    path_marked = session_dir / f"{sid_marked}.json"
+    cut_marked = _cut_mid_character(path_marked)
+    assert _prefix_message_count(path_marked) == 5
+    empty = _session(sid_marked, [])
+    empty.active_stream_id = "stream"
+    empty.save(skip_index=True)
+    assert path_marked.read_bytes() == cut_marked
+
+    # Nonempty unmarked control: a real nonempty snapshot may overwrite.
+    sid_nonempty = "s_8798_unmarked_nonempty"
+    path_nonempty = session_dir / f"{sid_nonempty}.json"
+    _write_unmarked_torn_sidecar(path_nonempty, n=3)
+    _session(sid_nonempty, _messages(2, word="kept")).save(skip_index=True)
+    data = _reload(path_nonempty)
+    assert [m["content"] for m in data["messages"]] == ["kept 0", "kept 1"]
