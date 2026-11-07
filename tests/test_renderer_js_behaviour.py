@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
@@ -204,6 +205,30 @@ class TestRendererSanitization:
         out = _render(driver_path, payload).lower()
         assert forbidden not in out, f"dangerous HTML survived sanitization: {out!r}"
         assert 'alert(1)' not in out, f"executable payload text should not remain executable: {out!r}"
+
+    @pytest.mark.parametrize(
+        "removed_tag", ["<script>", "</script>", "<unknown>", "<img src=x>"]
+    )
+    @pytest.mark.parametrize("prefix", ["", "> ", "# ", "- "])
+    def test_removing_tags_cannot_reconstitute_executable_markup(
+        self, driver_path, removed_tag, prefix
+    ):
+        payload = (
+            prefix + "<" + removed_tag
+            + 'img src="data:image/png;base64,AA==" onerror="this.dataset.marker=1">'
+        )
+        out = _render(driver_path, payload)
+        elements = []
+
+        class Elements(HTMLParser):
+            def handle_starttag(self, tag, attrs):
+                elements.append((tag, dict(attrs)))
+
+        Elements().feed(out)
+        assert not any(tag == "img" for tag, _ in elements), out
+        assert not any(
+            key.startswith("on") for _, attrs in elements for key in attrs
+        ), out
 
     def test_generated_image_markdown_uses_delegated_lightbox_not_inline_js(self, driver_path):
         out = _render(driver_path, "![capy](https://example.com/capy.png)").lower()
