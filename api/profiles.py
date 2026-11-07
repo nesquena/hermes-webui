@@ -974,6 +974,67 @@ def get_hermes_home_for_profile(name: str) -> Path:
     return _resolve_profile_home_for_name(name)
 
 
+def _named_profile_home_shape(path) -> Path | None:
+    """Return the ``<root>/profiles/<id>`` component of *path*, using path shape only.
+
+    Deliberately looser than ``hermes_constants.named_profile_home`` (which also
+    proves the parent is a real Hermes profiles root): a path this function
+    calls named but upstream would not is merely over-restrictive, while the
+    reverse — upstream says named and we say not — cannot happen, because
+    upstream requires the same ``parent.name == "profiles"`` + profile-id
+    grammar this uses. That asymmetry is what makes it safe to use as the
+    "is this even a named home?" pre-check when the upstream helpers are
+    unavailable.
+    """
+    try:
+        current = Path(path).expanduser()
+    except Exception:
+        return None
+    for candidate in (current, *current.parents):
+        if candidate.parent.name == "profiles" and not candidate.name.startswith("."):
+            if _PROFILE_ID_RE.fullmatch(candidate.name):
+                return candidate
+    return None
+
+
+def is_live_profile_home_for_reads(home) -> bool:
+    """Whether a cross-profile reader may touch *home*.
+
+    A named profile home must still be live — identity marker present and no
+    delete tombstone — or reading it would call ``ensure_dirs()`` and create
+    ``cron/`` + ``cron/output/`` inside a ghost shell. The default/custom homes
+    are not under ``profiles/`` and stay readable.
+
+    Fails CLOSED for named homes: when the liveness helpers cannot be imported
+    or the check raises, a named home is treated as NOT readable. AGENTS.md
+    requires identity checks to deny access when safety cannot be confirmed —
+    returning ``True`` there let a stale profile name reach ``list_jobs()`` on
+    any helper failure, which is exactly the ghost-shell write this predicate
+    exists to prevent.
+
+    Non-named homes are decided by path shape alone (see
+    :func:`_named_profile_home_shape`), so a deployment without hermes-agent —
+    where ``hermes_constants`` is simply not installed — still reads the
+    default home. Denying it there would blank the whole Tasks panel for a
+    shape we *can* prove is not a named profile.
+    """
+    named = _named_profile_home_shape(home)
+    if named is None:
+        # Provably not under a profiles/ root: the default/custom home is readable.
+        return True
+    try:
+        from hermes_constants import named_profile_is_live
+
+        return bool(named_profile_is_live(named))
+    except Exception as exc:
+        logger.warning(
+            "profile liveness check failed for %s (%s) — denying cross-profile read",
+            named,
+            exc,
+        )
+        return False
+
+
 _TERMINAL_ENV_MAPPINGS = {
     'backend': 'TERMINAL_ENV',
     'env_type': 'TERMINAL_ENV',
@@ -2575,6 +2636,8 @@ def _build_profile_rows_fast() -> list | None:
             _read_config_model,
             _check_gateway_running,
             _PROFILE_ID_RE as _UPSTREAM_PROFILE_ID_RE,
+            named_profile_has_identity,
+            named_profile_is_deleted,
         )
     except Exception:
         return None
@@ -2617,6 +2680,15 @@ def _build_profile_rows_fast() -> list | None:
             if not entry.is_dir():
                 continue
             if not _UPSTREAM_PROFILE_ID_RE.match(entry.name):
+                continue
+            # Upstream `_iter_named_profile_dirs()` lists a dir as a profile only when it
+            # carries an identity marker and is not tombstoned. This fast path used to
+            # stop at "is a dir + valid id", so a marker-less shell left behind by a
+            # delete (or by a recovery-artifact mkdir) showed up in the dropdown and was
+            # then read by /api/crons. Match upstream here or the two lists disagree.
+            if not named_profile_has_identity(entry):
+                continue
+            if named_profile_is_deleted(entry):
                 continue
             rows.append(_row(entry, entry.name, False))
 
