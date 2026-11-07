@@ -14243,7 +14243,7 @@ _LOGIN_LOCALE = {
     "de": {
         "lang": "de-DE",
         "title": "Anmelden",
-        "subtitle": "Geben Sie Ihr Passwort ein, um fortzufahren",
+        "subtitle": "Gib dein Passwort ein, um fortzufahren",
         "placeholder": "Passwort",
         "btn": "Anmelden",
         "invalid_pw": "Ung\u00fcltiges Passwort",
