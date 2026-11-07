@@ -105,7 +105,7 @@ def test_tombstone_alone_rejects_an_otherwise_live_home(tmp_path):
 
 
 def test_read_predicate_fails_closed_when_liveness_cannot_be_confirmed(tmp_path, monkeypatch):
-    """An unconfirmable identity check must DENY, never allow (AGENTS.md fail-closed)."""
+    """An unconfirmable liveness check on a NAMED home must DENY (AGENTS.md fail-closed)."""
     from api import profiles as webui_profiles
     import hermes_constants
 
@@ -117,16 +117,18 @@ def test_read_predicate_fails_closed_when_liveness_cannot_be_confirmed(tmp_path,
     monkeypatch.setattr(hermes_constants, "named_profile_is_live", _boom)
     # A named home that cannot be proven live is not readable...
     assert webui_profiles.is_live_profile_home_for_reads(live) is False
-    # ...and the default home (not under profiles/) is unaffected by the failure.
+    # ...but the default home is not under profiles/, so it never needed the
+    # helper and stays readable (a shape we can prove, not an unknown).
     assert webui_profiles.is_live_profile_home_for_reads(home) is True
 
 
-def test_read_predicate_fails_closed_when_helpers_are_missing(tmp_path, monkeypatch):
-    """Import failure is an unknown result for EVERY home: deny, do not allow.
+def test_read_predicate_denies_named_homes_when_helpers_are_missing(tmp_path, monkeypatch):
+    """Import failure denies NAMED homes; the default home keeps working.
 
-    With ``hermes_constants`` unimportable we cannot even tell whether a path is a
-    named profile home, so nothing can be confirmed — the predicate denies. This is
-    the reviewer's contract: unknown is never allowed.
+    This is the CI shape: hermes-agent is not installed there, so
+    ``hermes_constants`` is simply absent. Denying every home would blank the
+    Tasks panel, so the pre-check is path shape (which needs no upstream
+    import) and only the named-home verdict falls back to deny.
     """
     from api import profiles as webui_profiles
     import sys
@@ -135,4 +137,5 @@ def test_read_predicate_fails_closed_when_helpers_are_missing(tmp_path, monkeypa
 
     monkeypatch.setitem(sys.modules, "hermes_constants", None)
     assert webui_profiles.is_live_profile_home_for_reads(live) is False
-    assert webui_profiles.is_live_profile_home_for_reads(home) is False
+    assert webui_profiles.is_live_profile_home_for_reads(ghost) is False
+    assert webui_profiles.is_live_profile_home_for_reads(home) is True

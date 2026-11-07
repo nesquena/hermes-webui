@@ -974,6 +974,29 @@ def get_hermes_home_for_profile(name: str) -> Path:
     return _resolve_profile_home_for_name(name)
 
 
+def _named_profile_home_shape(path) -> Path | None:
+    """Return the ``<root>/profiles/<id>`` component of *path*, using path shape only.
+
+    Deliberately looser than ``hermes_constants.named_profile_home`` (which also
+    proves the parent is a real Hermes profiles root): a path this function
+    calls named but upstream would not is merely over-restrictive, while the
+    reverse — upstream says named and we say not — cannot happen, because
+    upstream requires the same ``parent.name == "profiles"`` + profile-id
+    grammar this uses. That asymmetry is what makes it safe to use as the
+    "is this even a named home?" pre-check when the upstream helpers are
+    unavailable.
+    """
+    try:
+        current = Path(path).expanduser()
+    except Exception:
+        return None
+    for candidate in (current, *current.parents):
+        if candidate.parent.name == "profiles" and not candidate.name.startswith("."):
+            if _PROFILE_ID_RE.fullmatch(candidate.name):
+                return candidate
+    return None
+
+
 def is_live_profile_home_for_reads(home) -> bool:
     """Whether a cross-profile reader may touch *home*.
 
@@ -982,25 +1005,31 @@ def is_live_profile_home_for_reads(home) -> bool:
     ``cron/`` + ``cron/output/`` inside a ghost shell. The default/custom homes
     are not under ``profiles/`` and stay readable.
 
-    Fails CLOSED: when the identity helpers cannot be imported or the check
-    raises, the home is treated as not readable. AGENTS.md requires authority /
-    identity checks to deny access when safety cannot be confirmed — returning
-    ``True`` here let a stale profile name reach ``list_jobs()`` on any helper
-    failure, which is exactly the ghost-shell write this predicate exists to
-    prevent.
-    """
-    try:
-        from hermes_constants import named_profile_home, named_profile_is_live
+    Fails CLOSED for named homes: when the liveness helpers cannot be imported
+    or the check raises, a named home is treated as NOT readable. AGENTS.md
+    requires identity checks to deny access when safety cannot be confirmed —
+    returning ``True`` there let a stale profile name reach ``list_jobs()`` on
+    any helper failure, which is exactly the ghost-shell write this predicate
+    exists to prevent.
 
-        named = named_profile_home(Path(home))
-        if named is None:
-            # Not under a profiles/ root: the default/custom home is always readable.
-            return True
-        return named_profile_is_live(named)
+    Non-named homes are decided by path shape alone (see
+    :func:`_named_profile_home_shape`), so a deployment without hermes-agent —
+    where ``hermes_constants`` is simply not installed — still reads the
+    default home. Denying it there would blank the whole Tasks panel for a
+    shape we *can* prove is not a named profile.
+    """
+    named = _named_profile_home_shape(home)
+    if named is None:
+        # Provably not under a profiles/ root: the default/custom home is readable.
+        return True
+    try:
+        from hermes_constants import named_profile_is_live
+
+        return bool(named_profile_is_live(named))
     except Exception as exc:
         logger.warning(
             "profile liveness check failed for %s (%s) — denying cross-profile read",
-            home,
+            named,
             exc,
         )
         return False
