@@ -203,6 +203,60 @@ def _optional_col(name: str, columns: set[str], fallback: str = "NULL") -> str:
     return f"s.{name}" if name in columns else f"{fallback} AS {name}"
 
 
+def _effective_source_sql(columns: set[str], alias: str = "s") -> str:
+    """SQL for the surface that made a session, ready for SELECT or WHERE.
+
+    Newer Hermes Agent stores every local interactive surface (cli, tui, gui,
+    acp) as ``source='local'`` and keeps the real surface in
+    ``created_source``. Read such a row as its ``created_source`` so it gets
+    the same label, bucket and filters as before that storage change (#8674).
+    Only the surfaces WebUI already files as CLI-family (acp, cli, tui) are
+    mapped. Desktop/gui, unknown or missing ``created_source``, older
+    databases and every other source are unchanged.
+
+    ``alias`` is the table alias to read from (always a fixed internal name,
+    never user input), so lineage queries can compare parent and child.
+    """
+    if 'source' not in columns:
+        return "NULL"
+    if 'created_source' not in columns:
+        return f"{alias}.source"
+    return (
+        f"(CASE WHEN LOWER(TRIM(COALESCE({alias}.source, ''))) = 'local' "
+        f"AND LOWER(TRIM(COALESCE({alias}.created_source, ''))) IN ('acp', 'cli', 'tui') "
+        f"THEN LOWER(TRIM({alias}.created_source)) ELSE {alias}.source END)"
+    )
+
+
+def _no_branch_marker_sql(child: str = "child", parent: str = "parent") -> str:
+    """SQL twin of the ``model_config`` boundary in ``_is_continuation_session``.
+
+    True only when the child's ``model_config`` carries no ``_branched_from`` /
+    ``_delegate_from`` / ``_reset_from`` marker naming this parent. Like
+    ``_branch_markers``, unreadable evidence (not JSON, not an object, or a
+    marker that is not a non-empty string) fails closed as a boundary.
+    ``child``/``parent`` are fixed internal aliases, never user input.
+    """
+    mc = f"{child}.model_config"
+    checks = []
+    for key in _MODEL_CONFIG_LINEAGE_KEYS:
+        path = f"'$.{key}'"
+        checks.append(
+            f"(json_type({mc}, {path}) IS NULL OR json_type({mc}, {path}) = 'null' "
+            f"OR (json_type({mc}, {path}) = 'text' "
+            f"AND TRIM(json_extract({mc}, {path})) != '' "
+            f"AND TRIM(json_extract({mc}, {path})) != TRIM({parent}.id)))"
+        )
+    return (
+        f"({mc} IS NULL OR TRIM({mc}) = '' OR (json_valid({mc}) "
+        f"AND json_type({mc}) = 'object' AND " + " AND ".join(checks) + "))"
+    )
+
+
+def _source_col(columns: set[str]) -> str:
+    return f"{_effective_source_sql(columns)} AS source"
+
+
 def _safe_lower(value) -> str:
     return str(value or "").strip().lower()
 
@@ -952,13 +1006,13 @@ def read_importable_agent_session_rows(
             included = tuple(str(source) for source in include_sources if source)
             if included:
                 placeholders = ", ".join("?" for _ in included)
-                where_clauses.append(f"s.source IN ({placeholders})")
+                where_clauses.append(f"{_effective_source_sql(session_cols)} IN ({placeholders})")
                 params.extend(included)
         if exclude_sources:
             excluded = tuple(str(source) for source in exclude_sources if source)
             if excluded:
                 placeholders = ", ".join("?" for _ in excluded)
-                where_clauses.append(f"s.source NOT IN ({placeholders})")
+                where_clauses.append(f"{_effective_source_sql(session_cols)} NOT IN ({placeholders})")
                 params.extend(excluded)
         if wanted_session_ids:
             placeholders = ", ".join("?" for _ in wanted_session_ids)
@@ -978,10 +1032,15 @@ def read_importable_agent_session_rows(
                 if wanted == 'assigned':
                     return _result([])
             elif {'parent_session_id', 'end_reason'} <= session_cols:
+                # Compare the surfaces the same way the listing shows them,
+                # so a 'local' + created_source continuation stays in its
+                # lineage's project bucket (#8674).
+                parent_source_sql = _effective_source_sql(session_cols, "parent")
+                child_source_sql = _effective_source_sql(session_cols, "child")
                 continuation_checks = [
                     "parent.end_reason IN ('compression', 'cli_close')",
-                    "(parent.source IS NULL OR child.source IS NULL "
-                    "OR LOWER(TRIM(parent.source)) = LOWER(TRIM(child.source)))",
+                    f"({parent_source_sql} IS NULL OR {child_source_sql} IS NULL "
+                    f"OR LOWER(TRIM({parent_source_sql})) = LOWER(TRIM({child_source_sql})))",
                 ]
                 if 'ended_at' in session_cols:
                     continuation_checks.append(
@@ -991,6 +1050,10 @@ def read_importable_agent_session_rows(
                     continuation_checks.append(
                         "LOWER(TRIM(COALESCE(child.session_source, ''))) != 'fork'"
                     )
+                if 'model_config' in session_cols:
+                    # Explicit branches/delegates/resets of this parent are
+                    # separate conversations, as in the listing (#8674).
+                    continuation_checks.append(_no_branch_marker_sql())
                 continuation_where = " AND ".join(continuation_checks)
                 # An assignment anywhere in a compression lineage assigns the
                 # whole logical conversation, so both filters must key on the
@@ -1083,7 +1146,7 @@ def read_importable_agent_session_rows(
 
         select_sql = f"""
             SELECT s.id, s.title, s.model, s.message_count,
-                   s.started_at, s.source,
+                   s.started_at, {_source_col(session_cols)},
                    {session_source_expr},
                    {model_config_expr},
                    {user_id_expr},
@@ -1296,7 +1359,7 @@ def read_assigned_project_row_counts(
             )
             if excluded:
                 placeholders = ", ".join("?" for _ in excluded)
-                where_clauses.append(f"s.source NOT IN ({placeholders})")
+                where_clauses.append(f"{_effective_source_sql(session_cols)} NOT IN ({placeholders})")
                 params.extend(excluded)
             cur.execute(
                 f"""
@@ -1373,7 +1436,7 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
             if not required.issubset(session_cols):
                 return _empty_lineage_report(sid)
 
-            source_expr = _optional_col('source', session_cols)
+            source_expr = _source_col(session_cols)
             session_source_expr = _optional_col('session_source', session_cols)
             model_config_expr = _optional_col('model_config', session_cols)
             title_expr = _optional_col('title', session_cols)
@@ -1514,7 +1577,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
             if 'parent_session_id' not in session_cols or 'end_reason' not in session_cols:
                 return {}
             session_source_expr = _optional_col('session_source', session_cols)
-            source_expr = _optional_col('source', session_cols)
+            source_expr = _source_col(session_cols)
             model_config_expr = _optional_col('model_config', session_cols)
             message_count_expr = _optional_col('message_count', session_cols, '0')
             # Identity columns let a session_reset successor stay a top-level
