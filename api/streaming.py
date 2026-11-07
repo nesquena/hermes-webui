@@ -4669,7 +4669,7 @@ def _resolve_image_input_mode(cfg: dict, active_provider: str = "", active_model
     return "native"
 
 
-def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachments, workspace: str, *, cfg: dict = None, active_provider: str = "", active_model: str = "", requested_provider: str = "", profile: str | Path | None = None):
+def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachments, workspace: str, *, cfg: dict = None, active_provider: str = "", active_model: str = "", requested_provider: str = "", profile: str | Path | None = None, session_id: str = ""):
     """Build native multimodal content parts for current-turn image uploads.
 
     WebUI uploads files into the active workspace. For image files, pass the
@@ -4707,11 +4707,62 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
     image_count = 0
 
     for att in attachments or []:
-        if not isinstance(att, dict):
+        # A persisted user row records its uploads as bare FILENAME STRINGS in
+        # `attachments`, and `_normalize_chat_attachments` turns an older
+        # client's filename into {"name": <filename>, "path": ""}. Both shapes
+        # carry no usable path, so the dict-only guard dropped every one and a
+        # re-sent turn carried NO image part: the user's picture silently
+        # vanished after an edit, a cancel-and-resend, or a provider switch.
+        name = ''
+        raw_path = ''
+        if isinstance(att, dict):
+            raw_path = str(att.get('path') or '').strip()
+            name = str(att.get('name') or att.get('filename') or '').strip()
+        elif isinstance(att, str):
+            value = att.strip()
+            # An absolute path is used as-is; anything else is a filename.
+            if value and Path(value).expanduser().is_absolute():
+                raw_path = value
+            else:
+                name = value
+        else:
             continue
-        raw_path = str(att.get('path') or '').strip()
+        if not raw_path and not name:
+            continue
         if not raw_path:
-            continue
+            # Resolve the filename inside the attachment inbox. Uploads live in
+            # a PER-SESSION subdirectory, so when the caller tells us which
+            # session this turn belongs to we look ONLY there. Searching every
+            # session directory and taking the first match would hand the model
+            # another chat's picture whenever two sessions happened to upload the
+            # same filename -- a cross-session leak with the correct file sitting
+            # right there. Containment is re-checked below for the result.
+            try:
+                from api.upload import _attachment_root
+                inbox = _attachment_root()
+            except Exception:
+                continue
+            candidate = None
+            if session_id:
+                try:
+                    from api.upload import _session_attachment_dir
+                    scoped = _session_attachment_dir(session_id) / name
+                except Exception:
+                    scoped = None
+                if scoped is not None and scoped.is_file():
+                    candidate = scoped
+            else:
+                # No session context (older callers): fall back to the inbox,
+                # then to a unique inbox-wide match.
+                direct = inbox / name
+                if direct.is_file():
+                    candidate = direct
+                else:
+                    matches = sorted(inbox.glob(f"*/{name}"))
+                    candidate = matches[0] if matches else None
+            if candidate is None:
+                continue
+            raw_path = str(candidate)
         try:
             path = Path(raw_path).expanduser().resolve()
             # Uploads should live inside the selected workspace OR the
@@ -4724,7 +4775,12 @@ def _build_native_multimodal_message(workspace_ctx: str, msg_text: str, attachme
             size = path.stat().st_size
             if size <= 0 or size > _NATIVE_IMAGE_MAX_BYTES:
                 continue
-            mime = str(att.get('mime') or '').strip() or (mimetypes.guess_type(path.name)[0] or '')
+            # `att` may be a plain string, so never attribute-access it here: the
+            # bare `except Exception: continue` below would turn an AttributeError
+            # into a silently DROPPED attachment, which is exactly how a string
+            # entry used to vanish even once it reached this point.
+            declared_mime = str(att.get('mime') or '').strip() if isinstance(att, dict) else ''
+            mime = declared_mime or (mimetypes.guess_type(path.name)[0] or '')
             if not mime.startswith('image/') or not _is_valid_image(path, mime):
                 continue
             data = base64.b64encode(path.read_bytes()).decode('ascii')
@@ -16522,7 +16578,7 @@ def _run_agent_streaming(
             _agent_msg_text = msg_text
             if _process_notifications:
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
-            user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg, active_provider=(resolved_provider or ""), active_model=(resolved_model or ""), requested_provider=(_session_requested_provider or ""), profile=(getattr(s, "profile", None) or Path(_profile_home)))
+            user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg, active_provider=(resolved_provider or ""), active_model=(resolved_model or ""), requested_provider=(_session_requested_provider or ""), profile=(getattr(s, "profile", None) or Path(_profile_home)), session_id=getattr(s, "session_id", ""))
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
             with _agent_lock:
                 _persist_user_timestamp = getattr(s, 'pending_started_at', None)
@@ -16595,6 +16651,7 @@ def _run_agent_streaming(
                     # profiles are logical ids only (round-5 grammar gate),
                     # explicit homes must arrive as Path values.
                     profile=(getattr(s, "profile", None) or Path(_profile_home)),
+                    session_id=getattr(s, "session_id", ""),
                 )
                 _run_conversation_kwargs["user_message"] = user_message
             # This exact WebUI-composed input is identity evidence for the
