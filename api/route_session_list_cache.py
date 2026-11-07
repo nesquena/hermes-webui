@@ -9,7 +9,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from api.config import LOCK, SESSION_DIR, SESSIONS, SETTINGS_FILE
-from api.models import _active_state_db_path, _active_stream_ids
+from api.models import _active_state_db_path, _active_stream_ids, _content_fingerprint_readable
 from api.profiles import _profiles_match
 
 
@@ -33,6 +33,29 @@ _SESSIONS_CACHE_TTL_SECONDS = 2.5
 # still invalidate immediately. Keep this strictly greater than
 # `_streamingPollMs`/1000 (see tests/test_streaming_cache_ttl_vs_poll.py).
 _SESSIONS_CACHE_STREAMING_TTL_SECONDS = 45.0
+# Rebuild-rate floor (2026-10-28). The stamp above changes whenever ANY writer
+# touches state.db or the session index — a live agent session does that on every
+# message and tool call — so on a busy host the entry "changes" on nearly every
+# poll, and each change forces a FULL all_sessions() rebuild (it re-parses every
+# transcript in the store). Measured with three concurrent agent sessions: 50
+# rebuilds in 12 min, 847 s of total stall, worst single /api/sessions request
+# 60.6 s while the machine sat at load 14 (a warm rebuild costs ~1.2 s of parsing
+# and multiples of that under contention). Serving a payload at most this many
+# seconds old bounds the staleness a client can see and caps the rebuild RATE.
+# The runtime overlay (active stream, pending flags, sort order) is applied on
+# every response regardless of the cache, so only structural row data (title,
+# counts, membership) can be this stale; a settings write or a structural change
+# still invalidates through the separate invalidation stamp.
+_SESSIONS_CACHE_MIN_REFRESH_SECONDS = 10.0
+# Consumer-facing statuses for `_session_list_cache_probe`. `held` is the explicit
+# "inside the rebuild-rate floor, serve this and do NOT start a rebuild" contract:
+# callers that treat every non-fresh hit as a rebuild trigger defeat the floor,
+# because singleflight only caps CONCURRENT rebuilds, never consecutive ones.
+_SESSION_LIST_CACHE_MISSING = "missing"
+_SESSION_LIST_CACHE_FRESH = "fresh"
+_SESSION_LIST_CACHE_HELD = "held"
+_SESSION_LIST_CACHE_STALE_SOURCE = "source"
+_SESSION_LIST_CACHE_STALE_AGE = "age"
 _SESSIONS_CACHE_MAX_ENTRIES = 64
 _SESSIONS_CACHE_WAIT_SECONDS = 0.25
 _SESSIONS_CACHE_STALE_WAIT_SECONDS = 0.10
@@ -374,56 +397,163 @@ def _session_list_cache_key(
     )
 
 
-def _session_list_cache_get(
+# Positions in the idle source stamp (an 8-tuple, see
+# `_session_list_cache_source_stamp`) the rebuild-rate floor compares before it
+# holds an entry: the state.db and state.db-WAL stat pair, the content
+# fingerprint, and the all-profiles stamp.
+#
+# The stat pair is NOT an optimisation detail here. `_sqlite_content_fingerprint`
+# is `MAX(rowid)` of `sessions`/`messages`, i.e. an APPEND POSITION: it does not
+# move for an UPDATE (a title or message_count written by `state_sync`/the
+# Desktop App) and it does not move for the DELETE of any row that is not the
+# current maximum. Every commit of any kind, however, touches the database file
+# (rollback journal) or appends frames to the WAL, so the stat pair is the only
+# cheap witness that "a commit happened at all". Comparing the fingerprint alone
+# is what let a committed rename/delete stay hidden for the whole floor: master
+# was always saved by this same stat movement, and the floor suppressed it.
+# (#8694)
+_STAMP_HOLD_EVIDENCE_INDEXES = (0, 1, 5, 6)
+
+
+def _session_list_cache_stamp_hold_evidence(stamp, all_profiles: bool = False):
+    """Return the evidence a floor hold may rely on, or ``None`` when unknown.
+
+    The rebuild-rate floor may only hold an entry whose committed ROW CONTENT is
+    provably unchanged: a settled message landing in state.db — the official
+    Desktop App continuing a WebUI-origin session, a CLI turn — and equally a
+    rename or a delete has to be visible on the very next request. That is the
+    reconciliation contract pinned by
+    ``tests/test_webui_state_db_reconciliation.py``, not an optional freshness
+    window. ``None`` (the streaming freeze marker's shorter tuple, a stubbed
+    stamp, or an UNREADABLE fingerprint) is unknown, and unknown never holds.
+
+    "Unreadable" is the first degeneracy: ``_sqlite_content_fingerprint``
+    degrades to ``None`` (total failure) or the ``_CONTENT_FINGERPRINT_UNREADABLE``
+    sentinel (per-table lock/timeout) instead of blocking the hot path. Two such
+    stamps compare EQUAL, so without this check an unknown state.db would hold
+    for the whole floor and suppress the file-stat fallback that used to force
+    reconciliation.
+
+    "Append-only" is the second: an unchanged ``MAX(rowid)`` is not an unchanged
+    table (see ``_STAMP_HOLD_EVIDENCE_INDEXES``), so the stat pair is part of the
+    evidence and any commit inside the floor revalidates instead of holding.
+    Only movement a state.db commit cannot produce — the session index and the
+    gateway metadata being rewritten — is coalesced, which is what the floor is
+    for. (#8694)
+    """
+    if not isinstance(stamp, tuple) or len(stamp) != 8:
+        return None
+    if not _session_list_cache_stamp_fingerprints_readable(stamp, all_profiles):
+        return None
+    return tuple(stamp[index] for index in _STAMP_HOLD_EVIDENCE_INDEXES)
+
+
+def _session_list_cache_stamp_fingerprints_readable(stamp, all_profiles: bool) -> bool:
+    """True only when every fingerprint the hold depends on was actually read."""
+    if not _content_fingerprint_readable(stamp[5]):
+        return False
+    all_profiles_stamp = stamp[6]
+    if not all_profiles:
+        # The all-profiles collection is only read for an all-profiles key, so a
+        # ``None`` here is "not applicable", not a failed read.
+        return True
+    if not isinstance(all_profiles_stamp, (tuple, list)):
+        return False
+    if not all_profiles_stamp:
+        # ``_all_profiles_cli_contexts`` degrades to an empty context list when it
+        # cannot resolve a single profile home (its ``api.profiles`` import
+        # fails). An empty stamp therefore carries NO per-profile fingerprint —
+        # unknown evidence, not proof that nothing committed — and two of them
+        # compare equal. (#8694)
+        return False
+    for profile_stamp in all_profiles_stamp:
+        if not isinstance(profile_stamp, tuple) or len(profile_stamp) != 3:
+            return False
+        if not _content_fingerprint_readable(profile_stamp[2]):
+            return False
+    return True
+
+
+def _session_list_cache_probe(
     key: tuple,
     allow_stale: bool = False,
-) -> tuple[dict | None, bool]:
+) -> tuple[dict | None, str]:
+    """Look the entry up and report WHY its payload is (not) directly usable.
+
+    Statuses:
+      ``missing`` — nothing cached (or the entry was dropped as unusable)
+      ``fresh``   — usable as-is, no rebuild needed
+      ``held``    — the rebuild-rate floor holds the entry: the caller serves the
+                    payload and returns WITHOUT claiming or starting a rebuild.
+                    ``_get_cached_session_list_payload`` needs this distinction —
+                    without it a held hit falls through to the generic
+                    stale-background branch, which claims an owner and starts the
+                    builder, so singleflight caps concurrent rebuilds while
+                    consecutive ones still run on every poll.
+      ``source``  — the source stamp moved past the floor
+      ``age``     — stale by TTL only
+    """
     now = time.monotonic()
     current_stamp = _session_list_cache_resolved_source_stamp(key)
     with _SESSIONS_CACHE_LOCK:
         entry = _SESSIONS_CACHE.get(key)
         if not entry:
-            return None, False
+            return None, _SESSION_LIST_CACHE_MISSING
         ts, stamp, payload = entry
         if stamp != current_stamp:
+            # Rebuild-rate floor: while a writer keeps touching state.db/index the
+            # stamp differs on almost every poll. Inside the floor, serve what we
+            # have instead of paying another full rebuild — but only when the
+            # committed row content AND the stat pair are provably unchanged. A
+            # committed message, rename or delete (Desktop app, CLI turn) breaks
+            # the reconciliation contract if it waits for the floor, so any
+            # movement a state.db commit can produce always rebuilds now.
+            hold_evidence = _session_list_cache_stamp_hold_evidence(stamp, bool(key[1]))
+            if (
+                hold_evidence is not None
+                and hold_evidence
+                == _session_list_cache_stamp_hold_evidence(current_stamp, bool(key[1]))
+                and (now - ts) < _SESSIONS_CACHE_MIN_REFRESH_SECONDS
+            ):
+                _SESSIONS_CACHE.move_to_end(key)
+                return _session_list_cache_copy_payload(payload), _SESSION_LIST_CACHE_HELD
             if allow_stale:
                 _SESSIONS_CACHE.move_to_end(key)
-                return _session_list_cache_copy_payload(payload), False
+                return _session_list_cache_copy_payload(payload), _SESSION_LIST_CACHE_STALE_SOURCE
             _SESSIONS_CACHE.pop(key, None)
-            return None, False
+            return None, _SESSION_LIST_CACHE_MISSING
         # #4808: widen the freshness window while a turn is streaming so the fixed
         # streaming poll cadence doesn't force a full rebuild on every poll.
         ttl = _SESSIONS_CACHE_TTL_SECONDS
         if _session_list_cache_streaming_freeze_marker() is not None:
             ttl = _SESSIONS_CACHE_STREAMING_TTL_SECONDS
-        fresh = (now - ts) < ttl
-        if fresh:
+        if (now - ts) < ttl:
             _SESSIONS_CACHE.move_to_end(key)
-            return _session_list_cache_copy_payload(payload), True
+            return _session_list_cache_copy_payload(payload), _SESSION_LIST_CACHE_FRESH
         if allow_stale:
             _SESSIONS_CACHE.move_to_end(key)
-            return _session_list_cache_copy_payload(payload), False
+            return _session_list_cache_copy_payload(payload), _SESSION_LIST_CACHE_STALE_AGE
         _SESSIONS_CACHE.pop(key, None)
-        return None, False
+        return None, _SESSION_LIST_CACHE_MISSING
+
+
+def _session_list_cache_get(
+    key: tuple,
+    allow_stale: bool = False,
+) -> tuple[dict | None, bool]:
+    payload, status = _session_list_cache_probe(key, allow_stale=allow_stale)
+    return payload, status == _SESSION_LIST_CACHE_FRESH
 
 
 def _session_list_cache_stale_reason(key: tuple) -> str | None:
-    """Return why an existing cache entry is stale, if it is stale."""
-    now = time.monotonic()
-    current_stamp = _session_list_cache_resolved_source_stamp(key)
-    with _SESSIONS_CACHE_LOCK:
-        entry = _SESSIONS_CACHE.get(key)
-        if not entry:
-            return None
-        ts, stamp, _payload = entry
-        if stamp != current_stamp:
-            return "source"
-        ttl = _SESSIONS_CACHE_TTL_SECONDS
-        if _session_list_cache_streaming_freeze_marker() is not None:
-            ttl = _SESSIONS_CACHE_STREAMING_TTL_SECONDS
-        if (now - ts) >= ttl:
-            return "age"
+    """Return why an existing cache entry is stale, if a rebuild is warranted."""
+    payload, status = _session_list_cache_probe(key, allow_stale=True)
+    if payload is None or status in (
+        _SESSION_LIST_CACHE_FRESH,
+        _SESSION_LIST_CACHE_HELD,
+    ):
         return None
+    return status
 
 
 def _session_list_cache_set(
@@ -431,10 +561,27 @@ def _session_list_cache_set(
     payload: dict,
     *,
     expected_invalidation_stamp: tuple[int, int] | None = None,
+    source_stamp=None,
 ) -> bool:
+    """Store a built payload under the source stamp it was certified against.
+
+    ``source_stamp`` is the stamp the CALLER read *before* it invoked the
+    builder. Storing the stamp read here instead — after the builder returned —
+    certifies the payload with evidence the builder never saw: a commit that
+    lands between the builder's row read and this insertion is folded into the
+    stored stamp, so the pair "old payload, new stamp" is then served as FRESH
+    for a full TTL, and the reconciliation contract is violated even after the
+    source moves again. Callers that build pass the pre-build stamp; callers
+    that already hold a consistent snapshot (tests, direct seed) may omit it, in
+    which case the current stamp is used. (#8694)
+    """
     if not isinstance(payload, dict):
         return False
-    stamp = _session_list_cache_resolved_source_stamp(key)
+    stamp = (
+        _session_list_cache_resolved_source_stamp(key)
+        if source_stamp is None
+        else source_stamp
+    )
     bounded = _session_list_cache_bounded_payload(payload)
     with _SESSIONS_CACHE_LOCK:
         # Projection intentionally happens outside the lock so large source rows
