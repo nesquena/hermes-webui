@@ -2736,7 +2736,34 @@ function _buildSkillCommandEntry(skill){
   const slug=_skillCommandSlug(skillName);
   if(!slug)return null;
   if(_getReservedSlashCommandSlugs().has(slug)) return null;
-  return{name:slug,desc:String(skill&&skill.description||'').trim()||t('slash_skill_desc'),source:'skill',skillName};
+  // Registry-qualified names (``namespace:skill``) are the plugin manager's
+  // canonical identity: send() and cmdUse() match them verbatim against the
+  // /api/skills rows, so the picker must insert the qualified name EXACTLY
+  // as registered — but ONLY for plugin rows. A directory skill saved with a
+  // colon in its name (the save endpoint accepts ``local:under_score``) is
+  // not a qualified identity: the installed agent resolves the master slug
+  // spelling (``/localunder-score``), and the verbatim
+  // ``/local:under_score`` entry dispatched a literal no skill row resolves
+  // (PR #7781 re-gate, SILENT). Slug-normalization (``_``→``-``, ``:``
+  // stripping) therefore still applies to every non-plugin row, and the
+  // typed autocomplete matches either separator spelling via
+  // _slashCommandSlugVariants.
+  const entryName=skill&&skill.source==='plugin'?skillName:slug;
+  // Carry the plugin namespace through so the picker can render a
+  // ``Plugin: <namespace>`` hint and the dropdown labels plugin skills
+  // distinctly. The ``source`` field stays ``"skill"`` (the picker badge
+  // renders the same way for directory and plugin skills), while
+  // ``plugin`` is the namespace extracted from the qualified name (#7770).
+  // A colon-bearing DIRECTORY skill must not be tagged: it is not
+  // plugin-registered, and the ``Plugin:`` hint would misattribute it.
+  const entry={name:entryName,desc:String(skill&&skill.description||'').trim()||t('slash_skill_desc'),source:'skill',skillName};
+  if(skill&&skill.source==='plugin'&&skill.plugin){
+    entry.plugin=String(skill.plugin);
+  }else if(skill&&skill.source==='plugin'&&skillName.includes(':')){
+    const ns=skillName.split(':',1)[0];
+    if(ns) entry.plugin=ns;
+  }
+  return entry;
 }
 function _buildBundleCommandEntry(bundle){
   const slug=_skillCommandSlug(bundle&&bundle.name);
@@ -2893,12 +2920,20 @@ function showCmdDropdown(matches){
       : '';
     if(c.source==='skill') el.classList.add('cmd-item-skill');
     if(isPath) el.classList.add('cmd-item-path');
+    // Surface the plugin namespace inline so users see where the skill comes
+    // from without losing the row to a separate column. The qualified name
+    // (``superpowers:brainstorming``) is already the visible label, so the
+    // description only needs a ``Plugin: <ns>`` tag when the namespace is
+    // not obvious from the label itself (#7770).
+    const descText=c.source==='skill'&&c.plugin&&!String(c.name||'').startsWith(`${c.plugin}:`)
+      ? `${c.desc||''} · Plugin: ${esc(c.plugin)}`.trim()
+      : (c.desc||'');
     const nameHtml=isPath
       ? `<div class="cmd-item-name"><span class="cmd-item-path-value">${esc(c.value)}</span></div>`
       : isSubArg
       ? `<div class="cmd-item-name"><span class="cmd-item-parent">/${esc(c.parent)}</span> <span class="cmd-item-subarg">${esc(c.value)}</span></div>`
       : `<div class="cmd-item-name">/${esc(c.name)}${usage}${badge}</div>`;
-    const descHtml=`<div class="cmd-item-desc">${esc(c.desc)}</div>`;
+    const descHtml=`<div class="cmd-item-desc">${esc(descText)}</div>`;
     el.innerHTML=`${nameHtml}${descHtml}`;
     el.onmousedown=(e)=>{
       e.preventDefault();
