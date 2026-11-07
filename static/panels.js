@@ -155,7 +155,10 @@ function syncAppTitlebar() {
       };
 
       inp.onkeydown = e2 => {
-        if (e2.key === 'Enter') { e2.preventDefault(); e2.stopPropagation(); finish(true); }
+        if (e2.key === 'Enter') {
+          if (window._isImeEnter && window._isImeEnter(e2)) return;
+          e2.preventDefault(); e2.stopPropagation(); finish(true);
+        }
         if (e2.key === 'Escape') { e2.preventDefault(); e2.stopPropagation(); finish(false); }
       };
       inp.onblur = () => finish(false);
@@ -3607,6 +3610,13 @@ function _kanbanLinksHtml(links){
   </div>`;
 }
 
+// Enter in the "New task" title is a submit — unless an IME composition owns
+// that keypress (candidate confirm / raw-pinyin commit).
+function kanbanNewTaskKeydown(ev){
+  if(!ev||ev.key!=='Enter') return;
+  if(window._isImeEnter&&window._isImeEnter(ev)) return;
+  createKanbanTask();
+}
 async function createKanbanTask(){
   const input = document.getElementById('kanbanNewTaskTitle');
   const title = input ? input.value.trim() : '';
@@ -4006,6 +4016,8 @@ function _kanbanTaskModalKey(ev){
     return;
   }
   if (ev.key === 'Enter' && !ev.shiftKey) {
+    // IME: a committing Enter belongs to the candidate window, not the modal.
+    if (window._isImeEnter && window._isImeEnter(ev)) return;
     // Enter submits except when the focus is in the description textarea
     // (where Enter should insert a newline).
     const target = ev.target;
@@ -6954,6 +6966,7 @@ function _wireWorkspaceFormPathSuggestions(){
       return;
     }
     if(e.key==='Enter' && _wsSuggestIndex>=0 && items[_wsSuggestIndex]){
+      if(window._isImeEnter&&window._isImeEnter(e))return;
       e.preventDefault();
       _applyWorkspaceSuggestion(items[_wsSuggestIndex].dataset.path||'');
       return;

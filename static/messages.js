@@ -1143,7 +1143,7 @@ function _editSelectionChipName(id,chip){
   const commit=()=>{ if(done)return; done=true; s.name=(inp.value.trim()||s.name).slice(0,120); _renderSelectionChips(); restoreFocus(); };
   const cancel=()=>{ if(done)return; done=true; _renderSelectionChips(); restoreFocus(); };
   inp.addEventListener('blur',commit);
-  inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){e.preventDefault();commit();} if(e.key==='Escape'){cancel();} });
+  inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){ if(window._isImeEnter&&window._isImeEnter(e))return; e.preventDefault();commit(); } if(e.key==='Escape'){cancel();} });
 }
 
 function _composerTextWithPendingSelections(){
@@ -9829,6 +9829,9 @@ let _clarifyVisibleSince = 0;
 let _clarifySignature = '';
 let _clarifySessionId = null;
 let _clarifyId = null;
+// IME guard for the clarify free-form input: a committed-but-still-composing
+// Enter must never submit the answer (mirrors the composer's `_imeComposing`).
+let _clarifyImeComposing = false;
 let _clarifyMissingEndpointWarned = false;
 let _clarifyCountdownTimer = null;
 let _clarifyExpiresAt = 0;
@@ -10251,12 +10254,22 @@ function showClarifyCard(pending) {
     if (!sameClarify) input.value = '';
     input.disabled = false;
     input.removeAttribute('readonly');
+    if (!input._clarifyImeTracked) {
+      input._clarifyImeTracked = true;
+      input.addEventListener('compositionstart', () => { _clarifyImeComposing = true; });
+      // Reset on the next tick: the committing keydown can land AFTER
+      // compositionend (Safari, some Linux IMEs), and it must be swallowed.
+      input.addEventListener('compositionend', () => {
+        setTimeout(() => { _clarifyImeComposing = false; }, 0);
+      });
+      input.addEventListener('blur', () => { _clarifyImeComposing = false; });
+    }
     input.onkeydown = (e) => {
-      // A single-line answer has no newline to insert, so every Enter submits it,
-      // whatever the composer's send key is. Routing it through the composer's
-      // decision left Enter doing nothing on phones and with a Shift/Ctrl+Enter
-      // send key (#8769). An IME Enter that commits a composition never submits.
+      // A single-line answer has no newline to insert, so every ordinary Enter
+      // submits it (#8769). An Enter owned by an IME composition only commits
+      // the candidate and must never submit the clarify form.
       if (e.key !== 'Enter') return;
+      if (_clarifyImeComposing) return;
       if (typeof window._isImeEnter === 'function'
           ? window._isImeEnter(e)
           : (e.isComposing || e.keyCode === 229)) return;
