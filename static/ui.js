@@ -7703,7 +7703,8 @@ if(window.visualViewport){
 
 // ── Fit-based composer footer collapse ──────────────────────────────────────
 // Stage classes on .composer-footer:
-//   (none) full labels · .cf-icons icon chips · .cf-icons.cf-burger hamburger.
+//   (none) full labels · .cf-shrink ellipsized labels · .cf-icons icon chips ·
+//   .cf-icons.cf-burger hamburger.
 let _composerFitScheduled=false;
 let _composerFitResizeObserver=null;
 let _composerFitMutationObserver=null;
@@ -7747,18 +7748,28 @@ function _fitComposerFooter(){
   // for the synchronous strip-and-measure.
   footer.classList.add('cf-measuring');
   try{
-    footer.classList.remove('cf-icons','cf-burger');
+    footer.classList.remove('cf-shrink','cf-icons','cf-burger');
     if(overflows()){
-      footer.classList.add('cf-icons');
-      next='cf-icons';
+      // Intermediate stage before hiding labels outright: cap the widest
+      // labeled chips (profile/workspace/model) so their labels ellipsize —
+      // bare icons leave the footer half-empty at widths where short labels
+      // would still fit comfortably.
+      footer.classList.add('cf-shrink');
+      next='cf-shrink';
       if(overflows()){
-        footer.classList.add('cf-burger');
-        next='cf-icons cf-burger';
+        footer.classList.remove('cf-shrink');
+        footer.classList.add('cf-icons');
+        next='cf-icons';
+        if(overflows()){
+          footer.classList.add('cf-burger');
+          next='cf-icons cf-burger';
+        }
       }
     }
   }finally{
     // Restore the measured stage, then release the frozen box in the same
     // task so no intermediate geometry is ever committed to the screen.
+    footer.classList.toggle('cf-shrink',next.includes('cf-shrink'));
     footer.classList.toggle('cf-icons',next.includes('cf-icons'));
     footer.classList.toggle('cf-burger',next.includes('cf-burger'));
     if(frozenHeight>0){

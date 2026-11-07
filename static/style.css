@@ -3292,6 +3292,42 @@
   .composer-footer.cf-icons .saved-prompts-popup{display:none!important;}
   .composer-footer.cf-icons .composer-divider{display:none;}
 
+  /* Keep generated tooltip boxes out of the fit measurement without deleting
+     their content. `content:none` made an idle icon-only control lose its CSS-
+     generated accessible name; removing/recreating the pseudo-element during a
+     refit also restarted an already-visible tooltip's reveal. Fixed-position
+     boxes do not contribute to .composer-left's scrollable overflow, so the
+     synchronous, visibility-hidden fit pass measures only the real controls.
+     Generated content, the global hover/focus delay and opacity continuity all
+     stay intact, including while the fit guard is active. */
+  .composer-footer.cf-measuring .has-tooltip::after{position:fixed!important;}
+
+  /* Intermediate shrink stage (between full labels and .cf-icons): the fit
+     ladder in ui.js caps the widest labeled chips so their labels ellipsize
+     instead of disappearing. Labels stay readable where bare icons would
+     leave the footer half-empty; the divider, saved-prompts button and
+     tightened paddings/gap reclaim the rest. Label elements already ellipsize
+     via their own min-width:0/overflow rules. */
+  .composer-footer.cf-shrink .composer-left{gap:3px;}
+  /* Compact labels may ellipsize inside their capped chips, but the controls
+     themselves must not flex-shrink to make the stage look like it fits. */
+  .composer-footer.cf-shrink .composer-left > *{flex-shrink:0;}
+  .composer-footer.cf-shrink .composer-divider{display:none;}
+  .composer-footer.cf-shrink #btnSavedPrompts,
+  .composer-footer.cf-shrink .saved-prompts-popup{display:none!important;}
+  /* Profile goes icon-only in shrink (mirrors the cf-icons profile rule): the
+     label is almost always the active profile name and carries the least
+     information of the three labeled chips — the reclaimed width goes to the
+     workspace and model labels, which are the ones worth reading. */
+  .composer-footer.cf-shrink .composer-profile-label,
+  .composer-footer.cf-shrink .composer-profile-chevron,
+  .composer-footer.cf-shrink #composerProfileLabel{display:none;}
+  .composer-footer.cf-shrink .composer-profile-chip{box-sizing:border-box;width:44px;height:44px;max-width:44px;min-width:44px;min-height:44px;padding:0;justify-content:center;gap:0;font-size:11px;}
+  .composer-footer.cf-shrink .composer-workspace-group{max-width:140px;}
+  .composer-footer.cf-shrink .composer-workspace-chip{padding-left:8px;padding-right:6px;}
+  .composer-footer.cf-shrink .composer-model-chip{max-width:120px;padding-left:8px;padding-right:6px;}
+  .composer-footer.cf-shrink .composer-reasoning-chip{padding-left:7px;padding-right:7px;}
+
   .composer-footer.cf-burger .composer-left{gap:8px;}
   .composer-footer.cf-burger .composer-workspace-group{box-sizing:border-box;flex:0 0 44px;width:44px;min-width:44px;max-width:44px;min-height:44px;overflow:hidden;border:none;background:transparent;border-radius:8px;}
   .composer-footer.cf-burger .composer-workspace-files-btn{box-sizing:border-box;width:44px;min-width:44px;max-width:44px;padding:0;border-radius:8px;}
