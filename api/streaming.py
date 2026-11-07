@@ -18938,6 +18938,18 @@ def _run_agent_streaming(
                         stream_id,
                         getattr(s, 'active_stream_id', None),
                     )
+                    # hwc: turn-terminal-event — this stream still needs a
+                    # terminal frame. Skipping the transcript writeback is
+                    # correct when this worker no longer owns the session.
+                    # Do not clear or save ``s`` here. ``active_stream_id is
+                    # None`` on the worker-held object is not authority:
+                    # cancel_stream clears that field eagerly, and a rename
+                    # after eviction lives on a different instance. Saving
+                    # this snapshot reverts that metadata.
+                    _error_payload['session_id'] = getattr(s, 'session_id', session_id)
+                    _error_payload['old_session_id'] = session_id
+                    _error_payload['stale_writeback_skipped'] = True
+                    put('apperror', _error_payload)
                     return
 
                 if _turn_pending_source in ('process_wakeup', 'delegation_wakeup'):
