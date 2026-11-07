@@ -142,7 +142,7 @@ def test_agent_route_and_display_receive_the_unwrapped_model(
     agent.__spec__ = ModuleSpec("agent", loader=None, is_package=True)
     reasoning = ModuleType("agent.reasoning_effort")
     reasoning.__spec__ = ModuleSpec("agent.reasoning_effort", loader=None)
-    setattr(agent, "reasoning_effort", reasoning)
+    monkeypatch.setattr(agent, "reasoning_effort", reasoning, raising=False)
 
     def recording_rule(provider_id, model_id, api_mode):
         calls.append(("route", provider_id, model_id, api_mode))
@@ -152,7 +152,7 @@ def test_agent_route_and_display_receive_the_unwrapped_model(
         calls.append(("display", provider_id, model_id, api_mode))
         return f"{effort} (sends max on this route)"
 
-    setattr(reasoning, "effort_display_label", recording_label)
+    monkeypatch.setattr(reasoning, "effort_display_label", recording_label, raising=False)
     monkeypatch.setitem(sys.modules, "agent", agent)
     monkeypatch.setitem(sys.modules, "agent.reasoning_effort", reasoning)
     monkeypatch.setattr(cfg, "VALID_REASONING_EFFORTS", (*cfg._WEBUI_BASE_EFFORTS, "ultra"))
