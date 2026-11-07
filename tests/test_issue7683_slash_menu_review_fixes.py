@@ -173,6 +173,10 @@ def _run_send(command: str, script_body: str = "await send();", *, commands_api_
           startApprovalPolling(){{}}, startClarifyPolling(){{}},
           _fetchYoloState(){{}}, attachLiveStream(){{}},
           newSession: async () => {{}},
+          // uploadPendingFiles lives in ui.js, which this realm does not load.
+          // send() calls it with no typeof guard, and any throw now aborts the
+          // send before /api/chat/start. An empty snapshot is the no-file path.
+          uploadPendingFiles: async () => [],
           $: id => id === 'msg' ? msgInput : genericEl,
           EventSource: function(){{ this.addEventListener=()=>{{}}; this.close=()=>{{}}; }},
           URL: function(){{ this.href=''; }},
