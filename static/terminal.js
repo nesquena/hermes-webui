@@ -93,7 +93,7 @@ function _sendTerminalInput(sid,data){
   // The server counts code points (Python len); [...data] does too.
   if(data.length>TERMINAL_INPUT_MAX_CHARS&&[...data].length>TERMINAL_INPUT_MAX_CHARS){
     // One paste over the limit is refused whole, as the server would refuse it.
-    showToast(t('terminal_input_failed')+'input too large',2600,'error');
+    showToast(t('terminal_input_too_large',TERMINAL_INPUT_MAX_CHARS),2600,'error');
     return;
   }
   const queue=TERMINAL_UI.inputQueues.get(sid);
