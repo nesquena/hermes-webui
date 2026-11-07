@@ -10,6 +10,10 @@ PROFILE_CONCEPT_FALLBACK_KEYS = {
     *PROFILE_CONCEPT_KEYS,
     "workspace_artifact_source_session",
     *scripts_fallback_keys('cs'),
+    "composer_action_interrupt",
+    "composer_action_queue",
+    "composer_action_steer",
+    "composer_action_stop",
 }
 
 
