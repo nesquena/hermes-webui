@@ -9473,6 +9473,24 @@ def _context_length_config_api_key_and_owner(
     return "", frozenset()
 
 
+def _context_lookup_agent_fallback(agent, resolved_api_key=None, resolved_base_url=None, resolved_provider=None) -> dict:
+    """The streaming sites' fallback credential as ONE source: (key, URL, provider) all from the Agent, or, when
+    the Agent has no key, all from the resolved runtime pair. Never the Agent's key with the session's URL: after a
+    fallback the Agent's key, URL and provider move together, away from the session's."""
+    agent_key = getattr(agent, "api_key", "") or ""
+    if agent_key:
+        return dict(
+            fallback_api_key=agent_key,
+            fallback_base_url=str(getattr(agent, "base_url", "") or ""),
+            fallback_provider=str(getattr(agent, "provider", "") or ""),
+        )
+    return dict(
+        fallback_api_key=resolved_api_key or "",
+        fallback_base_url=str(resolved_base_url or ""),
+        fallback_provider=str(resolved_provider or ""),
+    )
+
+
 def _context_length_lookup_inputs_for_model(
     model: str | None,
     provider: str | None = None,
@@ -9482,6 +9500,7 @@ def _context_length_lookup_inputs_for_model(
     cfg: dict | None = None,
     fallback_api_key: object = None,
     fallback_base_url: str | None = None,
+    fallback_provider: str | None = None,
 ) -> _ContextLengthLookupInputs:
     """Return the effective metadata resolver inputs for a WebUI model.
 
@@ -9651,10 +9670,12 @@ def _context_length_lookup_inputs_for_model(
         effective_api_key = ""
 
     # A fallback key (the Agent's own key at the streaming sites) is used only when
-    # the config selection left none, and only under the same rule: it owns the URL
-    # it came with, or, with no URL, its provider's fixed hosts. The lookup's URL is
-    # never changed for it. This keeps v0.52.544's order (config key first, then
-    # the Agent's) without putting the Agent's key on a URL it doesn't own.
+    # the config selection left none, and only under the caller-key rule: it owns
+    # the URL it came with (the Agent's own, never the session's), or, with no URL,
+    # the fixed hosts of ITS provider (the Agent's, which a fallback may have
+    # switched away from the session's label). The lookup's URL is never changed
+    # for it. This keeps v0.52.544's order (config key first, then the Agent's)
+    # without putting the Agent's key on a host it doesn't own.
     fallback_key = (
         fallback_api_key
         if (fallback_api_key and not isinstance(fallback_api_key, str))
@@ -9663,7 +9684,10 @@ def _context_length_lookup_inputs_for_model(
     if not effective_api_key and fallback_key:
         fallback_owned = _context_lookup_owned_origins(
             fallback_base_url,
-            own_provider="" if str(fallback_base_url or "").strip() else caller_provider,
+            own_provider=(
+                "" if str(fallback_base_url or "").strip()
+                else _canonical_context_provider(fallback_provider)
+            ),
         )
         if _context_lookup_contacted_origins(effective_provider, effective_base_url) <= fallback_owned:
             effective_api_key = fallback_key

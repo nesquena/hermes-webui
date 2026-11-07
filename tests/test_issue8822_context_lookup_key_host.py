@@ -156,6 +156,29 @@ def test_a_fallback_key_never_lands_on_a_url_it_did_not_come_with():
     assert got.api_key == ""
 
 
+@pytest.mark.parametrize("agent_provider, sent", [("anthropic", "AGENT-KEY"), ("deepseek", ""), ("", "")])
+def test_a_fallback_key_without_a_url_owns_its_own_providers_fixed_hosts(agent_provider, sent):
+    """Not the session label's: after a fallback the Agent's key belongs to the Agent's provider."""
+    got = _lookup({"model": {"provider": "anthropic"}}, "anthropic",
+                  fallback_api_key="AGENT-KEY", fallback_base_url="", fallback_provider=agent_provider)
+    assert (got.base_url, got.api_key) == ("", sent)
+
+
+def test_a_fallback_key_under_another_label_does_not_reach_that_labels_fixed_host():
+    got = _lookup({"model": {"provider": "openai-codex"}}, "openai-codex",
+                  fallback_api_key=_jwt("AGENT-KEY"), fallback_base_url="", fallback_provider="anthropic")
+    assert got.api_key == ""
+
+
+def test_the_agent_fallback_is_one_source():
+    agent = types.SimpleNamespace(api_key="AGENT-KEY", base_url="", provider="anthropic")
+    assert routes._context_lookup_agent_fallback(agent, "K-SESSION", C, "openai-codex") == dict(
+        fallback_api_key="AGENT-KEY", fallback_base_url="", fallback_provider="anthropic")
+    keyless = types.SimpleNamespace(api_key="", base_url=A, provider="anthropic")
+    assert routes._context_lookup_agent_fallback(keyless, "K-SESSION", C, "openai-codex") == dict(
+        fallback_api_key="K-SESSION", fallback_base_url=C, fallback_provider="openai-codex")
+
+
 @pytest.mark.parametrize("filled", ["model", "record"])
 def test_a_caller_key_without_a_url_is_never_paired_with_a_filled_url(filled):
     """The GET /api/session entry passes a key with no URL; the lookup then fills one from another source."""
@@ -298,6 +321,20 @@ def test_a_site_under_another_label_sends_the_agents_key_only_where_it_owns_ever
     exec(_site_blocks()[site], ns)
     assert ns["_cfg_base_url"] == C
     assert ns["_cfg_api_key"] == ("K-OTHER" if follows_url else "")
+
+
+@pytest.mark.parametrize("site", [0, 1])
+def test_a_site_never_pairs_the_agents_key_with_the_sessions_url(site, monkeypatch):
+    """After a fallback to an Agent with no URL, the lookup URL is still the session's; the Agent's key isn't its."""
+    cfg = {"model": {"provider": "custom:my-proxy"}, "providers": {}, "custom_providers": []}
+    import api.config as api_config
+    monkeypatch.setattr(api_config, "get_config", lambda *a, **k: cfg, raising=False)
+    ns = dict(agent=types.SimpleNamespace(model="m-x", base_url="", api_key="AGENT-KEY", provider="deepseek"),
+              resolved_model="m-x", resolved_provider="custom:my-proxy", resolved_base_url=A,
+              resolved_api_key="K-SESSION", _cfg=cfg)
+    exec(_site_blocks()[site], ns)
+    assert ns["_cfg_base_url"] == A
+    assert ns["_cfg_api_key"] == ""
 
 
 def _site_calls():
