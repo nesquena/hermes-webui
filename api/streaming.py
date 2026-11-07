@@ -54,6 +54,7 @@ from api.config import (
     merge_custom_provider_runtime_bundle,
     CustomProviderRouteError,
     MODEL_ALIAS_ROUTE_UNRESOLVED,
+    PROVIDER_NAME_AMBIGUOUS,
     raise_for_unresolved_model_alias_route,
     CUSTOM_ROUTE_NO_CREDENTIAL,
     CUSTOM_ROUTE_NO_ENDPOINT,
@@ -88,10 +89,21 @@ from api.memory_profile_scope import (
     agent_has_memory,
     call_as_session_owner,
     construct_profile_scoped_agent,
+    # #8652 (master): the server-authoritative memory status notice.
     memory_status_event,
     session_memory_status,
+    # #8613: release an unowned eviction's memory provider only when its agent is
+    # the last holder of the instance.
+    release_unowned_memory_provider,
+    # #8804: cancel the context engine's background summary pass (close-only; its
+    # session end stays behind the owner check), skipped along with a refused shutdown.
+    release_unowned_context_engine,
+    # #8613: refuse the release instead of waiting on the acquisition fence,
+    # for a caller that holds a lock and must not block.
+    release_without_fence_wait,
     session_profile_home_or_empty,
     turn_memory_reason,
+    unregister_provider_holders,
 )
 from api.models import (
     StateDBSessionMessagesSnapshot,
@@ -455,7 +467,8 @@ def _strip_compact_echo_suffix(value: str, suffix: str) -> tuple[str, bool]:
 def _redacted_session_payload_with_full_messages(session, *, tool_calls=None) -> dict | None:
     """Best-effort terminal SSE session payload for already-persisted state."""
     try:
-        return redact_session_data(
+        from api.helpers import public_session_projection
+        return public_session_projection(
             _session_payload_with_full_messages(session, tool_calls=tool_calls)
         )
     except Exception:
@@ -863,21 +876,27 @@ def _apply_profile_home_context_to_streaming_model(
         return model, provider_context, False
 
     try:
-        from api import yaml_compat as _yaml_pp
+        from api.config import _has_env_ref
+        from api.profiles import load_profile_config
 
         _pp_cfg_path = Path(profile_home) / "config.yaml"
         if not _pp_cfg_path.is_file():
             return model, provider_context, False
 
-        _pp_cfg = _yaml_pp.safe_load(_pp_cfg_path.read_text(encoding="utf-8")) or {}
+        # config.yaml keeps raw ``${VAR}`` references (#8032): expand them under
+        # the session profile's env binding; a provider/default that stays
+        # unresolved is absent, never a provider context or repair target.
+        _pp_cfg = load_profile_config(profile_home)
         if not isinstance(_pp_cfg, dict):
             return model, provider_context, False
 
         _pp = (_pp_cfg.get("model", {}).get("provider") or "").strip()
-        if not _pp:
+        if not _pp or _has_env_ref(_pp):
             return model, provider_context, False
 
         _pp_default = (_pp_cfg.get("model", {}).get("default") or "").strip()
+        if _has_env_ref(_pp_default):
+            _pp_default = ""
         return _apply_profile_provider_context_to_streaming_model(
             model,
             provider_context,
@@ -1107,7 +1126,15 @@ def _attempt_model_alias_credential_self_heal(
         with SESSION_AGENT_CACHE_LOCK:
             evicted = SESSION_AGENT_CACHE.pop(session_id, None)
         if evicted is not None:
-            _close_cached_agent_entry_at_session_boundary(session_id, evicted)
+            # #8613 round 3 (the maintainer's note): this close runs inside the
+            # per-session agent lock, so it must NOT wait — neither on the
+            # construction fence nor on the evicted agent's own queued memory
+            # write (the release drains it, bounded). The wait would stall the
+            # user's next turn while the lock is held. The release is refused
+            # right away instead, and the provider keeps its worker until the
+            # next session boundary.
+            with release_without_fence_wait():
+                _close_cached_agent_entry_at_session_boundary(session_id, evicted)
     except Exception:
         logger.debug("[webui] self-heal: alias agent-cache eviction failed", exc_info=True)
     return fresh_route, _resolve_model_alias_endpoint_runtime(
@@ -2183,6 +2210,8 @@ def _custom_provider_route_classification(error) -> dict:
         label = 'Provider credential unavailable'
     elif reason == CUSTOM_ROUTE_NO_ENDPOINT:
         label = 'Provider endpoint unavailable'
+    elif reason == PROVIDER_NAME_AMBIGUOUS:
+        label = 'Provider name conflict'
     else:
         label = 'Provider not configured'
     return {
@@ -6722,6 +6751,46 @@ def _extract_title_response(resp, *, aux: bool = False) -> tuple[str, str]:
         return '', f'llm_empty{suffix}'
 
 
+def _title_provider_name_ambiguous(provider: str, base_url: str) -> bool:
+    """True when the title route's provider name has two claimants (#8690).
+
+    ``call_llm`` hands the name to the Agent, which answers it with the first
+    record that claims it, so the endpoint and key could come from different
+    records. ``auto`` / unset without a URL is the Agent's main provider. The
+    title then falls back to the local (non-LLM) one; the warning carries the
+    verdict message, which names records and never a URL or credential.
+
+    Both inputs are read the way ``call_llm`` will read them (Codex r4): the
+    config file the Agent's ``get_config_path()`` names, unexpanded (a title
+    worker binds the session profile's env for the Agent, not WebUI's profile
+    view), and the Agent's current ``_read_main_provider()`` (re-expanded from
+    the profile .env, unlike WebUI's cache). WebUI's own view is the fallback
+    only when the Agent's readers are unavailable.
+    """
+    from api.config import _load_yaml_config_file_raw, get_config, provider_name_ambiguity_verdict
+
+    try:
+        from hermes_cli.config import get_config_path as agent_config_path
+
+        source = _load_yaml_config_file_raw(Path(agent_config_path()))
+    except Exception:
+        source = None
+    name = provider
+    if not name and not base_url:
+        try:
+            from agent.auxiliary_client import _read_main_provider
+
+            name = str(_read_main_provider() or '')
+        except Exception:
+            main = get_config().get('model')
+            name = main.get('provider', '') if isinstance(main, dict) else ''
+    verdict = provider_name_ambiguity_verdict(name, config=source) if name else None
+    if verdict is None:
+        return False
+    logger.warning("skipping LLM title generation: %s", verdict['message'])
+    return True
+
+
 def generate_title_raw_via_aux(
     user_text: str,
     assistant_text: str,
@@ -6753,6 +6822,8 @@ def generate_title_raw_via_aux(
         provider = normalized_provider or ''
     except ValueError:
         pass
+    if _title_provider_name_ambiguous(provider, base_url):
+        return None, 'provider_name_ambiguous_aux'
     api_key = ''
     if not caller_supplied_route:
         api_key = str(configured.get('api_key', '') or '').strip()
@@ -7135,6 +7206,7 @@ _TITLE_FAILURE_HUMAN_REASONS = {
     'empty_user_message': 'this session has no user message to title yet',
     'empty_title': 'no title could be produced for this session',
     'title_generation_disabled': 'title generation is disabled for this profile',
+    'provider_name_ambiguous_aux': "two providers claim the title model's provider name",
 }
 
 
@@ -13684,7 +13756,15 @@ def _attempt_credential_self_heal(
         with SESSION_AGENT_CACHE_LOCK:
             _evicted_entry = SESSION_AGENT_CACHE.pop(session_id, None)
         if _evicted_entry is not None:
-            _close_cached_agent_entry_at_session_boundary(session_id, _evicted_entry)
+            # #8613 round 3 (the maintainer's note): this close runs inside the
+            # per-session agent lock, so it must NOT wait — neither on the
+            # construction fence nor on the evicted agent's own queued memory
+            # write (the release drains it, bounded). The wait would stall the
+            # user's next turn while the lock is held. The release is refused
+            # right away instead, and the provider keeps its worker until the
+            # next session boundary.
+            with release_without_fence_wait():
+                _close_cached_agent_entry_at_session_boundary(session_id, _evicted_entry)
 
         # 3. Invalidate the credential pool for this provider
         invalidate_credential_pool_cache(provider_id)
@@ -13843,19 +13923,46 @@ def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
     if not should_close_evicted_agent:
         return False
 
+    engine_release_due = False
     try:
         shutdown_memory_provider = getattr(agent, 'shutdown_memory_provider', None)
         if callable(shutdown_memory_provider):
             session_messages = vars(agent).get('_session_messages', [])
-            call_as_session_owner(
+            if not call_as_session_owner(
                 agent,
                 lambda: shutdown_memory_provider(session_messages),
                 session_id=session_id,
                 owner_home=_owner_home,
                 what="memory provider shutdown",
-            )
+            ):
+                # #8613: an owner that cannot be resolved also skipped the provider
+                # teardown inside shutdown_memory_provider; release the provider in
+                # its own bound profile, without a session end. A no-op unless this
+                # agent is the LAST holder of every instance it serves — a provider
+                # shared with a live agent of the same profile keeps running.
+                #
+                # #8804: the refusal also skipped the context engine's release, unless
+                # the Agent's own shutdown ran (a refusal at hook time). Decided BEFORE the
+                # release, which marks an old Agent's agent shut down.
+                engine_release_due = not getattr(agent, '_memory_provider_shutdown', False)
+                release_unowned_memory_provider(agent, session_id=session_id, owner_home=_owner_home)
     except Exception:
         logger.debug("Failed to shut down evicted agent memory provider for session %s", session_id, exc_info=True)
+
+    # #8804: cancel the context engine's background summary pass, in the agent's own
+    # profile home. Its session end is NOT run: it may write, and the owner is unknown.
+    if engine_release_due:
+        try:
+            release_unowned_context_engine(agent, session_id=session_id)
+        except Exception:
+            logger.debug("Failed to release the evicted agent's context engine for session %s", session_id, exc_info=True)
+
+    # #8613: this agent is out of the cache for good, so it holds no provider
+    # instance any more — whether or not one was released above.
+    try:
+        unregister_provider_holders(agent)
+    except Exception:
+        logger.debug("Failed to drop provider holders for evicted session %s", session_id, exc_info=True)
 
     try:
         session_db = getattr(agent, '_session_db', None)
@@ -16778,7 +16885,14 @@ def _run_agent_streaming(
                                 )
                     if _skipped_agent_migration_entry is not None:
                         try:
-                            _close_cached_agent_entry_at_session_boundary(old_sid, _skipped_agent_migration_entry)
+                            # #8613: this close runs inside the per-session agent
+                            # lock, so it must NOT wait on the acquisition fence —
+                            # the wait would stall the user's next turn while the
+                            # lock is held. The release is refused right away
+                            # instead, and the provider keeps its worker until the
+                            # next session boundary.
+                            with release_without_fence_wait():
+                                _close_cached_agent_entry_at_session_boundary(old_sid, _skipped_agent_migration_entry)
                         except Exception:
                             logger.debug("Failed to close skipped compression-migration cached agent for session %s", old_sid, exc_info=True)
                     _compressed = True

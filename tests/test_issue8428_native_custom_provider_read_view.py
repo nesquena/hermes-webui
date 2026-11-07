@@ -113,9 +113,14 @@ def test_exact_issue_shape_is_visible_without_mutation(monkeypatch, native_confi
 
 
 @pytest.mark.parametrize("legacy", [None, {}, "bad", [], [None, 3]])
-def test_explicit_empty_or_malformed_legacy_does_not_enable_native(legacy, native_config):
+def test_empty_or_malformed_legacy_has_no_winners_and_keeps_native(legacy, native_config):
+    """#8685: an empty or malformed legacy list has no legacy entries to win, so native
+    providers stay readable exactly as with no legacy key. v0.52.544's catalog and routing
+    showed and routed them, and the Agent scans ``providers:`` before the legacy list."""
+    without = config._custom_provider_entries(copy.deepcopy(native_config))
+    assert [config._custom_provider_slug_from_name(e["name"]) for e in without] == [PID]
     native_config["custom_providers"] = legacy
-    assert config._custom_provider_entries(native_config) == []
+    assert config._custom_provider_entries(native_config) == without
 
 
 def test_mixed_legacy_wins_by_identity_but_unrelated_native_survives(native_config):
@@ -223,10 +228,8 @@ def test_reasoning_and_context_metadata(monkeypatch, native_config):
     config._thread_ctx.env = {"DEMO_GATEWAY_API_KEY": "synthetic-owned-key"}
     assert config.resolve_model_reasoning_efforts(MODEL, PID) == ["medium"]
     assert config.resolve_model_reasoning_efforts("unlisted", PID) == ["low", "high"]
-    inputs = routes._context_length_lookup_inputs_for_model(MODEL, PID, cfg=native_config)
-    assert inputs.config_context_length == 123456
-    assert inputs.base_url == URL
-    assert inputs.api_key == "synthetic-owned-key"
+    # #8819 (option B): the context-length lookup is v0.52.544's again: it reads no native-schema record
+    # (``api:``), so its context and key are not asserted here.
 
 
 def test_routing_uses_complete_original_owned_record(monkeypatch, native_config):
@@ -382,8 +385,8 @@ def test_mixed_store_metadata_and_connection_use_legacy_winner(monkeypatch, nati
     assert config.resolve_model_provider(MODEL) == (MODEL, PID, legacy["base_url"])
     assert providers._get_provider_api_key(PID) is None
     assert custom_cards()[0]["has_key"] is False
-    inputs = routes._context_length_lookup_inputs_for_model(MODEL, PID, cfg=native_config)
-    assert (inputs.config_context_length, inputs.base_url, inputs.api_key) == (98765, legacy["base_url"], "")
+    # #8819 (option B): the context-length lookup is v0.52.544's again, so in a mixed store it can pair
+    # one source's URL with the other source's key, as 544 did (#8822). This test no longer pins the lookup.
     bundle = config.resolve_custom_provider_bundle(PID)
     assert bundle["source"] == "custom_providers"
     assert bundle["record"] is legacy
@@ -476,14 +479,28 @@ def test_malformed_native_store_is_empty(native):
     assert config._custom_provider_entries({"providers": native}) == []
 
 
+def _consumer_views(monkeypatch, data):
+    bind(monkeypatch, data)
+    config.invalidate_models_cache()
+    views = {
+        "cards": [(c["id"], c.get("display_name"), c.get("has_key")) for c in custom_cards()],
+        "live": sorted(m["id"] for m in live()["models"]),
+    }
+    for name, catalog in (("cold", config._static_models_catalog_without_live_probes()),
+                          ("refreshed", config.get_available_models(force_refresh=True))):
+        groups = [g for g in catalog["groups"] if g["provider_id"] == PID]
+        views[name] = [(g["provider"], [m["id"] for m in g["models"]]) for g in groups]
+    return views
+
+
 @pytest.mark.parametrize("legacy", [[], None, "malformed"])
-def test_legacy_suppression_is_consistent_across_read_consumers(monkeypatch, native_config, legacy):
+def test_empty_legacy_shows_native_consistently_across_read_consumers(monkeypatch, native_config, legacy):
+    """#8685: cards, live models and both catalogs see the native provider exactly as with no legacy key."""
+    without = _consumer_views(monkeypatch, copy.deepcopy(native_config))
+    assert len(without["cards"]) == 1
+    assert len(without["cold"]) == len(without["refreshed"]) == 1
     native_config["custom_providers"] = legacy
-    bind(monkeypatch, native_config)
-    assert not custom_cards()
-    assert live()["models"] == []
-    for catalog in (config._static_models_catalog_without_live_probes(), config.get_available_models(force_refresh=True)):
-        assert not any(g["provider_id"] == PID for g in catalog["groups"])
+    assert _consumer_views(monkeypatch, native_config) == without
 
 
 def test_same_display_label_does_not_merge_distinct_identities(native_config):
@@ -554,12 +571,11 @@ def test_native_context_same_url_preserves_requested_record_authority(monkeypatc
     assert (inputs.provider, inputs.base_url, inputs.api_key, inputs.config_context_length) == (
         "custom:second", URL, "synthetic-second-key", 22222,
     )
-    # Metadata resolvers also receive only the selected authority, never an
-    # earlier same-URL record they could independently match a second time.
-    assert [entry["name"] for entry in inputs.custom_providers] == ["custom:second"]
 
 
-@pytest.mark.parametrize("requested", ["custom:ghost", "custom:disabled"])
+# #8819 (option B): the context-length lookup is v0.52.544's again: a disabled record lends its key to its own
+# URL again (as on 544), so only the unknown identity is asserted.
+@pytest.mark.parametrize("requested", ["custom:ghost"])
 @pytest.mark.parametrize("reverse", [False, True])
 def test_native_context_same_url_cannot_borrow_for_unowned_identity(monkeypatch, requested, reverse):
     records = [
@@ -570,10 +586,11 @@ def test_native_context_same_url_cannot_borrow_for_unowned_identity(monkeypatch,
     bind(monkeypatch, data)
     inputs = routes._context_length_lookup_inputs_for_model(MODEL, requested, base_url=URL, cfg=data)
     assert (inputs.provider, inputs.base_url, inputs.api_key, inputs.config_context_length) == (requested, URL, "", None)
-    assert inputs.custom_providers == []
 
 
-@pytest.mark.parametrize("count", [1, 2])
+# #8819 (option B): the context-length lookup is v0.52.544's again: it infers no native owner for a session
+# without an identity, so only the two-owner case (no key) is asserted.
+@pytest.mark.parametrize("count", [2])
 @pytest.mark.parametrize("by", ["base", "model"])
 def test_identity_absent_context_inference_requires_unique_owner(monkeypatch, count, by):
     data = {"providers": {
@@ -582,11 +599,7 @@ def test_identity_absent_context_inference_requires_unique_owner(monkeypatch, co
     }}
     bind(monkeypatch, data)
     inputs = routes._context_length_lookup_inputs_for_model(MODEL, base_url=URL if by == "base" else None, cfg=data)
-    if count == 1:
-        assert (inputs.provider, inputs.base_url, inputs.api_key, inputs.config_context_length) == ("custom:p0", URL, "synthetic-key-0", 12345)
-    else:
-        assert (inputs.provider, inputs.api_key, inputs.config_context_length) == ("", "", None)
-        assert inputs.custom_providers == []
+    assert (inputs.provider, inputs.api_key, inputs.config_context_length) == ("", "", None)
 
 
 @pytest.mark.parametrize("reverse", [False, True])
@@ -614,8 +627,7 @@ def test_native_identity_collision_read_and_runtime_authority_agree(monkeypatch,
     assert config.resolve_model_provider(MODEL) == (MODEL, identity, winner_url)
     assert config.resolve_model_provider("loser-model")[1] != identity
     assert config.resolve_model_provider(f"@{identity}:{MODEL}") == (MODEL, identity, winner_url)
-    inputs = routes._context_length_lookup_inputs_for_model(MODEL, identity, cfg=data)
-    assert (inputs.base_url, inputs.api_key, inputs.config_context_length) == (winner_url, bundle["api_key"], 22222)
+    # #8819 (option B): the context-length lookup is v0.52.544's again (no native-schema URL); not asserted.
     runtime = routes._resolve_agent_connection_bundle(identity, "synthetic-ambient", "https://ambient.invalid/v1", {})
     assert (runtime["base_url"], runtime["api_key"]) == (winner_url, bundle["api_key"])
     for catalog in (config._static_models_catalog_without_live_probes(), config.get_available_models(force_refresh=True)):
@@ -639,7 +651,8 @@ def test_native_normalization_collision_without_exact_key_fails_closed(monkeypat
         lambda: config.resolve_custom_provider_bundle(PID),
         lambda: providers._get_provider_api_key(PID),
         lambda: config.resolve_model_provider(f"@{PID}:{MODEL}"),
-        lambda: routes._context_length_lookup_inputs_for_model(MODEL, PID, cfg=data),
+        # #8819 (option B): the context-length lookup is v0.52.544's again: it does not refuse an
+        # ambiguous native identity (544 took the first match).
         lambda: routes._resolve_agent_connection_bundle(PID, None, None, {}),
     ):
         with pytest.raises(config.AmbiguousCustomProviderError):
@@ -853,7 +866,9 @@ def test_only_configured_preserves_nonactive_native_group(
     before = copy.deepcopy(data)
     bind(monkeypatch, data)
     assert config.resolve_model_provider("@openai:gpt-5.4") == ("gpt-5.4", "openai", None)
-    visible = state in {"native", "mixed"}
+    # #8685: an empty or malformed legacy list has no legacy winners, so the native
+    # group stays visible as in the "native" state (v0.52.544 showed it too).
+    visible = state != "disabled"
     assert len(custom_cards()) == int(visible)
     for catalog in (config._static_models_catalog_without_live_probes(), config.get_available_models(force_refresh=True)):
         ids = [g["provider_id"] for g in catalog["groups"]]
@@ -867,8 +882,7 @@ def test_only_configured_preserves_nonactive_native_group(
         with pytest.raises(config.CustomProviderRouteError):
             routes._resolve_agent_connection_bundle(PID, "synthetic-ambient", "https://ambient.invalid/v1", {})
     else:
-        # Explicit legacy suppression is a presentation rule, not a rewrite of
-        # the raw runtime selector. Mixed legacy still owns the complete bundle.
+        # Mixed legacy still owns the complete bundle; otherwise the native record does.
         bundle = config.resolve_custom_provider_bundle(PID)
         assert (bundle["base_url"], bundle["api_key"]) == (owned_url, owned_key)
         runtime = routes._resolve_agent_connection_bundle(PID, "synthetic-ambient", "https://ambient.invalid/v1", {})
@@ -919,8 +933,10 @@ def test_unrelated_native_ambiguity_does_not_poison_explicit_routes(
     assert outbound_attempts == []
 
 
+# #8819 (option B): the context-length lookup is v0.52.544's again: its boundaries ("context",
+# "context-with-key", "context-key-reader") no longer refuse an ambiguous identity.
 @pytest.mark.parametrize("boundary", [
-    "qualified-model", "raw-bundle", "runtime", "context", "context-with-key", "key-reader", "context-key-reader",
+    "qualified-model", "raw-bundle", "runtime", "key-reader",
 ])
 def test_requested_native_ambiguity_remains_terminal(
     outbound_attempts, conflicting_native_config, boundary,
@@ -933,15 +949,8 @@ def test_requested_native_ambiguity_remains_terminal(
             config.resolve_custom_provider_bundle(PID)
         elif boundary == "runtime":
             routes._resolve_agent_connection_bundle(PID, "synthetic-ambient", "https://safe.invalid/v1", {})
-        elif boundary == "key-reader":
-            providers._get_provider_api_key(PID)
-        elif boundary == "context-key-reader":
-            routes._context_length_config_api_key_for_provider(PID, data)
         else:
-            routes._context_length_lookup_inputs_for_model(
-                "shared", PID, base_url="https://safe.invalid/v1",
-                api_key="synthetic-caller" if boundary == "context-with-key" else None, cfg=data,
-            )
+            providers._get_provider_api_key(PID)
     assert outbound_attempts == []
 
 
@@ -959,7 +968,6 @@ def test_native_ambiguity_cannot_make_unknown_or_doubled_targets_borrow(
         "shared", target, base_url="https://safe.invalid/v1", cfg=data,
     )
     assert (inputs.provider, inputs.api_key, inputs.config_context_length) == (target, "", None)
-    assert inputs.custom_providers == []
     assert live(target)["models"] == []
     assert outbound_attempts == []
 
@@ -981,8 +989,7 @@ def test_native_ambiguity_isolated_from_safe_readers_and_live(monkeypatch, confl
         safe = next(g for g in catalog["groups"] if g["provider_id"] == "custom:safe")
         assert [m["id"] for m in safe["models"]] == ["@custom:safe:safe-model"]
     assert requests == []  # fixed models: neither colliding nor safe lanes probe
-    inputs = routes._context_length_lookup_inputs_for_model("safe-model", "custom:safe", cfg=data)
-    assert (inputs.api_key, inputs.base_url, inputs.config_context_length) == ("synthetic-safe", "https://safe.invalid/v1", 76543)
+    # #8819 (option B): the context-length lookup is v0.52.544's again (no native-schema record); not asserted.
     runtime = routes._resolve_agent_connection_bundle("custom:safe", "synthetic-ambient", "https://ambient.invalid/v1", {})
     assert (runtime["base_url"], runtime["api_key"]) == ("https://safe.invalid/v1", "synthetic-safe")
     assert [m["id"] for m in live("custom:safe")["models"]] == ["safe-model"]
@@ -1124,11 +1131,11 @@ def test_underscore_and_hyphen_native_owners_stay_distinct(monkeypatch, outbound
 
 
 @pytest.mark.parametrize("legacy", [[], None, "bad"])
-def test_suppressed_read_view_keeps_the_owned_record_credential_and_context(monkeypatch, legacy):
-    """An empty/malformed legacy list hides native rows from the read view, but
-    the keyed ``providers['custom:<slug>']`` record still owns the route: its key
-    clears a paused wakeup after an exhausted pool key, and its context window
-    and key reach the context lookup (#8448 release gate; master resolved both)."""
+def test_empty_legacy_read_view_keeps_the_owned_record_credential_and_context(monkeypatch, legacy):
+    """With an empty/malformed legacy list the keyed ``providers['custom:<slug>']`` record
+    is in the read view (#8685) and owns the route: its key clears a paused wakeup after an
+    exhausted pool key, and its context window and key reach the context lookup (#8448
+    release gate; master resolved both)."""
     owned = "custom:owned"
     data = {
         "model": {"provider": "openai", "default": "other"},
@@ -1150,7 +1157,7 @@ def test_suppressed_read_view_keeps_the_owned_record_credential_and_context(monk
         lambda pid: [dict(exhausted)] if pid == owned else [],
     )
     config.invalidate_credential_pool_cache(owned)
-    assert config._custom_provider_entries(data) == []
+    assert [config._custom_provider_slug_from_name(e["name"]) for e in config._custom_provider_entries(data)] == [owned]
 
     assert providers._get_provider_api_key(owned) == "fixture-replacement"
     assert providers.provider_has_usable_credential(owned)

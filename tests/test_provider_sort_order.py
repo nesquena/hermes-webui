@@ -350,9 +350,13 @@ class TestProviderSortOrder:
                 "providers": dict(reversed(records) if reverse else records)}
         _setup_config(tmp_path, monkeypatch, yaml.safe_dump(data, sort_keys=False))
         before = copy.deepcopy(config.get_config())
-        # The runtime resolver's existing named preference must NOT be changed globally.
+        # #8685: the bare built-in selector keeps its own route, exactly as if the native
+        # ``custom:<pid>`` record were absent (v0.52.544 parity); only the explicit
+        # ``custom:<pid>`` selector reaches the named record.
+        without_named = {**before, "providers": {k: v for k, v in before["providers"].items() if k != named}}
         runtime_before = config._resolve_configured_provider_id(pid, before)
-        assert runtime_before == named
+        assert runtime_before == config._resolve_configured_provider_id(pid, without_named) != named
+        assert config._resolve_configured_provider_id(named, before) == named
         bundle_before = config.resolve_custom_provider_bundle(named)
         route_before = config.resolve_model_provider(f"@{named}:named-model:tag")
 
