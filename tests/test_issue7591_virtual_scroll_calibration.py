@@ -914,6 +914,9 @@ function _messageVirtualKeepTailCount(){ return 0; }
 function _messageVirtualWindowKeyFor(){ return 'window-key'; }
 function _compensateScrollForMeasurementDelta(fn){ fn(); }
 function _deferClearProgrammaticScroll(){}
+// The integrated scheduler wires the reader settlement into the ResizeObserver
+// path; the harness owns no reader state, so settle is a no-op here.
+function _settleMessageWindowReader(){}
 function renderMessages(options){ renders.push(options); }
 eval(extractFunc('_messageVirtualMeasurementCycleKeyFor'));
 eval(extractFunc('_messageJumpScrollOwnsViewport'));
@@ -956,8 +959,11 @@ console.log(JSON.stringify({
     assert metrics["rendersDuringJump"] == []
     assert metrics["deferredHeld"] is True
     assert metrics["framesAfterSecondFrame"] == 0
+    # The deferred-follow scheduler redesign renders internal measurement
+    # refreshes through the owned window path, so the settled flush carries
+    # _windowOnly alongside _internalMeasurement (see _scheduleMessageVirtualizedRender).
     assert metrics["rendersAfterSettlement"] == [
-        {"preserveScroll": True, "_internalMeasurement": True}
+        {"preserveScroll": True, "_windowOnly": True, "_internalMeasurement": True}
     ]
 
 
@@ -1009,6 +1015,9 @@ function _messageRenderCacheSignature(){ return 'signature'; }
 function _rehydrateTransparentStreamDom(){}
 function _rehydrateDeferredWorklogsFromCache(){}
 function _wireMessageWindowLoadEarlierButton(){}
+// The integrated cache branch re-arms window ownership after the restore; the
+// harness owns no reader state, so ownership init is a no-op here.
+function _initializeMessageWindowOwnership(){}
 function _updateMessageVirtualMeasurements(){}
 function requestAnimationFrame(){}
 function _deferClearProgrammaticScroll(){}
@@ -1215,3 +1224,99 @@ console.log(JSON.stringify(out));
     assert abs(metrics["restoredDrift"]) < 2, metrics
     assert abs(metrics["plainDrift"]) < 2, metrics
     assert metrics["plainMove"] == 120, metrics
+
+
+def test_turn_alignment_shares_the_solver_row_height_policy():
+    """Gate-cert 9ba1d994 finding 2: the non-transparent turn-alignment pass in
+    _currentMessageVirtualWindow re-derived row heights from the FLAT role
+    priors while the solver used the calibrated role means (and measured zero /
+    collapsed rows). On calibrated transcripts the alignment pass then emitted
+    top/bottom pads that disagreed with the boundaries the solver had just
+    chosen — the viewport-fling class #7591 fixed for the solver itself.
+
+    Scenario: compact_worklog transcript, every turn [user, hidden assistant,
+    visible assistant, final assistant], SPARSE height cache (nothing
+    measured), assistant role calibrated (25 distinct measured rows) to 640px
+    vs the flat prior of 160px. scrollTop aims the raw solver at the final
+    assistant of turn 20 (row 83); alignment must pull the boundary back to the
+    run head (row 81) and weigh the newly mounted visible assistant at its
+    calibrated 640px, not the flat 160px.
+    """
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + _calibration_block(js) + r"""
+const assert = require('node:assert/strict');
+// Constants the extracted solver reads as free variables; they live just above
+// the calibration block in ui.js. Values mirror production exactly.
+const MESSAGE_VIRTUAL_THRESHOLD_ROWS = 80;
+const MESSAGE_VIRTUAL_BUFFER_PX = 900;
+eval(extractFunc('_messageVirtualWindow'));
+eval(extractFunc('_messageVirtualRoleForEntry'));
+eval(extractFunc('_currentMessageVirtualWindow'));
+
+// Transcript: 60 turns of [user, hidden assistant, visible assistant, final assistant].
+const entries = [];
+for (let t = 0; t < 60; t++) {
+  entries.push({ rawIdx: 4 * t, m: { role: 'user' } });
+  entries.push({ rawIdx: 4 * t + 1, m: { role: 'assistant' } });
+  entries.push({ rawIdx: 4 * t + 2, m: { role: 'assistant' } });
+  entries.push({ rawIdx: 4 * t + 3, m: { role: 'assistant' } });
+}
+let mode = 'compact_worklog';
+const chatActivityMode = () => mode;
+const S = { busy: false, messages: [] };
+// Only the first assistant of each turn folds into the worklog; its visible
+// sibling and the turn-final answer stay mounted.
+const _assistantMessageBelongsInWorklog = (m, rawIdx, a, b, opts) =>
+  m.role === 'assistant' && (rawIdx % 4) === 1;
+const _messageWindowReader = () => null;
+const _syncMessageVirtualHeightCache = () => {};
+// Sparse cache: nothing measured, every row estimates.
+let _messageVirtualHeightCache = [];
+const _messageVirtualEstimatedRowHeight = 140;
+const container = { scrollTop: 30000, clientHeight: 720 };
+const $ = () => container;
+
+// Calibrated assistant mean: 25 distinct measured rows at 640px (flat prior 160).
+for (let i = 0; i < 25; i++) _recordMessageVirtualRoleMeasurement('assistant', 10000 + i, 640);
+assert.strictEqual(_messageVirtualCalibratedRoleHeight('assistant'), 640);
+assert.strictEqual(_messageVirtualDefaultHeightForRole('assistant'), 160);
+
+const aligned = _currentMessageVirtualWindow(entries, 0);
+
+// Boundary-moving control: the raw solver alone lands on row 83 (the final
+// assistant of turn 20); alignment must pull the start back to the run head
+// at row 81.
+const raw = _messageVirtualWindow({
+  total: entries.length,
+  scrollTop: 30000,
+  viewportHeight: 720,
+  heights: [],
+  defaultHeight: 140,
+  bufferPx: 900,
+  keepTailCount: 0,
+  roleForIdx: idx => _messageVirtualRoleForEntry(entries[idx]),
+  defaultHeightForRole: _messageVirtualCalibratedRoleHeight,
+  collapsedForIdx: idx => _assistantMessageBelongsInWorklog(
+    entries[idx].m, entries[idx].rawIdx, null, undefined,
+    { isTurnFinalAssistant: (entries[idx + 1] || {}).m?.role !== 'assistant' }),
+  reader: null,
+});
+assert.strictEqual(raw.start, 83, JSON.stringify(raw));
+assert.strictEqual(raw.end, 92, JSON.stringify(raw));
+
+// Shared policy: per-turn weight is user 120 + hidden 0 + visible 640 + final
+// 640 = 1400px. Solver offset 28760 (rows 0..82); alignment mounts rows 81-82
+// and must subtract the visible assistant at its CALIBRATED 640px:
+// 28760 - 0 - 640 = 28120. The flat-prior estimator the alignment pass used
+// before this fix subtracts only 160 -> 28600.
+// bottomPad: rows 92..239 are 37 full turns at the shared policy = 51800
+// (the flat priors give (120+0+160+160)*37 = 16280).
+assert.strictEqual(aligned.virtualized, true, JSON.stringify(aligned));
+assert.strictEqual(aligned.start, 81, JSON.stringify(aligned));
+assert.strictEqual(aligned.end, 92, JSON.stringify(aligned));
+assert.strictEqual(aligned.tailStart, 240, JSON.stringify(aligned));
+assert.strictEqual(aligned.topPad, 28120, JSON.stringify(aligned));
+assert.strictEqual(aligned.bottomPad, 51800, JSON.stringify(aligned));
+console.log('alignment policy parity ok');
+"""
+    assert _run_node(source) == "alignment policy parity ok"

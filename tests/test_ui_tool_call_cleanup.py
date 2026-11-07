@@ -238,8 +238,8 @@ class TestToolCallGroupingStatic:
         capture_fn = _function_body(UI_JS, "_captureWorklogDetailDisclosureState")
         restore_fn = _function_body(UI_JS, "_restoreWorklogDetailDisclosureState")
         apply_fn = _function_body(UI_JS, "_setWorklogDetailDisclosureOpen")
-        capture_pos = render_fn.index("const worklogDetailDisclosureState=_captureWorklogDetailDisclosureState(inner);")
-        cache_pos = render_fn.index("if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi)")
+        capture_pos = render_fn.index("const worklogDetailDisclosureState=_captureWorklogDetailDisclosureState(liveInner);")
+        cache_pos = render_fn.index("if(!ownedWindow&&sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi)")
         cache_return_pos = render_fn.index("return;", cache_pos)
         wipe_pos = render_fn.index("inner.innerHTML='';")
         restore_pos = render_fn.index("_restoreWorklogDetailDisclosureState(inner, worklogDetailDisclosureState);")
@@ -448,8 +448,8 @@ class TestToolCallGroupingStatic:
         assert "savedState==='open'" in helper or 'savedState==="open"' in helper, (
             "Live Activity groups can still restore explicit live open state."
         )
-        assert "if(live && savedState==='open')" in helper or 'if(live && savedState==="open")' in helper, (
-            "Saved open state must be scoped to live groups so final L1 defaults collapsed."
+        assert "if((live||opts.restoreDisclosure) && savedState==='open')" in helper, (
+            "Saved open state requires live or explicit owned-window restoration; final L1 defaults collapsed."
         )
         assert "savedState==='closed'" in helper or 'savedState==="closed"' in helper, (
             "A saved closed Activity group should still override the live expanded default."
