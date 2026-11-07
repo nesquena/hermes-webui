@@ -1213,6 +1213,8 @@ def check_auth(handler, parsed) -> bool:
     If not authorized, sends 401 (API) or 302 redirect (page) and returns False."""
     if not is_auth_enabled():
         return True
+    from api.instance_branding import public_asset_path
+
     # Public paths don't require auth
     if (
         parsed.path in PUBLIC_PATHS
@@ -1221,6 +1223,7 @@ def check_auth(handler, parsed) -> bool:
             parsed.path.startswith('/api/share/')
             and parsed.path not in {'/api/share/create', '/api/share/revoke'}
         )
+        or public_asset_path(parsed.path)
         or parsed.path.startswith('/static/')
         or parsed.path.startswith('/session/static/')
     ):

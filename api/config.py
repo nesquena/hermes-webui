@@ -15032,7 +15032,7 @@ _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8}
 _SETTINGS_TTS_ENGINE_RE = __import__("re").compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 
 _SETTINGS_WRITE_VERSION = 0
-_SETTINGS_WRITE_LOCK = __import__("threading").Lock()
+_SETTINGS_WRITE_LOCK = __import__("threading").RLock()
 
 
 def _atomic_write_settings_text(path: Path, text: str) -> None:
@@ -15104,11 +15104,23 @@ def _coerce_provider_cost_budget(value: Any) -> float | None:
     return rounded
 
 
-def save_settings(settings: dict) -> dict:
+def save_settings(settings: dict, *, _branding=None) -> dict:
+    # Serialize the entire read/modify/write, shared with branding transactions.
+    with _SETTINGS_WRITE_LOCK:
+        return _save_settings_locked(dict(settings), _branding=_branding)
+
+
+def _save_settings_locked(settings: dict, *, _branding=None) -> dict:
     """Save settings to disk. Returns the merged settings. Ignores unknown keys."""
     raw_settings = _read_raw_settings_file()
     persisted_speech_keys = _extract_persisted_speech_keys(raw_settings)
     current = load_settings()
+    if _branding is None and "instance_name" in settings:
+        branding = current.get("instance_branding")
+        if isinstance(branding, dict) and branding.get("manages_instance_name") is True:
+            raise ValueError("Use the instance-branding API to change its managed name")
+    if _branding is not None:
+        current["instance_branding"] = _branding
     applied_speech_keys: set[str] = set()
     if (
         "worklog_details_expanded_default" not in settings
