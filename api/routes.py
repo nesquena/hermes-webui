@@ -24758,23 +24758,67 @@ def _tts_open(req, *, timeout=30, opener_factory=None):
     return _urlopen(req, timeout=timeout)
 
 
-def _default_edge_voice() -> str:
-    """Default Edge voice for /api/tts: the agent config's ``tts.edge.voice``.
+def _detect_text_lang(text: str) -> str:
+    """Best-effort it/en detection: a stopword vote, no extra dependency.
 
-    The previous hardcoded ``zh-CN-XiaoxiaoNeural`` made any request without an
-    explicit voice speak Chinese; the agent config (itself the voice the chat
-    TTS uses) is the single source of truth. Falls back to it-IT-ElsaNeural.
+    Returns "" when the vote is inconclusive (short texts), so callers fall back
+    to the configured single voice instead of guessing wrong.
     """
+    words = re.findall(r"[a-zàèéìòù']+", (text or "").lower())
+    if len(words) < 3:
+        return ""
+    it_words = {
+        "il", "lo", "la", "gli", "le", "un", "una", "di", "che", "non", "per",
+        "con", "sono", "questo", "questa", "anche", "più", "già", "perché",
+        "cosa", "come", "quando", "adesso", "oggi", "molto", "così", "ma",
+    }
+    en_words = {
+        "the", "and", "is", "are", "you", "for", "with", "this", "that", "not",
+        "have", "what", "when", "there", "from", "would", "should", "about",
+        "can", "will", "your", "but", "just", "very",
+    }
+    it_votes = sum(1 for w in words if w in it_words)
+    en_votes = sum(1 for w in words if w in en_words)
+    accented_it = sum(1 for w in words if any(c in "àèéìòù" for c in w))
+    it_votes += accented_it
+    if it_votes >= 2 and it_votes > en_votes:
+        return "it"
+    if en_votes >= 2 and en_votes > it_votes:
+        return "en"
+    return ""
+
+
+def _default_edge_voice(text: str = "") -> str:
+    """Default Edge voice for /api/tts, picked by the text's language.
+
+    Precedence: ``tts.edge.voices.<lang>`` from the active profile's config.yaml,
+    then a built-in per-language default (it -> Elsa, en -> Ava), then
+    ``tts.edge.voice`` (the configured single voice, all languages), then Elsa.
+    Before this, the endpoint hardcoded zh-CN-XiaoxiaoNeural and spoke Chinese.
+    """
+    cfg: dict = {}
     try:
         import yaml
 
         cfg = yaml.safe_load(_active_profile_config_path().read_text()) or {}
-        voice = ((cfg.get("tts") or {}).get("edge") or {}).get("voice")
-        if isinstance(voice, str) and voice.strip():
-            return voice.strip()
     except Exception:
-        logger.debug("Failed to read tts.edge.voice from agent config", exc_info=True)
+        logger.debug("Failed to read the agent config for TTS voices", exc_info=True)
+    edge_cfg = (cfg.get("tts") or {}).get("edge") or {}
+    lang = _detect_text_lang(text)
+    if lang:
+        voices = edge_cfg.get("voices")
+        if isinstance(voices, dict):
+            per_lang = voices.get(lang)
+            if isinstance(per_lang, str) and per_lang.strip():
+                return per_lang.strip()
+        builtin = {"it": "it-IT-ElsaNeural", "en": "en-US-AvaNeural"}.get(lang)
+        if builtin:
+            return builtin
+    voice = edge_cfg.get("voice")
+    if isinstance(voice, str) and voice.strip():
+        return voice.strip()
     return "it-IT-ElsaNeural"
+
 
 
 def _handle_tts(handler, parsed):
@@ -24795,7 +24839,7 @@ def _handle_tts(handler, parsed):
     async API at that time.
     """
     text = ""
-    voice = _default_edge_voice()
+    voice = ""
     rate_str = ""
     pitch_str = ""
     engine = "edge"  # "edge" | "elevenlabs" | "openai" | "browser" (browser is client-side only)
@@ -24807,7 +24851,7 @@ def _handle_tts(handler, parsed):
     try:
         data = read_body(handler)
         text = (data.get("text") or "").strip()
-        voice = data.get("voice") or voice
+        voice = data.get("voice") or _default_edge_voice(text)
         rate_str = _normalize_tts_prosody(data.get("rate"), unit="%")
         pitch_str = _normalize_tts_prosody(data.get("pitch"), unit="Hz")
         request_engine = data.get("engine")
@@ -25083,9 +25127,12 @@ def _handle_tts(handler, parsed):
     allowed = {
         "zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunxiNeural",
         "zh-CN-YunjianNeural", "zh-CN-YunyangNeural",
-        "en-US-AriaNeural", "en-US-GuyNeural",
+        "en-US-AriaNeural", "en-US-GuyNeural", "en-US-AvaNeural",
+        "en-US-EmmaNeural", "en-US-JennyNeural", "en-GB-SoniaNeural",
         "en-US-AndrewMultilingualNeural", "en-US-AvaMultilingualNeural",
         "en-US-BrianMultilingualNeural", "en-US-EmmaMultilingualNeural",
+        "it-IT-ElsaNeural", "it-IT-DiegoNeural", "it-IT-IsabellaNeural",
+        "it-IT-GiuseppeMultilingualNeural",
         "fr-CA-AntoineNeural", "fr-CA-JeanNeural",
         "fr-CA-SylvieNeural", "fr-CA-ThierryNeural",
         "fr-FR-DeniseNeural", "fr-FR-EloiseNeural", "fr-FR-HenriNeural",
