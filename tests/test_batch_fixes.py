@@ -110,16 +110,18 @@ class TestCronSkillCacheInvalidation:
 
     def test_cache_busted_on_skill_save(self):
         src = self._panels_src()
-        # saveSkillForm() is the handler invoked on skill save (renamed from
-        # submitSkillSave in the main-view refactor; the old name still aliases it).
+        # Shared invalidation retires pending reads as well as cached values.
+        # Executable coverage lives in test_skills_runtime_scope_cache.py.
         m = re.search(
-            r'async function saveSkillForm\(\).*?_skillsData\s*=\s*null.*?_cronSkillsCache\s*=\s*null',
+            r'async function saveSkillForm\(\).*?_invalidateSkillCachesAfterWrite\(\)',
             src, re.DOTALL
         )
-        assert m, (
-            "_cronSkillsCache must be set to null in saveSkillForm() "
-            "right after _skillsData = null"
-        )
+        assert m, "saveSkillForm must retire both skill loaders via shared invalidation"
+        after_write = src.split('function _invalidateSkillCachesAfterWrite(', 1)[1].split('\n}', 1)[0]
+        assert 'invalidateSkillListCaches(keepSkills)' in after_write
+        helper = src.split('function invalidateSkillListCaches(', 1)[1].split('\nlet ', 1)[0]
+        assert '_skillsData = null;' in helper
+        assert '_cronSkillsCache = null;' in helper
 
 
 # ── Group D: System (auto) theme ──────────────────────────────────────────────
