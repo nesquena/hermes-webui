@@ -409,3 +409,59 @@ def test_force_update_refusal_offer_does_not_repeat_discard_confirmation(tmp_pat
     else:
         assert out["apiCalls"] == [first]
         assert out["waitCalls"] == 0
+
+
+_AGENT_BEHIND = {"agent": {"behind": 1}}
+
+
+def test_agent_target_confirmation_names_the_gateway_runs_too(tmp_path):
+    """#8667: an Agent update cycles the Gateway, so its copy says so."""
+
+    out = _run(
+        {
+            "entry": "apply",
+            "target": "agent",
+            "updateData": _AGENT_BEHIND,
+            "responses": [_refusal(2, target="agent"), {"ok": True, "target": "agent"}],
+            "clickOffer": True,
+            "confirmAnswers": [True],
+        },
+        tmp_path,
+    )
+    assert out["afterRefusal"]["offer"]["label"] == "Update anyway (interrupts 2 runs)"
+    assert out["confirmCalls"] == [
+        {
+            "title": "Interrupt active runs?",
+            "message": (
+                "2 agent runs are still working in the WebUI and in the Gateway. "
+                "Updating the Agent also restarts the Gateway and stops them; the "
+                "WebUI runs are saved as interrupted. Wait for them to finish if you can."
+            ),
+            "confirmLabel": "Interrupt and update",
+            "danger": True,
+            "focusCancel": True,
+        }
+    ]
+    assert out["apiCalls"] == [
+        {"url": "/api/updates/apply", "body": {"target": "agent"}},
+        {"url": "/api/updates/apply", "body": {"target": "agent", "force_active_runs": True}},
+    ]
+
+
+def test_webui_target_confirmation_keeps_the_webui_only_copy(tmp_path):
+    """The #7293 copy is unchanged for a WebUI update (Gateway runs survive)."""
+
+    out = _run(
+        {
+            "entry": "apply",
+            "target": "webui",
+            "updateData": _WEBUI_BEHIND,
+            "responses": [_refusal(2), {"ok": True, "target": "webui"}],
+            "clickOffer": True,
+            "confirmAnswers": [True],
+        },
+        tmp_path,
+    )
+    message = out["confirmCalls"][0]["message"]
+    assert message.startswith("2 WebUI agent runs are still working.")
+    assert "Gateway" not in message
