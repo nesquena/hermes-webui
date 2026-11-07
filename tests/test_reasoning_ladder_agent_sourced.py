@@ -23,6 +23,8 @@ of whatever Agent happens to be installed on the CI host: they monkeypatch
 both or derive from them.
 """
 
+from typing import Any
+
 import pytest
 
 from api import config as cfg
@@ -638,6 +640,78 @@ class TestComposedHandlerRegressions:
         assert captured["payload"]["reasoning_effort"] == "ultra"
         assert captured["payload"]["reasoning_effort_display"] == "ultra"
         assert raw() == "ultra"
+
+
+# ── Gate #8681: real handler, session, and profile persistence boundaries ────
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+@pytest.mark.parametrize("model", ["gpt-6-sol", "@openai-codex:gpt-6-sol"])
+def test_composed_handler_keeps_wrapped_codex_model_parity(
+    tmp_path, monkeypatch, method, model,
+):
+    agent = pytest.importorskip("agent.reasoning_effort")
+    rule: Any = getattr(agent, "route_supported_efforts", None)
+    if not callable(rule):
+        raise pytest.skip.Exception("installed Agent has no route_supported_efforts")
+    try:
+        accepted: Any = rule("openai-codex", "gpt-6-sol", "codex_app_server")
+    except TypeError:
+        raise pytest.skip.Exception("installed Agent route rule predates api_mode") from None
+    if "ultra" not in accepted:
+        raise pytest.skip.Exception("installed Agent lacks the gpt-6-sol app-server capability")
+    routes, captured, _dir, sid, raw = _composed_handler_env(
+        tmp_path, monkeypatch, ambient=None, profile_runtime="codex_app_server",
+        stored_effort="ultra" if method == "GET" else "high",
+    )
+    monkeypatch.setattr(cfg, "_agent_route_supported_efforts", lambda: rule)
+    monkeypatch.setattr(cfg, "_resolve_model_reasoning_efforts_impl", lambda *a, **k: list(_LADDER))
+    if method == "GET":
+        _drive_get(routes, sid, model=model)
+    else:
+        _drive_post(routes, sid, monkeypatch, model=model)
+    assert captured["status"] == 200
+    status = captured["payload"]
+    assert status["reasoning_effort"] == "ultra"
+    assert status["reasoning_effort_display"] == "ultra"
+    assert status["supported_efforts"] == list(_LADDER)
+    assert raw() == "ultra"
+
+
+def test_composed_handler_missing_rule_keeps_annotation_without_accepting_ultra(
+    tmp_path, monkeypatch,
+):
+    routes, captured, _dir, sid, raw = _composed_handler_env(
+        tmp_path, monkeypatch, ambient=None, profile_runtime="codex_app_server",
+    )
+    monkeypatch.setattr(cfg, "_agent_route_supported_efforts", lambda: None)
+    monkeypatch.setattr(cfg, "VALID_REASONING_EFFORTS", cfg._rank_valid_efforts(_LADDER))
+    monkeypatch.setattr(
+        cfg, "_resolve_model_reasoning_efforts_impl", lambda *a, **k: list(cfg._WEBUI_BASE_EFFORTS)
+    )
+    _drive_get(routes, sid, model="@openai-codex:gpt-6-sol")
+    assert captured["status"] == 200
+    assert captured["payload"]["reasoning_effort"] == "max"
+    assert captured["payload"]["reasoning_effort_display"] == "ultra (sends max on this route)"
+    assert "ultra" not in captured["payload"]["supported_efforts"]
+    assert raw() == "ultra"
+
+    # The rejected POST must not rewrite the already-saved choice.
+    def capture_bad(_handler, message, status=400):
+        captured.update(status=status, error=message)
+        return True
+
+    monkeypatch.setattr(routes, "bad", capture_bad)
+    _drive_post(routes, sid, monkeypatch, model="@openai-codex:gpt-6-sol")
+    assert captured["status"] == 400
+    assert "Unknown reasoning effort" in captured["error"]
+    assert raw() == "ultra"
+
+    # A supported choice can still be saved and replaces the explanation.
+    _drive_post(routes, sid, monkeypatch, model="@openai-codex:gpt-6-sol", effort="high")
+    assert captured["status"] == 200
+    assert captured["payload"]["reasoning_effort"] == "high"
+    assert captured["payload"]["reasoning_effort_display"] == "high"
+    assert raw() == "high"
 
 
 # ── Every rung ABOVE max gets the route check (review round 7, must-fix 1) ───
