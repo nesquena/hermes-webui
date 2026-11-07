@@ -66,6 +66,21 @@ APIs; jsdom assertions are not real-browser evidence. For staged screenshots,
 `issue8427.expand(true)`, `issue8427.collapse(true)`, and
 `issue8427.render(true)` expose the same flow.
 
+## Existing config must be readable before settings writes
+
+Run `./scripts/test.sh -q tests/test_config_write_read_guard.py`.
+The shared `config.yaml` saver re-reads and validates the existing file before
+writing, independently of the tolerant display-read cache. Malformed YAML,
+non-mapping documents, and read errors abort without replacing user settings;
+missing files and empty/null YAML documents may still be initialized. This
+includes reasoning-effort clears as well as nonempty updates. The tests run the
+real parser and atomic writer with PyYAML and the standalone ruamel fallback,
+including stale cache keys, a pre-save external edit, mode preservation, write
+failures, and serialized in-process settings edits. Read-only display fallbacks
+are unchanged. The existing serializer is not comment-preserving; this fix does
+not change that or add cross-process locking against edits after validation.
+
+
 ## Project-picker deferred repaint handoff regression
 
 Expand a parent with fork-child menus, open a picker, defer a list repaint,
