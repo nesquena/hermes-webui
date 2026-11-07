@@ -56,6 +56,7 @@ from api.config import (
     get_config,
     invalidate_models_cache,
     reload_config,
+    resolve_custom_provider_connection,
 )
 from api.plugin_providers import (
     effective_provider_display_name,
@@ -1381,6 +1382,9 @@ def _provider_has_key(provider_id: str) -> bool:
     3. ``config.yaml → model.api_key`` (only if provider is the active one)
     4. ``config.yaml → providers.<id>.api_key``
     5. ``config.yaml → custom_providers[].api_key`` (for custom providers)
+
+    Named custom records use the routing resolver, including profile-scoped
+    ``key_env`` references and their ``api_key_env`` alias under ``providers:``.
     """
     if provider_id.startswith("custom:"):
         return _get_provider_api_key(provider_id) is not None
@@ -1445,53 +1449,28 @@ def _provider_has_key(provider_id: str) -> bool:
     return False
 
 
-def _get_provider_api_key(provider_id: str) -> str | None:
-    """Return a configured provider API key without exposing it to callers."""
+def _get_configured_provider_api_key(provider_id: str) -> str | None:
+    """Read static credentials from the provider's own config record."""
     provider_id = (provider_id or "").strip().lower()
     if provider_id.startswith("custom:"):
         from api.config import (
-            _select_custom_provider_record, _unique_custom_provider_entry,
-            _custom_provider_slug_key, _custom_provider_identity_disabled,
+            _custom_provider_identity_disabled,
+            _custom_provider_selection_config,
         )
 
-        cfg = get_config()
-        if _custom_provider_identity_disabled(provider_id, cfg):
+        if _custom_provider_identity_disabled(provider_id, _custom_provider_selection_config()):
             return None
-        entry, _source, _exact, _status = _select_custom_provider_record(
-            provider_id, _custom_provider_slug_key(provider_id), cfg,
-        )
-        if entry is None:
-            entry = _unique_custom_provider_entry(
-                _custom_provider_entries(cfg), _custom_provider_slug_key(provider_id),
-            )
-        if entry is not None:
-            key = _resolve_custom_record_key(entry.get("api_key"), entry.get("key_env"), provider_id)
-            if key:
-                return key
-        # No presentation row does not rule out an explicitly owned pool key.
+        api_key, _base_url = resolve_custom_provider_connection(provider_id)
+        if _provider_value_counts_as_api_key(provider_id, api_key):
+            return api_key
+        # Preserve explicitly owned pool-only credentials and their eligibility
+        # checks even when no presentation record supplies a static key.
         for pooled in _pool_entry_payloads(provider_id):
             if not _pool_entry_currently_unusable(pooled):
                 key = str(pooled.get("runtime_api_key") or pooled.get("agent_key") or pooled.get("access_token") or "").strip()
-                if key:
+                if _provider_value_counts_as_api_key(provider_id, key):
                     return key
         return None
-    env_var = _provider_env_var_for(provider_id)
-    if env_var:
-        env_path = _get_hermes_home() / ".env"
-        env_values = _load_env_file(env_path)
-        env_file_value = env_values.get(env_var)
-        if _provider_value_counts_as_api_key(provider_id, env_file_value):
-            return str(env_file_value).strip() or None
-        env_value = _thread_local_env_value(env_var)
-        if _provider_value_counts_as_api_key(provider_id, env_value):
-            return str(env_value).strip() or None
-        for alias in _PROVIDER_ENV_VAR_ALIASES.get(provider_id, ()) or ():
-            alias_file_value = env_values.get(alias)
-            if _provider_value_counts_as_api_key(provider_id, alias_file_value):
-                return str(alias_file_value).strip() or None
-            alias_value = _thread_local_env_value(alias)
-            if _provider_value_counts_as_api_key(provider_id, alias_value):
-                return str(alias_value).strip() or None
 
     cfg = get_config()
     model_cfg = cfg.get("model", {})
@@ -1518,6 +1497,35 @@ def _get_provider_api_key(provider_id: str) -> str | None:
                 cp_key = _resolve_custom_record_key(cp.get("api_key"), cp.get("key_env"), provider_id)
                 if _provider_value_counts_as_api_key(provider_id, cp_key):
                     return cp_key
+    return None
+
+
+def _get_provider_api_key(provider_id: str) -> str | None:
+    """Return a configured provider API key without exposing it to callers."""
+    provider_id = (provider_id or "").strip().lower()
+    if provider_id.startswith("custom:"):
+        return _get_configured_provider_api_key(provider_id)
+    env_var = _provider_env_var_for(provider_id)
+    if env_var:
+        env_path = _get_hermes_home() / ".env"
+        env_values = _load_env_file(env_path)
+        env_file_value = env_values.get(env_var)
+        if _provider_value_counts_as_api_key(provider_id, env_file_value):
+            return str(env_file_value).strip() or None
+        env_value = _thread_local_env_value(env_var)
+        if _provider_value_counts_as_api_key(provider_id, env_value):
+            return str(env_value).strip() or None
+        for alias in _PROVIDER_ENV_VAR_ALIASES.get(provider_id, ()) or ():
+            alias_file_value = env_values.get(alias)
+            if _provider_value_counts_as_api_key(provider_id, alias_file_value):
+                return str(alias_file_value).strip() or None
+            alias_value = _thread_local_env_value(alias)
+            if _provider_value_counts_as_api_key(provider_id, alias_value):
+                return str(alias_value).strip() or None
+
+    configured_key = _get_configured_provider_api_key(provider_id)
+    if configured_key is not None:
+        return configured_key
     # Fallback: try credential pool (e.g. bothub key stored via auth.json)
     for entry in _pool_entry_payloads(provider_id):
         status = str(entry.get("last_status") or "").strip().lower()
