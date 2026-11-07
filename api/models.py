@@ -32,7 +32,7 @@ except ImportError:  # pragma: no cover
     _msvcrt = None
 
 import api.config as _cfg
-from api.compression_anchor import is_context_compression_marker
+from api.compression_anchor import is_context_compression_marker, is_prompt_compaction_marker
 from api.config import (
     SESSION_DIR, SESSION_INDEX_FILE, SESSIONS, SESSIONS_MAX,
     LOCK, STREAMS, STREAMS_LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME,
@@ -12791,6 +12791,12 @@ def _project_state_db_message(row, available, id_col, optional, *, include_row_i
         if col not in row.keys():
             continue
         value = row[col]
+        if col == '_compressed_summary':
+            # SQLite stores 0/1; only the truthy signal is meaningful (it tells
+            # the compaction marker predicate this row carries a handoff).
+            if value:
+                msg[col] = True
+            continue
         if value in (None, ''):
             continue
         if col in {'tool_calls', 'reasoning_details', 'codex_reasoning_items', 'codex_message_items'}:
@@ -12933,6 +12939,11 @@ def get_state_db_session_messages(
                 # sidecar in the WebUI's internal history; the provider-safe
                 # projection strips it before any direct API request.
                 'api_content',
+                # Agent-side flag marking a compaction handoff row (#8709).
+                # The merged carrier keeps its authentic tail text behind the
+                # ``[PRIOR CONTEXT ...]`` header, so the marker predicate needs
+                # the flag as well as the content prefix.
+                '_compressed_summary',
             ]
             id_col = ['id'] if 'id' in available else []
             revision_cols = []
@@ -15689,13 +15700,11 @@ def _compression_anchor_timestamp_as_float(value) -> float | None:
 
 def _context_messages_include_compression_marker(messages: list) -> bool:
     for message in messages or []:
-        if not is_context_compression_marker(message):
-            continue
-        text = _message_content_text(message).lower().lstrip()
         # Only prompt compaction summaries require fail-closed state.db replay.
         # Other compression-adjacent summaries, such as Session Arc Summary,
         # keep the existing prefix-delta behavior so fresh follow-ups survive.
-        if text.startswith("[context compaction") or text.startswith("context compaction"):
+        # The prefix rule itself is owned by api/compression_anchor.py.
+        if is_prompt_compaction_marker(message):
             return True
     return False
 

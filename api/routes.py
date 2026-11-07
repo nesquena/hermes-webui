@@ -57,7 +57,10 @@ from api.agent_sessions import (
     open_state_db_readonly,
     read_session_lineage_report,
 )
-from api.compression_anchor import visible_messages_for_anchor
+from api.compression_anchor import (
+    project_compaction_carriers_for_display,
+    visible_messages_for_anchor,
+)
 from api.process_event_utils import is_hidden_transcript_row
 from api.compression_recovery import (
     COMPRESSION_RECOVERY_ACTION_START_FOCUSED,
@@ -17049,6 +17052,14 @@ def _handle_session_get(handler, parsed) -> bool:
                 _display_tool_calls, _display_owner_positions
             )
         if load_messages:
+            # #8709: the display transcript is the only place the synthetic
+            # compaction handoff is removed. A merged carrier keeps its
+            # authentic retained text and its tool-call step; raw/model-facing
+            # history (state.db rows, agent replay) keeps the full handoff.
+            # Applied before windowing so the visible-row budget matches what
+            # the browser will actually render (a pure handoff projects to
+            # empty content and is not renderable).
+            _all_msgs = project_compaction_carriers_for_display(_all_msgs)
             _truncated_msgs, _messages_offset = _message_window_for_display(
                 _all_msgs,
                 msg_limit=msg_limit,

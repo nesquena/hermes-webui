@@ -20275,7 +20275,13 @@ function _isContextCompactionMessage(m){
   return _isContextCompactionText(text);
 }
 function _isContextCompactionText(text){
-  return /^\s*\[context compaction/i.test(String(text||'')) || /^\s*context compaction/i.test(String(text||''));
+  // Prefix vocabulary is owned by api/compression_anchor.py
+  // (COMPACTION_PROMPT_CARD_PREFIX / COMPACTION_HANDOFF_HEADER_PREFIX); this is
+  // the browser mirror, not a second source of truth. `[PRIOR CONTEXT ...]` is
+  // the merged compaction carrier the Agent folds into a retained tail row
+  // (#8709); `_compactionSummarySegment` already parses its summary segment.
+  return /^\s*\[(context compaction|prior context)/i.test(String(text||''))
+    || /^\s*context compaction/i.test(String(text||''));
 }
 function _compactionSummarySegment(text){
   // Mirror of api/compression_anchor.py compaction_summary_segment(). The
