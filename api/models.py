@@ -14957,6 +14957,45 @@ def _loose_session_message_content(value: str) -> str:
     return " ".join(re.findall(r"\w+", str(value or "").casefold()))
 
 
+_OCCURRENCE_IDENTITY_FIELDS = ("id", "message_id", "_state_db_row_id")
+
+
+def _established_occurrence_identities(msg: dict) -> tuple[str, ...]:
+    """Return every established private identity a row carries.
+
+    A settled row can carry a stable WebUI ``id`` AND a durable
+    ``_state_db_row_id`` simultaneously.  Keeping only the first field let a
+    stable identity mask a comparable durable conflict: the sidecar row
+    (stable 2 + durable 7) then read as identity-less on the durable side, so
+    a genuinely distinct SQLite row 8 collapsed onto it and the restored turn
+    was suppressed (#8672 review P2, round 3).  All established namespaces
+    are emitted, in field order, so the comparison checks each of them.
+
+    Two aliases of ONE namespace carrying the same value (``id`` and
+    ``message_id`` both ``7``) are a single identity, deduped here by
+    canonical ``(namespace, value)`` -- the same rule
+    ``_stable_message_identity_details`` applies.  Two aliases carrying
+    DIFFERENT values are contradictory provenance and both stay, so the row
+    remains distinct from either.
+    """
+    identities: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for field in _OCCURRENCE_IDENTITY_FIELDS:
+        value = msg.get(field)
+        if value in (None, ""):
+            continue
+        identity = f"id:{field}:{value}"
+        canonical = (
+            _occurrence_identity_namespace(identity),
+            _occurrence_identity_value(identity),
+        )
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        identities.append(identity)
+    return tuple(identities)
+
+
 def _session_message_occurrence_for_key(
     msg: dict, *, include_private_identity: bool = True
 ) -> str:
@@ -14988,6 +15027,16 @@ def _session_message_occurrence_for_key(
     any identity at all stays indistinguishable, and those key together
     because the information to tell them apart simply is not there.
 
+    EVERY established identity is kept, not just the first one (#8672 review
+    P2, round 3): a settled row carries a stable WebUI ``id`` AND a durable
+    ``_state_db_row_id`` at the same time, and keeping only the stable one
+    let it MASK a comparable durable conflict -- a distinct SQLite row 8
+    collapsed onto a sidecar row that already owned durable 7 and the
+    restored turn was suppressed.  The comparison therefore sees all
+    namespaces the row establishes, using the same alias rules as
+    ``_stable_message_identity_details`` (``id``/``message_id`` are one
+    namespace; every row-id alias is another).
+
     ``include_private_identity`` is True for the VISIBLE key: a clocked row
     may still carry a durable id, and two conflicting ids are evidence of two
     distinct rows even when only one side has a clock (Greptile r4).  The
@@ -15001,11 +15050,7 @@ def _session_message_occurrence_for_key(
     stamp = _normalized_message_timestamp_for_key(msg.get("timestamp"))
     identity = ""
     if include_private_identity or not stamp:
-        for field in ("id", "message_id", "_state_db_row_id"):
-            value = msg.get(field)
-            if value not in (None, ""):
-                identity = f"id:{field}:{value}"
-                break
+        identity = ",".join(_established_occurrence_identities(msg))
     if stamp:
         return f"{stamp}|{identity}" if identity else stamp
     return identity
@@ -15123,6 +15168,13 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
     # merging two established different occurrences.  Structural (non-string)
     # content rows are included: this probe is exact identity only and can
     # never fuzzy-match a scalar.
+    #
+    # The probe is the prebuilt lookup's bounded-work contract: it resolves a
+    # candidate with dict lookups keyed by clock and canonical identity
+    # namespace ONLY, so a group holding thousands of same-clock occurrences
+    # of one repeated prompt never rescans its bucket per incoming row
+    # (#8672 review P2, round 3).  The single build pass below stays linear
+    # in the key count; every per-clock sub-index is filled inside it.
     by_clockfree = {}
     for key in visible_keys:
         if not isinstance(key, tuple) or not key:
@@ -15131,39 +15183,76 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
             _visible_key_without_occurrence(key),
             {
                 "any": key,
-                "clockless": None,
+                # Exact occurrence string -> key (never the "" sentinel).
+                "by_occurrence": {},
+                # Rows that ESTABLISH a clock, bucketed per clock.  Inside one
+                # clock bucket the identities are indexed per canonical
+                # namespace, and one representative is kept, so the probe can
+                # answer "same clock, same namespace, different value" and
+                # "same clock, our namespace absent" without iterating.
                 "by_clock": {},
+                # Rows whose clock is UNESTABLISHED.  They cannot prove they
+                # are a different occurrence, so they stay compatible with an
+                # incoming clock the buckets do not carry (Greptile P1: two
+                # identical image turns, one clocked and one clockless, made
+                # the merge append the image a second time).  ``anonymous`` is
+                # the first such row carrying no identity at all -- a pure
+                # wildcard that can never contradict anything.
+                "clockless": {
+                    "by_identity": {},
+                    "by_namespace": {},
+                    "representative": None,
+                    "anonymous": None,
+                },
                 "by_identity": {},
                 "by_namespace": {},
                 "identity_values": set(),
-                "by_occurrence": {},
             },
         )
         occurrence = _visible_key_field(key, _VISIBLE_KEY_OCCURRENCE_INDEX, "")
-        if occurrence == "":
-            # A row with no usable clock is a wildcard for every incoming
-            # occurrence, so one representative is enough for the whole group.
-            if group["clockless"] is None:
-                group["clockless"] = key
-        else:
+        clock, identity_text = _occurrence_parts(occurrence)
+        identities = _occurrence_identities(identity_text)
+        if occurrence:
             group["by_occurrence"].setdefault(occurrence, key)
+        if clock:
+            bucket = group["by_clock"].get(clock)
+            if bucket is None:
+                bucket = {"by_identity": {}, "by_namespace": {}, "representative": key}
+                group["by_clock"][clock] = bucket
             # Index the two dimensions separately.  A clock and a private id
             # are not interchangeable, and a conflicting id must stay visible
             # to the probe even when one side also carries a clock
-            # (Greptile r4).
-            clock, identity = _occurrence_parts(occurrence)
-            if clock:
-                group["by_clock"].setdefault(clock, {}).setdefault(identity, key)
-            if identity:
-                group["by_identity"].setdefault(identity, key)
-                group["identity_values"].add(identity)
-                # Index the identities PER NAMESPACE as well (#8672 review P2):
-                # a stable WebUI id and a SQLite row id describe different
-                # things, so only ids inside ONE namespace can contradict each
-                # other.
-                group["by_namespace"].setdefault(
+            # (Greptile r4).  A row that establishes SEVERAL namespaces is
+            # indexed under every one of them, so the reconciled replay of
+            # one logical row still resolves by its durable half.
+            for identity in identities:
+                bucket["by_identity"].setdefault(identity, key)
+                bucket["by_namespace"].setdefault(
                     _occurrence_identity_namespace(identity), {}
                 ).setdefault(identity, key)
+        else:
+            # A row with no usable clock is a wildcard for every incoming
+            # occurrence, so one representative is enough for the whole group.
+            clockless = group["clockless"]
+            if clockless["representative"] is None:
+                clockless["representative"] = key
+            if not identities and clockless["anonymous"] is None:
+                clockless["anonymous"] = key
+            for identity in identities:
+                clockless["by_identity"].setdefault(identity, key)
+                clockless["by_namespace"].setdefault(
+                    _occurrence_identity_namespace(identity), {}
+                ).setdefault(identity, key)
+        for identity in identities:
+            group["by_identity"].setdefault(identity, key)
+            group["identity_values"].add(identity)
+            # Index the identities PER NAMESPACE as well (#8672 review P2):
+            # a stable WebUI id and a SQLite row id describe different
+            # things, so only ids inside ONE namespace can contradict each
+            # other.
+            group["by_namespace"].setdefault(
+                _occurrence_identity_namespace(identity), {}
+            ).setdefault(identity, key)
     # Keep loose_by_key lazy.  Some transcripts contain multi-megabyte tool
     # outputs; eagerly casefolding + regex-tokenizing every visible key on every
     # duplicate probe made /api/session take 10s+ and blocked /api/sessions.
@@ -15326,6 +15415,9 @@ def _occurrence_parts(value) -> tuple[str, str]:
     ``"id:<field>:<value>"`` when the clock is missing.  Keeping the two
     dimensions separable lets the comparison distinguish a contradictory
     private identity from a merely one-sided clock (Greptile r4).
+
+    The identity half may itself carry SEVERAL identities, one per
+    established namespace, joined by :func:`_occurrence_identities`.
     """
     if value is None:
         return "", ""
@@ -15338,6 +15430,42 @@ def _occurrence_parts(value) -> tuple[str, str]:
     if text.startswith("id:"):
         return "", text
     return text, ""
+
+
+def _occurrence_identities(identity) -> tuple[str, ...]:
+    """Split an occurrence identity half into its individual identities.
+
+    ``_established_occurrence_identities`` emits one identity per
+    established namespace, joined so the discriminator stays a single string
+    (``"id:id:2,id:_state_db_row_id:7"``).  The split is anchored on the
+    ``id:`` prefix every identity carries, so a separator inside a value
+    cannot silently forge an extra identity.
+    """
+    if not identity:
+        return ()
+    pieces = str(identity).split(",id:")
+    identities = (pieces[0], *(f"id:{piece}" for piece in pieces[1:]))
+    return tuple(part for part in identities if part)
+
+
+def _occurrence_identity_value(identity) -> str:
+    """Return the canonical VALUE half of a private identity.
+
+    ``id`` and ``message_id`` are aliases of one stable identity, so
+    ``id:id:7`` and ``id:message_id:7`` carry the SAME value in the SAME
+    namespace and must not contradict each other: the namespace helper maps
+    both to ``"stable"`` and this helper returns ``"7"`` for both.  An
+    unrecognised identity falls back to its own literal text, so two
+    unrecognised identities only conflict when they are literally equal.
+    """
+    if not identity:
+        return ""
+    text = str(identity)
+    if not text.startswith("id:"):
+        return text
+    _prefix, _separator, remainder = text.partition(":")
+    _field, _separator, value = remainder.partition(":")
+    return value or text
 
 
 def _occurrence_identity_namespace(identity) -> str:
@@ -15378,18 +15506,32 @@ def _occurrence_identity_conflict(left_identity, right_identity) -> bool:
     """True when two private identities CONTRADICT each other.
 
     Two identities contradict only when they live in the SAME namespace and
-    carry different values.  A stable WebUI id and a SQLite row id are
+    carry different VALUES.  A stable WebUI id and a SQLite row id are
     different namespaces, so they cannot contradict each other (#8672 review
     P2) -- the reconciled replay of one logical row carries the stable id on
     the sidecar side and the row id on the SQLite side.
+
+    Either side may establish SEVERAL namespaces at once, and every pair is
+    compared: a stable id must not mask a comparable durable conflict on the
+    same row (#8672 review P2, round 3), and two aliases of one namespace
+    carrying the same value are still one identity rather than a
+    contradiction.
     """
-    if not left_identity or not right_identity:
-        return False
-    if left_identity == right_identity:
-        return False
-    return _occurrence_identity_namespace(left_identity) == _occurrence_identity_namespace(
-        right_identity
-    )
+    left = _occurrence_identities(left_identity)
+    right = _occurrence_identities(right_identity)
+    for left_part in left:
+        for right_part in right:
+            if not left_part or not right_part or left_part == right_part:
+                continue
+            if _occurrence_identity_namespace(left_part) != _occurrence_identity_namespace(
+                right_part
+            ):
+                continue
+            if _occurrence_identity_value(left_part) != _occurrence_identity_value(
+                right_part
+            ):
+                return True
+    return False
 
 
 def _visible_keys_share_occurrence(left, right) -> bool:
@@ -15422,6 +15564,26 @@ def _visible_keys_share_occurrence(left, right) -> bool:
     return True
 
 
+def _clockless_duplicate_candidate(group: dict, identities):
+    """Return a clock-unestablished representative compatible with ``identities``.
+
+    A row without a usable clock cannot prove it is a DIFFERENT occurrence,
+    so it stays a wildcard for an incoming clock the group's buckets do not
+    carry.  The caller applies the group-level namespace check first, so no
+    clock-unestablished identity can contradict the incoming ones here and
+    the first representative is compatible by construction.
+    """
+    clockless = group.get("clockless") or {}
+    if clockless.get("representative") is None:
+        return None
+    by_identity = clockless.get("by_identity") or {}
+    for identity in identities:
+        match = by_identity.get(identity)
+        if match is not None:
+            return match
+    return clockless.get("anonymous") or clockless.get("representative")
+
+
 def _clockfree_duplicate_candidate(group: dict, occurrence):
     """Pick a clock-free duplicate representative consistent with ``occurrence``.
 
@@ -15435,56 +15597,76 @@ def _clockfree_duplicate_candidate(group: dict, occurrence):
     A private identity only contradicts another one WITHIN its own namespace
     (#8672 review P2): a stable WebUI ``id`` and a SQLite ``_state_db_row_id``
     describe different things, so they never conflict and the reconciled
-    replay of one logical row still collapses.
+    replay of one logical row still collapses.  A row that establishes
+    SEVERAL namespaces is compared in ALL of them, so a stable id cannot mask
+    a comparable durable conflict on the same row (round 3).
+
+    Every step below is a dict lookup keyed by clock and canonical identity
+    namespace -- never a scan over the group's members (#8672 review P2,
+    round 3): the prebuilt index is the bounded-work contract, and a bucket
+    holding a thousand same-clock occurrences of one repeated prompt must
+    not be rescanned per incoming row.
     """
     exact = group.get("by_occurrence", {}).get(occurrence)
     if exact is not None:
         return exact
-    clock, identity = _occurrence_parts(occurrence)
+    clock, identity_text = _occurrence_parts(occurrence)
+    identities = _occurrence_identities(identity_text)
     by_namespace = group.get("by_namespace") or {}
-    if identity:
-        namespace = _occurrence_identity_namespace(identity)
-        namespace_values = by_namespace.get(namespace) or {}
+    for identity in identities:
+        namespace_values = by_namespace.get(_occurrence_identity_namespace(identity))
         if namespace_values and identity not in namespace_values:
             # A conflicting private id in the SAME namespace is contradictory
             # identity, not a missing clock: keep the rows distinct.
             return None
     if clock:
-        clock_mates = group.get("by_clock", {}).get(clock)
-        if clock_mates is not None:
-            if identity:
-                match = clock_mates.get(identity)
+        bucket = (group.get("by_clock") or {}).get(clock)
+        if bucket is not None:
+            bucket_by_identity = bucket.get("by_identity") or {}
+            for identity in identities:
+                match = bucket_by_identity.get(identity)
                 if match is not None:
                     return match
-                # Same clock but a DIFFERENT private id.  That contradicts only
-                # inside one namespace; an id from another namespace (stable
-                # WebUI id vs SQLite row id) is merely one-sided and collapses
-                # onto the identity-less or otherwise compatible twin.
-                for candidate_identity, candidate in clock_mates.items():
-                    if not _occurrence_identity_conflict(
-                        identity, candidate_identity
-                    ):
-                        return candidate
-                return None
-            return next(iter(clock_mates.values()))
+            bucket_by_namespace = bucket.get("by_namespace") or {}
+            for identity in identities:
+                if _occurrence_identity_namespace(identity) in bucket_by_namespace:
+                    # Same clock, same namespace, different value: another row
+                    # already owns this occurrence at this clock, so the rows
+                    # are genuinely distinct.  An id from a DIFFERENT namespace
+                    # at the same clock (stable WebUI id vs SQLite row id) is
+                    # merely one-sided and collapses onto the bucket's
+                    # compatible representative.
+                    return None
+            return bucket.get("representative")
+        # No row establishes this clock.  A different ESTABLISHED clock stays
+        # distinct, but a clock-unestablished copy of the same turn is still
+        # compatible and must be checked BEFORE the incoming clock is
+        # rejected: two identical image turns, one at a known clock and one
+        # without any timestamp, replayed the second one from state.db at a
+        # new clock and the merge appended the image again (Greptile P1).
+        clockless = _clockless_duplicate_candidate(group, identities)
+        if clockless is not None:
+            return clockless
         if group.get("by_clock"):
             return None
         return group.get("any")
-    if identity:
-        match = group.get("by_identity", {}).get(identity)
-        if match is not None:
-            return match
-        # No exact identity match.  Identities from a DIFFERENT namespace cannot
-        # contradict ours, so the row still collapses onto one of them.
-        for candidate_identity, candidate in (group.get("by_identity") or {}).items():
-            if not _occurrence_identity_conflict(identity, candidate_identity):
-                return candidate
-        if not (group.get("by_identity") or {}):
-            # The group carries no identity at all: ours cannot contradict
-            # anything, so the row collapses.
-            return group.get("any")
-        return None
-    return group.get("clockless") or group.get("any")
+    if identities:
+        by_identity = group.get("by_identity") or {}
+        for identity in identities:
+            match = by_identity.get(identity)
+            if match is not None:
+                return match
+        # The namespace check above proved no group identity contradicts
+        # ours, so the first identity-bearing row is a compatible
+        # representative -- resolved without scanning the bucket.
+        for candidate in by_identity.values():
+            return candidate
+        return group.get("any")
+    return (
+        (group.get("clockless") or {}).get("anonymous")
+        or (group.get("clockless") or {}).get("representative")
+        or group.get("any")
+    )
 
 
 def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lookup: dict | None = None):
