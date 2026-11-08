@@ -101,6 +101,42 @@ _MAX_INTENT_AGE_SECONDS = 24 * 60 * 60  # stale disk intent must not survive for
 # evict another session's live attempt no matter how much traffic arrives.
 _ROLLBACK_RECEIPT_TTL_SECONDS = 15 * 60
 
+# #7862 re-gate round 18 (P1, "restart leaves continuation blocked"): the
+# handoffs a restore deliberately left alone because their ownership window
+# was still fresh, mapped to the moment that window ends. Startup is the ONLY
+# production caller of ``restore_goal_continuations()``, so without a
+# scheduled re-check the intent those handoffs describe stays unusable until
+# ANOTHER process restart -- neither requests nor the sweep adopt them, and a
+# second restore in the same process skips the cached token. The recovery is
+# therefore scheduled for the window's end (see
+# ``recover_deferred_goal_continuation_handoffs``).
+_DEFERRED_HANDOFF_RECOVERY: "dict[tuple[str, str], float]" = {}
+_DEFERRED_RECOVERY_TIMER: "Optional[threading.Timer]" = None
+# A small margin past the window's end: the owner's own launch or rollback
+# lands inside the window, so anything still present a moment later is an
+# admission nobody came back for.
+_DEFERRED_RECOVERY_MARGIN_SECONDS = 1.0
+
+# #7862 re-gate round 18 (P1, "late rollback repeats completed work"): the
+# DURABLE record of which start attempts spent a given intent generation,
+# ``{session_id: {generation: {attempt_id: timestamp}}}``. A rejected-start
+# rollback is guarded by in-memory state (pending record, foreign handoff,
+# retirement stamp) that a successor's successful launch removes: B adopts the
+# expired handoff, consumes the restored intent, launches and discharges its
+# own handoff, and A's late rollback then finds nothing left to refuse it. The
+# spend ledger survives all of that, because it is written by the consume
+# itself and never removed by a launch. The timestamps are what keep the
+# rejected-start RETRY loop legitimate: only the most recent spender of a
+# generation may roll that generation back. Bounded like the tombstones.
+_SPENT_GENERATIONS: "dict[str, dict[int, dict[str, float]]]" = {}
+_MAX_SPENT_SESSIONS = 512
+_MAX_SPENT_GENERATIONS_PER_SESSION = 8
+
+# Sentinel for "the registry file is absent or unreadable" (see
+# ``_load_file_payload``). A plain ``None`` cannot be used: a JSON payload of
+# ``null`` is a shape error, not an absence.
+_MISSING = object()
+
 # One owner lock: in-memory mutation + durable snapshot are a single critical
 # section, so two writer threads can never interleave different generations.
 _LOCK = threading.RLock()
@@ -325,7 +361,7 @@ def _merge_disk_state_unlocked() -> None:
     """
     from api.config import PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_RECORDS
 
-    disk, disk_tombstones, disk_handoffs = _load_file_raw()
+    disk, disk_tombstones, disk_handoffs, disk_spent = _load_file_sections()
     if _LAST_LOAD_ERROR:
         # Corrupt/unreadable registry: the disk is NOT evidence that records
         # are gone. Refuse to drop or adopt anything; live memory stays
@@ -454,6 +490,22 @@ def _merge_disk_state_unlocked() -> None:
             # marker and the token it anchors.
             continue
         del _CONTINUATION_HANDOFF_TOKENS[key]
+    # #7862 re-gate round 18 (P1, "late rollback repeats completed work"):
+    # merge the durable spend ledger. The section is ADDITIVE evidence -- a
+    # peer's spend of a generation is exactly what a rollback in THIS process
+    # must refuse, so a key disk carries is folded in rather than replaced
+    # (this process may hold an attempt of its own for the same generation,
+    # and dropping it would let its own rollback be refused).
+    for sid, per_generation in disk_spent.items():
+        merged = _SPENT_GENERATIONS.setdefault(sid, {})
+        for generation, spenders in per_generation.items():
+            target = merged.setdefault(generation, {})
+            for attempt, stamp in spenders.items():
+                if stamp >= target.get(attempt, 0.0):
+                    target[attempt] = stamp
+    _prune_spent_generations_unlocked()
+
+
 _GENERATION = 0  # bumped under _LOCK on every accepted mutation (arm/retire)
 _LAST_LOAD_ERROR: Optional[str] = None
 _LAST_WRITE_ERROR: Optional[str] = None
@@ -757,7 +809,11 @@ def reclaim_goal_continuation_receipt(session_id: str, attempt_id: str = "") -> 
 
 
 def record_goal_continuation_stream(
-    session_id: str, attempt_id: str, stream_id: str
+    session_id: str,
+    attempt_id: str,
+    stream_id: str,
+    *,
+    consumed: bool = False,
 ) -> bool:
     """Bind this admission's stream identity to its handoff; return durability.
 
@@ -776,6 +832,14 @@ def record_goal_continuation_stream(
     The write is the same atomic snapshot as every other mutation, so the
     stream id is durable the moment this returns True. A False return means
     it did not land — the caller treats the admission as unsettled.
+
+    ``consumed`` is the route's OWN provenance (#7862 re-gate round 18, P1
+    "expired receipt permits duplicate worker"): True when THIS start attempt's
+    consume committed. The in-memory receipt that used to carry that fact can
+    be swept (the TTL) and the local handoff merged away (a peer takeover), so
+    a missing key plus a missing receipt used to read as "genuinely ordinary"
+    and the route launched a second goal worker for one intent. The caller's
+    state cannot expire, so it is consulted first.
 
     Never raises into the chat path.
     """
@@ -813,7 +877,17 @@ def record_goal_continuation_stream(
             # this process no longer owns, which is how a second goal worker
             # for one intent appeared. Refuse exactly like the in-transaction
             # refusal below.
-            if _attempt_has_live_receipt_unlocked(sid, attempt):
+            #
+            # #7862 re-gate round 18 (P1, "expired receipt permits duplicate
+            # worker"): the receipt is ALSO perishable. After A waits past the
+            # ownership window B adopts the handoff, an unrelated consume in
+            # A's process merges that handoff away and the sweep drops A's old
+            # receipt — and then BOTH entries are missing, so the check above
+            # answered True and the ordinary launch path started a second
+            # worker for the same continuation. The route therefore passes its
+            # OWN ``consumed`` state in: it is the one provenance that cannot
+            # expire, because the route knows whether ITS consume committed.
+            if consumed or _attempt_has_live_receipt_unlocked(sid, attempt):
                 logger.error(
                     "Goal continuation admission for session %s (attempt %s) "
                     "was consumed and then revoked; refusing to bind its "
@@ -1154,6 +1228,86 @@ def _drop_continuation_handoffs_unlocked(sid: str) -> int:
     return len(keys)
 
 
+def _prune_spent_generations_unlocked() -> None:
+    """Bound the durable spend ledger; callers hold ``_LOCK``.
+
+    #7862 re-gate round 18: the ledger is evidence, so it is pruned by age of
+    the generation (oldest first) exactly like the tombstones are bounded --
+    never by "the session looks quiet". Losing an old entry degrades to the
+    pre-round-18 behaviour for that one generation, which is the safe
+    direction.
+    """
+    if len(_SPENT_GENERATIONS) <= _MAX_SPENT_SESSIONS:
+        return
+
+    def _newest_generation(sid: str) -> int:
+        return max(_SPENT_GENERATIONS.get(sid) or {0: set()})
+
+    stale = sorted(_SPENT_GENERATIONS, key=_newest_generation)
+    for sid in stale[: len(_SPENT_GENERATIONS) - _MAX_SPENT_SESSIONS]:
+        _SPENT_GENERATIONS.pop(sid, None)
+
+
+def _record_spent_generation_unlocked(sid: str, record: dict, attempt_id: str) -> None:
+    """Record durably that *attempt_id* spent *record*'s generation.
+
+    #7862 re-gate round 18 (P1, "late rollback repeats completed work"): the
+    consume is the ONLY event that proves an intent was spent, and the
+    in-memory evidence a rollback restore consults (the pending record, the
+    successor's handoff, the losing attempt's receipt) is all removable by the
+    successor's own successful launch. This ledger is written in the same
+    snapshot as the consume and never removed by a launch, so a late rollback
+    can still tell "this generation ran" from "this generation never ran".
+    Callers hold ``_LOCK`` (inside a registry transaction).
+    """
+    attempt = str(attempt_id or "").strip()
+    if not attempt:
+        # An attempt-less consume has no identity to attribute the spend to;
+        # recording it under a shared key would refuse every later rollback
+        # for that generation, including the attempt's own.
+        return
+    try:
+        generation = int((record or {}).get("generation") or 0)
+    except (TypeError, ValueError):
+        generation = 0
+    if not generation:
+        return
+    per_generation = _SPENT_GENERATIONS.setdefault(sid, {})
+    per_generation.setdefault(generation, {})[attempt] = time.time()
+    # Bound per session: keep the NEWEST generations, which are the ones a
+    # live rollback can still describe.
+    if len(per_generation) > _MAX_SPENT_GENERATIONS_PER_SESSION:
+        for stale in sorted(per_generation)[
+            : len(per_generation) - _MAX_SPENT_GENERATIONS_PER_SESSION
+        ]:
+            per_generation.pop(stale, None)
+        if not per_generation:
+            _SPENT_GENERATIONS.pop(sid, None)
+    _prune_spent_generations_unlocked()
+
+
+def _later_generation_spender_unlocked(
+    sid: str, generation: int, attempt: str
+) -> str:
+    """Return the attempt that spent *generation* after *attempt* did, else "".
+
+    Callers hold ``_LOCK``. The most recent spender of a generation is the one
+    whose rejected start a rollback may still undo -- that is exactly the
+    rejected-start retry loop, where the same intent is consumed, rolled back
+    and consumed again by the next attempt. Any attempt that spent the
+    generation EARLIER has already had its turn: a rollback landing now would
+    re-run work a later attempt already completed, which is the duplicate the
+    finding describes.
+    """
+    if not generation:
+        return ""
+    spenders = (_SPENT_GENERATIONS.get(sid) or {}).get(generation) or {}
+    if not spenders:
+        return ""
+    latest = max(spenders, key=lambda name: spenders[name])
+    return "" if latest == attempt else latest
+
+
 def _record_rollback_receipt_unlocked(sid: str, record: dict, attempt_id: str) -> None:
     """Store a rollback receipt for one start attempt; callers hold ``_LOCK``."""
     attempt = str(attempt_id or "") or "attempt"
@@ -1261,6 +1415,23 @@ def _write_registry_unlocked(records: dict, *, context: str = "") -> bool:
                     # whole session.
                     if not rec.get("_handoff_adopted_into_record")
                 },
+                # #7862 re-gate round 18 (P1, "late rollback repeats completed
+                # work"): the spend ledger. Every durable guard a rollback
+                # restore consults lives in this file — the record, the
+                # tombstones, the handoffs — so the evidence that a SUCCESSOR
+                # attempt spent this generation has to as well. A successor's
+                # successful launch removes the record, discharges its handoff
+                # and (through the TTL) can drop the losing attempt's receipt;
+                # only this section still says "generation G was spent by
+                # attempt B", which is what refuses A's late rollback.
+                "spent_generations": {
+                    sid: {
+                        str(generation): dict(sorted(spenders.items()))
+                        for generation, spenders in per_generation.items()
+                    }
+                    for sid, per_generation in _SPENT_GENERATIONS.items()
+                    if per_generation
+                },
             },
             sort_keys=True,
         ).encode("utf-8")
@@ -1299,6 +1470,186 @@ def _write_registry_unlocked(records: dict, *, context: str = "") -> bool:
                 pass
 
 
+def _load_file_payload():
+    """Lock-free read of the on-disk registry payload.
+
+    Returns the parsed JSON value (a ``dict`` payload, or a ``list`` for the
+    v1 session-id format), or ``_MISSING`` when the file is absent or
+    unreadable. Split out of ``_load_file_raw`` so the callers that need the
+    round-18 ``spent_generations`` section read it from the SAME parse instead
+    of re-reading the file. ``_LAST_LOAD_ERROR`` / ``_LAST_FILE_GENERATION``
+    are maintained exactly like the original monolithic reader: never raises.
+    """
+    global _LAST_LOAD_ERROR, _LAST_FILE_GENERATION
+    _LAST_LOAD_ERROR = None
+    try:
+        raw = _PENDING_GOAL_FILE.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except FileNotFoundError:
+        _LAST_FILE_GENERATION = 0
+        return _MISSING
+    except (OSError, ValueError) as exc:
+        _LAST_LOAD_ERROR = f"{type(exc).__name__}: {exc}"
+        logger.warning("Goal continuation registry unreadable: %s", _LAST_LOAD_ERROR)
+        _LAST_FILE_GENERATION = 0
+        return _MISSING
+    if isinstance(data, dict):
+        _LAST_FILE_GENERATION = int(data.get("generation") or 0)
+    else:
+        # v1 (a bare list) or an unexpected shape: no global generation.
+        _LAST_FILE_GENERATION = 0
+    return data
+
+
+def _parse_spent_generations(raw) -> "dict[str, dict[int, dict[str, float]]]":
+    """Parse the durable ``spent_generations`` section (never raises).
+
+    #7862 re-gate round 18 (P1, "late rollback repeats completed work"): the
+    section records, per session and generation, WHICH start attempts spent
+    that generation and WHEN — ``{attempt: timestamp}``. The order matters: a
+    rollback is legitimate while its own attempt is the MOST RECENT spender of
+    that generation (the rejected-start retry loop), and a duplicate once a
+    later attempt spent it (the successor's completed work). A malformed entry
+    is skipped rather than failing the whole read; the v1 list shape (a bare
+    list of attempts, no timestamps) is accepted with timestamp 0 so an older
+    payload still refuses, conservatively.
+    """
+    out: "dict[str, dict[int, dict[str, float]]]" = {}
+    if not isinstance(raw, dict):
+        return out
+    for sid, generations in raw.items():
+        if not isinstance(generations, dict):
+            continue
+        per_generation: "dict[int, dict[str, float]]" = {}
+        for generation, attempts in generations.items():
+            try:
+                generation_i = int(generation or 0)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(attempts, dict):
+                spenders = {}
+                for attempt, stamp in attempts.items():
+                    name = str(attempt or "").strip()
+                    if not name:
+                        continue
+                    try:
+                        spenders[name] = float(stamp or 0.0)
+                    except (TypeError, ValueError):
+                        spenders[name] = 0.0
+            elif isinstance(attempts, (list, tuple, set)):
+                spenders = {
+                    str(a).strip(): 0.0 for a in attempts if str(a or "").strip()
+                }
+            else:
+                continue
+            if generation_i and spenders:
+                per_generation[generation_i] = spenders
+        if per_generation:
+            out[str(sid)] = per_generation
+    return out
+
+
+def _load_file_sections() -> (
+    "tuple[dict[str, dict], dict[str, int], dict[tuple[str, str], dict],"
+    " dict[str, dict[int, set[str]]]]"
+):
+    """Lock-free read of the on-disk registry.
+
+    Returns ``(records, tombstones, handoffs, spent_generations)``. The first
+    three are the round-7 contract unchanged; the fourth is the round-18
+    spend ledger. Missing file -> four empty mappings; corrupt/unexpected ->
+    empty mappings with the parse failure recorded in ``_LAST_LOAD_ERROR``
+    (never raises). A v1 list-of-strings file is upgraded in memory to
+    records with a blank prompt.
+    """
+    global _LAST_LOAD_ERROR
+    data = _load_file_payload()
+    if data is _MISSING:
+        return {}, {}, {}, {}
+    if isinstance(data, list):
+        # v1 format: a bare list of session ids. Upgrade in memory: blank
+        # prompt (the old format never carried text); generation is assigned
+        # when the record is restored/merged.
+        return (
+            {
+                str(sid): {
+                    "prompt": "",
+                    "generation": 0,
+                    "created_at": time.time(),
+                    "reason": "goal_continue",
+                    "continuation_id": "",
+                }
+                for sid in data
+                if isinstance(sid, str) and sid
+            },
+            {},
+            {},
+            {},
+        )
+    if not isinstance(data, dict):
+        _LAST_LOAD_ERROR = f"unexpected registry shape: {type(data).__name__}"
+        return {}, {}, {}, {}
+    raw_records = data.get("records")
+    if not isinstance(raw_records, dict):
+        _LAST_LOAD_ERROR = (
+            f"registry has no records mapping ({type(raw_records).__name__})"
+        )
+        return {}, {}, {}, {}
+    file_generation = int(data.get("generation") or 0)
+    raw_tombstones = data.get("tombstones")
+    if not isinstance(raw_tombstones, dict):
+        raw_tombstones = {}
+    tombstones: "dict[str, int]" = {}
+    for sid, gen in raw_tombstones.items():
+        try:
+            tombstones[str(sid)] = int(gen or 0)
+        except (TypeError, ValueError):
+            continue
+    handoffs: "dict[tuple[str, str], dict]" = {}
+    raw_handoffs = data.get("continuation_handoffs")
+    if isinstance(raw_handoffs, dict):
+        for key, rec in raw_handoffs.items():
+            if not isinstance(rec, dict):
+                continue
+            sid, _, attempt = str(key).partition("\u0000")
+            if not sid or not attempt:
+                continue
+            handoffs[(sid, attempt)] = {
+                "prompt": str(rec.get("prompt") or ""),
+                "generation": int(rec.get("generation") or file_generation),
+                "created_at": float(rec.get("created_at") or time.time()),
+                "reason": str(rec.get("reason") or "goal_continue"),
+                "continuation_id": str(rec.get("continuation_id") or ""),
+                # #7862 round 10: the liveness clock must survive the load.
+                # This builder is a whitelist, so a field not named here is
+                # dropped even though it is persisted — and a restored
+                # handoff with no clock reads as abandoned, which sweeps the
+                # receipt it is supposed to protect.
+                "_handoff_minted_at": float(rec.get("_handoff_minted_at") or 0.0),
+                # #7862 re-gate CORE (Oct 10): the stream identity of an
+                # admission that LAUNCHED. Same whitelist trap as the clock:
+                # dropping it would make every restored admission look like
+                # an interrupted start, and the adoption would resurrect a
+                # continuation whose turn already ran — the exact
+                # failed-discharge resurrection this round closes.
+                "_handoff_stream_id": str(rec.get("_handoff_stream_id") or ""),
+            }
+    out: dict[str, dict] = {}
+    for sid, rec in raw_records.items():
+        if not isinstance(rec, dict):
+            continue
+        out[str(sid)] = {
+            "prompt": str(rec.get("prompt") or ""),
+            "generation": int(rec.get("generation") or file_generation),
+            "created_at": float(rec.get("created_at") or time.time()),
+            "reason": str(rec.get("reason") or "goal_continue"),
+            "continuation_id": str(rec.get("continuation_id") or ""),
+        }
+    return out, tombstones, handoffs, _parse_spent_generations(
+        data.get("spent_generations")
+    )
+
+
 def _load_file_raw() -> "tuple[dict[str, dict], dict[str, int], dict[tuple[str, str], dict]]":
     """Lock-free read of the on-disk registry -> (records, tombstones, handoffs).
 
@@ -1311,97 +1662,13 @@ def _load_file_raw() -> "tuple[dict[str, dict], dict[str, int], dict[tuple[str, 
     died between the consume and the pending-start write can still re-adopt the
     intent instead of restoring nothing. A v3 file has no such section; nothing
     can be re-adopted for it, which is the pre-round-7 behaviour.
+
+    The round-18 ``spent_generations`` section is read by
+    ``_load_file_sections``; this three-tuple shape is kept because every
+    round-7..17 schedule unpacks it.
     """
-    global _LAST_LOAD_ERROR, _LAST_FILE_GENERATION
-    _LAST_LOAD_ERROR = None
-    try:
-        raw = _PENDING_GOAL_FILE.read_text(encoding="utf-8")
-        data = json.loads(raw)
-    except FileNotFoundError:
-        _LAST_FILE_GENERATION = 0
-        return {}, {}, {}
-    except (OSError, ValueError) as exc:
-        _LAST_LOAD_ERROR = f"{type(exc).__name__}: {exc}"
-        logger.warning("Goal continuation registry unreadable: %s", _LAST_LOAD_ERROR)
-        _LAST_FILE_GENERATION = 0
-        return {}, {}, {}
-    if isinstance(data, dict):
-        file_generation = int(data.get("generation") or 0)
-        _LAST_FILE_GENERATION = file_generation
-        raw_records = data.get("records")
-        if not isinstance(raw_records, dict):
-            _LAST_LOAD_ERROR = (
-                f"registry has no records mapping ({type(raw_records).__name__})"
-            )
-            return {}, {}, {}
-        raw_tombstones = data.get("tombstones")
-        if not isinstance(raw_tombstones, dict):
-            raw_tombstones = {}
-        tombstones: "dict[str, int]" = {}
-        for sid, gen in raw_tombstones.items():
-            try:
-                tombstones[str(sid)] = int(gen or 0)
-            except (TypeError, ValueError):
-                continue
-        handoffs: "dict[tuple[str, str], dict]" = {}
-        raw_handoffs = data.get("continuation_handoffs")
-        if isinstance(raw_handoffs, dict):
-            for key, rec in raw_handoffs.items():
-                if not isinstance(rec, dict):
-                    continue
-                sid, _, attempt = str(key).partition("\u0000")
-                if not sid or not attempt:
-                    continue
-                handoffs[(sid, attempt)] = {
-                    "prompt": str(rec.get("prompt") or ""),
-                    "generation": int(rec.get("generation") or file_generation),
-                    "created_at": float(rec.get("created_at") or time.time()),
-                    "reason": str(rec.get("reason") or "goal_continue"),
-                    "continuation_id": str(rec.get("continuation_id") or ""),
-                    # #7862 round 10: the liveness clock must survive the load.
-                    # This builder is a whitelist, so a field not named here is
-                    # dropped even though it is persisted — and a restored
-                    # handoff with no clock reads as abandoned, which sweeps the
-                    # receipt it is supposed to protect.
-                    "_handoff_minted_at": float(rec.get("_handoff_minted_at") or 0.0),
-                    # #7862 re-gate CORE (Oct 10): the stream identity of an
-                    # admission that LAUNCHED. Same whitelist trap as the clock:
-                    # dropping it would make every restored admission look like
-                    # an interrupted start, and the adoption would resurrect a
-                    # continuation whose turn already ran — the exact
-                    # failed-discharge resurrection this round closes.
-                    "_handoff_stream_id": str(rec.get("_handoff_stream_id") or ""),
-                }
-        out: dict[str, dict] = {}
-        for sid, rec in raw_records.items():
-            if not isinstance(rec, dict):
-                continue
-            out[str(sid)] = {
-                "prompt": str(rec.get("prompt") or ""),
-                "generation": int(rec.get("generation") or file_generation),
-                "created_at": float(rec.get("created_at") or time.time()),
-                "reason": str(rec.get("reason") or "goal_continue"),
-                "continuation_id": str(rec.get("continuation_id") or ""),
-            }
-        return out, tombstones, handoffs
-    if isinstance(data, list):
-        # v1 format: a bare list of session ids. Upgrade in memory: blank
-        # prompt (the old format never carried text); generation is assigned
-        # when the record is restored/merged.
-        _LAST_FILE_GENERATION = 0
-        return {
-            str(sid): {
-                "prompt": "",
-                "generation": 0,
-                "created_at": time.time(),
-                "reason": "goal_continue",
-                "continuation_id": "",
-            }
-            for sid in data
-            if isinstance(sid, str) and sid
-        }, {}, {}
-    _LAST_LOAD_ERROR = f"unexpected registry shape: {type(data).__name__}"
-    return {}, {}, {}
+    records, tombstones, handoffs, _spent = _load_file_sections()
+    return records, tombstones, handoffs
 
 
 def load_pending_goal_continuations() -> dict:
@@ -1812,16 +2079,30 @@ def consume_pending_goal_continuation(
             _next_generation_unlocked()
             PENDING_GOAL_CONTINUATION.discard(sid)
             popped = PENDING_GOAL_CONTINUATION_RECORDS.pop(sid)
+            # #7862 re-gate round 18 (P1, "older tabs cannot send"): the
+            # prompt/token mirror is the OTHER half of the consumed record.
+            # Leaving it behind let the legacy key-omission resolver hand a
+            # stale token to an older tab, whose next ordinary message then
+            # carried a continuation token with no pending marker and was
+            # refused outright. It is captured first so the commit-failure
+            # path below can put BOTH halves back.
+            from api.config import PENDING_GOAL_CONTINUATION_PROMPTS
+
+            _popped_mirror = PENDING_GOAL_CONTINUATION_PROMPTS.pop(sid, None)
             # #7862 round 8 (CORE, finding 2): the record removal and the handoff that
             # replaces it must land in ONE os.replace. Round 7 wrote them in two
             # passes (record gone at the first replace, handoff added at the second),
             # so a process loss between them left records=[] handoffs=[] and the retry
-            # ran as an ordinary turn; and when the second write failed the handoff was
-            # dropped while the consume still returned True. Both halves are staged in
-            # memory first and committed together, so the durable snapshot shows either
+            # ran as an ordinary turn; and when the second write failed the handoff
+            # was dropped while the consume still returned True. Both halves are staged
+            # in memory first and committed together, so the durable snapshot shows either
             # "record present, no handoff" or "record absent, handoff present" — never
             # the empty middle.
             _record_rollback_receipt_unlocked(sid, record, attempt_id)
+            # #7862 re-gate round 18 (P1, "late rollback repeats completed
+            # work"): the DURABLE spend evidence, in the same snapshot as the
+            # removal it describes.
+            _record_spent_generation_unlocked(sid, popped, attempt_id)
             _record_continuation_handoff_unlocked(sid, record, attempt_id)
             if not _write_registry_unlocked(
                 PENDING_GOAL_CONTINUATION_RECORDS,
@@ -1838,6 +2119,8 @@ def consume_pending_goal_continuation(
                 _drop_rollback_receipt_unlocked(sid)
                 PENDING_GOAL_CONTINUATION.add(sid)
                 PENDING_GOAL_CONTINUATION_RECORDS[sid] = popped
+                if _popped_mirror is not None:
+                    PENDING_GOAL_CONTINUATION_PROMPTS[sid] = _popped_mirror
                 logger.warning(
                     "Refused to consume goal continuation for session %s: the "
                     "durable record could not be removed atomically with its handoff",
@@ -1991,6 +2274,35 @@ def restore_pending_goal_continuation(session_id: str, record: dict) -> bool:
                         }
                     )
                     return False
+            # #7862 re-gate round 18 (P1, "late rollback repeats completed
+            # work"): the round-17 guard above only sees a successor while its
+            # handoff still exists. If B adopted, consumed AND launched, its
+            # handoff is discharged and the pending-record table is empty, so
+            # every in-memory check passes and this rollback would restore the
+            # continuation B already ran. The DURABLE spend ledger the consume
+            # wrote still says which attempt spent this generation, so compare
+            # against it: only the attempt that spent it may roll its own
+            # rejected start back.
+            _later_spender = _later_generation_spender_unlocked(
+                sid, int(record.get("generation") or 0), losing_attempt
+            )
+            if _later_spender:
+                logger.warning(
+                    "Goal continuation rollback for session %s refused: "
+                    "generation %d was already spent by a LATER start attempt "
+                    "(%s); the successor's completed work must not run twice",
+                    sid,
+                    int(record.get("generation") or 0),
+                    _later_spender,
+                )
+                _RETIRED_LOG.append(
+                    {
+                        "session_id": sid,
+                        "reason": "rollback_refused_generation_spent",
+                        "at": time.time(),
+                    }
+                )
+                return False
             # Durable tombstone check: has this session's intent been explicitly
             # retired since this receipt was minted? ``_TOMBSTONES`` is loaded from
             # disk and survives both a restart and unlimited unrelated
@@ -2021,6 +2333,13 @@ def restore_pending_goal_continuation(session_id: str, record: dict) -> bool:
             restored = dict(record)
             PENDING_GOAL_CONTINUATION.add(sid)
             PENDING_GOAL_CONTINUATION_RECORDS[sid] = restored
+            # #7862 re-gate round 18 (P1, "older tabs cannot send"): the
+            # consume now removes master's prompt/token mirror together with
+            # the record, so the rollback that puts the record back must put
+            # the mirror back too — otherwise the /goal orphan sweep strips the
+            # marker and the legacy resolver loses the admission (the exact
+            # round-15 CORE finding 4 shape, now on the rollback path).
+            _publish_continuation_mirror_unlocked(sid, restored)
             # #7862 round 9 (CORE, finding "successful retries leave claimable
             # handoffs"): the intent is live again as a RECORD, so the handoff for
             # the attempt that consumed it is spent. Keeping it let a successful
@@ -2196,6 +2515,116 @@ def _publish_continuation_mirror_unlocked(sid: str, record: dict) -> None:
             }
 
 
+def _schedule_deferred_handoff_recovery_unlocked(now: "float | None" = None) -> None:
+    """Arm the one-shot recovery timer for the earliest ownership window.
+
+    #7862 re-gate round 18 (P1, "restart leaves continuation blocked"): the
+    startup restore leaves a fresh handoff alone, and nothing ever looked at
+    it again — the continuation stayed unusable until another process restart.
+    The recovery is scheduled here, for the moment the earliest registered
+    window ends, so the owner's own launch/rollback still wins inside the
+    window and only an admission nobody came back for is adopted afterwards.
+
+    One timer per process: the recovery re-runs the restore, which
+    re-registers anything still fresh and reschedules. Callers hold ``_LOCK``
+    (inside the registry transaction); the timer itself never takes the lock
+    synchronously, it only starts a thread.
+    """
+    global _DEFERRED_RECOVERY_TIMER
+    if not _DEFERRED_HANDOFF_RECOVERY:
+        return
+    if _DEFERRED_RECOVERY_TIMER is not None and _DEFERRED_RECOVERY_TIMER.is_alive():
+        return
+    now = time.time() if now is None else float(now)
+    delay = (
+        max(0.0, min(_DEFERRED_HANDOFF_RECOVERY.values()) - now)
+        + _DEFERRED_RECOVERY_MARGIN_SECONDS
+    )
+    try:
+        timer = threading.Timer(delay, _run_deferred_handoff_recovery)
+        timer.daemon = True
+        timer.name = "goal-continuation-deferred-recovery"
+        _DEFERRED_RECOVERY_TIMER = timer
+        timer.start()
+    except Exception:  # pragma: no cover - a runtime that cannot start threads
+        logger.warning(
+            "Goal continuation registry: could not schedule the deferred "
+            "handoff recovery; a skipped admission stays claimable for the "
+            "next startup restore",
+            exc_info=True,
+        )
+
+
+def _run_deferred_handoff_recovery() -> None:
+    """Timer callback: adopt the handoffs whose ownership window has ended."""
+    try:
+        recover_deferred_goal_continuation_handoffs()
+    except Exception:  # pragma: no cover - never let a timer thread die loudly
+        logger.warning(
+            "Goal continuation registry: the deferred handoff recovery failed",
+            exc_info=True,
+        )
+
+
+def recover_deferred_goal_continuation_handoffs(
+    now: "float | None" = None,
+) -> int:
+    """Adopt the durable handoffs a restore skipped, once their window ended.
+
+    #7862 re-gate round 18 (P1, "restart leaves continuation blocked"): a
+    restart inside the 15-minute ownership window keeps the interrupted
+    attempt's handoff but creates no pending record, and nothing adopted it
+    later — the continuation stayed unusable until another process restart.
+    This is the scheduled re-check: for every registered handoff whose window
+    has ended, the cached skip token is released and the restore is re-run, so
+    the ordinary adoption path (stream reconciliation, retirement authority,
+    generation baselines) decides with exactly the rules a cold start would
+    use.
+
+    Returns the number of continuations the re-run restored. ``now`` lets a
+    caller (a test) evaluate the window against a specific clock without
+    sleeping through the lease. Never raises into the chat path; a lock it
+    cannot take leaves the registration in place for the next attempt.
+    """
+    from api.config import PENDING_GOAL_CONTINUATION_RECORDS
+
+    with _LOCK:
+        now = time.time() if now is None else float(now)
+        due = [
+            key
+            for key, window_end in _DEFERRED_HANDOFF_RECOVERY.items()
+            if window_end <= now
+        ]
+        if not due:
+            return 0
+        for key in due:
+            _DEFERRED_HANDOFF_RECOVERY.pop(key, None)
+            token = _CONTINUATION_HANDOFF_TOKENS.get(key)
+            if token is None:
+                # Already adopted or discharged by another path.
+                continue
+            if token.get("_handoff_adopted_into_record"):
+                # A conversion anchor, not the skip token: the admission was
+                # already adopted into a record.
+                continue
+            # The skip branch cached this token verbatim so the closing
+            # snapshot would keep the live peer's admission on disk. It is
+            # also what makes a later restore skip the same handoff (the
+            # "already owns the admission" branch), so it has to be released
+            # before the restore can adopt it. The durable copy is untouched
+            # and stays re-adoptable if this pass refuses.
+            _CONTINUATION_HANDOFF_TOKENS.pop(key, None)
+        try:
+            return restore_goal_continuations()
+        except Exception:
+            logger.warning(
+                "Goal continuation registry: the deferred handoff recovery "
+                "could not complete",
+                exc_info=True,
+            )
+            return 0
+
+
 def restore_goal_continuations() -> int:
     """Startup-only restore: merge durable records into the live marker set.
 
@@ -2213,14 +2642,24 @@ def restore_goal_continuations() -> int:
     """
     from api.config import PENDING_GOAL_CONTINUATION, PENDING_GOAL_CONTINUATION_RECORDS
 
-    # #7862 re-gate (2026-10-27, CORE finding 1): the startup restore is a
-    # registry writer too — it takes the cross-process lock so a second
-    # process's restore (or any concurrent writer) cannot interleave with
-    # its adopt/drop decisions. It does its own disk read below, so the
-    # generic merge is deliberately NOT run here.
+    # #7862 re-gate round 18 (P1, "restart leaves continuation blocked"): the
+    # startup restore is a registry writer too — it takes the cross-process
+    # lock so a second process's restore (or any concurrent writer) cannot
+    # interleave with its adopt/drop decisions. It does its own disk read
+    # below, so the generic merge is deliberately NOT run here.
     try:
         with _registry_transaction():
-            disk, disk_tombstones, disk_handoffs = _load_file_raw()
+            disk, disk_tombstones, disk_handoffs, disk_spent = _load_file_sections()
+            # #7862 re-gate round 18: fold the durable spend ledger in before
+            # any adoption decision, exactly like the generic merge does.
+            for _sid, _per_generation in disk_spent.items():
+                _merged = _SPENT_GENERATIONS.setdefault(_sid, {})
+                for _generation, _spenders in _per_generation.items():
+                    _target = _merged.setdefault(_generation, {})
+                    for _attempt, _stamp in _spenders.items():
+                        if _stamp >= _target.get(_attempt, 0.0):
+                            _target[_attempt] = _stamp
+            _prune_spent_generations_unlocked()
             # SILENT finding 3: a session deleted while this process was down
             # must not have its intent restored. The delete's retirement write
             # can fail (ENOSPC) after the WebUI tombstone landed, and a cold
@@ -2392,6 +2831,17 @@ def restore_goal_continuations() -> int:
                         sid,
                         attempt,
                         int(time.time() - _handoff_minted_at),
+                    )
+                    # #7862 re-gate round 18 (P1, "restart leaves continuation
+                    # blocked"): this skip is CORRECT for the window it is
+                    # decided in, but nothing re-examined it afterwards:
+                    # startup is the only production caller of this function,
+                    # neither requests nor the sweep adopt a skipped handoff,
+                    # and a second restore in this process skips the cached
+                    # token below. Register the window's end so the recovery
+                    # can be scheduled for it.
+                    _DEFERRED_HANDOFF_RECOVERY[(sid, attempt)] = (
+                        _handoff_minted_at + _ROLLBACK_RECEIPT_TTL_SECONDS
                     )
                     # #7862 re-gate round 16 (CORE finding 2): this restore
                     # deliberately does not run the generic merge, so the
@@ -2581,6 +3031,13 @@ def restore_goal_continuations() -> int:
                     "from an interrupted start",
                     adopted,
                 )
+            # #7862 re-gate round 18 (P1, "restart leaves continuation
+            # blocked"): a handoff this pass left alone is registered above;
+            # schedule the recovery for the earliest window's end so the
+            # continuation becomes claimable without ANOTHER process restart.
+            # Called under the transaction so the registration and the
+            # snapshot cannot interleave with a peer's.
+            _schedule_deferred_handoff_recovery_unlocked()
             # #7862 re-gate CORE (Oct 10): a REFUSED or already-launched handoff is
             # dropped in memory during the loop above, but the drop only becomes
             # real when the snapshot commits. Without this write the spent handoff
