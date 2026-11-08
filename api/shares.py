@@ -350,7 +350,9 @@ def _placeholder_inline_data_uris(text: str) -> str:
     return _CONTENT_DATA_URI_RE.sub(_INLINE_DATA_PLACEHOLDER, text)
 
 
-def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> str:
+def _embed_share_media(
+    text: str, *, allowed_roots: tuple[Path, ...] = (), trusted_roots: tuple[Path, ...] = ()
+) -> str:
     """Find local MEDIA: references and replace them with inline <img> tags.
 
     Only paths that name a regular file inside at least one of
@@ -369,6 +371,12 @@ def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> st
     resolved root before anything is read from it.  Anything unverifiable
     fails closed.
 
+    *allowed_roots* are resolved here; one that cannot be (symlink loop,
+    EINVAL) is dropped.  *trusted_roots* were resolved at trust time (the
+    attachment root, at startup) and are walked as given, never re-resolved
+    by name, so a symlink planted later inside another root cannot redirect
+    them (#8590).
+
     This runs BEFORE :func:`_redact_share_paths` so the concrete file path
     is still available for the allowed-roots check.
     """
@@ -376,8 +384,18 @@ def _embed_share_media(text: str, *, allowed_roots: tuple[Path, ...] = ()) -> st
         return text
 
     windows = _share_platform_is_windows()
-    configured = tuple(r for r in allowed_roots if r)
-    allowed = tuple(Path(r).resolve() for r in configured)
+    configured: list = []
+    allowed: list = []
+    for root in allowed_roots:
+        try:
+            resolved = Path(root).resolve() if root else None
+        except (OSError, RuntimeError, ValueError):
+            resolved = None  # #8590: an unresolvable root is dropped, never a 500
+        if resolved is not None:
+            configured.append(root)
+            allowed.append(resolved)
+    configured += [r for r in trusted_roots if r]
+    allowed += [r for r in trusted_roots if r]
     root_spellings = _share_root_spellings(configured, allowed, windows=windows)
 
     def _replace_ref(m: re.Match) -> str:
@@ -948,7 +966,9 @@ def _read_share_media_windows(candidates, limit: int) -> bytes | None:
     return None
 
 
-def _sanitize_message(message: dict, *, redact_paths=(), allowed_roots: tuple[Path, ...] = ()) -> dict | None:
+def _sanitize_message(
+    message: dict, *, redact_paths=(), allowed_roots: tuple[Path, ...] = (), trusted_roots: tuple[Path, ...] = ()
+) -> dict | None:
     if not isinstance(message, dict):
         return None
     role = str(message.get("role") or "").strip().lower()
@@ -975,7 +995,7 @@ def _sanitize_message(message: dict, *, redact_paths=(), allowed_roots: tuple[Pa
     # Embed local media BEFORE path redaction so the concrete path is still
     # available for file reads.  MEDIA: references become self-contained data
     # URIs — or a static placeholder if the path is outside the allowed roots.
-    text = _embed_share_media(text, allowed_roots=allowed_roots)
+    text = _embed_share_media(text, allowed_roots=allowed_roots, trusted_roots=trusted_roots)
     text = _redact_share_paths(text, redact_paths)
     if not text.strip():
         return None
@@ -1037,9 +1057,13 @@ def build_share_snapshot(session) -> dict:
     _ws = raw_dict.get("workspace")
     if _ws and isinstance(_ws, str) and _ws.strip():
         _allowed_roots.append(Path(_ws.strip()))
+    # The attachment root is trusted as resolved at startup, never re-resolved
+    # by name here: it may sit inside the workspace, where anyone who can
+    # write could plant a symlink redirecting it (#8590).
+    _trusted_roots: tuple[Path, ...] = ()
     try:
-        from api.upload import _attachment_root
-        _allowed_roots.append(_attachment_root())
+        from api.upload import _share_attachment_root
+        _trusted_roots = tuple(r for r in (_share_attachment_root(),) if r is not None)
     except Exception:
         pass
     _allowed_roots_tuple: tuple[Path, ...] = tuple(_allowed_roots)
@@ -1047,6 +1071,7 @@ def build_share_snapshot(session) -> dict:
     for raw in safe_session.get("messages") or []:
         sanitized = _sanitize_message(
             raw, redact_paths=redact_paths, allowed_roots=_allowed_roots_tuple,
+            trusted_roots=_trusted_roots,
         )
         if sanitized:
             safe_messages.append(sanitized)
@@ -1128,7 +1153,38 @@ def create_or_refresh_share(session) -> dict:
     )
 
 
+def _share_owner_exists(payload: dict) -> bool:
+    """True while the conversation that published ``payload`` still exists (#8837).
+
+    Every share create since sharing shipped has written the owner's sidecar
+    (``SESSION_DIR/<sid>.json``) before returning the link, external sessions
+    included (they get a metadata-only sidecar), and every snapshot records that
+    ``source_session_id``. So a stat of that one path answers the question. The
+    sidecar is never opened: this runs for anonymous requests, and a sidecar can
+    be tens of MiB. A snapshot without a valid owner id, or whose owner's sidecar
+    is gone (the conversation was deleted, including by a delete from before
+    this check existed), is not served.
+    """
+    sid = payload.get("source_session_id")
+    if not isinstance(sid, str) or not sid:
+        return False
+    try:
+        from api import models
+
+        if not models.is_safe_session_id(sid):
+            return False
+        return (models.SESSION_DIR / f"{sid}.json").is_file()
+    except Exception:
+        logger.debug("Failed to check the owner of a share snapshot", exc_info=True)
+        return False
+
+
 def load_share(token: str) -> dict | None:
+    """The public view of a share, or ``None`` (the caller answers 404).
+
+    A refused snapshot (revoked, or its conversation no longer exists) gives the
+    same ``None`` as an unknown token (#8837).
+    """
     try:
         path = _share_path(token)
     except ValueError:
@@ -1144,7 +1200,57 @@ def load_share(token: str) -> dict | None:
         return None
     if payload.get("revoked_at"):
         return None
+    if not _share_owner_exists(payload):
+        return None
     return _public_share_payload(payload)
+
+
+def revoke_share_owned_by(token: str, session_id: str) -> bool:
+    """Revoke the snapshot under ``token`` if ``session_id`` published it (#8837).
+
+    For deleting a conversation. A compression continuation inherits its
+    parent's token, and refreshing its share rewrites the snapshot under that
+    token with the continuation as owner; deleting the parent must not revoke
+    that link, so only a snapshot this session owns is touched.
+
+    Returns True when no unrevoked snapshot of ``session_id`` remains under
+    ``token`` (revoked now or before, absent, unparseable, or owned by another
+    session), False when the snapshot could not be read or the revoke could not
+    be written; the caller then refuses the delete.
+    """
+    token = str(token or "").strip()
+    session_id = str(session_id or "").strip()
+    if not token or not session_id:
+        return True
+    try:
+        path = _share_path(token)
+    except ValueError:
+        return True  # nothing can be stored under an invalid token
+    with _SHARE_LOCK:
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return True
+        except UnicodeDecodeError:
+            return True  # load_share() cannot decode it either, so it serves nothing
+        except Exception:
+            logger.warning("Failed to read share snapshot %s to revoke it", path, exc_info=True)
+            return False
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            return True  # load_share() cannot parse it either, so it serves nothing
+        if not isinstance(payload, dict) or payload.get("revoked_at"):
+            return True
+        if str(payload.get("source_session_id") or "") != session_id:
+            return True
+        payload["revoked_at"] = time.time()
+        try:
+            _write_json_atomic(path, payload)
+        except Exception:
+            logger.warning("Failed to revoke share snapshot %s", path, exc_info=True)
+            return False
+    return True
 
 
 def revoke_share(session) -> bool:

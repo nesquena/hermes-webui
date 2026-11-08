@@ -35,6 +35,7 @@ import pytest
 from api import config
 from api import gateway_chat
 from api import run_drain
+from tests._updater_restart_isolation import isolated_restart_scheduler
 
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -652,15 +653,23 @@ def test_successful_update_keeps_admission_closed_until_restart(tmp_path, monkey
     _git_dir(tmp_path, monkeypatch, upd)
     monkeypatch.setattr(upd, "_wait_until_restart_safe", lambda *a, **k: {"restart_blocked": False})
 
-    def inner(target, channel):
-        upd._schedule_restart(delay=60)  # never fires during the test
-        return {"ok": True, "restart_scheduled": True, "target": target}
+    # #8687: the real _schedule_restart() spawns a daemon worker that takes
+    # api.updates._apply_lock and walks the real repository's __pycache__ tree.
+    # It outlives this test and refuses every later apply_update() in the
+    # session with "Update already in progress". The stub keeps the
+    # admission fence this test asserts on (production closes it inside
+    # _schedule_restart, before the worker starts) and drops only the worker.
+    with isolated_restart_scheduler(monkeypatch) as restart:
+        def inner(target, channel):
+            upd._schedule_restart(delay=60)  # never fires during the test
+            return {"ok": True, "restart_scheduled": True, "target": target}
 
-    monkeypatch.setattr(upd, "_apply_update_inner", inner)
-    result = upd.apply_update("webui")
-    assert result["ok"] is True
-    refusal = run_drain.run_admission_closed_response()
-    assert refusal is not None and refusal["_status"] == 503
+        monkeypatch.setattr(upd, "_apply_update_inner", inner)
+        result = upd.apply_update("webui")
+        assert result["ok"] is True
+        refusal = run_drain.run_admission_closed_response()
+        assert refusal is not None and refusal["_status"] == 503
+        assert restart.calls == [60], "the restart was not scheduled"
 
 
 def test_force_and_clear_lock_paths_accept_force(tmp_path, monkeypatch):
