@@ -11,7 +11,9 @@ import os
 import re as _re
 import ssl
 import sys
+import threading
 from pathlib import Path
+from types import MappingProxyType
 from api.config import IMAGE_EXTS, MD_EXTS
 
 logger = logging.getLogger(__name__)
@@ -752,6 +754,37 @@ MAX_BODY_BYTES = 20 * 1024 * 1024  # 20MB limit for non-upload POST bodies
 
 # ── Credential redaction ──────────────────────────────────────────────────────
 
+# hermes-agent's redaction policy is not fixed at import time:
+# ``agent.redact.register_redaction_patterns()`` (reached from plugins through
+# ``PluginContext.register_redaction_patterns``) rebuilds the prefix matcher by
+# REBINDING two module globals that ``redact_sensitive_text`` reads on every
+# call: ``_PREFIX_RE`` (the compiled alternation) and ``_PREFIX_SUBSTRINGS``
+# (its pre-screen). Every registry shape since the registry appeared swaps both
+# (``_rebuild_prefix_matcher``); the registry dict/list itself is never read on
+# the redaction path. Agents that predate the registry never rebind them, and
+# without hermes-agent there is no policy at all. The identities of these two
+# objects are therefore a complete, O(1) fingerprint of the runtime-mutable
+# part of the policy the small-string memo depends on (#8844).
+_REDACTION_POLICY_KEYS = ("_PREFIX_RE", "_PREFIX_SUBSTRINGS")
+_NO_REDACTION_POLICY = MappingProxyType({})
+_REDACTION_POLICY_MISSING = object()  # tells an absent policy name from an empty one (#8847)
+
+
+def _redaction_policy_namespace(redact_sensitive_text, module):
+    """Return the globals ``redact_sensitive_text`` resolves its policy from.
+
+    Prefers the function's own ``__globals__`` (exactly what it reads at call
+    time, even if ``sys.modules`` later points elsewhere), then the module
+    dict. A namespace with neither policy key (old agent, stub, wrapper) maps
+    to an immutable empty mapping: a constant fingerprint, i.e. today's
+    never-invalidated memo.
+    """
+    for ns in (getattr(redact_sensitive_text, "__globals__", None), getattr(module, "__dict__", None)):
+        if isinstance(ns, dict) and any(key in ns for key in _REDACTION_POLICY_KEYS):
+            return ns
+    return _NO_REDACTION_POLICY
+
+
 def _build_redact_fn():
     """Return a redactor backed by hermes-agent plus local fallback patterns."""
     # Fallback mirrors the agent's known credential prefixes so WebUI API
@@ -891,6 +924,10 @@ def _build_redact_fn():
     except ImportError:
         return _fallback_redact
 
+    _policy_ns = _redaction_policy_namespace(
+        redact_sensitive_text, sys.modules.get("agent.redact")
+    )
+
     def _combined_redact(text: str) -> str:
         if not isinstance(text, str) or not text:
             return text
@@ -907,6 +944,7 @@ def _build_redact_fn():
         agent_redacted = _restore_code_env_key_literals(text, agent_redacted)
         return _fallback_redact(agent_redacted)
 
+    _combined_redact._redaction_policy_ns = _policy_ns
     return _combined_redact
 
 
@@ -915,10 +953,13 @@ _redact_fn_uncached = _build_redact_fn()
 # Repeated dashboard polls re-request the same unchanged session payloads, so
 # the combined redactor (~15 regex passes per string) was the dominant CPU cost
 # under concurrent polling — enough to wedge the single-process server behind
-# the GIL and surface as "Mất kết nối" in the browser. The redactor is pure and
-# deterministic (force=True, fixed masking), so identical strings always map to
-# identical output and are safe to memoize without invalidation.
-_redact_fn_lru = functools.lru_cache(maxsize=4096)(_redact_fn_uncached)
+# the GIL and surface as "Mất kết nối" in the browser. For a FIXED agent policy
+# the redactor is pure and deterministic (force=True, fixed masking), so
+# identical strings map to identical output. The policy itself can grow at
+# runtime (see _REDACTION_POLICY_KEYS), so the memo is scoped to the policy
+# fingerprint by ``_redact_fn_cached`` below (#8844).
+_REDACT_CACHE_MAXSIZE = 4096
+_redact_fn_lru = functools.lru_cache(maxsize=_REDACT_CACHE_MAXSIZE)(_redact_fn_uncached)
 
 # Cap per-entry size so a handful of giant tool-output dumps can't evict the
 # thousands of small recurring strings that actually benefit, or balloon RSS.
@@ -941,10 +982,93 @@ _REDACT_CACHE_MAX_TEXT_LEN = 16384
 # be redacted.
 
 
+def _redaction_policy_namespace_of(lru):
+    """Policy namespace of the redactor *lru* memoizes (empty when unknown)."""
+    ns = getattr(getattr(lru, "__wrapped__", None), "_redaction_policy_ns", None)
+    return ns if isinstance(ns, (dict, MappingProxyType)) else _NO_REDACTION_POLICY
+
+
+def _redaction_policy_state_for(lru):
+    """``(lru, policy_ns.get, _PREFIX_RE, _PREFIX_SUBSTRINGS, has_plugin_patterns)`` as seen now.
+
+    The state holds strong references to the fingerprint objects, so their
+    identities cannot be recycled while they are compared with ``is``.
+
+    ``has_plugin_patterns`` (#8847) is recomputed only when the fingerprint
+    moves, so it needs no invalidation of its own. It is read AFTER the
+    fingerprint: every registry shape (a list, later a per-source dict) is
+    mutated before ``_rebuild_prefix_matcher()`` rebinds the fingerprint, so a
+    state holding the new fingerprint has seen the new registry. If the
+    registry name is absent but plugins can still register patterns (the
+    Agent renamed its private registry), WebUI can't tell, so it reports True
+    and fails closed. Without either name (an Agent that predates the
+    registry, or no policy namespace) it reports False: today's prefilter.
+    """
+    get = _redaction_policy_namespace_of(lru).get
+    prefix_re, prefix_substrings = get("_PREFIX_RE"), get("_PREFIX_SUBSTRINGS")
+    registry = get("_PLUGIN_PREFIX_PATTERNS", _REDACTION_POLICY_MISSING)
+    if registry is not _REDACTION_POLICY_MISSING:
+        has_plugin_patterns = bool(registry)
+    else:  # the registry can't be read: fail closed if plugins can register
+        register = get("register_redaction_patterns", _REDACTION_POLICY_MISSING)
+        has_plugin_patterns = register is not _REDACTION_POLICY_MISSING
+    return (lru, get, prefix_re, prefix_substrings, has_plugin_patterns)
+
+
+_redaction_policy_lock = threading.Lock()
+_redaction_policy_state = _redaction_policy_state_for(_redact_fn_lru)
+
+
+def _sync_redaction_policy():
+    """Slow path: the memo or the agent policy changed since the last call.
+
+    A policy change ROTATES to a fresh LRU instead of clearing in place. A
+    request already computing under the old policy then finishes into the
+    retired cache, which nothing consults again, so it cannot repopulate the
+    live memo with a pre-registration result after the switch. A memo rebound
+    by someone else (tests patch ``_redact_fn_lru``, then restore it) is
+    adopted and cleared, since its entries may predate the current policy.
+    """
+    global _redact_fn_lru, _redaction_policy_state
+    with _redaction_policy_lock:
+        lru = _redact_fn_lru
+        state = _redaction_policy_state
+        current = _redaction_policy_state_for(lru)
+        if lru is state[0]:
+            if current[2] is state[2] and current[3] is state[3]:
+                return state  # another thread already synced this policy
+            try:
+                maxsize = lru.cache_info().maxsize
+            except Exception:
+                maxsize = _REDACT_CACHE_MAXSIZE
+            retired = lru
+            lru = functools.lru_cache(maxsize=maxsize)(lru.__wrapped__)
+            current = (lru,) + current[1:]
+            # Publish the new cache before the state that vouches for it.
+            _redact_fn_lru = lru
+            clear = getattr(retired, "cache_clear", None)
+        else:
+            clear = getattr(lru, "cache_clear", None)
+        if callable(clear):
+            clear()
+        _redaction_policy_state = current
+        return current
+
+
+def _current_redaction_policy():
+    """The policy state for the memo and Agent policy in force now (#8844)."""
+    lru = _redact_fn_lru
+    state = _redaction_policy_state
+    policy_get = state[1]
+    if lru is state[0] and policy_get("_PREFIX_RE") is state[2] and policy_get("_PREFIX_SUBSTRINGS") is state[3]:
+        return state
+    return _sync_redaction_policy()
+
+
 def _redact_fn_cached(text):
     if len(text) > _REDACT_CACHE_MAX_TEXT_LEN:
         return _redact_fn_uncached(text)
-    return _redact_fn_lru(text)
+    return _current_redaction_policy()[0](text)
 
 
 _SENSITIVE_CASE_MARKERS = (
@@ -1109,7 +1233,11 @@ def _redact_text(text: str, *, _enabled: bool | None = None) -> str:
         _enabled = bool(load_settings().get("api_redact_enabled", True))
     if not _enabled:
         return text
-    if not _might_contain_sensitive_text(text):
+    # The prefilter knows only WebUI's fixed markers, not the token shapes a
+    # plugin registered with the Agent at runtime. While any exist, every
+    # string goes to the Agent (fail closed, #8847); without them the shortcut
+    # and its cost are unchanged.
+    if not _might_contain_sensitive_text(text) and not _current_redaction_policy()[4]:
         return text
     return _redact_fn_cached(text)
 
@@ -1287,6 +1415,64 @@ def _mpf_image_ranges(data: bytes, base: int) -> list[tuple[int, int]] | None:
     return ranges
 
 
+_SEF_MAX_ENTRIES = 64
+_SEF_BLOCK_NAME = _re.compile(rb"[\x21-\x7e]+")
+
+
+def _is_samsung_sef_trailer(data: bytes) -> bool:
+    """Return whether *data* is exactly one Samsung SEF trailer.
+
+    Samsung cameras append a Samsung Extended Format trailer after the JPEG EOI:
+    data blocks, then an ``SEFH`` directory, then ``<directory length> SEFT``.
+    Each directory entry is ``u16 0, u16 type, u32 offset back from SEFH,
+    u32 size``, and each block starts with ``u16 0, u16 type, u32 name length,
+    name``. Like MPF, the bytes must be fully accounted for: the blocks tile the
+    whole region from EOI up to SEFH with no gaps or overlaps, every header
+    matches its entry, and nothing follows SEFT.
+
+    The tiling is proven from the directory alone before any block is read, so
+    each block byte is looked at most once: overlapping entries that all point
+    at one huge block are rejected without scanning it (projections run this on
+    every GET).
+    """
+    if len(data) < 20 or data[-4:] != b"SEFT":
+        return False
+    dir_len = int.from_bytes(data[-8:-4], "little")
+    dir_pos = len(data) - 8 - dir_len
+    if dir_pos <= 0 or data[dir_pos:dir_pos + 4] != b"SEFH":
+        return False
+    count = int.from_bytes(data[dir_pos + 8:dir_pos + 12], "little")
+    if not 1 <= count <= _SEF_MAX_ENTRIES or dir_len != 12 + 12 * count:
+        return False
+    blocks = []
+    for index in range(count):
+        entry = dir_pos + 12 + 12 * index
+        if data[entry:entry + 2] != b"\0\0":
+            return False
+        offset = int.from_bytes(data[entry + 4:entry + 8], "little")
+        size = int.from_bytes(data[entry + 8:entry + 12], "little")
+        start = dir_pos - offset
+        if offset > dir_pos or size < 8 or start + size > dir_pos:
+            return False
+        blocks.append((start, size, data[entry + 2:entry + 4]))
+    end = 0
+    for start, size, _kind in sorted(blocks):
+        if start != end:
+            return False
+        end = start + size
+    if end != dir_pos:
+        return False
+    for start, size, kind in blocks:
+        if data[start:start + 2] != b"\0\0" or data[start + 2:start + 4] != kind:
+            return False
+        name_len = int.from_bytes(data[start + 4:start + 8], "little")
+        if name_len < 1 or 8 + name_len > size:
+            return False
+        if _SEF_BLOCK_NAME.fullmatch(data, start + 8, start + 8 + name_len) is None:
+            return False
+    return True
+
+
 def _is_complete_jpeg(raw: bytes, *, _allow_mpf: bool = True) -> bool:
     if len(raw) < 4 or raw[:2] != b"\xff\xd8":
         return False
@@ -1308,7 +1494,7 @@ def _is_complete_jpeg(raw: bytes, *, _allow_mpf: bool = True) -> bool:
             if not saw_sof or not saw_scan:
                 return False
             if mpf_ranges is None:
-                return pos == len(raw)
+                return pos == len(raw) or (_allow_mpf and _is_samsung_sef_trailer(raw[pos:]))
             if mpf_ranges[0] != (0, pos):
                 return False
             # No gaps, overlaps, undeclared pictures or post-EOI payloads.
@@ -1318,7 +1504,7 @@ def _is_complete_jpeg(raw: bytes, *, _allow_mpf: bool = True) -> bool:
                 if not _is_complete_jpeg(raw[start:end], _allow_mpf=False):
                     return False
                 pos = end
-            return pos == len(raw)
+            return pos == len(raw) or _is_samsung_sef_trailer(raw[pos:])
         if marker in {0x00, 0x01, 0xD8} or 0xD0 <= marker <= 0xD7:
             return False
         if pos + 2 > len(raw):
