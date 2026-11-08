@@ -1983,13 +1983,21 @@ def _redact_nested_message_containers(value, *, _enabled: bool):
     return result
 
 
-def public_session_projection(session_dict: dict) -> dict:
+def public_session_projection(session_dict: dict, *, _messages_projected: bool = False) -> dict:
     """Return a public session payload with redaction and alias stripping.
 
     Callers use this for every response/export/SSE session payload.  It never
     mutates the in-memory session or the caller's dictionary.
+
+    ``_messages_projected`` (#7925 by-construction): the caller already ran the
+    delivered projection, so ``messages`` holds the exact rows the prefix digest
+    hashed. Re-projecting here would strip fields that projection *adds* — most
+    visibly ``_active_turn_user``, which is derived from the session's
+    active-turn token rather than stored on the row — and the response would
+    then disagree with its own proof. Forwarded verbatim to
+    ``redact_session_data``.
     """
-    result = redact_session_data(session_dict)
+    result = redact_session_data(session_dict, _messages_projected=_messages_projected)
     from api.gateway_chat import gateway_session_chat_read_only_reason
 
     result.pop("chat_read_only_reason", None)

@@ -29,6 +29,7 @@ against small deterministic stubs.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -45,6 +46,19 @@ _SESSIONS_JS = _REPO / "static" / "sessions.js"
 _UI_JS = _REPO / "static" / "ui.js"
 NODE = shutil.which("node")
 needs_node = pytest.mark.skipif(NODE is None, reason="node required")
+
+
+def _node_env() -> dict:
+    """Child environment for the node drivers.
+
+    A launcher may export NODE_CHANNEL_FD (its IPC channel to its own parent)
+    and/or NODE_OPTIONS. Either one makes a freshly spawned node abort on exit
+    with SIGABRT *after* writing correct output: returncode -6, empty stderr,
+    which reads like a driver bug rather than environment bleed. Drop both so
+    each driver starts as a plain interpreter.
+    """
+    return {k: v for k, v in os.environ.items()
+            if k not in ("NODE_CHANNEL_FD", "NODE_OPTIONS")}
 
 
 # --------------------------------------------------------------------------- #
@@ -305,6 +319,7 @@ def _run_jump(**scenario):
         capture_output=True,
         text=True,
         timeout=20,
+        env=_node_env(),
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
@@ -494,10 +509,15 @@ global._bumpMessagesGeneration=()=>{_messagesGeneration++;};
 let synced=0;
 global._syncToolCallsForLoadedMessages=()=>{synced++;};
 global._advanceVisibleBaselineForServerKnownRows=()=>{};
+// #7925 prefix-proof state: `_ensureAllMessagesLoaded` maintains these module
+// globals, and `_markPrefixProvenRows` / `_adoptPrefixProof` read them.
+global._sessionPrefixFp='';
+global._sessionPrefixFpEnd=-1;
+global._prefixProvenRows=new WeakSet();
 let release=null, calls=0;
 global.api=()=>{calls++;return new Promise(r=>{release=()=>r({session:{session_id:'a',messages:FULL.slice(),
   tool_calls:[],message_count:10,visible_message_count:10}});});};
-for(const name of ['_transcriptFreshnessSnapshot','_transcriptIsFresh','_ensureAllMessagesLoaded']) eval(extractFrom(src,name));
+for(const name of ['_transcriptFreshnessSnapshot','_transcriptIsFresh','_markPrefixProvenRows','_adoptPrefixProof','_ensureAllMessagesLoaded']) eval(extractFrom(src,name));
 (async()=>{
   const p=_ensureAllMessagesLoaded(scenario.opts);
   await new Promise(r=>setImmediate(r));
@@ -518,11 +538,17 @@ for(const name of ['_transcriptFreshnessSnapshot','_transcriptIsFresh','_ensureA
 
 
 def _run_loader(**scenario):
+    # Strip NODE_CHANNEL_FD / NODE_OPTIONS: a launcher may export either, and
+    # both make a fresh node abort on exit with SIGABRT after writing correct
+    # output (returncode -6, empty stderr — reads like a driver bug).
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("NODE_CHANNEL_FD", "NODE_OPTIONS")}
     result = subprocess.run(
         [NODE, "-e", _LOADER_DRIVER, str(_SESSIONS_JS), json.dumps(scenario)],
         capture_output=True,
         text=True,
         timeout=20,
+        env=env,
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
@@ -724,6 +750,7 @@ def _run_virtual(**scenario):
         capture_output=True,
         text=True,
         timeout=20,
+        env=_node_env(),
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
@@ -785,6 +812,7 @@ def _run_click(session, helper="ok"):
         capture_output=True,
         text=True,
         timeout=20,
+        env=_node_env(),
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
@@ -902,7 +930,7 @@ process.stdout.write(_messageJumpScrollBehavior(container, el));
 
 
 def _jump_behavior(offset, reduced=False):
-    r = subprocess.run([NODE, "-e", _BEHAVIOR_DRIVER, str(_UI_JS), json.dumps({"offset": offset, "reduced": reduced})],
+    r = subprocess.run([NODE, "-e", _BEHAVIOR_DRIVER, str(_UI_JS), json.dumps({"offset": offset, "reduced": reduced})], env=_node_env(),
                        capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr
     return r.stdout
@@ -1041,6 +1069,7 @@ def test_hits_and_query_changes_advance_the_search_jump_generation():
         capture_output=True,
         text=True,
         timeout=20,
+        env=_node_env(),
     )
     assert result.returncode == 0, result.stderr
     r = json.loads(result.stdout)
