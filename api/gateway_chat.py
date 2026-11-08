@@ -3612,10 +3612,11 @@ def _run_gateway_chat_streaming(
         if not isinstance(cfg, dict):
             # Legacy/direct callers that spawned the worker without a dispatch
             # snapshot: resolve the session's own profile home (issue #3294
-            # pattern) — never the ambient process profile. The resolver deep
-            # copies, so a concurrent reload of another profile cannot mutate
-            # what this worker reads.
-            cfg = _gateway_session_owner_cfg(s)
+            # pattern) — never the ambient process profile. Use the same
+            # resolver as the endpoint path so root's HERMES_CONFIG_PATH
+            # override and Runs API opt-in are honored (#8523).
+            from api.gateway_sessions import config_for_session
+            cfg = config_for_session(vars(s))
         # Defensive re-copy for callers that handed in a live cache object
         # (older dispatch paths / direct test callers): the worker must observe
         # the snapshot it was dispatched with, never a later profile reload.
