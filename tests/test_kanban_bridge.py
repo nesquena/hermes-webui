@@ -1718,3 +1718,28 @@ def test_bulk_invalid_status_does_not_assign_or_emit_event(monkeypatch):
         "a rejected status must not append an assigned event"
     )
     assert task.assignee == "alice", "a rejected status must leave the prior assignee intact"
+
+
+def test_bulk_null_assignee_without_status_is_noop(monkeypatch):
+    """A legacy bulk call with no status field and a null assignee must be a no-op.
+
+    Regression: the bulk afterward-assign guard moved from a value check to
+    key presence (``"assignee" in body``), so ``{ids, assignee: null}`` with
+    no status durably cleared the assignee and appended an ``assigned``
+    event. The legacy contract treats null with no status as a no-op: Alice
+    stays and no ``assigned`` event is recorded.
+    """
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    task = FakeTask("t_bulk_null_noop", "Ready card", "ready", "alice")
+    fake_kanban.tasks.append(task)
+
+    result = bridge._bulk_tasks_payload(
+        {"ids": ["t_bulk_null_noop"], "assignee": None}
+    )
+
+    assert result["results"] == [{"id": "t_bulk_null_noop", "ok": True}]
+    assert task.assignee == "alice", "a null assignee with no status must leave the prior assignee intact"
+    assert [e.kind for e in fake_kanban.events if e.task_id == "t_bulk_null_noop"] == [], (
+        "a null assignee with no status must not append an assigned event"
+    )

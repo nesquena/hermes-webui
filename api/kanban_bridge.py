@@ -773,7 +773,7 @@ def _bulk_tasks_payload(body: dict, *, board=None):
                         patch_body["assignee"] = body.get("assignee")
                         assignee_in_patch = True
                     _patch_task(conn, task_id, patch_body)
-                if has_assignee and not assignee_in_patch:
+                if body.get("assignee") is not None and not assignee_in_patch:
                     if not kb.assign_task(conn, task_id, body.get("assignee") or None):
                         entry.update(ok=False, error="assign refused")
                 if body.get("priority") is not None:
