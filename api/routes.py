@@ -10890,9 +10890,13 @@ def _session_context_length_lookup_state(
             from api.config import resolve_custom_provider_connection
 
             custom_key, custom_base = resolve_custom_provider_connection(provider_for_lookup)
-            api_key_for_lookup = str(custom_key or "").strip()
+            custom_base = str(custom_base or "").strip()
             if not base_url_for_lookup:
-                base_url_for_lookup = str(custom_base or "").strip()
+                base_url_for_lookup = custom_base
+            # #8822: the record's key owns only the record's own URL. When the model
+            # block overrides the URL, the lookup selects the key for that URL itself.
+            if _context_lookup_origin(base_url_for_lookup) == _context_lookup_origin(custom_base):
+                api_key_for_lookup = str(custom_key or "").strip()
         except Exception:
             logger.debug("custom provider context-length connection resolution failed", exc_info=True)
     return model_for_lookup, provider_for_lookup, base_url_for_lookup, api_key_for_lookup

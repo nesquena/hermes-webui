@@ -204,6 +204,52 @@ def test_the_url_is_never_changed():
         assert got.base_url in (A, B, C, L, "")
 
 
+# ── GET /api/session assembles the caller pair under the same rule ─────────────
+
+
+def _session_state(cfg, provider, monkeypatch):
+    """Bind ``cfg`` for the real resolvers and return (base_url, api_key) as GET /api/session hands them on."""
+    import api.config as config
+
+    cfg.setdefault("providers", {})
+    cfg.setdefault("custom_providers", [])
+    monkeypatch.setattr(config, "cfg", cfg)
+    monkeypatch.setattr(config, "get_config", lambda *a, **k: cfg)
+    _model, _provider, base_url, api_key = routes._session_context_length_lookup_state("m-x", provider)
+    return base_url, api_key
+
+
+@pytest.mark.parametrize("cfg", [
+    {"model": {"provider": "custom:my-proxy", "base_url": A}, "providers": {"custom:my-proxy": {"api_key": "KB"}}},
+    {"model": {"provider": "custom:my-proxy", "base_url": A},
+     "providers": {"custom:my-proxy": {"base_url": B, "api_key": "KB"}}},
+    {"model": {"provider": "custom:my-proxy", "base_url": A},
+     "custom_providers": [{"name": "my-proxy", "base_url": L, "api_key": "KL"}]},
+], ids=["record-key-only", "record-url", "legacy-entry"])
+def test_a_session_reload_never_pairs_a_records_key_with_the_model_url(cfg, monkeypatch):
+    assert _session_state(cfg, "custom:my-proxy", monkeypatch) == (A, "")
+
+
+def test_a_session_reload_keeps_a_records_key_on_its_own_url(monkeypatch):
+    cfg = {"model": {"provider": "custom:my-proxy"}, "providers": {"custom:my-proxy": {"base_url": B, "api_key": "KB"}}}
+    assert _session_state(cfg, "custom:my-proxy", monkeypatch) == (B, "KB")
+
+
+def test_a_session_reload_keeps_a_records_key_when_the_model_url_is_the_records_own(monkeypatch):
+    cfg = {"model": {"provider": "custom:my-proxy", "base_url": B},
+           "providers": {"custom:my-proxy": {"base_url": B.upper(), "api_key": "KB"}}}
+    base_url, api_key = _session_state(cfg, "custom:my-proxy", monkeypatch)
+    assert (routes._context_lookup_origin(base_url), api_key) == (routes._context_lookup_origin(B), "KB")
+
+
+def test_a_session_reload_still_resolves_a_records_env_key(monkeypatch):
+    """The record's key is resolved here, not at the lookup: a ``${VAR}`` key still travels with the record's URL."""
+    monkeypatch.setenv("MY_PROXY_TEST_KEY", "KB-env")
+    cfg = {"model": {"provider": "custom:my-proxy"},
+           "providers": {"custom:my-proxy": {"base_url": B, "api_key": "${MY_PROXY_TEST_KEY}"}}}
+    assert _session_state(cfg, "custom:my-proxy", monkeypatch) == (B, "KB-env")
+
+
 # ── Fixed metadata hosts ────────────────────────────────────────────────────────
 
 
