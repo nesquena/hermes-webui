@@ -143,7 +143,10 @@ import tempfile as _tempfile
 #
 # Pin all three variables to a temp root that is verifiably outside the
 # production home, and create it up front so gettempdir() cannot fall through
-# to a TEMP/TMP that points back inside ~/.hermes.
+# to a TEMP/TMP that points back inside ~/.hermes. A candidate must also be
+# WRITABLE: mkdir(exist_ok=True) succeeds on a root that exists but is
+# read-only, which would otherwise be selected over a writable fallback and
+# every later tempfile/TEST_STATE_DIR write would fail (review of #8898).
 _PROD_HERMES_HOME_FOR_TMP = pathlib.Path(HOME / '.hermes').resolve()
 _TMP_ROOT_CANDIDATES = (
     pathlib.Path(_tempfile.gettempdir()),
@@ -160,11 +163,22 @@ for _tmp_candidate in _TMP_ROOT_CANDIDATES:
         _resolved.mkdir(parents=True, exist_ok=True)
     except OSError:
         continue
+    # Prove writability by creating and removing a probe file before accepting:
+    # an existing-but-unwritable root passes the mkdir above silently.
+    try:
+        _probe_fd, _probe_name = _tempfile.mkstemp(dir=_resolved, prefix='.tmp-writable-')
+    except OSError:
+        continue
+    os.close(_probe_fd)
+    try:
+        os.unlink(_probe_name)
+    except OSError:
+        pass
     _TEST_TMP_ROOT = _resolved
     break
 else:
     raise RuntimeError(
-        "REFUSING TO RUN: no temp root outside the production Hermes home "
+        "REFUSING TO RUN: no writable temp root outside the production Hermes home "
         f"({_PROD_HERMES_HOME_FOR_TMP}) was usable; tests would resolve their "
         "temp homes inside ~/.hermes and the Agent would fold them back onto "
         "the real profile root."
