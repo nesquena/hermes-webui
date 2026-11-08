@@ -7037,7 +7037,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             // #4720: the merged array still starts at the resident origin, not
             // the settled tail's offset. Preserve that coordinate before hydrate.
             if(typeof _oldestIdx!=='undefined')_oldestIdx=_preSettleOldestIdx==null?0:_preSettleOldestIdx;
-            if(typeof _messagesTruncated!=='undefined')_messagesTruncated=_preSettleMessagesTruncated||!!d.session._messages_truncated;
+            // Completeness belongs to the selected merged window, not to either
+            // input independently. An origin-zero merge is already the full
+            // transcript even when the settled input was a bounded tail; a
+            // positive-origin merge still needs Load earlier / load-all.
+            if(typeof _messagesTruncated!=='undefined')_messagesTruncated=_preSettleOldestIdx>0;
           }else if(typeof _oldestIdx!=='undefined'){
             _oldestIdx=!_doneAdoption.snapshotAdopted
               ? (_preSettleOldestIdx==null?0:_preSettleOldestIdx)

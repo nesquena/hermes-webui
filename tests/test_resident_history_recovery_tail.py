@@ -15,12 +15,15 @@ import textwrap
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
+SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 
 def _extract_function(src: str, name: str) -> str:
     start = src.find(f"function {name}(")
-    assert start >= 0, f"{name} not found in static/messages.js"
+    assert start >= 0, f"{name} not found in source JavaScript"
+    if start >= 6 and src[start - 6:start] == "async ":
+        start -= 6
     brace = src.find("{", start)
     depth = 1
     i = brace + 1
@@ -33,6 +36,18 @@ def _extract_function(src: str, name: str) -> str:
 
 def _optional_function(src: str, name: str) -> str:
     return _extract_function(src, name) if f"function {name}(" in src else ""
+
+
+def _optional_load_all() -> list[str]:
+    """Load the real consumer on the PR; stay harness-compatible on master."""
+    if "async function _ensureAllMessagesLoaded(" not in SESSIONS_JS:
+        return []
+    fn = _extract_function(SESSIONS_JS, "_ensureAllMessagesLoaded")
+    return [
+        fn,
+        _optional_function(SESSIONS_JS, "_transcriptFreshnessSnapshot"),
+        _optional_function(SESSIONS_JS, "_transcriptIsFresh"),
+    ]
 
 
 def _pieces() -> list[str]:
@@ -56,13 +71,15 @@ def _pieces() -> list[str]:
         _extract_function(MESSAGES_JS, "_isHistoricalAnchorActivityScene"),
         "function msgContent(m){return (m && m.content)||'';}",
         "function _isPreservedCompressionTaskListMarkerOnlyText(t){return /active task list was preserved/i.test(String(t||''));}",
+        *_optional_load_all(),
     ]
 
 
 def _run_node(case: str) -> dict:
     assert NODE, "node is required for these behavioural regressions"
+    script = "\n".join([*_pieces(), textwrap.dedent(case)])
     result = subprocess.run(
-        [NODE, "-e", "\n".join([*_pieces(), textwrap.dedent(case)])],
+        [NODE, "-e", "(async()=>{\n" + script + "\n})().catch(err=>{console.error(err);process.exit(1);});"],
         capture_output=True,
         text=True,
         timeout=30,
@@ -159,7 +176,16 @@ def test_older_identical_answer_cannot_satisfy_current_turn() -> None:
     assert got == {"count": 4, "lastRole": "assistant", "lastText": "yes", "texts": ["old question", "yes", "new question", "yes"]}
 
 
-def _listener(prev: list[dict], settled: dict, *, pre_generation=None, pre_oldest_idx=0, streamed_answer=None, pre_messages_truncated=False) -> dict:
+def _listener(
+    prev: list[dict],
+    settled: dict,
+    *,
+    pre_generation=None,
+    pre_oldest_idx=0,
+    streamed_answer=None,
+    pre_messages_truncated=False,
+    load_all=False,
+) -> dict:
     start = MESSAGES_JS.find("let _doneFinalAnswer=")
     end = MESSAGES_JS.find("if(typeof _hydrateTodosFromSession", start)
     assert start >= 0 and end > start, "real done settle statements not found"
@@ -179,15 +205,34 @@ def _listener(prev: list[dict], settled: dict, *, pre_generation=None, pre_oldes
         let _messagesTruncated={json.dumps(pre_messages_truncated)};
         const _streamDisplay=()=>({json.dumps(streamed_answer)});
         {statements}
-        console.log(JSON.stringify({{
+        const _loadAllApiCalls=[];
+        let _loadingOlder=false;
+        const _loadingSessionId=null,_messagesGeneration=0;
+        const _bumpMessagesGeneration=()=>{{}};
+        const _syncToolCallsForLoadedMessages=()=>{{}};
+        const _advanceVisibleBaselineForServerKnownRows=()=>{{}};
+        const window={{}};
+        async function api(path){{_loadAllApiCalls.push(path);return null;}}
+        const _result=()=>({{
           sessionId:S.session&&S.session.session_id,
           sessionTitle:S.session&&S.session.title,
           texts:S.messages.map(m=>m.content),
           prefixIdentity:S.messages[0]===_residentMessages[0],
           oldestIdx:_oldestIdx,
           messagesTruncated:_messagesTruncated
-        }}));
+        }});
     """
+    if load_all:
+        case += r'''
+        (async()=>{
+          const watchdog=setTimeout(()=>{console.error('load-all case stalled');process.exit(1);},5000);
+          const loadAllResult=await _ensureAllMessagesLoaded({rejectIfStale:true});
+          clearTimeout(watchdog);
+          console.log(JSON.stringify({..._result(),loadAllResult,loadAllRequests:_loadAllApiCalls.length}));
+        })().catch(err=>{console.error(err);process.exit(1);});
+        '''
+    else:
+        case += "console.log(JSON.stringify(_result()));"
     return _run_node(case)
 
 
@@ -197,6 +242,51 @@ def test_real_done_listener_keeps_prefix_and_resident_paging_origin() -> None:
     assert got["texts"] == [m["content"] for m in prev]
     assert got["prefixIdentity"] is True
     assert got["oldestIdx"] == 70
+    assert got["messagesTruncated"] is True
+
+
+def test_merged_window_completeness_tracks_selected_origin_and_real_load_all() -> None:
+    prev = _sample_messages()
+    for pre_oldest_idx, settled_offset, expected_truncated, expected_requests in (
+        (0, 2, False, 0),
+        (10, 12, True, 1),
+    ):
+        got = _listener(
+            prev,
+            {
+                "session_id": "A",
+                "messages": prev[2:],
+                "transcript_generation": 7,
+                "_messages_offset": settled_offset,
+                "_messages_truncated": True,
+                "message_count": pre_oldest_idx + len(prev),
+            },
+            pre_generation=7,
+            pre_oldest_idx=pre_oldest_idx,
+            load_all=True,
+        )
+        assert got["texts"] == [m["content"] for m in prev]
+        assert got["prefixIdentity"] is True
+        assert got["oldestIdx"] == pre_oldest_idx
+        assert got["messagesTruncated"] is expected_truncated
+        assert got["loadAllResult"] is not expected_truncated
+        assert got["loadAllRequests"] == expected_requests
+
+
+def test_empty_origin_zero_retention_real_load_all_short_circuits() -> None:
+    prev = _sample_messages()
+    got = _listener(
+        prev,
+        {"session_id": "A", "messages": [], "message_count": len(prev), "transcript_generation": 7},
+        pre_generation=7,
+        pre_oldest_idx=0,
+        load_all=True,
+    )
+    assert got["texts"] == [m["content"] for m in prev]
+    assert got["oldestIdx"] == 0
+    assert got["messagesTruncated"] is False
+    assert got["loadAllResult"] is True
+    assert got["loadAllRequests"] == 0
 
 
 def test_unmarked_shorter_snapshot_stays_server_wins() -> None:
