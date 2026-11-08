@@ -1468,7 +1468,7 @@ function _micToastKeyForRecognitionError(error){
   }
 
   async function _probeServerSttCapability(){
-    if(!_canRecordAudio||_micForceMediaRecorderStored!==null) return;
+    if(!_canRecordAudio) return;
     try{
       const res=await fetch('api/transcribe/capability',{cache:'no-store'});
       const data=await res.json().catch(()=>({}));
