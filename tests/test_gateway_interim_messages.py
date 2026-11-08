@@ -83,7 +83,11 @@ def test_success_writeback_keeps_commentary_outside_model_context(monkeypatch, t
 @pytest.mark.parametrize('terminal', ['failed', 'cancelled'])
 @pytest.mark.parametrize('already_streamed', [False, True])
 @pytest.mark.parametrize('trailing', ['', 'Open answer.', 'Checking.'])
-def test_terminal_writeback_retains_sealed_commentary(monkeypatch, tmp_path, terminal, already_streamed, trailing):
+@pytest.mark.parametrize('sealed_reasoning,open_reasoning', [
+    ('', ''), ('Sealed thought.', ''), ('', 'Later thought.'),
+    ('Sealed thought.', 'Later thought.'), ('Same thought.', 'Same thought.'),
+])
+def test_terminal_writeback_retains_sealed_commentary(monkeypatch, tmp_path, terminal, already_streamed, trailing, sealed_reasoning, open_reasoning):
     monkeypatch.setattr(models, 'SESSION_DIR', tmp_path)
     save = models.Session.save
     monkeypatch.setattr(models.Session, 'save', lambda self, *a, **k: save(self, *a, skip_index=True, **k))
@@ -112,9 +116,13 @@ def test_terminal_writeback_retains_sealed_commentary(monkeypatch, tmp_path, ter
     monkeypatch.setattr(streaming, '_webui_ephemeral_system_prompt', lambda *a, **k: '')
 
     frames = []
+    if sealed_reasoning:
+        frames.append(frame('reasoning.available', len(frames) + 1, text=sealed_reasoning))
     if already_streamed:
         frames.append(frame('message.delta', len(frames) + 1, delta='Checking.'))
     frames.append(frame('message.interim', len(frames) + 1, text='Checking.', already_streamed=already_streamed))
+    if open_reasoning:
+        frames.append(frame('reasoning.available', len(frames) + 1, text=open_reasoning))
     if trailing:
         frames.append(frame('message.delta', len(frames) + 1, delta=trailing))
     frames.append(frame('run.' + terminal, len(frames) + 1, error='terminal failure'))
@@ -131,12 +139,17 @@ def test_terminal_writeback_retains_sealed_commentary(monkeypatch, tmp_path, ter
     monkeypatch.setattr(g.urllib.request, 'urlopen', urlopen)
     # Exercise the actual worker, runs adapter, relay, journal and Session.save.
     g._run_gateway_chat_streaming('sid', 'question', 'model', str(ROOT), 'stream')
-    expected = ['older question', 'Checking.', 'question', 'Checking.'] + ([trailing] if trailing else [])
+    has_open = bool(trailing or open_reasoning)
+    expected = ['older question', 'Checking.', 'question', 'Checking.'] + ([trailing] if has_open else [])
+    expected_reasoning = [text for text in (sealed_reasoning, open_reasoning) if text]
+    assert [m['reasoning'] for m in session.messages if m.get('reasoning')] == expected_reasoning
     assert [m['content'] for m in session.messages[:-1]] == expected
+    assert session.messages[3].get('reasoning', '') == sealed_reasoning
     assert session.messages[3].get('_recovered_display_only') is True
     assert not session.messages[3].get('_partial')
-    if trailing:
+    if has_open:
         assert session.messages[4].get('_partial') is True
+        assert session.messages[4].get('reasoning', '') == open_reasoning
         assert not session.messages[4].get('_recovered_display_only')
     marker = session.messages[-1]
     assert marker.get('_error') if terminal == 'failed' else 'cancelled' in marker['content'].lower()
@@ -149,6 +162,7 @@ def test_terminal_writeback_retains_sealed_commentary(monkeypatch, tmp_path, ter
     assert [m['content'] for m in saved['messages']] == expected + [marker['content']]
     assert [m['content'] for m in reloaded.messages] == expected + [marker['content']]
     assert saved['messages'] == reloaded.messages == session.messages
+    assert [m['reasoning'] for m in reloaded.messages if m.get('reasoning')] == expected_reasoning
     assert all(not m.get('_recovered_display_only') for m in reloaded.context_messages)
     expected_checking = int(trailing == 'Checking.')
     if terminal == 'cancelled':
@@ -157,7 +171,7 @@ def test_terminal_writeback_retains_sealed_commentary(monkeypatch, tmp_path, ter
         assert all(m['content'] != 'Checking.' for m in reloaded.context_messages)
     assert reloaded.messages[3].get('_recovered_display_only') is True
     assert not reloaded.messages[3].get('_partial')
-    if trailing:
+    if has_open:
         assert reloaded.messages[4].get('_partial') is True
         assert not reloaded.messages[4].get('_recovered_display_only')
 
@@ -263,15 +277,22 @@ def test_streamed_interim_seals_tokens_without_repeating_final():
     assert events[1] == ('interim_assistant', {'text':'Checking files.', 'already_streamed':True, 'gateway_seq':2})
     assert result[0] == g.STREAM_PARTIAL_TEXT['stream'] == 'Answer.'
 
-def test_restart_restores_only_open_answer_segment(monkeypatch):
+@pytest.mark.parametrize('sealed_reasoning,open_reasoning', [
+    ('Sealed thought.', ''), ('Sealed thought.', 'Later thought.'),
+    ('Same thought.', 'Same thought.'), ('', 'Later thought.'), ('', ''),
+])
+def test_restart_restores_only_open_answer_segment(monkeypatch, sealed_reasoning, open_reasoning):
     rows = [
+        {'event':'reasoning','payload':{'text':sealed_reasoning,'gateway_seq':0}},
         {'event':'token','payload':{'text':'Checking files.','gateway_seq':1}},
         {'event':'interim_assistant','payload':{'text':'Checking files.','already_streamed':True,'gateway_seq':2}},
         {'event':'token','payload':{'text':'Ans','gateway_seq':3}},
+        {'event':'reasoning','payload':{'text':open_reasoning,'gateway_seq':4}},
     ]
     monkeypatch.setattr(run_journal, 'read_run_events', lambda *a,**k: {'events':rows})
-    assert g._restore_relayed_gateway_state('sid','stream') == 3
+    assert g._restore_relayed_gateway_state('sid','stream') == 4
     assert g.STREAM_PARTIAL_TEXT['stream'] == 'Ans'
-    result, events, seqs = relay([frame('message.delta',4,delta='wer.'),frame('run.completed',5,output='Answer.')],final_text=g._seed_gateway_stream_text('stream'))
+    assert g.STREAM_REASONING_TEXT['stream'] == open_reasoning
+    result, events, seqs = relay([frame('message.delta',5,delta='wer.'),frame('run.completed',6,output='Answer.')],final_text=g._seed_gateway_stream_text('stream'))
     assert result[0] == g.STREAM_PARTIAL_TEXT['stream'] == 'Answer.'
     assert [d['text'] for e,d in events if e == 'token'] == ['wer.']

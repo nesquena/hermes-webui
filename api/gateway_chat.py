@@ -1168,9 +1168,11 @@ def _relay_gateway_run_events(
                     "text": text.strip(),
                     "already_streamed": payload.get("already_streamed") is True,
                 })
-                # Commentary seals the visible segment, not the final answer.
-                # Keep both answer carriers clean across connection boundaries.
+                # The journal owns the sealed segment, including its reasoning.
+                # Terminal snapshots must retain only the still-open segment.
                 final_text = _adopt_gateway_stream_text(stream_id, "")
+                if stream_id in STREAM_REASONING_TEXT:
+                    STREAM_REASONING_TEXT[stream_id] = ""
             commit()
             sse_event = "message"
             continue
@@ -1992,6 +1994,8 @@ def _restore_relayed_gateway_state(session_id: str, stream_id: str) -> int | Non
         if name == "interim_assistant":
             if isinstance(payload.get("text"), str) and payload["text"].strip():
                 _adopt_gateway_stream_text(stream_id, "")
+                if stream_id in STREAM_REASONING_TEXT:
+                    STREAM_REASONING_TEXT[stream_id] = ""
         elif name == "token":
             STREAM_PARTIAL_TEXT[stream_id] = STREAM_PARTIAL_TEXT.get(stream_id, "") + str(payload.get("text") or "")
         else:
