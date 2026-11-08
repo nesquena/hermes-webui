@@ -977,24 +977,107 @@ def get_hermes_home_for_profile(name: str) -> Path:
 def _named_profile_home_shape(path) -> Path | None:
     """Return the ``<root>/profiles/<id>`` component of *path*, using path shape only.
 
-    Deliberately looser than ``hermes_constants.named_profile_home`` (which also
-    proves the parent is a real Hermes profiles root): a path this function
-    calls named but upstream would not is merely over-restrictive, while the
-    reverse — upstream says named and we say not — cannot happen, because
-    upstream requires the same ``parent.name == "profiles"`` + profile-id
-    grammar this uses. That asymmetry is what makes it safe to use as the
-    "is this even a named home?" pre-check when the upstream helpers are
-    unavailable.
+    Import-independent fallback used when the installed Agent's classifier
+    (``hermes_constants.named_profile_home``) is unavailable, and as the
+    fail-closed proxy when that classifier raises. It preserves the same
+    ``.hermes`` stop boundary the classifier uses: a default home that merely
+    lives under a coincidental ``profiles/`` ancestor (for example
+    ``<root>/profiles/operator/.hermes``) is NOT called a named home, and only
+    the deepest matching component is authoritative.
+
+    It is deliberately looser than ``hermes_constants.named_profile_home`` in
+    provenance (it cannot prove the ``profiles`` parent is a real Hermes
+    root), so on Agent-absent deployments a custom home such as
+    ``<root>/profiles/project/custom-root`` may still be over-restrictively
+    treated as named and denied — the safe direction for a ghost shell.
     """
     try:
         current = Path(path).expanduser()
     except Exception:
         return None
     for candidate in (current, *current.parents):
+        # Default-home boundary: a `.hermes` component ends the walk, exactly
+        # like the installed classifier, so an unrelated `profiles/` ancestor
+        # above it is never treated as a profiles root.
+        if candidate.name == ".hermes":
+            return None
         if candidate.parent.name == "profiles" and not candidate.name.startswith("."):
             if _PROFILE_ID_RE.fullmatch(candidate.name):
                 return candidate
     return None
+
+
+def _named_home_under_resolved_profiles_root(path: Path) -> Path | None:
+    """Return the logical ``<root>/profiles/<id>`` home for a path under the RESOLVED profiles root.
+
+    ``get_hermes_home_for_profile()`` resolves the final path, so when
+    ``profiles`` itself is a symlink the home arrives as ``<resolved>/<id>`` —
+    the ``profiles`` component is gone and neither the shape grammar nor the
+    installed classifier can see it. The resolved root still identifies the
+    home, and the LOGICAL path keeps the identity the liveness checks need (the
+    ``.deleted`` tombstone lives beside ``profiles/<id>``, reachable through
+    the symlink). Only the first component under the root is a profile id;
+    deeper components are inside the home, not a second home.
+    """
+    try:
+        resolved_root = _profiles_root()
+        resolved = Path(path).resolve(strict=False)
+        if resolved == resolved_root or resolved_root not in resolved.parents:
+            return None
+        name = resolved.relative_to(resolved_root).parts[0]
+        if not _PROFILE_ID_RE.fullmatch(name):
+            return None
+    except Exception:
+        return None
+    return _DEFAULT_HERMES_HOME / "profiles" / name
+
+
+def _named_profile_home_for_reads(path) -> Path | None:
+    """Classify *path* as a named profile home; the caller checks its liveness.
+
+    Returns the canonical ``<root>/profiles/<id>`` home, or ``None`` for a
+    provably non-named (default/custom) home.
+
+    Classification order:
+
+    1. The installed Agent's ``named_profile_home`` is authoritative: it stops
+       at a ``.hermes`` component and proves the ``profiles`` parent is a real
+       Hermes root, so a legitimate default/custom home that merely sits under
+       a coincidental ``profiles/`` ancestor is not a named home. A ``None``
+       answer is only re-examined through the resolved profiles root, for the
+       symlinked-profiles case where the component was resolved away.
+    2. When the classifier is unavailable (Agent-absent deployment) or raises,
+       the import-independent shape grammar decides, with the same ``.hermes``
+       stop boundary — a path that still *looks* named is denied rather than
+       admitted while classification cannot be confirmed.
+    """
+    try:
+        current = Path(path).expanduser()
+    except Exception:
+        return None
+
+    def _shape_or_resolved() -> Path | None:
+        named = _named_profile_home_shape(current)
+        if named is not None:
+            return named
+        return _named_home_under_resolved_profiles_root(current)
+
+    try:
+        from hermes_constants import named_profile_home
+    except Exception:
+        named_profile_home = None
+    if named_profile_home is None:
+        return _shape_or_resolved()
+    try:
+        named = named_profile_home(current)
+    except Exception:
+        # Classifier failed: fall back to the shape grammar (fail closed).
+        return _shape_or_resolved()
+    if named is not None:
+        return named
+    # Authoritative "not a named home" — unless a symlinked profiles root
+    # stripped the ``profiles`` component before this check saw the path.
+    return _named_home_under_resolved_profiles_root(current)
 
 
 def is_live_profile_home_for_reads(home) -> bool:
@@ -1005,20 +1088,21 @@ def is_live_profile_home_for_reads(home) -> bool:
     ``cron/`` + ``cron/output/`` inside a ghost shell. The default/custom homes
     are not under ``profiles/`` and stay readable.
 
+    Classification prefers the installed Agent's ``named_profile_home(actual_home)``
+    classifier (see :func:`_named_profile_home_for_reads`), which preserves the
+    ``.hermes`` boundary and profiles-root provenance; named homes are then
+    liveness-checked on their canonical home. The import-independent fallback
+    keeps Agent-absent deployments working: provably non-named homes are
+    admitted, uncertain named homes are denied.
+
     Fails CLOSED for named homes: when the liveness helpers cannot be imported
     or the check raises, a named home is treated as NOT readable. AGENTS.md
     requires identity checks to deny access when safety cannot be confirmed —
     returning ``True`` there let a stale profile name reach ``list_jobs()`` on
     any helper failure, which is exactly the ghost-shell write this predicate
     exists to prevent.
-
-    Non-named homes are decided by path shape alone (see
-    :func:`_named_profile_home_shape`), so a deployment without hermes-agent —
-    where ``hermes_constants`` is simply not installed — still reads the
-    default home. Denying it there would blank the whole Tasks panel for a
-    shape we *can* prove is not a named profile.
     """
-    named = _named_profile_home_shape(home)
+    named = _named_profile_home_for_reads(home)
     if named is None:
         # Provably not under a profiles/ root: the default/custom home is readable.
         return True
