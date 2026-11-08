@@ -2814,6 +2814,11 @@ async function loadSession(sid){
   const _loadGeneration = ++_loadSessionGeneration;
   const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
   _loadingSessionId = sid;
+  // #8701: the INFLIGHT entry (and its stream) before this load's first await.
+  // A send during the awaits replaces or re-points it; the other-stream prompt
+  // skip below then must not apply to the new turn's prompt.
+  const _inflightAtLoadStart=INFLIGHT[sid];
+  const _inflightStreamAtLoadStart=String((_inflightAtLoadStart&&_inflightAtLoadStart.streamId)||'').trim();
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
   // Reset scroll state for fresh session navigation — the reader expects to
   // land at the bottom of the new transcript, not wherever a stale unpin flag
@@ -3316,7 +3321,11 @@ async function loadSession(sid){
       S.messages=_dropCurrentTurnAssistantMessages(S.messages);
     }
     S.messages=_mergeInflightTailMessages(S.messages,inflightMessages,
-      _inflightTurnOwnerStart(S.session,INFLIGHT[sid],activeStreamId));
+      _inflightTurnOwnerStart(S.session,INFLIGHT[sid],activeStreamId),
+      INFLIGHT[sid]===_inflightAtLoadStart
+        &&String(INFLIGHT[sid].streamId||'').trim()===_inflightStreamAtLoadStart
+        &&_inflightNamesOtherStream(INFLIGHT[sid],activeStreamId)
+        &&!!String((S.session&&S.session.pending_user_message)||'').trim());
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
     if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
       INFLIGHT[sid].messages=S.messages;
@@ -5146,13 +5155,28 @@ function _inflightTurnOwnerStart(session,inflight,activeStreamId){
   return Number.isFinite(start)&&start>0?start:0;
 }
 
+// True when the INFLIGHT snapshot names a stream other than the active one: a
+// stale in-memory entry (missed `done`) whose prompt belongs to another turn.
+function _inflightNamesOtherStream(inflight,activeStreamId){
+  const active=String(activeStreamId||'').trim();
+  const own=String((inflight&&inflight.streamId)||'').trim();
+  return !!(active&&own&&own!==active);
+}
+
 // `turnOwnerStart` (optional): the server start of the turn this INFLIGHT tail
 // belongs to (_inflightTurnOwnerStart). When known it places the recovered
 // prompt instead of the prompt's client-clock `_ts`, which can trail the
 // server start by latency or skew and so claim a previous turn's rows, and it
 // stamps the copy so the pending merge reuses it rather than adding a second
-// one (`_recoveredPromptCopyForTurn`).
-function _mergeInflightTailMessages(baseMessages, inflightMessages, turnOwnerStart){
+// one (`_recoveredPromptCopyForTurn`). `promptFromOtherStream` (optional;
+// loadSession sets it when _inflightNamesOtherStream AND the server sends a
+// non-blank pending_user_message, the field getPendingSessionMessage reads, AND
+// the entry and its stream id are the ones the load started with):
+// the snapshot's prompt is not this turn's, so it is not placed; the pending
+// merge supplies the running turn's prompt, and placing both showed it twice
+// (#8701). Without a server prompt the snapshot's row stays, or the turn
+// would show none.
+function _mergeInflightTailMessages(baseMessages, inflightMessages, turnOwnerStart, promptFromOtherStream){
   const base=Array.isArray(baseMessages)?baseMessages:[];
   const inflight=Array.isArray(inflightMessages)?inflightMessages:[];
   const ownerStart=Number.isFinite(Number(turnOwnerStart))&&Number(turnOwnerStart)>0?Number(turnOwnerStart):0;
@@ -5180,6 +5204,7 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages, turnOwnerSta
     const candidate=tail[tailIdx];
     if(!candidate) continue;
     const isUser=String(candidate.role||'')==='user';
+    if(isUser&&tailIdx===promptTailIdx&&promptFromOtherStream) continue;
     if(isUser&&windowed&&tailIdx===promptTailIdx){
       // A windowed first page (msg_limit paging) can start INSIDE the running
       // turn: `base` then holds the turn's activity rows but not its `user`
