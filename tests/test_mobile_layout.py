@@ -1100,6 +1100,8 @@ def test_composer_controls_switch_to_fit_stage_classes():
         "_fitComposerFooter() should measure actual left-cluster overflow"
     assert "cf-shrink" in fit_body and "cf-icons" in fit_body and "cf-burger" in fit_body, \
         "_fitComposerFooter() should toggle the compact stage classes"
+    assert ".composer-footer .composer-left > *{flex-shrink:0;}" in CSS, \
+        "full as well as compact fit stages must preserve direct-child control footprints"
     # Stage ladder order: shrink is tried before icons, icons before burger.
     shrink_add = fit_body.index("classList.add('cf-shrink')")
     icons_add = fit_body.index("classList.add('cf-icons')")

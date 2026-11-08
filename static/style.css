@@ -3274,6 +3274,10 @@
 
   /* Fit-based composer footer collapse. ui.js measures actual overflow on
      .composer-left and toggles these stage classes on .composer-footer. */
+  /* Full labels may ellipsize inside their own capped chips, but direct-child
+     controls must never flex-shrink to make any stage — including full — look
+     like it fits. Otherwise the ladder accepts unusably narrow click targets. */
+  .composer-footer .composer-left > *{flex-shrink:0;}
   .composer-footer.cf-icons .composer-left{gap:10px;overflow-x:auto;overflow-y:hidden;}
   .composer-footer.cf-icons .composer-left > *{flex-shrink:0;}
   .composer-footer.cf-icons .composer-profile-wrap,

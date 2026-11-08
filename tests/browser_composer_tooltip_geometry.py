@@ -10,7 +10,10 @@ Binds the three regressions reproduced on PR #8766 (2026-11-05):
   directions must not hide and re-reveal it while hover remains active;
 * in a populated long-name scene at 1120x900, the natural shrink-to-icons
   boundary must keep the enabled Attach control at its declared 34px width,
-  demoting to icons when needed rather than squeezing its click target.
+  demoting to icons when needed rather than squeezing its click target;
+* with the supported control-order setting moved to Attach-last, the full-stage
+  candidates at 1252px (ordinary labels) and 1464px (long labels) must preserve
+  both Attach and Dictate at 34px, then recover at wide and phone widths.
 
 The server and state are disposable and agent-free. No production app, browser,
 credentials, or service is touched.
@@ -111,6 +114,44 @@ def _collect_opacity_recording(page, width: int) -> list[dict]:
     if not _wait_until(page, "window.__composerTooltipOpacitySamples.length >= 24", 3000):
         return page.evaluate("window.__composerTooltipOpacitySamples")
     return page.evaluate("window.__composerTooltipOpacitySamples")
+
+
+def _composer_geometry(page) -> dict:
+    return page.evaluate(
+        """() => {
+          const footer = document.querySelector('.composer-footer');
+          const left = document.querySelector('.composer-left');
+          const attach = document.querySelector('#btnAttach');
+          const mic = document.querySelector('#btnMic');
+          const rect = attach.getBoundingClientRect();
+          const micRect = mic.getBoundingClientRect();
+          return {
+            stage: footer.classList.contains('cf-burger') ? 'burger'
+              : footer.classList.contains('cf-shrink') ? 'shrink'
+              : footer.classList.contains('cf-icons') ? 'icons' : 'full',
+            footerClasses: footer.className,
+            attachEnabled: !attach.disabled,
+            attachWidth: rect.width,
+            attachHeight: rect.height,
+            attachFlexShrink: getComputedStyle(attach).flexShrink,
+            micWidth: micRect.width,
+            micHeight: micRect.height,
+            micFlexShrink: getComputedStyle(mic).flexShrink,
+            leftClientWidth: left.clientWidth,
+            leftScrollWidth: left.scrollWidth,
+            controlOrder: Array.from(left.children)
+              .filter((element) => !['fileInput', 'cameraFileInput'].includes(element.id) && !element.classList.contains('composer-divider'))
+              .map((element) => element.id || element.className),
+            children: Array.from(left.children).map((element) => ({
+              id: element.id,
+              className: element.className,
+              display: getComputedStyle(element).display,
+              flexShrink: getComputedStyle(element).flexShrink,
+              width: element.getBoundingClientRect().width,
+            })),
+          };
+        }"""
+    )
 
 
 def _check(browser, base: str) -> tuple[list[str], dict]:
@@ -283,34 +324,7 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
         )
         page.set_viewport_size({"width": 1120, "height": 900})
         page.wait_for_timeout(400)
-        shrink = page.evaluate(
-            """() => {
-              const footer = document.querySelector('.composer-footer');
-              const left = document.querySelector('.composer-left');
-              const attach = document.querySelector('#btnAttach');
-              const rect = attach.getBoundingClientRect();
-              const style = getComputedStyle(attach);
-              return {
-                stage: footer.classList.contains('cf-burger') ? 'burger'
-                  : footer.classList.contains('cf-shrink') ? 'shrink'
-                  : footer.classList.contains('cf-icons') ? 'icons' : 'full',
-                footerClasses: footer.className,
-                attachEnabled: !attach.disabled,
-                attachWidth: rect.width,
-                attachHeight: rect.height,
-                attachFlexShrink: style.flexShrink,
-                leftClientWidth: left.clientWidth,
-                leftScrollWidth: left.scrollWidth,
-                children: Array.from(left.children).map((element) => ({
-                  id: element.id,
-                  className: element.className,
-                  display: getComputedStyle(element).display,
-                  flexShrink: getComputedStyle(element).flexShrink,
-                  width: element.getBoundingClientRect().width,
-                })),
-              };
-            }"""
-        )
+        shrink = _composer_geometry(page)
         evidence["longName1120"] = shrink
         if shrink["stage"] not in {"shrink", "icons"}:
             failures.append(f"populated 1120px scene missed the natural shrink-to-icons boundary: {shrink}")
@@ -318,6 +332,88 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
             failures.append(f"Attach is unexpectedly disabled in the 1120px boundary scene: {shrink}")
         if abs(shrink["attachWidth"] - 34) > 0.5:
             failures.append(f"compact stage squeezed enabled Attach below its declared 34px width: {shrink}")
+
+        # C51-F1 (2026-11-07): the full stage could satisfy the same overflow
+        # predicate by squeezing Attach/Mic too. Reproduce through the SUPPORTED
+        # reorder seam rather than forcing a stage class or writing inline style.
+        # Move every left control ahead of Attach, just as the settings drag
+        # chip does; the production apply path rebuilds order and refits.
+        page.evaluate(
+            """() => {
+              const defs = window._COMPOSER_CONTROL_TOGGLE_DEFS.concat(
+                window._COMPOSER_SITUATIONAL_CONTROL_TOGGLE_DEFS,
+              );
+              const order = defs
+                .filter((def) => def.orderGroup === 'left' && def.key !== 'hide_composer_attach')
+                .map((def) => def.key)
+                .concat('hide_composer_attach');
+              if (typeof window._applyComposerControlOrder !== 'function') {
+                throw new Error('supported composer control-order API missing');
+              }
+              window._applyComposerControlOrder(order);
+            }"""
+        )
+        scenarios = (
+            (
+                "ordinary1252",
+                1252,
+                "default",
+                "GPT-5.4 Mini",
+            ),
+            (
+                "long1464",
+                1464,
+                "a-very-long-workspace-name-for-layout-regression",
+                "an-extremely-long-language-model-display-name-for-the-footer",
+            ),
+        )
+        # Keep one independently measured natural-full boundary. This host's
+        # width-sweep reproduces C51-F1 at 1590px: the candidate stays full while
+        # Attach/Mic collapse to 17.046875px. The two certifier widths above are
+        # neighboring controls, not substitutes for this biting case.
+        scenarios += ((
+            "fullSqueeze1590",
+            1590,
+            "a-very-long-workspace-name-for-layout-regression",
+            "an-extremely-long-language-model-display-name-for-the-footer",
+        ),)
+        evidence["attachLast"] = {}
+        for name, width, workspace_label, model_label in scenarios:
+            page.evaluate(
+                """({workspaceLabel, modelLabel}) => {
+                  document.getElementById('composerWorkspaceLabel').textContent = workspaceLabel;
+                  document.getElementById('composerModelLabel').textContent = modelLabel;
+                }""",
+                {"workspaceLabel": workspace_label, "modelLabel": model_label},
+            )
+            page.set_viewport_size({"width": width, "height": 900})
+            page.wait_for_timeout(400)
+            geometry = _composer_geometry(page)
+            evidence["attachLast"][name] = geometry
+            if geometry["controlOrder"][-1] != "btnAttach":
+                failures.append(f"{name}: supported reorder did not leave Attach-last: {geometry['controlOrder']}")
+            if not geometry["attachEnabled"]:
+                failures.append(f"{name}: Attach unexpectedly disabled: {geometry}")
+            for control in ("Attach", "Mic"):
+                measured = geometry[f"{control.lower()}Width"]
+                if abs(measured - 34) > 0.5:
+                    failures.append(
+                        f"{name}: {control} measured {measured}px rather than its declared 34px "
+                        f"at natural {geometry['stage']} stage: {geometry}"
+                    )
+        evidence["attachLast"]["recovery"] = {}
+        for name, width in (("wide1920", 1920), ("phone390", 390)):
+            page.set_viewport_size({"width": width, "height": 900})
+            page.wait_for_timeout(400)
+            geometry = _composer_geometry(page)
+            evidence["attachLast"]["recovery"][name] = geometry
+            expected_width = 44 if width <= 640 else 34
+            for control in ("Attach", "Mic"):
+                measured = geometry[f"{control.lower()}Width"]
+                if abs(measured - expected_width) > 0.5:
+                    failures.append(
+                        f"{name} recovery: {control} measured {measured}px, expected {expected_width}px: {geometry}"
+                    )
 
         if page_errors:
             failures.append(f"uncaught browser errors: {page_errors}")
