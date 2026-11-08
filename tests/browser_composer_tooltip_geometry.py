@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Real-browser regression gate for composer-tooltip measurement lifecycle.
 
-Binds the three regressions reproduced on PR #8766 (2026-11-05):
+Binds the four regressions reproduced on PR #8766 (2026-11-05/07):
 
 * with Dictate visible, enabled, idle, neither hovered nor focused, Chromium's
   accessibility tree must still name #btnMic "Dictate" (Attach is the positive
@@ -116,6 +116,68 @@ def _collect_opacity_recording(page, width: int) -> list[dict]:
     return page.evaluate("window.__composerTooltipOpacitySamples")
 
 
+LONG_WORKSPACE_LABEL = "a-very-long-workspace-name-for-layout-regression"
+LONG_MODEL_LABEL = "an-extremely-long-language-model-display-name-for-the-footer"
+
+
+def _set_populated_scene(page, workspace_label: str, model_label: str) -> None:
+    """Set the certifier fixture without racing boot's settings/model writers."""
+    page.evaluate(
+        """({workspaceLabel, modelLabel}) => {
+          const labels = {
+            composerWorkspaceLabel: workspaceLabel,
+            composerModelLabel: modelLabel,
+          };
+          for (const [id, text] of Object.entries(labels)) {
+            const element = document.getElementById(id);
+            if (element) element.textContent = text;
+          }
+          const workspace = document.getElementById('composerWorkspaceChip');
+          if (workspace) workspace.disabled = false;
+          const quota = document.getElementById('providerQuotaChip');
+          quota.hidden = false;
+          quota.style.display = 'inline-flex';
+          document.getElementById('providerQuotaChipLabel').textContent = '82% remaining';
+          const reasoning = document.getElementById('composerReasoningWrap');
+          reasoning.style.display = 'block';
+          document.getElementById('composerReasoningLabel').textContent = 'XHIGH';
+          document.getElementById('ctxIndicatorWrap').style.display = 'inline-flex';
+          const status = document.getElementById('composerStatus');
+          status.style.display = 'inline';
+          status.textContent = 'Running';
+        }""",
+        {"workspaceLabel": workspace_label, "modelLabel": model_label},
+    )
+
+
+def _assert_scene(
+    failures: list[str],
+    name: str,
+    geometry: dict,
+    workspace_label: str,
+    model_label: str,
+    *,
+    require_populated: bool,
+) -> None:
+    """Prove hydration did not replace the fixture before the measurement."""
+    fixture = geometry["fixture"]
+    if fixture["workspaceText"] != workspace_label or fixture["modelText"] != model_label:
+        failures.append(
+            f"{name}: labels were overwritten before measurement: "
+            f"{fixture['workspaceText']!r} / {fixture['modelText']!r}"
+        )
+    for key in ("attachDisplay", "micDisplay"):
+        if fixture[key] == "none":
+            failures.append(f"{name}: required control disappeared before measurement: {fixture}")
+    if not require_populated:
+        return
+    if fixture["quotaHidden"] or fixture["quotaDisplay"] == "none":
+        failures.append(f"{name}: populated quota control disappeared: {fixture}")
+    for key in ("reasoningDisplay", "contextDisplay", "statusDisplay"):
+        if fixture[key] == "none":
+            failures.append(f"{name}: populated control disappeared ({key}): {fixture}")
+
+
 def _composer_geometry(page) -> dict:
     return page.evaluate(
         """() => {
@@ -125,7 +187,19 @@ def _composer_geometry(page) -> dict:
           const mic = document.querySelector('#btnMic');
           const rect = attach.getBoundingClientRect();
           const micRect = mic.getBoundingClientRect();
+          const quota = document.getElementById('providerQuotaChip');
           return {
+            fixture: {
+              workspaceText: document.getElementById('composerWorkspaceLabel').textContent,
+              modelText: document.getElementById('composerModelLabel').textContent,
+              quotaHidden: quota.hidden,
+              quotaDisplay: getComputedStyle(quota).display,
+              reasoningDisplay: getComputedStyle(document.getElementById('composerReasoningWrap')).display,
+              contextDisplay: getComputedStyle(document.getElementById('ctxIndicatorWrap')).display,
+              statusDisplay: getComputedStyle(document.getElementById('composerStatus')).display,
+              attachDisplay: getComputedStyle(attach).display,
+              micDisplay: getComputedStyle(mic).display,
+            },
             stage: footer.classList.contains('cf-burger') ? 'burger'
               : footer.classList.contains('cf-shrink') ? 'shrink'
               : footer.classList.contains('cf-icons') ? 'icons' : 'full',
@@ -176,6 +250,8 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
     cdp = context.new_cdp_session(page)
     try:
         page.goto("/", wait_until="domcontentloaded")
+        if not _wait_until(page, "typeof S !== 'undefined' && S._bootReady === true", 15000):
+            return ["app did not reach S._bootReady before fixture injection"], evidence
         page.wait_for_selector("#btnMic", state="visible", timeout=15000)
         if not _wait_until(page, "typeof window._fitComposerFooter === 'function'", 15000):
             return ["app did not initialize the composer fit path"], evidence
@@ -297,35 +373,12 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
         # R1 (2026-11-05): build a synthetic populated long-name scene near
         # the shrink-to-icons boundary. Only control content/presence and the
         # viewport change; the production resize handler chooses the stage.
-        page.evaluate(
-            """() => {
-              const labels = {
-                composerWorkspaceLabel: 'a-very-long-workspace-name-for-layout-regression',
-                composerModelLabel: 'an-extremely-long-language-model-display-name-for-the-footer',
-              };
-              for (const [id, text] of Object.entries(labels)) {
-                const element = document.getElementById(id);
-                if (element) element.textContent = text;
-              }
-              const workspace = document.getElementById('composerWorkspaceChip');
-              if (workspace) workspace.disabled = false;
-              const quota = document.getElementById('providerQuotaChip');
-              quota.hidden = false;
-              quota.style.display = 'inline-flex';
-              document.getElementById('providerQuotaChipLabel').textContent = '82% remaining';
-              const reasoning = document.getElementById('composerReasoningWrap');
-              reasoning.style.display = 'block';
-              document.getElementById('composerReasoningLabel').textContent = 'XHIGH';
-              document.getElementById('ctxIndicatorWrap').style.display = 'inline-flex';
-              const status = document.getElementById('composerStatus');
-              status.style.display = 'inline';
-              status.textContent = 'Running';
-            }"""
-        )
+        _set_populated_scene(page, LONG_WORKSPACE_LABEL, LONG_MODEL_LABEL)
         page.set_viewport_size({"width": 1120, "height": 900})
         page.wait_for_timeout(400)
         shrink = _composer_geometry(page)
         evidence["longName1120"] = shrink
+        _assert_scene(failures, "longName1120", shrink, LONG_WORKSPACE_LABEL, LONG_MODEL_LABEL, require_populated=True)
         if shrink["stage"] not in {"shrink", "icons"}:
             failures.append(f"populated 1120px scene missed the natural shrink-to-icons boundary: {shrink}")
         if not shrink["attachEnabled"]:
@@ -367,29 +420,24 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
                 "an-extremely-long-language-model-display-name-for-the-footer",
             ),
         )
-        # Keep one independently measured natural-full boundary. This host's
-        # width-sweep reproduces C51-F1 at 1590px: the candidate stays full while
-        # Attach/Mic collapse to 17.046875px. The two certifier widths above are
-        # neighboring controls, not substitutes for this biting case.
-        scenarios += ((
-            "fullSqueeze1590",
-            1590,
-            "a-very-long-workspace-name-for-layout-regression",
-            "an-extremely-long-language-model-display-name-for-the-footer",
-        ),)
+        # Keep two neighboring natural-full boundary cases. The measured
+        # transition sits near the existing 1600px composer breakpoint; keeping
+        # both avoids pretending one pixel is a universal boundary across hosts.
+        for boundary_width in (1600, 1610):
+            scenarios += ((
+                f"fullSqueeze{boundary_width}",
+                boundary_width,
+                LONG_WORKSPACE_LABEL,
+                LONG_MODEL_LABEL,
+            ),)
         evidence["attachLast"] = {}
         for name, width, workspace_label, model_label in scenarios:
-            page.evaluate(
-                """({workspaceLabel, modelLabel}) => {
-                  document.getElementById('composerWorkspaceLabel').textContent = workspaceLabel;
-                  document.getElementById('composerModelLabel').textContent = modelLabel;
-                }""",
-                {"workspaceLabel": workspace_label, "modelLabel": model_label},
-            )
+            _set_populated_scene(page, workspace_label, model_label)
             page.set_viewport_size({"width": width, "height": 900})
             page.wait_for_timeout(400)
             geometry = _composer_geometry(page)
             evidence["attachLast"][name] = geometry
+            _assert_scene(failures, name, geometry, workspace_label, model_label, require_populated=True)
             if geometry["controlOrder"][-1] != "btnAttach":
                 failures.append(f"{name}: supported reorder did not leave Attach-last: {geometry['controlOrder']}")
             if not geometry["attachEnabled"]:
@@ -403,10 +451,19 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
                     )
         evidence["attachLast"]["recovery"] = {}
         for name, width in (("wide1920", 1920), ("phone390", 390)):
+            _set_populated_scene(page, LONG_WORKSPACE_LABEL, LONG_MODEL_LABEL)
             page.set_viewport_size({"width": width, "height": 900})
             page.wait_for_timeout(400)
             geometry = _composer_geometry(page)
             evidence["attachLast"]["recovery"][name] = geometry
+            _assert_scene(
+                failures,
+                name,
+                geometry,
+                LONG_WORKSPACE_LABEL,
+                LONG_MODEL_LABEL,
+                require_populated=width > 640,
+            )
             expected_width = 44 if width <= 640 else 34
             for control in ("Attach", "Mic"):
                 measured = geometry[f"{control.lower()}Width"]
@@ -492,7 +549,7 @@ def main() -> int:
                         print(" - " + failure, file=sys.stderr)
                     print(json.dumps(evidence, indent=2), file=sys.stderr)
                     return 1
-                print("COMPOSER TOOLTIP GEOMETRY PASSED: idle AX + 2x24 resize frames + 1120px shrink target")
+                print("COMPOSER TOOLTIP GEOMETRY PASSED: idle AX + 2x24 resize frames + 1120px shrink target + Attach-last full-stage targets + wide/phone recovery")
                 return 0
             finally:
                 proc.terminate()
