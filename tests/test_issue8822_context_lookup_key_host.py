@@ -269,16 +269,16 @@ def _fake_agent(monkeypatch, *, copilot_step=True, predicates=True, raising=Fals
         def _boom(url):
             raise RuntimeError("predicate failed")
 
-        setattr(mm, "_is_custom_endpoint", _boom if raising else (lambda url: url not in (K, G)))
-        setattr(mm, "_is_known_provider_base_url", _boom if raising else (lambda url: url in (K, G)))
-    setattr(mm, "_infer_provider_from_url", lambda url: (infer or {}).get(url, ""))
+        mm._is_custom_endpoint = _boom if raising else (lambda url: url not in (K, G))
+        mm._is_known_provider_base_url = _boom if raising else (lambda url: url in (K, G))
+    mm._infer_provider_from_url = lambda url: (infer or {}).get(url, "")
     agent_pkg = types.ModuleType("agent")
-    setattr(agent_pkg, "model_metadata", mm)
+    agent_pkg.model_metadata = mm
     hm = types.ModuleType("hermes_cli.models")
     if copilot_step:
-        setattr(hm, "get_copilot_model_context", lambda *a, **k: None)
+        hm.get_copilot_model_context = lambda *a, **k: None
     cli_pkg = types.ModuleType("hermes_cli")
-    setattr(cli_pkg, "models", hm)
+    cli_pkg.models = hm
     for name, module in (("agent", agent_pkg), ("agent.model_metadata", mm),
                          ("hermes_cli", cli_pkg), ("hermes_cli.models", hm)):
         monkeypatch.setitem(sys.modules, name, module)
@@ -482,7 +482,7 @@ def test_the_agent_receives_a_token_source_itself_not_its_repr(site, monkeypatch
         return 8192
 
     stub = types.ModuleType("agent.model_metadata")
-    setattr(stub, "get_model_context_length", get_model_context_length)
+    stub.get_model_context_length = get_model_context_length
     monkeypatch.setitem(sys.modules, "agent.model_metadata", stub)
     cfg = {"model": {"provider": "custom", "base_url": C}, "providers": {}, "custom_providers": []}
     import api.config as api_config
