@@ -2436,6 +2436,29 @@ async function newSession(flash, options={}){
     const boundModel=(options&&options.model)||null;
     const boundProvider=(options&&options.model_provider)||null;
     const hasLoadedSession=!!(S.session&&S.session.session_id);
+    // #8576 maintainer follow-up: the explicit-picker evidence for the LOADED
+    // session. boot.js's modelSelect change handler records every pick the
+    // user makes on a loaded session under THAT session's own id
+    // (_rememberExplicitPickerPick, ui.js), and every session load/switch —
+    // plus newSession() itself — clears it. A marker that still exists for
+    // S.session was therefore authored by the user AFTER the current session
+    // loaded, under the CURRENT profile: a fresh selection the current
+    // profile owns, never the previous profile's picker/persisted pair. That
+    // is what lets a loaded-session custom pick survive an armed
+    // profile-switch model reset whose destination catalogue came back empty
+    // (the gate never releases there), while the stale-profile/catalogue
+    // quarantine below still rejects every value the marker does not name.
+    let freshExplicitPick=null;
+    if(S.session&&S.session.session_id&&typeof _readExplicitPickerPick==='function'){
+      try{ freshExplicitPick=_readExplicitPickerPick(S.session.session_id)||null; }
+      catch(_){ freshExplicitPick=null; }
+    }
+    const freshExplicitPickValue=String((freshExplicitPick&&freshExplicitPick.value)||'').trim();
+    // The marker authorizes ONLY the exact value it recorded. A picker or
+    // persisted entry holding anything else is leftover catalogue state from
+    // the previous profile and stays quarantined while the reset is armed.
+    const freshExplicitPickOwns=(value)=>!!(freshExplicitPickValue
+      &&freshExplicitPickValue===String(value||'').trim());
     let newModelState=null;
     let consumedExplicitModelOverride=false;
     let usingConfiguredDefault=false;
@@ -2450,10 +2473,25 @@ async function newSession(flash, options={}){
       // #8527: the configured default must travel with its own provider.
       newModelState.model_provider=window._activeProvider||null;
       usingConfiguredDefault=true;
-    }else if(!S._profileSwitchModelReset&&modelSelForNew&&modelSelForNew.value&&typeof _modelStateForSelect==='function'){
+    }else if((!S._profileSwitchModelReset||freshExplicitPickOwns(modelSelForNew&&modelSelForNew.value))
+        &&modelSelForNew&&modelSelForNew.value&&typeof _modelStateForSelect==='function'){
+      // #8576 follow-up: while the reset gate is armed the picker normally
+      // holds the PREVIOUS profile's catalogue, so it stays quarantined —
+      // unless the selection is the one the user explicitly picked on the
+      // loaded session (marker above), which the current profile owns even
+      // when the destination catalogue came back empty and the gate never
+      // released.
       newModelState=_modelStateForSelect(modelSelForNew,modelSelForNew.value);
-    }else if(!S._profileSwitchModelReset&&typeof _readPersistedModelState==='function'){
-      newModelState=_readPersistedModelState();
+    }else if((!S._profileSwitchModelReset||freshExplicitPickValue)
+        &&typeof _readPersistedModelState==='function'){
+      // The persisted pair is not session-scoped, so under the armed gate only
+      // the value the fresh pick itself wrote may pass; any other value is the
+      // previous profile's quarantined state.
+      const _persistedModelState=_readPersistedModelState();
+      if(!S._profileSwitchModelReset
+         ||freshExplicitPickOwns(_persistedModelState&&_persistedModelState.model)){
+        newModelState=_persistedModelState;
+      }
     }
     if(newModelState&&newModelState.model){
       reqBody.model=newModelState.model;
