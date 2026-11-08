@@ -223,8 +223,11 @@ class TestKeyboardAndButton:
             assert m, f"base .img-lightbox-{sel}:hover rule not found"
             assert "rgba(72,72,78,.88)" in m.group(1), f".img-lightbox-{sel}:hover must lighten, got {m.group(1)}"
         assert ".img-lightbox-close:focus-visible{outline:2px solid rgba(255,255,255,.85);outline-offset:2px;}" in css
+        # Skin overrides now live in static/skins/<key>.css; read the skin files, not style.css.
+        from tests.skin_css import read_skin_css
         for skin in ("nous", "neon", "neon-soft", "neon-paint", "verdigris"):
-            assert f'[data-skin="{skin}"] .img-lightbox-fit:hover' in css, f"{skin} skin themes close but not Fit"
+            skin_css = read_skin_css(skin)
+            assert f'[data-skin="{skin}"] .img-lightbox-fit:hover' in skin_css, f"{skin} skin themes close but not Fit"
 
 
 class TestResizeCleanup:

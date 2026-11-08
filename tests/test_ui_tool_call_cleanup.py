@@ -13,6 +13,10 @@ REPO = pathlib.Path(__file__).parent.parent
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
+# The worklog quiet-row resets moved to static/scaffold.css, which loads after
+# the skins; readers that assert on them need all three layers in load order.
+from tests.skin_css import read_all_css
+CSS_ALL = read_all_css()
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 
 
@@ -880,32 +884,32 @@ class TestToolCardDesignTokens:
 
     def test_worklog_thinking_card_uses_quiet_tool_row_hierarchy(self):
         selector = ".tool-worklog-list > .agent-activity-thinking .thinking-card,"
-        assert selector in CSS, "Worklog Thinking Card quiet override missing"
-        card_rule = re.sub(r"\s+", "", CSS.split(selector, 1)[1].split("}", 1)[0])
+        assert selector in CSS_ALL, "Worklog Thinking Card quiet override missing"
+        card_rule = re.sub(r"\s+", "", CSS_ALL.split(selector, 1)[1].split("}", 1)[0])
         header_rule = re.sub(
             r"\s+",
             "",
-            CSS.split(".tool-worklog-list > .agent-activity-thinking .thinking-card-header{", 1)[1].split("}", 1)[0],
+            CSS_ALL.split(".tool-worklog-list > .agent-activity-thinking .thinking-card-header{", 1)[1].split("}", 1)[0],
         )
         label_rule = re.sub(
             r"\s+",
             "",
-            CSS.split(".tool-worklog-list > .agent-activity-thinking .thinking-card-label{", 1)[1].split("}", 1)[0],
+            CSS_ALL.split(".tool-worklog-list > .agent-activity-thinking .thinking-card-label{", 1)[1].split("}", 1)[0],
         )
         icon_rule = re.sub(
             r"\s+",
             "",
-            CSS.split(".tool-worklog-list > .agent-activity-thinking .thinking-card-icon,", 1)[1].split("}", 1)[0],
+            CSS_ALL.split(".tool-worklog-list > .agent-activity-thinking .thinking-card-icon,", 1)[1].split("}", 1)[0],
         )
         body_rule = re.sub(
             r"\s+",
             "",
-            CSS.split(".tool-worklog-list > .agent-activity-thinking .thinking-card.open .thinking-card-body{", 1)[1].split("}", 1)[0],
+            CSS_ALL.split(".tool-worklog-list > .agent-activity-thinking .thinking-card.open .thinking-card-body{", 1)[1].split("}", 1)[0],
         )
         pre_rule = re.sub(
             r"\s+",
             "",
-            CSS.split(".tool-worklog-list > .agent-activity-thinking .thinking-card-body pre{", 1)[1].split("}", 1)[0],
+            CSS_ALL.split(".tool-worklog-list > .agent-activity-thinking .thinking-card-body pre{", 1)[1].split("}", 1)[0],
         )
 
         assert "background:transparent" in card_rule
