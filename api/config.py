@@ -824,6 +824,31 @@ _yaml_file_cache: dict[str, tuple] = {}
 _yaml_file_cache_lock = threading.Lock()
 
 
+def _detached_copy(value, _active=None):
+    """Deep-copy a parsed YAML tree so every mapping/list OCCURRENCE is its own
+    object. ``copy.deepcopy`` keeps YAML anchor/alias identity (its memo maps a
+    shared node to one copy), so a writer that mutates one aliased slot in a
+    raw write snapshot would silently change every other slot sharing the
+    anchor. The env-expanding reader always produced detached copies; raw
+    write transactions (#8032) must too. A genuinely self-referential node
+    (a recursive alias) keeps deepcopy semantics instead of recursing forever.
+    """
+    if not isinstance(value, (dict, list)):
+        return value
+    if _active is None:
+        _active = set()
+    key = id(value)
+    if key in _active:
+        return copy.deepcopy(value)
+    _active.add(key)
+    try:
+        if isinstance(value, dict):
+            return {k: _detached_copy(v, _active) for k, v in value.items()}
+        return [_detached_copy(v, _active) for v in value]
+    finally:
+        _active.discard(key)
+
+
 def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict:
     """Return the RAW (un-env-expanded) parsed config dict, memoized on
     (resolved path, st_mtime_ns, st_size). Shared parse core for
@@ -859,7 +884,7 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
             raw = cached[1]
             if not isinstance(raw, dict):
                 return {}
-            return copy.deepcopy(raw) if _copy else raw
+            return _detached_copy(raw) if _copy else raw
 
     # Cache miss / stale: parse off disk. Done outside the lock so a slow parse
     # doesn't serialize unrelated paths; a concurrent duplicate parse is harmless.
@@ -872,7 +897,7 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
     raw = loaded if isinstance(loaded, dict) else {}
     with _yaml_file_cache_lock:
         _yaml_file_cache[cache_key] = (stat_key, raw)
-    return copy.deepcopy(raw) if _copy else raw
+    return _detached_copy(raw) if _copy else raw
 
 
 def _load_yaml_config_file(config_path: Path) -> dict:
@@ -1113,6 +1138,54 @@ def _config_for_yaml_save(config_data: dict) -> dict:
         if not agent_cfg:
             data.pop("agent", None)
     return data
+
+
+# ── Config WRITE rule (#8032 / #5619) ─────────────────────────────────────────
+# A config write transaction must read config.yaml with
+# _load_yaml_config_file_raw(), mutate that RAW document and save it. Env
+# expansion (_load_yaml_config_file / get_config) is for READS only: saving an
+# expanded dict writes the resolved secret in place of its ``${VAR}``
+# reference. ``${env:VAR}`` and every other reference form must likewise be
+# saved verbatim. A writer that must COMPARE a stored value against a
+# resolved one expands a copy for the comparison and keeps the raw value; a
+# writer that re-saves a field the UI displayed resolved goes through
+# _preserve_env_ref().
+_ENV_REF_PATTERN = re.compile(r"\$\{[^}]+\}")
+
+
+def _has_env_ref(value) -> bool:
+    """True when *value* is a string holding at least one ``${...}`` reference."""
+    return isinstance(value, str) and _ENV_REF_PATTERN.search(value) is not None
+
+
+def _preserve_env_ref(raw_value, new_value, normalize=None):
+    """Return *raw_value* when it is a ``${VAR}`` reference that currently
+    resolves to *new_value* (after the optional ``normalize``), else *new_value*.
+
+    Lets a writer re-save a value the UI displayed from an env-backed field
+    without baking the resolved value into config.yaml, while a value the user
+    really changed is still written exactly as given (#8032).
+
+    This includes an EMPTY submission: a reference whose variable is set to ""
+    is displayed as "" and re-submitted as "", which is an unchanged field, so
+    the reference is kept rather than dropped.
+    """
+    if not _has_env_ref(raw_value) or not isinstance(new_value, str) or new_value == raw_value:
+        return new_value
+    try:
+        expanded = _expand_env_vars(raw_value)
+        if normalize is not None:
+            same = normalize(expanded) == normalize(new_value)
+        else:
+            same = expanded == new_value
+    except Exception:
+        return new_value
+    return raw_value if same else new_value
+
+
+def _normalize_base_url_for_compare(value) -> str:
+    """Comparison form of a base URL (writers persist it stripped, no trailing /)."""
+    return str(value or "").strip().rstrip("/")
 
 
 def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
@@ -1975,7 +2048,7 @@ def _named_custom_provider_slug_for_provider(
     # selector; WebUI selector resolution never hands it the bare built-in
     # route (#8685). The Agent's own runtime resolution is order-dependent
     # downstream of this (#8690).
-    legacy_only = not raw.startswith("custom:") and not _is_native_custom_provider_key(raw)
+    legacy_only = _is_bare_builtin_provider_id(raw)
     legacy_names = _legacy_custom_provider_names(config_obj) if legacy_only else set()
     for entry in _custom_provider_entries(config_obj):
         entry_name = str(entry.get("name") or "").strip().lower()
@@ -2000,6 +2073,119 @@ def _legacy_custom_provider_names(config_obj: dict | None = None) -> set[str]:
         for entry in raw_entries
         if isinstance(entry, dict) and str(entry.get("name") or "").strip()
     }
+
+
+def _is_bare_builtin_provider_id(provider: object) -> bool:
+    """Whether a bare (non-``custom:``) id names a built-in or plugin provider.
+
+    Such an id is claimed only by a legacy ``custom_providers`` entry of that
+    name, never by a native ``providers['custom:<id>']`` record (#8685, #8816).
+
+    ``_is_native_custom_provider_key`` alone decides plugin-backed built-ins from
+    the plugin registry, so with plugin discovery unavailable the Agent's
+    canonical ``xai`` (WebUI's tables say ``x-ai``) read as a native custom key,
+    and a bare xAI session took the ``custom:xai`` record's endpoint and key
+    (#8816). A static-table built-in is therefore also matched through the
+    provider alias table, independent of plugin discovery.
+    """
+    raw = str(provider or "").strip().lower()
+    if not raw or raw.startswith("custom:"):
+        return False
+    if not _is_native_custom_provider_key(raw):
+        return True
+
+    targets = _provider_id_forms(raw)
+    # A registered plugin reached through an alias (``fw`` -> ``fireworks``).
+    if any(_is_plugin_model_provider(t) for t in targets):
+        return True
+    # A built-in from WebUI's tables or the Agent's own provider catalog, so the
+    # answer doesn't depend on WebUI's plugin discovery (``fireworks`` is in the
+    # Agent catalog but not in WebUI's tables).
+    return bool(targets & _known_builtin_provider_forms())
+
+
+def _provider_id_forms(value: object) -> set[str]:
+    """A provider id's spellings: itself, ``_`` as ``-``, and each one's alias target."""
+    value = str(value or "").strip().lower()
+    forms = {value, value.replace("_", "-")}
+    forms |= {str(_resolve_provider_alias(f) or f).strip().lower() for f in tuple(forms)}
+    # The generic ``custom`` target (Agent aliases ollama/local/vllm -> custom;
+    # catalog slug ``custom``) is a placeholder, not a provider identity: a
+    # bare ``vllm`` with its own ``custom:vllm`` record keeps that route, as on
+    # .630. A raw ``custom`` id never reaches here (the caller returns first).
+    return {f for f in forms if f and f != "custom"}
+
+
+# (key, forms) for _known_builtin_provider_forms; replaced whole, never mutated.
+_KNOWN_BUILTIN_FORMS_CACHE: tuple[tuple, frozenset[str]] | None = None
+
+
+def _known_builtin_provider_forms() -> frozenset[str]:
+    """Every spelling of every built-in id WebUI knows: its tables plus the Agent catalog.
+
+    Rebuilding this for each unknown bare custom name made ``resolve_model_provider``
+    up to ~6x slower (#8816, round 7). The cache key is everything the result
+    depends on: the Agent's and WebUI's alias tables (by content), WebUI's provider
+    tables (by key) and the Agent catalog's entries. Any change rebuilds it, so a
+    stale answer is never served.
+    """
+    global _KNOWN_BUILTIN_FORMS_CACHE
+    try:
+        from hermes_cli.models import _PROVIDER_ALIASES as _agent_aliases
+
+        agent_aliases = tuple(_agent_aliases.items()) if isinstance(_agent_aliases, dict) else ()
+    except Exception:
+        agent_aliases = ()
+    try:
+        from hermes_cli.models import CANONICAL_PROVIDERS as _catalog
+
+        # The entries (NamedTuples in every Agent so far) themselves, not their slugs:
+        # plugin admission inserts entries at runtime, which changes this tuple, and
+        # comparing it short-circuits on identity, so the slug walk below runs only
+        # when the catalog changed.
+        catalog_key = tuple(_catalog or ())
+    except Exception:
+        catalog_key = ()
+    key = (
+        agent_aliases,
+        tuple(_PROVIDER_ALIASES.items()),
+        tuple(_PROVIDER_DISPLAY),
+        tuple(_PROVIDER_MODELS),
+        catalog_key,
+    )
+    cached = _KNOWN_BUILTIN_FORMS_CACHE
+    try:
+        if cached is not None and cached[0] == key:
+            return cached[1]
+    except Exception:
+        pass  # an entry type whose comparison raises: rebuild
+    known = [k for k in (*_PROVIDER_DISPLAY, *_PROVIDER_MODELS) if isinstance(k, str)]
+    known.extend(_agent_builtin_provider_ids())
+    forms = frozenset(form for k in known for form in _provider_id_forms(k))
+    _KNOWN_BUILTIN_FORMS_CACHE = (key, forms)
+    return forms
+
+
+def _agent_builtin_provider_ids() -> tuple[str, ...]:
+    """Provider slugs in the Agent's canonical catalog, or ``()`` when the Agent
+    (or an older Agent without the catalog) isn't importable, or the catalog has
+    a shape this WebUI doesn't know. Never raises into routing."""
+    try:
+        from hermes_cli.models import CANONICAL_PROVIDERS
+
+        slugs = []
+        for entry in CANONICAL_PROVIDERS or ():
+            if isinstance(entry, str):
+                slug = entry
+            else:
+                slug = getattr(entry, "slug", None)
+                if slug is None and isinstance(entry, (tuple, list)) and entry:
+                    slug = entry[0]
+            if isinstance(slug, str) and slug.strip():
+                slugs.append(slug.strip().lower())
+        return tuple(slugs)
+    except Exception:
+        return ()
 
 
 def _resolve_configured_provider_id(
@@ -3319,6 +3505,82 @@ def _custom_provider_slug_key(value: object) -> str:
     return produced.split(":", 1)[1] if produced.startswith("custom:") else produced
 
 
+# Fields _custom_provider_entries() writes on its copy of a native record; every
+# other field of the entry is the normalized record's own.
+_CUSTOM_PROVIDER_ENTRY_VIEW_FIELDS = frozenset({"name", "display_name", "model"})
+
+
+def _raw_custom_provider_url(raw_cfg: dict, exp_cfg: dict, match: dict, url: str) -> str:
+    """Return the raw config text behind the selected custom provider's URL (#8032).
+
+    ``match`` was selected from ``_custom_provider_entries(exp_cfg)``, the
+    env-expanded view, and ``url`` is its resolved base URL. Recover the field of
+    THAT record, never a value search across records:
+
+    * a legacy winner is the very dict from ``exp_cfg["custom_providers"]``;
+      expansion keeps list positions, so its raw twin is at the same index;
+    * a native winner is a normalized copy. Its source record is the one whose
+      ``_normalized_raw_provider_record(record, key)`` equals the entry on every
+      field the entries view copies (the normalizer stamps the record's own
+      config key as ``provider_key``), and the URL field is the one the
+      normalizer read: the first non-empty ``api``/``url``/``base_url`` of the
+      expanded record.
+
+    The raw text is used only when it expands to ``url``. Otherwise, or when the
+    source is not exactly one raw text, return ``url`` itself, which is what
+    master writes. Pure and lock-safe.
+    """
+    want = _normalize_base_url_for_compare(url)
+
+    def _same(raw):
+        if isinstance(raw, str) and raw.strip():
+            if _normalize_base_url_for_compare(_expand_env_vars(raw)) == want:
+                return raw.strip()
+        return None
+
+    if not (isinstance(raw_cfg, dict) and isinstance(exp_cfg, dict)):
+        return url
+    exp_list = exp_cfg.get("custom_providers")
+    raw_list = raw_cfg.get("custom_providers")
+    if isinstance(exp_list, list):
+        for index, entry in enumerate(exp_list):
+            if entry is not match:
+                continue
+            twin = raw_list[index] if (
+                isinstance(raw_list, list) and len(raw_list) == len(exp_list)
+            ) else None
+            return (_same(twin.get("base_url")) if isinstance(twin, dict) else None) or url
+    exp_native = exp_cfg.get("providers")
+    raw_native = raw_cfg.get("providers")
+    if not (isinstance(exp_native, dict) and isinstance(raw_native, dict)):
+        return url
+    found = set()
+    for key, record in exp_native.items():
+        if not isinstance(record, dict) or not record:
+            continue
+        normalized = _normalized_raw_provider_record(record, key)
+        if any(
+            match.get(field) != value
+            for field, value in normalized.items()
+            if field not in _CUSTOM_PROVIDER_ENTRY_VIEW_FIELDS
+        ):
+            continue
+        url_field = next(
+            (
+                field for field in _RAW_PROVIDER_URL_FIELDS
+                if isinstance(record.get(field), str) and record.get(field).strip()
+            ),
+            None,
+        )
+        raw_record = raw_native.get(key)
+        if url_field is None or not isinstance(raw_record, dict):
+            continue
+        raw = _same(raw_record.get(url_field))
+        if raw is not None:
+            found.add(raw)
+    return found.pop() if len(found) == 1 else url
+
+
 def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> dict | None:
     """Return the single named ``custom_providers`` entry matching ``slug_key``.
 
@@ -3606,8 +3868,14 @@ def resolve_model_provider(
         for slug, pdef in providers_cfg.items():
             if not isinstance(pdef, dict):
                 continue
-            if _is_native_custom_provider_key(slug):
-                continue  # handled by the read view, including enabled/legacy precedence
+            if target not in _configured_model_ids(pdef.get('models')):
+                continue
+            if _is_native_custom_provider_key(slug) and not _is_bare_builtin_provider_id(slug):
+                # Handled by the read view, including enabled/legacy precedence.
+                # A built-in's own record (``providers.fireworks`` when plugin
+                # discovery is unavailable) stays its URL override, as on .630
+                # and v0.52.544 (#8816 senior round 4).
+                continue
             # Copilot is the documented exception: `providers.copilot.models` is
             # a per-model SETTINGS map (reasoning_effort, limits, etc.), NOT a
             # routable allowlist (see the exception at the catalog-build site).
@@ -3972,6 +4240,8 @@ CUSTOM_ROUTE_NO_ENDPOINT = "custom_provider_endpoint_unresolved"
 # Kept beside the custom-provider reasons because it travels the same terminal
 # verdict path: an unresolvable route must stop before any provider routing.
 MODEL_ALIAS_ROUTE_UNRESOLVED = "model_alias_route_unresolved"
+# A built-in provider name that another provider record also claims (#8690).
+PROVIDER_NAME_AMBIGUOUS = "provider_name_ambiguous"
 
 # Key the verdict travels under on a merged bundle. ``None`` == routable.
 CUSTOM_ROUTE_ERROR_FIELD = "route_error"
@@ -4204,6 +4474,274 @@ def _custom_record_names_identity(display_name: object, provider_key: object, pi
         for value in (display_name, provider_key)
         if str(value or "").strip()
     )
+
+
+# ``hermes_cli.config._ENV_REF_RE``: the references the Agent expands in string values.
+_AGENT_ENV_REF_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def _agent_expands_env_ref(value: object) -> bool:
+    """True when the Agent expands a ``${VAR}`` / ``${env:VAR}`` in string ``value``.
+
+    Mirror of ``hermes_cli.config._env_ref_var_name``; ``${env:}``, other sources
+    (``${file:...}``) and an incomplete ``${`` stay verbatim, as do mapping keys.
+    """
+    if not isinstance(value, str):
+        return False
+    for inner in _AGENT_ENV_REF_RE.findall(value):
+        ref = inner.strip()
+        if ref.startswith("env:"):
+            if ref[len("env:"):].strip():
+                return True
+        elif not re.match(r"^[a-z][a-z0-9_-]*:", ref):
+            return True
+    return False
+
+
+def _agent_expanded_text(value: object) -> str | None:
+    """String ``value`` as the installed Agent's ``load_config()`` expands it here, else None.
+
+    Calls the Agent's own expander (``hermes_cli.config._expand_env_vars``: an env
+    ``${VAR}`` / ``${env:VAR}`` is read through ``agent.secret_scope.get_secret`` under the
+    bound scope; an unset or non-env reference stays verbatim), and only while
+    ``agent.secret_scope.current_secret_scope()`` is not None. When it is None this returns
+    None, so a templated name claims every name and a templated ``enabled`` flag keeps its
+    record claiming: fail closed, even where the Agent's own resolver would expand the value
+    from the process env. The rule is that condition, not a list of routes.
+
+    A known request path where it is None: the chat route's
+    ``streaming._resolve_runtime_connection_bundle`` (and the model-alias variant) for the
+    root profile (``default`` or a renamed root alias) or with no profile name, when no
+    outer scope is bound. ``profiles.profile_scope_for_detached_worker`` binds no scope for
+    those and leaves any outer one in place; for a named profile it binds one through
+    ``profiles.profile_env_for_background_worker``. Other paths may bind one, the root
+    profile included: read-only request scopes
+    (``profiles.profile_env_for_active_request_readonly``, the root profile too with
+    ``include_root=True``) and background workers such as title generation
+    (``profile_env_for_background_worker`` binds one for a non-empty profile name other
+    than ``default``, a renamed root alias included). None as well when the expander is unavailable or
+    fails: callers keep their fail-closed reading.
+    """
+    try:
+        from agent.secret_scope import current_secret_scope
+        from hermes_cli.config import _expand_env_vars as agent_expand_env_vars
+    except ImportError:
+        return None
+    try:
+        # Without a bound profile secret scope the expander reads the shared process env,
+        # which a concurrent worker for another profile can hold: keep the reading closed.
+        # Known case: the chat route's bundle resolution for the root profile or with no
+        # profile name, when no outer scope is bound (see the docstring).
+        # Re-reading that env after the resolver could see another value than the resolver
+        # read (test_a_concurrent_profile_env_between_the_resolver_and_the_guard_...).
+        # Follow-up: judge against the exact value the Agent resolver read for this request.
+        if current_secret_scope() is None:
+            return None
+        expanded = agent_expand_env_vars(value)
+    except Exception:
+        logger.debug("provider name check: Agent env expansion failed", exc_info=True)
+        return None
+    return expanded if isinstance(expanded, str) else None
+
+
+def _claiming_value(keys: tuple, values: tuple, names: set) -> str | None:
+    """The first identity in ``keys`` / ``values`` whose spellings include one of ``names``.
+
+    Spellings: the Agent's alias vocabulary (:func:`_custom_provider_alias_set`)
+    plus underscore folding. The claiming identity is returned for the message in
+    its raw spelling (never a URL, credential or expanded value). A value the Agent
+    env-expands is judged by the Agent's own expansion (:func:`_agent_expanded_text`,
+    an unset reference stays verbatim) only while an Agent profile secret scope is bound
+    (``agent.secret_scope.current_secret_scope()`` is not None); otherwise (no scope bound,
+    for example the chat route's bundle resolution for the root profile with no outer
+    scope; or no expander) it claims every name, since WebUI cannot then reproduce the
+    value the Agent's resolver reads with certainty.
+    """
+    for value, expandable in (*((key, False) for key in keys), *((val, True) for val in values)):
+        text = spelled = str(value or "").strip()
+        if expandable and _agent_expands_env_ref(value):
+            expanded = _agent_expanded_text(value)
+            if expanded is None:
+                return text
+            spelled = expanded.strip()
+        aliases = _custom_provider_alias_set(spelled, "") if spelled else frozenset()
+        if names & (aliases | {alias.replace("_", "-") for alias in aliases}):
+            return text
+    return None
+
+
+def _provider_identity_sources(config: object) -> tuple:
+    """The config views :func:`provider_name_ambiguity_verdict` reads identities from.
+
+    An explicit ``config`` is the only view. Otherwise the active profile's
+    config.yaml as parsed but NOT env-expanded (the file :func:`get_config`
+    serves, via :func:`_get_config_path`) comes first, then the cached view.
+    The Agent re-expands ``${VAR}`` references from the profile's current
+    secret scope on every load, while the cache keeps the expansion it saw when
+    it last reloaded (an edited .env does not change config.yaml's mtime), so
+    only the raw spelling tells reliably that a name is a reference (Codex r3).
+    The cached view still counts, so an in-memory config is never ignored.
+    Every view carries the Agent's managed scope (:func:`_with_managed_scope`).
+    """
+    if config is not None:
+        return (_with_managed_scope(config),)
+    try:
+        raw = _load_yaml_config_file_raw(_get_config_path(), _copy=False)
+    except Exception:
+        logger.debug("provider name check: raw config unreadable", exc_info=True)
+        raw = None
+    # A detached snapshot, not get_config()'s live cache dict: another profile's request can
+    # refill that dict in place while this check runs, and a retained reference then judged
+    # this profile's name against the other profile's records (release-lane tag-delta audit).
+    return (_with_managed_scope(raw), _with_managed_scope(get_config_snapshot()))
+
+
+def _with_managed_scope(view: object) -> object:
+    """``view`` with the Agent's managed-scope config.yaml merged on top (Codex r5).
+
+    The Agent resolves providers from ``load_config()``, which deep-merges the
+    IT-pushed managed config over the profile's, managed winning per leaf
+    (``hermes_cli.config._merge_managed_overlay``). Same reader and merge as
+    ``managed_scope.apply_managed_overlay``, minus its ``${VAR}`` expansion, so
+    a managed reference is judged like any other (:func:`_claiming_value`: by the
+    Agent's expander under a bound profile secret scope, else a wildcard). ``view``
+    is never mutated; an Agent
+    without managed scope, or no managed config, leaves it unchanged.
+    """
+    try:
+        from hermes_cli.config import _deep_merge
+        from hermes_cli.managed_scope import load_managed_config
+    except ImportError:
+        return view
+    try:
+        managed = load_managed_config() if isinstance(view, dict) else None
+        return _deep_merge(copy.deepcopy(view), managed) if isinstance(managed, dict) and managed else view
+    except Exception:
+        # The Agent fails open the same way (``apply_managed_overlay``).
+        logger.debug("provider name check: managed scope unreadable", exc_info=True)
+        return view
+
+
+def provider_name_ambiguity_verdict(provider: object, config: object = None) -> dict | None:
+    """Terminal verdict when one built-in provider name has two claimants (#8690).
+
+    Identities are read from every view :func:`_provider_identity_sources`
+    returns; the first view with an ambiguity decides (fail closed).
+
+    The Agent answers a name with the first record whose alias set contains it
+    and shares one credential pool between such records, so the endpoint and key
+    it returns can belong to different records depending on config order. The
+    route fails closed instead. Purely name-based (no URL is read); a record
+    claims in any spelling the Agent accepts. A keyed record the Agent treats as
+    disabled claims nothing; a templated ``enabled`` flag is judged after the Agent's
+    env expansion only while an Agent profile secret scope is bound
+    (``current_secret_scope()`` is not None), and with none bound the record keeps
+    claiming (fail closed). A templated ``name`` follows the same rule
+    (:func:`_agent_expanded_text`, which names a known request path with no scope). A legacy row counts enabled or not (the Agent's
+    legacy view still selects disabled rows).
+
+    * Bare built-in ``X``: ambiguous when any record other than ``providers.X``
+      claims ``X``, or two keys are ``X``. Without ``providers.X`` the built-in
+      identity (default endpoint, ambient key) is still the second claimant:
+      WebUI routes bare ``X`` as the built-in (#8685), the Agent as the sibling.
+    * Explicit ``custom:X`` (``X`` built-in): ambiguous when ``providers.X``
+      exists and another record also claims ``custom:X`` (the Agent's alias set
+      for ``providers.X`` contains it). Otherwise untouched.
+    """
+    route = str(provider or "").strip().lower().replace(" ", "-")
+    explicit = route.startswith("custom:")
+    builtin = _canonicalise_provider_id(route.split(":", 1)[1].strip() if explicit else route)
+    if (
+        not builtin
+        or builtin in {"custom", "auto"}
+        or builtin.startswith("custom:")
+        or _is_native_custom_provider_key(builtin)
+    ):
+        return None
+    names = {route, route.replace("_", "-"), f"custom:{builtin}" if explicit else builtin}
+    for source in _provider_identity_sources(config):
+        if isinstance(source, dict):
+            verdict = _provider_name_ambiguity_in(source, route, builtin, explicit, names)
+            if verdict is not None:
+                return verdict
+    return None
+
+
+def _provider_name_ambiguity_in(source: dict, route: str, builtin: str, explicit: bool, names: set) -> dict | None:
+    """:func:`provider_name_ambiguity_verdict` for one config view."""
+    own: list[str] = []
+    others: list[str] = []
+    providers = source.get("providers")
+    for key, record in (providers.items() if isinstance(providers, dict) else ()):
+        key_text = str(key or "").strip()
+        if not key_text or not isinstance(record, dict):
+            continue
+        # The Agent skips a keyed record whose ``enabled`` is false in both of its views
+        # (``_match_new_style_provider`` and ``providers_dict_to_custom_providers``), so a
+        # disabled one claims nothing. Legacy ``custom_providers`` rows stay counted below:
+        # the Agent's legacy view still selects a row the user switched off. A templated
+        # flag is judged as the Agent expands it only while a profile secret scope is bound
+        # (``current_secret_scope()`` is not None, :func:`_agent_expanded_text`); with none
+        # bound or no expander it is unknown and keeps the record claiming (fail closed).
+        flag = record.get("enabled", True)
+        if _agent_expands_env_ref(flag):
+            expanded = _agent_expanded_text(flag)
+            flag = flag if expanded is None else expanded
+        if not _raw_provider_record_enabled({"enabled": flag}):
+            continue
+        # The Agent's identities for a keyed record: its ``name`` (or key) and its key.
+        claimed_by = _claiming_value((key_text,), (record.get("name"),), names)
+        if claimed_by is None:
+            continue
+        if not key_text.lower().startswith("custom:") and _canonicalise_provider_id(key_text) == builtin:
+            own.append(key_text)
+        else:
+            others.append(f"'{key_text}'" + (f" (named '{claimed_by}')" if claimed_by != key_text else ""))
+    legacy = source.get("custom_providers")
+    # A legacy row's only identity is its ``name``; the Agent ignores a
+    # non-list section and a row's raw ``provider_key``.
+    for row in legacy if isinstance(legacy, list) else ():
+        claimed_by = _claiming_value((), (row.get("name"),), names) if isinstance(row, dict) else None
+        if claimed_by is not None:
+            others.append(f"custom_providers entry '{claimed_by}'")
+    if explicit:
+        ambiguous = bool(own) and len(own) + len(others) >= 2
+    else:
+        ambiguous = bool(others) or len(own) >= 2
+    if not ambiguous:
+        return None
+    claimants = [f"the built-in '{builtin}'"] + [f"'{key}'" for key in own[1:]] + others
+    count = {2: "Two", 3: "Three"}.get(len(claimants), str(len(claimants)))
+    listed = ", ".join(claimants[:-1]) + " and " + claimants[-1]
+    return {
+        "reason": PROVIDER_NAME_AMBIGUOUS,
+        "provider": route,
+        "message": (
+            f"{count} providers claim '{builtin}': {listed}. Rename the custom one "
+            "(for example custom:my-proxy) or remove one, then retry."
+        ),
+        "hint": "Edit the provider under Settings -> Providers or in config.yaml.",
+    }
+
+
+def _refuse_ambiguous_provider_name(bundle: dict, *providers: object) -> dict | None:
+    """Make ``bundle`` terminal when any of ``providers`` is ambiguous (#8690).
+
+    The verdict is what stops the turn (:data:`CUSTOM_ROUTE_ERROR_FIELD`); the
+    connection and every side field are cleared too, so a consumer that reads
+    the fields without checking it still has nothing to send.
+    """
+    for provider in dict.fromkeys(providers):
+        verdict = provider_name_ambiguity_verdict(provider)
+        if verdict is not None:
+            bundle["base_url"] = None
+            bundle["api_key"] = None
+            for field in CUSTOM_CONNECTION_SIDE_FIELDS:
+                bundle[field] = None
+            bundle[CUSTOM_ROUTE_ERROR_FIELD] = verdict
+            logger.warning("refusing provider route: %s", verdict["message"])
+            return verdict
+    return None
 
 
 # ``enabled:`` words YAML may hand us as strings, matching
@@ -5130,14 +5668,18 @@ def _custom_provider_runtime_bundle_with_provenance(
         "acp_command": _rt.get("acp_command", _rt.get("command")),
         "acp_args": _rt.get("acp_args", _rt.get("args")),
         "credential_pool": _rt.get("credential_pool"),
-        # Routable until a named custom route proves otherwise. Non-custom
-        # routes legitimately leave the endpoint and/or credential to the
-        # runtime provider, so only the named-``custom:`` branches below can
-        # record a verdict here.
+        # Routable until a route proves otherwise. Non-custom routes
+        # legitimately leave the endpoint and/or credential to the runtime
+        # provider; they record a verdict only when two records claim their
+        # name (#8690). Named ``custom:`` routes are judged below.
         CUSTOM_ROUTE_ERROR_FIELD: None,
     }
 
     lookup = lookup_provider or resolved_provider
+    # A name two records claim (#8690) is refused before any record is chosen:
+    # the runtime dict may already pair one record's endpoint with another's key.
+    if _refuse_ambiguous_provider_name(bundle, lookup, resolved_provider) is not None:
+        return bundle, None
     if not (isinstance(lookup, str) and lookup.startswith("custom:")):
         return bundle, None
 
@@ -7192,7 +7734,8 @@ def set_reasoning_display(show: bool) -> dict:
     """
     config_path = _get_config_path()
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load: a write must never save env-expanded values (#8032 write rule).
+        config_data = _load_yaml_config_file_raw(config_path)
         display_cfg = config_data.get("display")
         if not isinstance(display_cfg, dict):
             display_cfg = {}
@@ -7620,6 +8163,23 @@ def _main_model_request_overrides(
     return overrides
 
 
+def _same_json_value(a, b) -> bool:
+    """Equal as JSON, so type edits count: Python treats 1 == True == 1.0 (#8129 r7).
+
+    One JSON round-trip first: JSON object keys are strings, so a YAML mapping
+    with mixed int/str keys (``logit_bias: {100: 1, '101': 2}``) can be sorted,
+    while values keep their JSON types. A value JSON cannot encode at all
+    (non-scalar mapping keys) falls back to plain equality.
+    """
+    def _canonical(value):
+        return json.dumps(json.loads(json.dumps(value, default=str)), sort_keys=True)
+
+    try:
+        return _canonical(a) == _canonical(b)
+    except (TypeError, ValueError):
+        return a == b
+
+
 def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> None:
     """Apply supported advanced model options to a config block in-place."""
     if advanced is None:
@@ -7628,8 +8188,15 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
         raise ValueError("advanced model options must be an object")
     if "base_url" in advanced:
         base_url = str(advanced.get("base_url") or "").strip().rstrip("/")
-        if base_url:
-            model_cfg["base_url"] = base_url
+        # model_cfg is the RAW block: re-submitting the displayed (resolved)
+        # URL keeps a ${VAR} reference instead of baking it (#8032). That
+        # includes "" for a reference whose variable is empty: the field is
+        # unchanged, so the reference survives instead of being removed.
+        stored_base_url = _preserve_env_ref(
+            model_cfg.get("base_url"), base_url, normalize=_normalize_base_url_for_compare
+        )
+        if stored_base_url:
+            model_cfg["base_url"] = stored_base_url
         else:
             model_cfg.pop("base_url", None)
     for field in ("timeout", "download_timeout", "max_concurrency"):
@@ -7650,10 +8217,13 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
         if extra_body in (None, ""):
             model_cfg.pop("extra_body", None)
         elif isinstance(extra_body, dict):
-            if extra_body:
-                model_cfg["extra_body"] = extra_body
-            else:
+            if not extra_body:
                 model_cfg.pop("extra_body", None)
+            elif not _same_json_value(_expand_env_vars(model_cfg.get("extra_body")), extra_body):
+                # Only a changed object is written: re-submitting the displayed
+                # (resolved) one unchanged keeps the raw block and its ${VAR}
+                # references (#8032).
+                model_cfg["extra_body"] = extra_body
         else:
             raise ValueError("extra_body must be a JSON object")
     if "service_tier" in advanced:
@@ -7682,12 +8252,20 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
     # reload_config() acquires _cfg_lock internally (it's not reentrant) so
     # it must be called AFTER releasing the lock to avoid deadlock.
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load (#8032 write rule): model_cfg stays raw so ${VAR} references
+        # in fields this save doesn't change are written back verbatim.
+        config_data = _load_yaml_config_file_raw(config_path)
         model_cfg = config_data.get("model", {})
         if not isinstance(model_cfg, dict):
             model_cfg = {}
+        raw_model_cfg = dict(model_cfg)
 
-        previous_provider = str(model_cfg.get("provider") or "").strip()
+        # Compare the RESOLVED provider: ``provider: ${MODEL_PROVIDER}`` must not
+        # look like a provider switch (which would drop a valid base_url) just
+        # because the raw placeholder differs from the caller's resolved value.
+        previous_provider = str(
+            _expand_env_vars(str(model_cfg.get("provider") or "").strip()) or ""
+        ).strip()
         requested_provider = str(provider or "").strip()
         resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
             selected_model
@@ -7712,12 +8290,25 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         if persisted_provider.lower() == "local":
             persisted_provider = "custom"
 
-        model_cfg["default"] = persisted_model
+        # Keep an env reference when it already resolves to the value being
+        # saved (the user re-saved what the UI displayed); a changed value is
+        # written as given.
+        model_cfg["default"] = _preserve_env_ref(
+            raw_model_cfg.get("default"), persisted_model, normalize=str.strip
+        )
         if persisted_provider:
-            model_cfg["provider"] = persisted_provider
+            model_cfg["provider"] = _preserve_env_ref(
+                raw_model_cfg.get("provider"), persisted_provider, normalize=str.strip
+            )
 
         if resolved_base_url and not provider_override_won:
-            model_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
+            # Same value as master writes; only a ${VAR} already in model.base_url
+            # that resolves to it is kept instead of its expansion (#8032).
+            model_cfg["base_url"] = _preserve_env_ref(
+                raw_model_cfg.get("base_url"),
+                str(resolved_base_url).strip().rstrip("/"),
+                normalize=_normalize_base_url_for_compare,
+            )
         elif persisted_provider != previous_provider:
             if persisted_provider == "openai":
                 model_cfg["base_url"] = "https://api.openai.com/v1"
@@ -7894,7 +8485,9 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
     model = str(model or "").strip()
     config_path = _get_config_path()
     with _cfg_lock:
-        config_data = _load_yaml_config_file(config_path)
+        # RAW load (#8032 write rule): untouched slots/fields keep their
+        # ${VAR} references.
+        config_data = _load_yaml_config_file_raw(config_path)
         if task != "__reset__" and task not in AUX_TASK_SLOTS:
             raise ValueError(f"Unknown auxiliary task slot: {task!r}. Valid: {list(AUX_TASK_SLOTS)}")
         if task == "__reset__":
@@ -7921,8 +8514,10 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
             slot_cfg = aux_cfg.get(task, {})
             if not isinstance(slot_cfg, dict):
                 slot_cfg = {}
-            slot_cfg["provider"] = provider
-            slot_cfg["model"] = model
+            # Keep a ${VAR} that already resolves to the submitted value: the
+            # advanced dialog re-posts the provider/model it displayed (#8032).
+            slot_cfg["provider"] = _preserve_env_ref(slot_cfg.get("provider"), provider, normalize=str.strip)
+            slot_cfg["model"] = _preserve_env_ref(slot_cfg.get("model"), model, normalize=str.strip)
             if provider and (provider.startswith("custom:") or provider == "custom"):
                 # Resolve the auxiliary slot's base_url against the SELECTED
                 # provider, not the active main provider. A bare
@@ -7958,12 +8553,23 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                     # closed on a collision (raises AmbiguousCustomProviderError)
                     # exactly like every other path — otherwise the ambiguity
                     # would be swallowed and the wrong endpoint persisted.
+                    # config_data is RAW (#8032). Select on an env-EXPANDED
+                    # snapshot, exactly as master selected on its expanded read:
+                    # legacy-over-native precedence (#8448), enabled state,
+                    # uniqueness and the native api/url/base_url alias order all
+                    # depend on resolved values. Then write the raw text behind
+                    # the winning URL, so a ${VAR} endpoint stays a reference.
+                    _exp_cfg = _expand_env_vars(config_data)
                     _cp_match = _unique_custom_provider_entry(
-                        _custom_provider_entries(config_data),
+                        _custom_provider_entries(_exp_cfg),
                         _custom_provider_slug_key(provider),
                     )
                     if _cp_match is not None:
-                        resolved_base_url = str(_cp_match.get("base_url") or "").strip() or None
+                        _url = str(_cp_match.get("base_url") or "").strip()
+                        if _url:
+                            resolved_base_url = _raw_custom_provider_url(
+                                config_data, _exp_cfg, _cp_match, _url,
+                            )
                 if not resolved_base_url:
                     # Best-effort fallback for the unnamed `custom` case (no own
                     # entry). Keep it non-fatal for unexpected errors, but let a
@@ -7975,7 +8581,13 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                     except Exception:
                         resolved_base_url = None
                 if resolved_base_url:
-                    slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
+                    # A ${VAR} already in the slot's base_url that resolves to
+                    # the new URL is kept instead of its expansion (#8032).
+                    slot_cfg["base_url"] = _preserve_env_ref(
+                        slot_cfg.get("base_url"),
+                        str(resolved_base_url).strip().rstrip("/"),
+                        normalize=_normalize_base_url_for_compare,
+                    )
             if advanced is not None:
                 try:
                     _apply_advanced_model_options(slot_cfg, advanced)
@@ -10192,6 +10804,12 @@ def merge_model_alias_runtime_bundle(
                 CUSTOM_ROUTE_NO_CREDENTIAL,
                 provider or f"model alias {route.get('alias') or '<unknown>'}",
             )
+        elif not explicit_credential:
+            # The credential came from the provider's runtime, host-gated against the
+            # alias URL. For a name two records claim that is the shared pool's key,
+            # which can be the other record's (#8690): the alias takes the provider's
+            # verdict. An alias with its own key owns both halves and is untouched.
+            _refuse_ambiguous_provider_name(bundle, logical_provider)
         return bundle
 
     resolved_provider = provider
@@ -10233,6 +10851,9 @@ def merge_model_alias_runtime_bundle(
                 CUSTOM_ROUTE_NO_CREDENTIAL,
                 provider or f"model alias {route.get('alias') or '<unknown>'}",
             )
+    # Last, so an alias credential can neither complete nor relabel a pair the
+    # provider's runtime resolved under a name two records claim (#8690).
+    _refuse_ambiguous_provider_name(bundle, provider, route.get("provider"))
     return bundle
 
 
@@ -14541,6 +15162,19 @@ def _clear_thread_env():
 SESSION_AGENT_LOCKS = weakref.WeakValueDictionary()
 SESSION_AGENT_LOCKS_LOCK = threading.Lock()
 
+# Per-session lock for share create/revoke only (#8255 review). Kept separate from
+# the agent-turn lock on purpose: the agent lock is held across a turn's retry and
+# credential refresh, so coordinating shares on it would make a revoke wait for a
+# whole agent operation, and a create would block the streaming worker while it
+# redacts and embeds a large snapshot. This lock covers token resolution, the
+# snapshot write/mark and the token persist, nothing else.
+SHARE_SESSION_LOCKS = weakref.WeakValueDictionary()
+SHARE_SESSION_LOCKS_LOCK = threading.Lock()
+
+# A share call waits at most this long for another share call on the same session
+# (the repo's other handlers use the same bound and answer 503 instead of hanging).
+SHARE_SESSION_LOCK_TIMEOUT_SECONDS = 5.0
+
 
 def _get_session_agent_lock(session_id: str) -> threading.Lock:
     """Return the per-session Lock used to serialize all Session mutations.
@@ -14564,6 +15198,23 @@ def _get_session_agent_lock(session_id: str) -> threading.Lock:
         if lock is None:
             lock = threading.Lock()
             SESSION_AGENT_LOCKS[session_id] = lock
+        return lock
+
+
+def _get_session_share_lock(session_id: str) -> threading.Lock:
+    """Return the per-session Lock that serializes share create/revoke (#8255).
+
+    Deliberately separate from ``_get_session_agent_lock``: the agent lock is held
+    across an agent turn (including its credential-refresh retry), so coordinating
+    shares on it would make a revoke wait for a whole agent operation and a create
+    would lock the streaming worker out while it redacts a large snapshot. Weak
+    registry, same lifecycle as the agent locks.
+    """
+    with SHARE_SESSION_LOCKS_LOCK:
+        lock = SHARE_SESSION_LOCKS.get(session_id)
+        if lock is None:
+            lock = threading.Lock()
+            SHARE_SESSION_LOCKS[session_id] = lock
         return lock
 
 
