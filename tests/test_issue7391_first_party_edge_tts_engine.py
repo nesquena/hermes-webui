@@ -74,6 +74,7 @@ let _ttsCurrentUtterance = null;
 let _ttsChunkQueue = [];
 let _ttsChunkIndex = 0;
 let _ttsActiveBtn = null;
+let _ttsPendingAborts = null;
 // #7529: the chunked Edge path pins the captured playback profile, so the
 // harness must expose the same global the production code reads.
 const S = { session: { session_id: 'sid-edge' }, activeProfile: 'default' };
@@ -160,6 +161,12 @@ def test_play_edge_tts_chunked_sends_explicit_engine_when_server_still_elevenlab
             extract_function(UI_JS, "_noteTtsRequestSent"),
             extract_function(UI_JS, "_ttsRequestWaitMs"),
             extract_function(UI_JS, "_stopActivePlaybackAudio"),
+            # #6541: in-flight request cancellation (stopTTS/_beginTtsPlayback
+            # abort the pending fetch through these helpers).
+            extract_function(UI_JS, "_abortPendingTtsRequests"),
+            extract_function(UI_JS, "_newTtsAbortController"),
+            extract_function(UI_JS, "_trackTtsAbort"),
+            extract_function(UI_JS, "_releaseTtsAbort"),
         ]
     )
     requests = _run_node(_UI_HARNESS.replace("__UI_FNS__", fns))
