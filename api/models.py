@@ -4129,6 +4129,7 @@ def _append_journaled_partial_output(
     dedupe_max_index: int | None = None,
     append_context: bool = True,
     display_only: bool = False,
+    through_last_interim: bool = False,
 ) -> bool:
     """Recover already-emitted visible output from a dead stream journal.
 
@@ -4154,6 +4155,18 @@ def _append_journaled_partial_output(
         return False
 
     events = [event for event in journal.get('events') or [] if isinstance(event, dict)]
+    if through_last_interim:
+        # A successful Gateway turn already has an authoritative final row.
+        # Reuse the journal's segment/dedup machinery for sealed commentary
+        # only; never recover the trailing final-answer tokens a second time.
+        boundary = max((
+            i + 1 for i, event in enumerate(events)
+            if event.get('event') == 'interim_assistant'
+        ), default=0)
+        events = events[:boundary] + [
+            event for event in events[boundary:]
+            if boundary and event.get('event') == 'tool_complete'
+        ]
     if not events:
         return False
 
@@ -4290,7 +4303,9 @@ def _append_journaled_partial_output(
                     current_assistant_idx = existing_idx
                     assistant_started_at = None
                     return existing_idx
-        timestamp = int(assistant_started_at or time.time())
+        timestamp = assistant_started_at or time.time()
+        if not through_last_interim:
+            timestamp = int(timestamp)
         recovered_assistant = {
             'role': 'assistant',
             'content': content,

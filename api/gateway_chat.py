@@ -1161,6 +1161,19 @@ def _relay_gateway_run_events(
             commit()
             sse_event = "message"
             continue
+        if payload_event == "message.interim":
+            text = payload.get("text")
+            if isinstance(text, str) and text.strip():
+                emit("interim_assistant", {
+                    "text": text.strip(),
+                    "already_streamed": payload.get("already_streamed") is True,
+                })
+                # Commentary seals the visible segment, not the final answer.
+                # Keep both answer carriers clean across connection boundaries.
+                final_text = _adopt_gateway_stream_text(stream_id, "")
+            commit()
+            sse_event = "message"
+            continue
         if payload_event == "message.delta":
             delta = str(payload.get("delta") or "")
             if delta:
@@ -1968,7 +1981,7 @@ def _restore_relayed_gateway_state(session_id: str, stream_id: str) -> int | Non
     for row in events:
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
         seq = payload.get("gateway_seq")
-        if row.get("event") in {"token", "reasoning", "tool", "tool_complete"}:
+        if row.get("event") in {"token", "interim_assistant", "reasoning", "tool", "tool_complete"}:
             if not isinstance(seq, int):
                 return None
             stateful.append((row["event"], payload))
@@ -1976,7 +1989,10 @@ def _restore_relayed_gateway_state(session_id: str, stream_id: str) -> int | Non
         if isinstance(seq, int):
             cursor = max(cursor, seq)
     for name, payload in stateful:
-        if name == "token":
+        if name == "interim_assistant":
+            if isinstance(payload.get("text"), str) and payload["text"].strip():
+                _adopt_gateway_stream_text(stream_id, "")
+        elif name == "token":
             STREAM_PARTIAL_TEXT[stream_id] = STREAM_PARTIAL_TEXT.get(stream_id, "") + str(payload.get("text") or "")
         else:
             _note_live_gateway_event(stream_id, name, payload)
@@ -3705,6 +3721,25 @@ def _run_gateway_chat_streaming(
                         if latest_text == msg_norm:
                             display = display[:-1]
                 s.messages = display + [user_msg, assistant_msg]
+            if _use_runs_api and s.messages and s.messages[-1].get("content") == assistant_text:
+                # The journal is also the browser replay source. Persist its
+                # sealed commentary with the SAME segment/dedup rules, before
+                # the final row, without adding process prose to model history.
+                from api.models import _append_journaled_partial_output
+
+                final_display = s.messages.pop()
+                turn_start = next((
+                    i + 1 for i in range(len(s.messages) - 1, -1, -1)
+                    if s.messages[i].get("role") == "user"
+                ), len(s.messages))
+                try:
+                    _append_journaled_partial_output(
+                        s, stream_id, dedupe_existing=True,
+                        dedupe_min_index=turn_start, append_context=False,
+                        display_only=True, through_last_interim=True,
+                    )
+                finally:
+                    s.messages.append(final_display)
             if active_turn_identity.get("token"):
                 current_display_rows = [
                     message
