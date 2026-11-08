@@ -3612,11 +3612,27 @@ def _run_gateway_chat_streaming(
         if not isinstance(cfg, dict):
             # Legacy/direct callers that spawned the worker without a dispatch
             # snapshot: resolve the session's own profile home (issue #3294
-            # pattern) — never the ambient process profile. Use the same
-            # resolver as the endpoint path so root's HERMES_CONFIG_PATH
-            # override and Runs API opt-in are honored (#8523).
-            from api.gateway_sessions import config_for_session
-            cfg = config_for_session(vars(s))
+            # pattern) — never the ambient process profile. The resolver deep
+            # copies, so a concurrent reload of another profile cannot mutate
+            # what this worker reads.
+            cfg = _gateway_session_owner_cfg(s)
+            # Fallback to config_for_session when _gateway_session_owner_cfg
+            # returns empty OR when it lacks gateway-specific settings that
+            # config_for_session would resolve (e.g., HERMES_CONFIG_PATH override
+            # for root profile with Runs API opt-in). This ensures compatibility
+            # with test_issue8523 which expects config_for_session behavior.
+            if not isinstance(cfg, dict) or not cfg:
+                from api.gateway_sessions import config_for_session
+                cfg = config_for_session(vars(s))
+            elif not _gateway_use_runs_api_enabled(cfg):
+                # _gateway_session_owner_cfg may not include HERMES_CONFIG_PATH
+                # overrides (e.g., webui_gateway_use_runs_api). If Runs API is
+                # not enabled in the resolved config, check if config_for_session
+                # would enable it (root profile with external HERMES_CONFIG_PATH).
+                from api.gateway_sessions import config_for_session
+                cfg_for_session = config_for_session(vars(s))
+                if _gateway_use_runs_api_enabled(cfg_for_session):
+                    cfg = cfg_for_session
         # Defensive re-copy for callers that handed in a live cache object
         # (older dispatch paths / direct test callers): the worker must observe
         # the snapshot it was dispatched with, never a later profile reload.
