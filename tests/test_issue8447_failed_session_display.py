@@ -1006,8 +1006,6 @@ def test_list_backfill_does_not_wait_out_a_writer_lock(tmp_path, monkeypatch):
 # index, pre-#8447 sidecars and index rows, an imported CLI duplicate, the
 # Agent's interim row forms, a fail → fail sequence).
 
-import threading  # noqa: E402  (test-module local import, grouped with the r3 tests)
-
 
 def _make_production_shaped_state_db(path):
     """A state.db shaped like the installed Agent's.
