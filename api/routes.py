@@ -29616,8 +29616,16 @@ def _start_regeneration_stream_locked(
         # BEFORE the worker is released, so the binding is durable before any
         # execution can happen. A failed binding refuses the launch (the except
         # below compensates the start and the caller restores the intent).
+        # #7862 re-gate round 18 (P1, "expired receipt permits duplicate
+        # worker"): the route's OWN consume state is the provenance that
+        # cannot expire. A receipt can be swept and a handoff merged away,
+        # which is how the missing-key fast path used to answer True and
+        # let a second goal worker launch for one intent.
         if goal_continuation_attempt_id and not record_goal_continuation_stream(
-            s.session_id, goal_continuation_attempt_id, stream_id
+            s.session_id,
+            goal_continuation_attempt_id,
+            stream_id,
+            consumed=goal_continuation_admitted,
         ):
             logger.error(
                 "Session %s: the goal-continuation admission for attempt %s "
@@ -30469,9 +30477,18 @@ def _start_chat_stream_for_session(
                     # admission is not durably tied to this stream, so the
                     # launch must be refused (the surrounding except compensates
                     # the start and rolls the intent back for a retry).
+                    # #7862 re-gate round 18 (P1, "expired receipt permits
+                    # duplicate worker"): the route's OWN consume state is the
+                    # provenance that cannot expire. A receipt can be swept
+                    # and a handoff merged away, which is how the missing-key
+                    # fast path used to answer True and let a second goal
+                    # worker launch for one intent.
                     goal_continuation_attempt_id = _current_goal_continuation_attempt_id()
                     if not record_goal_continuation_stream(
-                        s.session_id, goal_continuation_attempt_id, stream_id
+                        s.session_id,
+                        goal_continuation_attempt_id,
+                        stream_id,
+                        consumed=consumed_goal_continuation,
                     ):
                         logger.error(
                             "Session %s: the goal-continuation admission for "

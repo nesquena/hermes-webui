@@ -281,9 +281,13 @@ class TestTheLaunchPathsHandleTheSettlement:
 
         # (a) The stream identity is bound to the admission BEFORE the
         # worker starts, so a failed settlement is reconcilable by stream.
+        # #7862 re-gate round 18: the binding also carries the route's OWN
+        # ``consumed`` provenance (the P1 "expired receipt permits duplicate
+        # worker"), so the pinned shape includes that keyword.
         record_m = _first_match(
             scope, r"record_goal_continuation_stream\(\s*s\.session_id\s*,"
-            r"\s*goal_continuation_attempt_id\s*,\s*stream_id\s*,?\s*\)"
+            r"\s*goal_continuation_attempt_id\s*,\s*stream_id\s*,"
+            r"\s*consumed=[a-zA-Z_]+\s*,?\s*\)"
         )
         assert record_m is not None, (
             "the launch path must bind the stream id to the admission before "

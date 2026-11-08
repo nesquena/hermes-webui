@@ -1703,6 +1703,24 @@ async function send(){
 
   const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
   _clearStaleBusyStateBeforeSend({compressionRunning});
+  // #7862 re-gate round 18 (P1, "busy resume goes to steer"): resolve the
+  // resume-bound continuation identity BEFORE the busy routing below chooses
+  // steer versus queue. The literal ``continue`` a ``/goal resume`` message
+  // asks for used to be claimed only at the POST boundary, which the busy
+  // block never reaches: the steer branch ran first, checks only
+  // ``_goalContinuationId`` and shipped the resume follow-up to
+  // /api/chat/steer instead of queueing the identified continuation. Claiming
+  // it here (one-shot, literal control only, no attachment wrapping — the
+  // same boundary the POST path applies) makes the steer condition below see
+  // the identity and fall through to the queue branches, which already carry
+  // the token. A genuine turn keeps its text and still steers.
+  if(!(options&&options.goalContinuationId)&&!_goalContinuationId
+     && typeof _claimResumeGoalContinuationToken==='function'
+     && _isLiteralResumeContinue(text)&&!S.pendingFiles.length
+     && S.session&&S.session.session_id){
+    const _resumeClaimedBeforeRouting=_claimResumeGoalContinuationToken(S.session.session_id);
+    if(_resumeClaimedBeforeRouting) _goalContinuationId=_resumeClaimedBeforeRouting;
+  }
   // If busy or a manual compression is still running, handle based on default_message_mode
   if(S.busy||compressionRunning){
     if(text||S.pendingFiles.length){

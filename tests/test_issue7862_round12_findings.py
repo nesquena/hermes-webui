@@ -486,10 +486,14 @@ class TestLaunchPathsRefuseOnUnboundStreamIdentity:
             "the regeneration path never receives the admission's attempt "
             "identity, so it cannot bind it to its stream (finding 2)"
         )
+        # #7862 re-gate round 18: the binding also carries the route's OWN
+        # ``consumed`` provenance (the P1 "expired receipt permits duplicate
+        # worker"), so the pinned shape includes that keyword.
         binding = _first_match(
             regen_scope,
             r"record_goal_continuation_stream\(\s*s\.session_id\s*,\s*"
-            r"goal_continuation_attempt_id\s*,\s*stream_id\s*,?\s*\)",
+            r"goal_continuation_attempt_id\s*,\s*stream_id\s*,"
+            r"\s*consumed=[a-zA-Z_]+\s*,?\s*\)",
         )
         assert binding is not None, (
             "the regeneration path never binds the admission's stream identity "
@@ -503,10 +507,14 @@ class TestLaunchPathsRefuseOnUnboundStreamIdentity:
 
     def test_the_worker_path_still_records_before_start(self):
         scope = _routes_scope()
+        # #7862 re-gate round 18: the pinned shape includes the route's OWN
+        # ``consumed`` provenance keyword (the P1 "expired receipt permits
+        # duplicate worker").
         record_m = _first_match(
             scope,
             r"record_goal_continuation_stream\(\s*s\.session_id\s*,"
-            r"\s*goal_continuation_attempt_id\s*,\s*stream_id\s*,?\s*\)",
+            r"\s*goal_continuation_attempt_id\s*,\s*stream_id\s*,"
+            r"\s*consumed=[a-zA-Z_]+\s*,?\s*\)",
         )
         assert record_m is not None
         thr = scope.find("thr.start()")
