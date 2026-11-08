@@ -2586,8 +2586,6 @@ def recover_deferred_goal_continuation_handoffs(
     sleeping through the lease. Never raises into the chat path; a lock it
     cannot take leaves the registration in place for the next attempt.
     """
-    from api.config import PENDING_GOAL_CONTINUATION_RECORDS
-
     with _LOCK:
         now = time.time() if now is None else float(now)
         due = [
