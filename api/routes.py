@@ -9188,13 +9188,24 @@ class _ContextLengthLookupInputs:
 # provider id it is given. Measured on every supported Agent with a no-network
 # request recorder (union over Agent versions: an Agent that skips a host only
 # makes this table conservative). "no_url" hosts are contacted when the lookup
-# passes no base URL; "with_url" hosts even when it passes one. Any id not listed
+# passes no base URL; "with_url" hosts even when it passes one, unless the named
+# detector says the installed Agent follows the URL, and only when the Agent's
+# lookup reaches its provider-specific step for that URL. Any id not listed
 # sends its key only to the base URL's own host.
 _CONTEXT_LOOKUP_FIXED_HOSTS = {
     "anthropic": {"no_url": ("api.anthropic.com",)},
     "novita": {"no_url": ("api.novita.ai",)},
-    "copilot": {"no_url": ("api.githubcopilot.com",)},
-    "copilot-acp": {"no_url": ("api.githubcopilot.com",)},
+    # Older Agents' Copilot live-models step ignores the lookup URL; newer ones dropped it.
+    "copilot": {
+        "no_url": ("api.githubcopilot.com",),
+        "with_url": ("api.githubcopilot.com",),
+        "with_url_unless": "_agent_copilot_lookup_follows_url",
+    },
+    "copilot-acp": {
+        "no_url": ("api.githubcopilot.com",),
+        "with_url": ("api.githubcopilot.com",),
+        "with_url_unless": "_agent_copilot_lookup_follows_url",
+    },
     # Older Agents' Codex catalog ignores the lookup URL; newer ones follow it.
     "openai-codex": {
         "no_url": ("chatgpt.com",),
@@ -9244,12 +9255,90 @@ def _agent_codex_catalog_follows_url() -> bool:
     return callable(getattr(_mm, "_codex_catalog_urls", None))
 
 
+def _agent_copilot_lookup_follows_url() -> bool:
+    """True when the installed Agent's lookup has no Copilot live-models step.
+
+    Older Agents (v0.22.2-v0.22.5, v2026.9.24) have ``hermes_cli.models.get_copilot_model_context``,
+    which their lookup calls with the key alone for a Copilot id (or an id inferred as Copilot)
+    once it reaches the provider-specific step, so it contacts api.githubcopilot.com whatever the
+    lookup URL. Newer Agents dropped that step and follow the URL. Without an importable
+    ``hermes_cli.models``, answer False so the Copilot row applies (the key is dropped).
+
+    The function's absence is read as "follows the URL". An Agent that renamed it but kept the
+    step would be misread; the installed-Agent coverage tests (``test_copilot_live_models_with_a_url
+    _is_in_the_table``, ``test_the_copilot_detector_matches_the_installed_agent``) fail on such an
+    Agent, which is why they run on every supported Agent before a release (#8822 note §5).
+    """
+    try:
+        from hermes_cli import models as _hm
+    except Exception:
+        return False
+    return not callable(getattr(_hm, "get_copilot_model_context", None))
+
+
+# Ids the Agent re-infers from the URL before its provider-specific step.
+_CONTEXT_LOOKUP_URL_INFERRED_IDS = ("", "custom", "openrouter")
+
+
+def _agent_inferred_context_provider(base_url: str) -> str:
+    """The provider id the installed Agent infers from ``base_url``, or "".
+
+    This is the Agent's own inference, so when it's missing the Agent infers nothing either.
+    A renamed one is caught by the coverage test, which probes the inferred ids over every
+    host the Agent knows.
+    """
+    try:
+        from agent import model_metadata as _mm
+    except Exception:
+        return ""
+    infer = getattr(_mm, "_infer_provider_from_url", None)
+    if not callable(infer):
+        return ""
+    try:
+        return str(infer(base_url) or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _agent_reaches_provider_step_with_url(provider: str, base_url: str) -> bool:
+    """Whether the installed Agent's lookup reaches its provider-specific step with this URL.
+
+    Read from the Agent's own early-return check: a truly custom endpoint (``_is_custom_endpoint``
+    and not ``_is_known_provider_base_url``) returns before that step, except for
+    ``openai-codex``. Then no fixed host is contacted, only the URL's own. Fails closed: with no
+    importable Agent, or a predicate missing or raising, answer True so the fixed-host rows apply
+    (the key is dropped rather than risked).
+    """
+    if str(provider or "").strip().lower() == "openai-codex":
+        return True
+    try:
+        from agent import model_metadata as _mm
+    except Exception:
+        return True
+    custom = getattr(_mm, "_is_custom_endpoint", None)
+    known = getattr(_mm, "_is_known_provider_base_url", None)
+    if not (callable(custom) and callable(known)):
+        return True
+    try:
+        return not (custom(base_url) and not known(base_url))
+    except Exception:
+        return True
+
+
 def _context_lookup_contacted_origins(provider: str, base_url: str) -> frozenset:
     """Every origin the Agent may send the lookup's key to for (provider, base_url)."""
     if str(base_url or "").strip():
         # A URL that names no host can't be owned by any key (the empty string
         # is never in an owned set), so its key is dropped.
-        return frozenset({_context_lookup_origin(base_url)}) | _context_lookup_fixed_origins(provider, with_url=True)
+        origins = frozenset({_context_lookup_origin(base_url)})
+        if not _agent_reaches_provider_step_with_url(provider, base_url):
+            return origins
+        origins |= _context_lookup_fixed_origins(provider, with_url=True)
+        if str(provider or "").strip().lower() in _CONTEXT_LOOKUP_URL_INFERRED_IDS:
+            inferred = _agent_inferred_context_provider(base_url)
+            if inferred:
+                origins |= _context_lookup_fixed_origins(inferred, with_url=True)
+        return origins
     return _context_lookup_fixed_origins(provider, with_url=False)
 
 

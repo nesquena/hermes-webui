@@ -238,7 +238,125 @@ def test_the_fixed_host_table_names_every_measured_host():
     assert table["anthropic"]["no_url"] == ("api.anthropic.com",)
     assert table["novita"]["no_url"] == ("api.novita.ai",)
     assert table["copilot"]["no_url"] == table["copilot-acp"]["no_url"] == ("api.githubcopilot.com",)
+    assert table["copilot"]["with_url"] == table["copilot-acp"]["with_url"] == ("api.githubcopilot.com",)
+    assert table["copilot"]["with_url_unless"] == table["copilot-acp"]["with_url_unless"] == (
+        "_agent_copilot_lookup_follows_url")
     assert table["openai-codex"]["no_url"] == table["openai-codex"]["with_url"] == ("chatgpt.com",)
+
+
+# ── The Copilot row with a URL (#8822 d-i) ─────────────────────────────────────
+#
+# Older Agents call their Copilot live-models step with the key alone once the lookup reaches the
+# provider-specific step, so a Copilot id's key (or one for an id the Agent infers as Copilot from the URL)
+# reaches api.githubcopilot.com even with a URL set. The row applies only on such Agents and only when the
+# Agent's own early-return check lets the lookup reach that step. Fake Agent modules stand in below, so these
+# tests need no Agent; the installed-Agent tests further down check the same helpers against real Agents.
+
+K = "https://api.known-provider.test/v1"   # a URL the fake Agent treats as a known provider's: the step is reached
+G = "https://models.github-inferred.test/v1"   # a URL the fake Agent infers as Copilot
+
+
+def _fake_agent(monkeypatch, *, copilot_step=True, predicates=True, raising=False, infer=None):
+    """Install stand-in ``agent.model_metadata`` and ``hermes_cli.models`` modules for one test.
+
+    ``predicates=False`` leaves out the Agent's early-return check; ``raising=True`` makes it raise.
+    ``copilot_step`` decides whether ``get_copilot_model_context`` exists. ``infer`` maps URL -> inferred id.
+    """
+    import sys
+
+    mm = types.ModuleType("agent.model_metadata")
+    if predicates:
+        def _boom(url):
+            raise RuntimeError("predicate failed")
+
+        setattr(mm, "_is_custom_endpoint", _boom if raising else (lambda url: url not in (K, G)))
+        setattr(mm, "_is_known_provider_base_url", _boom if raising else (lambda url: url in (K, G)))
+    setattr(mm, "_infer_provider_from_url", lambda url: (infer or {}).get(url, ""))
+    agent_pkg = types.ModuleType("agent")
+    setattr(agent_pkg, "model_metadata", mm)
+    hm = types.ModuleType("hermes_cli.models")
+    if copilot_step:
+        setattr(hm, "get_copilot_model_context", lambda *a, **k: None)
+    cli_pkg = types.ModuleType("hermes_cli")
+    setattr(cli_pkg, "models", hm)
+    for name, module in (("agent", agent_pkg), ("agent.model_metadata", mm),
+                         ("hermes_cli", cli_pkg), ("hermes_cli.models", hm)):
+        monkeypatch.setitem(sys.modules, name, module)
+
+
+def _no_agent(monkeypatch):
+    import sys
+
+    for name in ("agent", "agent.model_metadata", "hermes_cli", "hermes_cli.models"):
+        monkeypatch.setitem(sys.modules, name, None)   # importing it now raises ImportError
+
+
+def _copilot_caller_key(url):
+    return _lookup({"model": {"provider": "copilot"}}, "copilot", base_url=url, api_key="K-CALLER")
+
+
+def test_an_older_agent_drops_a_copilot_key_whose_url_reaches_the_copilot_step(monkeypatch):
+    _fake_agent(monkeypatch)
+    got = _copilot_caller_key(K)
+    assert got.base_url == K
+    assert got.api_key == ""
+
+
+def test_an_older_agent_keeps_a_copilot_key_on_a_custom_endpoint_it_returns_early_for(monkeypatch):
+    """The narrowing: at a truly custom endpoint the Agent returns before the Copilot step, so the key goes
+    only to that URL, which it owns. Also the control that keeps the fail-closed tests below from passing
+    vacuously."""
+    _fake_agent(monkeypatch)
+    got = _copilot_caller_key(C)
+    assert (got.base_url, got.api_key) == (C, "K-CALLER")
+
+
+def test_a_newer_agent_keeps_a_copilot_key_on_its_own_url(monkeypatch):
+    _fake_agent(monkeypatch, copilot_step=False)
+    for url in (C, K):
+        got = _copilot_caller_key(url)
+        assert (got.base_url, got.api_key) == (url, "K-CALLER")
+
+
+@pytest.mark.parametrize("broken", ["no-agent", "no-predicates", "predicate-raises"])
+def test_the_copilot_row_fails_closed_when_the_agents_checks_cant_be_read(broken, monkeypatch):
+    """Condition 1 (auditor, STB8822DIACK): when the row's inputs can't be read (no importable Agent, the
+    early-return predicates missing, or one raising), the row applies and the key is dropped, even at a URL the
+    real check would have let it keep (C, as in the control above)."""
+    if broken == "no-agent":
+        _no_agent(monkeypatch)
+        assert routes._agent_copilot_lookup_follows_url() is False
+    else:
+        _fake_agent(monkeypatch, predicates=(broken != "no-predicates"), raising=(broken == "predicate-raises"))
+    assert routes._agent_reaches_provider_step_with_url("copilot", C) is True
+    got = _copilot_caller_key(C)
+    assert got.base_url == C
+    assert got.api_key == ""
+
+
+def test_the_copilot_detector_reads_the_agents_copilot_step(monkeypatch):
+    """The detector says "follows the URL" only when ``hermes_cli.models`` imports and lacks the Copilot step.
+    If it can't be imported, it fails closed (False). An Agent that keeps the step under a new name is the
+    absence-detector risk (#8822 note §5); the installed-Agent tests below catch it."""
+    _fake_agent(monkeypatch, copilot_step=True)
+    assert routes._agent_copilot_lookup_follows_url() is False
+    _fake_agent(monkeypatch, copilot_step=False)
+    assert routes._agent_copilot_lookup_follows_url() is True
+    _no_agent(monkeypatch)
+    assert routes._agent_copilot_lookup_follows_url() is False
+
+
+@pytest.mark.parametrize("provider", ["", "custom", "openrouter"])
+def test_an_id_the_agent_infers_as_copilot_gets_the_copilot_row(provider, monkeypatch):
+    """For the ids the Agent re-infers from the URL, a URL it infers as Copilot reaches the Copilot step on an
+    older Agent; one it infers as nothing keeps the key on its own URL."""
+    _fake_agent(monkeypatch, infer={G: "copilot"})
+    got = _lookup({"model": {"provider": provider or "custom"}}, provider, base_url=G, api_key="K-CALLER")
+    assert got.base_url == G
+    assert got.api_key == ""
+    _fake_agent(monkeypatch, infer={})
+    got = _lookup({"model": {"provider": provider or "custom"}}, provider, base_url=G, api_key="K-CALLER")
+    assert (got.base_url, got.api_key) == (G, "K-CALLER")
 
 
 # ── The two streaming call sites that used to fall back to the Agent's key ─────
@@ -493,8 +611,16 @@ def _agent_keyed_hosts(state, url, key, provider):
     for mode in ("miss", "hit"):
         for module in (mm, hm):
             for name, value in list(vars(module).items()):
-                if "cache" in name.lower() and not name.isupper() and isinstance(value, (dict, set, list)):
+                if "cache" not in name.lower() or name.isupper():
+                    continue
+                if isinstance(value, (dict, set, list)):
                     value.clear()
+                elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                    # A cache's timestamp: older Agents keep the GitHub model catalog behind a TTL checked against
+                    # ``time.monotonic()``, and an emptied catalog with a fresh timestamp reads as "cached empty",
+                    # so a second probe with the same key would contact nothing. -inf makes every TTL expired,
+                    # whatever the host's uptime (a fresh CI runner can be younger than the TTL).
+                    setattr(module, name, float("-inf") if "time" in name.lower() else 0)
         shutil.rmtree(home, ignore_errors=True)
         home.mkdir(parents=True)
         state["mode"] = mode
@@ -570,14 +696,8 @@ def _agent_known_hosts():
     return sorted(h if h.count(".") >= 2 else f"api.{h}" for h in hosts if h)
 
 
-def _agent_has_copilot_live_models_step():
-    import hermes_cli.models as hm
-
-    return callable(getattr(hm, "get_copilot_model_context", None))
-
-
-def _is_held_copilot_row(provider, url, unlisted):
-    """#8822 d (held for Nathan): Copilot's live-models step reached with a URL set."""
+def _is_copilot_with_url_row(provider, url, unlisted):
+    """#8822 d-i: Copilot's live-models step reached with a URL set (older Agents only)."""
     return bool(url) and unlisted == {"api.githubcopilot.com"}
 
 
@@ -605,23 +725,45 @@ def test_the_fixed_host_table_covers_the_installed_agent(shape, recorded_agent_r
 
     Probed over the Agent's whole provider set (as the lookup emits each id) plus ``''``, ``custom`` and
     ``openrouter``, with no URL, a custom endpoint and a known provider host, and for the ids the Agent infers from
-    a URL, every known host. The held Copilot-with-a-URL rows are checked separately below.
+    a URL, every known host. The Copilot-with-a-URL rows are reported separately below.
     """
     key = "K-synthetic" if shape == "synthetic" else _jwt("K-synthetic")
-    gaps = [g for g in _coverage_gaps(recorded_agent_requests, key) if not _is_held_copilot_row(*g)]
+    gaps = [g for g in _coverage_gaps(recorded_agent_requests, key) if not _is_copilot_with_url_row(*g)]
     assert not gaps, f"the Agent sent the key to hosts the table lacks: {sorted((p, u, sorted(h)) for p, u, h in gaps)}"
 
 
 @requires_agent
 @pytest.mark.parametrize("shape", ["synthetic", "jwt"])
-def test_copilot_live_models_with_a_url_is_in_the_table(shape, recorded_agent_requests, request):
-    """Older Agents (with Copilot's live-models step) send a Copilot id's key, or an id inferred from a GitHub URL,
-    to api.githubcopilot.com even with a URL set. #8822 d covers it; held until Nathan answers."""
-    if _agent_has_copilot_live_models_step():
-        request.node.add_marker(pytest.mark.xfail(strict=True, reason="#8822 d: Copilot live models with a URL, held"))
+def test_copilot_live_models_with_a_url_is_in_the_table(shape, recorded_agent_requests):
+    """Older Agents (with Copilot's live-models step) send a Copilot id's key, or that of an id inferred from a
+    GitHub URL, to api.githubcopilot.com even with a URL set. The d-i row must list every such host. This is also
+    the backstop for the detector: an Agent that renames ``get_copilot_model_context`` but keeps the step makes
+    the detector say "follows the URL", and fails here."""
     key = "K-synthetic" if shape == "synthetic" else _jwt("K-synthetic")
-    held = [g for g in _coverage_gaps(recorded_agent_requests, key) if _is_held_copilot_row(*g)]
-    assert not held, f"{len(held)} Copilot-with-a-URL rows, e.g. {sorted((p, u) for p, u, _ in held)[:4]}"
+    rows = [g for g in _coverage_gaps(recorded_agent_requests, key) if _is_copilot_with_url_row(*g)]
+    assert not rows, f"{len(rows)} Copilot-with-a-URL rows, e.g. {sorted((p, u) for p, u, _ in rows)[:4]}"
+
+
+@requires_agent
+def test_the_copilot_detector_matches_the_installed_agent(recorded_agent_requests):
+    """``_agent_copilot_lookup_follows_url`` must say "follows" exactly when the Agent sends a Copilot key with a
+    known provider's URL nowhere but that URL, so a renamed Agent function fails here instead of silently
+    letting the key reach api.githubcopilot.com."""
+    known = "https://api.openai.com/v1"
+    sent = _agent_keyed_hosts(recorded_agent_requests, known, "K-synthetic", "copilot")
+    assert ("api.githubcopilot.com" in sent) == (not routes._agent_copilot_lookup_follows_url())
+
+
+@requires_agent
+@pytest.mark.parametrize("url", [C, "https://api.openai.com/v1"])
+def test_the_early_return_gate_matches_the_installed_agent(url, recorded_agent_requests):
+    """On an Agent with the Copilot step, ``_agent_reaches_provider_step_with_url`` must be True exactly when the
+    Agent's lookup reaches that step for ``url``: the key then also goes to api.githubcopilot.com. A custom
+    endpoint returns early (key stays on the URL); a known provider's URL doesn't."""
+    if routes._agent_copilot_lookup_follows_url():
+        pytest.skip("the installed Agent has no Copilot live-models step")
+    sent = _agent_keyed_hosts(recorded_agent_requests, url, "K-synthetic", "copilot")
+    assert ("api.githubcopilot.com" in sent) == routes._agent_reaches_provider_step_with_url("copilot", url)
 
 
 @requires_agent
