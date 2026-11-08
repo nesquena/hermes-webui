@@ -5880,6 +5880,15 @@ function _dropStaleLiveModelOptions(provider, freshValues, sel){
   try{
     if(!sel||!sel.querySelectorAll) return 0;
     const selected=(sel.options&&sel.selectedIndex>=0)?sel.options[sel.selectedIndex]:null;
+    // #6919 (gate C48-F3): the append path deduplicates on the NORMALIZED
+    // identity, so a fresh `vendor/model` never replaces an existing
+    // `vendor/Model`. Matching the RAW value here would then delete the
+    // survivor and Settings would lose both spellings. Resolve each live
+    // option's identity with the same helper the append uses — the raw
+    // exact-spelling membership check above stays as the fast path.
+    const identityOf=(typeof _modelPickerOptionIdentity==='function')
+      ? (value)=>_modelPickerOptionIdentity(value,provider)
+      : null;
     for(const og of sel.querySelectorAll('optgroup')){
       if(String((og.dataset||{}).provider||'')!==String(provider)) continue;
       for(const opt of [...(og.children||[])]){
@@ -5890,6 +5899,11 @@ function _dropStaleLiveModelOptions(provider, freshValues, sel){
         // twin was deduped away) must survive: the catalog still offers it.
         if(opt.dataset&&opt.dataset.catalogOrigin==='1') continue;
         if(freshValues.has(String(opt.value))) continue;
+        // #6919 (gate C48-F3): the append deduplicated on the normalized
+        // identity, so the prune must recognize it too — a fresh
+        // `vendor/model` keeps an existing `vendor/Model` instead of the
+        // raw-value mismatch removing the only remaining spelling.
+        if(identityOf&&freshValues.has(identityOf(opt.value))) continue;
         og.removeChild(opt);
         removed++;
       }
@@ -5954,7 +5968,16 @@ function _addLiveModelsToSelect(provider, models, sel, opts){
       if(_isPortalFetch && !mid.startsWith('@')){
         mid=`@${provider}:${mid}`;
       }
-      if(refreshed) refreshed.add(String(mid));
+      if(refreshed){
+        refreshed.add(String(mid));
+        // #6919 (gate C48-F3): the pruner compares NORMALIZED identities, so
+        // the reconcile set must carry them too. The append skips the fresh
+        // spelling when the normalized identity already exists, and a
+        // raw-value-only set would then fail the identity membership test and
+        // prune the existing option — vendor/Model -> vendor/model would
+        // remove both.
+        refreshed.add(optionIdentity(mid,provider));
+      }
       if(existingIds.has(mid)) continue;
       const identity=optionIdentity(mid,provider);
       let twin=null;

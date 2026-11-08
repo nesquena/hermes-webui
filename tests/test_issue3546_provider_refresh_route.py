@@ -1240,3 +1240,286 @@ def test_empty_membership_reconcile_is_wired_to_the_pruner():
         "#6919: only the reconcile path may reconcile an empty membership — "
         "the plain append path keeps its empty-array no-op"
     )
+
+
+# ---------------------------------------------------------------------------
+# #6919 (gate C48-F3): deduplication and pruning must share ONE identity.
+# The append path recognizes a NORMALIZED identity (vendor/Model ===
+# vendor/model, dashes as dots, case-insensitive) and skips the fresh
+# spelling; the prune path compared RAW values and deleted the existing
+# spelling — Settings ended up with neither option after a Refresh Models
+# click that reported HTTP 200.
+#
+# Fix specification: maintain one Settings option per successful fresh
+# provider/model identity; reconcile dedup and prune consistently while
+# preserving canonical fresh outgoing IDs and selected/static/sibling
+# choices; cover case-variant and same-spelling behaviour.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_case_variant_live_option_survives_reconcile_prune():
+    """C48-F3 discriminator: an UNSELECTED live-only option whose spelling
+    differs only in case from the fresh member must survive reconciliation.
+    Dedup skips the fresh spelling (same normalized identity), so pruning the
+    old one removes both. The selected option, the static catalog row, the
+    sibling provider's option and the canonical routed outgoing ID must all
+    stay untouched, and exactly one option may remain for the identity."""
+    result = _replay_add_live("""
+  const group=_el('optgroup',{dataset:{provider:'custom:cpa'}});
+  group.appendChild(_mk('@custom:cpa:static-pick',''));   // static catalog row
+  group.appendChild(_mk('@custom:cpa:selected','Live model — fetched from provider',{provider:'custom:cpa',live:'1'}));
+  group.appendChild(_mk('@custom:cpa:vendor/Model','Live model — fetched from provider',{provider:'custom:cpa',live:'1'}));
+  const other=_el('optgroup',{dataset:{provider:'other'}});
+  other.appendChild(_mk('other/model','Live model — fetched from provider',{provider:'other',live:'1'}));
+  const sel=_makeSelect([group,other],'@custom:cpa:selected');
+  _addLiveModelsToSelect('custom:cpa',[
+    {id:'selected',label:'Selected'},
+    {id:'vendor/Model',label:'Vendor Model'},
+    {id:'static-pick',label:'Static Pick'},
+  ],sel,{reconcile:true});
+  const afterFirst=group.children.map(o=>o.value);
+  // Fresh payload advertises the LOWERCASE spelling of the same identity.
+  _addLiveModelsToSelect('custom:cpa',[
+    {id:'selected',label:'Selected'},
+    {id:'vendor/model',label:'Vendor Model'},
+    {id:'static-pick',label:'Static Pick'},
+  ],sel,{reconcile:true});
+  const afterSecond=group.children.map(o=>o.value);
+  const vendorCount=afterSecond.filter(v=>String(v).toLowerCase().includes('vendor/')).length;
+  process.stdout.write(JSON.stringify({
+    afterFirst:afterFirst,
+    afterSecond:afterSecond,
+    vendorCount:vendorCount,
+    selectedAfter:sel.value,
+    otherAfter:other.children.map(o=>o.value),
+  }));
+""")
+    assert result["afterFirst"] == [
+        "@custom:cpa:static-pick",
+        "@custom:cpa:selected",
+        "@custom:cpa:vendor/Model",
+    ], f"unexpected hydrated picker shape: {result['afterFirst']}"
+    assert result["vendorCount"] == 1, (
+        "C48-F3: the case-variant identity must survive with exactly ONE "
+        f"Settings option — got {result['afterSecond']}"
+    )
+    assert "@custom:cpa:vendor/Model" in result["afterSecond"], (
+        "C48-F3: the existing vendor/Model option must NOT be pruned by a "
+        f"fresh vendor/model — got {result['afterSecond']}"
+    )
+    assert result["selectedAfter"] == "@custom:cpa:selected", (
+        "the current selection must survive reconciliation — "
+        f"got {result['selectedAfter']}"
+    )
+    assert "@custom:cpa:selected" in result["afterSecond"], (
+        "the selected option must stay selectable — "
+        f"got {result['afterSecond']}"
+    )
+    assert "@custom:cpa:static-pick" in result["afterSecond"], (
+        "the static catalog row must never be pruned — "
+        f"got {result['afterSecond']}"
+    )
+    assert result["otherAfter"] == ["other/model"], (
+        "reconciliation is provider-scoped; the sibling provider's option "
+        f"must survive — got {result['otherAfter']}"
+    )
+    # The canonical routed outgoing ID of the fresh member must be the
+    # option's value — no rewrite, no duplicate.
+    assert sorted(result["afterSecond"]) == sorted([
+        "@custom:cpa:static-pick",
+        "@custom:cpa:selected",
+        "@custom:cpa:vendor/Model",
+    ]), f"unexpected post-reconcile picker shape: {result['afterSecond']}"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_same_spelling_live_option_survives_reconcile_prune():
+    """Same-spelling control for the C48-F3 fix: an option whose spelling
+    EXACTLY matches a fresh member survives (this must stay green before and
+    after the identity fix), while an ordinary stale live-only member is
+    still pruned on the next refresh."""
+    result = _replay_add_live("""
+  const group=_el('optgroup',{dataset:{provider:'custom:cpa'}});
+  group.appendChild(_mk('@custom:cpa:vendor/model','Live model — fetched from provider',{provider:'custom:cpa',live:'1'}));
+  group.appendChild(_mk('@custom:cpa:gone','Live model — fetched from provider',{provider:'custom:cpa',live:'1'}));
+  const sel=_makeSelect([group],null);
+  _addLiveModelsToSelect('custom:cpa',[
+    {id:'vendor/model',label:'Vendor Model'},
+    {id:'gone',label:'Gone'},
+  ],sel,{reconcile:true});
+  const afterFirst=group.children.map(o=>o.value);
+  _addLiveModelsToSelect('custom:cpa',[{id:'vendor/model',label:'Vendor Model'}],sel,{reconcile:true});
+  const afterSecond=group.children.map(o=>o.value);
+  process.stdout.write(JSON.stringify({afterFirst:afterFirst,afterSecond:afterSecond}));
+""")
+    assert result["afterFirst"] == ["@custom:cpa:vendor/model", "@custom:cpa:gone"], (
+        f"unexpected hydrated picker shape: {result['afterFirst']}"
+    )
+    assert result["afterSecond"] == ["@custom:cpa:vendor/model"], (
+        "the same-spelling live option must survive and the stale live-only "
+        f"option must still be pruned — got {result['afterSecond']}"
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_case_variant_live_only_option_survives_the_refresh_chain():
+    """C48-F3, end to end — the maintainer's browser schedule: Settings holds
+    an UNSELECTED live-only OpenRouter option `vendor/Model`; Refresh Models
+    posts 200 and the fresh /api/models/live DATA advertises `vendor/model`.
+    At least one Settings option for the identity must survive, and the
+    selection, static catalog row and sibling-provider option stay intact."""
+    result = _replay_empty_membership("""
+  window._activeProvider='openrouter';
+  const group=_el('optgroup',{dataset:{provider:'openrouter'}});
+  group.appendChild(_mk('openrouter/static-pick',''));   // static catalog row
+  group.appendChild(_mk('openrouter/selected','Live model — fetched from provider',{provider:'openrouter',live:'1'}));
+  group.appendChild(_mk('vendor/Model','Live model — fetched from provider',{provider:'openrouter',live:'1'}));
+  const other=_el('optgroup',{dataset:{provider:'zai'}});
+  other.appendChild(_mk('zai/keep','Live model — fetched from provider',{provider:'zai',live:'1'}));
+  const sel=_makeSelect([group,other],'openrouter/selected');
+  _settingsSel=sel;
+
+  // A completed live fetch hydrates the picker with the same spellings.
+  const first=_fetchLiveModels('openrouter',sel,null,{reconcile:true});
+  await _tick();
+  fetchDeferreds[0].resolve({json:async()=>({models:[
+    {id:'openrouter/selected',label:'Selected'},
+    {id:'vendor/Model',label:'Vendor Model'},
+    {id:'openrouter/static-pick',label:'Static Pick'},
+  ]})});
+  await first;
+  await _tick();
+  const afterFetch=group.children.map(o=>o.value);
+
+  // Refresh Models: the epoch invalidation dispatches the replacement fetch.
+  invalidateLiveModelCache();
+  await _tick();
+  const dispatched=fetchUrls.length;
+
+  // The fresh live DATA advertises the case-variant spelling.
+  fetchDeferreds[1].resolve({json:async()=>({models:[
+    {id:'openrouter/selected',label:'Selected'},
+    {id:'vendor/model',label:'Vendor Model'},
+    {id:'openrouter/static-pick',label:'Static Pick'},
+  ]})});
+  await _tick();
+  await _tick();
+  const afterRefresh=group.children.map(o=>o.value);
+  const vendorCount=afterRefresh.filter(v=>String(v).toLowerCase().includes('vendor/')).length;
+  process.stdout.write(JSON.stringify({
+    afterFetch:afterFetch,
+    dispatched:dispatched,
+    afterRefresh:afterRefresh,
+    vendorCount:vendorCount,
+    selectedAfter:sel.value,
+    otherAfter:other.children.map(o=>o.value),
+  }));
+""")
+    assert result["afterFetch"] == [
+        "openrouter/static-pick",
+        "openrouter/selected",
+        "vendor/Model",
+    ], f"unexpected hydrated picker shape: {result['afterFetch']}"
+    assert result["dispatched"] == 2, (
+        "the invalidation must dispatch exactly one replacement fetch, "
+        f"got {result['dispatched']}"
+    )
+    assert result["vendorCount"] == 1, (
+        "C48-F3: after a refresh whose fresh DATA advertises vendor/model, "
+        "the Settings picker must still offer the vendor/Model identity — "
+        f"got {result['afterRefresh']}"
+    )
+    assert "vendor/Model" in result["afterRefresh"], (
+        "C48-F3: the existing unselected live-only option must survive the "
+        f"refresh chain — got {result['afterRefresh']}"
+    )
+    assert result["selectedAfter"] == "openrouter/selected", (
+        "the refresh chain must never move the selection — "
+        f"got {result['selectedAfter']}"
+    )
+    assert "openrouter/selected" in result["afterRefresh"] and "openrouter/static-pick" in result["afterRefresh"], (
+        f"the selected and static choices must survive: {result['afterRefresh']}"
+    )
+    assert result["otherAfter"] == ["zai/keep"], (
+        "the sibling provider's option must survive the refresh chain — "
+        f"got {result['otherAfter']}"
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_same_spelling_live_only_option_survives_the_refresh_chain():
+    """Same-spelling control for the refresh chain: the fresh DATA advertises
+    the exact existing spelling — the option survives, no duplicate appears,
+    and a genuinely stale live-only option is still pruned. Must stay green
+    before and after the identity fix."""
+    result = _replay_empty_membership("""
+  window._activeProvider='openrouter';
+  const group=_el('optgroup',{dataset:{provider:'openrouter'}});
+  group.appendChild(_mk('openrouter/selected','Live model — fetched from provider',{provider:'openrouter',live:'1'}));
+  group.appendChild(_mk('vendor/model','Live model — fetched from provider',{provider:'openrouter',live:'1'}));
+  group.appendChild(_mk('vendor/gone','Live model — fetched from provider',{provider:'openrouter',live:'1'}));
+  const sel=_makeSelect([group],'openrouter/selected');
+  _settingsSel=sel;
+
+  const first=_fetchLiveModels('openrouter',sel,null,{reconcile:true});
+  await _tick();
+  fetchDeferreds[0].resolve({json:async()=>({models:[
+    {id:'openrouter/selected',label:'Selected'},
+    {id:'vendor/model',label:'Vendor Model'},
+    {id:'vendor/gone',label:'Gone'},
+  ]})});
+  await first;
+  await _tick();
+
+  invalidateLiveModelCache();
+  await _tick();
+  // Same spelling, stale member removed from the fresh membership.
+  fetchDeferreds[1].resolve({json:async()=>({models:[
+    {id:'openrouter/selected',label:'Selected'},
+    {id:'vendor/model',label:'Vendor Model'},
+  ]})});
+  await _tick();
+  await _tick();
+  const afterRefresh=group.children.map(o=>o.value);
+  const vendorCount=afterRefresh.filter(v=>String(v).toLowerCase().includes('vendor/')).length;
+  process.stdout.write(JSON.stringify({
+    afterRefresh:afterRefresh,
+    vendorCount:vendorCount,
+    selectedAfter:sel.value,
+  }));
+""")
+    assert result["vendorCount"] == 1, (
+        "the same-spelling option must survive exactly once — "
+        f"got {result['afterRefresh']}"
+    )
+    assert result["afterRefresh"] == [
+        "openrouter/selected",
+        "vendor/model",
+    ], (
+        "the same-spelling option must survive while the stale live-only "
+        f"option is pruned — got {result['afterRefresh']}"
+    )
+    assert result["selectedAfter"] == "openrouter/selected", (
+        "the refresh chain must never move the selection — "
+        f"got {result['selectedAfter']}"
+    )
+
+
+def test_prune_uses_the_same_identity_as_dedup():
+    """Structural pin for C48-F3: the reconcile set must carry the NORMALIZED
+    identity of every fresh member, and the pruner must resolve each live
+    option's NORMALIZED identity (guarded for standalone extraction). Raw
+    value and identity then agree, so vendor/Model -> vendor/model cannot
+    remove both."""
+    ui = _read_static("ui.js")
+    add = _extract_function_body(ui, "function _addLiveModelsToSelect(")
+    drop = _extract_function_body(ui, "function _dropStaleLiveModelOptions(")
+    assert "optionIdentity(mid,provider)" in add, (
+        "C48-F3: the reconcile set must carry each fresh member's NORMALIZED "
+        "identity — the pruner compares identities, not raw spellings"
+    )
+    assert "_modelPickerOptionIdentity" in drop, (
+        "C48-F3: the pruner must resolve the NORMALIZED identity of each live "
+        "option — a fresh vendor/model must match an existing vendor/Model"
+    )
