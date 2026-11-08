@@ -115,6 +115,9 @@ send. The `review` branch (`api/kanban_bridge.py:472`) then:
    the reviewer, emits `review_requested`, and clears a live claim because a
    dashboard action is an explicit human override. Any other source status is
    refused with HTTP 400 `cannot request review from status: <status>`;
+   running/ready sources can still be refused for other reasons (e.g.
+   unfinished dependencies), and the native reason is returned when the Agent
+   supports it;
 3. when the same PATCH carries the `assignee` key, the assignee write is
    deferred until after `request_review` so the event keeps the original
    implementer (the Agent dashboard plugin orders the two the same way). An

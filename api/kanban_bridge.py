@@ -19,6 +19,7 @@ way back to ``ready`` — is documented in ``docs/kanban.md``.
 
 from __future__ import annotations
 
+import inspect
 import json
 from api.sse_chunked import end_sse_headers
 import time
@@ -482,19 +483,30 @@ def _patch_task(conn, task_id: str, body: dict):
         if not hasattr(kb, "request_review"):
             raise RuntimeError("review requires a newer Hermes Agent")
         reviewer = body.get("assignee") or None
-        ok = kb.request_review(
-            conn,
-            task_id,
-            summary=body.get("summary"),
-            metadata=body.get("metadata"),
-            reviewer=reviewer,
-            force=True,
-        )
+        try:
+            use_reason = "with_reason" in inspect.signature(kb.request_review).parameters
+        except (TypeError, ValueError):
+            use_reason = False
+        review_kwargs = {
+            "summary": body.get("summary"),
+            "metadata": body.get("metadata"),
+            "reviewer": reviewer,
+            "force": True,
+        }
+        if use_reason:
+            review_kwargs["with_reason"] = True
+        result = kb.request_review(conn, task_id, **review_kwargs)
+        ok, reason = result if use_reason else (bool(result), None)
         if not ok:
             current = kb.get_task(conn, task_id)
-            raise ValueError(
-                f"cannot request review from status: {current.status if current else 'missing'}"
-            )
+            now = current.status if current else "missing"
+            if now not in ("running", "ready"):
+                raise ValueError(
+                    f"cannot request review from status: {now}"
+                )
+            if reason:
+                raise ValueError(str(reason))
+            raise ValueError(f"review request refused for a {now} task")
         if review_assignee_deferred and not reviewer:
             # Explicit clear (assignee: null or "") while requesting review:
             # unassign after the handoff has captured the implementer.
