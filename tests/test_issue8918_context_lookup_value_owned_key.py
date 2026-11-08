@@ -108,6 +108,14 @@ def test_a_key_env_holder_matches(monkeypatch):
     assert (got.base_url, got.api_key) == (L, "K1")
 
 
+def test_a_record_key_env_holder_matches(monkeypatch):
+    monkeypatch.setenv("WEBUI_TEST_8918_KEY", "K1")
+    got = _lookup({"model": {"provider": "custom:my-proxy", "base_url": B},
+                   "providers": {"custom:my-proxy": {"base_url": B, "key_env": "WEBUI_TEST_8918_KEY"}}},
+                  api_key="K1")
+    assert (got.base_url, got.api_key) == (B, "K1")
+
+
 @pytest.mark.parametrize("caller, held", [("K1", "  K1  "), ("  K1\t", "K1"), (" K1 ", "\nK1 ")])
 def test_surrounding_whitespace_is_not_part_of_the_value(caller, held):
     # WebUI strips every key it reads, on both sides, so a value padded with whitespace is the same credential: the
@@ -186,6 +194,40 @@ def test_a_legacy_entry_named_like_a_builtin_grants_no_fixed_host():
 def test_a_custom_model_block_holding_the_value_grants_no_fixed_host():
     cfg = {"model": {"provider": "custom:anthropic", "api_key": "K1"}}
     assert routes._context_lookup_origin(ANTHROPIC) not in routes._context_lookup_same_value_origins("K1", cfg)
+
+
+def test_an_alias_record_grants_its_canonical_builtins_fixed_host():
+    # ``providers.claude`` is the anthropic record under an alias: the owner rule and the Agent treat it as anthropic.
+    got = _lookup({"model": {"provider": "custom:my-proxy", "base_url": ANTHROPIC},
+                   "providers": {"claude": {"api_key": "K1"}}}, api_key="K1")
+    assert (got.base_url, got.api_key) == (ANTHROPIC, "K1")
+
+
+X = "https://x.caller-url.test/v1"
+COPILOT_HOST = "api.githubcopilot.com:443"
+
+
+def _contacts_caller_url_and_copilot(monkeypatch):
+    # Pin what the Agent contacts for (copilot, X): the caller's URL and Copilot's fixed host. Whether the installed
+    # Agent's Copilot step adds the fixed host varies by Agent version; these tests are about the gate's arithmetic.
+    contacted = frozenset({routes._context_lookup_origin(X), COPILOT_HOST})
+    monkeypatch.setattr(routes, "_context_lookup_contacted_origins", lambda *a, **k: contacted)
+
+
+def test_the_grant_adds_to_the_keys_own_hosts_rather_than_replacing_them(monkeypatch):
+    # The caller key owns X; the copilot record holding the same value owns Copilot's fixed host. Only together do
+    # they cover what the Agent contacts.
+    _contacts_caller_url_and_copilot(monkeypatch)
+    got = _lookup({"providers": {"copilot": {"api_key": "K1"}}}, provider="copilot", base_url=X, api_key="K1")
+    assert (got.base_url, got.api_key) == (X, "K1")
+
+
+def test_a_model_block_grants_its_own_providers_fixed_hosts_not_the_sessions(monkeypatch):
+    # The model block holds K1 for novita. The session is copilot: Copilot's fixed host must not be granted through
+    # the model block just because the lookup is for copilot.
+    _contacts_caller_url_and_copilot(monkeypatch)
+    got = _lookup({"model": {"provider": "novita", "api_key": "K1"}}, provider="copilot", base_url=X, api_key="K1")
+    assert (got.base_url, got.api_key) == (X, "")
 
 
 # ── A key the config selection took from a source without a URL ─────────────
