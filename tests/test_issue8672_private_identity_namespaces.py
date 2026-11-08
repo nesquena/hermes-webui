@@ -110,16 +110,20 @@ def _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages, context_
     return session
 
 
-def _settle_display_and_context(result_rows, prompt):
+def _settle_display_and_context(monkeypatch, result_rows, prompt):
     """Run ONE real ``_settle_result_messages()`` call and return its rows.
 
     The producer is what mints the stable message ids, so the fixture carries
-    the REAL identity shape instead of a hand-built key tuple.
+    the REAL identity shape instead of a hand-built key tuple.  The annotation
+    helper is patched with ``monkeypatch`` so the stub cannot leak into later
+    tests (maintainer request, 2026-11-06 review).
     """
     from api import streaming
     from api.models import Session
 
-    streaming._annotate_media_snapshots_for_settled_messages = lambda _m: None
+    monkeypatch.setattr(
+        streaming, "_annotate_media_snapshots_for_settled_messages", lambda _m: None
+    )
     session = Session(session_id="webui_8672_settle", messages=[], context_messages=[])
     streaming._settle_result_messages(
         session, [], [], copy.deepcopy(result_rows), prompt, "webui", None
@@ -144,6 +148,7 @@ def test_stable_id_and_sqlite_row_id_do_not_append_a_second_sentinel_row(
     import api.models as models
 
     display_rows, context_rows = _settle_display_and_context(
+        monkeypatch,
         [
             {"role": "assistant", "content": "earlier answer", "timestamp": 500.0},
             {
@@ -284,7 +289,9 @@ def test_bounded_regeneration_still_reads_only_the_tail_window(monkeypatch, tmp_
     import api.models as models
     from api import session_ops, streaming
 
-    streaming._annotate_media_snapshots_for_settled_messages = lambda _m: None
+    monkeypatch.setattr(
+        streaming, "_annotate_media_snapshots_for_settled_messages", lambda _m: None
+    )
 
     sid = "webui_8672_p2_2"
     session = models.Session(session_id=sid, messages=[], context_messages=[])
@@ -353,7 +360,9 @@ def test_bounded_path_is_actually_taken_instead_of_the_full_read(monkeypatch, tm
     import api.models as models
     from api import session_ops, streaming
 
-    streaming._annotate_media_snapshots_for_settled_messages = lambda _m: None
+    monkeypatch.setattr(
+        streaming, "_annotate_media_snapshots_for_settled_messages", lambda _m: None
+    )
 
     sid = "webui_8672_p2_2_fullread"
     session = models.Session(session_id=sid, messages=[], context_messages=[])
