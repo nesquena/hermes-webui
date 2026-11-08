@@ -173,6 +173,10 @@ def _assert_scene(
         return
     if fixture["quotaHidden"] or fixture["quotaDisplay"] == "none":
         failures.append(f"{name}: populated quota control disappeared: {fixture}")
+    expected_text = {"quotaText": "82% remaining", "reasoningText": "XHIGH", "statusText": "Running"}
+    for key, expected in expected_text.items():
+        if fixture[key] != expected:
+            failures.append(f"{name}: populated text changed ({key}={fixture[key]!r}, expected {expected!r})")
     for key in ("reasoningDisplay", "contextDisplay", "statusDisplay"):
         if fixture[key] == "none":
             failures.append(f"{name}: populated control disappeared ({key}): {fixture}")
@@ -194,9 +198,12 @@ def _composer_geometry(page) -> dict:
               modelText: document.getElementById('composerModelLabel').textContent,
               quotaHidden: quota.hidden,
               quotaDisplay: getComputedStyle(quota).display,
+              quotaText: document.getElementById('providerQuotaChipLabel').textContent,
               reasoningDisplay: getComputedStyle(document.getElementById('composerReasoningWrap')).display,
+              reasoningText: document.getElementById('composerReasoningLabel').textContent,
               contextDisplay: getComputedStyle(document.getElementById('ctxIndicatorWrap')).display,
               statusDisplay: getComputedStyle(document.getElementById('composerStatus')).display,
+              statusText: document.getElementById('composerStatus').textContent,
               attachDisplay: getComputedStyle(attach).display,
               micDisplay: getComputedStyle(mic).display,
             },
@@ -443,6 +450,11 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
             if not geometry["attachEnabled"]:
                 failures.append(f"{name}: Attach unexpectedly disabled: {geometry}")
             for control in ("Attach", "Mic"):
+                if geometry[f"{control.lower()}FlexShrink"] != "0":
+                    failures.append(
+                        f"{name}: {control} retained flex-shrink={geometry[f'{control.lower()}FlexShrink']} "
+                        f"at natural {geometry['stage']} stage: {geometry}"
+                    )
                 measured = geometry[f"{control.lower()}Width"]
                 if abs(measured - 34) > 0.5:
                     failures.append(
@@ -466,6 +478,11 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
             )
             expected_width = 44 if width <= 640 else 34
             for control in ("Attach", "Mic"):
+                if geometry[f"{control.lower()}FlexShrink"] != "0":
+                    failures.append(
+                        f"{name} recovery: {control} retained flex-shrink="
+                        f"{geometry[f'{control.lower()}FlexShrink']}: {geometry}"
+                    )
                 measured = geometry[f"{control.lower()}Width"]
                 if abs(measured - expected_width) > 0.5:
                     failures.append(
