@@ -4462,6 +4462,61 @@ def _raw_provider_record_runtime_authority(
     }
 
 
+def _resolved_credential_is_owner_own(
+    owner_value: object, resolved_value: object
+) -> bool:
+    """True when the resolver's credential IS the owning record's own.
+
+    #8664 review P1 "Same endpoint/mode does not establish credential
+    ownership" (nesquena-hermes + Greptile, 2026-11-06): two records that
+    canonicalise together and share endpoint and wire protocol are still TWO
+    credential authorities, and the native resolver picks its credential by
+    EXACT spelling — the SIBLING when the requested spelling is not the
+    owner's. Comparing only the owner's INLINE ``api_key`` therefore reported
+    "no disagreement" for every other way a record can own a credential
+    (``key_env``, ``key_cmd``, ``credential_pool``, or genuine keylessness),
+    and the bundle went out carrying the sibling's secret.
+
+    So compare the OWNER'S OWN resolved credential — the value
+    :func:`_raw_provider_record_runtime_authority` derives from this record's
+    own env/command/pool ladder, or its keyless signal when it declares
+    nothing — against what the resolver handed back:
+
+    * literal vs literal -> string equality;
+    * a ``key_cmd`` token provider -> the COMMAND it runs
+      (``CommandTokenSource.cache_identity``), never the provider object:
+      a fresh provider is built per resolution, so object identity could
+      never match even for the owner's own record;
+    * the keyless placeholder -> only an equally keyless answer agrees;
+    * a declared credential that resolved to NOTHING (an unset ``${ENV}``, a
+      ``key_env`` naming a missing variable, a pool that yielded nothing) ->
+      nothing the resolver produced can be this record's, so any credential
+      it handed back belongs to someone else. That is what keeps "the owner
+      HAS a credential the resolver never got" (disagreement) distinct from
+      "the owner is genuinely keyless" (which resolves to the placeholder
+      above, never to None).
+    """
+    if callable(owner_value):
+        if not callable(resolved_value):
+            return False
+        owner_identity = getattr(owner_value, "cache_identity", None)
+        resolved_identity = getattr(resolved_value, "cache_identity", None)
+        if owner_identity is None or resolved_identity is None:
+            # A credential source we cannot identify is not provably the
+            # owner's own — fail closed rather than assume agreement.
+            return False
+        return str(owner_identity) == str(resolved_identity)
+    if callable(resolved_value):
+        # The owner's own credential is a literal (or its keyless signal); a
+        # callable is some other record's command-minted token.
+        return False
+    owner_text = str(owner_value or "").strip()
+    resolved_text = str(resolved_value or "").strip()
+    if not owner_text:
+        return not resolved_text
+    return owner_text == resolved_text
+
+
 def _host_gated_env_key(base_url: str | None) -> str | None:
     """Env credential the installed runtime would accept for ``base_url``, else None.
 
@@ -5083,8 +5138,43 @@ def _custom_provider_runtime_bundle_with_provenance(
                     and resolved_mode_str
                     != owner_mode_effective.strip().lower()
                 )
+                # #8664 review P1 "Same endpoint/mode does not establish
+                # credential ownership" (nesquena-hermes + Greptile,
+                # 2026-11-06): with a sibling present, url_split / key_split /
+                # mode_split all coming back false is NOT proof that the
+                # resolver handed back the owner's connection. The resolver
+                # picks its credential by EXACT spelling, so a NON-owning
+                # spelling resolves the SIBLING — and key_split only ever
+                # compared the owner's INLINE api_key. An owner that declares
+                # its credential as key_env / key_cmd / credential_pool, or
+                # declares none at all (genuinely keyless), therefore matched
+                # on "same URL, same mode" and went out with the sibling's
+                # credential; a keyless owner inherited the sibling's key.
+                #
+                # Complete credential provenance — not merely matching URL and
+                # mode — is what decides ownership: resolve the owner's OWN
+                # credential through the same complete-authority ladder the
+                # rebuild uses (env value, command-minted token, pool
+                # selection, or the record's own keyless signal) and require it
+                # to BE what the resolver returned. The ladder is consulted
+                # only when the inline comparison is inconclusive (the owner
+                # declares no inline api_key), so a genuinely matching
+                # connection — including one the resolver legitimately sourced
+                # from an ambient env var or a pool that the same ladder
+                # resolves to the very same value — is still never rebuilt.
+                authority = None
                 if sibling_exists:
                     split = url_split or key_split or mode_split
+                    if not split and not owner_key_declared:
+                        authority = _raw_provider_record_runtime_authority(
+                            owner_cfg,
+                            owner_key,
+                            resolved_base_url,
+                        )
+                        key_split = not _resolved_credential_is_owner_own(
+                            authority.get("api_key"), resolved_api_key
+                        )
+                        split = key_split
                 else:
                     # No sibling can be the source, so the only legitimate repair
                     # is "the resolver produced no credential for this record
@@ -5121,11 +5211,17 @@ def _custom_provider_runtime_bundle_with_provenance(
                 # OWN defaults — the protocol the installed runtime would assume
                 # for its endpoint, a keyless record's own keyless signal, no
                 # pool when it has none. Nothing here may keep a sibling's value.
-                authority = _raw_provider_record_runtime_authority(
-                    owner_cfg,
-                    owner_key,
-                    resolved_base_url,
-                )
+                #
+                # Reuse the authority the provenance check already resolved
+                # when there was one: a second resolution re-reads the config,
+                # can select a different pool entry and mints a SECOND key_cmd
+                # token provider.
+                if authority is None:
+                    authority = _raw_provider_record_runtime_authority(
+                        owner_cfg,
+                        owner_key,
+                        resolved_base_url,
+                    )
                 for field in (
                     "base_url",
                     "api_key",

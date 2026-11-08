@@ -28,9 +28,19 @@ The four findings:
      miss ``providers.mistralai.api_key``, so the authenticated fetch was
      skipped and the user got the two static models.
 
-The suite SKIPS when the installed Hermes agent is not importable: a
-hand-rolled stand-in would be exactly the approximation these findings
-reject.
+The resolver-driven tests (everything that requests the ``native`` fixture)
+SKIP when the installed Hermes agent is not importable: a hand-rolled
+stand-in would be exactly the approximation these findings reject. The
+source-shape check and the live-handler tests do NOT use the resolver, so
+they run agent-free — the module-wide skip used to disable regressions they
+could catch (round 5, review 2026-11-06).
+
+Round 5 adds:
+
+  5. P1 "Relay key reaches another server" — the OpenAI-compat live-models
+     fallback resolved the RAW record key but kept fetching the hardcoded
+     vendor URL, so a record declaring a relay ``base_url`` had its key sent
+     to ``https://api.mistral.ai/v1/models``.
 """
 
 from __future__ import annotations
@@ -65,10 +75,6 @@ def _real_hermes_available() -> bool:
         return False
 
 
-pytestmark = pytest.mark.skipif(
-    not _real_hermes_available(),
-    reason="installed Hermes agent (real native resolver) not importable",
-)
 
 
 # ---------------------------------------------------------------------
@@ -114,7 +120,17 @@ def _swap_in_test_config(extra_cfg: dict):
 def native(monkeypatch):
     """Point the REAL installed resolver at the swapped WebUI config and a
     hermetic (synthetic-pool-only) credential state. Returns a callable that
-    resolves a provider id through the REAL resolver with that state."""
+    resolves a provider id through the REAL resolver with that state.
+
+    The agent requirement lives HERE, on the fixture, not on the module:
+    only the resolver-driven tests need the installed runtime. The
+    source-shape check and the live-handler tests below run agent-free, so
+    an agent-less run still exercises the regressions they cover (round 5,
+    review 2026-11-06: "Independent tests get skipped")."""
+    if not _real_hermes_available():
+        pytest.skip(
+            "installed Hermes agent (real native resolver) not importable"
+        )
     import hermes_cli.runtime_provider as rp
     import hermes_cli.config as cfg_mod
     import agent.credential_pool as acp
@@ -532,7 +548,14 @@ def _run_live_models(monkeypatch, providers_cfg, requested="mistral"):
             return False
 
         def read(self):
-            return json.dumps({"data": [{"id": "mistral-large-latest"}]}).encode()
+            # A live-ONLY id: "mistral-large-latest" also sits in the static
+            # _PROVIDER_MODELS fallback, so asserting it would pass even when
+            # the live response was never parsed (round 5, review 2026-11-06:
+            # "assert the returned live payload ... so this does not become
+            # false-green evidence").
+            return json.dumps(
+                {"data": [{"id": "mistral-large-live-canary"}]}
+            ).encode()
 
     def fake_urlopen(req, timeout=None):
         fetched["url"] = req.full_url
@@ -557,6 +580,10 @@ def _run_live_models(monkeypatch, providers_cfg, requested="mistral"):
         restore()
 
 
+def _payload_ids(payload: dict) -> list:
+    return [m.get("id") for m in (payload.get("models") or [])]
+
+
 class TestLiveModelsReadsTheRawConfigKey:
     """``_handle_live_models`` must resolve the RAW ``providers:`` key before
     reading the credential, so the canonical fold cannot make it miss the
@@ -577,6 +604,11 @@ class TestLiveModelsReadsTheRawConfigKey:
             "providers['mistralai'] key."
         )
         assert fetched["auth"] == "Bearer legacy-live-key-canary"
+        assert fetched.get("url") == "https://api.mistral.ai/v1/models"
+        assert _payload_ids(payload) == ["mistral-large-live-canary"], (
+            "the captured request is not the evidence: the handler must return "
+            f"the LIVE payload, not the static fallback {_payload_ids(payload)}"
+        )
 
     def test_canonical_record_key_is_still_used(self, monkeypatch):
         """CONTROL: resolving the raw key must not lose the CANONICAL
@@ -593,6 +625,11 @@ class TestLiveModelsReadsTheRawConfigKey:
             "live-models fallback"
         )
         assert fetched["auth"] == "Bearer canonical-live-key-canary"
+        assert fetched.get("url") == "https://api.mistral.ai/v1/models"
+        assert _payload_ids(payload) == ["mistral-large-live-canary"], (
+            "the captured request is not the evidence: the handler must return "
+            f"the LIVE payload, not the static fallback {_payload_ids(payload)}"
+        )
 
     def test_unrelated_provider_key_is_not_borrowed(self, monkeypatch):
         """CONTROL: a record for a DIFFERENT provider must never supply the
@@ -605,6 +642,107 @@ class TestLiveModelsReadsTheRawConfigKey:
         }
         fetched, payload = _run_live_models(monkeypatch, providers_cfg)
         assert not fetched.get("auth"), (
+            "a record belonging to another provider must not supply the "
+            f"credential; got {fetched.get('auth')!r}"
+        )
+
+
+# =====================================================================
+# ⑤ P1 "Relay key reaches another server" — endpoint with its credential
+# =====================================================================
+
+
+class TestVendorFallbackKeepsEndpointWithCredential:
+    """#8664 review P1 (nesquena-hermes + Greptile, 2026-11-06): the
+    OpenAI-compat live-models fallback resolved the RAW record key but kept
+    fetching the hardcoded vendor URL, so a record declaring a relay
+    ``base_url`` had its credential sent to
+    ``https://api.mistral.ai/v1/models``.
+
+    The destination invariant: the selected record's credential may only
+    travel to that record's OWN endpoint. These tests drive the REAL
+    ``_handle_live_models`` handler and capture the request BEFORE transport.
+    """
+
+    _RELAY_RECORD = {
+        "mistralai": {
+            "api_key": "legacy-relay-key-canary",
+            "base_url": "https://legacy-relay.example/v1",
+        },
+    }
+
+    def test_relay_record_key_is_not_sent_to_the_vendor_url(self, monkeypatch):
+        fetched, payload = _run_live_models(monkeypatch, dict(self._RELAY_RECORD))
+        assert not fetched, (
+            "the vendor fallback sent the legacy record's credential to "
+            f"{fetched.get('url')} (Authorization: {fetched.get('auth')!r}), but "
+            "providers.mistralai declares https://legacy-relay.example/v1 — the "
+            "credential must travel with its own endpoint, never to the vendor "
+            "URL it was not configured for"
+        )
+        # The user still gets an answer: the static fallback list.
+        assert _payload_ids(payload), (
+            "skipping the fetch must still return the static fallback list"
+        )
+
+    def test_relay_record_key_is_not_sent_to_the_vendor_url_legacy_spelling(
+        self, monkeypatch
+    ):
+        """The same record requested by its LEGACY spelling: the raw-key
+        resolution finds it either way, so the invariant must hold for both."""
+        fetched, payload = _run_live_models(
+            monkeypatch, dict(self._RELAY_RECORD), requested="mistralai"
+        )
+        assert not fetched, (
+            "the vendor fallback sent the legacy record's credential to "
+            f"{fetched.get('url')} (Authorization: {fetched.get('auth')!r}) for "
+            "the legacy request spelling too"
+        )
+        assert _payload_ids(payload)
+
+    @pytest.mark.parametrize(
+        "record_url",
+        ["https://api.mistral.ai/v1", "https://api.mistral.ai/v1/"],
+    )
+    def test_record_with_the_vendor_endpoint_still_fetches(self, monkeypatch, record_url):
+        """CONTROL: when the selected record's OWN endpoint IS the vendor's
+        (trailing slash tolerated), the authenticated fetch must still happen
+        — the round-4 behaviour this finding must not regress."""
+        providers_cfg = {
+            "mistralai": {
+                "api_key": "legacy-live-key-canary",
+                "base_url": record_url,
+            },
+        }
+        fetched, payload = _run_live_models(monkeypatch, providers_cfg)
+        assert fetched.get("url") == "https://api.mistral.ai/v1/models"
+        assert fetched.get("auth") == "Bearer legacy-live-key-canary"
+        assert _payload_ids(payload) == ["mistral-large-live-canary"], (
+            "a record whose own endpoint is the vendor's must still get the "
+            f"live payload, not the static fallback {_payload_ids(payload)}"
+        )
+
+    def test_record_without_endpoint_still_fetches_the_vendor(self, monkeypatch):
+        """CONTROL: a record that declares NO endpoint has no differing
+        endpoint to protect — the vendor URL is that provider's canonical
+        destination for its own key, so the fetch proceeds."""
+        providers_cfg = {"mistralai": {"api_key": "legacy-live-key-canary"}}
+        fetched, payload = _run_live_models(monkeypatch, providers_cfg)
+        assert fetched.get("url") == "https://api.mistral.ai/v1/models"
+        assert fetched.get("auth") == "Bearer legacy-live-key-canary"
+        assert _payload_ids(payload) == ["mistral-large-live-canary"]
+
+    def test_unrelated_provider_record_is_still_not_borrowed(self, monkeypatch):
+        """CONTROL (destination variant): another provider's record — even one
+        that points at the vendor URL — must not supply the credential."""
+        providers_cfg = {
+            "openrouter": {
+                "api_key": "other-provider-key-canary",
+                "base_url": "https://api.mistral.ai/v1",
+            },
+        }
+        fetched, payload = _run_live_models(monkeypatch, providers_cfg)
+        assert not fetched, (
             "a record belonging to another provider must not supply the "
             f"credential; got {fetched.get('auth')!r}"
         )
