@@ -241,6 +241,20 @@ class FakeKanbanDB:
             return _ret(False, "task not found")
         if task.status not in ("running", "ready"):
             return _ret(False, "task is not in running/ready")
+        if task.status == "running" and task.claim_lock is not None and not force:
+            # Native kanban_db refuses to hand off a live-claimed card without
+            # an explicit human override. The bridge always passes force=True
+            # for dashboard review drops; reproduce the fence so ordering and
+            # override regressions surface.
+            return _ret(
+                False,
+                f"cannot request review for {task_id}: currently running (claimed). "
+                "Wait for completion or reclaim the stale lock first.",
+            )
+        if force:
+            # A dashboard review drop is a human override: the live claim is
+            # released as part of the handoff (dashboard plugin parity).
+            task.claim_lock = None
         implementer = task.assignee if task.assignee != reviewer else None
         task.status = "review"
         if reviewer is not None:
@@ -1743,3 +1757,39 @@ def test_bulk_null_assignee_without_status_is_noop(monkeypatch):
     assert [e.kind for e in fake_kanban.events if e.task_id == "t_bulk_null_noop"] == [], (
         "a null assignee with no status must not append an assigned event"
     )
+
+
+def test_claimed_running_handoff_to_review_clears_live_claim(monkeypatch):
+    """A claimed Running card handed to Review must release the live claim.
+
+    Native ``request_review(..., force=True)`` clears the claim as a human
+    override (dashboard plugin parity). The bridge already passes
+    ``force=True``; the handoff must land in review, drop the live claim
+    (not just flip the status string), and keep implementer provenance in
+    the durable ``review_requested`` event.
+    """
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    task = FakeTask(
+        "t_claimed_review", "Worker holding the card", "running", "alice",
+        claim_lock="worker-1",
+    )
+    fake_kanban.tasks.append(task)
+
+    result = bridge._patch_task_payload(
+        "t_claimed_review",
+        {"status": "review", "assignee": "bob", "summary": "Please review"},
+    )
+
+    assert result["task"]["status"] == "review"
+    assert task.status == "review"
+    assert task.assignee == "bob", "an explicit reviewer must reassign the card"
+    assert task.claim_lock is None, (
+        "a claimed running handoff to review must clear the live claim"
+    )
+    event = next(
+        e for e in fake_kanban.events
+        if e.task_id == "t_claimed_review" and e.kind == "review_requested"
+    )
+    assert event.payload["implementer"] == "alice"
+    assert event.payload["reviewer"] == "bob"
