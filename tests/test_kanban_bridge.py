@@ -31,6 +31,7 @@ class FakeTask:
     claim_lock: str | None = None
     claim_expires: float | None = None
     worker_pid: int | None = None
+    unfinished_parents: bool = False
 
 
 @dataclass
@@ -243,6 +244,8 @@ class FakeKanbanDB:
             return _ret(False, "task not found")
         if task.status not in ("running", "ready"):
             return _ret(False, "task is not in running/ready")
+        if task.unfinished_parents:
+            return _ret(False, "cannot request review: unfinished dependencies")
         if task.status == "running" and task.claim_lock is not None and not force:
             # Native kanban_db refuses to hand off a live-claimed card without
             # an explicit human override. The bridge always passes force=True
@@ -1805,3 +1808,27 @@ def test_claimed_running_handoff_to_review_clears_live_claim(monkeypatch):
     )
     assert event.payload["implementer"] == "alice"
     assert event.payload["reviewer"] == "bob"
+
+
+def test_review_refused_for_unfinished_dependencies_returns_native_reason(monkeypatch):
+    """A running/ready card refused on dependency grounds must surface the native reason.
+
+    Regression (maintainer C57-F1): ``_patch_task`` mapped EVERY falsy
+    ``request_review`` result to ``cannot request review from status:
+    <status>``, so a ready card refused for unfinished parents was blamed
+    on its status. The bridge must return the Agent's native reason when
+    the source status already permits review.
+    """
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    task = FakeTask("t_ready_deps", "Blocked by parents", "ready", "alice", unfinished_parents=True)
+    fake_kanban.tasks.append(task)
+
+    import pytest
+    with pytest.raises(ValueError) as exc_info:
+        with bridge._conn() as conn:
+            bridge._patch_task(conn, "t_ready_deps", {"status": "review"})
+    assert "unfinished dependencies" in str(exc_info.value)
+    assert "from status: ready" not in str(exc_info.value)
+    assert task.status == "ready"
+    assert [e for e in fake_kanban.events if e.task_id == "t_ready_deps" and e.kind == "review_requested"] == []
