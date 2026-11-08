@@ -33,7 +33,7 @@ import re
 import sqlite3
 import sys
 import threading
-from contextlib import closing
+from contextlib import closing, nullcontext
 from pathlib import Path
 
 from api.turn_journal import (
@@ -493,12 +493,34 @@ def _note_recovered_sidecar_write(session_path: Path) -> None:
         models._note_sidecar_write(session_path.stem)
 
 
+def _recovery_persist_lock(session_path: Path):
+    """Return the per-session lock ``Session.save`` and every sidecar patch hold.
+
+    Holding it from the inspection through ``os.replace`` keeps a concurrent
+    writer (a save, a share write, the #8830 share-field repair) from replacing
+    a restored sidecar with the copy it read before the restore (#8833). Those
+    writers only exist in a process that has loaded ``api.models``; until then
+    the standalone CLI gets a no-op context, and once a later step imports it
+    the CLI takes an uncontended lock. The lock is reentrant, so a caller that
+    already holds it for this session cannot deadlock here.
+    """
+    models = sys.modules.get('api.models')
+    if models is None:
+        return nullcontext()
+    return models._session_persist_lock(session_path.stem)
+
+
 def recover_session(session_path: Path) -> dict:
     """Restore session_path from its .bak when the bak has more messages.
 
     Returns a status dict identical to ``inspect_session_recovery_status``
     plus a "restored" boolean.
     """
+    with _recovery_persist_lock(session_path):
+        return _recover_session_locked(session_path)
+
+
+def _recover_session_locked(session_path: Path) -> dict:
     status, backup_payload = _inspect_session_recovery_snapshot(session_path)
     if status["recommend"] != "restore":
         return {**status, "restored": False}

@@ -8,10 +8,13 @@ load_settings() must treat that as "file not accessible = use defaults" rather
 than propagating the exception up to crash the request handler.
 """
 import stat
+import os
+
 import pytest
 import api.config as config
 
 
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root bypasses DAC permission bits")
 def test_load_settings_returns_defaults_when_settings_file_unreadable(monkeypatch, tmp_path):
     """PermissionError from SETTINGS_FILE.exists() must not propagate — return defaults instead.
 
