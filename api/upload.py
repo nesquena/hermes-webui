@@ -595,7 +595,25 @@ def _stt_provider_capability_from_module(stt):
         def has_browser_audio_converter():
             helper = getattr(stt, "_find_ffmpeg_binary", None)
             try:
-                return bool(helper()) if callable(helper) else False
+                if callable(helper):
+                    return bool(helper())
+            except Exception:
+                return False
+            # Older agent releases keep the ffmpeg lookup on
+            # tools.transcription_audio (e.g. v0.22.x defines it as
+            # partial(_find_binary, "ffmpeg") there); fall back to it, then to
+            # a plain PATH lookup, so this passive probe matches what
+            # _prepare_local_audio will actually do at transcription time.
+            try:
+                import tools.transcription_audio as _ta
+                ta_helper = getattr(_ta, "_find_ffmpeg_binary", None)
+                if callable(ta_helper):
+                    return bool(ta_helper())
+            except Exception:
+                pass
+            try:
+                import shutil as _shutil
+                return bool(_shutil.which("ffmpeg"))
             except Exception:
                 return False
 
