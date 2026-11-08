@@ -53,6 +53,7 @@ from tests.test_append_only_fast_path_server import (  # noqa: E402
     _warm_cache_append_harness,
     _warm_display_cache,
 )
+from tests.test_7925_prefix_fp_by_construction import _independent_digest  # noqa: E402
 from tests.test_webui_state_db_reconciliation import _make_state_db  # noqa: E402
 
 
@@ -338,6 +339,58 @@ def test_proof_body_and_verification_read_one_projection(monkeypatch, tmp_path):
     assert _prefix_fingerprint_over_projection(scoped_rows, scoped_cards) == held_fp, (
         "the verification must compare the echo against the digest of the "
         "SAME projection re-scoped to the client's held range"
+    )
+
+
+# ── the public form of the response IS the delivered projection ─────────────
+
+
+def test_the_public_form_of_the_response_keeps_the_active_user_marker(monkeypatch, tmp_path):
+    """#7925 Greptile P1 (2026-11-08): the public projection adds no second pass.
+
+    ``_handle_session_get`` hands ``public_session_projection`` the payload
+    whose rows ``prefix_fp`` hashed. The public form used to call
+    ``redact_session_data`` again WITHOUT ``_messages_projected``: that second
+    pass re-projected every row from scratch and stripped ``_active_turn_user``
+    — a field the projection ADDS from the session's active-turn token, never
+    one it stores on the row, and the first pass had already removed
+    ``_active_turn_token`` so it could not be rebuilt. The response therefore
+    disagreed with its own proof, and the browser lost the marker it needs to
+    recognize the saved pending prompt, so it could show that prompt twice.
+
+    RED-before (head 174754d90): the turn's user row arrives without
+    ``_active_turn_user`` — the same silent drop
+    ``test_active_turn_boundary_refuses_the_append`` pins from the digest side.
+    """
+    import api.config
+    from api.process_event_utils import build_active_turn_token
+
+    token = build_active_turn_token("stream-1", 1700000000.0)
+    assert token
+    sidecar = _sidecar_rows(4)
+    # Row 2 is the turn's own user row; the settlement helper stamps the very
+    # token the session's active-turn token is derived from.
+    sidecar[2]["_active_turn_token"] = token
+    routes, captured = _warm_cache_append_harness(monkeypatch, tmp_path, sidecar, list(sidecar))
+
+    import api.models as models
+
+    s = models.get_session("cont-child")
+    s.active_stream_id = "stream-1"
+    s.pending_started_at = 1700000000.0
+    # Keep the stream "alive" so the GET path does not clear the pending turn
+    # before it can be projected, and so the active stream is reported.
+    monkeypatch.setitem(api.config.STREAMS, "stream-1", object())
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: {"stream-1"})
+
+    held = _full_transcript_get(routes)
+    delivered = held.get("messages") or []
+    assert len(delivered) == 4
+    # The public form kept the marker the delivered projection added …
+    assert delivered[2].get("_active_turn_user") is True, delivered[2]
+    # … and the rows the browser sees are the rows the proof hashed.
+    assert _independent_digest(delivered) == held["prefix_fp"], (
+        "the response must deliver exactly the rows its proof hashed"
     )
 
 

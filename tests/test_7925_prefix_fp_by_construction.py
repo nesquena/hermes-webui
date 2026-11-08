@@ -410,7 +410,7 @@ def test_active_turn_boundary_refuses_the_append(monkeypatch, tmp_path):
 # ── (f) the format tag is domain-separated from the legacy format ───────────
 
 
-def test_prefix_fingerprint_format_tag_is_domain_separated():
+def test_prefix_fingerprint_format_tag_is_domain_separated(monkeypatch):
     """#7925 acceptance (f): an older format's digest can never compare equal.
 
     The domain-separation tag rides inside the hash, so bumping it (``/2`` →
@@ -429,21 +429,21 @@ def test_prefix_fingerprint_format_tag_is_domain_separated():
         "so an older build's proof can never compare equal to a new one"
     )
     # Re-mint under the legacy tag: it must never collide with the current one.
+    # monkeypatch (Greptile 2026-11-08, P2): the legacy tag used to be restored
+    # in a ``finally`` and then set AGAIN for the closing assertion with no
+    # restore at all, so every later test in the process minted under the
+    # legacy format and results depended on test order. monkeypatch undoes the
+    # swap however this test exits.
     import api.routes as routes
 
-    legacy_tag = routes._PREFIX_FP_DIGEST_TAG
-    try:
-        routes._PREFIX_FP_DIGEST_TAG = b"prefix_fp/2\x1f"
-        legacy = _display_prefix_fingerprint(rows, 50)
-    finally:
-        routes._PREFIX_FP_DIGEST_TAG = legacy_tag
+    monkeypatch.setattr(routes, "_PREFIX_FP_DIGEST_TAG", b"prefix_fp/2\x1f")
+    legacy = _display_prefix_fingerprint(rows, 50)
     assert legacy != current, (
         "a digest minted under the legacy format tag compared equal to a "
         "new-format one — the tag is not inside the hash input"
     )
     # Same rows, same everything but the tag: the inequality above is evidence
     # the tag is bound into the hash rather than a coincidence of the row bytes.
-    routes._PREFIX_FP_DIGEST_TAG = b"prefix_fp/2\x1f"
     assert _display_prefix_fingerprint(rows, 50) == legacy
 
 
